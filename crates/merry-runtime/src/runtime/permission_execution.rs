@@ -157,7 +157,7 @@ pub(super) async fn execute_permission_request_tool_call(
         proposal,
         ProcessExecutionAdmission::new(
             ActionPolicyDecision::allow_permissioned_process_action(),
-            ProcessPermissionProfileId::APPROVED_PERMISSION_REQUEST_V1,
+            ProcessPermissionProfileId::APPROVED_PERMISSION_REQUEST,
             runner,
             attribute_plan_effect,
         )

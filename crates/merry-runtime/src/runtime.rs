@@ -707,8 +707,10 @@ struct RuntimeInner {
     automatic_compaction: RwLock<AutomaticCompactionConfig>,
     context_window_tokens: RwLock<Option<NonZeroU64>>,
     capabilities: RuntimeCapabilities,
+    prompt_profile: crate::PromptProfile,
     progress_commentary: bool,
     tool_registry: ToolRegistry,
+    tool_admission: Option<crate::ToolAdmission>,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_low_risk_workspace_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
@@ -794,11 +796,7 @@ impl RuntimeInner {
     }
 
     fn visible_tool_specs(&self) -> Vec<merry_core::ToolSpec> {
-        let mut specs = self.tool_registry.tool_specs();
-        if let Some(manager) = self.subagent_manager.as_ref() {
-            specs.retain(|spec| manager.is_tool_visible(spec.name()));
-        }
-        specs
+        self.tool_registry.tool_specs()
     }
 }
 

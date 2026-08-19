@@ -20,6 +20,7 @@ use std::{path::Path, sync::Arc};
 use super::checkpoint_ref_tool::{
     execute_merry_read_checkpoint_ref_tool_call, is_merry_read_checkpoint_ref_tool,
 };
+use super::diagnostics::DIAGNOSTIC_TOOL_NOT_ADMITTED;
 use super::permission_execution::{
     HighRiskActionReview, execute_permission_request_tool_call, review_process_action,
 };
@@ -54,6 +55,14 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 call_id: call_id.clone(),
             })?
     };
+
+    if inner
+        .tool_admission
+        .as_ref()
+        .is_some_and(|admission| !admission.allows(pending.name()))
+    {
+        return resolve_tool_admission_denial(inner, &pending, context).await;
+    }
 
     // Plan control calls remain executable; only the current read/update pair
     // is advertised in provider requests.
@@ -285,7 +294,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 .as_ref()
                 .is_some_and(|accepted| {
                     accepted.admission.sandbox_profile()
-                        == crate::LocalWorkspaceProcessSandboxProfile::HostV1
+                        == crate::LocalWorkspaceProcessSandboxProfile::Host
                         && matches!(
                             proposal.evidence(),
                             ActionProposalEvidence::ProcessAction(intent)
@@ -309,7 +318,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     proposal,
                     ProcessExecutionAdmission::new(
                         policy_decision,
-                        ProcessPermissionProfileId::READ_ONLY_V1,
+                        ProcessPermissionProfileId::READ_ONLY,
                         runner,
                         active_plan_harness.is_some(),
                     ),
@@ -330,7 +339,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     proposal,
                     ProcessExecutionAdmission::new(
                         policy_decision,
-                        ProcessPermissionProfileId::SHELL_READ_ONLY_V1,
+                        ProcessPermissionProfileId::SHELL_READ_ONLY,
                         runner,
                         active_plan_harness.is_some(),
                     ),
@@ -388,7 +397,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 let requires_high_risk_review =
                     crate::process::requires_process_action_review(intent);
                 let requires_host_path_review = accepted.admission.sandbox_profile()
-                    == crate::LocalWorkspaceProcessSandboxProfile::HostV1
+                    == crate::LocalWorkspaceProcessSandboxProfile::Host
                     && crate::process::requires_host_process_path_review(intent);
                 if !fully_trusted && (requires_high_risk_review || requires_host_path_review) {
                     let reason = if requires_high_risk_review {
@@ -630,6 +639,52 @@ pub(super) async fn execute_tool_call_with_active_permit(
             content,
             diagnostic,
             execution_evidence,
+        )?
+    };
+    persist_tool_events(inner, events).await
+}
+
+async fn resolve_tool_admission_denial(
+    inner: &Arc<RuntimeInner>,
+    pending: &PendingToolCall,
+    context: ToolExecutionContext,
+) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+    if context.cancellation_token().is_cancelled() {
+        return Err(RuntimeError::ToolExecutionCancelled {
+            session_id: inner.session_id.clone(),
+            call_id: pending.id().clone(),
+        });
+    }
+
+    let diagnostic = diagnostic_from_text(
+        DIAGNOSTIC_TOOL_NOT_ADMITTED,
+        format!(
+            "tool {} is not admitted for this runtime scope",
+            pending.name()
+        ),
+    );
+    let content = ArtifactContent::json(
+        serde_json::json!({
+            "error": DIAGNOSTIC_TOOL_NOT_ADMITTED,
+            "tool": pending.name().as_str(),
+            "message": diagnostic.message(),
+        })
+        .to_string(),
+    );
+    let events = {
+        let mut session = inner.session.lock().await;
+        if context.cancellation_token().is_cancelled() {
+            return Err(RuntimeError::ToolExecutionCancelled {
+                session_id: inner.session_id.clone(),
+                call_id: pending.id().clone(),
+            });
+        }
+        session.submit_tool_execution_outcome(
+            pending.id(),
+            ToolCallResultStatus::Failed,
+            content,
+            Some(diagnostic),
+            None,
         )?
     };
     persist_tool_events(inner, events).await

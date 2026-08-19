@@ -1,7 +1,7 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, stdout_error, unexpected};
-use crate::coding_runtime::{
+use crate::coding::{
     HeadlessCodingRuntimeInput, ProcessExecutionMode, action_process_runner_for_mode,
-    build_headless_coding_runtime, build_headless_coding_runtime_with_permission_review_mode,
+    build_headless_coding, build_headless_coding_with_permission_review_mode,
     coding_agent_loop_config, coding_agent_process_admission, coding_agent_requires_sandbox_error,
 };
 use crate::config::MerryConfig;
@@ -58,7 +58,7 @@ pub(crate) async fn run(
     process_execution_mode: ProcessExecutionMode,
     fully_trusted: bool,
 ) -> Result<RunExitStatus, CliError> {
-    let Some(admission) =
+    let Some(_admission) =
         coding_agent_process_admission(sandbox_child_handoff, process_execution_mode).await
     else {
         return Err(coding_agent_requires_sandbox_error("run"));
@@ -82,12 +82,9 @@ pub(crate) async fn run(
     let runtime_input = HeadlessCodingRuntimeInput {
         session_id: session_id.as_str(),
         root: &root,
-        admission,
         provider,
         model,
-        runner: backend.runner(),
-        process_backend: Some(backend.clone()),
-        permissioned_process_runner_factory: backend.permissioned_factory(),
+        process_backend: backend,
         extra_tools,
         allow_hidden_workspace_paths: false,
         automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
@@ -102,12 +99,12 @@ pub(crate) async fn run(
         subagents: subagents_config(merry_config).map_err(unexpected)?.into(),
     };
     let runtime = if fully_trusted {
-        build_headless_coding_runtime_with_permission_review_mode(
+        build_headless_coding_with_permission_review_mode(
             runtime_input,
             merry_runtime::PermissionReviewMode::FullyTrusted,
         )?
     } else {
-        build_headless_coding_runtime(runtime_input)?
+        build_headless_coding(runtime_input)?
     };
     let input = StepInput::user_text(&args.task).map_err(unexpected)?;
     let context = StepContext::default()
@@ -477,21 +474,19 @@ mod tests {
         RunExitStatus, default_run_session_id, write_agent_loop_jsonl_output,
         write_agent_loop_output,
     };
-    use crate::coding_runtime::{
-        CodingSubagentsConfig, HeadlessCodingRuntimeInput, build_headless_coding_runtime,
+    use crate::coding::{
+        CodingSubagentsConfig, HeadlessCodingRuntimeInput, build_headless_coding,
+        fixed_process_backend,
     };
-    use crate::debug::coding_loop::coding_loop_process_call;
-    use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
+    use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name, process_tool_call};
+    use merry::profiles::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
     use merry_core::ToolName;
     use merry_llm::{
         FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
         ToolArguments,
     };
-    use merry_runtime::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
-    use merry_runtime::{
-        AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, ProcessRunner, StepContext,
-        StepInput,
-    };
+    use merry_process::ProcessSession;
+    use merry_runtime::{AgentLoopConfig, ProcessRunner, StepContext, StepInput};
     use std::{
         io,
         pin::Pin,
@@ -551,15 +546,16 @@ mod tests {
         let permissioned_factory = Arc::new(
             merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
         );
-        let runtime = build_headless_coding_runtime(HeadlessCodingRuntimeInput {
+        let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
             session_id: "run-writer-test",
             root: &workspace,
-            admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            process_backend: fixed_process_backend(ProcessSession::from_parts(
+                merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+                runner,
+                permissioned_factory,
+            )),
             provider: Arc::new(provider),
             model: model_name(),
-            runner,
-            process_backend: None,
-            permissioned_process_runner_factory: permissioned_factory,
             extra_tools: Vec::new(),
             allow_hidden_workspace_paths: false,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
@@ -599,12 +595,10 @@ mod tests {
                 Ok(ModelEvent::OutputTextDelta {
                     delta: "我先解析 baidu.com 的 DNS。".to_owned(),
                 }),
-                Ok(coding_loop_process_call(
-                    "run-progress-dns",
-                    &["getent", "hosts", "baidu.com"],
-                    None,
-                )
-                .expect("valid process call")),
+                Ok(
+                    process_tool_call("run-progress-dns", &["getent", "hosts", "baidu.com"], None)
+                        .expect("valid process call"),
+                ),
             ],
             vec![Ok(ModelEvent::Completed {
                 response: ModelResponse::new(
@@ -619,15 +613,16 @@ mod tests {
         let permissioned_factory = Arc::new(
             merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
         );
-        let runtime = build_headless_coding_runtime(HeadlessCodingRuntimeInput {
+        let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
             session_id: "run-progress-writer-test",
             root: &workspace,
-            admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            process_backend: fixed_process_backend(ProcessSession::from_parts(
+                merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+                runner,
+                permissioned_factory,
+            )),
             provider: Arc::new(provider),
             model: model_name(),
-            runner,
-            process_backend: None,
-            permissioned_process_runner_factory: permissioned_factory,
             extra_tools: Vec::new(),
             allow_hidden_workspace_paths: false,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
@@ -676,15 +671,16 @@ mod tests {
         let permissioned_factory = Arc::new(
             merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
         );
-        let runtime = build_headless_coding_runtime(HeadlessCodingRuntimeInput {
+        let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
             session_id: "run-jsonl-writer-test",
             root: &workspace,
-            admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            process_backend: fixed_process_backend(ProcessSession::from_parts(
+                merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+                runner,
+                permissioned_factory,
+            )),
             provider: Arc::new(provider),
             model: model_name(),
-            runner,
-            process_backend: None,
-            permissioned_process_runner_factory: permissioned_factory,
             extra_tools: Vec::new(),
             allow_hidden_workspace_paths: false,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
@@ -740,15 +736,16 @@ mod tests {
         let permissioned_factory = Arc::new(
             merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
         );
-        let runtime = build_headless_coding_runtime(HeadlessCodingRuntimeInput {
+        let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
             session_id: "run-blocked-writer-test",
             root: &workspace,
-            admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
+            process_backend: fixed_process_backend(ProcessSession::from_parts(
+                merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+                runner,
+                permissioned_factory,
+            )),
             provider: Arc::new(provider),
             model: model_name(),
-            runner,
-            process_backend: None,
-            permissioned_process_runner_factory: permissioned_factory,
             extra_tools: Vec::new(),
             allow_hidden_workspace_paths: false,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),

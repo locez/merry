@@ -34,6 +34,13 @@ pub enum RuntimeError {
         reason: &'static str,
     },
 
+    /// A child runtime factory could not materialize its runtime profile.
+    #[error("child runtime construction failed: {message}")]
+    ChildRuntimeBuild {
+        /// Profile construction detail from the owning composition layer.
+        message: String,
+    },
+
     /// A subagent status operation did not select any child agents.
     #[error("{operation} requires at least one agent id")]
     InvalidSubagentSelection {

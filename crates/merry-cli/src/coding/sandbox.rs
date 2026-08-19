@@ -1,15 +1,14 @@
 use crate::cli_error::CliError;
-use crate::coding_runtime::ProcessExecutionMode;
-use crate::debug;
+use crate::coding::ProcessExecutionMode;
 use crate::sandbox::{
     ChildHandoff as SandboxChildHandoff, MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION_ENV,
-    RuntimeProfile as SandboxRuntimeProfile, read_proc_self_mountinfo,
+    local_workspace_process_admission, read_proc_self_mountinfo,
     runtime_profile_from_evidence as sandbox_runtime_profile_from_evidence,
 };
 use merry_runtime::AcceptedLocalWorkspaceProcessAdmission;
-use std::{env, ffi::OsStr};
+use std::env;
 
-pub(crate) async fn coding_loop_smoke_admission_from_current_process(
+pub(crate) async fn sandbox_admission_from_current_process(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
 ) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
     let sandbox_marker = env::var_os(MERRY_SANDBOX_ENV);
@@ -22,7 +21,8 @@ pub(crate) async fn coding_loop_smoke_admission_from_current_process(
         tmpdir.as_deref(),
         mountinfo.as_deref(),
     );
-    coding_loop_smoke_admission(
+    local_workspace_process_admission(
+        true,
         sandbox_child_handoff,
         sandbox_runtime_profile,
         sandbox_marker.as_deref(),
@@ -35,31 +35,16 @@ pub(crate) async fn coding_agent_process_admission(
     mode: ProcessExecutionMode,
 ) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
     if matches!(mode, ProcessExecutionMode::Unrestricted) {
-        return Some(AcceptedLocalWorkspaceProcessAdmission::accept_host_v1());
+        return Some(AcceptedLocalWorkspaceProcessAdmission::accept_host());
     }
     if matches!(mode, ProcessExecutionMode::InnerOnly) {
-        return Some(AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1());
+        return Some(AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace());
     }
-    coding_loop_smoke_admission_from_current_process(sandbox_child_handoff).await
+    sandbox_admission_from_current_process(sandbox_child_handoff).await
 }
 
 pub(crate) fn coding_agent_requires_sandbox_error(command: &str) -> CliError {
     CliError::DebugUsage(format!(
-        "merry {command} requires the automatic bubblewrap sandbox"
+        "merry {command} requires the configured outer sandbox"
     ))
-}
-
-fn coding_loop_smoke_admission(
-    sandbox_child_handoff: Option<SandboxChildHandoff>,
-    sandbox_runtime_profile: Option<SandboxRuntimeProfile>,
-    sandbox: Option<&OsStr>,
-    version: Option<&OsStr>,
-) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
-    debug::shell::runtime_admission(
-        true,
-        sandbox_child_handoff,
-        sandbox_runtime_profile,
-        sandbox,
-        version,
-    )
 }

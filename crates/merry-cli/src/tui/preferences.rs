@@ -239,7 +239,7 @@ impl TuiPreferencesStore {
             })?
             .version;
         let preferences = match version {
-            1 => toml::from_str::<TuiPreferencesV1>(&text)
+            1 => toml::from_str::<LegacyTuiPreferences>(&text)
                 .map_err(|source| PreferencesError::Parse {
                     path: self.path.clone(),
                     source,
@@ -336,7 +336,7 @@ struct PreferencesVersion {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TuiPreferencesV1 {
+struct LegacyTuiPreferences {
     #[serde(default = "legacy_preferences_version")]
     version: u32,
     #[serde(default)]
@@ -353,7 +353,7 @@ struct TuiPreferencesV1 {
     subagent_max_threads: Option<usize>,
 }
 
-impl TuiPreferencesV1 {
+impl LegacyTuiPreferences {
     fn migrate(self, default_provider: Option<&str>) -> Result<TuiPreferences, PreferencesError> {
         if self.version != 1 {
             return Err(PreferencesError::UnsupportedVersion {
@@ -460,7 +460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migrates_v1_model_into_the_selected_provider_history() {
+    async fn migrates_legacy_model_into_the_selected_provider_history() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let path = temp.path().join("merry/tui-preferences.toml");
         tokio::fs::create_dir_all(path.parent().expect("preferences parent"))

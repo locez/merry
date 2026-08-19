@@ -1,5 +1,5 @@
 use crate::cli_error::{CliError, unexpected};
-use crate::coding_runtime::ActionProcessBackendOptions;
+use crate::coding::ActionProcessBackendOptions;
 use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
 use crate::sandbox::default_inner_development_path_rules;
 use merry_core::SessionId;
@@ -106,18 +106,17 @@ pub(crate) fn action_process_backend_options(
     let host_integrations = config
         .map(MerryConfig::host_integrations)
         .unwrap_or_default();
-    let environment_overrides = config
+    let environment_overrides: Vec<(OsString, OsString)> = config
         .map(MerryConfig::process_environment_overrides)
         .transpose()?
         .unwrap_or_default()
         .into_iter()
         .map(|(name, value)| (OsString::from(name), OsString::from(value)))
         .collect();
-    Ok(ActionProcessBackendOptions {
-        path_rules,
-        host_integrations,
-        environment_overrides,
-    })
+    Ok(ActionProcessBackendOptions::new()
+        .with_path_rules(path_rules)
+        .with_host_integrations(host_integrations)
+        .with_environment_overrides(environment_overrides))
 }
 
 pub(crate) fn configured_runtime_builder(
@@ -163,7 +162,7 @@ readwrite_paths = ["/srv/trusted-writable"]
         let options = action_process_backend_options(Some(&config))
             .expect("action backend options should build");
         let readonly = options
-            .path_rules
+            .path_rules()
             .iter()
             .find(|rule| rule.path() == std::path::Path::new("/srv/trusted-readonly"))
             .expect("configured read-only path should remain visible to the inner runner");
@@ -171,7 +170,7 @@ readwrite_paths = ["/srv/trusted-writable"]
         assert_eq!(readonly.source(), PathAccessRuleSource::TrustedGlobalConfig);
 
         let writable = options
-            .path_rules
+            .path_rules()
             .iter()
             .find(|rule| rule.path() == std::path::Path::new("/srv/trusted-writable"))
             .expect("configured writable ceiling should remain visible to the inner runner");
@@ -180,7 +179,7 @@ readwrite_paths = ["/srv/trusted-writable"]
             writable.source(),
             PathAccessRuleSource::TrustedGlobalConfigWritableCeiling
         );
-        assert!(options.path_rules.iter().any(|rule| {
+        assert!(options.path_rules().iter().any(|rule| {
             rule.source() == PathAccessRuleSource::DefaultDevelopmentBaseline
                 && rule.access() == merry_runtime::PathAccess::ReadOnly
         }));

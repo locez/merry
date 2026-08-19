@@ -94,8 +94,10 @@
             ),
             context_window_tokens: tokio::sync::RwLock::new(None),
             capabilities: crate::RuntimeCapabilities::default(),
+            prompt_profile: crate::PromptProfile::default(),
             progress_commentary: false,
             tool_registry: ToolRegistry::default(),
+            tool_admission: None,
             memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
             allow_low_risk_workspace_patches: false,
             low_risk_process_runner: None,
@@ -133,7 +135,7 @@
     }
 
     fn accepted_local_workspace_process_admission() -> AcceptedLocalWorkspaceProcessAdmission {
-        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1()
+        AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace()
     }
 
     fn completed_event() -> ModelEvent {

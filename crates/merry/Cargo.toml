@@ -3,15 +3,15 @@ name = "merry"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-publish = false
 
 [dependencies]
-merry-core = { path = "../merry-core" }
-merry-llm = { path = "../merry-llm" }
-merry-provider-anthropic = { path = "../merry-provider-anthropic" }
-merry-provider-openai = { path = "../merry-provider-openai" }
-merry-runtime = { path = "../merry-runtime" }
-merry-tool-workspace = { path = "../merry-tool-workspace" }
+merry-core = { path = "../merry-core", version = "0.1.0" }
+merry-coding = { path = "../merry-coding", version = "0.1.0" }
+merry-llm = { path = "../merry-llm", version = "0.1.0" }
+merry-process = { path = "../merry-process", version = "0.1.0" }
+merry-provider-anthropic = { path = "../merry-provider-anthropic", version = "0.1.0" }
+merry-provider-openai = { path = "../merry-provider-openai", version = "0.1.0" }
+merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
 thiserror.workspace = true
 
 [dev-dependencies]

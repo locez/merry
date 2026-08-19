@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     RuntimeError, UserImageInput,
-    artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
+    artifact::{ArtifactContent, ArtifactError},
     compaction::CompactionError,
 };
 use merry_core::{
@@ -120,7 +120,6 @@ pub(crate) enum PersistedTranscriptItem {
         id: u64,
         model_turn_id: ModelTurnId,
         artifact_id: ArtifactId,
-        #[serde(default)]
         image_artifact_ids: Vec<ArtifactId>,
         origin: PersistedUserInputOrigin,
     },
@@ -143,55 +142,6 @@ pub(crate) enum PersistedTranscriptItem {
         artifact_id: ArtifactId,
         prompt_projection: ToolResultPromptProjection,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PersistedTranscriptV1 {
-    pub(crate) items: Vec<PersistedTranscriptItemV1>,
-    pub(crate) next_id: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum PersistedTranscriptItemV1 {
-    UserMessage {
-        id: u64,
-        text: String,
-        origin: PersistedUserInputOrigin,
-    },
-    AssistantText {
-        id: u64,
-        artifact_id: ArtifactId,
-    },
-    ToolCall {
-        id: u64,
-        call: PendingToolCall,
-    },
-    ToolResult {
-        id: u64,
-        call_id: ToolCallId,
-        result: ToolCallResult,
-        artifact_id: ArtifactId,
-    },
-}
-
-#[derive(Debug)]
-pub(crate) enum TranscriptV1MigrationError {
-    Artifact(ArtifactError),
-    Transcript(RuntimeError),
-}
-
-impl From<ArtifactError> for TranscriptV1MigrationError {
-    fn from(value: ArtifactError) -> Self {
-        Self::Artifact(value)
-    }
-}
-
-impl From<RuntimeError> for TranscriptV1MigrationError {
-    fn from(value: RuntimeError) -> Self {
-        Self::Transcript(value)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -497,68 +447,6 @@ impl Transcript {
         };
         transcript.validate_persisted_turns()?;
         Ok(transcript)
-    }
-
-    pub(crate) fn from_persisted_v1(
-        persisted: PersistedTranscriptV1,
-        artifacts: &ArtifactRegistry,
-    ) -> Result<(Self, ArtifactRegistry), TranscriptV1MigrationError> {
-        let legacy_turn_id = ModelTurnId::new(0);
-        let mut migrated_artifacts = artifacts.clone();
-        let mut items = Vec::with_capacity(persisted.items.len());
-        for item in persisted.items {
-            items.push(match item {
-                PersistedTranscriptItemV1::UserMessage { id, text, origin } => {
-                    let artifact_id = super::artifacts::user_message_id(TranscriptItemId::new(id));
-                    let artifact = ArtifactRef::new(artifact_id.clone(), ArtifactKind::Text);
-                    migrated_artifacts.record(artifact, ArtifactContent::text(text))?;
-                    PersistedTranscriptItem::UserMessage {
-                        id,
-                        model_turn_id: legacy_turn_id,
-                        artifact_id,
-                        image_artifact_ids: Vec::new(),
-                        origin,
-                    }
-                }
-                PersistedTranscriptItemV1::AssistantText { id, artifact_id } => {
-                    PersistedTranscriptItem::AssistantText {
-                        id,
-                        model_turn_id: legacy_turn_id,
-                        artifact_id,
-                    }
-                }
-                PersistedTranscriptItemV1::ToolCall { id, call } => {
-                    PersistedTranscriptItem::ToolCall {
-                        id,
-                        model_turn_id: legacy_turn_id,
-                        call,
-                        prompt_projection: ToolCallPromptProjection::Full,
-                    }
-                }
-                PersistedTranscriptItemV1::ToolResult {
-                    id,
-                    call_id,
-                    result,
-                    artifact_id,
-                } => PersistedTranscriptItem::ToolResult {
-                    id,
-                    model_turn_id: legacy_turn_id,
-                    call_id,
-                    result,
-                    artifact_id,
-                    prompt_projection: ToolResultPromptProjection::Full,
-                },
-            });
-        }
-        let transcript = Self::from_persisted(PersistedTranscript {
-            items,
-            next_id: persisted.next_id,
-            model_turns: [(legacy_turn_id, ModelTurnStatus::Completed)]
-                .into_iter()
-                .collect(),
-            next_model_turn_id: 1,
-        })?;
-        Ok((transcript, migrated_artifacts))
     }
 }
 

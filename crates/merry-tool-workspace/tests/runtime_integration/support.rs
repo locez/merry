@@ -10,15 +10,11 @@ pub(super) use merry_llm::{
     testing::FakeModelProvider,
 };
 pub(super) use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, LedgerFactKind,
-    LedgerProjection, ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, Runtime, RuntimeProfile,
-    StepContext, StepInput, ToolExecutionContext,
+    LedgerFactKind, LedgerProjection, Runtime, StepContext, StepInput, ToolExecutionContext,
 };
 pub(super) use merry_tool_workspace::{
     ReadOnlyWorkspaceTools, WORKSPACE_LIST_DIR_TOOL, WORKSPACE_PATCH_TOOL,
-    WORKSPACE_READ_FILE_TOOL, WORKSPACE_SEARCH_TEXT_TOOL, WorkspaceCodingLoopProfile,
-    WorkspaceRuntimeProfileBuilderExt, WorkspaceToolLimits, WorkspaceToolsConfig,
+    WORKSPACE_READ_FILE_TOOL, WORKSPACE_SEARCH_TEXT_TOOL, WorkspaceToolsConfig,
 };
 pub(super) use serde_json::{Map, Value};
 pub(super) use std::{
@@ -146,13 +142,6 @@ pub(super) fn add_patch(path: &str, lines: &[&str]) -> String {
     format!("*** Begin Workspace Patch\n*** Add File: {path}\n{additions}\n*** End Workspace Patch")
 }
 
-pub(super) fn pending_process_call(call_id: &str, command: &str) -> ModelEvent {
-    let mut arguments = Map::new();
-    arguments.insert("command".to_owned(), Value::String(command.to_owned()));
-    arguments.insert("cwd".to_owned(), Value::Null);
-    pending_workspace_call(call_id, "run_process", arguments)
-}
-
 type ScriptedModelStep = Vec<Result<ModelEvent, ModelError>>;
 type ScriptedModelSteps = Vec<ScriptedModelStep>;
 type RecordedModelRequests = Vec<ModelRequest>;
@@ -231,27 +220,6 @@ pub(super) async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeJo
         .await
 }
 
-pub(super) fn assert_continuation_request_body(request: &ModelRequest, original_task: &str) {
-    let dynamic_text = request
-        .dynamic_messages()
-        .iter()
-        .map(|message| message.content().as_text())
-        .collect::<Vec<_>>()
-        .join("\n---\n");
-    assert!(
-        dynamic_text.contains(original_task),
-        "continuation request should preserve original task user message"
-    );
-    assert!(
-        !dynamic_text.contains("Continue after tool result."),
-        "continuation request must not include a synthetic loop-control user prompt"
-    );
-    assert!(
-        !dynamic_text.contains("Original task:"),
-        "continuation request must not include the synthetic original task label"
-    );
-}
-
 pub(super) fn runtime_with_workspace_tools(root: &Path, model_event: ModelEvent) -> Runtime {
     let (runtime, _) = runtime_with_workspace_tools_and_provider(root, model_event);
     runtime
@@ -317,111 +285,6 @@ pub(super) fn runtime_with_opt_in_workspace_patch_tools_and_provider(
         builder = builder.register_tool(tool);
     }
     builder.build().expect("runtime should build")
-}
-
-pub(super) fn runtime_with_coding_loop_tools(
-    root: &Path,
-    provider: ScriptedModelProvider,
-    runner: Arc<dyn ProcessRunner>,
-) -> Runtime {
-    let profile = WorkspaceCodingLoopProfile::new(
-        WorkspaceToolsConfig::new(vec![root.to_path_buf()]).with_limits(WorkspaceToolLimits {
-            max_patch_bytes: 256,
-            ..WorkspaceToolLimits::default()
-        }),
-    )
-    .expect("workspace coding loop profile should construct")
-    .with_patch_tool()
-    .with_cli_bwrap_process_runner(
-        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
-        runner,
-    );
-    let profile = RuntimeProfile::builder()
-        .with_workspace_coding_loop(profile)
-        .expect("workspace coding loop profile should apply")
-        .build()
-        .expect("runtime profile should build");
-    Runtime::builder(session_id())
-        .model_provider(Arc::new(provider), model_name())
-        .with_profile(profile)
-        .expect("runtime profile should apply")
-        .build()
-        .expect("runtime should build")
-}
-
-#[derive(Clone)]
-pub(super) struct ScriptedProcessRunner {
-    observed_intents: Arc<Mutex<Vec<ProcessActionIntent>>>,
-    responses: Arc<Mutex<Vec<ScriptedProcessResponse>>>,
-}
-
-#[derive(Clone)]
-pub(super) struct ScriptedProcessResponse {
-    status: ProcessExitStatus,
-    stdout_text: String,
-    stderr_text: String,
-}
-
-impl ScriptedProcessRunner {
-    pub(super) fn new(responses: Vec<ScriptedProcessResponse>) -> Self {
-        Self {
-            observed_intents: Arc::new(Mutex::new(Vec::new())),
-            responses: Arc::new(Mutex::new(responses.into_iter().rev().collect())),
-        }
-    }
-
-    pub(super) fn observed_intents(&self) -> Vec<ProcessActionIntent> {
-        self.observed_intents
-            .lock()
-            .expect("process intents mutex should not be poisoned")
-            .clone()
-    }
-}
-
-impl ScriptedProcessResponse {
-    pub(super) fn success(stdout_text: &str) -> Self {
-        Self {
-            status: ProcessExitStatus::Exited(0),
-            stdout_text: stdout_text.to_owned(),
-            stderr_text: String::new(),
-        }
-    }
-}
-
-impl ProcessRunner for ScriptedProcessRunner {
-    fn run<'a>(
-        &'a self,
-        intent: ProcessActionIntent,
-        context: ProcessRunnerContext,
-    ) -> ProcessRunnerFuture<'a> {
-        Box::pin(async move {
-            if context.cancellation_token().is_cancelled() {
-                return Err(ProcessRunnerError::Cancelled);
-            }
-
-            self.observed_intents
-                .lock()
-                .expect("process intents mutex should not be poisoned")
-                .push(intent.clone());
-
-            let response = self
-                .responses
-                .lock()
-                .expect("process responses mutex should not be poisoned")
-                .pop()
-                .expect("scripted process response should exist");
-
-            ProcessRunnerOutput::new(
-                &intent,
-                response.status,
-                response.stdout_text,
-                false,
-                response.stderr_text,
-                false,
-            )
-            .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))
-        })
-    }
 }
 
 pub(super) async fn execute_first_pending_call(

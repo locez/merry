@@ -1,22 +1,19 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, stdout_error, unexpected};
-use crate::coding_runtime::{
-    RuntimeRoleProviderConfig, coding_loop_workspace_roots, with_workspace_coding_loop_profile,
-    workspace_tools_config_with_resources,
-};
+use crate::coding::RuntimeRoleProviderConfig;
 use crate::config::MerryConfig;
 use crate::provider_config::{
     RuntimePrimaryProviderConfig, RuntimeProviderBundle, openai_provider_bundle,
     openai_provider_config_bundle,
 };
 use crate::runtime_config::automatic_compaction_config;
+use merry::profiles::{coding_agent, load_root_project_rules};
 use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{
     AgentLoopConfig, AgentLoopStatus, AutomaticCompactionConfig, RegisteredTool, Runtime,
-    StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
+    SkillCatalog, StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
     ToolExecutorFuture,
 };
-use merry_tool_workspace::WorkspaceCodingLoopProfile;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -247,9 +244,6 @@ pub(crate) fn build_runtime(input: RuntimeInput<'_>) -> Result<Runtime, CliError
     let mut builder = Runtime::builder(session_id)
         .automatic_compaction(input.automatic_compaction)
         .model_provider(input.provider, input.model);
-    if let Some(policy) = input.retry_policy {
-        builder = builder.model_retry_policy(policy);
-    }
     if let Some(role_provider) = input.context_compaction {
         builder = builder.model_provider_for_role(
             role_provider.role,
@@ -257,15 +251,27 @@ pub(crate) fn build_runtime(input: RuntimeInput<'_>) -> Result<Runtime, CliError
             role_provider.model,
         );
     }
-    let profile = WorkspaceCodingLoopProfile::new(workspace_tools_config_with_resources(
-        coding_loop_workspace_roots(input.root, &input.skill_roots),
-        input.skill_roots.clone(),
-        input.allow_hidden_workspace_paths,
-        None,
-    )?)
-    .map_err(unexpected)?;
-    let builder = with_workspace_coding_loop_profile(builder, profile)?
+    let project_rules = load_root_project_rules(input.root).map_err(unexpected)?;
+    let skill_catalog = if input.skill_roots.is_empty() {
+        None
+    } else {
+        Some(SkillCatalog::load_from_roots(input.skill_roots.clone()).map_err(unexpected)?)
+    };
+    let mut profile = coding_agent(input.root)
+        .readonly_resource_roots(input.skill_roots.clone())
+        .allow_hidden(input.allow_hidden_workspace_paths)
         .register_tool(cmd_check_command_tool(input.environment)?);
+    if let Some(project_rules) = project_rules {
+        profile = profile.project_rules(project_rules);
+    }
+    if let Some(skill_catalog) = skill_catalog {
+        profile = profile.skill_catalog(skill_catalog);
+    }
+    if let Some(policy) = input.retry_policy {
+        profile = profile.retry_policy(policy);
+    }
+    let profile = profile.build().map_err(unexpected)?;
+    let builder = profile.apply_to(builder).map_err(unexpected)?;
     builder.build().map_err(unexpected)
 }
 

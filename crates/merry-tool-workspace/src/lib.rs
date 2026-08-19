@@ -20,7 +20,6 @@ mod errors;
 mod list;
 mod patch;
 mod path;
-mod profile;
 mod read;
 mod schema;
 mod search;
@@ -29,9 +28,6 @@ mod tools;
 mod trace;
 
 pub use config::{WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceToolsConfig};
-pub use profile::{
-    WorkspaceCodingLoopProfile, WorkspaceCodingLoopProfileError, WorkspaceRuntimeProfileBuilderExt,
-};
 pub use tools::ReadOnlyWorkspaceTools;
 
 /// Registered tool name for read-only file reads.

@@ -1,9 +1,10 @@
+use crate::cli_error::{CliError, unexpected};
 use futures_util::stream;
-use merry_core::ProviderName;
+use merry_core::{ProviderName, ToolName};
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
     ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
-    ModelStreamContext,
+    ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
 };
 use merry_runtime::{
     ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
@@ -14,11 +15,67 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+pub(crate) fn process_tool_call(
+    call_id: &str,
+    argv: &[&str],
+    cwd: Option<&str>,
+) -> Result<ModelEvent, CliError> {
+    let mut arguments = serde_json::Map::new();
+    arguments.insert(
+        "command".to_owned(),
+        serde_json::Value::String(argv.join(" ")),
+    );
+    arguments.insert(
+        "cwd".to_owned(),
+        cwd.map_or(serde_json::Value::Null, |cwd| {
+            serde_json::Value::String(cwd.to_owned())
+        }),
+    );
+    tool_call(
+        call_id,
+        merry_tool_workspace::CODING_LOOP_PROCESS_TOOL,
+        arguments,
+    )
+}
+
+pub(crate) fn workspace_tool_call<const N: usize>(
+    call_id: &str,
+    tool_name: &str,
+    arguments: [(&str, serde_json::Value); N],
+) -> Result<ModelEvent, CliError> {
+    tool_call(
+        call_id,
+        tool_name,
+        arguments
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+}
+
+pub(crate) fn tool_call(
+    call_id: &str,
+    tool_name: &str,
+    arguments: serde_json::Map<String, serde_json::Value>,
+) -> Result<ModelEvent, CliError> {
+    let call = ModelToolCall::new(
+        ModelToolCallId::new(call_id).map_err(unexpected)?,
+        ToolName::new(tool_name).map_err(unexpected)?,
+        ToolArguments::new(arguments),
+    );
+    Ok(ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::tool_call(call)],
+            FinishReason::ToolCalls,
+            None,
+        ),
+    })
+}
+
 #[derive(Clone)]
 pub(crate) struct FakeProcessRunner {
     calls: Arc<AtomicUsize>,
     observed_argv: Arc<Mutex<Vec<Vec<String>>>>,
-    observed_cwd: Arc<Mutex<Vec<Option<String>>>>,
     outputs: Arc<Mutex<Vec<FakeProcessRunnerStep>>>,
 }
 
@@ -27,11 +84,10 @@ impl FakeProcessRunner {
         Self::scripted([FakeProcessRunnerStep::success(stdout)])
     }
 
-    pub(crate) fn scripted<const N: usize>(steps: [FakeProcessRunnerStep; N]) -> Self {
+    fn scripted<const N: usize>(steps: [FakeProcessRunnerStep; N]) -> Self {
         Self {
             calls: Arc::new(AtomicUsize::new(0)),
             observed_argv: Arc::new(Mutex::new(Vec::new())),
-            observed_cwd: Arc::new(Mutex::new(Vec::new())),
             outputs: Arc::new(Mutex::new(steps.into_iter().rev().collect())),
         }
     }
@@ -46,17 +102,10 @@ impl FakeProcessRunner {
             .expect("observed argv mutex should not be poisoned")
             .clone()
     }
-
-    pub(crate) fn observed_cwd(&self) -> Vec<Option<String>> {
-        self.observed_cwd
-            .lock()
-            .expect("observed cwd mutex should not be poisoned")
-            .clone()
-    }
 }
 
 #[derive(Clone)]
-pub(crate) struct FakeProcessRunnerStep {
+struct FakeProcessRunnerStep {
     status: ProcessExitStatus,
     stdout: String,
     stderr: String,
@@ -68,14 +117,6 @@ impl FakeProcessRunnerStep {
             status: ProcessExitStatus::Exited(0),
             stdout: stdout.into(),
             stderr: String::new(),
-        }
-    }
-
-    pub(crate) fn failure(stderr: impl Into<String>) -> Self {
-        Self {
-            status: ProcessExitStatus::Exited(1),
-            stdout: String::new(),
-            stderr: stderr.into(),
         }
     }
 }
@@ -92,10 +133,6 @@ impl ProcessRunner for FakeProcessRunner {
                 .lock()
                 .expect("observed argv mutex should not be poisoned")
                 .push(intent.argv().to_vec());
-            self.observed_cwd
-                .lock()
-                .expect("observed cwd mutex should not be poisoned")
-                .push(intent.cwd().map(str::to_owned));
             if context.cancellation_token().is_cancelled() {
                 return Err(ProcessRunnerError::Cancelled);
             }

@@ -27,32 +27,13 @@ impl CheckpointSourceKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub(super) enum PersistedCheckpointRef {
-    Evidence(PersistedEvidenceCheckpointRef),
-    LegacyExcerpt(PersistedLegacyExcerptCheckpointRef),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PersistedEvidenceCheckpointRef {
+pub(super) struct PersistedCheckpointRef {
     id: String,
     source_kind: CheckpointSourceKind,
     sequence_start: u64,
     sequence_end: u64,
     evidence: EvidenceRef,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PersistedLegacyExcerptCheckpointRef {
-    id: String,
-    source_kind: String,
-    source_id: String,
-    sequence_start: u64,
-    sequence_end: u64,
-    locator: String,
-    excerpt: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,13 +83,13 @@ impl CheckpointRef {
 
 impl From<&CheckpointRef> for PersistedCheckpointRef {
     fn from(value: &CheckpointRef) -> Self {
-        Self::Evidence(PersistedEvidenceCheckpointRef {
+        Self {
             id: value.id().as_str().to_owned(),
             source_kind: value.source_kind(),
             sequence_start: value.sequence_range().start(),
             sequence_end: value.sequence_range().end(),
             evidence: value.evidence().clone(),
-        })
+        }
     }
 }
 
@@ -116,34 +97,12 @@ impl TryFrom<PersistedCheckpointRef> for CheckpointRef {
     type Error = CheckpointError;
 
     fn try_from(value: PersistedCheckpointRef) -> Result<Self, Self::Error> {
-        match value {
-            PersistedCheckpointRef::Evidence(value) => Ok(Self::new(
-                CheckpointRefId::new(&value.id)?,
-                value.source_kind,
-                CheckpointSequenceRange::new(value.sequence_start, value.sequence_end)?,
-                value.evidence,
-            )),
-            PersistedCheckpointRef::LegacyExcerpt(value) => {
-                let PersistedLegacyExcerptCheckpointRef {
-                    id,
-                    source_kind,
-                    source_id,
-                    sequence_start,
-                    sequence_end,
-                    locator,
-                    excerpt,
-                } = value;
-                drop((
-                    source_kind,
-                    source_id,
-                    sequence_start,
-                    sequence_end,
-                    locator,
-                    excerpt,
-                ));
-                Err(CheckpointError::LegacyExcerptRefUnsupported { ref_id: id })
-            }
-        }
+        Ok(Self::new(
+            CheckpointRefId::new(&value.id)?,
+            value.source_kind,
+            CheckpointSequenceRange::new(value.sequence_start, value.sequence_end)?,
+            value.evidence,
+        ))
     }
 }
 

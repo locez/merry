@@ -328,7 +328,7 @@ fn shell_forged_hidden_handoff_markers_and_accept_do_not_enable_local_workspace_
     let output = merry()
         .args([
             "--merry-sandbox-child-handoff",
-            "cli-bwrap-v1",
+            "cli-bwrap",
             "debug",
             "shell",
             "--accept-local-workspace-process-risk",

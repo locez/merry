@@ -659,16 +659,6 @@ impl SubagentManager {
         Ok(task)
     }
 
-    pub(crate) fn is_tool_visible(&self, tool_name: &ToolName) -> bool {
-        match tool_name.as_str() {
-            SPAWN_SUBAGENTS_TOOL_NAME => self.enabled.load(Ordering::Acquire),
-            WAIT_SUBAGENTS_TOOL_NAME | CANCEL_SUBAGENTS_TOOL_NAME => {
-                self.enabled.load(Ordering::Acquire) || self.has_agents.load(Ordering::Acquire)
-            }
-            _ => true,
-        }
-    }
-
     pub(crate) async fn update_policy(
         &self,
         enabled: bool,
@@ -2490,28 +2480,6 @@ mod manager_tests {
     }
 
     #[tokio::test]
-    async fn runtime_controlled_manager_changes_spawn_tool_visibility() {
-        let manager = SubagentManager::runtime_controlled(
-            merry_core::SessionId::new("dynamic-subagents").unwrap(),
-            SubagentConfig::default(),
-            Arc::new(FakeChildFactory::new()),
-            false,
-        );
-        let spawn = ToolName::new(SPAWN_SUBAGENTS_TOOL_NAME).unwrap();
-        let workspace_read = ToolName::new("workspace_read_file").unwrap();
-
-        assert!(!manager.is_tool_visible(&spawn));
-        assert!(manager.is_tool_visible(&workspace_read));
-
-        manager
-            .update_policy(true, SubagentConfig::default())
-            .await
-            .expect("policy update should apply");
-
-        assert!(manager.is_tool_visible(&spawn));
-    }
-
-    #[tokio::test]
     async fn runtime_controlled_manager_rejects_spawn_after_it_is_disabled() {
         let factory = Arc::new(FakeChildFactory::new());
         let manager = SubagentManager::runtime_controlled(
@@ -2823,7 +2791,7 @@ mod manager_tests {
                     Arc::new(provider),
                     ModelName::new("fake/bridge-child").expect("valid model name"),
                 )
-                .registered_tool_allowlist(input.allowed_tools)
+                .tool_admission(crate::ToolAdmission::allow_only(input.allowed_tools))
                 .allow_bridge_tools()
                 .register_tool(RegisteredTool::bridge(bridge_tool_spec()))
                 .build()

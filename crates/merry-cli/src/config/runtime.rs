@@ -240,12 +240,12 @@ impl SubagentsConfig {
     }
 }
 
-impl From<SubagentsConfig> for crate::coding_runtime::CodingSubagentsConfig {
+impl From<SubagentsConfig> for crate::coding::CodingSubagentsConfig {
     fn from(config: SubagentsConfig) -> Self {
         if config.is_enabled() {
-            crate::coding_runtime::CodingSubagentsConfig::enabled(config.limits())
+            crate::coding::CodingSubagentsConfig::enabled(config.limits())
         } else {
-            crate::coding_runtime::CodingSubagentsConfig::default()
+            crate::coding::CodingSubagentsConfig::default()
         }
     }
 }

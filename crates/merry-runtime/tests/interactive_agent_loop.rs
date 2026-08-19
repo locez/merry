@@ -1094,7 +1094,7 @@ async fn interactive_settings_update_does_not_interrupt_the_active_model_request
 }
 
 #[tokio::test]
-async fn interactive_subagent_setting_changes_the_next_request_tool_profile() {
+async fn interactive_subagent_setting_keeps_the_tool_profile_stable() {
     let provider = RecordingProvider::new_with_steps(vec![
         vec![Ok(completed_text_event("disabled"))],
         vec![Ok(completed_text_event("enabled"))],
@@ -1137,18 +1137,18 @@ async fn interactive_subagent_setting_changes_the_next_request_tool_profile() {
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
-    assert!(
-        !requests[0]
-            .tools()
-            .iter()
-            .any(|tool| tool.name().as_str() == "spawn_subagents")
-    );
-    assert!(
-        requests[1]
-            .tools()
-            .iter()
-            .any(|tool| tool.name().as_str() == "spawn_subagents")
-    );
+    let first_tools = requests[0]
+        .tools()
+        .iter()
+        .map(|tool| tool.name().as_str())
+        .collect::<Vec<_>>();
+    let second_tools = requests[1]
+        .tools()
+        .iter()
+        .map(|tool| tool.name().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(first_tools, second_tools);
+    assert!(first_tools.contains(&"spawn_subagents"));
 }
 
 #[tokio::test]

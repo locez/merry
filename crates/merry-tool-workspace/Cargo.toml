@@ -5,9 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-merry-core = { path = "../merry-core" }
-merry-llm = { path = "../merry-llm" }
-merry-runtime = { path = "../merry-runtime" }
+merry-core = { path = "../merry-core", version = "0.1.0" }
+merry-llm = { path = "../merry-llm", version = "0.1.0" }
+merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
 regex.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -21,7 +21,7 @@ libc.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
-merry-llm = { path = "../merry-llm", features = ["test-utils"] }
+merry-llm = { path = "../merry-llm", version = "0.1.0", features = ["test-utils"] }
 tokio-util.workspace = true
 tracing-subscriber.workspace = true
 

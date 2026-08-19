@@ -5,7 +5,7 @@ mod cli_error;
 mod cli_exit;
 mod cli_route;
 mod cmd;
-mod coding_runtime;
+mod coding;
 mod config;
 mod debug;
 mod mcp_tools;

@@ -92,9 +92,6 @@ pub enum CheckpointError {
     #[error("checkpoint ref {ref_id} is duplicated")]
     DuplicateRef { ref_id: String },
 
-    #[error("legacy checkpoint excerpt ref {ref_id} has no original artifact evidence")]
-    LegacyExcerptRefUnsupported { ref_id: String },
-
     #[error("checkpoint ref {ref_id} does not exist in checkpoint {checkpoint_id}")]
     RefNotFound {
         checkpoint_id: String,

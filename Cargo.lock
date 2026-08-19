@@ -1456,12 +1456,13 @@ name = "merry"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "merry-coding",
  "merry-core",
  "merry-llm",
+ "merry-process",
  "merry-provider-anthropic",
  "merry-provider-openai",
  "merry-runtime",
- "merry-tool-workspace",
  "tempfile",
  "thiserror 2.0.19",
 ]
@@ -1476,9 +1477,11 @@ dependencies = [
  "futures-util",
  "image",
  "libc",
+ "merry",
  "merry-core",
  "merry-llm",
  "merry-mcp",
+ "merry-process",
  "merry-provider-anthropic",
  "merry-provider-openai",
  "merry-runtime",
@@ -1500,6 +1503,22 @@ dependencies = [
  "tracing-subscriber",
  "two-face",
  "unicode-width",
+]
+
+[[package]]
+name = "merry-coding"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "merry-core",
+ "merry-llm",
+ "merry-process",
+ "merry-runtime",
+ "merry-tool-workspace",
+ "schemars",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1554,6 +1573,19 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "merry-process"
+version = "0.1.0"
+dependencies = [
+ "merry-core",
+ "merry-runtime",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

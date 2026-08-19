@@ -1,0 +1,24 @@
+[package]
+name = "merry-coding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+merry-core = { path = "../merry-core", version = "0.1.0" }
+merry-llm = { path = "../merry-llm", version = "0.1.0" }
+merry-process = { path = "../merry-process", version = "0.1.0" }
+merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
+merry-tool-workspace = { path = "../merry-tool-workspace", version = "0.1.0" }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+schemars.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[lints]
+workspace = true

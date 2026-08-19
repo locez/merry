@@ -1,22 +1,23 @@
-use super::CodingRuntimeError;
-use merry_runtime::ProjectRules;
+use merry_runtime::{ContextError, ProjectRules};
 use std::{
     fs,
     io::{self, ErrorKind, Read},
-    path::Path,
+    path::{Path, PathBuf},
 };
+use thiserror::Error;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-const ROOT_PROJECT_RULES_FILE: &str = "AGENTS.md";
-const MAX_ROOT_PROJECT_RULES_BYTES: usize = 1024 * 1024;
+/// Root project-rule file loaded by the coding composition.
+pub const ROOT_PROJECT_RULES_FILE: &str = "AGENTS.md";
+/// Maximum accepted root project-rule file size.
+pub const MAX_ROOT_PROJECT_RULES_BYTES: usize = 1024 * 1024;
 
-pub(super) fn load_root_project_rules(
-    root: &Path,
-) -> Result<Option<ProjectRules>, CodingRuntimeError> {
+/// Loads the root `AGENTS.md` file without following a file symlink.
+pub fn load_root_project_rules(root: &Path) -> Result<Option<ProjectRules>, ProjectRulesLoadError> {
     let canonical_root =
-        fs::canonicalize(root).map_err(|source| CodingRuntimeError::ProjectRulesRead {
+        fs::canonicalize(root).map_err(|source| ProjectRulesLoadError::ProjectRulesRead {
             path: root.to_path_buf(),
             source,
         })?;
@@ -24,37 +25,37 @@ pub(super) fn load_root_project_rules(
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(source) if source.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(source) => return Err(CodingRuntimeError::ProjectRulesRead { path, source }),
+        Err(source) => return Err(ProjectRulesLoadError::ProjectRulesRead { path, source }),
     };
     if metadata.file_type().is_symlink() {
-        return Err(CodingRuntimeError::ProjectRulesPathDenied {
+        return Err(ProjectRulesLoadError::ProjectRulesPathDenied {
             path,
             reason: "symbolic links are not allowed",
         });
     }
     if !metadata.is_file() {
-        return Err(CodingRuntimeError::ProjectRulesNotRegularFile { path });
+        return Err(ProjectRulesLoadError::ProjectRulesNotRegularFile { path });
     }
 
     let file = match open_root_project_rules(&path) {
         Ok(file) => file,
         Err(source) if is_symlink_open_error(&source) => {
-            return Err(CodingRuntimeError::ProjectRulesPathDenied {
+            return Err(ProjectRulesLoadError::ProjectRulesPathDenied {
                 path,
                 reason: "symbolic links are not allowed",
             });
         }
-        Err(source) => return Err(CodingRuntimeError::ProjectRulesRead { path, source }),
+        Err(source) => return Err(ProjectRulesLoadError::ProjectRulesRead { path, source }),
     };
     let metadata = match file.metadata() {
         Ok(metadata) => metadata,
-        Err(source) => return Err(CodingRuntimeError::ProjectRulesRead { path, source }),
+        Err(source) => return Err(ProjectRulesLoadError::ProjectRulesRead { path, source }),
     };
     if !metadata.is_file() {
-        return Err(CodingRuntimeError::ProjectRulesNotRegularFile { path });
+        return Err(ProjectRulesLoadError::ProjectRulesNotRegularFile { path });
     }
     if metadata.len() > MAX_ROOT_PROJECT_RULES_BYTES as u64 {
-        return Err(CodingRuntimeError::ProjectRulesTooLarge {
+        return Err(ProjectRulesLoadError::ProjectRulesTooLarge {
             path,
             max_bytes: MAX_ROOT_PROJECT_RULES_BYTES,
         });
@@ -65,10 +66,10 @@ pub(super) fn load_root_project_rules(
         .take(MAX_ROOT_PROJECT_RULES_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
     {
-        return Err(CodingRuntimeError::ProjectRulesRead { path, source });
+        return Err(ProjectRulesLoadError::ProjectRulesRead { path, source });
     }
     if bytes.len() > MAX_ROOT_PROJECT_RULES_BYTES {
-        return Err(CodingRuntimeError::ProjectRulesTooLarge {
+        return Err(ProjectRulesLoadError::ProjectRulesTooLarge {
             path,
             max_bytes: MAX_ROOT_PROJECT_RULES_BYTES,
         });
@@ -76,7 +77,7 @@ pub(super) fn load_root_project_rules(
     let text = match String::from_utf8(bytes) {
         Ok(text) => text,
         Err(source) => {
-            return Err(CodingRuntimeError::ProjectRulesRead {
+            return Err(ProjectRulesLoadError::ProjectRulesRead {
                 path,
                 source: io::Error::new(ErrorKind::InvalidData, source),
             });
@@ -90,10 +91,55 @@ pub(super) fn load_root_project_rules(
 
     ProjectRules::new(ROOT_PROJECT_RULES_FILE, text)
         .map(Some)
-        .map_err(|source| CodingRuntimeError::ProjectRulesInvalid {
+        .map_err(|source| ProjectRulesLoadError::ProjectRulesInvalid {
             path,
             source: Box::new(source),
         })
+}
+
+/// Errors raised while loading the root project rules.
+#[derive(Debug, Error)]
+pub enum ProjectRulesLoadError {
+    /// The root path or rules file could not be read.
+    #[error("failed to read project rules at {path}: {source}")]
+    ProjectRulesRead {
+        /// Path involved in the failed read.
+        path: PathBuf,
+        /// Underlying filesystem error.
+        #[source]
+        source: io::Error,
+    },
+    /// The rules path was intentionally rejected as unsafe.
+    #[error("project rules path is denied at {path}: {reason}")]
+    ProjectRulesPathDenied {
+        /// Path rejected by the loader.
+        path: PathBuf,
+        /// Stable rejection reason.
+        reason: &'static str,
+    },
+    /// The rules path exists but is not a regular file.
+    #[error("project rules path is not a regular file: {path}")]
+    ProjectRulesNotRegularFile {
+        /// Path that was not a regular file.
+        path: PathBuf,
+    },
+    /// The rules file exceeds the bounded loader limit.
+    #[error("project rules at {path} exceed the {max_bytes}-byte limit")]
+    ProjectRulesTooLarge {
+        /// Oversized rules path.
+        path: PathBuf,
+        /// Maximum accepted size.
+        max_bytes: usize,
+    },
+    /// The rules content failed typed runtime validation.
+    #[error("invalid project rules at {path}: {source}")]
+    ProjectRulesInvalid {
+        /// Invalid rules path.
+        path: PathBuf,
+        /// Runtime validation error.
+        #[source]
+        source: Box<ContextError>,
+    },
 }
 
 #[cfg(unix)]
@@ -163,7 +209,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            CodingRuntimeError::ProjectRulesInvalid { path: actual, .. } if actual == path
+            ProjectRulesLoadError::ProjectRulesInvalid { path: actual, .. } if actual == path
         ));
     }
 
@@ -186,7 +232,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            CodingRuntimeError::ProjectRulesInvalid { path: actual, .. } if actual == path
+            ProjectRulesLoadError::ProjectRulesInvalid { path: actual, .. } if actual == path
         ));
     }
 
@@ -201,7 +247,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            CodingRuntimeError::ProjectRulesNotRegularFile { path: actual } if actual == path
+            ProjectRulesLoadError::ProjectRulesNotRegularFile { path: actual } if actual == path
         ));
     }
 
@@ -220,7 +266,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            CodingRuntimeError::ProjectRulesPathDenied { path: actual, .. } if actual == path
+            ProjectRulesLoadError::ProjectRulesPathDenied { path: actual, .. } if actual == path
         ));
     }
 
@@ -235,7 +281,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            CodingRuntimeError::ProjectRulesTooLarge {
+            ProjectRulesLoadError::ProjectRulesTooLarge {
                 path: actual,
                 max_bytes: MAX_ROOT_PROJECT_RULES_BYTES,
             } if actual == path
@@ -265,7 +311,7 @@ mod tests {
         let error = load_root_project_rules(temp.path()).expect_err("invalid UTF-8 rejects");
 
         match error {
-            CodingRuntimeError::ProjectRulesRead {
+            ProjectRulesLoadError::ProjectRulesRead {
                 path: actual,
                 source,
             } => {

@@ -63,7 +63,7 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
         json!({
             "ok": true,
             "kind": "process_action",
-            "permission_profile_id": "process.read_only.v1",
+            "permission_profile_id": "process.read_only",
             "status": {
                 "kind": "exited",
                 "code": 0,
@@ -128,7 +128,7 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
     assert!(!evidence.stderr_truncated());
     assert_eq!(
         evidence.permission_profile_id().as_str(),
-        "process.read_only.v1"
+        "process.read_only"
     );
     assert!(evidence.matches_intent(intent));
 
@@ -192,7 +192,7 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
     assert!(artifact_order < observation_order);
     assert!(observation_order < resolved_order);
     assert!(observation_text.contains("exit code 0"));
-    assert!(observation_text.contains("permission_profile=process.read_only.v1"));
+    assert!(observation_text.contains("permission_profile=process.read_only"));
     assert!(observation_text.contains("stdout_bytes=21"));
     assert!(observation_text.contains("stderr_bytes=0"));
     assert!(observation_text.contains(&format!("artifact={}", result.artifact().id().as_str())));
@@ -436,7 +436,7 @@ async fn fully_trusted_host_process_allows_high_risk_argv_without_review() {
                 .permission_review_mode(PermissionReviewMode::FullyTrusted)
                 .permission_admission_source(Arc::new(admission.clone()))
                 .allow_accepted_local_workspace_process_actions(
-                    AcceptedLocalWorkspaceProcessAdmission::accept_host_v1(),
+                    AcceptedLocalWorkspaceProcessAdmission::accept_host(),
                     Arc::new(runner.clone()),
                 )
                 .build()
@@ -497,7 +497,7 @@ async fn host_process_requires_review_without_fully_trusted_mode() {
                     named_model("fake/approval-review"),
                 )
                 .allow_accepted_local_workspace_process_actions(
-                    AcceptedLocalWorkspaceProcessAdmission::accept_host_v1(),
+                    AcceptedLocalWorkspaceProcessAdmission::accept_host(),
                     Arc::new(runner.clone()),
                 )
                 .build()
@@ -550,7 +550,7 @@ async fn ordinary_host_process_does_not_require_review_without_external_path() {
                     named_model("fake/approval-review"),
                 )
                 .allow_accepted_local_workspace_process_actions(
-                    AcceptedLocalWorkspaceProcessAdmission::accept_host_v1(),
+                    AcceptedLocalWorkspaceProcessAdmission::accept_host(),
                     Arc::new(runner.clone()),
                 )
                 .build()
@@ -602,7 +602,7 @@ async fn host_git_metadata_write_requires_path_review_without_fully_trusted_mode
                     named_model("fake/approval-review"),
                 )
                 .allow_accepted_local_workspace_process_actions(
-                    AcceptedLocalWorkspaceProcessAdmission::accept_host_v1(),
+                    AcceptedLocalWorkspaceProcessAdmission::accept_host(),
                     Arc::new(runner.clone()),
                 )
                 .build()
@@ -654,7 +654,7 @@ async fn host_process_with_external_path_requires_review_without_fully_trusted_m
                     named_model("fake/approval-review"),
                 )
                 .allow_accepted_local_workspace_process_actions(
-                    AcceptedLocalWorkspaceProcessAdmission::accept_host_v1(),
+                    AcceptedLocalWorkspaceProcessAdmission::accept_host(),
                     Arc::new(runner.clone()),
                 )
                 .build()
@@ -843,7 +843,7 @@ async fn opt_in_accepted_local_workspace_process_action_executes_local_workspace
         json!({
             "ok": true,
             "kind": "process_action",
-            "permission_profile_id": "process.local_workspace.bwrap.v1",
+            "permission_profile_id": "process.local_workspace",
             "status": {
                 "kind": "exited",
                 "code": 0,
@@ -919,7 +919,7 @@ async fn opt_in_accepted_local_workspace_process_action_executes_local_workspace
     assert!(!evidence.stderr_truncated());
     assert_eq!(
         evidence.permission_profile_id().as_str(),
-        "process.local_workspace.bwrap.v1"
+        "process.local_workspace"
     );
     assert!(evidence.matches_intent(intent));
 
@@ -957,7 +957,7 @@ async fn accepted_local_workspace_process_action_denies_when_admission_profile_m
     .with_action_proposal();
     let mismatched_admission =
         AcceptedLocalWorkspaceProcessAdmission::for_test_permission_profile_id(
-            ProcessPermissionProfileId::READ_ONLY_V1,
+            ProcessPermissionProfileId::READ_ONLY,
         );
     let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
         "runtime-policy-command-exec-mismatched-local-effect-profile",
@@ -1008,7 +1008,8 @@ async fn accepted_local_workspace_process_action_denies_when_admission_profile_m
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn accepted_local_workspace_process_action_executes_unknown_argv_under_bwrap_profile() {
+async fn accepted_local_workspace_process_action_executes_unknown_argv_under_local_workspace_profile()
+ {
     let executor = ProcessProposingToolExecutor::with_argv(["unknown-readonly-ish", "--version"]);
     let runner = FakeProcessRunner::succeeding();
     let tool = RegisteredTool::new(
@@ -1159,7 +1160,7 @@ fn process_execution_evidence_matches_process_action_kind() {
     .expect("valid process intent");
     let evidence = ProcessExecutionEvidence::new(
         &intent,
-        ProcessPermissionProfileId::READ_ONLY_V1,
+        ProcessPermissionProfileId::READ_ONLY,
         ProcessExitStatus::Exited(0),
         64,
         false,

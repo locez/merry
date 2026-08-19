@@ -1,4 +1,4 @@
-use super::{SessionState, artifacts::CONTEXT_SEED_ARTIFACT_PREFIX};
+use super::SessionState;
 use crate::{
     RuntimeError,
     artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
@@ -20,7 +20,6 @@ impl SessionState {
         id: &str,
         text: &str,
     ) -> Result<(), RuntimeError> {
-        let legacy_artifact_id = legacy_context_seed_artifact_id(id)?;
         let mut managed_predecessor = None;
         for (index, entry) in self.context_entries.iter().enumerate() {
             if !is_managed_construction_context_seed(entry.as_summary(), id, &self.artifacts)? {
@@ -45,15 +44,7 @@ impl SessionState {
             candidate_entries.remove(index);
         }
 
-        let target_artifact_id = if managed_predecessor.is_none()
-            && matches!(
-                candidate_artifacts.read_record(&legacy_artifact_id),
-                Err(ArtifactError::MissingArtifact { .. })
-            ) {
-            legacy_artifact_id
-        } else {
-            refreshed_context_seed_artifact_id(id, text)?
-        };
+        let target_artifact_id = refreshed_context_seed_artifact_id(id, text)?;
         let recorded = match candidate_artifacts.read_record(&target_artifact_id) {
             Ok(record)
                 if record.artifact().kind() == &ArtifactKind::Text
@@ -188,10 +179,6 @@ impl SessionState {
     }
 }
 
-fn legacy_context_seed_artifact_id(id: &str) -> Result<ArtifactId, RuntimeError> {
-    ArtifactId::new(&format!("{CONTEXT_SEED_ARTIFACT_PREFIX}{id}")).map_err(Into::into)
-}
-
 fn refreshed_context_seed_artifact_id(id: &str, text: &str) -> Result<ArtifactId, RuntimeError> {
     let mut hash_input = String::with_capacity(id.len() + 1 + text.len());
     hash_input.push_str(id);
@@ -219,10 +206,8 @@ fn is_managed_construction_context_seed(
         return Ok(false);
     }
 
-    let legacy_artifact_id = legacy_context_seed_artifact_id(summary.id())?;
     let refreshed_artifact_id = refreshed_context_seed_artifact_id(summary.id(), summary.text())?;
-    if reference.artifact_id != legacy_artifact_id && reference.artifact_id != refreshed_artifact_id
-    {
+    if reference.artifact_id != refreshed_artifact_id {
         return Ok(false);
     }
 

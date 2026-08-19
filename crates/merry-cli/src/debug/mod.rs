@@ -1,7 +1,6 @@
-use clap::{Subcommand, ValueEnum};
+use clap::Subcommand;
 
 pub(crate) mod basic;
-pub(crate) mod coding_loop;
 pub(crate) mod openai;
 pub(crate) mod shell;
 
@@ -46,37 +45,6 @@ pub(crate) enum Command {
         about = "Run a local command through Merry's process action protocol"
     )]
     Shell(ShellArgs),
-    #[command(
-        name = "coding-loop-smoke",
-        about = "Run an opt-in sandboxed coding-loop smoke with deterministic model steps"
-    )]
-    CodingLoopSmoke,
-    #[command(
-        name = "permission-network-smoke",
-        about = "Run an opt-in sandboxed permission review smoke driven by a live OpenAI-compatible model",
-        after_help = crate::cli::OPENAI_ENV_HELP
-    )]
-    PermissionNetworkSmoke(PermissionNetworkSmokeArgs),
-    #[command(
-        name = "coding-loop-live-smoke",
-        about = "Run an opt-in sandboxed coding-loop smoke driven by a live OpenAI-compatible model"
-    )]
-    CodingLoopLiveSmoke(CodingLoopLiveSmokeArgs),
-    #[command(
-        name = "coding-loop-task-smoke",
-        about = "Run an opt-in sandboxed coding-loop task smoke with deterministic model steps"
-    )]
-    CodingLoopTaskSmoke(CodingLoopTaskSmokeArgs),
-    #[command(
-        name = "coding-loop-task-live-smoke",
-        about = "Run an opt-in sandboxed coding-loop task smoke driven by a live OpenAI-compatible model"
-    )]
-    CodingLoopTaskLiveSmoke(CodingLoopTaskLiveSmokeArgs),
-    #[command(
-        name = "coding-loop-subagent-live-smoke",
-        about = "Run an opt-in sandboxed coding-loop smoke that requires a live model to delegate to a child agent"
-    )]
-    CodingLoopSubagentLiveSmoke(CodingLoopSubagentLiveSmokeArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -138,108 +106,4 @@ pub(crate) struct ShellArgs {
         help = "Command argv to run after `shell --`; no shell string parsing is performed"
     )]
     pub(crate) argv: Vec<String>,
-}
-
-#[derive(Debug, clap::Args)]
-pub(crate) struct CodingLoopLiveSmokeArgs {
-    #[arg(
-        long,
-        value_name = "MODEL",
-        allow_hyphen_values = true,
-        help = "Model name; overrides [providers.default].model"
-    )]
-    pub(crate) model: Option<String>,
-
-    #[arg(
-        long,
-        value_name = "N",
-        value_parser = crate::cli::parse_max_output_tokens,
-        default_value_t = 512,
-        help = "Maximum output tokens per live model step"
-    )]
-    pub(crate) max_output_tokens: u64,
-}
-
-#[derive(Debug, clap::Args)]
-pub(crate) struct PermissionNetworkSmokeArgs {
-    #[arg(
-        long,
-        value_name = "MODEL",
-        allow_hyphen_values = true,
-        help = "Model name; overrides [providers.default].model"
-    )]
-    pub(crate) model: Option<String>,
-
-    #[arg(
-        long,
-        value_name = "N",
-        value_parser = crate::cli::parse_max_output_tokens,
-        default_value_t = 768,
-        help = "Maximum output tokens for each live model step"
-    )]
-    pub(crate) max_output_tokens: u64,
-}
-
-#[derive(Debug, clap::Args)]
-pub(crate) struct CodingLoopTaskSmokeArgs {
-    #[arg(
-        long,
-        value_enum,
-        default_value = "status-text",
-        help = "Disposable coding task fixture to run"
-    )]
-    pub(crate) task: CodingLoopTaskSmokeTask,
-}
-
-#[derive(Debug, clap::Args)]
-pub(crate) struct CodingLoopTaskLiveSmokeArgs {
-    #[arg(
-        long,
-        value_enum,
-        default_value = "status-text",
-        help = "Disposable coding task fixture to run"
-    )]
-    pub(crate) task: CodingLoopTaskSmokeTask,
-
-    #[arg(
-        long,
-        value_name = "MODEL",
-        allow_hyphen_values = true,
-        help = "Model name; overrides [providers.default].model"
-    )]
-    pub(crate) model: Option<String>,
-
-    #[arg(
-        long,
-        value_name = "N",
-        value_parser = crate::cli::parse_max_output_tokens,
-        default_value_t = 768,
-        help = "Maximum output tokens for each live model step"
-    )]
-    pub(crate) max_output_tokens: u64,
-}
-
-#[derive(Debug, clap::Args)]
-pub(crate) struct CodingLoopSubagentLiveSmokeArgs {
-    #[arg(
-        long,
-        value_name = "MODEL",
-        allow_hyphen_values = true,
-        help = "Model name; overrides [providers.default].model"
-    )]
-    pub(crate) model: Option<String>,
-
-    #[arg(
-        long,
-        value_name = "N",
-        value_parser = crate::cli::parse_max_output_tokens,
-        default_value_t = 768,
-        help = "Maximum output tokens for each live model step"
-    )]
-    pub(crate) max_output_tokens: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum CodingLoopTaskSmokeTask {
-    StatusText,
 }

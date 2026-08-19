@@ -2,6 +2,7 @@ use merry_core::ErrorInfo;
 
 pub(super) const DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED: &str = "tool_call_result_required";
 pub(super) const DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED: &str = "action_policy_denied";
+pub(super) const DIAGNOSTIC_TOOL_NOT_ADMITTED: &str = "tool_not_admitted";
 pub(super) const DIAGNOSTIC_TOOL_NOT_REGISTERED: &str = "tool_not_registered";
 pub(super) const TOOL_ACTION_POLICY_DENIED_MESSAGE: &str =
     "tool action was blocked by runtime policy";

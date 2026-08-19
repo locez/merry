@@ -29,9 +29,6 @@ use tokio_stream::wrappers::ReceiverStream;
 
 /// Generic SDK/runtime default for one top-level agent run.
 pub const DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS: usize = 128;
-/// Coding-agent default for one top-level user task.
-pub const DEFAULT_CODING_AGENT_MAX_MODEL_TURNS: usize = 1024;
-
 /// Configuration for [`Runtime::run_agent_loop`].
 ///
 /// `max_model_turns` bounds the number of model turns started by one loop run.
@@ -1786,6 +1783,7 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
     match error {
         RuntimeError::StepAlreadyActive { .. } => "step_already_active",
         RuntimeError::InvalidStepInput { .. } => "invalid_step_input",
+        RuntimeError::ChildRuntimeBuild { .. } => "child_runtime_build",
         RuntimeError::InvalidSubagentSelection { .. } => "invalid_subagent_selection",
         RuntimeError::PlanEffectAttribution { .. } => "plan_effect_attribution_failed",
         RuntimeError::PlanSubagentAttemptInactive { .. } => "plan_subagent_attempt_inactive",

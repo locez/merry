@@ -130,7 +130,7 @@ async fn request_permissions_approved_by_review_executes_exact_process_action() 
     assert_eq!(payload["kind"], "process_action");
     assert_eq!(
         payload["permission_profile_id"],
-        ProcessPermissionProfileId::APPROVED_PERMISSION_REQUEST_V1.as_str()
+        ProcessPermissionProfileId::APPROVED_PERMISSION_REQUEST.as_str()
     );
     assert_eq!(
         payload["permission_review"]["rationale"],

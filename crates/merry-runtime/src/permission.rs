@@ -913,6 +913,17 @@ pub(crate) fn permission_request_from_call(
     PermissionRequest::new(call, reason, requested, action, review_context)
 }
 
+/// Parses a permission request tool call without additional review context.
+///
+/// Runtime-owned adapters may use this boundary when they need to inspect the
+/// same normalized request type as runtime admission. Review context is added
+/// only by the runtime execution path and is intentionally not exposed here.
+pub fn parse_permission_request(
+    call: &PendingToolCall,
+) -> Result<PermissionRequest, PermissionAdmissionError> {
+    permission_request_from_call(call, Vec::new())
+}
+
 pub(crate) fn permission_denied_outcome(
     pending: &PendingToolCall,
     request: &PermissionRequest,

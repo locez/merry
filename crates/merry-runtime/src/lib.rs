@@ -46,9 +46,9 @@ mod model_config;
 mod permission;
 mod plan;
 mod process;
-mod process_runner;
 mod process_tool;
 mod profile;
+mod prompt;
 mod runtime;
 #[cfg(test)]
 mod schema_contract;
@@ -61,6 +61,7 @@ mod subagent;
 mod summary_draft_promotion;
 mod token_estimate;
 mod tool;
+mod tool_admission;
 mod tool_input_validation;
 mod user_input;
 mod workspace_scope;
@@ -68,7 +69,7 @@ mod workspace_scope;
 pub use agent_loop::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopError,
     AgentLoopEventStream, AgentLoopResult, AgentLoopStatus, AgentLoopStreamMessage,
-    DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS, DEFAULT_CODING_AGENT_MAX_MODEL_TURNS,
+    DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS,
 };
 pub use artifact::{
     ArtifactContent, ArtifactContentKind, ArtifactError, ArtifactRecord, ArtifactRegistry,
@@ -115,7 +116,7 @@ pub use permission::{
     PermissionRequest, PermissionReviewMode, PermissionReviewRequest, PermissionReviewResponse,
     PermissionReviewResponseError, PermissionReviewRisk, PermissionUserAuthorization,
     PermissionedAction, RequestedCapability, RequestedPathCapability, RuntimeTrustLevel,
-    request_permissions_tool,
+    parse_permission_request, request_permissions_tool,
 };
 pub use plan::{
     BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanApprovalInput, PlanChangeInput,
@@ -130,19 +131,15 @@ pub use process::{
     ProcessActionError, ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence,
     ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext,
     ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
-    StaticPermissionedProcessRunnerFactory, UnrestrictedPermissionedProcessRunnerFactory,
-    is_low_risk_process_action_intent, is_read_only_shell_process_action_intent,
-    shell_command_for_argv,
-};
-pub use process_runner::{
-    BwrapPermissionedProcessRunnerFactory, BwrapProcessEnvironment, BwrapProcessRunner,
-    BwrapSessionPermissions, TokioProcessRunner,
+    StaticPermissionedProcessRunnerFactory, is_low_risk_process_action_intent,
+    is_read_only_shell_process_action_intent, shell_command_for_argv,
 };
 pub use process_tool::{ProcessCommandToolError, process_command_tool};
 pub use profile::{
     AcceptedLocalWorkspaceProcessRunnerProfile, PathAccess, PathAccessRule, PathAccessRuleSource,
     RuntimeCapabilities, RuntimeProfile, RuntimeProfileBuilder, RuntimeProfileError,
 };
+pub use prompt::{PromptBlock, PromptError, PromptProfile};
 pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
 pub use session_projection::SessionTranscriptItem;
 pub use session_store::{FileSessionStore, PlanPersistenceLocation, SessionStoreError};
@@ -164,6 +161,7 @@ pub use tool::{
     ToolExecutionOutcome, ToolExecutionResult, ToolExecutor, ToolExecutorFuture, ToolRunner,
     WorkspacePatchChangeEvidence, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
 };
+pub use tool_admission::ToolAdmission;
 pub use user_input::{
     MAX_USER_IMAGE_DIMENSION, MAX_USER_IMAGE_PIXELS, MAX_USER_IMAGE_PNG_BYTES,
     MAX_USER_IMAGE_TOTAL_PNG_BYTES, MAX_USER_IMAGES, StepInput, UserImageInput, UserMessageInput,

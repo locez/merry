@@ -1,7 +1,6 @@
 use super::*;
-use crate::debug::coding_loop::{coding_loop_tool_call, coding_loop_workspace_call};
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
-use crate::testing::ScriptedProvider;
+use crate::testing::{ScriptedProvider, tool_call, workspace_tool_call};
 use merry_core::RuntimeJournalPayload;
 use merry_llm::{FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse};
 use merry_runtime::{ArtifactContent, StepContext, StepInput, ToolExecutionContext};
@@ -157,7 +156,7 @@ async fn generate_command_plan_reads_structured_final_output() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-    let provider = ScriptedProvider::new(vec![vec![Ok(coding_loop_workspace_call(
+    let provider = ScriptedProvider::new(vec![vec![Ok(workspace_tool_call(
         "call-final-command-plan",
         merry_runtime::FINAL_OUTPUT_TOOL_NAME,
         [
@@ -235,7 +234,7 @@ async fn cmd_check_command_tool_reports_path_availability() {
         "programs".to_owned(),
         serde_json::json!(["available-tool", "missing-tool", "printf"]),
     );
-    let provider = ScriptedProvider::new(vec![vec![Ok(coding_loop_tool_call(
+    let provider = ScriptedProvider::new(vec![vec![Ok(tool_call(
         "call-check-command",
         CHECK_COMMAND_TOOL_NAME,
         arguments,

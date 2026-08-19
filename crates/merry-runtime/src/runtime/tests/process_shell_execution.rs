@@ -109,7 +109,7 @@ async fn read_only_shell_process_executes_under_shell_profile_when_opted_in() {
         input_payload,
         json!({
             "kind": "shell_command_input",
-            "permission_profile_id": "process.shell.read_only.v1",
+            "permission_profile_id": "process.shell.read_only",
             "tool_call_id": "call-command-exec-shell-read-only-opt-in",
             "tool_name": "policy_command_shell_read_only_opt_in",
             "intent": {
@@ -141,10 +141,7 @@ async fn read_only_shell_process_executes_under_shell_profile_when_opted_in() {
             .expect("shell process result artifact should be textual JSON"),
     )
     .expect("shell process result artifact should parse as JSON");
-    assert_eq!(
-        payload["permission_profile_id"],
-        "process.shell.read_only.v1"
-    );
+    assert_eq!(payload["permission_profile_id"], "process.shell.read_only");
     assert!(payload["intent"].get("argv").is_none());
     assert_eq!(
         payload["input_artifact"],
@@ -173,7 +170,7 @@ async fn read_only_shell_process_executes_under_shell_profile_when_opted_in() {
     };
     assert_eq!(
         evidence.permission_profile_id(),
-        ProcessPermissionProfileId::SHELL_READ_ONLY_V1
+        ProcessPermissionProfileId::SHELL_READ_ONLY
     );
     let ActionProposalEvidence::ProcessAction(intent) = audits[0]
         .proposal()
@@ -196,7 +193,7 @@ async fn read_only_shell_process_executes_under_shell_profile_when_opted_in() {
             LedgerProjection::Fact { .. } | LedgerProjection::Lifecycle { .. } => None,
         })
         .expect("shell process result should reduce into a compact ledger observation");
-    assert!(observation_text.contains("permission_profile=process.shell.read_only.v1"));
+    assert!(observation_text.contains("permission_profile=process.shell.read_only"));
     assert!(observation_text.contains("shell=bash"));
     assert!(observation_text.contains("shell_flag=-lc"));
     assert!(observation_text.contains("shell_script_bytes=24"));
@@ -247,7 +244,7 @@ async fn read_only_shell_process_traces_payload_free_input_metadata_when_opted_i
     assert_eq!(runner.call_count(), 1);
     assert!(logs.contains("\"event\":\"runtime.process.execute.start\""));
     assert!(logs.contains("\"event\":\"runtime.process.execute.finish\""));
-    assert!(logs.contains("\"permission_profile_id\":\"process.shell.read_only.v1\""));
+    assert!(logs.contains("\"permission_profile_id\":\"process.shell.read_only\""));
     assert!(logs.contains("\"shell\":\"bash\""));
     assert!(logs.contains("\"shell_flag\":\"-lc\""));
     assert!(logs.contains("\"shell_script_bytes\":24"));

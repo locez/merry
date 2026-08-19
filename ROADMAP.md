@@ -13,7 +13,7 @@ issues. This file keeps only the major delivery sequence and its dependencies.
 - [x] [T0: Establish delivery baseline, roadmap, and architecture guard](https://github.com/locez/merry/issues/10)
 - [x] [T1: Establish evaluation protocol and TaskSpec (prototype complete; follow-up deferred)](https://github.com/locez/merry/issues/8)
 - [x] [T2: Deterministic Offline Harness (closed; covered by Rust unit/integration tests)](https://github.com/locez/merry/issues/11)
-- [ ] [T3: Establish the unique CodingAgentProfile](https://github.com/locez/merry/issues/12)
+- [x] [T3: Establish the unique CodingAgentProfile (implemented; shared facade/CLI profile, stable-prefix and admission evidence)](https://github.com/locez/merry/issues/12)
 - [x] [T4: Internal Coding Eval Suite (closed; no standalone runner)](https://github.com/locez/merry/issues/13)
 - [ ] [T5: Unify CLI, Debug, and Rust Runtime Builder](https://github.com/locez/merry/issues/14)
 - [ ] [T6: Establish production reliability, security, and observability harness](https://github.com/locez/merry/issues/15)

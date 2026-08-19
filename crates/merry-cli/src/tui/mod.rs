@@ -1,5 +1,5 @@
 use crate::cli_error::CliError;
-use crate::coding_runtime::ProcessExecutionMode;
+use crate::coding::ProcessExecutionMode;
 use crate::config::{MerryConfig, XdgPaths};
 use crate::provider_management::{
     ProviderDiscoveryDraft, ProviderManagementError, ProviderManagementService,

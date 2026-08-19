@@ -5,8 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-merry-core = { path = "../merry-core" }
-merry-runtime = { path = "../merry-runtime" }
+merry-core = { path = "../merry-core", version = "0.1.0" }
+merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
 reqwest.workspace = true
 schemars.workspace = true
 serde.workspace = true

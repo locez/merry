@@ -99,17 +99,20 @@ not require mechanically moving every existing module in one change.
   artifacts, context compilation, memory activation, checkpoints, permission
   admission, tool execution, cancellation, and lifecycle state. Runtime state
   is the source of truth for those concerns.
+- `crates/merry-process` is the host-process adapter layer. It owns the small
+  process backend/session boundary and platform-specific process runners; it
+  depends on runtime contracts but does not own coding policy or permission
+  state.
 - `crates/merry-provider-openai` and `crates/merry-provider-anthropic` are
   provider adapters. They translate external protocols at the `merry-llm`
   boundary; wire structs and protocol details stay private to those crates.
 - `crates/merry-tool-workspace` and `crates/merry-mcp` are resource and tool
   adapters. They connect workspace or MCP capabilities to runtime contracts
   and do not own session, ledger, artifact, or policy state.
-- Coding composition is a logical owner for coding prompts, project rules,
-  tool catalog, permission policy, validation, retry/recovery, and final
-  reporting. A dedicated `merry-coding` crate is not a current workspace
-  member; do not create another parallel composition path until that boundary
-  is deliberately established.
+- `crates/merry-coding` is the coding-composition owner for coding prompts,
+  project rules, tool catalog, permission policy, validation, retry/recovery,
+  and final reporting. The facade and product surfaces consume its typed
+  profile; they must not assemble a parallel coding policy.
 - `crates/merry` is the Rust facade. It owns application-facing construction
   and event surfaces without exposing provider wire types or CLI details.
 - `crates/merry-cli` is the product surface. It owns CLI/TUI interaction,

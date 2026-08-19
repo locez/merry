@@ -132,10 +132,4 @@ fn debug_help_writes_usage_to_stdout() {
     assert!(stdout.contains("--session-id <SESSION_ID>"));
     assert!(stdout.contains("--input <TEXT>"));
     assert!(stdout.contains("openai"));
-    assert!(stdout.contains("coding-loop-smoke"));
-    assert!(stdout.contains("permission-network-smoke"));
-    assert!(stdout.contains("coding-loop-live-smoke"));
-    assert!(stdout.contains("coding-loop-task-smoke"));
-    assert!(stdout.contains("coding-loop-task-live-smoke"));
-    assert!(stdout.contains("coding-loop-subagent-live-smoke"));
 }

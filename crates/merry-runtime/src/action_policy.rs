@@ -325,7 +325,7 @@ pub(crate) fn is_local_workspace_effect_process_action_proposal(
                     && classify_process_intent(intent)
                         == ProcessIntentClass::LocalWorkspaceEffect
                     && required_process_permission_profile_id(intent)
-                        == Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+                        == Some(ProcessPermissionProfileId::LOCAL_WORKSPACE)
                     && admission.matches_intent(intent)
         )
 }
@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn process_admission_predicates_keep_low_and_local_workspace_lanes_distinct() {
         let call = pending_tool_call();
-        let admission = AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1();
+        let admission = AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace();
         let informational = process_proposal(&call, &["rustc", "--version"]);
         assert!(is_low_risk_process_action_proposal(
             ToolActionKind::CommandExec,
@@ -586,7 +586,7 @@ mod tests {
 
         let mismatched_admission =
             AcceptedLocalWorkspaceProcessAdmission::for_test_permission_profile_id(
-                ProcessPermissionProfileId::READ_ONLY_V1,
+                ProcessPermissionProfileId::READ_ONLY,
             );
         assert!(!is_local_workspace_effect_process_action_proposal(
             ToolActionKind::CommandExec,

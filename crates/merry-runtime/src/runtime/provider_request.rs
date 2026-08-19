@@ -1,7 +1,7 @@
 use crate::{
     CheckpointDecision, ContextBudget, ContextBudgetPolicy, ContextCompiler,
-    DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS, ProjectRules, ResolvedContextWindow, RuntimeError,
-    SessionContextSnapshot, SkillCatalog, TaskAnchor, decide_checkpoint,
+    DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS, ProjectRules, PromptProfile, ResolvedContextWindow,
+    RuntimeError, SessionContextSnapshot, SkillCatalog, TaskAnchor, decide_checkpoint,
     plan::projection::{
         coordinator_plan_control_message, coordinator_plan_inactive_control_message,
     },
@@ -157,6 +157,7 @@ pub(super) fn compile_step_request_from_inputs(
     inputs: &StepRequestInputs,
     tool_specs: Vec<merry_core::ToolSpec>,
     generation_config: GenerationConfig,
+    prompt_profile: &PromptProfile,
     progress_commentary: bool,
 ) -> Result<merry_llm::ModelRequest, StepRequestCompileError> {
     let compiled_context = ContextCompiler::new().compile(&inputs.snapshot)?;
@@ -171,6 +172,7 @@ pub(super) fn compile_step_request_from_inputs(
         transcript: &inputs.transcript,
         tool_specs,
         generation_config,
+        prompt_profile,
         progress_commentary,
     })
     .map_err(StepRequestCompileError::from)
@@ -188,6 +190,7 @@ pub(super) fn estimate_compaction_fixed_dynamic_tokens(
     inputs: &StepRequestInputs,
     tool_specs: Vec<merry_core::ToolSpec>,
     generation_config: GenerationConfig,
+    prompt_profile: &PromptProfile,
     progress_commentary: bool,
 ) -> Result<CompactionFixedDynamicTokens, StepRequestCompileError> {
     let replacement_context =
@@ -203,6 +206,7 @@ pub(super) fn estimate_compaction_fixed_dynamic_tokens(
         transcript: &[],
         tool_specs: tool_specs.clone(),
         generation_config: generation_config.clone(),
+        prompt_profile,
         progress_commentary,
     })?;
     let archive_only_context = ContextCompiler::new().compile(&inputs.snapshot)?;
@@ -217,6 +221,7 @@ pub(super) fn estimate_compaction_fixed_dynamic_tokens(
         transcript: &[],
         tool_specs,
         generation_config,
+        prompt_profile,
         progress_commentary,
     })?;
 
@@ -357,6 +362,7 @@ mod tests {
             &without_checkpoint,
             Vec::new(),
             GenerationConfig::default(),
+            &PromptProfile::default(),
             false,
         )
         .expect("baseline estimate builds");
@@ -372,6 +378,7 @@ mod tests {
             &with_checkpoint,
             Vec::new(),
             GenerationConfig::default(),
+            &PromptProfile::default(),
             false,
         )
         .expect("checkpoint estimates build");
@@ -399,6 +406,7 @@ mod tests {
             &with_history,
             Vec::new(),
             GenerationConfig::default(),
+            &PromptProfile::default(),
             false,
         )
         .expect("history estimates build");

@@ -1,9 +1,5 @@
-use crate::coding_runtime::ProcessExecutionMode;
-use crate::debug::{
-    Args as DebugArgs, CodingLoopLiveSmokeArgs as DebugCodingLoopLiveSmokeArgs,
-    CodingLoopSubagentLiveSmokeArgs as DebugCodingLoopSubagentLiveSmokeArgs,
-    CodingLoopTaskLiveSmokeArgs as DebugCodingLoopTaskLiveSmokeArgs, OpenAiArgs as DebugOpenAiArgs,
-};
+use crate::coding::ProcessExecutionMode;
+use crate::debug::{Args as DebugArgs, OpenAiArgs as DebugOpenAiArgs};
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
@@ -15,8 +11,8 @@ Environment:
 Provider/model/base URL/API key source come from
 `$XDG_CONFIG_HOME/merry/config.toml` or `~/.config/merry/config.toml`.
 Set exactly one of `[providers.openai-compatible].api_key` or `api_key_file`.
-For sandboxed live smokes, prefer config-relative `api_key_file =
-\"secrets/openai.key\"` so credentials are not passed through bwrap argv.
+For sandboxed model debugging, prefer config-relative `api_key_file =
+\"secrets/openai.key\"` so credentials are not passed through process argv.
 ";
 
 #[derive(Debug, Parser)]
@@ -180,40 +176,6 @@ pub(crate) fn debug_openai_usage() -> String {
     command_usage(&mut command)
 }
 
-pub(crate) fn debug_coding_loop_live_smoke_usage() -> String {
-    let mut command = DebugCodingLoopLiveSmokeArgs::augment_args(clap::Command::new(
-        "coding-loop-live-smoke",
-    ))
-    .bin_name("merry debug coding-loop-live-smoke")
-    .about("Run an opt-in sandboxed coding-loop smoke driven by a live OpenAI-compatible model")
-    .after_help(OPENAI_ENV_HELP);
-    command_usage(&mut command)
-}
-
-pub(crate) fn debug_coding_loop_task_live_smoke_usage() -> String {
-    let mut command = DebugCodingLoopTaskLiveSmokeArgs::augment_args(clap::Command::new(
-        "coding-loop-task-live-smoke",
-    ))
-    .bin_name("merry debug coding-loop-task-live-smoke")
-    .about(
-        "Run an opt-in sandboxed coding-loop task smoke driven by a live OpenAI-compatible model",
-    )
-    .after_help(OPENAI_ENV_HELP);
-    command_usage(&mut command)
-}
-
-pub(crate) fn debug_coding_loop_subagent_live_smoke_usage() -> String {
-    let mut command = DebugCodingLoopSubagentLiveSmokeArgs::augment_args(clap::Command::new(
-        "coding-loop-subagent-live-smoke",
-    ))
-    .bin_name("merry debug coding-loop-subagent-live-smoke")
-    .about(
-        "Run an opt-in sandboxed coding-loop smoke that requires a live model to delegate to a child agent",
-    )
-    .after_help(OPENAI_ENV_HELP);
-    command_usage(&mut command)
-}
-
 fn command_usage(command: &mut clap::Command) -> String {
     let mut buffer = Vec::new();
     command
@@ -225,16 +187,12 @@ fn command_usage(command: &mut clap::Command) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, CliCommand, ProcessExecutionMode, cmd_usage, debug_coding_loop_live_smoke_usage,
-        debug_coding_loop_subagent_live_smoke_usage, debug_coding_loop_task_live_smoke_usage,
-        debug_openai_usage, shell_usage,
+        Cli, CliCommand, ProcessExecutionMode, cmd_usage, debug_openai_usage, shell_usage,
     };
-    use crate::debug::{
-        CodingLoopTaskSmokeTask, Command as DebugCommand, DEFAULT_INPUT, DEFAULT_SESSION_ID,
-    };
+    use crate::debug::{Command as DebugCommand, DEFAULT_INPUT, DEFAULT_SESSION_ID};
     use crate::sandbox::{
         ChildHandoff as SandboxChildHandoff, ClipboardAccess, SANDBOX_CHILD_HANDOFF_ARG,
-        SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
+        SANDBOX_CHILD_HANDOFF_CLI_BWRAP,
     };
     use clap::Parser;
 
@@ -441,203 +399,8 @@ mod tests {
                     assert_eq!(openai.max_output_tokens, Some(16));
                     assert_eq!(openai.debug_tool_result.as_deref(), Some("tool result"));
                 }
-                Some(
-                    DebugCommand::Shell(_)
-                    | DebugCommand::CodingLoopSmoke
-                    | DebugCommand::PermissionNetworkSmoke(_)
-                    | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
-                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
-                ) => panic!("expected debug openai subcommand"),
+                Some(DebugCommand::Shell(_)) => panic!("expected debug openai subcommand"),
                 None => panic!("expected debug openai subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn parses_debug_coding_loop_smoke() {
-        let cli = Cli::try_parse_from(["merry", "debug", "coding-loop-smoke"])
-            .expect("debug coding-loop-smoke args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::CodingLoopSmoke) => {}
-                Some(
-                    DebugCommand::OpenAi(_)
-                    | DebugCommand::Shell(_)
-                    | DebugCommand::PermissionNetworkSmoke(_)
-                    | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
-                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
-                )
-                | None => panic!("expected debug coding-loop-smoke subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn parses_debug_permission_network_smoke() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "debug",
-            "permission-network-smoke",
-            "--model",
-            "gpt-test",
-            "--max-output-tokens",
-            "384",
-        ])
-        .expect("debug permission-network-smoke args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::PermissionNetworkSmoke(smoke)) => {
-                    assert_eq!(smoke.model.as_deref(), Some("gpt-test"));
-                    assert_eq!(smoke.max_output_tokens, 384);
-                }
-                Some(
-                    DebugCommand::OpenAi(_)
-                    | DebugCommand::Shell(_)
-                    | DebugCommand::CodingLoopSmoke
-                    | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
-                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
-                )
-                | None => panic!("expected debug permission-network-smoke subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn parses_debug_coding_loop_live_smoke() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "debug",
-            "coding-loop-live-smoke",
-            "--model",
-            "gpt-test",
-            "--max-output-tokens",
-            "384",
-        ])
-        .expect("debug coding-loop-live-smoke args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::CodingLoopLiveSmoke(live)) => {
-                    assert_eq!(live.model.as_deref(), Some("gpt-test"));
-                    assert_eq!(live.max_output_tokens, 384);
-                }
-                Some(
-                    DebugCommand::OpenAi(_)
-                    | DebugCommand::Shell(_)
-                    | DebugCommand::CodingLoopSmoke
-                    | DebugCommand::PermissionNetworkSmoke(_)
-                    | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
-                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
-                )
-                | None => panic!("expected debug coding-loop-live-smoke subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn parses_debug_coding_loop_task_smoke() {
-        let cli = Cli::try_parse_from(["merry", "debug", "coding-loop-task-smoke"])
-            .expect("debug coding-loop-task-smoke args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::CodingLoopTaskSmoke(task)) => {
-                    assert_eq!(task.task, CodingLoopTaskSmokeTask::StatusText);
-                }
-                Some(
-                    DebugCommand::OpenAi(_)
-                    | DebugCommand::Shell(_)
-                    | DebugCommand::CodingLoopSmoke
-                    | DebugCommand::PermissionNetworkSmoke(_)
-                    | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_)
-                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
-                )
-                | None => panic!("expected debug coding-loop-task-smoke subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn parses_debug_coding_loop_task_live_smoke() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "debug",
-            "coding-loop-task-live-smoke",
-            "--task",
-            "status-text",
-            "--model",
-            "gpt-test",
-            "--max-output-tokens",
-            "384",
-        ])
-        .expect("debug coding-loop-task-live-smoke args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::CodingLoopTaskLiveSmoke(live)) => {
-                    assert_eq!(live.task, CodingLoopTaskSmokeTask::StatusText);
-                    assert_eq!(live.model.as_deref(), Some("gpt-test"));
-                    assert_eq!(live.max_output_tokens, 384);
-                }
-                Some(
-                    DebugCommand::OpenAi(_)
-                    | DebugCommand::Shell(_)
-                    | DebugCommand::CodingLoopSmoke
-                    | DebugCommand::PermissionNetworkSmoke(_)
-                    | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopSubagentLiveSmoke(_),
-                )
-                | None => panic!("expected debug coding-loop-task-live-smoke subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn parses_debug_coding_loop_subagent_live_smoke() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "debug",
-            "coding-loop-subagent-live-smoke",
-            "--model",
-            "gpt-test",
-            "--max-output-tokens",
-            "384",
-        ])
-        .expect("debug coding-loop-subagent-live-smoke args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::CodingLoopSubagentLiveSmoke(live)) => {
-                    assert_eq!(live.model.as_deref(), Some("gpt-test"));
-                    assert_eq!(live.max_output_tokens, 384);
-                }
-                Some(
-                    DebugCommand::OpenAi(_)
-                    | DebugCommand::Shell(_)
-                    | DebugCommand::CodingLoopSmoke
-                    | DebugCommand::PermissionNetworkSmoke(_)
-                    | DebugCommand::CodingLoopLiveSmoke(_)
-                    | DebugCommand::CodingLoopTaskSmoke(_)
-                    | DebugCommand::CodingLoopTaskLiveSmoke(_),
-                )
-                | None => panic!("expected debug coding-loop-subagent-live-smoke subcommand"),
             },
             _ => panic!("expected debug subcommand"),
         }
@@ -692,7 +455,7 @@ mod tests {
         let cli = Cli::try_parse_from([
             "merry",
             SANDBOX_CHILD_HANDOFF_ARG,
-            SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
+            SANDBOX_CHILD_HANDOFF_CLI_BWRAP,
             "debug",
             "shell",
             "--",
@@ -703,7 +466,7 @@ mod tests {
 
         assert_eq!(
             cli.sandbox_child_handoff,
-            Some(SandboxChildHandoff::CliBwrapV1)
+            Some(SandboxChildHandoff::CliBwrap)
         );
     }
 
@@ -729,10 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn live_smoke_usage_contains_openai_env_help() {
+    fn debug_openai_usage_contains_openai_env_help() {
         assert!(debug_openai_usage().contains("MERRY_OPENAI_DEBUG=1"));
-        assert!(debug_coding_loop_live_smoke_usage().contains("MERRY_OPENAI_DEBUG=1"));
-        assert!(debug_coding_loop_task_live_smoke_usage().contains("MERRY_OPENAI_DEBUG=1"));
-        assert!(debug_coding_loop_subagent_live_smoke_usage().contains("MERRY_OPENAI_DEBUG=1"));
     }
 }

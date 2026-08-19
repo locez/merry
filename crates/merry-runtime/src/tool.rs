@@ -1204,6 +1204,7 @@ impl std::fmt::Debug for RegisteredTool {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ToolRegistry {
     tools: BTreeMap<ToolName, RegisteredToolEntry>,
+    order: Vec<ToolName>,
 }
 
 #[derive(Debug, Clone)]
@@ -1215,6 +1216,7 @@ struct RegisteredToolEntry {
 impl ToolRegistry {
     pub(crate) fn from_registered(tools: Vec<RegisteredTool>) -> Result<Self, ToolRegistryError> {
         let mut registry = BTreeMap::new();
+        let mut order = Vec::with_capacity(tools.len());
 
         for tool in tools {
             let name = tool.spec().name().clone();
@@ -1230,14 +1232,19 @@ impl ToolRegistry {
             if registry.insert(name.clone(), entry).is_some() {
                 return Err(ToolRegistryError::DuplicateName { name });
             }
+            order.push(name);
         }
 
-        Ok(Self { tools: registry })
+        Ok(Self {
+            tools: registry,
+            order,
+        })
     }
 
     pub(crate) fn tool_specs(&self) -> Vec<ToolSpec> {
-        self.tools
-            .values()
+        self.order
+            .iter()
+            .filter_map(|name| self.tools.get(name))
             .map(|entry| entry.tool.spec().clone())
             .collect()
     }

@@ -1,13 +1,14 @@
 //! Tokio-backed process runner adapter.
 //!
 //! This module is the concrete OS process adapter for Merry's runtime-owned
-//! [`crate::ProcessRunner`] boundary. It does not decide whether a process is
+//! [`merry_runtime::ProcessRunner`] boundary. It does not decide whether a process is
 //! admitted; callers must still opt in through runtime permission profiles.
 
-use crate::{
-    HostIntegration, PathAccess, PathAccessRule, PermissionRequest,
+use merry_runtime::{
+    HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource, PermissionRequest,
     PermissionedProcessRunnerFactory, ProcessActionIntent, ProcessExitStatus, ProcessRunner,
     ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+    RequestedCapability,
 };
 use std::{
     collections::BTreeSet,
@@ -19,6 +20,9 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
+
+mod tokio_runner;
+pub use tokio_runner::TokioProcessRunner;
 
 const BWRAP_PROGRAM: &str = "bwrap";
 const ACTION_SANDBOX_HOME_FALLBACK: &str = "/home/merry";
@@ -37,63 +41,6 @@ const ACTION_SANDBOX_ETC_READ_ONLY_DIR_PATHS: &[&str] = &[
     "/etc/ca-certificates",
     "/etc/pki",
 ];
-
-/// Runtime-owned process runner backed by [`tokio::process::Command`].
-///
-/// The runner executes the exact validated argv supplied by
-/// [`ProcessActionIntent`], inherits the current process environment, closes
-/// stdin, captures stdout/stderr up to the intent limits, and cooperatively
-/// cancels by killing the child process. Permission profiles and sandbox
-/// constraints are enforced by the runtime construction path that selects this
-/// runner, not by this type.
-#[derive(Debug, Default, Clone)]
-pub struct TokioProcessRunner {
-    cwd_root: Option<PathBuf>,
-    environment_overrides: Vec<(OsString, OsString)>,
-}
-
-impl TokioProcessRunner {
-    /// Creates a Tokio-backed process runner.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            cwd_root: None,
-            environment_overrides: Vec::new(),
-        }
-    }
-
-    /// Creates a Tokio-backed process runner whose process cwd values are
-    /// resolved under a stable workspace root.
-    #[must_use]
-    pub fn new_at_workspace_root(root: impl Into<PathBuf>) -> Self {
-        Self {
-            cwd_root: Some(root.into()),
-            environment_overrides: Vec::new(),
-        }
-    }
-
-    /// Validates and applies environment assignments while preserving all
-    /// other variables inherited from the Merry process.
-    pub fn with_environment_overrides(
-        mut self,
-        overrides: impl IntoIterator<Item = (OsString, OsString)>,
-    ) -> Result<Self, ProcessRunnerError> {
-        let mut names = std::collections::BTreeSet::new();
-        let mut validated = Vec::new();
-        for (name, value) in overrides {
-            validate_environment_name(&name)?;
-            validate_os_string(&value, "host process environment value")?;
-            if !names.insert(name.clone()) {
-                return Err(ProcessRunnerError::infrastructure(
-                    "host process environment contains a duplicate variable",
-                ));
-            }
-            validated.push((name, value));
-        }
-        self.environment_overrides = validated;
-        Ok(self)
-    }
-}
 
 /// Host-derived paths used to construct one action sandbox.
 ///
@@ -423,7 +370,7 @@ fn absolute_env_path(name: &str, fallback: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(fallback))
 }
 
-/// Runtime-owned process runner that executes each process inside bubblewrap.
+/// Host-process runner that executes each process inside bubblewrap.
 ///
 /// This is Merry's per-action sandbox backend for Linux. It is intentionally
 /// separate from the CLI outer sandbox: the outer sandbox protects the host
@@ -669,7 +616,7 @@ impl BwrapPermissionedProcessRunnerFactory {
             .requested()
             .iter()
             .filter_map(|capability| {
-                let crate::RequestedCapability::Path(requested) = capability else {
+                let RequestedCapability::Path(requested) = capability else {
                     return None;
                 };
                 let path = materialize_requested_path(&self.cwd_root, requested.path());
@@ -679,7 +626,7 @@ impl BwrapPermissionedProcessRunnerFactory {
                             PathAccessRule::new(
                                 path,
                                 effective_access,
-                                crate::PathAccessRuleSource::PermissionReview,
+                                PathAccessRuleSource::PermissionReview,
                             )
                         }),
                 )
@@ -695,7 +642,7 @@ impl BwrapPermissionedProcessRunnerFactory {
             .requested()
             .iter()
             .filter_map(|capability| match capability {
-                crate::RequestedCapability::HostIntegration(integration) => Some(*integration),
+                RequestedCapability::HostIntegration(integration) => Some(*integration),
                 _ => None,
             })
             .collect()
@@ -790,7 +737,7 @@ fn effective_requested_path_access(
     if configured_rules.iter().any(|rule| {
         requested_path.starts_with(rule.path())
             && rule.access() == PathAccess::ReadOnly
-            && rule.source() == crate::PathAccessRuleSource::TrustedGlobalConfig
+            && rule.source() == PathAccessRuleSource::TrustedGlobalConfig
     }) {
         // Explicit global read-only rules are a hard ceiling. Git metadata
         // baselines are intentionally different: a reviewed action may
@@ -803,10 +750,9 @@ fn effective_requested_path_access(
 
 fn normalize_path_rules(rules: Vec<PathAccessRule>) -> Vec<PathAccessRule> {
     let mut merged =
-        std::collections::BTreeMap::<PathBuf, (PathAccess, crate::PathAccessRuleSource)>::new();
+        std::collections::BTreeMap::<PathBuf, (PathAccess, PathAccessRuleSource)>::new();
     for rule in rules {
-        let access = if rule.source()
-            == crate::PathAccessRuleSource::TrustedGlobalConfigWritableCeiling
+        let access = if rule.source() == PathAccessRuleSource::TrustedGlobalConfigWritableCeiling
             && rule.access() == PathAccess::ReadWrite
         {
             PathAccess::ReadOnly
@@ -832,7 +778,7 @@ fn normalize_path_rules(rules: Vec<PathAccessRule>) -> Vec<PathAccessRule> {
 
 fn normalize_session_path_rules(rules: Vec<PathAccessRule>) -> Vec<PathAccessRule> {
     let mut merged =
-        std::collections::BTreeMap::<PathBuf, (PathAccess, crate::PathAccessRuleSource)>::new();
+        std::collections::BTreeMap::<PathBuf, (PathAccess, PathAccessRuleSource)>::new();
     for rule in rules {
         let entry = merged
             .entry(rule.path().to_path_buf())
@@ -880,10 +826,10 @@ fn session_path_access(left: PathAccess, right: PathAccess) -> PathAccess {
 
 fn merged_path_rule(
     left_access: PathAccess,
-    left_source: crate::PathAccessRuleSource,
+    left_source: PathAccessRuleSource,
     right_access: PathAccess,
-    right_source: crate::PathAccessRuleSource,
-) -> (PathAccess, crate::PathAccessRuleSource) {
+    right_source: PathAccessRuleSource,
+) -> (PathAccess, PathAccessRuleSource) {
     if left_access == PathAccess::Deny {
         return (left_access, left_source);
     }
@@ -892,9 +838,9 @@ fn merged_path_rule(
     }
 
     let left_is_hard_read_only = left_access == PathAccess::ReadOnly
-        && left_source == crate::PathAccessRuleSource::TrustedGlobalConfig;
+        && left_source == PathAccessRuleSource::TrustedGlobalConfig;
     let right_is_hard_read_only = right_access == PathAccess::ReadOnly
-        && right_source == crate::PathAccessRuleSource::TrustedGlobalConfig;
+        && right_source == PathAccessRuleSource::TrustedGlobalConfig;
     if left_is_hard_read_only {
         return (left_access, left_source);
     }
@@ -903,17 +849,17 @@ fn merged_path_rule(
     }
 
     let left_is_git_metadata_baseline = left_access == PathAccess::ReadOnly
-        && left_source == crate::PathAccessRuleSource::GitMetadataBaseline;
+        && left_source == PathAccessRuleSource::GitMetadataBaseline;
     let right_is_git_metadata_baseline = right_access == PathAccess::ReadOnly
-        && right_source == crate::PathAccessRuleSource::GitMetadataBaseline;
+        && right_source == PathAccessRuleSource::GitMetadataBaseline;
     if left_is_git_metadata_baseline
-        && right_source == crate::PathAccessRuleSource::PermissionReview
+        && right_source == PathAccessRuleSource::PermissionReview
         && right_access == PathAccess::ReadWrite
     {
         return (right_access, right_source);
     }
     if right_is_git_metadata_baseline
-        && left_source == crate::PathAccessRuleSource::PermissionReview
+        && left_source == PathAccessRuleSource::PermissionReview
         && left_access == PathAccess::ReadWrite
     {
         return (left_access, left_source);
@@ -926,9 +872,9 @@ fn merged_path_rule(
     }
 
     let left_is_reviewed_write = left_access == PathAccess::ReadWrite
-        && left_source == crate::PathAccessRuleSource::PermissionReview;
+        && left_source == PathAccessRuleSource::PermissionReview;
     let right_is_reviewed_write = right_access == PathAccess::ReadWrite
-        && right_source == crate::PathAccessRuleSource::PermissionReview;
+        && right_source == PathAccessRuleSource::PermissionReview;
     if left_is_reviewed_write {
         return (left_access, left_source);
     }
@@ -952,7 +898,7 @@ fn git_metadata_baseline_rule(path: impl Into<PathBuf>) -> PathAccessRule {
     PathAccessRule::new(
         path,
         PathAccess::ReadOnly,
-        crate::PathAccessRuleSource::GitMetadataBaseline,
+        PathAccessRuleSource::GitMetadataBaseline,
     )
 }
 
@@ -963,7 +909,7 @@ fn add_git_metadata_baseline_rules(
     let reviewed_git_write_paths = rules
         .iter()
         .filter(|rule| {
-            rule.source() == crate::PathAccessRuleSource::PermissionReview
+            rule.source() == PathAccessRuleSource::PermissionReview
                 && rule.access() == PathAccess::ReadWrite
                 && is_git_metadata_path(rule.path())
         })
@@ -1139,9 +1085,9 @@ fn bwrap_process_plan_with_environment(
     }
     append_bwrap_required_path_rule(&mut args, cwd_root, PathAccess::ReadWrite);
     for rule in path_rules {
-        if rule.source() == crate::PathAccessRuleSource::GitMetadataBaseline {
+        if rule.source() == PathAccessRuleSource::GitMetadataBaseline {
             append_bwrap_git_metadata_baseline_rule(&mut args, rule.path());
-        } else if rule.source() == crate::PathAccessRuleSource::PermissionReview
+        } else if rule.source() == PathAccessRuleSource::PermissionReview
             && rule.access() == PathAccess::ReadWrite
             && is_git_metadata_path(rule.path())
             && !rule.path().exists()
@@ -1150,7 +1096,7 @@ fn bwrap_process_plan_with_environment(
             // mount for a newly-created .git directory. A required bind would
             // fail before git init gets a chance to create the directory.
             continue;
-        } else if rule.source() == crate::PathAccessRuleSource::PermissionReview {
+        } else if rule.source() == PathAccessRuleSource::PermissionReview {
             append_bwrap_required_path_rule(&mut args, rule.path(), rule.access());
         } else {
             append_bwrap_path_rule(&mut args, rule.path(), rule.access());
@@ -1341,56 +1287,6 @@ async fn run_process_plan(
     run_spawned_process(command, intent, context, backend_program).await
 }
 
-impl ProcessRunner for TokioProcessRunner {
-    fn run<'a>(
-        &'a self,
-        intent: ProcessActionIntent,
-        context: ProcessRunnerContext,
-    ) -> ProcessRunnerFuture<'a> {
-        let cwd_root = self.cwd_root.clone();
-        let environment_overrides = self.environment_overrides.clone();
-        Box::pin(async move {
-            run_tokio_process(intent, context, cwd_root.as_deref(), &environment_overrides).await
-        })
-    }
-}
-
-async fn run_tokio_process(
-    intent: ProcessActionIntent,
-    context: ProcessRunnerContext,
-    cwd_root: Option<&Path>,
-    environment_overrides: &[(OsString, OsString)],
-) -> Result<ProcessRunnerOutput, ProcessRunnerError> {
-    let Some((program, args)) = intent.argv().split_first() else {
-        return Err(ProcessRunnerError::infrastructure(
-            "validated process argv was unexpectedly empty",
-        ));
-    };
-    let program = program.clone();
-    let program_for_error = program.clone();
-    let args = args.to_vec();
-
-    if context.cancellation_token().is_cancelled() {
-        return Err(ProcessRunnerError::Cancelled);
-    }
-
-    let mut command = tokio::process::Command::new(&program);
-    command
-        .args(&args)
-        .current_dir(process_current_dir(cwd_root, &intent))
-        .envs(
-            environment_overrides
-                .iter()
-                .map(|(name, value)| (name, value)),
-        )
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    run_spawned_process(command, intent, context, program_for_error).await
-}
-
 async fn run_spawned_process(
     mut command: tokio::process::Command,
     intent: ProcessActionIntent,
@@ -1525,13 +1421,14 @@ mod tests {
         BwrapSessionPermissions, TokioProcessRunner, bwrap_process_plan,
         bwrap_process_plan_with_environment, process_current_dir,
     };
-    use crate::{
+    use crate::UnrestrictedPermissionedProcessRunnerFactory;
+    use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
+    use merry_runtime::{
         HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource, PermissionRequest,
         PermissionedAction, PermissionedProcessRunnerFactory, ProcessActionIntent,
         ProcessEnvPolicy, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-        StaticPermissionedProcessRunnerFactory, UnrestrictedPermissionedProcessRunnerFactory,
+        StaticPermissionedProcessRunnerFactory,
     };
-    use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
     use serde_json::json;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -1556,8 +1453,7 @@ mod tests {
             ToolName::new("request_permissions").expect("valid tool name"),
             ToolCallArguments::try_from(arguments).expect("valid tool arguments"),
         );
-        crate::permission::permission_request_from_call(&call, Vec::new())
-            .expect("permission request should parse")
+        merry_runtime::parse_permission_request(&call).expect("permission request should parse")
     }
 
     fn request_process_intent(request: &PermissionRequest) -> &ProcessActionIntent {

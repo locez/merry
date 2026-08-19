@@ -4,8 +4,8 @@ use super::{
     checkpoint_window::ArchivedRefManifest,
     plan_persistence::validate_plan_snapshot_refs,
     transcript::{
-        PersistedTranscript, PersistedTranscriptV1, ToolCallPromptProjection,
-        ToolResultPromptProjection, Transcript, TranscriptItem, TranscriptV1MigrationError,
+        PersistedTranscript, ToolCallPromptProjection, ToolResultPromptProjection, Transcript,
+        TranscriptItem,
     },
 };
 use crate::{
@@ -15,8 +15,8 @@ use crate::{
     artifact::{ArtifactContent, ArtifactRegistry, PersistedArtifactRecord},
     checkpoint::{CheckpointRef, CheckpointRefId, CheckpointSequenceRange, CheckpointSourceKind},
     context::{
-        CompactedCheckpoint, ContextCompiler, ContextEntry, ContextError, ContextEvidence,
-        ContextSummary, PersistedCompactedCheckpoint, SessionContextSnapshot,
+        CompactedCheckpoint, ContextCompiler, ContextEntry, ContextEvidence, ContextSummary,
+        PersistedCompactedCheckpoint, SessionContextSnapshot,
     },
     judgment::{JudgmentRegistry, PersistedJudgmentRegistry},
     ledger::{PersistedLedgerEntry, TaskLedger},
@@ -36,9 +36,7 @@ use std::{
     sync::Arc,
 };
 
-const LEGACY_SESSION_STATE_FORMAT_VERSION: u32 = 1;
-const PRE_PLAN_SESSION_STATE_FORMAT_VERSION: u32 = 2;
-const SESSION_STATE_FORMAT_VERSION: u32 = 3;
+const CURRENT_SESSION_STATE_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredSessionDocumentHeader {
@@ -48,7 +46,7 @@ struct StoredSessionDocumentHeader {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredSessionDocument<T> {
+struct StoredSessionDocument {
     format_version: u32,
     session_id: SessionId,
     next_sequence: u64,
@@ -56,25 +54,17 @@ struct StoredSessionDocument<T> {
     ledger: Vec<PersistedLedgerEntry>,
     artifacts: Vec<StoredArtifact>,
     compacted_checkpoint: Option<PersistedCompactedCheckpoint>,
-    #[serde(default)]
     archived_ref_manifest: Vec<StoredArchivedRef>,
-    #[serde(default)]
-    prompt_history_projection: Option<PromptHistoryProjection>,
+    prompt_history_projection: PromptHistoryProjection,
     context_entries: Vec<StoredContextEntry>,
-    transcript: T,
+    transcript: PersistedTranscript,
     resolved_tool_calls: Vec<ToolCallId>,
     usage: Option<SessionUsage>,
     task_anchor: Option<StoredTaskAnchor>,
     registries: StoredRegistries,
-    #[serde(default)]
     active_plan: Option<PersistedPlanState>,
-    #[serde(default)]
     terminal_plans: Vec<PlanSnapshot>,
 }
-
-type StoredSessionDocumentV1 = StoredSessionDocument<PersistedTranscriptV1>;
-type StoredSessionDocumentV2 = StoredSessionDocument<PersistedTranscript>;
-type StoredSessionDocumentV3 = StoredSessionDocument<PersistedTranscript>;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -173,12 +163,7 @@ impl SessionState {
             Err(error) => return Err(error),
         };
         let header: StoredSessionDocumentHeader = serde_json::from_slice(&bytes)?;
-        if !matches!(
-            header.format_version,
-            LEGACY_SESSION_STATE_FORMAT_VERSION
-                | PRE_PLAN_SESSION_STATE_FORMAT_VERSION
-                | SESSION_STATE_FORMAT_VERSION
-        ) {
+        if header.format_version != CURRENT_SESSION_STATE_FORMAT_VERSION {
             return Err(SessionStoreError::UnsupportedFormatVersion {
                 actual: header.format_version,
             });
@@ -190,21 +175,8 @@ impl SessionState {
             });
         }
 
-        let mut session = match header.format_version {
-            LEGACY_SESSION_STATE_FORMAT_VERSION => {
-                let document: StoredSessionDocumentV1 = serde_json::from_slice(&bytes)?;
-                Self::from_stored_document_v1(document)
-            }
-            PRE_PLAN_SESSION_STATE_FORMAT_VERSION => {
-                let document: StoredSessionDocumentV2 = serde_json::from_slice(&bytes)?;
-                Self::from_stored_document(document, PRE_PLAN_SESSION_STATE_FORMAT_VERSION)
-            }
-            SESSION_STATE_FORMAT_VERSION => {
-                let document: StoredSessionDocumentV3 = serde_json::from_slice(&bytes)?;
-                Self::from_stored_document(document, SESSION_STATE_FORMAT_VERSION)
-            }
-            _ => unreachable!("supported session format version checked before body decode"),
-        }?;
+        let document: StoredSessionDocument = serde_json::from_slice(&bytes)?;
+        let mut session = Self::from_stored_document(document)?;
         if let Some(overlay_bytes) = overlay_bytes {
             session.apply_plan_overlay(&overlay_bytes, false)?;
         }
@@ -316,7 +288,7 @@ impl SessionState {
             .collect::<Vec<_>>();
 
         let document = StoredSessionDocument {
-            format_version: SESSION_STATE_FORMAT_VERSION,
+            format_version: CURRENT_SESSION_STATE_FORMAT_VERSION,
             session_id: self.session_id.clone(),
             next_sequence: view.next_sequence,
             session_started: view.session_started,
@@ -331,7 +303,7 @@ impl SessionState {
                 .iter()
                 .map(StoredArchivedRef::from)
                 .collect(),
-            prompt_history_projection: Some(view.prompt_history_projection),
+            prompt_history_projection: view.prompt_history_projection,
             context_entries: self
                 .context_entries
                 .iter()
@@ -368,11 +340,8 @@ impl SessionState {
         }
     }
 
-    fn from_stored_document(
-        document: StoredSessionDocumentV3,
-        expected_format_version: u32,
-    ) -> Result<Self, SessionStoreError> {
-        if document.format_version != expected_format_version {
+    fn from_stored_document(document: StoredSessionDocument) -> Result<Self, SessionStoreError> {
+        if document.format_version != CURRENT_SESSION_STATE_FORMAT_VERSION {
             return Err(SessionStoreError::UnsupportedFormatVersion {
                 actual: document.format_version,
             });
@@ -382,24 +351,8 @@ impl SessionState {
             .compacted_checkpoint
             .map(CompactedCheckpoint::from_persisted)
             .transpose()
-            .map_err(|error| match error {
-                ContextError::Checkpoint {
-                    source: crate::CheckpointError::LegacyExcerptRefUnsupported { .. },
-                } => invalid_document("legacy checkpoint excerpt refs are unsupported"),
-                _ => invalid_document("stored compacted checkpoint is invalid"),
-            })?;
-        let prompt_history_projection = match document.prompt_history_projection {
-            Some(projection) => projection,
-            None if compacted_checkpoint
-                .as_ref()
-                .is_some_and(|checkpoint| checkpoint.citation_backed().is_some()) =>
-            {
-                return Err(invalid_document(
-                    "stored compacted V2 session has no prompt history projection",
-                ));
-            }
-            None => PromptHistoryProjection::default(),
-        };
+            .map_err(|_| invalid_document("stored compacted checkpoint is invalid"))?;
+        let prompt_history_projection = document.prompt_history_projection;
         let archived_ref_manifest = ArchivedRefManifest::new(
             document
                 .archived_ref_manifest
@@ -496,91 +449,6 @@ impl SessionState {
             validate_plan_snapshot_refs(&session.artifacts, terminal)?;
         }
         Ok(session)
-    }
-
-    fn from_stored_document_v1(
-        document: StoredSessionDocumentV1,
-    ) -> Result<Self, SessionStoreError> {
-        if document.format_version != LEGACY_SESSION_STATE_FORMAT_VERSION {
-            return Err(SessionStoreError::UnsupportedFormatVersion {
-                actual: document.format_version,
-            });
-        }
-        if document.compacted_checkpoint.is_some() {
-            return Err(SessionStoreError::LegacyCompactedHistoryUnavailable {
-                session_id: document.session_id,
-            });
-        }
-
-        let StoredSessionDocument {
-            format_version: _,
-            session_id,
-            next_sequence,
-            session_started,
-            ledger,
-            artifacts,
-            compacted_checkpoint: _,
-            archived_ref_manifest: _,
-            prompt_history_projection: _,
-            context_entries,
-            transcript,
-            resolved_tool_calls,
-            usage,
-            task_anchor,
-            registries,
-            active_plan: _,
-            terminal_plans: _,
-        } = document;
-
-        let artifacts = artifacts
-            .into_iter()
-            .map(PersistedArtifactRecord::from)
-            .collect();
-        let artifacts = ArtifactRegistry::from_persisted_records(artifacts)
-            .map_err(|_| invalid_document("stored artifact registry is invalid"))?;
-        let (transcript, artifacts) = Transcript::from_persisted_v1(transcript, &artifacts)
-            .map_err(|error| match error {
-                TranscriptV1MigrationError::Artifact(
-                    crate::artifact::ArtifactError::DuplicateId { id },
-                ) => SessionStoreError::LegacyUserArtifactCollision { artifact_id: id },
-                TranscriptV1MigrationError::Artifact(_) => {
-                    invalid_document("legacy user message artifact is invalid")
-                }
-                TranscriptV1MigrationError::Transcript(error) => {
-                    tracing::debug!(
-                        error = %error,
-                        "legacy session transcript migration rejected invalid transcript"
-                    );
-                    invalid_document("legacy transcript is invalid")
-                }
-            })?;
-
-        Self::from_stored_document(
-            StoredSessionDocument {
-                format_version: SESSION_STATE_FORMAT_VERSION,
-                session_id,
-                next_sequence,
-                session_started,
-                ledger,
-                artifacts: artifacts
-                    .persisted_records()
-                    .into_iter()
-                    .map(StoredArtifact::from)
-                    .collect(),
-                compacted_checkpoint: None,
-                archived_ref_manifest: Vec::new(),
-                prompt_history_projection: Some(PromptHistoryProjection::default()),
-                context_entries,
-                transcript: transcript.persisted(),
-                resolved_tool_calls,
-                usage,
-                task_anchor,
-                registries,
-                active_plan: None,
-                terminal_plans: Vec::new(),
-            },
-            SESSION_STATE_FORMAT_VERSION,
-        )
     }
 
     fn validate_persisted_context_entries_with_checkpoint(

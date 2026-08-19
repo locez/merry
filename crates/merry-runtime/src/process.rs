@@ -57,11 +57,14 @@ impl ProcessEnvPolicy {
 /// Explicit admission for the process runner used by the local workspace lane.
 ///
 /// This value is intentionally small and declarative. It records that the
-/// caller has selected Merry's current CLI bubblewrap profile and accepted the
-/// local workspace process risk for that profile; it is not proof that any
-/// process is actually confined. Runtime code treats it as construction-time
-/// admission for the configured process runner boundary; argv classification
-/// remains a risk signal rather than an executable allowlist.
+/// caller has selected Merry's local-workspace process profile and accepted
+/// the process risk for that profile; it is not proof that any process is
+/// actually confined. A host adapter may materialize this profile with a
+/// platform-native mechanism such as bubblewrap, a different platform
+/// mechanism, or an explicitly unavailable capability. Runtime code treats it
+/// as construction-time admission for the configured process runner boundary;
+/// argv classification remains a risk signal rather than an executable
+/// allowlist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptedLocalWorkspaceProcessAdmission {
     sandbox_profile: LocalWorkspaceProcessSandboxProfile,
@@ -69,30 +72,30 @@ pub struct AcceptedLocalWorkspaceProcessAdmission {
 }
 
 impl AcceptedLocalWorkspaceProcessAdmission {
-    /// Creates admission for the Merry CLI bubblewrap v1 sandbox profile.
+    /// Creates admission for the local workspace process profile.
     ///
     /// Calling this explicitly accepts validated process intents for the
     /// declared profile. The selected runner still enforces filesystem,
     /// network, and host-integration capabilities.
     #[must_use]
-    pub const fn accept_cli_bwrap_v1() -> Self {
+    pub const fn accept_local_workspace() -> Self {
         Self {
-            sandbox_profile: LocalWorkspaceProcessSandboxProfile::CliBwrapV1,
-            permission_profile_id: ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1,
+            sandbox_profile: LocalWorkspaceProcessSandboxProfile::LocalWorkspace,
+            permission_profile_id: ProcessPermissionProfileId::LOCAL_WORKSPACE,
         }
     }
 
     /// Creates admission for the explicit unrestricted host process profile.
     ///
-    /// The runtime still records and audits the process action, but the CLI
+    /// The runtime still records and audits the process action, but the host
     /// process backend does not add an operating-system sandbox in this mode.
     /// Review policy remains a separate runtime setting; host admission does
     /// not imply fully trusted execution.
     #[must_use]
-    pub const fn accept_host_v1() -> Self {
+    pub const fn accept_host() -> Self {
         Self {
-            sandbox_profile: LocalWorkspaceProcessSandboxProfile::HostV1,
-            permission_profile_id: ProcessPermissionProfileId::LOCAL_WORKSPACE_HOST_V1,
+            sandbox_profile: LocalWorkspaceProcessSandboxProfile::Host,
+            permission_profile_id: ProcessPermissionProfileId::LOCAL_WORKSPACE_HOST,
         }
     }
 
@@ -101,7 +104,7 @@ impl AcceptedLocalWorkspaceProcessAdmission {
         permission_profile_id: ProcessPermissionProfileId,
     ) -> Self {
         Self {
-            sandbox_profile: LocalWorkspaceProcessSandboxProfile::CliBwrapV1,
+            sandbox_profile: LocalWorkspaceProcessSandboxProfile::LocalWorkspace,
             permission_profile_id,
         }
     }
@@ -120,10 +123,10 @@ impl AcceptedLocalWorkspaceProcessAdmission {
 
     pub(crate) fn matches_intent(self, intent: &ProcessActionIntent) -> bool {
         let required = required_process_permission_profile_id(intent);
-        (self.sandbox_profile == LocalWorkspaceProcessSandboxProfile::HostV1 && required.is_some())
+        (self.sandbox_profile == LocalWorkspaceProcessSandboxProfile::Host && required.is_some())
             || required == Some(self.permission_profile_id)
-            || (self.permission_profile_id == ProcessPermissionProfileId::LOCAL_WORKSPACE_HOST_V1
-                && required == Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1))
+            || (self.permission_profile_id == ProcessPermissionProfileId::LOCAL_WORKSPACE_HOST
+                && required == Some(ProcessPermissionProfileId::LOCAL_WORKSPACE))
     }
 }
 
@@ -131,10 +134,21 @@ impl AcceptedLocalWorkspaceProcessAdmission {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalWorkspaceProcessSandboxProfile {
-    /// Merry CLI bubblewrap profile version 1.
-    CliBwrapV1,
-    /// Explicit unrestricted host process profile version 1.
-    HostV1,
+    /// Local workspace process profile.
+    LocalWorkspace,
+    /// Explicit unrestricted host process profile.
+    Host,
+}
+
+impl LocalWorkspaceProcessSandboxProfile {
+    /// Returns the stable profile label used in process composition identity.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalWorkspace => "local-workspace",
+            Self::Host => "host",
+        }
+    }
 }
 
 /// Stable identifier for a runtime-owned process permission profile.
@@ -147,15 +161,15 @@ pub struct ProcessPermissionProfileId(&'static str);
 
 impl ProcessPermissionProfileId {
     /// Read-only process lane for bounded inspection commands.
-    pub const READ_ONLY_V1: Self = Self("process.read_only.v1");
-    /// Local workspace process lane accepted for the CLI bubblewrap v1 sandbox.
-    pub const LOCAL_WORKSPACE_BWRAP_V1: Self = Self("process.local_workspace.bwrap.v1");
+    pub const READ_ONLY: Self = Self("process.read_only");
+    /// Local workspace process lane.
+    pub const LOCAL_WORKSPACE: Self = Self("process.local_workspace");
     /// Local workspace process lane accepted for the unrestricted host profile.
-    pub const LOCAL_WORKSPACE_HOST_V1: Self = Self("process.local_workspace.host.v1");
+    pub const LOCAL_WORKSPACE_HOST: Self = Self("process.local_workspace.host");
     /// Read-only shell wrapper lane for plain command sequences under a real shell runner.
-    pub const SHELL_READ_ONLY_V1: Self = Self("process.shell.read_only.v1");
+    pub const SHELL_READ_ONLY: Self = Self("process.shell.read_only");
     /// Process lane admitted by an explicit permission request review.
-    pub const APPROVED_PERMISSION_REQUEST_V1: Self = Self("process.permission_request.approved.v1");
+    pub const APPROVED_PERMISSION_REQUEST: Self = Self("process.permission_request.approved");
 
     /// Returns the stable profile identifier string.
     #[must_use]
@@ -180,11 +194,11 @@ impl<'de> Deserialize<'de> for ProcessPermissionProfileId {
     {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
-            "process.read_only.v1" => Ok(Self::READ_ONLY_V1),
-            "process.local_workspace.bwrap.v1" => Ok(Self::LOCAL_WORKSPACE_BWRAP_V1),
-            "process.local_workspace.host.v1" => Ok(Self::LOCAL_WORKSPACE_HOST_V1),
-            "process.shell.read_only.v1" => Ok(Self::SHELL_READ_ONLY_V1),
-            "process.permission_request.approved.v1" => Ok(Self::APPROVED_PERMISSION_REQUEST_V1),
+            "process.read_only" => Ok(Self::READ_ONLY),
+            "process.local_workspace" => Ok(Self::LOCAL_WORKSPACE),
+            "process.local_workspace.host" => Ok(Self::LOCAL_WORKSPACE_HOST),
+            "process.shell.read_only" => Ok(Self::SHELL_READ_ONLY),
+            "process.permission_request.approved" => Ok(Self::APPROVED_PERMISSION_REQUEST),
             _ => Err(serde::de::Error::custom(format!(
                 "unsupported process permission profile id `{value}`"
             ))),
@@ -303,31 +317,6 @@ impl PermissionedProcessRunnerFactory for StaticPermissionedProcessRunnerFactory
         Ok(())
     }
 
-    fn runner_for(&self, _request: &PermissionRequest) -> Arc<dyn ProcessRunner> {
-        Arc::clone(&self.runner)
-    }
-}
-
-/// Permissioned runner factory for the explicit unrestricted host profile.
-///
-/// The host profile already exposes the process to the caller's operating
-/// system environment, so a later capability request does not need another
-/// backend-specific materialization step. Runtime admission and action audit
-/// still remain active around the returned runner.
-#[derive(Clone)]
-pub struct UnrestrictedPermissionedProcessRunnerFactory {
-    runner: Arc<dyn ProcessRunner>,
-}
-
-impl UnrestrictedPermissionedProcessRunnerFactory {
-    /// Creates a factory that reuses the unrestricted host runner.
-    #[must_use]
-    pub fn new(runner: Arc<dyn ProcessRunner>) -> Self {
-        Self { runner }
-    }
-}
-
-impl PermissionedProcessRunnerFactory for UnrestrictedPermissionedProcessRunnerFactory {
     fn runner_for(&self, _request: &PermissionRequest) -> Arc<dyn ProcessRunner> {
         Arc::clone(&self.runner)
     }
@@ -1538,7 +1527,7 @@ const FORBIDDEN_GIT_SUBCOMMANDS: &[&str] = &[
 /// for the additional process inputs.
 #[must_use]
 pub fn is_low_risk_process_action_intent(intent: &ProcessActionIntent) -> bool {
-    required_process_permission_profile_id(intent) == Some(ProcessPermissionProfileId::READ_ONLY_V1)
+    required_process_permission_profile_id(intent) == Some(ProcessPermissionProfileId::READ_ONLY)
 }
 
 /// Returns whether a process intent is a plain read-only shell-wrapper action.
@@ -1552,29 +1541,29 @@ pub fn is_low_risk_process_action_intent(intent: &ProcessActionIntent) -> bool {
 #[must_use]
 pub fn is_read_only_shell_process_action_intent(intent: &ProcessActionIntent) -> bool {
     required_process_permission_profile_id(intent)
-        == Some(ProcessPermissionProfileId::SHELL_READ_ONLY_V1)
+        == Some(ProcessPermissionProfileId::SHELL_READ_ONLY)
 }
 
 pub(crate) fn required_process_permission_profile_id(
     intent: &ProcessActionIntent,
 ) -> Option<ProcessPermissionProfileId> {
     if intent.env_policy() != ProcessEnvPolicy::Empty || intent.stdin_text().is_some() {
-        return Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1);
+        return Some(ProcessPermissionProfileId::LOCAL_WORKSPACE);
     }
 
     if is_read_only_plain_shell_process_argv(intent.argv()) {
-        return Some(ProcessPermissionProfileId::SHELL_READ_ONLY_V1);
+        return Some(ProcessPermissionProfileId::SHELL_READ_ONLY);
     }
 
     match classify_process_intent(intent) {
-        ProcessIntentClass::Informational => Some(ProcessPermissionProfileId::READ_ONLY_V1),
+        ProcessIntentClass::Informational => Some(ProcessPermissionProfileId::READ_ONLY),
         ProcessIntentClass::LocalWorkspaceEffect => {
-            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE)
         }
-        ProcessIntentClass::Unknown => Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1),
+        ProcessIntentClass::Unknown => Some(ProcessPermissionProfileId::LOCAL_WORKSPACE),
         // Classification is a risk signal, not a command allowlist. The
         // selected runner remains the authority for capability enforcement.
-        ProcessIntentClass::Forbidden => Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1),
+        ProcessIntentClass::Forbidden => Some(ProcessPermissionProfileId::LOCAL_WORKSPACE),
     }
 }
 
@@ -2037,7 +2026,7 @@ mod tests {
         let intent = intent();
         let evidence = ProcessExecutionEvidence::new(
             &intent,
-            ProcessPermissionProfileId::READ_ONLY_V1,
+            ProcessPermissionProfileId::READ_ONLY,
             ProcessExitStatus::Exited(0),
             128,
             false,
@@ -2051,7 +2040,7 @@ mod tests {
         assert_eq!(evidence.cwd(), intent.cwd());
         assert_eq!(
             evidence.permission_profile_id(),
-            ProcessPermissionProfileId::READ_ONLY_V1
+            ProcessPermissionProfileId::READ_ONLY
         );
         assert_eq!(evidence.status(), ProcessExitStatus::Exited(0));
         assert_eq!(evidence.exit_code(), Some(0));
@@ -2063,7 +2052,7 @@ mod tests {
 
         let too_many_bytes = ProcessExecutionEvidence::new(
             &intent,
-            ProcessPermissionProfileId::READ_ONLY_V1,
+            ProcessPermissionProfileId::READ_ONLY,
             ProcessExitStatus::Exited(1),
             1025,
             true,
@@ -2093,7 +2082,7 @@ mod tests {
         .expect("informational intent is valid");
         assert_eq!(
             required_process_permission_profile_id(&informational),
-            Some(ProcessPermissionProfileId::READ_ONLY_V1)
+            Some(ProcessPermissionProfileId::READ_ONLY)
         );
 
         let local_workspace_effect = ProcessActionIntent::new(
@@ -2112,7 +2101,7 @@ mod tests {
         .expect("local workspace effect intent is valid");
         assert_eq!(
             required_process_permission_profile_id(&local_workspace_effect),
-            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE)
         );
 
         let unknown = ProcessActionIntent::new(
@@ -2126,7 +2115,7 @@ mod tests {
         .expect("unknown intent is syntactically valid");
         assert_eq!(
             required_process_permission_profile_id(&unknown),
-            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE)
         );
 
         let with_stdin = ProcessActionIntent::new(
@@ -2140,7 +2129,7 @@ mod tests {
         .expect("stdin intent is syntactically valid");
         assert_eq!(
             required_process_permission_profile_id(&with_stdin),
-            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE)
         );
 
         let shell_read_only = ProcessActionIntent::new(
@@ -2158,7 +2147,7 @@ mod tests {
         .expect("read-only shell intent is valid");
         assert_eq!(
             required_process_permission_profile_id(&shell_read_only),
-            Some(ProcessPermissionProfileId::SHELL_READ_ONLY_V1)
+            Some(ProcessPermissionProfileId::SHELL_READ_ONLY)
         );
 
         let shell_workspace_effect = ProcessActionIntent::new(
@@ -2176,7 +2165,7 @@ mod tests {
         .expect("shell workspace effect intent is valid");
         assert_eq!(
             required_process_permission_profile_id(&shell_workspace_effect),
-            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+            Some(ProcessPermissionProfileId::LOCAL_WORKSPACE)
         );
     }
 
@@ -2206,28 +2195,34 @@ mod tests {
         )
         .expect("informational intent is valid");
 
-        let admission = AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1();
+        let admission = AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace();
         assert_eq!(
             admission.permission_profile_id(),
-            ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1
+            ProcessPermissionProfileId::LOCAL_WORKSPACE
         );
         assert!(admission.matches_intent(&local_workspace_effect));
         assert!(!admission.matches_intent(&informational));
 
         let mismatched_admission =
             AcceptedLocalWorkspaceProcessAdmission::for_test_permission_profile_id(
-                ProcessPermissionProfileId::READ_ONLY_V1,
+                ProcessPermissionProfileId::READ_ONLY,
             );
         assert!(!mismatched_admission.matches_intent(&local_workspace_effect));
 
-        let host_admission = AcceptedLocalWorkspaceProcessAdmission::accept_host_v1();
+        assert_eq!(
+            serde_json::from_str::<ProcessPermissionProfileId>("\"process.local_workspace\"")
+                .expect("process profile id should remain readable"),
+            ProcessPermissionProfileId::LOCAL_WORKSPACE
+        );
+
+        let host_admission = AcceptedLocalWorkspaceProcessAdmission::accept_host();
         assert_eq!(
             host_admission.sandbox_profile(),
-            LocalWorkspaceProcessSandboxProfile::HostV1
+            LocalWorkspaceProcessSandboxProfile::Host
         );
         assert_eq!(
             host_admission.permission_profile_id(),
-            ProcessPermissionProfileId::LOCAL_WORKSPACE_HOST_V1
+            ProcessPermissionProfileId::LOCAL_WORKSPACE_HOST
         );
         assert!(host_admission.matches_intent(&local_workspace_effect));
         assert!(host_admission.matches_intent(&informational));
@@ -2487,7 +2482,7 @@ mod tests {
             );
             assert_eq!(
                 required_process_permission_profile_id(&intent),
-                Some(ProcessPermissionProfileId::LOCAL_WORKSPACE_BWRAP_V1)
+                Some(ProcessPermissionProfileId::LOCAL_WORKSPACE)
             );
         }
 

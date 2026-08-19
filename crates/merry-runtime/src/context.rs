@@ -647,7 +647,9 @@ impl ProjectRules {
         &self.content_hash
     }
 
-    pub(crate) fn to_stable_prefix_message_text(&self) -> String {
+    /// Renders the exact provider-neutral project-rules stable-prefix block.
+    #[must_use]
+    pub fn to_stable_prefix_message_text(&self) -> String {
         format!(
             "project-rules-source:{}\nproject-rules-content-hash:{}\n{}",
             self.source_path, self.content_hash, self.text

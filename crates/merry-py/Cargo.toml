@@ -13,10 +13,10 @@ crate-type = ["cdylib", "rlib"]
 futures-executor.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
-merry-core = { path = "../merry-core" }
-merry-llm = { path = "../merry-llm", features = ["test-utils"] }
-merry = { path = "../merry" }
-merry-runtime = { path = "../merry-runtime" }
+merry-core = { path = "../merry-core", version = "0.1.0" }
+merry-llm = { path = "../merry-llm", version = "0.1.0", features = ["test-utils"] }
+merry = { path = "../merry", version = "0.1.0" }
+merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
 pyo3.workspace = true
 schemars.workspace = true
 serde.workspace = true

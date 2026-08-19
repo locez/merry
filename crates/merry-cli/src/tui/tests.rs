@@ -3263,7 +3263,7 @@ fn projector_shows_permission_allow_rationale_on_success() {
                 text_artifact("permission-success-output"),
             ),
             output: Some(ToolOutput::Json {
-                json: r#"{"ok":true,"kind":"process_action","permission_profile_id":"process.permission_request.approved.v1","permission_review":{"source":"model","risk":"low","user_authorization":"high","rationale":"The exact command is grounded in the user's task."}}"#.to_owned(),
+                json: r#"{"ok":true,"kind":"process_action","permission_profile_id":"process.permission_request.approved","permission_review":{"source":"model","risk":"low","user_authorization":"high","rationale":"The exact command is grounded in the user's task."}}"#.to_owned(),
             }),
             source: source(),
         },
@@ -3277,7 +3277,7 @@ fn projector_shows_permission_allow_rationale_on_success() {
         panic!("successful permission call should show an expanded admission result");
     };
     assert!(body.contains("allowed: The exact command is grounded in the user's task."));
-    assert!(body.contains("profile: process.permission_request.approved.v1"));
+    assert!(body.contains("profile: process.permission_request.approved"));
     assert_eq!(body, focus_body);
 }
 

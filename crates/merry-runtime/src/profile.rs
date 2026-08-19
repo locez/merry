@@ -2,7 +2,7 @@
 
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, PermissionAdmissionSource, PermissionReviewMode,
-    PermissionedProcessRunnerFactory, ProcessRunner, ProjectRules, RegisteredTool,
+    PermissionedProcessRunnerFactory, ProcessRunner, ProjectRules, PromptProfile, RegisteredTool,
     RuntimeTrustLevel, SkillCatalog, SubagentManager, TaskAnchor,
 };
 use merry_core::ToolName;
@@ -214,6 +214,7 @@ impl AcceptedLocalWorkspaceProcessRunnerProfile {
 pub struct RuntimeProfile {
     capabilities: RuntimeCapabilities,
     model_retry_policy: Option<ModelRetryPolicy>,
+    prompt_profile: PromptProfile,
     progress_commentary: bool,
     initial_context_summaries: BTreeMap<String, String>,
     registered_tools: Vec<RegisteredTool>,
@@ -249,6 +250,12 @@ impl RuntimeProfile {
     #[must_use]
     pub const fn model_retry_policy(&self) -> Option<ModelRetryPolicy> {
         self.model_retry_policy
+    }
+
+    /// Returns the stable prompt composition used by runtime request compilation.
+    #[must_use]
+    pub const fn prompt_profile(&self) -> &PromptProfile {
+        &self.prompt_profile
     }
 
     /// Returns whether this profile asks the model for tool-progress commentary.
@@ -363,6 +370,7 @@ impl RuntimeProfile {
         RuntimeProfileParts {
             capabilities: self.capabilities,
             model_retry_policy: self.model_retry_policy,
+            prompt_profile: self.prompt_profile,
             progress_commentary: self.progress_commentary,
             initial_context_summaries: self.initial_context_summaries,
             registered_tools: self.registered_tools,
@@ -386,6 +394,7 @@ impl RuntimeProfile {
 pub(crate) struct RuntimeProfileParts {
     pub(crate) capabilities: RuntimeCapabilities,
     pub(crate) model_retry_policy: Option<ModelRetryPolicy>,
+    pub(crate) prompt_profile: PromptProfile,
     pub(crate) progress_commentary: bool,
     pub(crate) initial_context_summaries: BTreeMap<String, String>,
     pub(crate) registered_tools: Vec<RegisteredTool>,
@@ -410,6 +419,7 @@ pub(crate) struct RuntimeProfileParts {
 pub struct RuntimeProfileBuilder {
     capabilities: RuntimeCapabilities,
     model_retry_policy: Option<ModelRetryPolicy>,
+    prompt_profile: PromptProfile,
     progress_commentary: bool,
     initial_context_summaries: BTreeMap<String, String>,
     registered_tools: Vec<RegisteredTool>,
@@ -435,6 +445,7 @@ impl RuntimeProfileBuilder {
         Self {
             capabilities: RuntimeCapabilities::default(),
             model_retry_policy: None,
+            prompt_profile: PromptProfile::default(),
             progress_commentary: false,
             initial_context_summaries: BTreeMap::new(),
             registered_tools: Vec::new(),
@@ -465,6 +476,13 @@ impl RuntimeProfileBuilder {
     #[must_use]
     pub fn model_retry_policy(mut self, policy: ModelRetryPolicy) -> Self {
         self.model_retry_policy = Some(policy);
+        self
+    }
+
+    /// Sets the stable prompt composition used by runtime request compilation.
+    #[must_use]
+    pub fn prompt_profile(mut self, profile: PromptProfile) -> Self {
+        self.prompt_profile = profile;
         self
     }
 
@@ -610,6 +628,7 @@ impl RuntimeProfileBuilder {
         Ok(RuntimeProfile {
             capabilities: self.capabilities,
             model_retry_policy: self.model_retry_policy,
+            prompt_profile: self.prompt_profile,
             progress_commentary: self.progress_commentary,
             initial_context_summaries: self.initial_context_summaries,
             registered_tools: self.registered_tools,

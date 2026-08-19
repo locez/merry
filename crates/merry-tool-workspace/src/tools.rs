@@ -77,7 +77,9 @@ impl ReadOnlyWorkspaceTools {
 }
 
 impl ReadOnlyWorkspaceTools {
-    pub(crate) fn project_capability_summary(&self) -> String {
-        self.state.project_capability_summary()
+    /// Returns deterministic project metadata facts for the configured roots.
+    #[must_use]
+    pub fn project_metadata_summary(&self) -> Option<String> {
+        self.state.project_metadata_summary()
     }
 }

@@ -149,7 +149,7 @@ async fn resumed_runtime_preserves_manual_summary_backed_by_another_seed_refresh
         let mut session = SessionState::new(session_id("runtime-cross-seed-refresh-id-source"));
         session
             .reconcile_construction_context_seed(seed_id, &format!("old {seed_id} text"))
-            .expect("legacy construction seed records");
+            .expect("initial construction seed records");
         session
             .reconcile_construction_context_seed(seed_id, MANUAL)
             .expect("refresh construction seed records");

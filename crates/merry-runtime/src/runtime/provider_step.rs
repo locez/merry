@@ -273,6 +273,7 @@ pub(super) async fn run_provider_step(
         &request_inputs,
         tool_specs.clone(),
         generation_config.clone(),
+        &inner.prompt_profile,
         inner.progress_commentary,
     ) {
         Ok(request) => {
@@ -334,6 +335,7 @@ pub(super) async fn run_provider_step(
             &request_inputs,
             tool_specs.clone(),
             generation_config.clone(),
+            &inner.prompt_profile,
             inner.progress_commentary,
         ) {
             Ok(tokens) => tokens,
@@ -489,6 +491,7 @@ pub(super) async fn run_provider_step(
             &request_inputs,
             tool_specs.clone(),
             generation_config.clone(),
+            &inner.prompt_profile,
             inner.progress_commentary,
         ) {
             Ok(request) => request,

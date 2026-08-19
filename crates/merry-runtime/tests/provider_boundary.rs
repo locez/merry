@@ -20,17 +20,18 @@ use merry_runtime::{
     CheckpointSequenceRange, CheckpointSourceKind, CheckpointValidationPolicy,
     CitationBackedCheckpoint, CitationCompactionInput, CitationCompactionPolicy,
     CompactedCheckpoint, CompactedCheckpointCandidate, ContextCompiler, ContextEvidence,
-    ContextSummary, LedgerFactKind, LedgerProjection, ProjectRules, RegisteredTool, Runtime,
-    RuntimeModelRole, SessionTranscriptItem, SkillCatalog, SkillMetadata, StepContext, StepInput,
-    TaskAnchor, TokioProcessRunner, ToolActionKind, ToolExecutionContext, ToolExecutionError,
-    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, citation_compaction_response_schema,
+    ContextSummary, LedgerFactKind, LedgerProjection, ProcessActionIntent, ProcessExitStatus,
+    ProcessRunner, ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture,
+    ProcessRunnerOutput, ProjectRules, RegisteredTool, Runtime, RuntimeModelRole,
+    SessionTranscriptItem, SkillCatalog, SkillMetadata, StepContext, StepInput, TaskAnchor,
+    ToolActionKind, ToolAdmission, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture, citation_compaction_response_schema,
     citation_compaction_system_prompt, process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
 use std::{
     collections::BTreeSet,
-    env,
     num::NonZeroUsize,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -756,12 +757,31 @@ async fn collect_text_output(stream: ModelEventStream) -> Result<String, String>
     Err("model stream ended before completion".to_owned())
 }
 
-fn command_is_available(program: &str) -> bool {
-    let Some(path) = env::var_os("PATH") else {
-        return false;
-    };
+#[derive(Debug, Clone, Copy)]
+struct ReadOnlyShellProcessRunner;
 
-    env::split_paths(&path).any(|directory| directory.join(program).is_file())
+impl ProcessRunner for ReadOnlyShellProcessRunner {
+    fn run<'a>(
+        &'a self,
+        intent: ProcessActionIntent,
+        context: ProcessRunnerContext,
+    ) -> ProcessRunnerFuture<'a> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ProcessRunnerError::Cancelled);
+            }
+
+            ProcessRunnerOutput::new(
+                &intent,
+                ProcessExitStatus::Exited(0),
+                "1\n",
+                false,
+                "",
+                false,
+            )
+            .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))
+        })
+    }
 }
 
 fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
@@ -2949,11 +2969,7 @@ async fn artifact_payloads_do_not_enter_prompt_context_by_default() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn tokio_process_runner_executes_read_only_shell_wrapper_with_input_artifact() {
-    if !command_is_available("bash") || !command_is_available("wc") {
-        return;
-    }
-
+async fn read_only_shell_wrapper_records_input_and_result_artifacts() {
     let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
         vec![ModelOutput::tool_call(shell_process_tool_call())],
         FinishReason::ToolCalls,
@@ -2967,7 +2983,7 @@ async fn tokio_process_runner_executes_read_only_shell_wrapper_with_input_artifa
             )
             .expect("process command tool should build"),
         )
-        .allow_read_only_shell_process_actions(Arc::new(TokioProcessRunner::new()))
+        .allow_read_only_shell_process_actions(Arc::new(ReadOnlyShellProcessRunner))
         .build()
         .expect("runtime should build");
 
@@ -2976,7 +2992,7 @@ async fn tokio_process_runner_executes_read_only_shell_wrapper_with_input_artifa
     let execution_events = runtime
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
-        .expect("read-only shell wrapper should execute through the Tokio runner");
+        .expect("read-only shell wrapper should execute through the process runner");
 
     assert_eq!(
         event_kind_names(&execution_events),
@@ -3007,7 +3023,7 @@ async fn tokio_process_runner_executes_read_only_shell_wrapper_with_input_artifa
     assert_eq!(input_payload["kind"], "shell_command_input");
     assert_eq!(
         input_payload["permission_profile_id"],
-        "process.shell.read_only.v1"
+        "process.shell.read_only"
     );
     assert_eq!(
         input_payload["input_evidence"]["script"],
@@ -3025,7 +3041,7 @@ async fn tokio_process_runner_executes_read_only_shell_wrapper_with_input_artifa
         serde_json::from_str(result_text).expect("result JSON should parse");
     assert_eq!(
         result_payload["permission_profile_id"],
-        "process.shell.read_only.v1"
+        "process.shell.read_only"
     );
     assert_eq!(
         result_payload["input_artifact"],
@@ -3721,6 +3737,48 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
         vec![5, 6, 7]
     );
     assert_eq!(provider.recorded_requests()[1].continuations().len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tool_admission_denies_execution_without_changing_provider_tool_surface() {
+    let call = model_tool_call_with_args("call-admission-denied", "search_notes", Map::new());
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_outputs_event(
+        vec![ModelOutput::tool_call(call)],
+        FinishReason::ToolCalls,
+    ))]]);
+    let runtime = Runtime::builder(session_id("provider-tool-admission"))
+        .tool_admission(ToolAdmission::allow_only(Vec::<ToolName>::new()))
+        .register_tool(RegisteredTool::read_only(
+            test_tool_spec("search_notes"),
+            Arc::new(ScriptedToolExecutor::succeeding_text("must not execute")),
+        ))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let pending_events = collect_step(&runtime, "Call a denied tool.").await;
+    assert!(
+        provider.recorded_requests()[0]
+            .tools()
+            .iter()
+            .any(|tool| tool.name().as_str() == "search_notes")
+    );
+    let pending = pending_tool_call(&pending_events).clone();
+    let execution_events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("tool admission should resolve a structured failure");
+
+    let result = resolved_tool_result(&execution_events);
+    assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        result
+            .diagnostic()
+            .expect("admission denial should have a diagnostic")
+            .code(),
+        "tool_not_admitted"
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -3,8 +3,8 @@ use super::checkpoint_ref_tool::merry_read_checkpoint_ref_tool;
 use super::{AcceptedLocalWorkspaceProcessRunner, Runtime, RuntimeInner};
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, CitationCompactionPolicy, CompactedCheckpoint,
-    FileSessionStore, ProcessRunner, ProjectRules, RuntimeCapabilities, RuntimeError,
-    RuntimeModelRole, RuntimeProfile, SkillCatalog, TaskAnchor,
+    FileSessionStore, ProcessRunner, ProjectRules, PromptProfile, RuntimeCapabilities,
+    RuntimeError, RuntimeModelRole, RuntimeProfile, SkillCatalog, TaskAnchor, ToolAdmission,
     artifact::ArtifactContent,
     memory::{MemoryActivationSource, StoredMemoryActivationSource},
     model_config::RuntimeModelConfigs,
@@ -28,7 +28,7 @@ use crate::{
 use merry_core::{ArtifactRef, SessionId, ToolName};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     num::NonZeroUsize,
     sync::{
         Arc,
@@ -103,9 +103,10 @@ pub struct RuntimeBuilder {
     model_retry_policy: ModelRetryPolicy,
     automatic_compaction: AutomaticCompactionConfig,
     capabilities: RuntimeCapabilities,
+    prompt_profile: PromptProfile,
     progress_commentary: bool,
     registered_tools: Vec<RegisteredTool>,
-    registered_tool_allowlist: Option<BTreeSet<merry_core::ToolName>>,
+    tool_admission: Option<ToolAdmission>,
     coordinator_plan_tools: bool,
     plan_subagent_control: Option<PlanSubagentControl>,
     plan_subagent_scope: Option<PlanSubagentScope>,
@@ -145,9 +146,10 @@ impl RuntimeBuilder {
             model_retry_policy: ModelRetryPolicy::default(),
             automatic_compaction: AutomaticCompactionConfig::default(),
             capabilities: RuntimeCapabilities::default(),
+            prompt_profile: PromptProfile::default(),
             progress_commentary: false,
             registered_tools: Vec::new(),
-            registered_tool_allowlist: None,
+            tool_admission: None,
             coordinator_plan_tools: false,
             plan_subagent_control: None,
             plan_subagent_scope: None,
@@ -279,16 +281,11 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Restricts configured/profile tools to an exact provider-visible allowlist.
-    ///
-    /// Runtime protocol tools, including the stable Plan read/update pair,
-    /// are appended after this filter.
+    /// Installs runtime admission for tool execution without changing the
+    /// provider-visible tool catalog.
     #[must_use]
-    pub fn registered_tool_allowlist<I>(mut self, tools: I) -> Self
-    where
-        I: IntoIterator<Item = merry_core::ToolName>,
-    {
-        self.registered_tool_allowlist = Some(tools.into_iter().collect());
+    pub fn tool_admission(mut self, admission: ToolAdmission) -> Self {
+        self.tool_admission = Some(admission);
         self
     }
 
@@ -331,6 +328,7 @@ impl RuntimeBuilder {
     pub fn with_profile(mut self, profile: RuntimeProfile) -> Result<Self, RuntimeError> {
         let parts = profile.into_parts();
         self.capabilities = parts.capabilities;
+        self.prompt_profile = parts.prompt_profile;
         if let Some(policy) = parts.model_retry_policy {
             self = self.model_retry_policy(policy);
         }
@@ -673,9 +671,6 @@ impl RuntimeBuilder {
     /// Duplicate tool names are rejected before the runtime is constructed.
     pub fn build(self) -> Result<Runtime, RuntimeError> {
         let mut registered_tools = self.registered_tools;
-        if let Some(allowlist) = self.registered_tool_allowlist.as_ref() {
-            registered_tools.retain(|tool| allowlist.contains(tool.spec().name()));
-        }
         if self.coordinator_plan_tools
             && (self.plan_subagent_control.is_some() || self.plan_subagent_scope.is_some())
         {
@@ -695,7 +690,12 @@ impl RuntimeBuilder {
                 .extend(scoped_child_plan_registered_tools().map_err(RuntimeError::from)?);
         }
         if self.automatic_compaction.is_enabled() {
-            registered_tools.push(merry_read_checkpoint_ref_tool().map_err(RuntimeError::from)?);
+            // Runtime-owned protocol tools form the stable prefix of the tool
+            // surface; profile-owned tools follow in their declared order.
+            registered_tools.insert(
+                0,
+                merry_read_checkpoint_ref_tool().map_err(RuntimeError::from)?,
+            );
         }
         let tool_registry =
             ToolRegistry::from_registered(registered_tools).map_err(|error| match error {
@@ -833,8 +833,10 @@ impl RuntimeBuilder {
                 automatic_compaction: RwLock::new(self.automatic_compaction),
                 context_window_tokens: RwLock::new(None),
                 capabilities: self.capabilities,
+                prompt_profile: self.prompt_profile,
                 progress_commentary: self.progress_commentary,
                 tool_registry,
+                tool_admission: self.tool_admission,
                 memory_activation_source: self.memory_activation_source,
                 allow_low_risk_workspace_patches: self.allow_low_risk_workspace_patches,
                 low_risk_process_runner: self.low_risk_process_runner,

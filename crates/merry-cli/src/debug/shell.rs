@@ -1,5 +1,5 @@
 use crate::cli_error::{CliError, shell_usage_error, stdout_error, unexpected};
-use crate::coding_runtime::action_process_runner;
+use crate::coding::action_process_runner;
 use crate::config::MerryConfig;
 use crate::debug::{DEFAULT_SESSION_ID, ShellArgs};
 use crate::runtime_config::action_process_backend_options;
@@ -7,9 +7,11 @@ use crate::runtime_events::{
     collect_runtime_step_events, first_pending_tool_call, write_runtime_events,
     write_runtime_step_events_to,
 };
+#[cfg(test)]
+use crate::sandbox::RuntimeProfile as SandboxRuntimeProfile;
 use crate::sandbox::{
-    ChildHandoff as SandboxChildHandoff, MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION,
-    MERRY_SANDBOX_VERSION_ENV, RuntimeProfile as SandboxRuntimeProfile, read_proc_self_mountinfo,
+    ChildHandoff as SandboxChildHandoff, MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION_ENV,
+    local_workspace_process_admission, read_proc_self_mountinfo,
     runtime_profile_from_evidence as sandbox_runtime_profile_from_evidence,
 };
 use futures_util::stream;
@@ -19,12 +21,13 @@ use merry_llm::{
     ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
     ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
 };
+use merry_process::TokioProcessRunner;
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, ArtifactContent, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
     ProcessActionIntent, ProcessEnvPolicy, ProcessRunner, Runtime, StepContext, StepInput,
-    TokioProcessRunner, ToolExecutionContext, process_command_tool, shell_command_for_argv,
+    ToolExecutionContext, process_command_tool, shell_command_for_argv,
 };
-use std::{env, ffi::OsStr, sync::Arc};
+use std::{env, sync::Arc};
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
 #[cfg(test)]
@@ -49,7 +52,7 @@ pub(crate) async fn run(
         tmpdir.as_deref(),
         mountinfo.as_deref(),
     );
-    let admission = runtime_admission(
+    let admission = local_workspace_process_admission(
         args.accept_local_workspace_process_risk,
         sandbox_child_handoff,
         sandbox_runtime_profile,
@@ -63,11 +66,16 @@ pub(crate) async fn run(
         ))
     })?;
     let runner: Arc<dyn ProcessRunner> = if sandbox_child_handoff.is_some() {
-        action_process_runner(
-            &current_dir,
-            action_process_backend_options(merry_config).map_err(unexpected)?,
-        )?
-        .runner()
+        if admission.is_some() {
+            action_process_runner(
+                &current_dir,
+                action_process_backend_options(merry_config).map_err(unexpected)?,
+            )?
+            .new_session()
+            .runner()
+        } else {
+            Arc::new(TokioProcessRunner::new_at_workspace_root(&current_dir))
+        }
     } else {
         Arc::new(TokioProcessRunner::new_at_workspace_root(&current_dir))
     };
@@ -152,25 +160,6 @@ fn build_runtime(
         builder = builder.allow_accepted_local_workspace_process_actions(admission, runner);
     }
     builder.build().map_err(unexpected)
-}
-
-pub(crate) fn runtime_admission(
-    accept_local_workspace_process_risk: bool,
-    sandbox_child_handoff: Option<SandboxChildHandoff>,
-    sandbox_runtime_profile: Option<SandboxRuntimeProfile>,
-    sandbox: Option<&OsStr>,
-    version: Option<&OsStr>,
-) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
-    if accept_local_workspace_process_risk
-        && sandbox_child_handoff == Some(SandboxChildHandoff::CliBwrapV1)
-        && sandbox_runtime_profile == Some(SandboxRuntimeProfile::CliBwrapV1)
-        && sandbox == Some(OsStr::new("1"))
-        && version == Some(OsStr::new(MERRY_SANDBOX_VERSION))
-    {
-        Some(AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1())
-    } else {
-        None
-    }
 }
 
 pub(crate) fn process_action_intent(argv: Vec<String>) -> Result<ProcessActionIntent, CliError> {

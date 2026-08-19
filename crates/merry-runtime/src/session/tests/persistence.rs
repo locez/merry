@@ -8,7 +8,6 @@ use crate::{
         ControlPlanAttemptInput, PlanChangeInput, PlanExecutionIntent, PlanNodeInput, PlanState,
         ReportPlanProgressInput, UpdatePlanInput, execution::PlanAttemptActor,
     },
-    session::PromptHistoryProjection,
 };
 use merry_core::{
     ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PlanActivationSource,
@@ -75,53 +74,7 @@ async fn session_state_round_trip_preserves_user_images_for_provider_history() {
 }
 
 #[tokio::test]
-async fn session_state_v2_user_message_without_image_ids_defaults_to_text_only() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let mut session = SessionState::new(session_id());
-    let turn_id = session.begin_model_turn().expect("turn should begin");
-    session
-        .record_user_message_body(turn_id, "legacy v2 text")
-        .expect("text message should record");
-    session
-        .close_model_response(turn_id, false)
-        .expect("turn should close");
-    session.save_to(&store).await.expect("session should save");
-
-    let mut document: serde_json::Value = serde_json::from_slice(
-        &store
-            .read_state_bytes(&session_id())
-            .await
-            .expect("state should read"),
-    )
-    .expect("state should be JSON");
-    document["transcript"]["items"][0]
-        .as_object_mut()
-        .expect("transcript item should be an object")
-        .remove("image_artifact_ids");
-    store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("state should serialize"),
-        )
-        .await
-        .expect("compatibility fixture should write");
-
-    let loaded = SessionState::load_from(&store, &session_id())
-        .await
-        .expect("old v2 user message should load");
-    let snapshot = loaded
-        .full_transcript_snapshot()
-        .expect("transcript should compile");
-    let [crate::session::TranscriptItemSnapshot::UserMessage { images, .. }] = snapshot.as_slice()
-    else {
-        panic!("transcript should contain one user message");
-    };
-    assert!(images.is_empty());
-}
-
-#[tokio::test]
-async fn session_state_v2_round_trip_preserves_turns_user_artifact_and_projections() {
+async fn session_state_round_trip_preserves_turns_user_artifact_and_projections() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     let mut session = SessionState::new(session_id());
@@ -224,177 +177,17 @@ async fn session_state_v2_round_trip_preserves_turns_user_artifact_and_projectio
     ));
 }
 
-#[tokio::test]
-async fn session_state_v1_without_compaction_migrates_to_legacy_turn_and_user_artifact() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let document = legacy_v1_document(vec![serde_json::json!({
-        "type": "user_message",
-        "id": 0,
-        "text": "  exact legacy user text\n",
-        "origin": "external_user"
-    })]);
-    store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("legacy document should serialize"),
-        )
-        .await
-        .expect("legacy state should write");
-
-    let mut loaded = SessionState::load_from(&store, &session_id())
-        .await
-        .expect("uncompacted V1 state should migrate");
-
-    assert_eq!(
-        loaded.model_turn_status(crate::session::ModelTurnId::new(0)),
-        Some(ModelTurnStatus::Completed)
-    );
-    assert_eq!(
-        loaded
-            .read_artifact_content(&artifact_id("user-message-0"))
-            .expect("migrated user artifact should load")
-            .as_text(),
-        Some("  exact legacy user text\n")
-    );
-    let next_turn = loaded.transcript.persisted().next_model_turn_id;
-    assert_eq!(next_turn, 1);
-    assert!(matches!(
-        &loaded.transcript.persisted().items[0],
-        crate::session::transcript::PersistedTranscriptItem::UserMessage {
-            model_turn_id,
-            artifact_id,
-            ..
-        } if *model_turn_id == crate::session::ModelTurnId::new(0)
-            && artifact_id.as_str() == "user-message-0"
-    ));
-
-    let post_migration_turn = loaded
-        .begin_model_turn()
-        .expect("post-migration turn should begin at one");
-    loaded
-        .record_user_message_body(post_migration_turn, "post-migration user text")
-        .expect("post-migration user message should record");
-    loaded
-        .record_assistant_text_output(post_migration_turn, "post-migration response".to_owned())
-        .expect("post-migration assistant output should record");
-    loaded
-        .close_model_response(post_migration_turn, false)
-        .expect("post-migration turn should complete");
-    loaded
-        .save_to(&store)
-        .await
-        .expect("migrated session should save as V2");
-
-    let reloaded = SessionState::load_from(&store, &session_id())
-        .await
-        .expect("V2 session with legacy turn zero should reload");
-    assert_eq!(
-        reloaded.model_turn_status(crate::session::ModelTurnId::new(0)),
-        Some(ModelTurnStatus::Completed)
-    );
-    assert_eq!(
-        reloaded.model_turn_status(post_migration_turn),
-        Some(ModelTurnStatus::Completed)
-    );
-    assert_eq!(reloaded.transcript.persisted().next_model_turn_id, 2);
-}
-
-#[tokio::test]
-async fn session_state_v1_with_compacted_checkpoint_is_rejected_as_exact_history_unavailable() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let mut document = legacy_v1_document(Vec::new());
-    document["compacted_checkpoint"] = serde_json::to_value(
-        citation_plain_runtime_checkpoint_for_tests("legacy-checkpoint", "deleted history")
-            .persisted(),
-    )
-    .expect("checkpoint should serialize");
-    store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("legacy document should serialize"),
-        )
-        .await
-        .expect("legacy state should write");
-
-    let error = SessionState::load_from(&store, &session_id())
-        .await
-        .expect_err("compacted V1 state should be rejected");
-
-    assert!(matches!(
-        error,
-        crate::SessionStoreError::LegacyCompactedHistoryUnavailable { .. }
-    ));
-    assert!(error.to_string().contains("physically deleted"));
-}
-
-#[tokio::test]
-async fn session_state_v1_user_artifact_collision_is_rejected_without_overwrite() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let mut document = legacy_v1_document(vec![serde_json::json!({
-        "type": "user_message",
-        "id": 0,
-        "text": "legacy source",
-        "origin": "external_user"
-    })]);
-    document["artifacts"] = serde_json::json!([{
-        "artifact": ArtifactRef::new(artifact_id("user-message-0"), ArtifactKind::Text),
-        "content": ArtifactContent::text("collision")
-    }]);
-    store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("legacy document should serialize"),
-        )
-        .await
-        .expect("legacy state should write");
-
-    let error = SessionState::load_from(&store, &session_id())
-        .await
-        .expect_err("colliding V1 user artifact should be rejected");
-
-    assert!(matches!(
-        error,
-        crate::SessionStoreError::LegacyUserArtifactCollision { .. }
-    ));
-}
-
-fn legacy_v1_document(items: Vec<serde_json::Value>) -> serde_json::Value {
+fn current_document() -> serde_json::Value {
     serde_json::json!({
-        "format_version": 1,
+        "format_version": 3,
         "session_id": session_id(),
         "next_sequence": 0,
         "session_started": false,
         "ledger": [],
         "artifacts": [],
         "compacted_checkpoint": null,
-        "context_entries": [],
-        "transcript": {
-            "items": items,
-            "next_id": 1
-        },
-        "resolved_tool_calls": [],
-        "usage": null,
-        "task_anchor": null,
-        "registries": {
-            "judgments": { "records": [] },
-            "summary_draft_promotions": { "records": [] },
-            "action_audits": { "records": [] }
-        }
-    })
-}
-
-fn literal_v2_document() -> serde_json::Value {
-    serde_json::json!({
-        "format_version": 2,
-        "session_id": session_id(),
-        "next_sequence": 0,
-        "session_started": false,
-        "ledger": [],
-        "artifacts": [],
-        "compacted_checkpoint": null,
+        "archived_ref_manifest": [],
+        "prompt_history_projection": { "compacted_through": null },
         "context_entries": [],
         "transcript": {
             "items": [],
@@ -409,79 +202,10 @@ fn literal_v2_document() -> serde_json::Value {
             "judgments": { "records": [] },
             "summary_draft_promotions": { "records": [] },
             "action_audits": { "records": [] }
-        }
+        },
+        "active_plan": null,
+        "terminal_plans": []
     })
-}
-
-#[tokio::test]
-async fn session_state_v2_without_projection_or_checkpoint_migrates_on_next_save() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let document = literal_v2_document();
-    assert!(document.get("prompt_history_projection").is_none());
-    store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("literal V2 document should serialize"),
-        )
-        .await
-        .expect("legacy V2 state should write");
-
-    let loaded = SessionState::load_from(&store, &session_id())
-        .await
-        .expect("uncompacted V2 state should migrate");
-    assert_eq!(
-        loaded.prompt_history_projection(),
-        PromptHistoryProjection::default()
-    );
-    loaded
-        .save_to(&store)
-        .await
-        .expect("migrated V2 state should save");
-
-    let rewritten: serde_json::Value = serde_json::from_slice(
-        &store
-            .read_state_bytes(&session_id())
-            .await
-            .expect("rewritten state should read"),
-    )
-    .expect("rewritten state should be JSON");
-    assert_eq!(
-        rewritten["prompt_history_projection"]["compacted_through"],
-        serde_json::Value::Null
-    );
-}
-
-#[tokio::test]
-async fn session_state_v2_with_checkpoint_but_without_projection_is_rejected() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let mut document = literal_v2_document();
-    document["compacted_checkpoint"] = serde_json::to_value(
-        citation_plain_runtime_checkpoint_for_tests(
-            "projection-missing-checkpoint",
-            "the old body may already have been physically deleted",
-        )
-        .persisted(),
-    )
-    .expect("checkpoint should serialize");
-    assert!(document.get("prompt_history_projection").is_none());
-    store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("literal V2 document should serialize"),
-        )
-        .await
-        .expect("legacy compacted V2 state should write");
-
-    let error = SessionState::load_from(&store, &session_id())
-        .await
-        .expect_err("compacted V2 state without a projection must reject resume");
-
-    assert!(matches!(
-        error,
-        crate::SessionStoreError::InvalidDocument { .. }
-    ));
 }
 
 #[tokio::test]
@@ -686,7 +410,7 @@ fn session_state_save_rejects_prompt_projection_without_checkpoint() {
 }
 
 #[tokio::test]
-async fn session_state_v2_load_rejects_missing_user_source_artifact() {
+async fn session_state_load_rejects_missing_user_source_artifact() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     let mut session = SessionState::new(session_id());
@@ -721,10 +445,10 @@ async fn session_state_v2_load_rejects_missing_user_source_artifact() {
 }
 
 #[tokio::test]
-async fn session_state_v2_load_rejects_user_message_cross_linked_to_readable_text_artifact() {
+async fn session_state_load_rejects_user_message_cross_linked_to_readable_text_artifact() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
-    let mut document = literal_v2_document();
+    let mut document = current_document();
     document["artifacts"] = serde_json::json!([{
         "artifact": ArtifactRef::new(artifact_id("unrelated-user-source"), ArtifactKind::Text),
         "content": ArtifactContent::text("readable but not the stable user source")
@@ -735,6 +459,7 @@ async fn session_state_v2_load_rejects_user_message_cross_linked_to_readable_tex
             "id": 0,
             "model_turn_id": 1,
             "artifact_id": "unrelated-user-source",
+            "image_artifact_ids": [],
             "origin": "external_user"
         }],
         "next_id": 1,
@@ -744,10 +469,10 @@ async fn session_state_v2_load_rejects_user_message_cross_linked_to_readable_tex
     store
         .write_state_bytes(
             &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("literal V2 document serializes"),
+            &serde_json::to_vec_pretty(&document).expect("current document serializes"),
         )
         .await
-        .expect("corrupted V2 state writes");
+        .expect("corrupted current state writes");
 
     let error = SessionState::load_from(&store, &session_id())
         .await
@@ -760,7 +485,7 @@ async fn session_state_v2_load_rejects_user_message_cross_linked_to_readable_tex
 }
 
 #[tokio::test]
-async fn session_state_v2_load_rejects_unreachable_model_turn_sequences() {
+async fn session_state_load_rejects_unreachable_model_turn_sequences() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     let cases = [
@@ -778,16 +503,16 @@ async fn session_state_v2_load_rejects_unreachable_model_turn_sequences() {
     ];
 
     for (case, model_turns, next_model_turn_id) in cases {
-        let mut document = literal_v2_document();
+        let mut document = current_document();
         document["transcript"]["model_turns"] = model_turns;
         document["transcript"]["next_model_turn_id"] = serde_json::Value::from(next_model_turn_id);
         store
             .write_state_bytes(
                 &session_id(),
-                &serde_json::to_vec_pretty(&document).expect("literal V2 document serializes"),
+                &serde_json::to_vec_pretty(&document).expect("current document serializes"),
             )
             .await
-            .expect("corrupted V2 state writes");
+            .expect("corrupted current state writes");
 
         assert!(
             matches!(
@@ -802,7 +527,7 @@ async fn session_state_v2_load_rejects_unreachable_model_turn_sequences() {
 }
 
 #[tokio::test]
-async fn session_state_v2_load_rejects_nonterminal_or_unresolved_turns() {
+async fn session_state_load_rejects_nonterminal_or_unresolved_turns() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     SessionState::new(session_id())
@@ -868,7 +593,7 @@ async fn session_state_v2_load_rejects_nonterminal_or_unresolved_turns() {
 }
 
 #[tokio::test]
-async fn session_state_v2_load_rejects_mismatched_tool_result_identity() {
+async fn session_state_load_rejects_mismatched_tool_result_identity() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     let mut session = SessionState::new(session_id());
@@ -1198,23 +923,48 @@ fn persisted_test_plan() -> PlanState {
 }
 
 #[tokio::test]
-async fn session_state_current_format_without_plan_loads_with_none_and_rewrites_current_format() {
+async fn session_state_rejects_unsupported_format_before_body_decode() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
-    let document = literal_v2_document();
+    let document = serde_json::json!({
+        "format_version": 99,
+        "session_id": session_id()
+    });
     store
         .write_state_bytes(
             &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("literal V2 document serializes"),
+            &serde_json::to_vec(&document).expect("header serializes"),
         )
         .await
-        .expect("V2 state writes");
+        .expect("unsupported state writes");
+
+    let error = SessionState::load_from(&store, &session_id())
+        .await
+        .expect_err("unsupported format must reject before body decode");
+    assert!(matches!(
+        error,
+        crate::SessionStoreError::UnsupportedFormatVersion { actual: 99 }
+    ));
+}
+
+#[tokio::test]
+async fn session_state_current_format_without_plan_round_trips_current_format() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let document = current_document();
+    store
+        .write_state_bytes(
+            &session_id(),
+            &serde_json::to_vec_pretty(&document).expect("current document serializes"),
+        )
+        .await
+        .expect("current state writes");
 
     let loaded = SessionState::load_from(&store, &session_id())
         .await
-        .expect("V2 state loads without a plan");
+        .expect("current state loads without a plan");
     assert!(loaded.active_plan().is_none());
-    loaded.save_to(&store).await.expect("migrated state saves");
+    loaded.save_to(&store).await.expect("current state saves");
 
     let rewritten: serde_json::Value = serde_json::from_slice(
         &store

@@ -1,12 +1,11 @@
 use super::{
-    CodingLoopRuntimeOptions, CodingSubagentsConfig, HeadlessCodingRuntimeInput,
-    ProcessExecutionMode, build_coding_loop_runtime, build_headless_coding_runtime,
-    coding_agent_process_admission, resume_headless_coding_runtime,
+    ActionProcessBackend, CodingRuntimeOptions, CodingSubagentsConfig, HeadlessCodingRuntimeInput,
+    ProcessExecutionMode, build_coding_runtime, build_headless_coding,
+    coding_agent_process_admission, fixed_process_backend, resume_headless_coding,
 };
 
-use crate::debug::coding_loop::coding_loop_workspace_call;
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
-use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
+use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name, workspace_tool_call};
 use merry_core::{
     RuntimeJournalEvent, SessionId, ToolCallResult, ToolCallResultStatus, ToolInputSchema,
     ToolName, ToolSpec,
@@ -15,6 +14,7 @@ use merry_llm::{
     FinishReason, ModelEvent, ModelMessageRole, ModelOutput, ModelProvider, ModelResponse,
     ModelToolCall, ModelToolCallId, ToolArguments,
 };
+use merry_process::ProcessSession;
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AgentLoopStatus, FileSessionStore,
     PermissionedProcessRunnerFactory, ProcessRunner, ProjectRules, RegisteredTool, Runtime,
@@ -33,19 +33,19 @@ async fn unrestricted_mode_admits_the_host_process_profile() {
 
     assert_eq!(
         admission.sandbox_profile(),
-        merry_runtime::LocalWorkspaceProcessSandboxProfile::HostV1
+        merry_runtime::LocalWorkspaceProcessSandboxProfile::Host
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn inner_only_mode_admits_the_inner_bwrap_process_profile() {
+async fn inner_only_mode_admits_the_inner_local_workspace_process_profile() {
     let admission = coding_agent_process_admission(None, ProcessExecutionMode::InnerOnly)
         .await
         .expect("inner-only mode should admit the inner process profile");
 
     assert_eq!(
         admission.sandbox_profile(),
-        merry_runtime::LocalWorkspaceProcessSandboxProfile::CliBwrapV1
+        merry_runtime::LocalWorkspaceProcessSandboxProfile::LocalWorkspace
     );
 }
 
@@ -71,12 +71,13 @@ fn headless_input<'a>(
     HeadlessCodingRuntimeInput {
         session_id,
         root,
-        admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
         provider,
         model: model_name(),
-        runner,
-        process_backend: None,
-        permissioned_process_runner_factory,
+        process_backend: fixed_process_backend(ProcessSession::from_parts(
+            AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+            runner,
+            permissioned_process_runner_factory,
+        )),
         extra_tools: Vec::new(),
         allow_hidden_workspace_paths: false,
         automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
@@ -88,8 +89,20 @@ fn headless_input<'a>(
     }
 }
 
+fn test_process_backend() -> ActionProcessBackend {
+    let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
+    let factory: Arc<dyn PermissionedProcessRunnerFactory> = Arc::new(
+        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+    );
+    fixed_process_backend(ProcessSession::from_parts(
+        AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+        runner,
+        factory,
+    ))
+}
+
 #[tokio::test(flavor = "current_thread")]
-async fn coding_runtime_projects_root_agents_in_the_stable_prefix() {
+async fn coding_projects_root_agents_in_the_stable_prefix() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
@@ -102,21 +115,18 @@ async fn coding_runtime_projects_root_agents_in_the_stable_prefix() {
     let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
         response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
     })]]);
-    let runtime = build_coding_loop_runtime(
+    let runtime = build_coding_runtime(
         "coding-loop-root-project-rules",
         &workspace,
-        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
         Arc::new(provider.clone()),
         model_name(),
-        Arc::new(FakeProcessRunner::succeeding("")),
-        CodingLoopRuntimeOptions {
+        CodingRuntimeOptions {
             allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
-            process_backend: None,
-            permissioned_process_runner_factory: None,
+            process_backend: test_process_backend(),
             extra_tools: Vec::new(),
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
@@ -141,7 +151,7 @@ async fn coding_runtime_projects_root_agents_in_the_stable_prefix() {
         .map(|message| message.content().as_text())
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(request.stable_prefix_message_count(), 3);
+    assert_eq!(request.stable_prefix_message_count(), 4);
     assert!(stable_text.contains("project-rules-source:AGENTS.md"));
     assert!(
         stable_text
@@ -151,7 +161,7 @@ async fn coding_runtime_projects_root_agents_in_the_stable_prefix() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn coding_runtime_omits_project_rules_when_root_agents_is_missing() {
+async fn coding_omits_project_rules_when_root_agents_is_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
@@ -159,21 +169,18 @@ async fn coding_runtime_omits_project_rules_when_root_agents_is_missing() {
     let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
         response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
     })]]);
-    let runtime = build_coding_loop_runtime(
+    let runtime = build_coding_runtime(
         "coding-loop-missing-root-project-rules",
         &workspace,
-        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
         Arc::new(provider.clone()),
         model_name(),
-        Arc::new(FakeProcessRunner::succeeding("")),
-        CodingLoopRuntimeOptions {
+        CodingRuntimeOptions {
             allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
-            process_backend: None,
-            permissioned_process_runner_factory: None,
+            process_backend: test_process_backend(),
             extra_tools: Vec::new(),
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
@@ -207,7 +214,7 @@ async fn coding_runtime_omits_project_rules_when_root_agents_is_missing() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn resumed_coding_runtime_reloads_current_root_agents() {
+async fn resumed_coding_reloads_current_root_agents() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
@@ -226,7 +233,7 @@ async fn resumed_coding_runtime_reloads_current_root_agents() {
             None,
         ),
     })]]);
-    let first_runtime = build_headless_coding_runtime(headless_input(
+    let first_runtime = build_headless_coding(headless_input(
         "headless-resume-reloads-project-rules",
         &workspace,
         Arc::new(first_provider.clone()),
@@ -256,7 +263,7 @@ async fn resumed_coding_runtime_reloads_current_root_agents() {
             None,
         ),
     })]]);
-    let resumed_runtime = resume_headless_coding_runtime(
+    let resumed_runtime = resume_headless_coding(
         headless_input(
             "headless-resume-reloads-project-rules",
             &workspace,
@@ -293,7 +300,7 @@ async fn resumed_coding_runtime_reloads_current_root_agents() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn resumed_coding_runtime_replaces_stale_project_capability_seed() {
+async fn resumed_coding_replaces_stale_project_capability_seed() {
     const SESSION_ID: &str = "headless-resume-refreshes-project-capabilities";
     const OLD_LANGUAGE_RULE: &str = "- Respond in the user's current input language by default unless the user explicitly requests another language.";
     const OLD_AGENTS_CAPABILITY: &str = "Detected AGENTS.md at the workspace root; read and follow it as project-specific instructions before substantial work.";
@@ -332,7 +339,7 @@ async fn resumed_coding_runtime_replaces_stale_project_capability_seed() {
             None,
         ),
     })]]);
-    let resumed_runtime = resume_headless_coding_runtime(
+    let resumed_runtime = resume_headless_coding(
         headless_input(
             SESSION_ID,
             &workspace,
@@ -395,21 +402,18 @@ async fn projects_skill_metadata_without_body() {
     let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
         response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
     })]]);
-    let runtime = build_coding_loop_runtime(
+    let runtime = build_coding_runtime(
         "coding-loop-skill-prefix",
         &workspace,
-        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
         Arc::new(provider.clone()),
         model_name(),
-        Arc::new(FakeProcessRunner::succeeding("")),
-        CodingLoopRuntimeOptions {
+        CodingRuntimeOptions {
             allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
-            process_backend: None,
-            permissioned_process_runner_factory: None,
+            process_backend: test_process_backend(),
             extra_tools: Vec::new(),
             skill_roots: vec![skill_root.clone()],
             subagents: CodingSubagentsConfig::default(),
@@ -465,15 +469,16 @@ async fn headless_runtime_uses_coding_agent_profile() {
         merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
     );
 
-    let runtime = build_headless_coding_runtime(HeadlessCodingRuntimeInput {
+    let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
         session_id: "headless-coding-runtime-profile",
         root: &workspace,
-        admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
         provider: Arc::new(provider.clone()),
         model: model_name(),
-        runner,
-        process_backend: None,
-        permissioned_process_runner_factory: permissioned_factory,
+        process_backend: fixed_process_backend(ProcessSession::from_parts(
+            AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+            runner,
+            permissioned_factory,
+        )),
         extra_tools: Vec::new(),
         allow_hidden_workspace_paths: false,
         automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
@@ -534,15 +539,16 @@ async fn headless_runtime_registers_extra_tools() {
     )
     .expect("tool spec should be valid");
 
-    let runtime = build_headless_coding_runtime(HeadlessCodingRuntimeInput {
+    let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
         session_id: "headless-coding-runtime-extra-tools",
         root: &workspace,
-        admission: AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
         provider: Arc::new(provider.clone()),
         model: model_name(),
-        runner,
-        process_backend: None,
-        permissioned_process_runner_factory: permissioned_factory,
+        process_backend: fixed_process_backend(ProcessSession::from_parts(
+            AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+            runner,
+            permissioned_factory,
+        )),
         allow_hidden_workspace_paths: false,
         automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
         retry_policy: None,
@@ -584,7 +590,7 @@ async fn includes_skill_roots_in_workspace_read_tools() {
     )
     .expect("write skill");
 
-    let provider = ScriptedProvider::new(vec![vec![Ok(coding_loop_workspace_call(
+    let provider = ScriptedProvider::new(vec![vec![Ok(workspace_tool_call(
         "call-read-skill",
         WORKSPACE_READ_FILE_TOOL,
         [(
@@ -593,21 +599,18 @@ async fn includes_skill_roots_in_workspace_read_tools() {
         )],
     )
     .expect("workspace read call should build"))]]);
-    let runtime = build_coding_loop_runtime(
+    let runtime = build_coding_runtime(
         "coding-loop-skill-root-read",
         &workspace,
-        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
         Arc::new(provider.clone()),
         model_name(),
-        Arc::new(FakeProcessRunner::succeeding("")),
-        CodingLoopRuntimeOptions {
+        CodingRuntimeOptions {
             allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
-            process_backend: None,
-            permissioned_process_runner_factory: None,
+            process_backend: test_process_backend(),
             extra_tools: Vec::new(),
             skill_roots: vec![skill_root.clone()],
             subagents: CodingSubagentsConfig::default(),
@@ -642,21 +645,18 @@ async fn allows_missing_default_skill_root() {
     let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
         response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
     })]]);
-    let runtime = build_coding_loop_runtime(
+    let runtime = build_coding_runtime(
         "coding-loop-missing-default-skill-root",
         &workspace,
-        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
         Arc::new(provider.clone()),
         model_name(),
-        Arc::new(FakeProcessRunner::succeeding("")),
-        CodingLoopRuntimeOptions {
+        CodingRuntimeOptions {
             allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
-            process_backend: None,
-            permissioned_process_runner_factory: None,
+            process_backend: test_process_backend(),
             extra_tools: Vec::new(),
             skill_roots: vec![missing_skill_root],
             subagents: CodingSubagentsConfig::default(),
@@ -691,21 +691,18 @@ async fn hides_subagent_tools_by_default() {
     let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
         response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
     })]]);
-    let runtime = build_coding_loop_runtime(
+    let runtime = build_coding_runtime(
         "coding-loop-subagents-default-off",
         &workspace,
-        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
         Arc::new(provider.clone()),
         model_name(),
-        Arc::new(FakeProcessRunner::succeeding("")),
-        CodingLoopRuntimeOptions {
+        CodingRuntimeOptions {
             allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
-            process_backend: None,
-            permissioned_process_runner_factory: None,
+            process_backend: test_process_backend(),
             extra_tools: Vec::new(),
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
@@ -742,21 +739,18 @@ async fn exposes_subagent_tools_when_enabled() {
     let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
         response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
     })]]);
-    let runtime = build_coding_loop_runtime(
+    let runtime = build_coding_runtime(
         "coding-loop-subagents-enabled",
         &workspace,
-        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
         Arc::new(provider.clone()),
         model_name(),
-        Arc::new(FakeProcessRunner::succeeding("")),
-        CodingLoopRuntimeOptions {
+        CodingRuntimeOptions {
             allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
-            process_backend: None,
-            permissioned_process_runner_factory: None,
+            process_backend: test_process_backend(),
             extra_tools: Vec::new(),
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::enabled(
@@ -787,7 +781,7 @@ async fn exposes_subagent_tools_when_enabled() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn subagent_with_narrow_tools_keeps_read_only_profile() {
+async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
@@ -841,21 +835,18 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
         completion_step(),
         completion_step(),
     ]);
-    let runtime = build_coding_loop_runtime(
+    let runtime = build_coding_runtime(
         "coding-loop-subagent-narrow-tools",
         &workspace,
-        AcceptedLocalWorkspaceProcessAdmission::accept_cli_bwrap_v1(),
         Arc::new(provider.clone()),
         model_name(),
-        Arc::new(FakeProcessRunner::succeeding("")),
-        CodingLoopRuntimeOptions {
+        CodingRuntimeOptions {
             allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
-            process_backend: None,
-            permissioned_process_runner_factory: None,
+            process_backend: test_process_backend(),
             extra_tools: Vec::new(),
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::enabled(
@@ -941,13 +932,26 @@ async fn subagent_with_narrow_tools_keeps_read_only_profile() {
     assert!(child_stable_text.contains("Child must receive root rule sentinel."));
     assert!(!child_stable_text.contains("Child must not reread changed root rule sentinel."));
     assert!(child_tool_names.contains(&"workspace_read_file"));
-    assert!(!child_tool_names.contains(&"workspace_list_dir"));
-    assert!(!child_tool_names.contains(&"workspace_search_text"));
-    assert!(!child_tool_names.contains(&"run_process"));
-    assert!(!child_tool_names.contains(&"workspace_patch"));
-    assert!(!child_tool_names.contains(&"spawn_subagents"));
-    assert!(!child_tool_names.contains(&"wait_subagents"));
-    assert!(!child_tool_names.contains(&"cancel_subagents"));
+    assert_eq!(
+        child_tool_names,
+        [
+            "run_process",
+            "request_permissions",
+            "workspace_read_file",
+            "workspace_list_dir",
+            "workspace_search_text",
+            "workspace_patch",
+            "spawn_subagents",
+            "wait_subagents",
+            "cancel_subagents",
+        ]
+    );
+    assert!(
+        child_request
+            .tool_profile_hash()
+            .as_str()
+            .starts_with("fnv1a64:")
+    );
 }
 
 fn resolved_tool_result(events: &[RuntimeJournalEvent]) -> &ToolCallResult {

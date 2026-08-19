@@ -113,7 +113,7 @@ fn runtime_profile_requires_tmpfs_home_tmp_and_expected_env() {
             Some(OsStr::new(SANDBOX_TMPDIR)),
             Some(mountinfo),
         ),
-        Some(RuntimeProfile::CliBwrapV1)
+        Some(RuntimeProfile::CliBwrap)
     );
     assert_eq!(
         runtime_profile_from_evidence(
@@ -121,7 +121,7 @@ fn runtime_profile_requires_tmpfs_home_tmp_and_expected_env() {
             Some(OsStr::new(SANDBOX_TMPDIR)),
             Some(mountinfo),
         ),
-        Some(RuntimeProfile::CliBwrapV1)
+        Some(RuntimeProfile::CliBwrap)
     );
 
     let custom_home_mountinfo = "\
@@ -135,7 +135,7 @@ fn runtime_profile_requires_tmpfs_home_tmp_and_expected_env() {
             Some(OsStr::new(SANDBOX_TMPDIR)),
             Some(custom_home_mountinfo),
         ),
-        Some(RuntimeProfile::CliBwrapV1)
+        Some(RuntimeProfile::CliBwrap)
     );
 
     for (home, tmpdir, mountinfo) in [
@@ -970,7 +970,7 @@ fn plan_reexecs_current_exe_with_hidden_handoff_and_sandbox_flag_removed() {
         &args[exe_index + 1..],
         [
             SANDBOX_CHILD_HANDOFF_ARG,
-            SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
+            SANDBOX_CHILD_HANDOFF_CLI_BWRAP,
             "debug",
             "--session-id",
             "custom-session",
@@ -984,7 +984,7 @@ fn plan_strips_host_provided_hidden_handoff_before_injecting_its_own() {
     host.args = vec![
         os("--with-sandbox"),
         os(SANDBOX_CHILD_HANDOFF_ARG),
-        os(SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1),
+        os(SANDBOX_CHILD_HANDOFF_CLI_BWRAP),
         os("debug"),
         os("--session-id"),
         os("custom-session"),
@@ -1003,13 +1003,13 @@ fn plan_strips_host_provided_hidden_handoff_before_injecting_its_own() {
 
     assert_eq!(handoff_positions.len(), 1);
     let handoff_index = handoff_positions[0];
-    assert_eq!(args[handoff_index + 1], SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1);
+    assert_eq!(args[handoff_index + 1], SANDBOX_CHILD_HANDOFF_CLI_BWRAP);
     assert!(contains_sequence(
         &args,
         &[
             "/workspace/merry/target/debug/merry",
             SANDBOX_CHILD_HANDOFF_ARG,
-            SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
+            SANDBOX_CHILD_HANDOFF_CLI_BWRAP,
             "debug",
             "--session-id",
             "custom-session",
@@ -1022,7 +1022,7 @@ fn plan_strips_host_provided_hidden_handoff_assignment_before_injecting_its_own(
     let mut host = sandbox_host();
     host.args = vec![
         os("--with-sandbox"),
-        os("--merry-sandbox-child-handoff=cli-bwrap-v1"),
+        os("--merry-sandbox-child-handoff=cli-bwrap"),
         os("debug"),
         os("--session-id"),
         os("custom-session"),
@@ -1043,7 +1043,7 @@ fn plan_strips_host_provided_hidden_handoff_assignment_before_injecting_its_own(
     assert!(
         !args
             .iter()
-            .any(|arg| arg == "--merry-sandbox-child-handoff=cli-bwrap-v1")
+            .any(|arg| arg == "--merry-sandbox-child-handoff=cli-bwrap")
     );
 }
 
@@ -1095,7 +1095,7 @@ fn args_without_sandbox_bootstrap_flags_preserves_shell_trailing_argv() {
         os("--"),
         os("--with-sandbox"),
         os(SANDBOX_CHILD_HANDOFF_ARG),
-        os(SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1),
+        os(SANDBOX_CHILD_HANDOFF_CLI_BWRAP),
     ];
 
     assert_eq!(
@@ -1105,7 +1105,7 @@ fn args_without_sandbox_bootstrap_flags_preserves_shell_trailing_argv() {
             os("--"),
             os("--with-sandbox"),
             os(SANDBOX_CHILD_HANDOFF_ARG),
-            os(SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1),
+            os(SANDBOX_CHILD_HANDOFF_CLI_BWRAP),
         ]
     );
 }

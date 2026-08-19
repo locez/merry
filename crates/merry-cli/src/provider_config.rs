@@ -1,5 +1,5 @@
 use crate::cli_error::{CliError, debug_openai_usage_error};
-use crate::coding_runtime::RuntimeRoleProviderConfig;
+use crate::coding::RuntimeRoleProviderConfig;
 use crate::config::{
     ConfiguredProviderProfile, EffectiveOpenAiProviderConfig, EffectiveProviderConfig, MerryConfig,
 };

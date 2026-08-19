@@ -1,6 +1,9 @@
 use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
 use crate::provider_config::MERRY_OPENAI_DEBUG_ENV;
-use merry_runtime::{HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource};
+use merry_runtime::{
+    AcceptedLocalWorkspaceProcessAdmission, HostIntegration, PathAccess, PathAccessRule,
+    PathAccessRuleSource,
+};
 use std::{
     env,
     ffi::{OsStr, OsString},
@@ -34,7 +37,7 @@ pub(crate) const MERRY_SANDBOX_ENV: &str = "MERRY_SANDBOX";
 pub(crate) const MERRY_SANDBOX_VERSION_ENV: &str = "MERRY_SANDBOX_VERSION";
 pub(crate) const MERRY_SANDBOX_VERSION: &str = "1";
 pub(crate) const SANDBOX_CHILD_HANDOFF_ARG: &str = "--merry-sandbox-child-handoff";
-pub(crate) const SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1: &str = "cli-bwrap-v1";
+pub(crate) const SANDBOX_CHILD_HANDOFF_CLI_BWRAP: &str = "cli-bwrap";
 pub(crate) const SANDBOX_HOME_ROOT: &str = "/home";
 pub(crate) const SANDBOX_TMPDIR: &str = "/tmp";
 pub(crate) const SANDBOX_WAYLAND_RUNTIME_DIR: &str = "/run/merry-wayland";
@@ -190,21 +193,42 @@ impl HostPathProbe for FilesystemHostProbe {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum ChildHandoff {
-    #[value(name = "cli-bwrap-v1")]
-    CliBwrapV1,
+    #[value(name = "cli-bwrap")]
+    CliBwrap,
 }
 
 impl ChildHandoff {
     fn as_cli_value(self) -> &'static str {
         match self {
-            Self::CliBwrapV1 => SANDBOX_CHILD_HANDOFF_CLI_BWRAP_V1,
+            Self::CliBwrap => SANDBOX_CHILD_HANDOFF_CLI_BWRAP,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuntimeProfile {
-    CliBwrapV1,
+    CliBwrap,
+}
+
+/// Validates the outer sandbox handoff before admitting the local workspace
+/// process profile to a product runtime.
+pub(crate) fn local_workspace_process_admission(
+    accept_local_workspace_process_risk: bool,
+    sandbox_child_handoff: Option<ChildHandoff>,
+    sandbox_runtime_profile: Option<RuntimeProfile>,
+    sandbox: Option<&OsStr>,
+    version: Option<&OsStr>,
+) -> Option<AcceptedLocalWorkspaceProcessAdmission> {
+    if accept_local_workspace_process_risk
+        && sandbox_child_handoff == Some(ChildHandoff::CliBwrap)
+        && sandbox_runtime_profile == Some(RuntimeProfile::CliBwrap)
+        && sandbox == Some(OsStr::new("1"))
+        && version == Some(OsStr::new(MERRY_SANDBOX_VERSION))
+    {
+        Some(AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace())
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -800,7 +824,7 @@ fn build_plan(
     args.extend([
         current_exe,
         os(SANDBOX_CHILD_HANDOFF_ARG),
-        os(ChildHandoff::CliBwrapV1.as_cli_value()),
+        os(ChildHandoff::CliBwrap.as_cli_value()),
     ]);
     args.extend(args_without_sandbox_bootstrap_flags(&host.args));
 
@@ -995,7 +1019,7 @@ pub(crate) fn runtime_profile_from_evidence(
     if mountinfo_has_tmpfs_mount(mountinfo, &home_mount)
         && mountinfo_has_tmpfs_mount(mountinfo, SANDBOX_TMPDIR)
     {
-        Some(RuntimeProfile::CliBwrapV1)
+        Some(RuntimeProfile::CliBwrap)
     } else {
         None
     }

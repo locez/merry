@@ -9,8 +9,8 @@ base64.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 jsonschema.workspace = true
-merry-core = { path = "../merry-core" }
-merry-llm = { path = "../merry-llm" }
+merry-core = { path = "../merry-core", version = "0.1.0" }
+merry-llm = { path = "../merry-llm", version = "0.1.0" }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,9 +23,9 @@ tracing.workspace = true
 [dev-dependencies]
 futures-executor.workspace = true
 futures-util.workspace = true
-merry-core = { path = "../merry-core" }
-merry-llm = { path = "../merry-llm", features = ["test-utils"] }
-merry-provider-openai = { path = "../merry-provider-openai" }
+merry-core = { path = "../merry-core", version = "0.1.0" }
+merry-llm = { path = "../merry-llm", version = "0.1.0", features = ["test-utils"] }
+merry-provider-openai = { path = "../merry-provider-openai", version = "0.1.0" }
 tokio.workspace = true
 tokio-util.workspace = true
 tracing-subscriber.workspace = true

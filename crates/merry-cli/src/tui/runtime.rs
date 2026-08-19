@@ -1,8 +1,8 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, unexpected};
-use crate::coding_runtime::{
+use crate::coding::{
     HeadlessCodingRuntimeInput, ProcessExecutionMode, action_process_runner_for_mode,
-    build_headless_coding_runtime_with_permission_source, coding_agent_loop_config,
-    coding_agent_process_admission, resume_headless_coding_runtime_with_permission_source,
+    build_headless_coding_with_permission_source, coding_agent_loop_config,
+    coding_agent_process_admission, resume_headless_coding_with_permission_source,
 };
 use crate::config::MerryConfig;
 use crate::mcp_tools::discover_configured_mcp_tools;
@@ -57,11 +57,11 @@ pub(crate) async fn start_tui_runtime_session(
     fully_trusted: bool,
     preferences: &TuiPreferences,
 ) -> Result<TuiRuntimeSession, CliError> {
-    let Some(admission) =
+    let Some(_admission) =
         coding_agent_process_admission(sandbox_child_handoff, process_execution_mode).await
     else {
         return Err(CliError::DebugUsage(
-            "merry TUI requires the automatic bubblewrap sandbox".to_owned(),
+            "merry TUI requires the configured outer sandbox".to_owned(),
         ));
     };
     let owned_config = merry_config.cloned().ok_or_else(|| {
@@ -108,12 +108,9 @@ pub(crate) async fn start_tui_runtime_session(
     let runtime_input = HeadlessCodingRuntimeInput {
         session_id: session_id.as_str(),
         root: &workspace_root,
-        admission,
         provider,
         model,
-        runner: backend.runner(),
-        process_backend: Some(backend.clone()),
-        permissioned_process_runner_factory: backend.permissioned_factory(),
+        process_backend: backend,
         extra_tools,
         allow_hidden_workspace_paths: false,
         automatic_compaction: automatic_compaction_config_with_preferences(
@@ -128,7 +125,7 @@ pub(crate) async fn start_tui_runtime_session(
             .transpose()
             .map_err(unexpected)?
             .unwrap_or_default(),
-        subagents: crate::coding_runtime::CodingSubagentsConfig::runtime_controlled(
+        subagents: crate::coding::CodingSubagentsConfig::runtime_controlled(
             subagents.is_enabled(),
             subagents.limits(),
         ),
@@ -139,7 +136,7 @@ pub(crate) async fn start_tui_runtime_session(
         PermissionReviewMode::ModelThenHostFallback
     };
     let runtime = if should_resume {
-        resume_headless_coding_runtime_with_permission_source(
+        resume_headless_coding_with_permission_source(
             runtime_input,
             session_store.session_state_store(),
             permission_source,
@@ -147,7 +144,7 @@ pub(crate) async fn start_tui_runtime_session(
         )
         .await?
     } else {
-        build_headless_coding_runtime_with_permission_source(
+        build_headless_coding_with_permission_source(
             runtime_input,
             permission_source,
             permission_review_mode,
