@@ -123,6 +123,12 @@ not require mechanically moving every existing module in one change.
   consumers. They may normalize external task formats and consume public
   runtime or facade contracts, but evaluation models must not become runtime
   state or provider wire types.
+- `crates/merry-eval` is deferred and a candidate for removal. Treat it as
+  frozen: do not add dependencies to it, make new crates or packages depend on
+  it, extend its public API or schema, or route runtime, facade, CLI, binding,
+  or SDK behavior through it. Existing references may remain only until an
+  explicit cleanup removes them; new evaluation work belongs in tests or the
+  owning upper-layer adapter with an independent contract.
 
 ### Dependency direction
 
