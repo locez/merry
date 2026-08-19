@@ -62,6 +62,25 @@
         )
     }
 
+    fn path_permission_pending_tool_call(id: &str, path: &str, access: &str) -> PendingToolCall {
+        PendingToolCall::new(
+            ToolCallId::new(id).expect("valid tool call id"),
+            ToolName::new("request_permissions").expect("valid tool name"),
+            ToolCallArguments::try_from(serde_json::json!({
+                "reason": "Need the requested path for this exact command.",
+                "requested": {
+                    "paths": [{ "path": path, "access": access }]
+                },
+                "for_action": {
+                    "kind": "process",
+                    "command": "printf '%s\\n' 'hello' > /tmp/hello-work.txt",
+                    "cwd": ".",
+                }
+            }))
+            .expect("valid path permission arguments"),
+        )
+    }
+
     fn invalid_permission_pending_tool_call(id: &str) -> PendingToolCall {
         PendingToolCall::new(
             ToolCallId::new(id).expect("valid tool call id"),

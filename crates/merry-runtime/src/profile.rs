@@ -35,6 +35,18 @@ impl PathAccess {
             Self::Deny => "deny",
         }
     }
+
+    /// Returns whether this granted access covers a requested access.
+    ///
+    /// Read-write access includes read-only access. Read-only access never
+    /// includes a read-write request, and deny never grants access.
+    #[must_use]
+    pub const fn covers(self, requested: Self) -> bool {
+        matches!(
+            (self, requested),
+            (Self::ReadWrite, Self::ReadOnly | Self::ReadWrite) | (Self::ReadOnly, Self::ReadOnly)
+        )
+    }
 }
 
 /// Trust source for a path access rule.
@@ -700,5 +712,15 @@ mod tests {
         assert_eq!(PathAccess::ReadOnly.as_str(), "ro");
         assert_eq!(PathAccess::ReadWrite.as_str(), "rw");
         assert_eq!(PathAccess::Deny.as_str(), "deny");
+    }
+
+    #[test]
+    fn path_access_coverage_keeps_read_only_and_read_write_distinct() {
+        assert!(PathAccess::ReadWrite.covers(PathAccess::ReadOnly));
+        assert!(PathAccess::ReadWrite.covers(PathAccess::ReadWrite));
+        assert!(PathAccess::ReadOnly.covers(PathAccess::ReadOnly));
+        assert!(!PathAccess::ReadOnly.covers(PathAccess::ReadWrite));
+        assert!(!PathAccess::Deny.covers(PathAccess::ReadOnly));
+        assert!(!PathAccess::Deny.covers(PathAccess::ReadWrite));
     }
 }

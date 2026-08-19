@@ -488,7 +488,7 @@ struct BwrapSessionPermissionState {
     host_integrations: Vec<HostIntegration>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct BwrapSessionPermissionSnapshot {
     path_rules: Vec<PathAccessRule>,
     host_integrations: Vec<HostIntegration>,
@@ -612,6 +612,11 @@ impl BwrapPermissionedProcessRunnerFactory {
         &self,
         request: &PermissionRequest,
     ) -> Result<Vec<PathAccessRule>, ProcessRunnerError> {
+        let mut effective_rules = self.path_rules.clone();
+        if let Some(permissions) = &self.session_permissions {
+            effective_rules.extend(permissions.snapshot()?.path_rules);
+        }
+        let effective_rules = normalize_path_rules(effective_rules);
         request
             .requested()
             .iter()
@@ -620,16 +625,22 @@ impl BwrapPermissionedProcessRunnerFactory {
                     return None;
                 };
                 let path = materialize_requested_path(&self.cwd_root, requested.path());
-                Some(
-                    effective_requested_path_access(&path, requested.access(), &self.path_rules)
-                        .map(|effective_access| {
-                            PathAccessRule::new(
-                                path,
-                                effective_access,
-                                PathAccessRuleSource::PermissionReview,
-                            )
-                        }),
-                )
+                let effective_access = match effective_requested_path_access(
+                    &path,
+                    requested.access(),
+                    &effective_rules,
+                ) {
+                    Ok(access) => access,
+                    Err(error) => return Some(Err(error)),
+                };
+                if path_rule_covers(&effective_rules, &path, effective_access) {
+                    return None;
+                }
+                Some(Ok(PathAccessRule::new(
+                    path,
+                    effective_access,
+                    PathAccessRuleSource::PermissionReview,
+                )))
             })
             .collect()
     }
@@ -698,6 +709,51 @@ impl PermissionedProcessRunnerFactory for BwrapPermissionedProcessRunnerFactory 
         self.path_rules_for_request(request).map(|_| ())
     }
 
+    fn request_capabilities_are_satisfied(
+        &self,
+        request: &PermissionRequest,
+    ) -> Result<bool, ProcessRunnerError> {
+        let environment = self.environment.validate_for_workspace(&self.cwd_root)?;
+        let snapshot = self
+            .session_permissions
+            .as_ref()
+            .map(BwrapSessionPermissions::snapshot)
+            .transpose()?
+            .unwrap_or_default();
+
+        let requested_integrations = self.requested_host_integrations_for_request(request);
+        environment.validate_requested_host_integrations(&requested_integrations)?;
+        if request.requests_network() {
+            return Ok(false);
+        }
+
+        let mut available_integrations = environment.host_integrations.clone();
+        available_integrations.extend(snapshot.host_integrations);
+        available_integrations.sort_unstable();
+        available_integrations.dedup();
+        if requested_integrations
+            .iter()
+            .any(|integration| !available_integrations.contains(integration))
+        {
+            return Ok(false);
+        }
+
+        let mut rules = self.path_rules.clone();
+        rules.extend(snapshot.path_rules);
+        let rules = normalize_path_rules(rules);
+        Ok(request
+            .requested()
+            .iter()
+            .all(|capability| match capability {
+                RequestedCapability::Network => false,
+                RequestedCapability::HostIntegration(_) => true,
+                RequestedCapability::Path(requested) => {
+                    let path = materialize_requested_path(&self.cwd_root, requested.path());
+                    path_rule_covers(&rules, &path, requested.access())
+                }
+            }))
+    }
+
     fn runner_for(&self, request: &PermissionRequest) -> Arc<dyn ProcessRunner> {
         let grant_error = self.grant_approved_request(request).err();
         let mut runner = self.build_runner(request);
@@ -746,6 +802,45 @@ fn effective_requested_path_access(
     }
 
     Ok(requested_access)
+}
+
+fn path_rule_covers(
+    rules: &[PathAccessRule],
+    requested_path: &Path,
+    requested_access: PathAccess,
+) -> bool {
+    if requested_access == PathAccess::Deny || is_git_metadata_path(requested_path) {
+        return false;
+    }
+    if rules
+        .iter()
+        .any(|rule| requested_path.starts_with(rule.path()) && rule.access() == PathAccess::Deny)
+    {
+        return false;
+    }
+    if requested_access == PathAccess::ReadWrite
+        && rules.iter().any(|rule| {
+            requested_path.starts_with(rule.path())
+                && rule.access() == PathAccess::ReadOnly
+                && matches!(
+                    rule.source(),
+                    PathAccessRuleSource::TrustedGlobalConfig
+                        | PathAccessRuleSource::TrustedGlobalConfigWritableCeiling
+                )
+        })
+    {
+        return false;
+    }
+
+    rules
+        .iter()
+        .filter(|rule| {
+            requested_path.starts_with(rule.path())
+                && rule.access() != PathAccess::Deny
+                && rule.source() != PathAccessRuleSource::GitMetadataBaseline
+        })
+        .max_by_key(|rule| path_depth(rule.path()))
+        .is_some_and(|rule| rule.access().covers(requested_access))
 }
 
 fn normalize_path_rules(rules: Vec<PathAccessRule>) -> Vec<PathAccessRule> {
@@ -1979,6 +2074,91 @@ mod tests {
             &["--bind-try", "/var/tmp", "/var/tmp"]
         ));
         assert!(args.iter().any(|arg| arg == "--unshare-net"));
+    }
+
+    #[test]
+    fn bwrap_permissioned_factory_reuses_parent_path_grants_for_descendants() {
+        let session_permissions = super::BwrapSessionPermissions::new();
+        let factory =
+            super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_bwrap_program("/custom/bin/bwrap")
+                .with_session_permissions(session_permissions.clone());
+        let parent_request = permission_request(json!({
+            "requested": {
+                "paths": [{ "path": "/tmp", "access": "rw" }]
+            },
+            "for_action": { "kind": "process", "command": "mkdir -p /tmp/work", "cwd": null }
+        }));
+        let descendant_read_write_request = permission_request(json!({
+            "requested": {
+                "paths": [{ "path": "/tmp/hello_world.txt", "access": "rw" }]
+            },
+            "for_action": { "kind": "process", "command": "cat /tmp/hello_world.txt", "cwd": null }
+        }));
+        let descendant_read_only_request = permission_request(json!({
+            "requested": {
+                "paths": [{ "path": "/tmp/hello_world.txt", "access": "ro" }]
+            },
+            "for_action": { "kind": "process", "command": "cat /tmp/hello_world.txt", "cwd": null }
+        }));
+        let network_request = permission_request(json!({
+            "requested": { "network": true },
+            "for_action": { "kind": "process", "command": "curl https://example.invalid", "cwd": null }
+        }));
+
+        let _ = factory.runner_for(&parent_request);
+        let descendant_runner = factory.build_runner(&descendant_read_write_request);
+        let descendant_plan = descendant_runner
+            .plan_for(request_process_intent(&descendant_read_write_request))
+            .expect("covered descendant process plan should build");
+        let descendant_args = os_args(&descendant_plan.args);
+        assert!(contains_sequence(
+            &descendant_args,
+            &["--bind", "/tmp", "/tmp"]
+        ));
+        assert!(!contains_sequence(
+            &descendant_args,
+            &["--bind", "/tmp/hello_world.txt", "/tmp/hello_world.txt"]
+        ));
+        assert!(
+            factory
+                .request_capabilities_are_satisfied(&descendant_read_write_request)
+                .expect("descendant write capability query should succeed")
+        );
+        assert!(
+            factory
+                .request_capabilities_are_satisfied(&descendant_read_only_request)
+                .expect("descendant read capability query should succeed")
+        );
+        assert!(
+            !factory
+                .request_capabilities_are_satisfied(&network_request)
+                .expect("network capability query should succeed")
+        );
+
+        let read_only_session = super::BwrapSessionPermissions::new();
+        let read_only_factory =
+            super::BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_bwrap_program("/custom/bin/bwrap")
+                .with_session_permissions(read_only_session);
+        let read_only_parent_request = permission_request(json!({
+            "requested": {
+                "paths": [{ "path": "/tmp", "access": "ro" }]
+            },
+            "for_action": { "kind": "process", "command": "cat /tmp/hello_world.txt", "cwd": null }
+        }));
+
+        let _ = read_only_factory.runner_for(&read_only_parent_request);
+        assert!(
+            read_only_factory
+                .request_capabilities_are_satisfied(&descendant_read_only_request)
+                .expect("read-only descendant capability query should succeed")
+        );
+        assert!(
+            !read_only_factory
+                .request_capabilities_are_satisfied(&descendant_read_write_request)
+                .expect("read-write upgrade capability query should succeed")
+        );
     }
 
     #[test]

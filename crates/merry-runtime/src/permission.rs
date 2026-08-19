@@ -323,6 +323,15 @@ impl PermissionAdmissionDecision {
         ))
     }
 
+    pub(crate) fn approved_existing_grant() -> Self {
+        Self::Approved(PermissionAdmissionReview::new(
+            PermissionAdmissionReviewSource::ExistingGrant,
+            PermissionReviewRisk::Low,
+            PermissionUserAuthorization::High,
+            "requested capabilities are already authorized by the current process session",
+        ))
+    }
+
     #[must_use]
     pub fn denied(rationale: impl Into<String>) -> Self {
         Self::Denied(PermissionAdmissionReview::new(
@@ -407,6 +416,7 @@ impl PermissionAdmissionReview {
 pub enum PermissionAdmissionReviewSource {
     Host,
     Model,
+    ExistingGrant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1027,6 +1037,7 @@ impl PermissionAdmissionReviewSource {
         match self {
             Self::Host => "host",
             Self::Model => "model",
+            Self::ExistingGrant => "existing_grant",
         }
     }
 }

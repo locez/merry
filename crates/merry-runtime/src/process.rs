@@ -275,6 +275,20 @@ pub trait PermissionedProcessRunnerFactory: Send + Sync {
         Ok(())
     }
 
+    /// Returns whether the backend already enforces every capability in the
+    /// request for the current process session.
+    ///
+    /// This query covers capability state only; it does not authorize the
+    /// requested action. Implementations must return `false` for capabilities
+    /// that are action-scoped, such as network access, or when the backend
+    /// cannot prove that the requested access is covered.
+    fn request_capabilities_are_satisfied(
+        &self,
+        _request: &PermissionRequest,
+    ) -> Result<bool, ProcessRunnerError> {
+        Ok(false)
+    }
+
     /// Creates the process runner for one approved permission request and
     /// records only the session-scoped capabilities supported by the backend.
     fn runner_for(&self, request: &PermissionRequest) -> Arc<dyn ProcessRunner>;

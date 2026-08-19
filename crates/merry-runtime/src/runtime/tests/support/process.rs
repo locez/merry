@@ -293,6 +293,7 @@
         runner: Arc<dyn ProcessRunner>,
         calls: Arc<AtomicUsize>,
         observed_network_requests: Arc<StdMutex<Vec<bool>>>,
+        capabilities_satisfied: Arc<AtomicBool>,
     }
 
     impl RecordingPermissionedProcessRunnerFactory {
@@ -301,7 +302,13 @@
                 runner,
                 calls: Arc::new(AtomicUsize::new(0)),
                 observed_network_requests: Arc::new(StdMutex::new(Vec::new())),
+                capabilities_satisfied: Arc::new(AtomicBool::new(false)),
             }
+        }
+
+        fn with_capabilities_satisfied(self) -> Self {
+            self.capabilities_satisfied.store(true, Ordering::SeqCst);
+            self
         }
 
         fn call_count(&self) -> usize {
@@ -317,6 +324,13 @@
     }
 
     impl PermissionedProcessRunnerFactory for RecordingPermissionedProcessRunnerFactory {
+        fn request_capabilities_are_satisfied(
+            &self,
+            _request: &crate::PermissionRequest,
+        ) -> Result<bool, ProcessRunnerError> {
+            Ok(self.capabilities_satisfied.load(Ordering::SeqCst))
+        }
+
         fn runner_for(&self, request: &crate::PermissionRequest) -> Arc<dyn ProcessRunner> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.observed_network_requests

@@ -90,7 +90,45 @@ pub(super) async fn execute_permission_request_tool_call(
         return persist_tool_events(inner, events).await;
     }
 
-    let admission = review_permission_request(inner, request.clone(), &context).await;
+    let capabilities_are_satisfied = match runner_factory
+        .request_capabilities_are_satisfied(&request)
+    {
+        Ok(satisfied) => satisfied,
+        Err(error) => {
+            let outcome = permission_blocked_outcome(pending, &error.to_string(), Some(&request));
+            let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
+            debug_assert!(execution_evidence.is_none());
+            let events = {
+                let mut session = inner.session.lock().await;
+                session.submit_tool_execution_outcome(
+                    pending.id(),
+                    status,
+                    content,
+                    diagnostic,
+                    None,
+                )?
+            };
+            return persist_tool_events(inner, events).await;
+        }
+    };
+    let action_requires_independent_review = match request.action() {
+        PermissionedAction::Process(intent) => {
+            crate::process::requires_process_action_review(intent)
+        }
+    };
+    let may_reuse_existing_grant = capabilities_are_satisfied
+        && !action_requires_independent_review
+        && !matches!(
+            inner.permission_review_mode,
+            crate::PermissionReviewMode::Required
+                | crate::PermissionReviewMode::HostDecisionOnly
+                | crate::PermissionReviewMode::FullyTrusted
+        );
+    let admission = if may_reuse_existing_grant {
+        Ok(crate::PermissionAdmissionDecision::approved_existing_grant())
+    } else {
+        review_permission_request(inner, request.clone(), &context).await
+    };
     let decision = match admission {
         Ok(decision) => decision,
         Err(error) => {
