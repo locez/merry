@@ -1509,6 +1509,7 @@ dependencies = [
 name = "merry-coding"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "libc",
  "merry-core",
  "merry-llm",
@@ -1519,6 +1520,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

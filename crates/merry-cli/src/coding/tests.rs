@@ -86,6 +86,7 @@ fn headless_input<'a>(
         approval_review: None,
         skill_roots: Vec::new(),
         subagents: CodingSubagentsConfig::default(),
+        workspace_tool_limits: None,
     }
 }
 
@@ -487,6 +488,7 @@ async fn headless_runtime_uses_coding_agent_profile() {
         approval_review: None,
         skill_roots: Vec::new(),
         subagents: CodingSubagentsConfig::default(),
+        workspace_tool_limits: None,
     })
     .expect("headless coding runtime should build");
 
@@ -556,6 +558,7 @@ async fn headless_runtime_registers_extra_tools() {
         approval_review: None,
         skill_roots: Vec::new(),
         subagents: CodingSubagentsConfig::default(),
+        workspace_tool_limits: None,
         extra_tools: vec![RegisteredTool::read_only(spec, Arc::new(StaticOkExecutor))],
     })
     .expect("headless coding runtime should build");

@@ -1,8 +1,8 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, unexpected};
 use crate::coding::{
-    HeadlessCodingRuntimeInput, ProcessExecutionMode, action_process_runner_for_mode,
-    build_headless_coding_with_permission_source, coding_agent_loop_config,
-    coding_agent_process_admission, resume_headless_coding_with_permission_source,
+    CodingPermissionPolicy, HeadlessCodingRuntimeInput, ProcessExecutionMode,
+    action_process_runner_for_mode, build_headless_coding_with_policy_composition,
+    coding_agent_process_admission, resume_headless_coding_composition_with_policy,
 };
 use crate::config::MerryConfig;
 use crate::mcp_tools::discover_configured_mcp_tools;
@@ -24,8 +24,8 @@ use merry_llm::GenerationConfig;
 use merry_runtime::{
     AgentLoopControl, AgentLoopInput, AutomaticCompactionConfig, ChannelPermissionAdmissionSource,
     InteractivePrimaryModel, InteractiveRunEventStream, InteractiveSettingsUpdate,
-    InteractiveSubagentSettings, PermissionReviewMode, PermissionReviewRequest, Runtime,
-    SessionTranscriptItem, SkillMetadata, StepContext, SubagentActivityReceiver,
+    InteractiveSubagentSettings, PermissionReviewRequest, Runtime, SessionTranscriptItem,
+    SkillMetadata, StepContext, SubagentActivityReceiver,
 };
 use std::{collections::VecDeque, env, num::NonZeroU64, path::PathBuf, sync::Arc};
 use tokio::sync::mpsc;
@@ -129,28 +129,25 @@ pub(crate) async fn start_tui_runtime_session(
             subagents.is_enabled(),
             subagents.limits(),
         ),
+        workspace_tool_limits: None,
     };
-    let permission_review_mode = if fully_trusted {
-        PermissionReviewMode::FullyTrusted
+    let permission_policy = if fully_trusted {
+        CodingPermissionPolicy::fully_trusted()
     } else {
-        PermissionReviewMode::ModelThenHostFallback
+        CodingPermissionPolicy::model_then_host_fallback(permission_source)
     };
-    let runtime = if should_resume {
-        resume_headless_coding_with_permission_source(
+    let coding_runtime = if should_resume {
+        resume_headless_coding_composition_with_policy(
             runtime_input,
             session_store.session_state_store(),
-            permission_source,
-            permission_review_mode,
+            permission_policy,
         )
         .await?
     } else {
-        build_headless_coding_with_permission_source(
-            runtime_input,
-            permission_source,
-            permission_review_mode,
-        )?
+        build_headless_coding_with_policy_composition(runtime_input, permission_policy)?
     };
-    let loop_config = coding_agent_loop_config()?;
+    let loop_config = coding_runtime.loop_config();
+    let runtime = coding_runtime.into_runtime();
     let skills = runtime.skills().await;
     let interactive = runtime
         .start_interactive_agent_run(

@@ -53,7 +53,6 @@
                 "reason": reason,
                 "requested": { "network": true },
                 "for_action": {
-                    "kind": "process",
                     "command": command,
                     "cwd": ".",
                 }
@@ -72,7 +71,6 @@
                     "paths": [{ "path": path, "access": access }]
                 },
                 "for_action": {
-                    "kind": "process",
                     "command": "printf '%s\\n' 'hello' > /tmp/hello-work.txt",
                     "cwd": ".",
                 }
@@ -93,7 +91,6 @@
                     ]
                 },
                 "for_action": {
-                    "kind": "process",
                     "command": "cargo test",
                     "cwd": ".",
                 }

@@ -157,11 +157,12 @@ fn runtime_role_provider(
     model: String,
     map_usage_error: fn(String) -> CliError,
 ) -> Result<RuntimeRoleProviderConfig, CliError> {
-    Ok(RuntimeRoleProviderConfig {
+    RuntimeRoleProviderConfig::new(
         role,
-        provider: model_provider(provider, map_usage_error)?,
-        model: ModelName::new(&model).map_err(|error| map_usage_error(error.to_string()))?,
-    })
+        model_provider(provider, map_usage_error)?,
+        ModelName::new(&model).map_err(|error| map_usage_error(error.to_string()))?,
+    )
+    .map_err(|error| map_usage_error(error.to_string()))
 }
 
 fn model_provider(
@@ -335,9 +336,9 @@ pub(crate) fn apply_openai_context_compaction_provider(
     if let Some(config) = context_compaction {
         let role_provider = openai_context_compaction_provider(config)?;
         builder = builder.model_provider_for_role(
-            role_provider.role,
-            role_provider.provider,
-            role_provider.model,
+            role_provider.role(),
+            role_provider.provider(),
+            role_provider.model().clone(),
         );
     }
     Ok(builder)
@@ -358,11 +359,12 @@ pub(crate) fn openai_role_provider_config(
     config: OpenAiConfig,
     map_usage_error: fn(String) -> CliError,
 ) -> Result<RuntimeRoleProviderConfig, CliError> {
-    Ok(RuntimeRoleProviderConfig {
+    RuntimeRoleProviderConfig::new(
         role,
-        provider: Arc::new(OpenAiProvider::new(config.provider)),
-        model: ModelName::new(&config.model).map_err(|error| map_usage_error(error.to_string()))?,
-    })
+        Arc::new(OpenAiProvider::new(config.provider)),
+        ModelName::new(&config.model).map_err(|error| map_usage_error(error.to_string()))?,
+    )
+    .map_err(|error| map_usage_error(error.to_string()))
 }
 
 pub(crate) fn openai_provider_bundle(
@@ -680,8 +682,8 @@ model = "gpt-compact"
         let compaction = bundle
             .context_compaction
             .expect("compaction override should be present");
-        assert_eq!(compaction.provider.name().as_str(), "compat");
-        assert_eq!(compaction.model.as_str(), "gpt-compact");
+        assert_eq!(compaction.provider().name().as_str(), "compat");
+        assert_eq!(compaction.model().as_str(), "gpt-compact");
     }
 
     #[test]
@@ -725,8 +727,8 @@ model = "gpt-compact"
         let compaction = bundle
             .context_compaction
             .expect("compaction override should remain configured");
-        assert_eq!(compaction.provider.name().as_str(), "compat");
-        assert_eq!(compaction.model.as_str(), "gpt-compact");
+        assert_eq!(compaction.provider().name().as_str(), "compat");
+        assert_eq!(compaction.model().as_str(), "gpt-compact");
     }
 
     #[test]
@@ -776,13 +778,16 @@ model = "gpt-review"
         let context_compaction = bundle
             .context_compaction
             .expect("context compaction provider should be materialized");
-        assert_eq!(context_compaction.role, RuntimeModelRole::ContextCompaction);
-        assert_eq!(context_compaction.model.as_str(), "gpt-compact");
+        assert_eq!(
+            context_compaction.role(),
+            RuntimeModelRole::ContextCompaction
+        );
+        assert_eq!(context_compaction.model().as_str(), "gpt-compact");
         let approval_review = bundle
             .approval_review
             .expect("approval review provider should be materialized");
-        assert_eq!(approval_review.role, RuntimeModelRole::ApprovalReview);
-        assert_eq!(approval_review.model.as_str(), "gpt-review");
+        assert_eq!(approval_review.role(), RuntimeModelRole::ApprovalReview);
+        assert_eq!(approval_review.model().as_str(), "gpt-review");
         assert_eq!(
             bundle
                 .retry_policy

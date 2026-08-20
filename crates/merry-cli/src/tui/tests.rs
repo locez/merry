@@ -3249,7 +3249,7 @@ fn projector_shows_permission_allow_rationale_on_success() {
                 "request_permissions",
                 json!({
                     "requested": { "network": true },
-                    "for_action": { "kind": "process", "command": "cargo test", "cwd": null }
+                    "for_action": { "command": "cargo test", "cwd": null }
                 }),
             ),
             source: source(),

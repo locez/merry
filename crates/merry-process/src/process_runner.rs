@@ -1932,11 +1932,11 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "/workspace/merry", "access": "rw" }]
             },
-            "for_action": { "kind": "process", "command": "cargo test", "cwd": "." }
+            "for_action": { "command": "cargo test", "cwd": "." }
         }));
         let request_with_network = permission_request(json!({
             "requested": { "network": true },
-            "for_action": { "kind": "process", "command": "cargo test", "cwd": "." }
+            "for_action": { "command": "cargo test", "cwd": "." }
         }));
 
         let runner_without_network = factory.build_runner(&request_without_network);
@@ -1971,7 +1971,7 @@ mod tests {
                 )]);
         let request = permission_request(json!({
             "requested": { "network": true },
-            "for_action": { "kind": "process", "command": "cargo test", "cwd": "." }
+            "for_action": { "command": "cargo test", "cwd": "." }
         }));
 
         let runner = factory.build_runner(&request);
@@ -1999,7 +1999,7 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "deps/cache", "access": "rw" }]
             },
-            "for_action": { "kind": "process", "command": "cargo test", "cwd": "." }
+            "for_action": { "command": "cargo test", "cwd": "." }
         }));
 
         let runner = factory.build_runner(&request);
@@ -2039,17 +2039,17 @@ mod tests {
                     { "path": "/var/lib/merry-demo.txt", "access": "ro" }
                 ]
             },
-            "for_action": { "kind": "process", "command": "touch /var/lib/merry-demo.txt", "cwd": null }
+            "for_action": { "command": "touch /var/lib/merry-demo.txt", "cwd": null }
         }));
         let later_request = permission_request(json!({
             "requested": { "network": true },
-            "for_action": { "kind": "process", "command": "cat /var/lib/merry-demo.txt", "cwd": null }
+            "for_action": { "command": "cat /var/lib/merry-demo.txt", "cwd": null }
         }));
         let narrower_request = permission_request(json!({
             "requested": {
                 "paths": [{ "path": "/tmp", "access": "ro" }]
             },
-            "for_action": { "kind": "process", "command": "ls /tmp", "cwd": null }
+            "for_action": { "command": "ls /tmp", "cwd": null }
         }));
 
         let _ = factory.runner_for(&first_request);
@@ -2087,23 +2087,23 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "/tmp", "access": "rw" }]
             },
-            "for_action": { "kind": "process", "command": "mkdir -p /tmp/work", "cwd": null }
+            "for_action": { "command": "mkdir -p /tmp/work", "cwd": null }
         }));
         let descendant_read_write_request = permission_request(json!({
             "requested": {
                 "paths": [{ "path": "/tmp/hello_world.txt", "access": "rw" }]
             },
-            "for_action": { "kind": "process", "command": "cat /tmp/hello_world.txt", "cwd": null }
+            "for_action": { "command": "cat /tmp/hello_world.txt", "cwd": null }
         }));
         let descendant_read_only_request = permission_request(json!({
             "requested": {
                 "paths": [{ "path": "/tmp/hello_world.txt", "access": "ro" }]
             },
-            "for_action": { "kind": "process", "command": "cat /tmp/hello_world.txt", "cwd": null }
+            "for_action": { "command": "cat /tmp/hello_world.txt", "cwd": null }
         }));
         let network_request = permission_request(json!({
             "requested": { "network": true },
-            "for_action": { "kind": "process", "command": "curl https://example.invalid", "cwd": null }
+            "for_action": { "command": "curl https://example.invalid", "cwd": null }
         }));
 
         let _ = factory.runner_for(&parent_request);
@@ -2145,7 +2145,7 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "/tmp", "access": "ro" }]
             },
-            "for_action": { "kind": "process", "command": "cat /tmp/hello_world.txt", "cwd": null }
+            "for_action": { "command": "cat /tmp/hello_world.txt", "cwd": null }
         }));
 
         let _ = read_only_factory.runner_for(&read_only_parent_request);
@@ -2173,7 +2173,7 @@ mod tests {
             .with_session_permissions(session_permissions);
         let network_request = permission_request(json!({
             "requested": { "network": true },
-            "for_action": { "kind": "process", "command": "curl https://example.invalid", "cwd": null }
+            "for_action": { "command": "curl https://example.invalid", "cwd": null }
         }));
 
         let _ = factory.runner_for(&network_request);
@@ -2218,13 +2218,13 @@ mod tests {
             "requested": {
                 "paths": [{ "path": external_root_path.clone(), "access": "rw" }]
             },
-            "for_action": { "kind": "process", "command": "cp a external/out", "cwd": null }
+            "for_action": { "command": "cp a external/out", "cwd": null }
         }));
         let git_request = permission_request(json!({
             "requested": {
                 "paths": [{ "path": external_git_path.clone(), "access": "rw" }]
             },
-            "for_action": { "kind": "process", "command": "git checkout -- README.md", "cwd": null }
+            "for_action": { "command": "git checkout -- README.md", "cwd": null }
         }));
 
         let _ = factory.runner_for(&parent_request);
@@ -2393,7 +2393,7 @@ mod tests {
                 .with_session_permissions(session_permissions.clone());
         let request = permission_request(json!({
             "requested": { "host_integrations": ["ssh-agent"] },
-            "for_action": { "kind": "process", "command": "ssh -T git@example.test", "cwd": null }
+            "for_action": { "command": "ssh -T git@example.test", "cwd": null }
         }));
 
         factory
@@ -2407,7 +2407,7 @@ mod tests {
             .with_session_permissions(session_permissions);
         let later_request = permission_request(json!({
             "requested": { "paths": [{ "path": ".", "access": "rw" }] },
-            "for_action": { "kind": "process", "command": "ssh -T git@example.test", "cwd": null }
+            "for_action": { "command": "ssh -T git@example.test", "cwd": null }
         }));
         let plan = base_runner
             .plan_for(request_process_intent(&later_request))
@@ -2437,7 +2437,7 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "deps", "access": "rw" }]
             },
-            "for_action": { "kind": "process", "command": "cargo test", "cwd": "." }
+            "for_action": { "command": "cargo test", "cwd": "." }
         }));
 
         factory
@@ -2484,7 +2484,7 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "secrets/token", "access": "ro" }]
             },
-            "for_action": { "kind": "process", "command": "cat secrets/token", "cwd": null }
+            "for_action": { "command": "cat secrets/token", "cwd": null }
         }));
 
         let error = factory
@@ -2506,7 +2506,7 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "deps/cache", "access": "rw" }]
             },
-            "for_action": { "kind": "process", "command": "cargo test", "cwd": null }
+            "for_action": { "command": "cargo test", "cwd": null }
         }));
 
         let error = factory
@@ -2529,7 +2529,7 @@ mod tests {
                 "paths": [{ "path": "/var/lib/merry-demo.txt", "access": "rw" }],
                 "host_integrations": ["dbus"]
             },
-            "for_action": { "kind": "process", "command": "gh auth status", "cwd": null }
+            "for_action": { "command": "gh auth status", "cwd": null }
         }));
 
         factory
@@ -2550,7 +2550,7 @@ mod tests {
             "requested": {
                 "paths": [{ "path": "secrets/token", "access": "ro" }]
             },
-            "for_action": { "kind": "process", "command": "cat secrets/token", "cwd": null }
+            "for_action": { "command": "cat secrets/token", "cwd": null }
         }));
 
         let runner = factory.runner_for(&request);
@@ -2827,7 +2827,6 @@ mod tests {
                 "paths": [{ "path": ".git", "access": "rw" }]
             },
             "for_action": {
-                "kind": "process",
                 "command": "git config --local user.name Merry",
                 "cwd": null
             }

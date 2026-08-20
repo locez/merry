@@ -1,17 +1,10 @@
-use merry::profiles::{CodingAgentProfileBuildError, ProjectRulesLoadError};
+use merry::profiles::CodingRuntimeBuildError;
 use merry_core::CoreError;
 use merry_process::ProcessBackendError;
-use merry_runtime::{AgentLoopConfigError, RuntimeError, SkillError};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub(crate) enum CodingRuntimeError {
-    #[error("invalid coding agent loop config: {source}")]
-    AgentLoopConfig {
-        #[from]
-        source: AgentLoopConfigError,
-    },
-
     #[error("core protocol error while building coding runtime: {source}")]
     Core {
         #[from]
@@ -24,29 +17,11 @@ pub(crate) enum CodingRuntimeError {
         source: ProcessBackendError,
     },
 
-    #[error("failed to load project rules: {source}")]
-    ProjectRules {
+    #[error("invalid coding runtime composition: {source}")]
+    CodingRuntime {
         #[from]
-        source: ProjectRulesLoadError,
+        source: CodingRuntimeBuildError,
     },
-
-    #[error("invalid shared coding-agent profile: {source}")]
-    CodingAgentProfile {
-        #[from]
-        source: CodingAgentProfileBuildError,
-    },
-
-    #[error("failed to load skill catalog: {source}")]
-    SkillCatalog {
-        #[from]
-        source: SkillError,
-    },
-
-    #[error("failed to apply runtime profile to builder: {source}")]
-    RuntimeProfileApply { source: RuntimeError },
-
-    #[error("failed to build runtime: {source}")]
-    RuntimeBuild { source: RuntimeError },
 }
 
 impl From<CodingRuntimeError> for crate::cli_error::CliError {

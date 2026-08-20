@@ -4,7 +4,9 @@ pub use merry_coding::{
     CODING_AGENT_DYNAMIC_CONTEXT_LAYOUT, CODING_AGENT_POLICY_PROMPT, CODING_AGENT_PROFILE_ID,
     CODING_AGENT_STABLE_PREFIX_LAYOUT, CodingAgentProfile, CodingAgentProfileBuildError,
     CodingAgentProfileBuilder, CodingAgentProfileHash, CodingAgentRunPolicy,
-    CodingAgentRunPolicyError, CodingChildRuntimeFactory, CodingFinalReportPolicy,
+    CodingAgentRunPolicyError, CodingFinalReportPolicy, CodingModelRoleConfig,
+    CodingModelRoleConfigError, CodingPermissionPolicy, CodingRuntime, CodingRuntimeBuildError,
+    CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig,
     DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, MAX_ROOT_PROJECT_RULES_BYTES, ProjectRulesLoadError,
     ROOT_PROJECT_RULES_FILE, WorkspaceToolLimits, coding_agent, load_root_project_rules,
 };
