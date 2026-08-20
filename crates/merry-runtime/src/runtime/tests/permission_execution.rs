@@ -68,7 +68,8 @@ async fn request_permissions_invalid_arguments_skip_review_and_runner() {
     let guidance_message = payload["guidance"]["message"]
         .as_str()
         .expect("invalid permission request should include guidance message");
-    assert!(guidance_message.contains("for_action.kind"));
+    assert!(guidance_message.contains("provide the exact command string and cwd"));
+    assert!(!guidance_message.contains("set for_action"));
     assert!(!guidance_message.contains("for_action.payload"));
 }
 

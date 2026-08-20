@@ -6,12 +6,12 @@ use crate::provider_config::{
     openai_provider_config_bundle,
 };
 use crate::runtime_config::automatic_compaction_config;
-use merry::profiles::{coding_agent, load_root_project_rules};
-use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
+use merry::profiles::{CodingRuntime, CodingRuntimeBuilder, CodingRuntimeInput};
+use merry_core::{ErrorInfo, PendingToolCall, SessionId, ToolInputSchema, ToolName, ToolSpec};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{
     AgentLoopConfig, AgentLoopStatus, AutomaticCompactionConfig, RegisteredTool, Runtime,
-    SkillCatalog, StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
+    StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
     ToolExecutorFuture,
 };
 use schemars::JsonSchema;
@@ -240,39 +240,23 @@ Runtime environment:
 }
 
 pub(crate) fn build_runtime(input: RuntimeInput<'_>) -> Result<Runtime, CliError> {
-    let session_id = merry_core::SessionId::new(input.session_id).map_err(unexpected)?;
-    let mut builder = Runtime::builder(session_id)
-        .automatic_compaction(input.automatic_compaction)
-        .model_provider(input.provider, input.model);
+    let session_id = SessionId::new(input.session_id).map_err(unexpected)?;
+    let mut coding_input =
+        CodingRuntimeInput::read_only(session_id, input.root, input.provider, input.model)
+            .with_automatic_compaction(input.automatic_compaction)
+            .with_allow_hidden_workspace_paths(input.allow_hidden_workspace_paths)
+            .with_skill_roots(input.skill_roots)
+            .with_extra_tools([cmd_check_command_tool(input.environment)?]);
     if let Some(role_provider) = input.context_compaction {
-        builder = builder.model_provider_for_role(
-            role_provider.role,
-            role_provider.provider,
-            role_provider.model,
-        );
-    }
-    let project_rules = load_root_project_rules(input.root).map_err(unexpected)?;
-    let skill_catalog = if input.skill_roots.is_empty() {
-        None
-    } else {
-        Some(SkillCatalog::load_from_roots(input.skill_roots.clone()).map_err(unexpected)?)
-    };
-    let mut profile = coding_agent(input.root)
-        .readonly_resource_roots(input.skill_roots.clone())
-        .allow_hidden(input.allow_hidden_workspace_paths)
-        .register_tool(cmd_check_command_tool(input.environment)?);
-    if let Some(project_rules) = project_rules {
-        profile = profile.project_rules(project_rules);
-    }
-    if let Some(skill_catalog) = skill_catalog {
-        profile = profile.skill_catalog(skill_catalog);
+        coding_input = coding_input.with_model_role(role_provider);
     }
     if let Some(policy) = input.retry_policy {
-        profile = profile.retry_policy(policy);
+        coding_input = coding_input.with_retry_policy(policy);
     }
-    let profile = profile.build().map_err(unexpected)?;
-    let builder = profile.apply_to(builder).map_err(unexpected)?;
-    builder.build().map_err(unexpected)
+    CodingRuntimeBuilder::for_command_generation(coding_input)
+        .build()
+        .map(CodingRuntime::into_runtime)
+        .map_err(|error| unexpected(error.to_string()))
 }
 
 pub(crate) async fn generate_command_plan(

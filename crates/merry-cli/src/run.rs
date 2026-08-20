@@ -1,8 +1,9 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, stdout_error, unexpected};
 use crate::coding::{
-    HeadlessCodingRuntimeInput, ProcessExecutionMode, action_process_runner_for_mode,
-    build_headless_coding, build_headless_coding_with_permission_review_mode,
-    coding_agent_loop_config, coding_agent_process_admission, coding_agent_requires_sandbox_error,
+    CodingPermissionPolicy, HeadlessCodingRuntimeInput, ProcessExecutionMode,
+    action_process_runner_for_mode, build_headless_coding_composition,
+    build_headless_coding_with_policy_composition, coding_agent_process_admission,
+    coding_agent_requires_sandbox_error,
 };
 use crate::config::MerryConfig;
 use crate::mcp_tools::discover_configured_mcp_tools;
@@ -97,36 +98,26 @@ pub(crate) async fn run(
             .map_err(unexpected)?
             .unwrap_or_default(),
         subagents: subagents_config(merry_config).map_err(unexpected)?.into(),
+        workspace_tool_limits: None,
     };
-    let runtime = if fully_trusted {
-        build_headless_coding_with_permission_review_mode(
+    let coding_runtime = if fully_trusted {
+        build_headless_coding_with_policy_composition(
             runtime_input,
-            merry_runtime::PermissionReviewMode::FullyTrusted,
+            CodingPermissionPolicy::fully_trusted(),
         )?
     } else {
-        build_headless_coding(runtime_input)?
+        build_headless_coding_composition(runtime_input)?
     };
+    let loop_config = coding_runtime.loop_config();
+    let runtime = coding_runtime.into_runtime();
     let input = StepInput::user_text(&args.task).map_err(unexpected)?;
     let context = StepContext::default()
         .with_generation_config(generation_config(merry_config).map_err(unexpected)?);
     if args.events_jsonl {
-        write_agent_loop_jsonl_output(
-            &runtime,
-            input,
-            coding_agent_loop_config()?,
-            context,
-            tokio::io::stdout(),
-        )
-        .await
+        write_agent_loop_jsonl_output(&runtime, input, loop_config, context, tokio::io::stdout())
+            .await
     } else {
-        write_agent_loop_output(
-            &runtime,
-            input,
-            coding_agent_loop_config()?,
-            context,
-            tokio::io::stdout(),
-        )
-        .await
+        write_agent_loop_output(&runtime, input, loop_config, context, tokio::io::stdout()).await
     }
 }
 
@@ -564,6 +555,7 @@ mod tests {
             approval_review: None,
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
+            workspace_tool_limits: None,
         })
         .expect("runtime should build");
 
@@ -631,6 +623,7 @@ mod tests {
             approval_review: None,
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
+            workspace_tool_limits: None,
         })
         .expect("runtime should build");
 
@@ -689,6 +682,7 @@ mod tests {
             approval_review: None,
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
+            workspace_tool_limits: None,
         })
         .expect("runtime should build");
 
@@ -754,6 +748,7 @@ mod tests {
             approval_review: None,
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
+            workspace_tool_limits: None,
         })
         .expect("runtime should build");
 

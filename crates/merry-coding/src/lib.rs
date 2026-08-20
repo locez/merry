@@ -1,21 +1,26 @@
 //! Provider-neutral coding composition for Merry.
 //!
-//! This crate is the single owner of the coding-agent profile: workspace
-//! tools, project-rule and skill projections, process admission lanes, tool
-//! order, and the stable composition identity. The facade and CLI consume
-//! these types rather than assembling a second coding policy.
+//! This crate is the single owner of coding composition: the parent runtime
+//! builder, child-runtime inputs, workspace tools, project-rule and skill
+//! projections, process admission lanes, tool order, and stable composition
+//! identity. The facade and CLI consume these types rather than assembling a
+//! second coding policy.
 
 mod child_runtime;
 mod project_rules;
+mod runtime;
 mod workspace;
 
 #[cfg(test)]
 mod tests;
 
-pub use child_runtime::CodingChildRuntimeFactory;
 pub use project_rules::{
     MAX_ROOT_PROJECT_RULES_BYTES, ProjectRulesLoadError, ROOT_PROJECT_RULES_FILE,
     load_root_project_rules,
+};
+pub use runtime::{
+    CodingModelRoleConfig, CodingModelRoleConfigError, CodingPermissionPolicy, CodingRuntime,
+    CodingRuntimeBuildError, CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig,
 };
 
 use merry_core::{CoreError, ToolName};

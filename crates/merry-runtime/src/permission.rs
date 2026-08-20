@@ -1202,11 +1202,6 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
                 "additionalProperties": false,
                 "description": "The exact process action that will run after admission. It does not grant access to paths that are not listed in requested.",
                 "properties": {
-                    "kind": {
-                        "type": "string",
-                        "enum": ["process"],
-                        "description": "Kind of exact action to run if the request is approved."
-                    },
                     "command": {
                         "type": "string",
                         "minLength": 1,
@@ -1225,7 +1220,7 @@ fn request_permissions_input_schema() -> Result<ToolInputSchema, PermissionAdmis
                         ]
                     }
                 },
-                "required": ["kind", "command", "cwd"]
+                "required": ["command", "cwd"]
             }
         },
         "required": ["requested", "for_action"]
@@ -1248,7 +1243,7 @@ pub(crate) fn permission_invalid_arguments_outcome(
         },
         "guidance": {
             "kind": "permission_request_invalid_arguments",
-            "message": "Fix the request_permissions arguments before retrying. Include requested and for_action, set for_action.kind to \"process\", provide the exact command string and cwd, and request only minimum network/path/host-integration capability. An unmodeled Linux Unix socket may be requested as its exact filesystem path.",
+            "message": "Fix the request_permissions arguments before retrying. Include requested and for_action, provide the exact command string and cwd, and request only minimum network/path/host-integration capability. An unmodeled Linux Unix socket may be requested as its exact filesystem path.",
         }
     });
     ToolExecutionOutcome::failed_json(
@@ -1267,40 +1262,28 @@ fn permissioned_action(
         });
     };
     for key in object.keys() {
-        if key != "kind" && key != "command" && key != "cwd" {
+        if key != "command" && key != "cwd" {
             return Err(PermissionAdmissionError::InvalidArguments {
                 message: format!("unsupported for_action field {key:?}"),
             });
         }
     }
 
-    let Some(Value::String(kind)) = object.get("kind") else {
-        return Err(PermissionAdmissionError::InvalidArguments {
-            message: "for_action.kind must be a string".to_owned(),
-        });
-    };
-    match kind.as_str() {
-        "process" => {
-            let command = command_from_arguments(object.get("command"))?;
-            let argv = crate::process::shell_command_argv(&command);
-            let cwd = cwd_from_arguments(object.get("cwd"))?;
-            let intent = ProcessActionIntent::new(
-                argv,
-                cwd,
-                ProcessEnvPolicy::empty(),
-                None,
-                DEFAULT_PERMISSION_STDOUT_LIMIT_BYTES,
-                DEFAULT_PERMISSION_STDERR_LIMIT_BYTES,
-            )
-            .map_err(|error| PermissionAdmissionError::InvalidArguments {
-                message: error.to_string(),
-            })?;
-            Ok(PermissionedAction::Process(intent))
-        }
-        actual => Err(PermissionAdmissionError::InvalidArguments {
-            message: format!("unsupported for_action.kind {actual:?}"),
-        }),
-    }
+    let command = command_from_arguments(object.get("command"))?;
+    let argv = crate::process::shell_command_argv(&command);
+    let cwd = cwd_from_arguments(object.get("cwd"))?;
+    let intent = ProcessActionIntent::new(
+        argv,
+        cwd,
+        ProcessEnvPolicy::empty(),
+        None,
+        DEFAULT_PERMISSION_STDOUT_LIMIT_BYTES,
+        DEFAULT_PERMISSION_STDERR_LIMIT_BYTES,
+    )
+    .map_err(|error| PermissionAdmissionError::InvalidArguments {
+        message: error.to_string(),
+    })?;
+    Ok(PermissionedAction::Process(intent))
 }
 
 fn requested_capabilities(
@@ -1848,7 +1831,7 @@ mod tests {
             &call(json!({
                 "reason": "Need to fetch dependency metadata",
                 "requested": { "network": true },
-                "for_action": { "kind": "process", "command": "cargo test", "cwd": "." }
+                "for_action": { "command": "cargo test", "cwd": "." }
             })),
             Vec::new(),
         )
@@ -1871,7 +1854,7 @@ mod tests {
                 "requested": {
                     "host_integrations": ["dbus", "ssh-agent"]
                 },
-                "for_action": { "kind": "process", "command": "gh auth status", "cwd": null }
+                "for_action": { "command": "gh auth status", "cwd": null }
             })),
             Vec::new(),
         )
@@ -1900,7 +1883,7 @@ mod tests {
                     "paths": [{ "path": ".config/gh", "access": "ro" }],
                     "host_integrations": ["dbus"]
                 },
-                "for_action": { "kind": "process", "command": "gh issue list", "cwd": null }
+                "for_action": { "command": "gh issue list", "cwd": null }
             })),
             Vec::new(),
         )
@@ -1986,21 +1969,19 @@ mod tests {
         let valid = json!({
             "reason": "Need dependency metadata",
             "requested": { "paths": [{ "path": "/tmp/cache", "access": "ro" }] },
-                "for_action": {
-                    "kind": "process",
-                    "command": "cargo metadata",
-                    "cwd": "."
-                }
+            "for_action": {
+                "command": "cargo metadata",
+                "cwd": "."
+            }
         });
         assert!(validator.is_valid(&valid));
 
         let host_integration_request = json!({
             "requested": { "host_integrations": ["dbus"] },
-                "for_action": {
-                    "kind": "process",
-                    "command": "gh auth status",
-                    "cwd": null
-                }
+            "for_action": {
+                "command": "gh auth status",
+                "cwd": null
+            }
         });
         assert!(validator.is_valid(&host_integration_request));
 
@@ -2012,6 +1993,10 @@ mod tests {
         let mut empty_requested = valid.clone();
         empty_requested["requested"] = json!({});
         assert!(!validator.is_valid(&empty_requested));
+
+        let mut redundant_kind = valid.clone();
+        redundant_kind["for_action"]["kind"] = json!("process");
+        assert!(!validator.is_valid(&redundant_kind));
 
         let mut oversized_reason = valid.clone();
         oversized_reason["reason"] = json!("x".repeat(MAX_PERMISSION_REASON_BYTES + 1));
@@ -2029,7 +2014,7 @@ mod tests {
             &call(json!({
                 "reason": "Need DNS lookup",
                 "requested": { "network": true },
-                "for_action": { "kind": "process", "command": "ping -c 1 baidu.com", "cwd": "" }
+                "for_action": { "command": "ping -c 1 baidu.com", "cwd": "" }
             })),
             Vec::new(),
         )
@@ -2045,7 +2030,7 @@ mod tests {
         let error = permission_request_from_call(
             &call(json!({
                 "requested": {},
-                "for_action": { "kind": "process", "command": "cargo test", "cwd": null }
+                "for_action": { "command": "cargo test", "cwd": null }
             })),
             Vec::new(),
         )
@@ -2064,7 +2049,7 @@ mod tests {
                         { "path": "deps/./", "access": "ro" }
                     ]
                 },
-                "for_action": { "kind": "process", "command": "cargo metadata", "cwd": null }
+                "for_action": { "command": "cargo metadata", "cwd": null }
             })),
             Vec::new(),
         )
@@ -2082,7 +2067,7 @@ mod tests {
         let traversal = permission_request_from_call(
             &call(json!({
                 "requested": { "paths": [{ "path": "../secrets", "access": "ro" }] },
-                "for_action": { "kind": "process", "command": "cat secrets", "cwd": null }
+                "for_action": { "command": "cat secrets", "cwd": null }
             })),
             Vec::new(),
         )
@@ -2097,7 +2082,7 @@ mod tests {
                         { "path": "./deps", "access": "rw" }
                     ]
                 },
-                "for_action": { "kind": "process", "command": "cargo metadata", "cwd": null }
+                "for_action": { "command": "cargo metadata", "cwd": null }
             })),
             Vec::new(),
         )
@@ -2143,7 +2128,7 @@ mod tests {
         let request = permission_request_from_call(
             &call(json!({
                 "requested": { "network": true },
-                "for_action": { "kind": "process", "command": "cargo test", "cwd": null }
+                "for_action": { "command": "cargo test", "cwd": null }
             })),
             Vec::new(),
         )
@@ -2198,7 +2183,7 @@ mod tests {
         let request = permission_request_from_call(
             &call(json!({
                 "requested": { "network": true },
-                "for_action": { "kind": "process", "command": "cargo test", "cwd": null }
+                "for_action": { "command": "cargo test", "cwd": null }
             })),
             Vec::new(),
         )
@@ -2239,7 +2224,7 @@ mod tests {
         let request = permission_request_from_call(
             &call(json!({
                 "requested": { "network": true },
-                "for_action": { "kind": "process", "command": "cargo test", "cwd": null }
+                "for_action": { "command": "cargo test", "cwd": null }
             })),
             Vec::new(),
         )
