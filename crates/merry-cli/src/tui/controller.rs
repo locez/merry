@@ -34,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 const TIMELINE_SCROLL_STEP: usize = 5;
 const FOCUS_SCROLL_STEP: usize = 5;
 const PLAN_SCROLL_STEP: usize = 5;
+const TUI_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
 struct ModelDiscoveryCompletion {
     generation: u64,
@@ -535,15 +536,18 @@ pub(crate) async fn run_controller(
     let mut model_discovery_generation = 0_u64;
     let mut model_discovery_token: Option<CancellationToken> = None;
     let mut subagent_activity_open = true;
+    let mut permission_requests_open = true;
     let mut input_history_warning_shown = false;
     state
         .plan_mut()
         .update_subagent_activity(session.subagent_activity.borrow().clone());
+    let mut refresh_interval = new_refresh_interval();
+    refresh_interval.tick().await;
     render_once(&mut terminal, &state)?;
 
     loop {
         tokio::select! {
-            _ = time::sleep(Duration::from_millis(100)), if state.is_active_run() => {
+            _ = refresh_interval.tick(), if state.is_active_run() => {
                 if let Some(next) = session.prune_cancelled_permission_reviews() {
                     match next {
                         Some((approval_id, body)) => state.open_permission_review(approval_id, body),
@@ -626,8 +630,9 @@ pub(crate) async fn run_controller(
                     }
                 }
             }
-            request = session.permission_requests.recv() => {
+            request = session.permission_requests.recv(), if permission_requests_open => {
                 let Some(request) = request else {
+                    permission_requests_open = false;
                     continue;
                 };
                 if let Some((approval_id, body)) = session.enqueue_permission_review(request) {
@@ -1401,4 +1406,32 @@ fn render_once(terminal: &mut TerminalSession, state: &TuiState) -> Result<(), C
         .draw(|frame| render::render(frame, state))
         .map_err(unexpected)?;
     Ok(())
+}
+
+fn new_refresh_interval() -> time::Interval {
+    let mut interval = time::interval(TUI_REFRESH_INTERVAL);
+    interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    interval
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TUI_REFRESH_INTERVAL, new_refresh_interval};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn refresh_interval_is_not_reset_by_unrelated_work() {
+        let mut refresh_interval = new_refresh_interval();
+        refresh_interval.tick().await;
+
+        for _ in 0..8 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let tick = tokio::time::timeout(TUI_REFRESH_INTERVAL, refresh_interval.tick()).await;
+        assert!(
+            tick.is_ok(),
+            "the persistent ticker should remain scheduled"
+        );
+    }
 }
