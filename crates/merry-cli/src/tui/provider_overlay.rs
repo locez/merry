@@ -1,10 +1,16 @@
 use super::input::{TextInput, TextInputViewport};
+use super::preferences::REASONING_EFFORT_PRESETS;
 use crate::config::{
-    ConfiguredProviderKind, ManagedProviderKind, ProviderConfigSource, derive_provider_alias,
+    ConfiguredProviderKind, ManagedProviderKind, ProviderAlias, ProviderConfigSource,
+    derive_provider_alias,
 };
+use crate::provider_management::{ProviderDraft, ProviderManagementError};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use merry_llm::ReasoningEffort;
 use merry_provider_openai::OpenAiProtocol;
 use std::{collections::BTreeSet, fmt};
+
+pub(crate) use super::provider_selection::ModelPickerTarget;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderListItem {
@@ -119,11 +125,7 @@ impl ProviderManagerOverlay {
             KeyCode::Enter => self.items.get(self.selected).map_or(
                 ProviderOverlayAction::OpenProviderForm,
                 |item| match item.model() {
-                    Some(model) => ProviderOverlayAction::SelectModel {
-                        alias: item.alias().to_owned(),
-                        model: model.to_owned(),
-                        target: ModelPickerTarget::ActiveProvider,
-                    },
+                    Some(_) => ProviderOverlayAction::SelectProvider(item.alias().to_owned()),
                     None => ProviderOverlayAction::OpenModelPicker(item.alias().to_owned()),
                 },
             ),
@@ -175,11 +177,12 @@ pub(crate) enum ProviderFormField {
     BaseUrl,
     ApiKey,
     Model,
+    ReasoningEffort,
     Save,
 }
 
 impl ProviderFormField {
-    pub(crate) const ALL: [Self; 8] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::DisplayName,
         Self::Alias,
         Self::Kind,
@@ -187,6 +190,7 @@ impl ProviderFormField {
         Self::BaseUrl,
         Self::ApiKey,
         Self::Model,
+        Self::ReasoningEffort,
         Self::Save,
     ];
 }
@@ -200,6 +204,13 @@ pub(crate) struct ProviderFormValues {
     pub(crate) base_url: String,
     pub(crate) api_key: String,
     pub(crate) model: String,
+    pub(crate) reasoning_effort: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProviderDraftMode {
+    Create,
+    Update,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +222,7 @@ pub(crate) struct ProviderFormSeed {
     pub(crate) protocol: Option<OpenAiProtocol>,
     pub(crate) base_url: String,
     pub(crate) model: String,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,13 +242,51 @@ impl fmt::Debug for ProviderFormValues {
             .field("base_url", &self.base_url)
             .field("api_key", &"<redacted>")
             .field("model", &self.model)
+            .field("reasoning_effort", &self.reasoning_effort)
             .finish()
+    }
+}
+
+impl ProviderFormValues {
+    pub(crate) fn to_draft(
+        &self,
+        mode: ProviderDraftMode,
+    ) -> Result<(ProviderAlias, merry_llm::ModelName, ProviderDraft), ProviderManagementError> {
+        let alias = ProviderAlias::new(self.alias.trim())
+            .map_err(|error| ProviderManagementError::Invalid(error.to_string()))?;
+        let model = merry_llm::ModelName::new(self.model.trim())
+            .map_err(|error| ProviderManagementError::Invalid(error.to_string()))?;
+        let draft = match mode {
+            ProviderDraftMode::Update => ProviderDraft::for_update(
+                self.display_name.trim(),
+                alias.clone(),
+                self.kind,
+                self.protocol,
+                self.base_url.trim(),
+                (!self.api_key.trim().is_empty()).then_some(self.api_key.trim()),
+                model.clone(),
+            )?,
+            ProviderDraftMode::Create => ProviderDraft::new(
+                self.display_name.trim(),
+                alias.clone(),
+                self.kind,
+                self.protocol,
+                self.base_url.trim(),
+                &self.api_key,
+                model.clone(),
+            )?,
+        };
+        Ok((
+            alias,
+            model,
+            draft.with_reasoning_effort_text(&self.reasoning_effort)?,
+        ))
     }
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ProviderFormOverlay {
-    fields: [TextInput; 5],
+    fields: [TextInput; 6],
     used_aliases: BTreeSet<String>,
     mode: ProviderFormMode,
     kind: ManagedProviderKind,
@@ -256,6 +306,7 @@ impl fmt::Debug for ProviderFormOverlay {
             .field("base_url", &self.field(ProviderFormField::BaseUrl))
             .field("api_key", &"<redacted>")
             .field("model", &self.field(ProviderFormField::Model))
+            .field("reasoning_effort", &self.reasoning_effort_text())
             .field("selected", &self.selected)
             .field("notice", &self.notice)
             .finish()
@@ -285,6 +336,9 @@ impl ProviderFormOverlay {
         fields[1].replace_text(seed.alias);
         fields[2].replace_text(seed.base_url);
         fields[4].replace_text(seed.model);
+        if let Some(reasoning_effort) = seed.reasoning_effort {
+            fields[5].replace_text(reasoning_effort.as_str().to_owned());
+        }
         Self {
             fields,
             used_aliases,
@@ -325,6 +379,18 @@ impl ProviderFormOverlay {
         }
     }
 
+    pub(crate) fn reasoning_effort_text(&self) -> &str {
+        self.field(ProviderFormField::ReasoningEffort)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reasoning_effort(&self) -> Option<ReasoningEffort> {
+        let value = self.reasoning_effort_text().trim();
+        (!value.is_empty())
+            .then(|| ReasoningEffort::new(value).ok())
+            .flatten()
+    }
+
     pub(crate) fn field(&self, field: ProviderFormField) -> &str {
         match field_input_index(field) {
             Some(index) => self.fields[index].text(),
@@ -353,12 +419,13 @@ impl ProviderFormOverlay {
         self.notice.as_deref()
     }
 
-    pub(crate) fn set_model(&mut self, model: &str) {
+    pub(crate) fn set_model_and_reasoning(&mut self, model: &str, reasoning_effort: &str) {
         self.fields[4].replace_text(model.to_owned());
+        self.fields[5].replace_text(reasoning_effort.to_owned());
         self.selected = ProviderFormField::ALL
             .iter()
-            .position(|field| *field == ProviderFormField::Model)
-            .expect("model field is present");
+            .position(|field| *field == ProviderFormField::ReasoningEffort)
+            .expect("reasoning effort field is present");
     }
 
     pub(crate) fn discovery_request(&self) -> (Option<String>, ProviderFormValues) {
@@ -405,6 +472,13 @@ impl ProviderFormOverlay {
                 if self.selected_field() == ProviderFormField::Protocol =>
             {
                 self.toggle_protocol();
+                ProviderOverlayAction::Consumed
+            }
+            KeyCode::Char(' ')
+                if self.selected_field() == ProviderFormField::ReasoningEffort
+                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.cycle_reasoning();
                 ProviderOverlayAction::Consumed
             }
             KeyCode::Enter if self.selected_field() == ProviderFormField::Model => {
@@ -466,6 +540,15 @@ impl ProviderFormOverlay {
         };
     }
 
+    fn cycle_reasoning(&mut self) {
+        let current = self.reasoning_effort_text().trim();
+        let next = REASONING_EFFORT_PRESETS
+            .iter()
+            .position(|value| *value == current)
+            .map_or(0, |index| (index + 1) % REASONING_EFFORT_PRESETS.len());
+        self.fields[5].replace_text(REASONING_EFFORT_PRESETS[next].to_owned());
+    }
+
     fn save_action(&self) -> ProviderOverlayAction {
         match &self.mode {
             ProviderFormMode::Add => ProviderOverlayAction::SaveProvider(self.values()),
@@ -485,6 +568,7 @@ impl ProviderFormOverlay {
             base_url: self.field(ProviderFormField::BaseUrl).to_owned(),
             api_key: self.field(ProviderFormField::ApiKey).to_owned(),
             model: self.field(ProviderFormField::Model).to_owned(),
+            reasoning_effort: self.reasoning_effort_text().trim().to_owned(),
         }
     }
 
@@ -504,6 +588,7 @@ fn field_input_index(field: ProviderFormField) -> Option<usize> {
         ProviderFormField::BaseUrl => Some(2),
         ProviderFormField::ApiKey => Some(3),
         ProviderFormField::Model => Some(4),
+        ProviderFormField::ReasoningEffort => Some(5),
         ProviderFormField::Save => None,
     }
 }
@@ -512,12 +597,6 @@ fn field_input_index(field: ProviderFormField) -> Option<usize> {
 pub(crate) struct ModelListItem {
     id: String,
     owner: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ModelPickerTarget {
-    ActiveProvider,
-    ProviderForm,
 }
 
 impl ModelListItem {
@@ -732,9 +811,16 @@ pub(crate) enum ProviderOverlayAction {
     RefreshModels(String),
     RefreshFormModels,
     DeleteProvider(String),
+    SelectProvider(String),
     SelectModel {
         alias: String,
         model: String,
+        target: ModelPickerTarget,
+    },
+    SelectReasoning {
+        alias: String,
+        model: String,
+        reasoning_effort: ReasoningEffort,
         target: ModelPickerTarget,
     },
 }
@@ -817,11 +903,7 @@ mod tests {
 
         assert_eq!(
             switch_manager.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            ProviderOverlayAction::SelectModel {
-                alias: "opencode".to_owned(),
-                model: "model-a".to_owned(),
-                target: ModelPickerTarget::ActiveProvider,
-            }
+            ProviderOverlayAction::SelectProvider("opencode".to_owned())
         );
         assert_eq!(
             edit_manager.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)),
@@ -947,6 +1029,52 @@ mod tests {
     }
 
     #[test]
+    fn provider_form_exposes_reasoning_effort_selection() {
+        let mut form = ProviderFormOverlay::new("provider".to_owned(), BTreeSet::new());
+        for _ in 0..7 {
+            let _ = form.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(form.selected_field(), ProviderFormField::ReasoningEffort);
+        assert_eq!(form.reasoning_effort(), None);
+
+        let _ = form.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        assert_eq!(
+            form.reasoning_effort()
+                .as_ref()
+                .map(ReasoningEffort::as_str),
+            Some("minimal")
+        );
+        let _ = form.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        assert_eq!(
+            form.reasoning_effort()
+                .as_ref()
+                .map(ReasoningEffort::as_str),
+            Some("low")
+        );
+    }
+
+    #[test]
+    fn provider_form_supports_builtin_and_custom_reasoning_efforts() {
+        let mut form = ProviderFormOverlay::new("provider".to_owned(), BTreeSet::new());
+        for _ in 0..7 {
+            let _ = form.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+
+        for expected in ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] {
+            let _ = form.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+            assert_eq!(form.reasoning_effort_text(), expected);
+        }
+
+        form.set_field_for_test(ProviderFormField::ReasoningEffort, "max ultra");
+        assert_eq!(
+            form.reasoning_effort()
+                .as_ref()
+                .map(ReasoningEffort::as_str),
+            Some("max ultra")
+        );
+    }
+
+    #[test]
     fn provider_edit_form_prefills_values_retains_secret_and_emits_update() {
         let mut form = ProviderFormOverlay::edit(
             ProviderFormSeed {
@@ -957,6 +1085,7 @@ mod tests {
                 protocol: Some(OpenAiProtocol::Responses),
                 base_url: "https://api.openai.com/v1".to_owned(),
                 model: "model-a".to_owned(),
+                reasoning_effort: None,
             },
             BTreeSet::from(["opencode".to_owned()]),
         );
@@ -974,7 +1103,7 @@ mod tests {
         let _ = form.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         let _ = form.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         let _ = form.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        for _ in 0..4 {
+        for _ in 0..5 {
             let _ = form.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
 
@@ -1000,6 +1129,7 @@ mod tests {
                 protocol: Some(OpenAiProtocol::ChatCompletions),
                 base_url: "https://opencode.example.test/v1".to_owned(),
                 model: "model-a".to_owned(),
+                reasoning_effort: None,
             },
             BTreeSet::from(["opencode".to_owned()]),
         );
@@ -1017,7 +1147,9 @@ mod tests {
             } if original_alias == "opencode" && values.model == "model-a"
         ));
 
-        let _ = form.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        for _ in 0..2 {
+            let _ = form.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
         assert_eq!(form.selected_field(), ProviderFormField::Save);
         assert!(matches!(
             form.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -1033,16 +1165,6 @@ mod tests {
         let action = form.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
 
         assert!(matches!(action, ProviderOverlayAction::SaveProvider(_)));
-    }
-
-    #[test]
-    fn provider_form_selected_model_replaces_initial_model() {
-        let mut form = ProviderFormOverlay::new("provider".to_owned(), BTreeSet::new());
-
-        form.set_model("discovered-model");
-
-        assert_eq!(form.field(ProviderFormField::Model), "discovered-model");
-        assert_eq!(form.selected_field(), ProviderFormField::Model);
     }
 
     #[test]

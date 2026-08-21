@@ -2,7 +2,10 @@ use super::TuiState;
 use crate::tui::{
     input::TextInput,
     overlay::{Overlay, SettingDirection, SettingItem},
-    preferences::{CodeTheme, CompactionStrategy, TuiPreferences, TuiSettingsDefaults},
+    preferences::{
+        CodeTheme, CompactionStrategy, REASONING_EFFORT_PRESETS, TuiPreferences,
+        TuiSettingsDefaults,
+    },
 };
 
 impl TuiState {
@@ -44,6 +47,13 @@ impl TuiState {
         }
     }
 
+    pub(crate) fn settings_reasoning_editor(&self) -> Option<&TextInput> {
+        match self.overlay.as_ref() {
+            Some(Overlay::Settings(settings)) => settings.reasoning_editor(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn settings_notice(&self) -> Option<&str> {
         match self.overlay.as_ref() {
             Some(Overlay::Settings(settings)) => settings.notice(),
@@ -67,28 +77,25 @@ impl TuiState {
         }
     }
 
-    pub(crate) fn commit_settings_model(&mut self, value: String) -> bool {
+    pub(crate) fn commit_settings_model(&mut self, value: String) -> Option<(String, String)> {
         let Some(provider) = self.effective_provider_alias().map(str::to_owned) else {
             self.set_settings_notice(Some("Select a provider first".to_owned()));
-            return false;
+            return None;
         };
         let value = value.trim();
-        let result = if value.is_empty() {
-            self.preferences.set_model_for_provider(&provider, None)
-        } else {
-            self.preferences
-                .set_model_for_provider(&provider, Some(value))
-        };
-        match result {
-            Ok(()) => {
-                self.set_settings_notice(Some("Applied".to_owned()));
-                true
+        if value.is_empty() {
+            match self.preferences.set_model_for_provider(&provider, None) {
+                Ok(()) => self.set_settings_notice(Some("Applied".to_owned())),
+                Err(error) => self.set_settings_notice(Some(error.to_string())),
             }
-            Err(error) => {
-                self.set_settings_notice(Some(error.to_string()));
-                false
-            }
+            return None;
         }
+        if let Err(error) = merry_llm::ModelName::new(value) {
+            self.set_settings_notice(Some(error.to_string()));
+            return None;
+        }
+        self.set_settings_notice(Some("Choose a thinking mode".to_owned()));
+        Some((provider, value.to_owned()))
     }
 
     pub(crate) fn begin_settings_context_window_edit(&mut self) {
@@ -100,6 +107,55 @@ impl TuiState {
         if let Some(Overlay::Settings(settings)) = self.overlay.as_mut() {
             settings.begin_context_window_edit(value);
         }
+    }
+
+    pub(crate) fn begin_settings_reasoning_edit(&mut self) {
+        let provider = self.effective_provider_alias().map(str::to_owned);
+        let value = provider
+            .as_deref()
+            .and_then(|provider| {
+                self.preferences
+                    .reasoning_label_for_provider(provider)
+                    .map(str::to_owned)
+            })
+            .or_else(|| {
+                self.settings_defaults
+                    .reasoning_effort_for_provider(provider.as_deref())
+                    .map(merry_llm::ReasoningEffort::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_default();
+        if let Some(Overlay::Settings(settings)) = self.overlay.as_mut() {
+            settings.begin_reasoning_edit(value);
+        }
+    }
+
+    pub(crate) fn commit_settings_reasoning(&mut self, value: String) -> bool {
+        let value = value.trim();
+        let reasoning_effort = if value.is_empty() {
+            None
+        } else {
+            match merry_llm::ReasoningEffort::new(value) {
+                Ok(effort) => Some(effort),
+                Err(error) => {
+                    self.set_settings_notice(Some(error.to_string()));
+                    return false;
+                }
+            }
+        };
+        let Some(provider) = self.effective_provider_alias().map(str::to_owned) else {
+            self.set_settings_notice(Some("Select a provider first".to_owned()));
+            return false;
+        };
+        if let Err(error) = self
+            .preferences
+            .set_reasoning_effort_for_provider(&provider, reasoning_effort)
+        {
+            self.set_settings_notice(Some(error.to_string()));
+            return false;
+        }
+        self.set_settings_notice(Some("Applied".to_owned()));
+        true
     }
 
     pub(crate) fn commit_settings_context_window(&mut self, value: String) -> bool {
@@ -150,7 +206,13 @@ impl TuiState {
                     let _ = self.preferences.set_model_for_provider(&provider, None);
                 }
             }
-            SettingItem::ReasoningEffort => self.preferences.reasoning_effort = None,
+            SettingItem::ReasoningEffort => {
+                if let Some(provider) = self.effective_provider_alias().map(str::to_owned) {
+                    let _ = self
+                        .preferences
+                        .set_reasoning_effort_for_provider(&provider, None);
+                }
+            }
             SettingItem::ContextWindow => self.preferences.context_window_tokens = None,
             SettingItem::AutoCompaction => self.preferences.auto_compaction_enabled = None,
             SettingItem::ContextStrategy => self.preferences.compaction_strategy = None,
@@ -177,10 +239,10 @@ impl TuiState {
                 )
             }
             SettingItem::ReasoningEffort => inherited_value(
-                self.preferences.reasoning_label(),
+                self.effective_provider_alias()
+                    .and_then(|provider| self.preferences.reasoning_label_for_provider(provider)),
                 self.settings_defaults
-                    .reasoning_effort
-                    .as_ref()
+                    .reasoning_effort_for_provider(self.effective_provider_alias())
                     .map(merry_llm::ReasoningEffort::as_str),
             ),
             SettingItem::ContextWindow => self
@@ -268,22 +330,31 @@ impl TuiState {
     }
 
     fn adjust_reasoning(&mut self, direction: SettingDirection) {
-        const VALUES: [&str; 5] = ["minimal", "low", "medium", "high", "xhigh"];
+        let Some(provider) = self.effective_provider_alias().map(str::to_owned) else {
+            return;
+        };
         let current = self
             .preferences
-            .reasoning_label()
-            .and_then(|effort| VALUES.iter().position(|value| *value == effort))
+            .reasoning_label_for_provider(&provider)
+            .and_then(|effort| {
+                REASONING_EFFORT_PRESETS
+                    .iter()
+                    .position(|value| *value == effort)
+            })
             .map(|index| index + 1)
             .unwrap_or(0);
-        let count = VALUES.len() + 1;
+        let count = REASONING_EFFORT_PRESETS.len() + 1;
         let next = match direction {
             SettingDirection::Previous => (current + count - 1) % count,
             SettingDirection::Next => (current + 1) % count,
         };
-        self.preferences.reasoning_effort = (next > 0).then(|| {
-            merry_llm::ReasoningEffort::new(VALUES[next - 1])
+        let reasoning_effort = (next > 0).then(|| {
+            merry_llm::ReasoningEffort::new(REASONING_EFFORT_PRESETS[next - 1])
                 .expect("static reasoning effort should validate")
         });
+        let _ = self
+            .preferences
+            .set_reasoning_effort_for_provider(&provider, reasoning_effort);
     }
 
     fn adjust_auto_compaction(&mut self, direction: SettingDirection) {

@@ -230,9 +230,10 @@ api_key_file = "managed/secrets/opencode.key"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-test"
-reasoning_effort = "low"
+reasoning_effort = "high"
 
 [providers.openai-compatible]
+reasoning_effort = "low"
 api_key = "sk-test"
 "#,
             ),
@@ -245,7 +246,7 @@ api_key = "sk-test"
 
         assert_eq!(
             generation.reasoning_effort().map(|effort| effort.as_str()),
-            Some("low")
+            Some("high")
         );
     }
 

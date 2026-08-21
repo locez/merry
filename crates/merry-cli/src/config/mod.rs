@@ -1,3 +1,4 @@
+use merry::profiles::NoSandboxReviewMode;
 use merry_runtime::{HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource};
 use serde::Deserialize;
 use std::{
@@ -74,6 +75,7 @@ impl XdgPaths {
         xdg_config_home: Option<PathBuf>,
         xdg_state_home: Option<PathBuf>,
     ) -> Self {
+        let home = normalize_path_lexically(&home);
         let config_base = absolute_or_default(xdg_config_home, home.join(".config"));
         let state_base = absolute_or_default(xdg_state_home, home.join(".local/state"));
         let config_dir = config_base.join("merry");
@@ -141,10 +143,11 @@ impl XdgPaths {
 }
 
 fn absolute_or_default(value: Option<PathBuf>, default: PathBuf) -> PathBuf {
-    match value {
+    let path = match value {
         Some(path) if path.is_absolute() && !path.as_os_str().is_empty() => path,
         _ => default,
-    }
+    };
+    normalize_path_lexically(&path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,6 +245,15 @@ impl MerryConfig {
 
     pub fn profile(&self) -> Option<&str> {
         self.raw.global.profile.as_deref()
+    }
+
+    pub(crate) fn no_sandbox_review_mode(&self) -> NoSandboxReviewMode {
+        self.raw
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.no_sandbox_review)
+            .map(Into::into)
+            .unwrap_or_default()
     }
 
     /// Returns user-configured path rules for the outer sandbox ceiling.
@@ -520,6 +532,7 @@ struct GlobalToml {
 struct PermissionsToml {
     ssh_agent: Option<bool>,
     dbus: Option<bool>,
+    no_sandbox_review: Option<NoSandboxReviewToml>,
     #[serde(default)]
     readonly_paths: Vec<String>,
     #[serde(default)]
@@ -530,6 +543,22 @@ struct PermissionsToml {
     paths: Vec<PathRuleToml>,
     #[serde(default)]
     environment: Vec<EnvironmentVariableToml>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum NoSandboxReviewToml {
+    Host,
+    Model,
+}
+
+impl From<NoSandboxReviewToml> for NoSandboxReviewMode {
+    fn from(value: NoSandboxReviewToml) -> Self {
+        match value {
+            NoSandboxReviewToml::Host => Self::Host,
+            NoSandboxReviewToml::Model => Self::Model,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -745,6 +774,23 @@ mod tests {
         assert_eq!(
             paths.default_log_file(),
             Path::new("/tmp/state/merry/logs/merry.jsonl")
+        );
+    }
+
+    #[test]
+    fn xdg_paths_normalize_absolute_environment_values() {
+        let paths = XdgPaths::from_parts(
+            PathBuf::from("/home/alice/../alice"),
+            Some(PathBuf::from("/tmp/config/../config")),
+            Some(PathBuf::from("/tmp/state/./nested/..")),
+        );
+
+        assert_eq!(paths.home(), Path::new("/home/alice"));
+        assert_eq!(paths.config_base_dir(), Path::new("/tmp/config"));
+        assert_eq!(paths.state_base_dir(), Path::new("/tmp/state"));
+        assert_eq!(
+            paths.managed_config_dir(),
+            Path::new("/tmp/config/merry/managed")
         );
     }
 
@@ -1024,6 +1070,26 @@ access = "ro"
                 .iter()
                 .all(|rule| rule.source() == PathAccessRuleSource::TrustedGlobalConfig)
         );
+    }
+
+    #[test]
+    fn configures_model_review_for_no_sandbox_mode() {
+        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let model = MerryConfig::load_optional_from_text(
+            Some("[permissions]\nno_sandbox_review = \"model\"\n"),
+            &paths,
+        )
+        .expect("permission review config should parse")
+        .expect("permission review config should exist");
+        assert_eq!(model.no_sandbox_review_mode(), NoSandboxReviewMode::Model);
+
+        let default = MerryConfig::load_optional_from_text(
+            Some("[permissions]\nno_sandbox_review = \"host\"\n"),
+            &paths,
+        )
+        .expect("host review config should parse")
+        .expect("host review config should exist");
+        assert_eq!(default.no_sandbox_review_mode(), NoSandboxReviewMode::Host);
     }
 
     #[test]

@@ -316,11 +316,7 @@ pub(crate) fn maybe_reexec(
     let host = Host::from_env(args)?;
     match plan_bootstrap(with_sandbox, clipboard_access, &host)? {
         Bootstrap::Disabled | Bootstrap::AlreadyInside => Ok(()),
-        Bootstrap::Reexec(plan) => {
-            ensure_host_managed_provider_directories(&host)?;
-            ensure_host_state_directory(&host)?;
-            exec(plan)
-        }
+        Bootstrap::Reexec(plan) => exec(plan),
     }
 }
 
@@ -345,7 +341,13 @@ pub(crate) fn plan_bootstrap(
     clipboard_access: ClipboardAccess,
     host: &Host,
 ) -> Result<Bootstrap, Error> {
-    plan_bootstrap_with_probe(with_sandbox, clipboard_access, host, &FilesystemHostProbe)
+    plan_bootstrap_with_probe_inner(
+        with_sandbox,
+        clipboard_access,
+        host,
+        &FilesystemHostProbe,
+        true,
+    )
 }
 
 #[cfg(test)]
@@ -369,19 +371,31 @@ pub(crate) fn plan_bootstrap_with_file_exists(
         }
     }
 
-    plan_bootstrap_with_probe(
+    plan_bootstrap_with_probe_inner(
         with_sandbox,
         ClipboardAccess::Disabled,
         host,
         &FileExistsProbe(file_exists),
+        false,
     )
 }
 
+#[cfg(test)]
 pub(crate) fn plan_bootstrap_with_probe(
     with_sandbox: bool,
     clipboard_access: ClipboardAccess,
     host: &Host,
     probe: &impl HostPathProbe,
+) -> Result<Bootstrap, Error> {
+    plan_bootstrap_with_probe_inner(with_sandbox, clipboard_access, host, probe, false)
+}
+
+fn plan_bootstrap_with_probe_inner(
+    with_sandbox: bool,
+    clipboard_access: ClipboardAccess,
+    host: &Host,
+    probe: &impl HostPathProbe,
+    prepare_host_writable_dirs: bool,
 ) -> Result<Bootstrap, Error> {
     if !with_sandbox {
         return Ok(Bootstrap::Disabled);
@@ -396,7 +410,16 @@ pub(crate) fn plan_bootstrap_with_probe(
     let path = sandbox_path(host);
     let bwrap = find_bwrap_in_path(&path, |candidate| probe.file_exists(candidate))
         .ok_or(Error::MissingBubblewrap)?;
-    ensure_host_log_directory(host)?;
+    SandboxPathPlan::new(host)?;
+    if prepare_host_writable_dirs {
+        ensure_host_managed_provider_directories(host)?;
+        ensure_host_state_directory(host)?;
+    } else {
+        ensure_host_log_directory(host)?;
+    }
+    // Directory preparation may materialize previously missing components.
+    // Re-check the filesystem identity immediately before producing mounts.
+    let path_plan = SandboxPathPlan::new(host)?;
 
     Ok(Bootstrap::Reexec(build_plan(
         host,
@@ -404,7 +427,134 @@ pub(crate) fn plan_bootstrap_with_probe(
         bwrap,
         clipboard_access,
         probe,
+        &path_plan,
     )))
+}
+
+#[derive(Debug, Clone)]
+struct SandboxPathPlan {
+    development_rules: Vec<PathAccessRule>,
+    trusted_rules: Vec<PathAccessRule>,
+    trusted_product_rules: Vec<PathAccessRule>,
+}
+
+impl SandboxPathPlan {
+    fn new(host: &Host) -> Result<Self, Error> {
+        let product_paths = [
+            host.xdg_paths.state_dir().to_path_buf(),
+            host.xdg_paths.managed_config_dir(),
+        ];
+        for product_path in &product_paths {
+            validate_product_path_identity(product_path)?;
+        }
+
+        validate_trusted_rule_conflicts(&host.trusted_path_rules)?;
+        for rule in &host.trusted_path_rules {
+            if rule.access() == PathAccess::Deny
+                && let Some(product_path) = product_paths
+                    .iter()
+                    .find(|product_path| paths_overlap(product_path, rule.path()))
+            {
+                return Err(Error::ProductPathConflictsWithTrustedRule {
+                    product_path: product_path.clone(),
+                    rule_path: rule.path().to_path_buf(),
+                    access: rule.access(),
+                });
+            }
+        }
+
+        let (trusted_rules, trusted_product_rules) = host
+            .trusted_path_rules
+            .iter()
+            .cloned()
+            .partition::<Vec<_>, _>(|rule| !path_is_inside_product(rule.path(), &product_paths));
+
+        Ok(Self {
+            development_rules: order_path_rules(default_development_path_rules(
+                host.xdg_paths.home(),
+            )),
+            trusted_rules: order_path_rules(trusted_rules),
+            trusted_product_rules: order_path_rules(trusted_product_rules),
+        })
+    }
+}
+
+fn validate_product_path_identity(path: &Path) -> Result<(), Error> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                current.pop();
+                continue;
+            }
+            Component::Normal(part) => current.push(part),
+        }
+
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(Error::ProductPathContainsSymlink {
+                    product_path: path.to_path_buf(),
+                    symlink_path: current,
+                });
+            }
+            Ok(_) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => break,
+            Err(source) => {
+                return Err(Error::ProductPathMetadata {
+                    path: current,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_trusted_rule_conflicts(rules: &[PathAccessRule]) -> Result<(), Error> {
+    for (index, rule) in rules.iter().enumerate() {
+        if let Some(conflicting) = rules[index + 1..]
+            .iter()
+            .find(|other| other.path() == rule.path() && other.access() != rule.access())
+        {
+            return Err(Error::ConflictingTrustedPathRules {
+                path: rule.path().to_path_buf(),
+                first_access: rule.access(),
+                second_access: conflicting.access(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn order_path_rules(mut rules: Vec<PathAccessRule>) -> Vec<PathAccessRule> {
+    rules.sort_by(|left, right| {
+        path_depth(left.path())
+            .cmp(&path_depth(right.path()))
+            .then_with(|| {
+                left.path()
+                    .to_string_lossy()
+                    .cmp(&right.path().to_string_lossy())
+            })
+    });
+    rules.dedup_by(|left, right| left.path() == right.path() && left.access() == right.access());
+    rules
+}
+
+fn path_depth(path: &Path) -> usize {
+    path.components().count()
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+fn path_is_inside_product(path: &Path, product_paths: &[PathBuf]) -> bool {
+    product_paths
+        .iter()
+        .any(|product_path| path.starts_with(product_path))
 }
 
 fn ensure_host_log_directory(host: &Host) -> Result<(), Error> {
@@ -677,6 +827,7 @@ fn build_plan(
     bwrap: PathBuf,
     clipboard_access: ClipboardAccess,
     probe: &impl HostPathProbe,
+    path_plan: &SandboxPathPlan,
 ) -> Plan {
     let cwd = host.cwd.as_os_str().to_owned();
     let current_exe = host.current_exe.as_os_str().to_owned();
@@ -717,7 +868,6 @@ fn build_plan(
     }
     args.extend([os("--perms"), os("0700"), os("--dir"), home.clone()]);
     append_bind_dir_try_args(&mut args, &config_dir, &config_dir);
-    append_bind_dir_rw_args(&mut args, &managed_config_dir, &managed_config_dir);
     args.extend([
         os("--ro-bind"),
         os("/usr"),
@@ -752,7 +902,6 @@ fn build_plan(
         os("--chdir"),
         cwd.clone(),
     ]);
-    append_bind_dir_rw_args(&mut args, &state_dir, &state_dir);
     if let Some(log_settings) = host.log_settings.as_ref()
         && let Some(host_log_dir) = log_settings.path.parent()
     {
@@ -762,10 +911,18 @@ fn build_plan(
             host_log_dir.as_os_str().to_owned(),
         ]);
     }
-    for rule in default_development_path_rules(host.xdg_paths.home()) {
-        append_path_rule_args(&mut args, &rule);
+    for rule in &path_plan.development_rules {
+        append_path_rule_args(&mut args, rule);
     }
-    for rule in &host.trusted_path_rules {
+    for rule in &path_plan.trusted_rules {
+        append_path_rule_args(&mut args, rule);
+    }
+    // A trusted read-only parent may be overridden by a narrower product-owned
+    // write mount. Trusted read-only children are appended below to retain the
+    // user's narrower restriction.
+    append_bind_dir_rw_args(&mut args, &state_dir, &state_dir);
+    append_bind_dir_rw_args(&mut args, &managed_config_dir, &managed_config_dir);
+    for rule in &path_plan.trusted_product_rules {
         append_path_rule_args(&mut args, rule);
     }
     for mount in &graphical_plan.mounts {
@@ -1112,6 +1269,24 @@ pub(crate) enum Error {
     MissingBubblewrap,
     InvalidWorkspacePath(&'static str),
     InvalidHomeLayout(&'static str),
+    ProductPathConflictsWithTrustedRule {
+        product_path: PathBuf,
+        rule_path: PathBuf,
+        access: PathAccess,
+    },
+    ProductPathContainsSymlink {
+        product_path: PathBuf,
+        symlink_path: PathBuf,
+    },
+    ProductPathMetadata {
+        path: PathBuf,
+        source: io::Error,
+    },
+    ConflictingTrustedPathRules {
+        path: PathBuf,
+        first_access: PathAccess,
+        second_access: PathAccess,
+    },
     Exec(io::Error),
 }
 
@@ -1164,6 +1339,42 @@ impl fmt::Display for Error {
             Error::InvalidHomeLayout(reason) => {
                 write!(formatter, "sandbox HOME layout is invalid: {reason}")
             }
+            Error::ProductPathConflictsWithTrustedRule {
+                product_path,
+                rule_path,
+                access,
+            } => write!(
+                formatter,
+                "sandbox product path {} conflicts with trusted global {} rule {}",
+                product_path.display(),
+                access.as_str(),
+                rule_path.display()
+            ),
+            Error::ProductPathContainsSymlink {
+                product_path,
+                symlink_path,
+            } => write!(
+                formatter,
+                "sandbox product path {} contains symlink component {}; refusing writable mount",
+                product_path.display(),
+                symlink_path.display()
+            ),
+            Error::ProductPathMetadata { path, source } => write!(
+                formatter,
+                "failed to inspect sandbox product path component {}: {source}",
+                path.display()
+            ),
+            Error::ConflictingTrustedPathRules {
+                path,
+                first_access,
+                second_access,
+            } => write!(
+                formatter,
+                "trusted sandbox path {} has conflicting {} and {} rules",
+                path.display(),
+                first_access.as_str(),
+                second_access.as_str()
+            ),
             Error::Exec(error) => {
                 write!(
                     formatter,

@@ -4,6 +4,7 @@ use super::{
     provider_overlay::{
         ModelPickerOverlay, ProviderFormOverlay, ProviderManagerOverlay, ProviderOverlayAction,
     },
+    reasoning_picker::{ReasoningPickerAction, ReasoningPickerOverlay},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use merry_core::{PlanAttemptOutcome, PlanNodeId, PlanPhase, PlanSnapshot};
@@ -61,6 +62,7 @@ pub(crate) enum Overlay {
     ProviderManager(ProviderManagerOverlay),
     ProviderForm(ProviderFormOverlay),
     ModelPicker(ModelPickerOverlay),
+    ReasoningPicker(ReasoningPickerOverlay),
     PlanApproval(PlanApprovalOverlay),
     PermissionReview(PermissionReviewOverlay),
     Dialog(MessageDialogOverlay),
@@ -187,6 +189,7 @@ pub(crate) enum SettingDirection {
 pub(crate) struct SettingsOverlay {
     selected: usize,
     model_editor: Option<TextInput>,
+    reasoning_editor: Option<TextInput>,
     context_window_editor: Option<TextInput>,
     notice: Option<String>,
 }
@@ -208,6 +211,8 @@ pub(crate) enum OverlayKeyResult {
     ResetSetting(SettingItem),
     BeginModelEdit,
     CommitModel(String),
+    BeginReasoningEdit,
+    CommitReasoning(String),
     BeginContextWindowEdit,
     CommitContextWindow(String),
     OpenShortcuts,
@@ -295,6 +300,10 @@ impl SettingsOverlay {
         self.context_window_editor.as_ref()
     }
 
+    pub(crate) fn reasoning_editor(&self) -> Option<&TextInput> {
+        self.reasoning_editor.as_ref()
+    }
+
     pub(crate) fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
     }
@@ -313,12 +322,21 @@ impl SettingsOverlay {
         self.notice = None;
     }
 
+    pub(crate) fn begin_reasoning_edit(&mut self, value: String) {
+        let mut input = TextInput::default();
+        input.replace_text(value);
+        self.reasoning_editor = Some(input);
+        self.notice = None;
+    }
+
     pub(crate) fn set_notice(&mut self, notice: Option<String>) {
         self.notice = notice;
     }
 
     fn insert_paste(&mut self, text: &str) {
         if let Some(editor) = self.model_editor.as_mut() {
+            editor.insert_str(text);
+        } else if let Some(editor) = self.reasoning_editor.as_mut() {
             editor.insert_str(text);
         } else if let Some(editor) = self.context_window_editor.as_mut() {
             editor.insert_str(text);
@@ -362,6 +380,24 @@ impl SettingsOverlay {
             };
         }
 
+        if let Some(editor) = self.reasoning_editor.as_mut() {
+            return match key.code {
+                KeyCode::Esc => {
+                    self.reasoning_editor = None;
+                    OverlayKeyResult::Consumed
+                }
+                KeyCode::Enter => {
+                    let value = editor.text().to_owned();
+                    self.reasoning_editor = None;
+                    OverlayKeyResult::CommitReasoning(value)
+                }
+                _ => {
+                    editor.handle_key(key);
+                    OverlayKeyResult::Consumed
+                }
+            };
+        }
+
         match key.code {
             KeyCode::Esc => OverlayKeyResult::Back,
             KeyCode::Down => {
@@ -396,6 +432,7 @@ impl SettingsOverlay {
             }
             KeyCode::Enter => match self.selected_item() {
                 SettingItem::DefaultModel => OverlayKeyResult::BeginModelEdit,
+                SettingItem::ReasoningEffort => OverlayKeyResult::BeginReasoningEdit,
                 SettingItem::ContextWindow => OverlayKeyResult::BeginContextWindowEdit,
                 SettingItem::DefaultProvider => {
                     OverlayKeyResult::Provider(ProviderOverlayAction::OpenProviderManager)
@@ -461,6 +498,21 @@ impl Overlay {
                 }
                 action => OverlayKeyResult::Provider(action),
             },
+            Self::ReasoningPicker(picker) => match picker.handle_key(key) {
+                ReasoningPickerAction::Back => OverlayKeyResult::Back,
+                ReasoningPickerAction::Consumed => OverlayKeyResult::Consumed,
+                ReasoningPickerAction::SelectReasoning {
+                    alias,
+                    model,
+                    reasoning_effort,
+                    target,
+                } => OverlayKeyResult::Provider(ProviderOverlayAction::SelectReasoning {
+                    alias,
+                    model,
+                    reasoning_effort,
+                    target,
+                }),
+            },
             Self::PlanApproval(_) => match key.code {
                 KeyCode::Enter => OverlayKeyResult::ConfirmPlanApproval,
                 KeyCode::Esc => OverlayKeyResult::Back,
@@ -496,6 +548,7 @@ impl Overlay {
             | Self::PlanApproval(_)
             | Self::PermissionReview(_)
             | Self::Dialog(_) => {}
+            Self::ReasoningPicker(picker) => picker.insert_paste(text),
             Self::Shortcuts(_) => {}
         }
     }

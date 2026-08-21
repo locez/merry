@@ -7,8 +7,8 @@ use super::{
     preferences::{TuiPreferences, TuiPreferencesStore, TuiSettingsDefaults},
     projector::TuiProjector,
     provider_overlay::{
-        ModelListItem, ModelPickerTarget, ProviderFormSeed, ProviderFormValues, ProviderListItem,
-        ProviderOverlayAction,
+        ModelListItem, ModelPickerTarget, ProviderDraftMode, ProviderFormSeed, ProviderFormValues,
+        ProviderListItem, ProviderOverlayAction,
     },
     render,
     runtime::TuiRuntimeSession,
@@ -19,7 +19,7 @@ use crate::{
     cli_error::{CliError, unexpected},
     config::{ProviderAlias, derive_provider_alias},
     provider_management::{
-        ProviderDiscoveryDraft, ProviderDraft, ProviderManagementError, ProviderManagementService,
+        ProviderDiscoveryDraft, ProviderManagementError, ProviderManagementService,
     },
 };
 use crossterm::event::{KeyCode, KeyEvent};
@@ -85,11 +85,20 @@ pub(crate) enum ControllerEffect {
     RefreshModels(String),
     RefreshFormModels,
     DeleteProvider(String),
-    SelectProviderModel {
+    SelectProvider {
+        alias: String,
+    },
+    OpenReasoningPicker {
         alias: String,
         model: String,
+        target: ModelPickerTarget,
     },
-    SelectProviderFormModel(String),
+    ApplyProviderModel {
+        alias: String,
+        model: String,
+        reasoning_effort: merry_llm::ReasoningEffort,
+        target: ModelPickerTarget,
+    },
     EnterPlanMode,
     ApprovePlan(merry_runtime::PlanApprovalInput),
     ApprovePermission(String),
@@ -247,7 +256,25 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
                 ControllerEffect::None
             }
             OverlayKeyResult::CommitModel(value) => {
-                if state.commit_settings_model(value) {
+                let clears_model = value.trim().is_empty();
+                match state.commit_settings_model(value) {
+                    Some((alias, model)) => ControllerEffect::OpenReasoningPicker {
+                        alias,
+                        model,
+                        target: ModelPickerTarget::ActiveProvider,
+                    },
+                    None if clears_model => {
+                        ControllerEffect::ApplyRuntimePreferences(state.preferences().clone())
+                    }
+                    None => ControllerEffect::None,
+                }
+            }
+            OverlayKeyResult::BeginReasoningEdit => {
+                state.begin_settings_reasoning_edit();
+                ControllerEffect::None
+            }
+            OverlayKeyResult::CommitReasoning(value) => {
+                if state.commit_settings_reasoning(value) {
                     ControllerEffect::ApplyRuntimePreferences(state.preferences().clone())
                 } else {
                     ControllerEffect::None
@@ -373,16 +400,27 @@ fn provider_overlay_effect(action: ProviderOverlayAction) -> ControllerEffect {
         ProviderOverlayAction::RefreshModels(alias) => ControllerEffect::RefreshModels(alias),
         ProviderOverlayAction::RefreshFormModels => ControllerEffect::RefreshFormModels,
         ProviderOverlayAction::DeleteProvider(alias) => ControllerEffect::DeleteProvider(alias),
+        ProviderOverlayAction::SelectProvider(alias) => ControllerEffect::SelectProvider { alias },
         ProviderOverlayAction::SelectModel {
             alias,
             model,
-            target: ModelPickerTarget::ActiveProvider,
-        } => ControllerEffect::SelectProviderModel { alias, model },
-        ProviderOverlayAction::SelectModel {
+            target,
+        } => ControllerEffect::OpenReasoningPicker {
+            alias,
             model,
-            target: ModelPickerTarget::ProviderForm,
-            ..
-        } => ControllerEffect::SelectProviderFormModel(model),
+            target,
+        },
+        ProviderOverlayAction::SelectReasoning {
+            alias,
+            model,
+            reasoning_effort,
+            target,
+        } => ControllerEffect::ApplyProviderModel {
+            alias,
+            model,
+            reasoning_effort,
+            target,
+        },
     }
 }
 
@@ -799,6 +837,7 @@ async fn dispatch_effect(
                     protocol: editable.protocol,
                     base_url: editable.base_url,
                     model: editable.default_model.as_str().to_owned(),
+                    reasoning_effort: editable.reasoning_effort,
                 },
                 used,
             );
@@ -901,7 +940,7 @@ async fn dispatch_effect(
             }
             let mut preferences = state.preferences().clone();
             preferences
-                .set_model_for_provider(alias.as_str(), None)
+                .clear_provider_state(alias.as_str())
                 .map_err(unexpected)?;
             let preference_cleanup_error = preferences_store.save(&preferences).await.err();
             state.replace_preferences(preferences);
@@ -921,35 +960,14 @@ async fn dispatch_effect(
             Ok(false)
         }
         ControllerEffect::SaveProvider(values) => {
-            let alias = match ProviderAlias::new(values.alias.trim()) {
-                Ok(alias) => alias,
+            let (alias, model, draft) = match values.to_draft(ProviderDraftMode::Create) {
+                Ok(values) => values,
                 Err(error) => {
                     state.set_provider_overlay_error(error.to_string());
                     return Ok(false);
                 }
             };
-            let model = match merry_llm::ModelName::new(values.model.trim()) {
-                Ok(model) => model,
-                Err(error) => {
-                    state.set_provider_overlay_error(error.to_string());
-                    return Ok(false);
-                }
-            };
-            let draft = match ProviderDraft::new(
-                values.display_name.trim(),
-                alias.clone(),
-                values.kind,
-                values.protocol,
-                values.base_url.trim(),
-                &values.api_key,
-                model.clone(),
-            ) {
-                Ok(draft) => draft,
-                Err(error) => {
-                    state.set_provider_overlay_error(error.to_string());
-                    return Ok(false);
-                }
-            };
+            let reasoning_effort = draft.reasoning_effort().cloned();
             if let Err(error) = providers.management.save_provider(draft).await {
                 state.set_provider_overlay_error(error.to_string());
                 return Ok(false);
@@ -967,6 +985,9 @@ async fn dispatch_effect(
             preferences.provider = Some(alias.as_str().to_owned());
             preferences
                 .set_model_for_provider(alias.as_str(), Some(model.as_str()))
+                .map_err(unexpected)?;
+            preferences
+                .set_reasoning_effort_for_provider(alias.as_str(), reasoning_effort)
                 .map_err(unexpected)?;
             if let Err(error) = session.apply_preferences(&preferences).await {
                 state.set_provider_overlay_error(format!(
@@ -990,31 +1011,8 @@ async fn dispatch_effect(
             values,
         } => {
             let original_alias = ProviderAlias::new(&original_alias).map_err(unexpected)?;
-            let alias = match ProviderAlias::new(values.alias.trim()) {
-                Ok(alias) => alias,
-                Err(error) => {
-                    state.set_provider_overlay_error(error.to_string());
-                    return Ok(false);
-                }
-            };
-            let model = match merry_llm::ModelName::new(values.model.trim()) {
-                Ok(model) => model,
-                Err(error) => {
-                    state.set_provider_overlay_error(error.to_string());
-                    return Ok(false);
-                }
-            };
-            let api_key = (!values.api_key.trim().is_empty()).then(|| values.api_key.trim());
-            let draft = match ProviderDraft::for_update(
-                values.display_name.trim(),
-                alias.clone(),
-                values.kind,
-                values.protocol,
-                values.base_url.trim(),
-                api_key,
-                model.clone(),
-            ) {
-                Ok(draft) => draft,
+            let (_, _, draft) = match values.to_draft(ProviderDraftMode::Update) {
+                Ok(values) => values,
                 Err(error) => {
                     state.set_provider_overlay_error(error.to_string());
                     return Ok(false);
@@ -1037,35 +1035,28 @@ async fn dispatch_effect(
             state.replace_settings_defaults(
                 TuiSettingsDefaults::from_config(Some(&config)).map_err(unexpected)?,
             );
-            let mut preferences = state.preferences().clone();
-            preferences
-                .set_model_for_provider(alias.as_str(), Some(model.as_str()))
-                .map_err(unexpected)?;
+            // Provider configuration and the TUI's per-provider selection are
+            // separate stores. Editing a URL, key, or provider default must
+            // not replace the model/thinking pair selected for this provider.
+            // Model changes go through the model picker, which atomically
+            // updates the selection preferences.
+            let preferences = state.preferences().clone();
             if let Err(error) = session.apply_preferences(&preferences).await {
                 state.set_provider_overlay_error(format!(
                     "provider updated; runtime refresh failed: {error:?}"
                 ));
                 return Ok(false);
             }
-            preferences_store
-                .save(&preferences)
-                .await
-                .map_err(unexpected)?;
-            state.replace_preferences(preferences);
             state.set_model_label(session.model_label.clone());
             state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
             let items = provider_list_items(providers.management, state)?;
             state.open_provider_manager(items);
             Ok(false)
         }
-        ControllerEffect::SelectProviderModel { alias, model } => {
+        ControllerEffect::SelectProvider { alias } => {
             let alias = ProviderAlias::new(&alias).map_err(unexpected)?;
-            let model = merry_llm::ModelName::new(&model).map_err(unexpected)?;
             let mut preferences = state.preferences().clone();
             preferences.provider = Some(alias.as_str().to_owned());
-            preferences
-                .set_model_for_provider(alias.as_str(), Some(model.as_str()))
-                .map_err(unexpected)?;
             if let Err(error) = session.apply_preferences(&preferences).await {
                 state.set_provider_overlay_error(format!("switch failed: {error:?}"));
                 return Ok(false);
@@ -1082,15 +1073,62 @@ async fn dispatch_effect(
             state.open_provider_manager(items);
             Ok(false)
         }
-        ControllerEffect::SelectProviderFormModel(model) => {
-            cancel_model_discovery(providers.discovery_token);
-            if !state.select_provider_form_model(&model) {
+        ControllerEffect::OpenReasoningPicker {
+            alias,
+            model,
+            target,
+        } => {
+            if !state.open_reasoning_picker(alias, model, target) {
                 state.set_provider_overlay_error(
-                    "provider form is no longer available for the selected model".to_owned(),
+                    "model selection is no longer available for reasoning mode selection"
+                        .to_owned(),
                 );
             }
             Ok(false)
         }
+        ControllerEffect::ApplyProviderModel {
+            alias,
+            model,
+            reasoning_effort,
+            target,
+        } => match target {
+            ModelPickerTarget::ActiveProvider => {
+                let alias = ProviderAlias::new(&alias).map_err(unexpected)?;
+                let mut preferences = state.preferences().clone();
+                preferences.provider = Some(alias.as_str().to_owned());
+                preferences
+                    .set_model_and_reasoning_for_provider(alias.as_str(), &model, reasoning_effort)
+                    .map_err(unexpected)?;
+                if let Err(error) = session.apply_preferences(&preferences).await {
+                    state.set_provider_overlay_error(format!("switch failed: {error:?}"));
+                    return Ok(false);
+                }
+                preferences_store
+                    .save(&preferences)
+                    .await
+                    .map_err(unexpected)?;
+                state.replace_preferences(preferences);
+                state.set_model_label(session.model_label.clone());
+                state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
+                if !state.restore_settings_after_reasoning_picker() {
+                    cancel_model_discovery(providers.discovery_token);
+                    let items = provider_list_items(providers.management, state)?;
+                    state.open_provider_manager(items);
+                }
+                Ok(false)
+            }
+            ModelPickerTarget::ProviderForm => {
+                cancel_model_discovery(providers.discovery_token);
+                if !state
+                    .select_provider_form_model_with_reasoning(&model, reasoning_effort.as_str())
+                {
+                    state.set_provider_overlay_error(
+                        "provider form is no longer available for the selected model".to_owned(),
+                    );
+                }
+                Ok(false)
+            }
+        },
         ControllerEffect::EnterPlanMode
         | ControllerEffect::ApprovePlan(_)
         | ControllerEffect::RevisePlan
@@ -1306,7 +1344,9 @@ pub(super) fn project_local_effect(effect: &ControllerEffect, state: &mut TuiSta
         | ControllerEffect::UpdateProvider { .. }
         | ControllerEffect::RefreshModels(_)
         | ControllerEffect::DeleteProvider(_)
-        | ControllerEffect::SelectProviderModel { .. } => {}
+        | ControllerEffect::SelectProvider { .. }
+        | ControllerEffect::OpenReasoningPicker { .. }
+        | ControllerEffect::ApplyProviderModel { .. } => {}
         _ => {}
     }
 }

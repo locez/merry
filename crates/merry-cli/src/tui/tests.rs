@@ -5,9 +5,9 @@ use super::controller::{
 };
 use super::input::{DraftImage, TextInput, TuiSubmission};
 use super::keymap::{KeyAction, KeyBinding, Keymap};
-use super::overlay::{Overlay, PaletteCommand};
+use super::overlay::{Overlay, PaletteCommand, SettingItem};
 use super::panels::{FocusPanelBody, FocusPanelTone, focus_panel_view};
-use super::preferences::CodeTheme;
+use super::preferences::{CodeTheme, TuiPreferences, TuiSettingsDefaults};
 use super::projector::TuiProjector;
 use super::provider_overlay::{ModelListItem, ProviderListItem};
 use super::render::{render_to_buffer, render_to_buffer_and_cursor, render_to_text};
@@ -28,9 +28,9 @@ use ratatui::{
     style::{Color, Modifier},
 };
 use serde_json::json;
-use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use std::{collections::BTreeMap, fs};
 
 fn text_submission(text: &str) -> TuiSubmission {
     TuiSubmission {
@@ -1233,6 +1233,51 @@ fn model_discovery_error_dialog_returns_to_model_picker() {
 }
 
 #[test]
+fn model_selection_requires_reasoning_before_it_emits_a_runtime_change() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.open_model_picker(
+        "opencode".to_owned(),
+        "OpenCode".to_owned(),
+        vec![ModelListItem::new("model-a", None)],
+    );
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+        ),
+        ControllerEffect::OpenReasoningPicker {
+            alias: "opencode".to_owned(),
+            model: "model-a".to_owned(),
+            target: super::provider_overlay::ModelPickerTarget::ActiveProvider,
+        }
+    );
+    assert!(state.open_reasoning_picker(
+        "opencode".to_owned(),
+        "model-a".to_owned(),
+        super::provider_overlay::ModelPickerTarget::ActiveProvider,
+    ));
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+        ),
+        ControllerEffect::ApplyProviderModel {
+            alias: "opencode".to_owned(),
+            model: "model-a".to_owned(),
+            reasoning_effort: merry_llm::ReasoningEffort::new("minimal").expect("preset is valid"),
+            target: super::provider_overlay::ModelPickerTarget::ActiveProvider,
+        }
+    );
+}
+
+#[test]
 fn command_palette_uses_a_magenta_selection_surface() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -1419,6 +1464,8 @@ fn provider_surfaces_fit_supported_terminal_sizes_without_secret_exposure() {
     let form = render_to_text(&state, 100, 30);
     assert!(form.contains("API protocol"));
     assert!(form.contains("Responses"));
+    assert!(form.contains("Thinking mode"));
+    assert!(!form.contains("Default"));
     assert!(form.contains("Save provider"));
     assert!(form.contains("Ctrl+S Save"));
     for (width, height) in [(100, 30), (80, 24), (40, 16)] {
@@ -1439,6 +1486,7 @@ fn provider_surfaces_fit_supported_terminal_sizes_without_secret_exposure() {
             protocol: Some(merry_provider_openai::OpenAiProtocol::ChatCompletions),
             base_url: "https://gateway.example.test/v1".to_owned(),
             model: "deepseek-v4-pro".to_owned(),
+            reasoning_effort: None,
         },
         Default::default(),
     );
@@ -1482,12 +1530,42 @@ fn provider_form_model_picker_returns_selection_to_the_form() {
             protocol: Some(merry_provider_openai::OpenAiProtocol::ChatCompletions),
             base_url: "https://opencode.example.test/v1".to_owned(),
             model: "model-a".to_owned(),
+            reasoning_effort: None,
         },
         Default::default(),
     );
 
     assert!(state.open_provider_form_model_picker("opencode".to_owned(), "OpenCode".to_owned(),));
-    assert!(state.select_provider_form_model("model-b"));
+    state.update_model_picker("opencode", Ok(vec![ModelListItem::new("model-b", None)]));
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+        ),
+        ControllerEffect::OpenReasoningPicker {
+            alias: "opencode".to_owned(),
+            model: "model-b".to_owned(),
+            target: super::provider_overlay::ModelPickerTarget::ProviderForm,
+        }
+    );
+    assert!(state.open_reasoning_picker(
+        "opencode".to_owned(),
+        "model-b".to_owned(),
+        super::provider_overlay::ModelPickerTarget::ProviderForm,
+    ));
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+        ),
+        ControllerEffect::ApplyProviderModel {
+            alias: "opencode".to_owned(),
+            model: "model-b".to_owned(),
+            reasoning_effort: merry_llm::ReasoningEffort::new("minimal").expect("preset is valid"),
+            target: super::provider_overlay::ModelPickerTarget::ProviderForm,
+        }
+    );
+    assert!(state.select_provider_form_model_with_reasoning("model-b", "minimal"));
 
     let Some(Overlay::ProviderForm(form)) = state.overlay() else {
         panic!("provider form should be restored");
@@ -1498,8 +1576,9 @@ fn provider_form_model_picker_returns_selection_to_the_form() {
     );
     assert_eq!(
         form.selected_field(),
-        super::provider_overlay::ProviderFormField::Model
+        super::provider_overlay::ProviderFormField::ReasoningEffort
     );
+    assert_eq!(form.reasoning_effort_text(), "minimal");
 }
 
 #[test]
@@ -1621,6 +1700,13 @@ fn settings_reasoning_change_applies_to_the_current_runtime() {
         Keymap::default(),
         TuiTheme::default(),
     );
+    state.configure_preferences(
+        TuiPreferences::default(),
+        TuiSettingsDefaults {
+            provider: Some("compat".to_owned()),
+            ..TuiSettingsDefaults::default()
+        },
+    );
     handle_key_event(
         KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
         &mut state,
@@ -1647,9 +1733,109 @@ fn settings_reasoning_change_applies_to_the_current_runtime() {
     assert!(matches!(
         effect,
         ControllerEffect::ApplyRuntimePreferences(preferences)
-            if preferences.reasoning_effort.is_some()
+            if preferences
+                .reasoning_effort_for_provider("compat")
+                .map(|effort| effort.as_str())
+                == Some("minimal")
     ));
     assert_eq!(state.settings_notice(), Some("Applied"));
+
+    for expected in ["low", "medium", "high", "xhigh", "max", "ultra"] {
+        let effect = handle_key_event(
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            &mut state,
+        );
+        assert!(matches!(
+            effect,
+            ControllerEffect::ApplyRuntimePreferences(preferences)
+                if preferences
+                    .reasoning_effort_for_provider("compat")
+                    .map(|effort| effort.as_str())
+                    == Some(expected)
+        ));
+    }
+}
+
+#[test]
+fn settings_reasoning_editor_accepts_custom_provider_value() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.configure_preferences(
+        TuiPreferences::default(),
+        TuiSettingsDefaults {
+            provider: Some("compat".to_owned()),
+            ..TuiSettingsDefaults::default()
+        },
+    );
+    state.open_settings();
+    for _ in 0..3 {
+        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
+    }
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+        ),
+        ControllerEffect::None
+    );
+    assert!(state.settings_reasoning_editor().is_some());
+    handle_paste_event("model-specific", &mut state);
+
+    let effect = handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+
+    assert!(matches!(
+        effect,
+        ControllerEffect::ApplyRuntimePreferences(preferences)
+            if preferences
+                .reasoning_effort_for_provider("compat")
+                .map(|effort| effort.as_str())
+                == Some("model-specific")
+    ));
+    assert_eq!(state.settings_notice(), Some("Applied"));
+}
+
+#[test]
+fn settings_reasoning_display_and_editor_follow_the_selected_provider() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut preferences = TuiPreferences::default();
+    preferences.provider = Some("alt".to_owned());
+    let defaults = TuiSettingsDefaults {
+        provider_aliases: vec!["compat".to_owned(), "alt".to_owned()],
+        provider: Some("compat".to_owned()),
+        reasoning_efforts: BTreeMap::from([(
+            "alt".to_owned(),
+            merry_llm::ReasoningEffort::new("max ultra").expect("custom effort should validate"),
+        )]),
+        ..TuiSettingsDefaults::default()
+    };
+    state.configure_preferences(preferences, defaults);
+
+    assert_eq!(
+        state.setting_value(SettingItem::ReasoningEffort),
+        "Inherit (max ultra)"
+    );
+    state.open_settings();
+    state.begin_settings_reasoning_edit();
+    assert_eq!(
+        state
+            .settings_reasoning_editor()
+            .expect("reasoning editor should open")
+            .text(),
+        "max ultra"
+    );
 }
 
 #[test]

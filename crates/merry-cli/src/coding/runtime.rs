@@ -52,6 +52,7 @@ pub(crate) fn build_headless_coding(
     build_headless_coding_composition(input).map(SharedCodingRuntime::into_runtime)
 }
 
+#[cfg(test)]
 pub(crate) fn build_headless_coding_composition(
     input: HeadlessCodingRuntimeInput<'_>,
 ) -> Result<SharedCodingRuntime, CodingRuntimeError> {

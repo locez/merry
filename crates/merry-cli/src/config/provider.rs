@@ -62,6 +62,8 @@ impl MerryConfig {
         } else {
             ProviderConfigSource::User
         };
+        let reasoning_effort =
+            parse_provider_reasoning_effort(alias.as_str(), provider.reasoning_effort.as_deref())?;
         let protocol = match kind {
             ConfiguredProviderKind::OpenAiCompatible => Some(provider.protocol.unwrap_or_default()),
             ConfiguredProviderKind::Anthropic => None,
@@ -73,8 +75,41 @@ impl MerryConfig {
             default_model,
             kind,
             protocol,
+            reasoning_effort,
             source,
         })
+    }
+
+    pub(crate) fn provider_reasoning_effort(
+        &self,
+        alias: &str,
+    ) -> Result<Option<ReasoningEffort>, ConfigError> {
+        Ok(self.provider_profile(alias)?.reasoning_effort().cloned())
+    }
+
+    pub(crate) fn effective_provider_reasoning_effort(
+        &self,
+        alias: &str,
+    ) -> Result<Option<ReasoningEffort>, ConfigError> {
+        let default_reasoning_effort = self
+            .raw
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.default.as_ref())
+            .filter(|default| default.provider == alias)
+            .and_then(|default| default.reasoning_effort.as_deref())
+            .map(ReasoningEffort::new)
+            .transpose()
+            .map_err(|error| {
+                ConfigError::Invalid(format!(
+                    "providers.default.reasoning_effort is invalid: {error}"
+                ))
+            })?;
+
+        match default_reasoning_effort {
+            Some(reasoning_effort) => Ok(Some(reasoning_effort)),
+            None => self.provider_reasoning_effort(alias),
+        }
     }
 
     pub fn validate_provider_settings_if_present(&self) -> Result<(), ConfigError> {
@@ -122,17 +157,8 @@ impl MerryConfig {
             .default
             .as_ref()
             .ok_or_else(|| ConfigError::Invalid("[providers.default] is required".to_owned()))?;
-        let reasoning_effort = default
-            .reasoning_effort
-            .as_deref()
-            .map(ReasoningEffort::new)
-            .transpose()
-            .map_err(|error| {
-                ConfigError::Invalid(format!(
-                    "providers.default.reasoning_effort is invalid: {error}"
-                ))
-            })?;
         let provider = self.provider_by_alias(&default.provider)?;
+        let reasoning_effort = self.effective_provider_reasoning_effort(&default.provider)?;
         Ok(EffectiveDefaultProviderConfig {
             alias: default.provider.clone(),
             model: default.model.clone(),
@@ -168,11 +194,13 @@ impl MerryConfig {
             .ok_or_else(|| ConfigError::Invalid(format!("[providers.{alias}] is required")))?;
         let kind = provider.kind.as_deref().unwrap_or(alias);
         let api_key = resolve_api_key_source(alias, provider, &self.config_dir, &self.home)?;
+        let reasoning_effort =
+            parse_provider_reasoning_effort(alias, provider.reasoning_effort.as_deref())?;
         match kind {
             "openai-compatible" => Ok(EffectiveProviderConfig::OpenAiCompatible(
                 EffectiveOpenAiProviderConfig {
                     model: None,
-                    reasoning_effort: None,
+                    reasoning_effort,
                     alias: alias.to_owned(),
                     protocol: provider.protocol.unwrap_or_default(),
                     base_url: provider.base_url.clone(),
@@ -182,6 +210,7 @@ impl MerryConfig {
             "anthropic" => Ok(EffectiveProviderConfig::Anthropic(
                 EffectiveAnthropicProviderConfig {
                     alias: alias.to_owned(),
+                    reasoning_effort,
                     base_url: provider.base_url.clone(),
                     api_version: provider.api_version.clone(),
                     default_max_output_tokens: provider.default_max_output_tokens,
@@ -254,6 +283,20 @@ fn resolve_api_key_source(
     Ok(api_key)
 }
 
+fn parse_provider_reasoning_effort(
+    alias: &str,
+    value: Option<&str>,
+) -> Result<Option<ReasoningEffort>, ConfigError> {
+    value
+        .map(ReasoningEffort::new)
+        .transpose()
+        .map_err(|error| {
+            ConfigError::Invalid(format!(
+                "providers.{alias}.reasoning_effort is invalid: {error}"
+            ))
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveDefaultProviderConfig {
     pub alias: String,
@@ -281,6 +324,7 @@ pub(crate) struct ConfiguredProviderProfile {
     default_model: Option<ModelName>,
     kind: ConfiguredProviderKind,
     protocol: Option<OpenAiProtocol>,
+    reasoning_effort: Option<ReasoningEffort>,
     source: ProviderConfigSource,
 }
 
@@ -303,6 +347,10 @@ impl ConfiguredProviderProfile {
 
     pub(crate) fn protocol(&self) -> Option<OpenAiProtocol> {
         self.protocol
+    }
+
+    pub(crate) fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
+        self.reasoning_effort.as_ref()
     }
 
     pub(crate) fn source(&self) -> ProviderConfigSource {
@@ -343,6 +391,7 @@ impl fmt::Debug for EffectiveOpenAiProviderConfig {
 #[derive(Clone, PartialEq, Eq)]
 pub struct EffectiveAnthropicProviderConfig {
     pub alias: String,
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub base_url: Option<String>,
     pub api_version: Option<String>,
     pub default_max_output_tokens: Option<u64>,
@@ -354,6 +403,7 @@ impl fmt::Debug for EffectiveAnthropicProviderConfig {
         formatter
             .debug_struct("EffectiveAnthropicProviderConfig")
             .field("alias", &self.alias)
+            .field("reasoning_effort", &self.reasoning_effort)
             .field("base_url", &self.base_url)
             .field("api_version", &self.api_version)
             .field("default_max_output_tokens", &self.default_max_output_tokens)
@@ -432,6 +482,7 @@ pub(super) struct DefaultProviderToml {
 pub(super) struct NamedProviderToml {
     pub(super) display_name: Option<String>,
     pub(super) default_model: Option<String>,
+    pub(super) reasoning_effort: Option<String>,
     #[serde(rename = "type")]
     pub(super) kind: Option<String>,
     pub(super) protocol: Option<OpenAiProtocol>,
@@ -565,6 +616,7 @@ model = "deepseek-v4-pro"
 [providers.opencode]
 display_name = "OpenCode"
 default_model = "deepseek-v4-pro"
+reasoning_effort = "low"
 type = "openai-compatible"
 api_key = "sk-test"
 "#,
@@ -586,6 +638,18 @@ api_key = "sk-test"
         );
         assert_eq!(profile.source(), ProviderConfigSource::User);
         assert_eq!(profile.protocol(), Some(OpenAiProtocol::Responses));
+        assert_eq!(
+            profile.reasoning_effort().map(ReasoningEffort::as_str),
+            Some("low")
+        );
+        let provider = config
+            .provider_by_alias("opencode")
+            .expect("provider should resolve");
+        assert!(matches!(
+            provider,
+            EffectiveProviderConfig::OpenAiCompatible(provider)
+                if provider.reasoning_effort.as_ref().map(ReasoningEffort::as_str) == Some("low")
+        ));
     }
 
     #[test]

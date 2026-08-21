@@ -9,6 +9,7 @@ use crate::{
 };
 use merry_llm::{
     ModelCatalog, ModelCatalogEntry, ModelCatalogError, ModelCatalogProvider, ModelName,
+    ReasoningEffort,
 };
 use merry_provider_anthropic::{AnthropicProvider, AnthropicProviderConfig};
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
@@ -37,6 +38,7 @@ pub(crate) struct ProviderDraft {
     protocol: Option<merry_provider_openai::OpenAiProtocol>,
     base_url: String,
     api_key: Option<SecretString>,
+    reasoning_effort: Option<ReasoningEffort>,
     default_model: ModelName,
 }
 
@@ -136,13 +138,14 @@ impl ProviderDraft {
         api_key: &str,
         default_model: ModelName,
     ) -> Result<Self, ProviderManagementError> {
-        let _ = ManagedProviderDefinition::new(
+        let _ = ManagedProviderDefinition::with_reasoning_effort(
             alias.clone(),
             display_name,
             default_model.clone(),
             kind,
             protocol,
             base_url,
+            None,
         )?;
         Ok(Self {
             display_name: display_name.to_owned(),
@@ -151,6 +154,7 @@ impl ProviderDraft {
             protocol,
             base_url: base_url.to_owned(),
             api_key: Some(SecretString::new(api_key)?),
+            reasoning_effort: None,
             default_model,
         })
     }
@@ -164,13 +168,14 @@ impl ProviderDraft {
         api_key: Option<&str>,
         default_model: ModelName,
     ) -> Result<Self, ProviderManagementError> {
-        let _ = ManagedProviderDefinition::new(
+        let _ = ManagedProviderDefinition::with_reasoning_effort(
             alias.clone(),
             display_name,
             default_model.clone(),
             kind,
             protocol,
             base_url,
+            None,
         )?;
         Ok(Self {
             display_name: display_name.to_owned(),
@@ -179,12 +184,43 @@ impl ProviderDraft {
             protocol,
             base_url: base_url.to_owned(),
             api_key: api_key.map(SecretString::new).transpose()?,
+            reasoning_effort: None,
             default_model,
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_reasoning_effort(
+        mut self,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) -> Self {
+        self.reasoning_effort = reasoning_effort;
+        self
+    }
+
+    pub(crate) fn with_reasoning_effort_text(
+        mut self,
+        value: &str,
+    ) -> Result<Self, ProviderManagementError> {
+        let value = value.trim();
+        self.reasoning_effort = if value.is_empty() {
+            None
+        } else {
+            Some(ReasoningEffort::new(value).map_err(|error| {
+                ProviderManagementError::Invalid(format!(
+                    "provider reasoning effort is invalid: {error}"
+                ))
+            })?)
+        };
+        Ok(self)
+    }
+
     pub(crate) fn alias(&self) -> &ProviderAlias {
         &self.alias
+    }
+
+    pub(crate) fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
+        self.reasoning_effort.as_ref()
     }
 }
 
@@ -206,6 +242,7 @@ impl fmt::Debug for ProviderDraft {
                 },
             )
             .field("default_model", &self.default_model)
+            .field("reasoning_effort", &self.reasoning_effort)
             .finish()
     }
 }
@@ -241,6 +278,7 @@ pub(crate) struct EditableProviderProfile {
     pub(crate) kind: ManagedProviderKind,
     pub(crate) protocol: Option<merry_provider_openai::OpenAiProtocol>,
     pub(crate) base_url: String,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
     pub(crate) default_model: ModelName,
 }
 
@@ -320,6 +358,7 @@ impl ProviderManagementService {
             kind,
             protocol,
             base_url,
+            reasoning_effort: profile.reasoning_effort().cloned(),
             default_model,
         })
     }
@@ -347,18 +386,20 @@ impl ProviderManagementService {
             protocol,
             base_url,
             api_key,
+            reasoning_effort,
             default_model,
         } = draft;
         let api_key = api_key.ok_or_else(|| {
             ProviderManagementError::Invalid("new managed providers require an API key".to_owned())
         })?;
-        let definition = ManagedProviderDefinition::new(
+        let definition = ManagedProviderDefinition::with_reasoning_effort(
             alias,
             &display_name,
             default_model,
             kind,
             protocol,
             &base_url,
+            reasoning_effort,
         )?;
         self.managed_store
             .upsert(definition, api_key.expose())
@@ -396,15 +437,17 @@ impl ProviderManagementService {
             protocol,
             base_url,
             api_key,
+            reasoning_effort,
             default_model,
         } = draft;
-        let definition = ManagedProviderDefinition::new(
+        let definition = ManagedProviderDefinition::with_reasoning_effort(
             alias,
             &display_name,
             default_model,
             kind,
             protocol,
             &base_url,
+            reasoning_effort,
         )?;
         self.managed_store
             .update(
@@ -995,7 +1038,8 @@ api_key = "sk-user"
                     "sk-retained",
                     ModelName::new("model-a").expect("model"),
                 )
-                .expect("draft"),
+                .expect("draft")
+                .with_reasoning_effort(Some(ReasoningEffort::new("medium").expect("valid effort"))),
             )
             .await
             .expect("provider save");
@@ -1003,6 +1047,13 @@ api_key = "sk-user"
         let editable = service.editable_provider(&alias).expect("editable profile");
         assert_eq!(editable.display_name, "OpenCode");
         assert_eq!(editable.protocol, Some(OpenAiProtocol::ChatCompletions));
+        assert_eq!(
+            editable
+                .reasoning_effort
+                .as_ref()
+                .map(ReasoningEffort::as_str),
+            Some("medium")
+        );
         service
             .update_provider(
                 &alias,
@@ -1015,7 +1066,9 @@ api_key = "sk-user"
                     None,
                     ModelName::new("model-b").expect("model"),
                 )
-                .expect("update draft"),
+                .expect("update draft")
+                .with_reasoning_effort_text("max ultra")
+                .expect("valid custom effort"),
             )
             .await
             .expect("provider update");
@@ -1025,6 +1078,13 @@ api_key = "sk-user"
         assert_eq!(updated.protocol, Some(OpenAiProtocol::Responses));
         assert_eq!(updated.base_url, "https://new.example.test/v1");
         assert_eq!(updated.default_model.as_str(), "model-b");
+        assert_eq!(
+            updated
+                .reasoning_effort
+                .as_ref()
+                .map(ReasoningEffort::as_str),
+            Some("max ultra")
+        );
         assert_eq!(secret_file_count(&paths).await, 1);
         let mut secrets = tokio::fs::read_dir(paths.managed_secrets_dir())
             .await

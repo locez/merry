@@ -8,6 +8,7 @@ mod cmd;
 mod coding;
 mod config;
 mod debug;
+mod headless_review;
 mod mcp_tools;
 mod observability;
 mod provider_config;

@@ -32,6 +32,12 @@ profile = "default"
 # dbus is the D-Bus session bus, including Secret Service/keyring access.
 # ssh_agent = true
 # dbus = true
+# Permission reviews in --no-sandbox remain host-interactive by default. Set
+# this to "model" to review with the configured model first and fall back to
+# the host only when that model review is unavailable. TUI reviews use their
+# dialog; headless `merry run` reviews read yes/no from stdin and write prompts
+# to stderr.
+# no_sandbox_review = "model"
 
 readonly_paths = [
   "/etc",
@@ -145,8 +151,9 @@ format = "json"
 provider = "openai-compatible"
 model = "gpt-4.1-mini"
 # Optional. Sent as Responses API reasoning.effort when supported by the model.
-# Leave unset to use provider/model defaults. Common OpenAI values include
-# minimal, low, medium, high, and model-dependent xhigh.
+# Leave unset to use provider/model defaults. The TUI presets include minimal,
+# low, medium, high, xhigh, max, and ultra; custom provider-supported values
+# are also accepted.
 # reasoning_effort = "medium"
 
 [providers.retry]
@@ -175,6 +182,9 @@ default_model = "gpt-4.1-mini"
 type = "openai-compatible"
 protocol = "responses"
 base_url = "https://api.openai.com/v1"
+# Optional provider-specific default used when this provider is selected in TUI.
+# The value may be any provider-supported reasoning identifier.
+# reasoning_effort = "medium"
 # Prefer api_key_file for local sandboxed smoke runs so the key stays in the
 # mounted config directory instead of argv or process environment.
 api_key_file = "secrets/openai.key"
@@ -186,6 +196,7 @@ api_key_file = "secrets/openai.key"
 # display_name = "Anthropic"
 # default_model = "claude-sonnet-4-5"
 # type = "anthropic"
+# reasoning_effort = "medium"
 # base_url = "https://api.anthropic.com"
 # api_version = "2023-06-01"
 # default_max_output_tokens = 4096

@@ -2,7 +2,7 @@ use super::{
     ConfigError, XdgPaths,
     provider::{NamedProviderToml, validate_api_key_text, validate_provider_display_name},
 };
-use merry_llm::ModelName;
+use merry_llm::{ModelName, ReasoningEffort};
 use merry_provider_anthropic::AnthropicProviderConfig;
 use merry_provider_openai::{OpenAiProtocol, OpenAiProviderConfig};
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -120,9 +120,11 @@ pub(crate) struct ManagedProviderDefinition {
     kind: ManagedProviderKind,
     base_url: String,
     protocol: Option<OpenAiProtocol>,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl ManagedProviderDefinition {
+    #[cfg(test)]
     pub(crate) fn new(
         alias: ProviderAlias,
         display_name: &str,
@@ -130,6 +132,26 @@ impl ManagedProviderDefinition {
         kind: ManagedProviderKind,
         protocol: Option<OpenAiProtocol>,
         base_url: &str,
+    ) -> Result<Self, ConfigError> {
+        Self::with_reasoning_effort(
+            alias,
+            display_name,
+            default_model,
+            kind,
+            protocol,
+            base_url,
+            None,
+        )
+    }
+
+    pub(crate) fn with_reasoning_effort(
+        alias: ProviderAlias,
+        display_name: &str,
+        default_model: ModelName,
+        kind: ManagedProviderKind,
+        protocol: Option<OpenAiProtocol>,
+        base_url: &str,
+        reasoning_effort: Option<ReasoningEffort>,
     ) -> Result<Self, ConfigError> {
         validate_provider_display_name(display_name)?;
         let protocol = match (kind, protocol) {
@@ -166,6 +188,7 @@ impl ManagedProviderDefinition {
             kind,
             base_url: base_url.to_owned(),
             protocol,
+            reasoning_effort,
         })
     }
 
@@ -173,6 +196,9 @@ impl ManagedProviderDefinition {
         NamedProviderToml {
             display_name: Some(self.display_name),
             default_model: Some(self.default_model.as_str().to_owned()),
+            reasoning_effort: self
+                .reasoning_effort
+                .map(|effort| effort.as_str().to_owned()),
             kind: Some(
                 match self.kind {
                     ManagedProviderKind::OpenAiCompatible => "openai-compatible",

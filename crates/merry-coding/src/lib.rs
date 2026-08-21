@@ -19,8 +19,10 @@ pub use project_rules::{
     load_root_project_rules,
 };
 pub use runtime::{
-    CodingModelRoleConfig, CodingModelRoleConfigError, CodingPermissionPolicy, CodingRuntime,
-    CodingRuntimeBuildError, CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig,
+    CodingModelRoleConfig, CodingModelRoleConfigError, CodingPermissionPolicy,
+    CodingPermissionPolicyError, CodingProcessBoundary, CodingRuntime, CodingRuntimeBuildError,
+    CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig, CodingTrustMode,
+    NoSandboxReviewMode,
 };
 
 use merry_core::{CoreError, ToolName};

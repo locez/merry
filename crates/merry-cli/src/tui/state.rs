@@ -12,6 +12,7 @@ use super::{
         ModelListItem, ModelPickerOverlay, ProviderFormOverlay, ProviderFormSeed,
         ProviderFormValues, ProviderListItem, ProviderManagerOverlay,
     },
+    reasoning_picker::ReasoningPickerOverlay,
     status::{format_header_status_parts, format_session_usage_full},
     theme::TuiTheme,
 };
@@ -215,6 +216,7 @@ pub(crate) struct TuiState {
     dialog_back: Option<Box<Overlay>>,
     provider_overlay_back: Option<ProviderOverlayBack>,
     provider_form_back: Option<ProviderFormOverlay>,
+    reasoning_picker_back: Option<Box<Overlay>>,
     preferences: TuiPreferences,
     settings_defaults: TuiSettingsDefaults,
     plan: PlanUiState,
@@ -279,6 +281,7 @@ impl TuiState {
             dialog_back: None,
             provider_overlay_back: None,
             provider_form_back: None,
+            reasoning_picker_back: None,
             preferences: TuiPreferences::default(),
             settings_defaults: TuiSettingsDefaults::default(),
             plan: PlanUiState::default(),
@@ -499,6 +502,7 @@ impl TuiState {
 
     pub(crate) fn open_provider_manager(&mut self, items: Vec<ProviderListItem>) {
         self.provider_form_back = None;
+        self.reasoning_picker_back = None;
         match self.overlay.take() {
             Some(Overlay::CommandPalette(_)) => {
                 self.provider_overlay_back = Some(ProviderOverlayBack::CommandPalette);
@@ -507,7 +511,10 @@ impl TuiState {
                 self.provider_overlay_back = Some(ProviderOverlayBack::Settings(settings));
             }
             Some(
-                Overlay::ProviderManager(_) | Overlay::ProviderForm(_) | Overlay::ModelPicker(_),
+                Overlay::ProviderManager(_)
+                | Overlay::ProviderForm(_)
+                | Overlay::ModelPicker(_)
+                | Overlay::ReasoningPicker(_),
             ) => {}
             Some(
                 Overlay::PlanApproval(_)
@@ -554,6 +561,7 @@ impl TuiState {
         models: Vec<ModelListItem>,
     ) {
         self.provider_form_back = None;
+        self.reasoning_picker_back = None;
         self.overlay = Some(Overlay::ModelPicker(ModelPickerOverlay::new(
             alias,
             display_name,
@@ -583,6 +591,22 @@ impl TuiState {
         true
     }
 
+    pub(crate) fn open_reasoning_picker(
+        &mut self,
+        alias: String,
+        model: String,
+        target: super::provider_overlay::ModelPickerTarget,
+    ) -> bool {
+        let Some(previous) = self.overlay.take() else {
+            return false;
+        };
+        self.reasoning_picker_back = Some(Box::new(previous));
+        self.overlay = Some(Overlay::ReasoningPicker(ReasoningPickerOverlay::new(
+            alias, model, target,
+        )));
+        true
+    }
+
     pub(crate) fn provider_form_discovery_request(
         &self,
     ) -> Option<(Option<String>, ProviderFormValues)> {
@@ -591,13 +615,34 @@ impl TuiState {
             .map(ProviderFormOverlay::discovery_request)
     }
 
-    pub(crate) fn select_provider_form_model(&mut self, model: &str) -> bool {
+    pub(crate) fn select_provider_form_model_with_reasoning(
+        &mut self,
+        model: &str,
+        reasoning_effort: &str,
+    ) -> bool {
         let Some(mut form) = self.provider_form_back.take() else {
             return false;
         };
-        form.set_model(model);
+        form.set_model_and_reasoning(model, reasoning_effort);
         self.overlay = Some(Overlay::ProviderForm(form));
+        self.reasoning_picker_back = None;
         true
+    }
+
+    pub(crate) fn restore_settings_after_reasoning_picker(&mut self) -> bool {
+        let Some(back) = self.reasoning_picker_back.take() else {
+            return false;
+        };
+        match *back {
+            Overlay::Settings(settings) => {
+                self.overlay = Some(Overlay::Settings(settings));
+                true
+            }
+            overlay => {
+                self.reasoning_picker_back = Some(Box::new(overlay));
+                false
+            }
+        }
     }
 
     pub(crate) fn update_model_picker(
@@ -708,6 +753,7 @@ impl TuiState {
         self.dialog_back = None;
         self.provider_overlay_back = None;
         self.provider_form_back = None;
+        self.reasoning_picker_back = None;
     }
 
     pub(crate) fn back_overlay(&mut self) {
@@ -727,6 +773,9 @@ impl TuiState {
             }
             Some(Overlay::ModelPicker(_)) => {
                 self.provider_form_back.take().map(Overlay::ProviderForm)
+            }
+            Some(Overlay::ReasoningPicker(_)) => {
+                self.reasoning_picker_back.take().map(|overlay| *overlay)
             }
             _ => None,
         };

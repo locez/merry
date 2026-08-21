@@ -1,11 +1,11 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, stdout_error, unexpected};
 use crate::coding::{
-    CodingPermissionPolicy, HeadlessCodingRuntimeInput, ProcessExecutionMode,
-    action_process_runner_for_mode, build_headless_coding_composition,
-    build_headless_coding_with_policy_composition, coding_agent_process_admission,
-    coding_agent_requires_sandbox_error,
+    CodingPermissionPolicy, CodingTrustMode, HeadlessCodingRuntimeInput, ProcessExecutionMode,
+    action_process_runner_for_mode, build_headless_coding_with_policy_composition,
+    coding_agent_process_admission, coding_agent_requires_sandbox_error,
 };
 use crate::config::MerryConfig;
+use crate::headless_review::HeadlessPermissionReviewer;
 use crate::mcp_tools::discover_configured_mcp_tools;
 use crate::provider_config::{
     RuntimePrimaryProviderConfig, RuntimeProviderBundle, runtime_provider_bundle_from_config,
@@ -100,25 +100,38 @@ pub(crate) async fn run(
         subagents: subagents_config(merry_config).map_err(unexpected)?.into(),
         workspace_tool_limits: None,
     };
-    let coding_runtime = if fully_trusted {
-        build_headless_coding_with_policy_composition(
-            runtime_input,
-            CodingPermissionPolicy::fully_trusted(),
-        )?
-    } else {
-        build_headless_coding_composition(runtime_input)?
-    };
+    let headless_reviewer = HeadlessPermissionReviewer::new();
+    let permission_policy = CodingPermissionPolicy::for_process_boundary(
+        process_execution_mode.into(),
+        if fully_trusted {
+            CodingTrustMode::FullyTrusted
+        } else {
+            CodingTrustMode::Reviewed
+        },
+        merry_config
+            .map(MerryConfig::no_sandbox_review_mode)
+            .unwrap_or_default(),
+        Some(headless_reviewer.source()),
+    )
+    .map_err(unexpected)?;
+    let coding_runtime =
+        build_headless_coding_with_policy_composition(runtime_input, permission_policy)?;
     let loop_config = coding_runtime.loop_config();
     let runtime = coding_runtime.into_runtime();
     let input = StepInput::user_text(&args.task).map_err(unexpected)?;
     let context = StepContext::default()
         .with_generation_config(generation_config(merry_config).map_err(unexpected)?);
-    if args.events_jsonl {
+    let review_task = headless_reviewer.start();
+    let run_result = if args.events_jsonl {
         write_agent_loop_jsonl_output(&runtime, input, loop_config, context, tokio::io::stdout())
             .await
     } else {
         write_agent_loop_output(&runtime, input, loop_config, context, tokio::io::stdout()).await
-    }
+    };
+    let review_result = review_task.finish().await.map_err(unexpected);
+    let status = run_result?;
+    review_result?;
+    Ok(status)
 }
 
 fn default_run_session_id() -> merry_core::SessionId {

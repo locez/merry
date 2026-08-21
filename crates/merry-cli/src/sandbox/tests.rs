@@ -8,6 +8,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(target_os = "linux")]
+use std::process::Command;
+
 #[derive(Default)]
 struct FakeHostProbe {
     metadata: BTreeMap<PathBuf, HostPathMetadata>,
@@ -483,6 +486,267 @@ fn plan_mounts_only_managed_provider_config_read_write() {
         &args,
         &["--bind-try", "/host/config/merry", SANDBOX_MERRY_CONFIG_DIR,]
     ));
+    let config_mount = sequence_position(
+        &args,
+        &[
+            "--ro-bind-try",
+            "/host/config/merry",
+            SANDBOX_MERRY_CONFIG_DIR,
+        ],
+    )
+    .expect("read-only provider config mount");
+    let managed_mount = sequence_position(
+        &args,
+        &[
+            "--bind",
+            "/host/config/merry/managed",
+            SANDBOX_MERRY_MANAGED_CONFIG_DIR,
+        ],
+    )
+    .expect("managed provider write mount");
+    assert!(
+        config_mount < managed_mount,
+        "managed provider mount must override only its read-only parent"
+    );
+}
+
+#[test]
+fn sandbox_allows_product_write_roots_under_trusted_readonly_parent_rules() {
+    let mut host = sandbox_host();
+    host.trusted_path_rules = vec![
+        PathAccessRule::new(
+            PathBuf::from("/host/config"),
+            PathAccess::ReadOnly,
+            PathAccessRuleSource::TrustedGlobalConfig,
+        ),
+        PathAccessRule::new(
+            PathBuf::from("/host/state"),
+            PathAccess::ReadOnly,
+            PathAccessRuleSource::TrustedGlobalConfig,
+        ),
+    ];
+    let Bootstrap::Reexec(plan) =
+        plan_sandbox(true, &host).expect("read-only parents should allow product child writes")
+    else {
+        panic!("expected sandbox reexec plan");
+    };
+    let args = plan_args(&plan);
+    let config_parent =
+        sequence_position(&args, &["--ro-bind-try", "/host/config", "/host/config"])
+            .expect("trusted config parent mount");
+    let managed_write = sequence_position(
+        &args,
+        &[
+            "--bind",
+            "/host/config/merry/managed",
+            SANDBOX_MERRY_MANAGED_CONFIG_DIR,
+        ],
+    )
+    .expect("managed provider write mount");
+    assert!(config_parent < managed_write);
+}
+
+#[test]
+fn sandbox_retains_trusted_readonly_product_child_rules() {
+    let mut host = sandbox_host();
+    host.trusted_path_rules = vec![PathAccessRule::new(
+        PathBuf::from("/host/config/merry/managed/secrets"),
+        PathAccess::ReadOnly,
+        PathAccessRuleSource::TrustedGlobalConfig,
+    )];
+
+    let Bootstrap::Reexec(plan) =
+        plan_sandbox(true, &host).expect("nested read-only rule should be representable")
+    else {
+        panic!("expected sandbox reexec plan");
+    };
+    let args = plan_args(&plan);
+    let managed_write = sequence_position(
+        &args,
+        &[
+            "--bind",
+            "/host/config/merry/managed",
+            SANDBOX_MERRY_MANAGED_CONFIG_DIR,
+        ],
+    )
+    .expect("managed provider write mount");
+    let secrets_readonly = sequence_position(
+        &args,
+        &[
+            "--ro-bind-try",
+            "/host/config/merry/managed/secrets",
+            "/host/config/merry/managed/secrets",
+        ],
+    )
+    .expect("trusted secrets read-only mount");
+    assert!(managed_write < secrets_readonly);
+}
+
+#[test]
+fn sandbox_orders_nested_trusted_rules_from_parent_to_child() {
+    let mut host = sandbox_host();
+    host.trusted_path_rules = vec![
+        PathAccessRule::new(
+            PathBuf::from("/workspace/shared/cache"),
+            PathAccess::ReadWrite,
+            PathAccessRuleSource::TrustedGlobalConfig,
+        ),
+        PathAccessRule::new(
+            PathBuf::from("/workspace/shared"),
+            PathAccess::ReadOnly,
+            PathAccessRuleSource::TrustedGlobalConfig,
+        ),
+    ];
+
+    let Bootstrap::Reexec(plan) =
+        plan_sandbox(true, &host).expect("nested trusted rules should be representable")
+    else {
+        panic!("expected sandbox reexec plan");
+    };
+    let args = plan_args(&plan);
+    let parent = sequence_position(
+        &args,
+        &["--ro-bind-try", "/workspace/shared", "/workspace/shared"],
+    )
+    .expect("trusted parent rule");
+    let child = sequence_position(
+        &args,
+        &[
+            "--bind-try",
+            "/workspace/shared/cache",
+            "/workspace/shared/cache",
+        ],
+    )
+    .expect("trusted child rule");
+    assert!(
+        parent < child,
+        "narrower trusted rules must be applied last"
+    );
+}
+
+#[test]
+fn sandbox_rejects_conflicting_rules_for_the_same_path() {
+    let mut host = sandbox_host();
+    host.trusted_path_rules = vec![
+        PathAccessRule::new(
+            PathBuf::from("/workspace/shared"),
+            PathAccess::ReadOnly,
+            PathAccessRuleSource::TrustedGlobalConfig,
+        ),
+        PathAccessRule::new(
+            PathBuf::from("/workspace/shared"),
+            PathAccess::ReadWrite,
+            PathAccessRuleSource::TrustedGlobalConfig,
+        ),
+    ];
+
+    let error = plan_sandbox(true, &host).expect_err("same-path conflicts must fail closed");
+    assert!(matches!(error, Error::ConflictingTrustedPathRules { .. }));
+}
+
+#[cfg(unix)]
+#[test]
+fn sandbox_rejects_symlinked_product_write_roots() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("temporary sandbox paths");
+    let real_config = temp.path().join("real-config");
+    let linked_config = temp.path().join("config-link");
+    std::fs::create_dir_all(&real_config).expect("real config directory");
+    symlink(&real_config, &linked_config).expect("config symlink");
+
+    let mut host = sandbox_host();
+    host.xdg_paths = XdgPaths::from_parts(
+        PathBuf::from("/home/alice"),
+        Some(linked_config),
+        Some(temp.path().join("state")),
+    );
+
+    let error = plan_sandbox(true, &host).expect_err("symlinked write root must fail closed");
+    assert!(matches!(error, Error::ProductPathContainsSymlink { .. }));
+}
+
+#[test]
+fn sandbox_rejects_merry_owned_write_roots_under_trusted_deny_rules() {
+    let mut host = sandbox_host();
+    host.trusted_path_rules = vec![PathAccessRule::new(
+        PathBuf::from("/host/config/merry/managed/secrets"),
+        PathAccess::Deny,
+        PathAccessRuleSource::TrustedGlobalConfig,
+    )];
+
+    let error = plan_sandbox(true, &host).expect_err("conflicting outer rule must fail closed");
+    assert!(matches!(
+        error,
+        Error::ProductPathConflictsWithTrustedRule {
+            access: PathAccess::Deny,
+            ..
+        }
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_keeps_child_write_bind_after_readonly_parent_mount() {
+    let temp = tempfile::tempdir().expect("temporary bubblewrap paths");
+    let parent = temp.path().join("config");
+    let managed = parent.join("managed");
+    std::fs::create_dir_all(&managed).expect("managed directory");
+
+    let output = match Command::new("bwrap")
+        .args(["--unshare-user", "--die-with-parent", "--ro-bind", "/", "/"])
+        .arg("--ro-bind")
+        .arg(&parent)
+        .arg(&parent)
+        .arg("--bind")
+        .arg(&managed)
+        .arg(&managed)
+        .arg("--")
+        .arg("/usr/bin/touch")
+        .arg(managed.join("probe"))
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("bubblewrap test could not start: {error}"),
+    };
+
+    assert!(
+        output.status.success(),
+        "bubblewrap mount-order probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(managed.join("probe").is_file());
+}
+
+#[test]
+fn sandbox_prepares_provider_and_state_write_roots_before_building_mounts() {
+    let temp = tempfile::tempdir().expect("temporary sandbox paths");
+    let mut host = sandbox_host();
+    host.xdg_paths = XdgPaths::from_parts(
+        PathBuf::from("/home/alice"),
+        Some(temp.path().join("config")),
+        Some(temp.path().join("state")),
+    );
+
+    let probe = FakeHostProbe::default();
+    let bootstrap = super::plan_bootstrap_with_probe_inner(
+        true,
+        ClipboardAccess::Disabled,
+        &host,
+        &probe,
+        true,
+    )
+    .expect("sandbox plan should prepare writable roots");
+    assert!(matches!(bootstrap, Bootstrap::Reexec(_)));
+    assert!(
+        host.xdg_paths
+            .managed_providers_file()
+            .parent()
+            .is_some_and(Path::exists)
+    );
+    assert!(host.xdg_paths.managed_secrets_dir().is_dir());
+    assert!(host.xdg_paths.state_dir().is_dir());
 }
 
 #[test]
@@ -1111,7 +1375,11 @@ fn args_without_sandbox_bootstrap_flags_preserves_shell_trailing_argv() {
 }
 
 fn contains_sequence(args: &[String], expected: &[&str]) -> bool {
-    args.windows(expected.len()).any(|window| {
+    sequence_position(args, expected).is_some()
+}
+
+fn sequence_position(args: &[String], expected: &[&str]) -> Option<usize> {
+    args.windows(expected.len()).position(|window| {
         window
             .iter()
             .map(String::as_str)

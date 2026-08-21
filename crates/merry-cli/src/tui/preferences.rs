@@ -10,8 +10,34 @@ use std::{
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
-const PREFERENCES_VERSION: u32 = 2;
+const PREFERENCES_VERSION: u32 = 3;
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) const REASONING_EFFORT_PRESETS: [&str; 7] =
+    ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TuiProviderState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<ReasoningEffort>,
+}
+
+impl TuiProviderState {
+    pub(crate) fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    pub(crate) fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
+        self.reasoning_effort.as_ref()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.model.is_none() && self.reasoning_effort.is_none()
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -76,9 +102,7 @@ pub(crate) struct TuiPreferences {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) provider: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    models: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    provider_states: BTreeMap<String, TuiProviderState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) context_window_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,8 +121,7 @@ impl Default for TuiPreferences {
             version: PREFERENCES_VERSION,
             code_theme: CodeTheme::default(),
             provider: None,
-            models: BTreeMap::new(),
-            reasoning_effort: None,
+            provider_states: BTreeMap::new(),
             context_window_tokens: None,
             auto_compaction_enabled: None,
             compaction_strategy: None,
@@ -109,12 +132,21 @@ impl Default for TuiPreferences {
 }
 
 impl TuiPreferences {
-    pub(crate) fn reasoning_label(&self) -> Option<&str> {
-        self.reasoning_effort.as_ref().map(ReasoningEffort::as_str)
+    pub(crate) fn reasoning_effort_for_provider(&self, provider: &str) -> Option<&ReasoningEffort> {
+        self.provider_states
+            .get(provider)
+            .and_then(TuiProviderState::reasoning_effort)
+    }
+
+    pub(crate) fn reasoning_label_for_provider(&self, provider: &str) -> Option<&str> {
+        self.reasoning_effort_for_provider(provider)
+            .map(ReasoningEffort::as_str)
     }
 
     pub(crate) fn model_for_provider(&self, provider: &str) -> Option<&str> {
-        self.models.get(provider).map(String::as_str)
+        self.provider_states
+            .get(provider)
+            .and_then(TuiProviderState::model)
     }
 
     pub(crate) fn set_model_for_provider(
@@ -128,13 +160,68 @@ impl TuiPreferences {
             Some(model) => {
                 let model = ModelName::new(model)
                     .map_err(|error| PreferencesError::Invalid(error.to_string()))?;
-                self.models
-                    .insert(provider.to_owned(), model.as_str().to_owned());
+                self.provider_states
+                    .entry(provider.to_owned())
+                    .or_default()
+                    .model = Some(model.as_str().to_owned());
             }
             None => {
-                self.models.remove(provider);
+                let should_remove = if let Some(state) = self.provider_states.get_mut(provider) {
+                    state.model = None;
+                    state.is_empty()
+                } else {
+                    false
+                };
+                if should_remove {
+                    self.provider_states.remove(provider);
+                }
             }
         }
+        Ok(())
+    }
+
+    pub(crate) fn set_reasoning_effort_for_provider(
+        &mut self,
+        provider: &str,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) -> Result<(), PreferencesError> {
+        ProviderAlias::new(provider)
+            .map_err(|error| PreferencesError::Invalid(error.to_string()))?;
+        let should_remove = {
+            let state = self.provider_states.entry(provider.to_owned()).or_default();
+            state.reasoning_effort = reasoning_effort;
+            state.is_empty()
+        };
+        if should_remove {
+            self.provider_states.remove(provider);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn clear_provider_state(&mut self, provider: &str) -> Result<(), PreferencesError> {
+        ProviderAlias::new(provider)
+            .map_err(|error| PreferencesError::Invalid(error.to_string()))?;
+        self.provider_states.remove(provider);
+        Ok(())
+    }
+
+    pub(crate) fn set_model_and_reasoning_for_provider(
+        &mut self,
+        provider: &str,
+        model: &str,
+        reasoning_effort: ReasoningEffort,
+    ) -> Result<(), PreferencesError> {
+        let model =
+            ModelName::new(model).map_err(|error| PreferencesError::Invalid(error.to_string()))?;
+        ProviderAlias::new(provider)
+            .map_err(|error| PreferencesError::Invalid(error.to_string()))?;
+        self.provider_states.insert(
+            provider.to_owned(),
+            TuiProviderState {
+                model: Some(model.as_str().to_owned()),
+                reasoning_effort: Some(reasoning_effort),
+            },
+        );
         Ok(())
     }
 }
@@ -144,7 +231,7 @@ pub(crate) struct TuiSettingsDefaults {
     pub(crate) provider_aliases: Vec<String>,
     pub(crate) provider: Option<String>,
     pub(crate) model: Option<String>,
-    pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) reasoning_efforts: BTreeMap<String, ReasoningEffort>,
     pub(crate) context_window_tokens: u64,
     pub(crate) subagents_enabled: bool,
     pub(crate) subagent_max_threads: usize,
@@ -159,7 +246,7 @@ impl Default for TuiSettingsDefaults {
             provider_aliases: Vec::new(),
             provider: None,
             model: None,
-            reasoning_effort: None,
+            reasoning_efforts: BTreeMap::new(),
             context_window_tokens: merry_runtime::DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
             subagents_enabled: false,
             subagent_max_threads: limits.max_threads(),
@@ -177,23 +264,38 @@ impl TuiSettingsDefaults {
             return Ok(Self::default());
         };
         let default_provider = config.configured_default_provider()?;
+        let provider_aliases = config.provider_aliases();
+        let mut reasoning_efforts = BTreeMap::new();
+        for alias in &provider_aliases {
+            if let Some(reasoning_effort) = config.effective_provider_reasoning_effort(alias)? {
+                reasoning_efforts.insert(alias.clone(), reasoning_effort);
+            }
+        }
         let subagents = config.subagents_config()?;
         let auto_compaction = config.automatic_compaction_config()?;
         Ok(Self {
-            provider_aliases: config.provider_aliases(),
+            provider_aliases,
             provider: default_provider
                 .as_ref()
                 .map(|provider| provider.alias.clone()),
             model: default_provider
                 .as_ref()
                 .map(|provider| provider.model.clone()),
-            reasoning_effort: default_provider.and_then(|provider| provider.reasoning_effort),
+            reasoning_efforts,
             context_window_tokens: merry_runtime::DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
             subagents_enabled: subagents.is_enabled(),
             subagent_max_threads: subagents.limits().max_threads(),
             auto_compaction_enabled: auto_compaction.is_enabled(),
             compaction_strategy: "Config".to_owned(),
         })
+    }
+
+    pub(crate) fn reasoning_effort_for_provider(
+        &self,
+        provider: Option<&str>,
+    ) -> Option<&ReasoningEffort> {
+        let provider = provider.or(self.provider.as_deref())?;
+        self.reasoning_efforts.get(provider)
     }
 }
 
@@ -240,6 +342,12 @@ impl TuiPreferencesStore {
             .version;
         let preferences = match version {
             1 => toml::from_str::<LegacyTuiPreferences>(&text)
+                .map_err(|source| PreferencesError::Parse {
+                    path: self.path.clone(),
+                    source,
+                })?
+                .migrate(default_provider)?,
+            2 => toml::from_str::<StoredTuiPreferencesV2>(&text)
                 .map_err(|source| PreferencesError::Parse {
                     path: self.path.clone(),
                     source,
@@ -309,10 +417,13 @@ impl TuiPreferences {
             ProviderAlias::new(provider)
                 .map_err(|error| PreferencesError::Invalid(error.to_string()))?;
         }
-        for (provider, model) in &self.models {
+        for (provider, state) in &self.provider_states {
             ProviderAlias::new(provider)
                 .map_err(|error| PreferencesError::Invalid(error.to_string()))?;
-            ModelName::new(model).map_err(|error| PreferencesError::Invalid(error.to_string()))?;
+            if let Some(model) = state.model() {
+                ModelName::new(model)
+                    .map_err(|error| PreferencesError::Invalid(error.to_string()))?;
+            }
         }
         if self.subagent_max_threads == Some(0) {
             return Err(PreferencesError::Invalid(
@@ -332,6 +443,54 @@ impl TuiPreferences {
 struct PreferencesVersion {
     #[serde(default = "legacy_preferences_version")]
     version: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredTuiPreferencesV2 {
+    #[serde(default = "legacy_preferences_version")]
+    version: u32,
+    #[serde(default)]
+    code_theme: CodeTheme,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    models: BTreeMap<String, String>,
+    #[serde(default)]
+    reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    context_window_tokens: Option<u64>,
+    #[serde(default)]
+    auto_compaction_enabled: Option<bool>,
+    #[serde(default)]
+    compaction_strategy: Option<CompactionStrategy>,
+    #[serde(default)]
+    subagents_enabled: Option<bool>,
+    #[serde(default)]
+    subagent_max_threads: Option<usize>,
+}
+
+impl StoredTuiPreferencesV2 {
+    fn migrate(self, default_provider: Option<&str>) -> Result<TuiPreferences, PreferencesError> {
+        if self.version != 2 {
+            return Err(PreferencesError::UnsupportedVersion {
+                path_version: self.version,
+                supported_version: PREFERENCES_VERSION,
+            });
+        }
+        migrate_provider_states(
+            self.provider,
+            self.models,
+            self.reasoning_effort,
+            self.code_theme,
+            self.context_window_tokens,
+            self.auto_compaction_enabled,
+            self.compaction_strategy,
+            self.subagents_enabled,
+            self.subagent_max_threads,
+            default_provider,
+        )
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -361,20 +520,9 @@ impl LegacyTuiPreferences {
                 supported_version: PREFERENCES_VERSION,
             });
         }
-        let mut preferences = TuiPreferences {
-            version: PREFERENCES_VERSION,
-            code_theme: self.code_theme,
-            provider: self.provider,
-            models: BTreeMap::new(),
-            reasoning_effort: self.reasoning_effort,
-            context_window_tokens: None,
-            auto_compaction_enabled: None,
-            compaction_strategy: None,
-            subagents_enabled: self.subagents_enabled,
-            subagent_max_threads: self.subagent_max_threads,
-        };
-        if let Some(model) = self.model.as_deref() {
-            let provider = preferences
+        let mut models = BTreeMap::new();
+        if let Some(model) = self.model {
+            let provider = self
                 .provider
                 .as_deref()
                 .or(default_provider)
@@ -382,12 +530,70 @@ impl LegacyTuiPreferences {
                     PreferencesError::Invalid(
                         "version 1 model preference cannot migrate without a provider".to_owned(),
                     )
-                })?
-                .to_owned();
-            preferences.set_model_for_provider(&provider, Some(model))?;
+                })?;
+            models.insert(provider.to_owned(), model);
         }
-        Ok(preferences)
+        migrate_provider_states(
+            self.provider,
+            models,
+            self.reasoning_effort,
+            self.code_theme,
+            None,
+            None,
+            None,
+            self.subagents_enabled,
+            self.subagent_max_threads,
+            default_provider,
+        )
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn migrate_provider_states(
+    provider: Option<String>,
+    models: BTreeMap<String, String>,
+    reasoning_effort: Option<ReasoningEffort>,
+    code_theme: CodeTheme,
+    context_window_tokens: Option<u64>,
+    auto_compaction_enabled: Option<bool>,
+    compaction_strategy: Option<CompactionStrategy>,
+    subagents_enabled: Option<bool>,
+    subagent_max_threads: Option<usize>,
+    default_provider: Option<&str>,
+) -> Result<TuiPreferences, PreferencesError> {
+    let mut provider_states = models
+        .into_iter()
+        .map(|(provider, model)| {
+            (
+                provider,
+                TuiProviderState {
+                    model: Some(model),
+                    reasoning_effort: None,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if let Some(reasoning_effort) = reasoning_effort
+        && let Some(provider) = provider.as_deref().or(default_provider)
+    {
+        provider_states
+            .entry(provider.to_owned())
+            .or_default()
+            .reasoning_effort = Some(reasoning_effort);
+    }
+    let preferences = TuiPreferences {
+        version: PREFERENCES_VERSION,
+        code_theme,
+        provider,
+        provider_states,
+        context_window_tokens,
+        auto_compaction_enabled,
+        compaction_strategy,
+        subagents_enabled,
+        subagent_max_threads,
+    };
+    preferences.validate()?;
+    Ok(preferences)
 }
 
 fn legacy_preferences_version() -> u32 {
@@ -434,23 +640,71 @@ pub(crate) enum PreferencesError {
 mod tests {
     use super::*;
 
+    #[test]
+    fn settings_defaults_keep_reasoning_effort_per_provider() {
+        let paths = crate::config::XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = crate::config::MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "compat"
+model = "gpt-test"
+reasoning_effort = "high"
+
+[providers.compat]
+type = "openai-compatible"
+reasoning_effort = "low"
+api_key = "sk-compat-test"
+
+[providers.alt]
+type = "openai-compatible"
+reasoning_effort = "max ultra"
+api_key = "sk-alt-test"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should exist");
+
+        let defaults =
+            TuiSettingsDefaults::from_config(Some(&config)).expect("settings defaults should load");
+
+        assert_eq!(
+            defaults
+                .reasoning_effort_for_provider(Some("compat"))
+                .map(ReasoningEffort::as_str),
+            Some("high")
+        );
+        assert_eq!(
+            defaults
+                .reasoning_effort_for_provider(Some("alt"))
+                .map(ReasoningEffort::as_str),
+            Some("max ultra")
+        );
+    }
+
     #[tokio::test]
     async fn preferences_store_round_trips_safe_tui_defaults() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let store = TuiPreferencesStore::new(temp.path().join("merry/tui-preferences.toml"));
-        let preferences = TuiPreferences {
+        let mut preferences = TuiPreferences {
             code_theme: CodeTheme::CatppuccinMocha,
             provider: Some("anthropic".to_owned()),
-            reasoning_effort: Some(ReasoningEffort::new("high").unwrap()),
             context_window_tokens: Some(272_000),
             subagents_enabled: Some(true),
             subagent_max_threads: Some(6),
             ..TuiPreferences::default()
         };
-        let mut preferences = preferences;
         preferences
             .set_model_for_provider("anthropic", Some("claude-test"))
             .expect("valid model preference");
+        preferences
+            .set_reasoning_effort_for_provider(
+                "anthropic",
+                Some(ReasoningEffort::new("high").unwrap()),
+            )
+            .expect("valid reasoning preference");
 
         store.save(&preferences).await.expect("preferences save");
         let loaded = store.load().await.expect("preferences load");
@@ -489,6 +743,69 @@ model = "deepseek-v4-pro"
             Some("deepseek-v4-pro")
         );
         assert_eq!(migrated.model_for_provider("anthropic"), None);
+    }
+
+    #[tokio::test]
+    async fn migrates_version_two_reasoning_only_to_its_selected_provider() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let path = temp.path().join("merry/tui-preferences.toml");
+        tokio::fs::create_dir_all(path.parent().expect("preferences parent"))
+            .await
+            .expect("preferences parent");
+        tokio::fs::write(
+            &path,
+            r#"
+version = 2
+provider = "opencode"
+models = { opencode = "model-a", anthropic = "model-b" }
+reasoning_effort = "max ultra"
+"#,
+        )
+        .await
+        .expect("v2 preferences");
+        let store = TuiPreferencesStore::new(path);
+
+        let migrated = store
+            .load_with_default_provider(Some("anthropic"))
+            .await
+            .expect("v2 preferences should migrate");
+
+        assert_eq!(migrated.model_for_provider("opencode"), Some("model-a"));
+        assert_eq!(migrated.model_for_provider("anthropic"), Some("model-b"));
+        assert_eq!(
+            migrated
+                .reasoning_effort_for_provider("opencode")
+                .map(ReasoningEffort::as_str),
+            Some("max ultra")
+        );
+        assert_eq!(migrated.reasoning_effort_for_provider("anthropic"), None);
+    }
+
+    #[test]
+    fn provider_state_keeps_one_model_and_reasoning_pair() {
+        let mut preferences = TuiPreferences::default();
+        preferences
+            .set_model_and_reasoning_for_provider(
+                "opencode",
+                "model-a",
+                ReasoningEffort::new("high").expect("valid effort"),
+            )
+            .expect("valid provider state");
+        preferences
+            .set_model_and_reasoning_for_provider(
+                "opencode",
+                "model-b",
+                ReasoningEffort::new("max ultra").expect("valid effort"),
+            )
+            .expect("valid provider state");
+
+        assert_eq!(preferences.model_for_provider("opencode"), Some("model-b"));
+        assert_eq!(
+            preferences
+                .reasoning_effort_for_provider("opencode")
+                .map(ReasoningEffort::as_str),
+            Some("max ultra")
+        );
     }
 
     #[tokio::test]

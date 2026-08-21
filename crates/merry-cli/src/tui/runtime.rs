@@ -1,6 +1,6 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, unexpected};
 use crate::coding::{
-    CodingPermissionPolicy, HeadlessCodingRuntimeInput, ProcessExecutionMode,
+    CodingPermissionPolicy, CodingTrustMode, HeadlessCodingRuntimeInput, ProcessExecutionMode,
     action_process_runner_for_mode, build_headless_coding_with_policy_composition,
     coding_agent_process_admission, resume_headless_coding_composition_with_policy,
 };
@@ -131,11 +131,17 @@ pub(crate) async fn start_tui_runtime_session(
         ),
         workspace_tool_limits: None,
     };
-    let permission_policy = if fully_trusted {
-        CodingPermissionPolicy::fully_trusted()
-    } else {
-        CodingPermissionPolicy::model_then_host_fallback(permission_source)
-    };
+    let permission_policy = CodingPermissionPolicy::for_process_boundary(
+        process_execution_mode.into(),
+        if fully_trusted {
+            CodingTrustMode::FullyTrusted
+        } else {
+            CodingTrustMode::Reviewed
+        },
+        owned_config.no_sandbox_review_mode(),
+        Some(permission_source),
+    )
+    .map_err(unexpected)?;
     let coding_runtime = if should_resume {
         resume_headless_coding_composition_with_policy(
             runtime_input,
@@ -423,9 +429,25 @@ fn generation_config_with_preferences(
     merry_config: Option<&MerryConfig>,
     preferences: &TuiPreferences,
 ) -> Result<GenerationConfig, crate::config::ConfigError> {
-    let reasoning_effort = preferences
-        .reasoning_effort
-        .clone()
+    let selected_provider = match preferences.provider.as_deref() {
+        Some(provider) => Some(provider.to_owned()),
+        None => merry_config
+            .map(MerryConfig::configured_default_provider)
+            .transpose()?
+            .flatten()
+            .map(|provider| provider.alias),
+    };
+    let preference_reasoning_effort = selected_provider
+        .as_deref()
+        .and_then(|provider| preferences.reasoning_effort_for_provider(provider))
+        .cloned();
+    let provider_reasoning_effort = merry_config
+        .zip(selected_provider.as_deref())
+        .map(|(config, provider)| config.effective_provider_reasoning_effort(provider))
+        .transpose()?
+        .flatten();
+    let reasoning_effort = preference_reasoning_effort
+        .or(provider_reasoning_effort)
         .or(main_reasoning_effort(merry_config)?);
     Ok(GenerationConfig::default().with_reasoning_effort(reasoning_effort))
 }
@@ -507,7 +529,49 @@ api_key = "sk-test"
         .expect("config should parse")
         .expect("config should exist");
         let mut preferences = TuiPreferences::default();
-        preferences.reasoning_effort = Some(merry_llm::ReasoningEffort::new("high").unwrap());
+        preferences
+            .set_reasoning_effort_for_provider(
+                "compat",
+                Some(merry_llm::ReasoningEffort::new("high").unwrap()),
+            )
+            .expect("reasoning preference should be valid");
+
+        let generation = generation_config_with_preferences(Some(&config), &preferences)
+            .expect("generation config should build");
+
+        assert_eq!(
+            generation.reasoning_effort().map(|effort| effort.as_str()),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn selected_provider_reasoning_effort_is_used_when_preference_is_inherited() {
+        let paths = XdgPaths::from_parts(std::path::PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "compat"
+model = "gpt-test"
+
+[providers.compat]
+type = "openai-compatible"
+api_key = "sk-test"
+
+[providers.alt]
+type = "openai-compatible"
+default_model = "alt-model"
+reasoning_effort = "high"
+api_key = "sk-alt-test"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should exist");
+        let mut preferences = TuiPreferences::default();
+        preferences.provider = Some("alt".to_owned());
 
         let generation = generation_config_with_preferences(Some(&config), &preferences)
             .expect("generation config should build");

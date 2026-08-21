@@ -116,6 +116,9 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
         Overlay::ModelPicker(picker) => {
             super::provider_render::render_model_picker(frame, state, picker)
         }
+        Overlay::ReasoningPicker(picker) => {
+            super::provider_render::render_reasoning_picker(frame, state, picker)
+        }
         Overlay::PlanApproval(approval) => render_plan_approval(frame, state, approval),
         Overlay::PermissionReview(review) => render_permission_review(frame, state, review),
         Overlay::Dialog(dialog) => render_message_dialog(frame, state, dialog),
@@ -236,6 +239,13 @@ fn render_settings(frame: &mut Frame<'_>, state: &TuiState) {
         .as_ref()
         .map(|viewport| format!("{}  editing", viewport.text))
         .unwrap_or_else(|| state.setting_value(SettingItem::DefaultModel));
+    let reasoning_editor_viewport = state
+        .settings_reasoning_editor()
+        .map(|input| input.viewport(inner.width.saturating_sub(36).max(1).into()));
+    let reasoning_value = reasoning_editor_viewport
+        .as_ref()
+        .map(|viewport| format!("{}  editing", viewport.text))
+        .unwrap_or_else(|| state.setting_value(SettingItem::ReasoningEffort));
     let context_window_editor_viewport = state
         .settings_context_window_editor()
         .map(|input| input.viewport(inner.width.saturating_sub(36).max(1).into()));
@@ -268,7 +278,7 @@ fn render_settings(frame: &mut Frame<'_>, state: &TuiState) {
         setting_line(
             state,
             "Reasoning effort",
-            &state.setting_value(SettingItem::ReasoningEffort),
+            &reasoning_value,
             selected == Some(SettingItem::ReasoningEffort),
         ),
         Line::default(),
@@ -344,6 +354,20 @@ fn render_settings(frame: &mut Frame<'_>, state: &TuiState) {
         let value_x = inner.x.saturating_add(26);
         let context_window_row = setting_line_index(SettingItem::ContextWindow);
         if let Some(visible_row) = context_window_row.checked_sub(scroll_offset)
+            && visible_row < visible_height
+        {
+            frame.set_cursor_position(Position::new(
+                value_x
+                    .saturating_add(viewport.cursor_column as u16)
+                    .min(inner.right().saturating_sub(1)),
+                inner.y.saturating_add(visible_row as u16),
+            ));
+        }
+    }
+    if let Some(viewport) = reasoning_editor_viewport {
+        let value_x = inner.x.saturating_add(26);
+        let reasoning_row = setting_line_index(SettingItem::ReasoningEffort);
+        if let Some(visible_row) = reasoning_row.checked_sub(scroll_offset)
             && visible_row < visible_height
         {
             frame.set_cursor_position(Position::new(

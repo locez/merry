@@ -1,4 +1,5 @@
 use super::CodingRuntimeError;
+use merry::profiles::CodingProcessBoundary;
 #[cfg(test)]
 use merry_process::ProcessSession;
 use merry_process::{
@@ -29,6 +30,16 @@ impl ProcessExecutionMode {
         match self {
             Self::Unrestricted => ProcessBackendMode::Host,
             Self::InnerOnly | Self::OuterAndInner => ProcessBackendMode::Isolated,
+        }
+    }
+}
+
+impl From<ProcessExecutionMode> for CodingProcessBoundary {
+    fn from(mode: ProcessExecutionMode) -> Self {
+        match mode {
+            ProcessExecutionMode::Unrestricted => Self::Unrestricted,
+            ProcessExecutionMode::InnerOnly => Self::InnerOnly,
+            ProcessExecutionMode::OuterAndInner => Self::OuterAndInner,
         }
     }
 }

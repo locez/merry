@@ -3,6 +3,7 @@ use super::{
     provider_overlay::{
         ModelPickerOverlay, ProviderFormField, ProviderFormOverlay, ProviderManagerOverlay,
     },
+    reasoning_picker::ReasoningPickerOverlay,
     state::TuiState,
     theme::SemanticColor,
 };
@@ -136,7 +137,7 @@ pub(super) fn render_provider_form(
     state: &TuiState,
     form: &ProviderFormOverlay,
 ) {
-    let region = centered_rect(frame.area(), PROVIDER_OVERLAY_WIDTH, 19);
+    let region = centered_rect(frame.area(), PROVIDER_OVERLAY_WIDTH, 20);
     render_surface(frame, state, region, form.title());
     let inner = inset(region, 2, 1);
     let value_width = inner.width.saturating_sub(24).max(1) as usize;
@@ -166,6 +167,11 @@ pub(super) fn render_provider_form(
                     None => "Messages".to_owned(),
                 },
                 ProviderFormField::ApiKey => form.masked_api_key(),
+                ProviderFormField::ReasoningEffort => form
+                    .field_viewport(*field, value_width)
+                    .map(|viewport| viewport.text)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_default(),
                 _ => form
                     .field_viewport(*field, value_width)
                     .map(|viewport| viewport.text)
@@ -196,6 +202,11 @@ pub(super) fn render_provider_form(
                     ProviderFormField::Model => {
                         &[("Enter", "Models"), ("Ctrl+S", "Save"), ("Esc", "Back")]
                     }
+                    ProviderFormField::ReasoningEffort => &[
+                        ("Ctrl+Space", "Presets"),
+                        ("Ctrl+S", "Save"),
+                        ("Esc", "Back"),
+                    ],
                     ProviderFormField::Save => &[("Enter", "Save"), ("Esc", "Back")],
                     _ => &[
                         ("Tab", "Next"),
@@ -352,6 +363,105 @@ pub(super) fn render_model_picker(
     ));
 }
 
+pub(super) fn render_reasoning_picker(
+    frame: &mut Frame<'_>,
+    state: &TuiState,
+    picker: &ReasoningPickerOverlay,
+) {
+    let region = centered_rect(frame.area(), PROVIDER_OVERLAY_WIDTH, 20);
+    render_surface(frame, state, region, " M  Thinking mode ");
+    let inner = inset(region, 2, 1);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(3),
+        ])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    picker.model().to_owned(),
+                    semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {}", picker.alias()),
+                    semantic_style(state, SemanticColor::Muted),
+                ),
+            ]),
+            Line::from(Span::styled(
+                "Choose a thinking mode for this model",
+                semantic_style(state, SemanticColor::Muted),
+            )),
+        ]),
+        rows[0],
+    );
+
+    if let Some(editor) = picker.custom_editor() {
+        let viewport = editor.viewport(rows[1].width.saturating_sub(10) as usize);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Custom ", semantic_style(state, SemanticColor::Focus)),
+                Span::styled(
+                    viewport.text.clone(),
+                    semantic_style(state, SemanticColor::Assistant),
+                ),
+            ])),
+            rows[1],
+        );
+        let status = picker
+            .error()
+            .unwrap_or("Enter a provider-supported reasoning identifier");
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    status,
+                    if picker.error().is_some() {
+                        semantic_style(state, SemanticColor::Error)
+                    } else {
+                        semantic_style(state, SemanticColor::Muted)
+                    },
+                )),
+                action_hint_line(state, &[("Enter", "Use"), ("Esc", "Back")]),
+            ]),
+            rows[2],
+        );
+        frame.set_cursor_position(Position::new(
+            rows[1]
+                .x
+                .saturating_add(7)
+                .saturating_add(viewport.cursor_column as u16)
+                .min(rows[1].right().saturating_sub(1)),
+            rows[1].y,
+        ));
+        return;
+    }
+
+    let lines = (0..picker.option_count())
+        .map(|index| {
+            let selected = index == picker.selected();
+            let base = selection_style(state, selected);
+            Line::from(vec![
+                Span::styled(if selected { "▌ " } else { "  " }, base),
+                Span::styled(
+                    picker.option_label(index),
+                    base.add_modifier(Modifier::BOLD),
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), rows[1]);
+    frame.render_widget(
+        Paragraph::new(action_hint_line(
+            state,
+            &[("Enter", "Use"), ("Esc", "Back")],
+        )),
+        rows[2],
+    );
+}
+
 fn form_field_label(field: ProviderFormField) -> &'static str {
     match field {
         ProviderFormField::DisplayName => "Provider name",
@@ -361,6 +471,7 @@ fn form_field_label(field: ProviderFormField) -> &'static str {
         ProviderFormField::BaseUrl => "Base URL",
         ProviderFormField::ApiKey => "API key",
         ProviderFormField::Model => "Initial model",
+        ProviderFormField::ReasoningEffort => "Thinking mode",
         ProviderFormField::Save => "Save provider",
     }
 }

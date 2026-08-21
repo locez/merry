@@ -1,21 +1,19 @@
 use crate::cli_error::CliError;
 use crate::coding::ProcessExecutionMode;
 use crate::config::{MerryConfig, XdgPaths};
+use crate::config::{ProviderAlias, derive_provider_alias};
 use crate::provider_management::{
     ProviderDiscoveryDraft, ProviderManagementError, ProviderManagementService,
 };
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
-use crate::{
-    config::{ProviderAlias, derive_provider_alias},
-    provider_management::ProviderDraft,
-};
 use crossterm::event::KeyCode;
 use input_history_store::InputHistoryStore;
 use keymap::Keymap;
 use preferences::{TuiPreferences, TuiPreferencesStore, TuiSettingsDefaults};
 use projector::TuiProjector;
 use provider_overlay::{
-    ModelListItem, ModelPickerTarget, ProviderFormSeed, ProviderListItem, ProviderOverlayAction,
+    ModelListItem, ModelPickerTarget, ProviderDraftMode, ProviderFormSeed, ProviderListItem,
+    ProviderOverlayAction,
 };
 use session_list::TuiSessionStore;
 use session_picker::SessionPickerSelection;
@@ -49,6 +47,8 @@ mod preferences;
 mod projector;
 mod provider_overlay;
 mod provider_render;
+mod provider_selection;
+mod reasoning_picker;
 mod render;
 mod runtime;
 mod session_list;
@@ -277,6 +277,15 @@ async fn run_provider_setup(
                                 state.back_overlay();
                                 continue;
                             }
+                            overlay::OverlayKeyResult::Back
+                                if matches!(
+                                    state.overlay(),
+                                    Some(overlay::Overlay::ReasoningPicker(_))
+                                ) =>
+                            {
+                                state.back_overlay();
+                                continue;
+                            }
                             overlay::OverlayKeyResult::Back => return Ok(None),
                             overlay::OverlayKeyResult::Provider(action) => action,
                             _ => ProviderOverlayAction::Consumed,
@@ -335,6 +344,7 @@ async fn run_provider_setup(
                                         protocol: editable.protocol,
                                         base_url: editable.base_url,
                                         model: editable.default_model.as_str().to_owned(),
+                                        reasoning_effort: editable.reasoning_effort,
                                     },
                                     used,
                                 );
@@ -429,40 +439,25 @@ async fn run_provider_setup(
                                     continue;
                                 }
                                 preferences
-                                    .set_model_for_provider(alias.as_str(), None)
+                                    .clear_provider_state(alias.as_str())
                                     .map_err(crate::cli_error::unexpected)?;
+                                preferences_store
+                                    .save(&preferences)
+                                    .await
+                                    .map_err(crate::cli_error::unexpected)?;
+                                state.replace_preferences(preferences.clone());
                                 open_setup_provider_manager(state, provider_management)?;
                             }
                             ProviderOverlayAction::SaveProvider(values) => {
-                                let alias = match ProviderAlias::new(values.alias.trim()) {
-                                    Ok(alias) => alias,
+                                let (alias, model, draft) =
+                                    match values.to_draft(ProviderDraftMode::Create) {
+                                    Ok(values) => values,
                                     Err(error) => {
                                         state.set_provider_overlay_error(error.to_string());
                                         continue;
                                     }
                                 };
-                                let model = match merry_llm::ModelName::new(values.model.trim()) {
-                                    Ok(model) => model,
-                                    Err(error) => {
-                                        state.set_provider_overlay_error(error.to_string());
-                                        continue;
-                                    }
-                                };
-                                let draft = match ProviderDraft::new(
-                                    values.display_name.trim(),
-                                    alias.clone(),
-                                    values.kind,
-                                    values.protocol,
-                                    values.base_url.trim(),
-                                    &values.api_key,
-                                    model.clone(),
-                                ) {
-                                    Ok(draft) => draft,
-                                    Err(error) => {
-                                        state.set_provider_overlay_error(error.to_string());
-                                        continue;
-                                    }
-                                };
+                                let reasoning_effort = draft.reasoning_effort().cloned();
                                 if let Err(error) = provider_management.save_provider(draft).await {
                                     state.set_provider_overlay_error(error.to_string());
                                     continue;
@@ -470,6 +465,12 @@ async fn run_provider_setup(
                                 preferences.provider = Some(alias.as_str().to_owned());
                                 preferences
                                     .set_model_for_provider(alias.as_str(), Some(model.as_str()))
+                                    .map_err(crate::cli_error::unexpected)?;
+                                preferences
+                                    .set_reasoning_effort_for_provider(
+                                        alias.as_str(),
+                                        reasoning_effort,
+                                    )
                                     .map_err(crate::cli_error::unexpected)?;
                                 preferences_store
                                     .save(&preferences)
@@ -483,32 +484,9 @@ async fn run_provider_setup(
                             } => {
                                 let original_alias = ProviderAlias::new(&original_alias)
                                     .map_err(crate::cli_error::unexpected)?;
-                                let alias = match ProviderAlias::new(values.alias.trim()) {
-                                    Ok(alias) => alias,
-                                    Err(error) => {
-                                        state.set_provider_overlay_error(error.to_string());
-                                        continue;
-                                    }
-                                };
-                                let model = match merry_llm::ModelName::new(values.model.trim()) {
-                                    Ok(model) => model,
-                                    Err(error) => {
-                                        state.set_provider_overlay_error(error.to_string());
-                                        continue;
-                                    }
-                                };
-                                let api_key = (!values.api_key.trim().is_empty())
-                                    .then(|| values.api_key.trim());
-                                let draft = match ProviderDraft::for_update(
-                                    values.display_name.trim(),
-                                    alias.clone(),
-                                    values.kind,
-                                    values.protocol,
-                                    values.base_url.trim(),
-                                    api_key,
-                                    model.clone(),
-                                ) {
-                                    Ok(draft) => draft,
+                                let (_, _, draft) =
+                                    match values.to_draft(ProviderDraftMode::Update) {
+                                    Ok(values) => values,
                                     Err(error) => {
                                         state.set_provider_overlay_error(error.to_string());
                                         continue;
@@ -521,31 +499,16 @@ async fn run_provider_setup(
                                     state.set_provider_overlay_error(error.to_string());
                                     continue;
                                 }
-                                preferences
-                                    .set_model_for_provider(
-                                        alias.as_str(),
-                                        Some(model.as_str()),
-                                    )
-                                    .map_err(crate::cli_error::unexpected)?;
-                                preferences_store
-                                    .save(&preferences)
-                                    .await
-                                    .map_err(crate::cli_error::unexpected)?;
+                                // Provider defaults belong to the config store. The
+                                // per-provider TUI model/thinking selection is a
+                                // separate preference and must survive edits to the
+                                // URL, credentials, or config defaults.
                                 open_setup_provider_manager(state, provider_management)?;
                             }
-                            ProviderOverlayAction::SelectModel {
-                                alias,
-                                model,
-                                target: ModelPickerTarget::ActiveProvider,
-                            } => {
+                            ProviderOverlayAction::SelectProvider(alias) => {
                                 let alias = ProviderAlias::new(&alias)
                                     .map_err(crate::cli_error::unexpected)?;
-                                let model = merry_llm::ModelName::new(&model)
-                                    .map_err(crate::cli_error::unexpected)?;
                                 preferences.provider = Some(alias.as_str().to_owned());
-                                preferences
-                                    .set_model_for_provider(alias.as_str(), Some(model.as_str()))
-                                    .map_err(crate::cli_error::unexpected)?;
                                 preferences_store
                                     .save(&preferences)
                                     .await
@@ -554,12 +517,51 @@ async fn run_provider_setup(
                                 return Ok(Some(preferences));
                             }
                             ProviderOverlayAction::SelectModel {
+                                alias,
                                 model,
+                                target,
+                            } => {
+                                if !state.open_reasoning_picker(alias, model, target) {
+                                    state.set_provider_overlay_error(
+                                        "model selection is no longer available for reasoning mode selection"
+                                            .to_owned(),
+                                    );
+                                }
+                            }
+                            ProviderOverlayAction::SelectReasoning {
+                                alias,
+                                model,
+                                reasoning_effort,
+                                target: ModelPickerTarget::ActiveProvider,
+                            } => {
+                                let alias = ProviderAlias::new(&alias)
+                                    .map_err(crate::cli_error::unexpected)?;
+                                preferences.provider = Some(alias.as_str().to_owned());
+                                preferences
+                                    .set_model_and_reasoning_for_provider(
+                                        alias.as_str(),
+                                        &model,
+                                        reasoning_effort,
+                                    )
+                                    .map_err(crate::cli_error::unexpected)?;
+                                preferences_store
+                                    .save(&preferences)
+                                    .await
+                                    .map_err(crate::cli_error::unexpected)?;
+                                cancel_setup_discovery(&mut discovery_token);
+                                return Ok(Some(preferences));
+                            }
+                            ProviderOverlayAction::SelectReasoning {
+                                model,
+                                reasoning_effort,
                                 target: ModelPickerTarget::ProviderForm,
                                 ..
                             } => {
                                 cancel_setup_discovery(&mut discovery_token);
-                                if !state.select_provider_form_model(&model) {
+                                if !state.select_provider_form_model_with_reasoning(
+                                    &model,
+                                    reasoning_effort.as_str(),
+                                ) {
                                     state.set_provider_overlay_error(
                                         "provider form is no longer available for the selected model"
                                             .to_owned(),
@@ -591,18 +593,22 @@ fn open_setup_provider_manager(
     state: &mut TuiState,
     provider_management: &ProviderManagementService,
 ) -> Result<(), CliError> {
+    let preferences = state.preferences().clone();
     let items = provider_management
         .profiles()
         .map_err(crate::cli_error::unexpected)?
         .into_iter()
         .map(|profile| {
+            let model = preferences
+                .model_for_provider(profile.alias().as_str())
+                .or_else(|| profile.default_model().map(merry_llm::ModelName::as_str));
             ProviderListItem::new(
                 profile.alias().as_str(),
                 profile.display_name(),
                 profile.kind(),
                 profile.source(),
                 profile.protocol(),
-                profile.default_model().map(merry_llm::ModelName::as_str),
+                model,
             )
         })
         .collect::<Vec<_>>();

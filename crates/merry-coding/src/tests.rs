@@ -649,7 +649,7 @@ async fn parent_builder_passes_policy_to_a_real_child_runtime() {
     .expect("approval role should be valid");
     let primary = run_parent_child_policy(
         "coding-parent-child-policy",
-        CodingPermissionPolicy::required(),
+        CodingPermissionPolicy::model_only(),
         vec![approval_role],
     )
     .await;
@@ -659,6 +659,100 @@ async fn parent_builder_passes_policy_to_a_real_child_runtime() {
         "child-approval"
     );
     assert!(primary.recorded_requests().len() >= 3);
+}
+
+#[test]
+fn process_boundary_policy_rejects_missing_host_admission() {
+    let error = match CodingPermissionPolicy::for_process_boundary(
+        CodingProcessBoundary::Unrestricted,
+        CodingTrustMode::Reviewed,
+        NoSandboxReviewMode::Model,
+        None,
+    ) {
+        Ok(_) => panic!("headless host fallback must be explicit"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        CodingPermissionPolicyError::HostAdmissionUnavailable {
+            boundary: CodingProcessBoundary::Unrestricted
+        }
+    ));
+}
+
+#[test]
+fn process_boundary_policy_uses_model_then_host_only_for_interactive_no_sandbox() {
+    let host = CountingAdmission::approving();
+    let policy = CodingPermissionPolicy::for_process_boundary(
+        CodingProcessBoundary::Unrestricted,
+        CodingTrustMode::Reviewed,
+        NoSandboxReviewMode::Model,
+        Some(Arc::new(host)),
+    )
+    .expect("host fallback policy should build");
+
+    assert!(matches!(
+        policy,
+        CodingPermissionPolicy::ModelThenHostFallback { .. }
+    ));
+}
+
+#[test]
+fn process_boundary_policy_defaults_to_host_review_for_interactive_no_sandbox() {
+    let host = CountingAdmission::approving();
+    let policy = CodingPermissionPolicy::for_process_boundary(
+        CodingProcessBoundary::Unrestricted,
+        CodingTrustMode::Reviewed,
+        NoSandboxReviewMode::Host,
+        Some(Arc::new(host)),
+    )
+    .expect("host review policy should build");
+
+    assert!(matches!(
+        policy,
+        CodingPermissionPolicy::HostDecisionOnly { .. }
+    ));
+}
+
+#[test]
+fn process_boundary_policy_keeps_outer_and_inner_model_only() {
+    let host = CountingAdmission::approving();
+    let policy = CodingPermissionPolicy::for_process_boundary(
+        CodingProcessBoundary::OuterAndInner,
+        CodingTrustMode::Reviewed,
+        NoSandboxReviewMode::Model,
+        Some(Arc::new(host)),
+    )
+    .expect("outer and inner model-only policy should build");
+
+    assert!(matches!(policy, CodingPermissionPolicy::Required));
+}
+
+#[test]
+fn outer_and_inner_model_only_does_not_need_a_host_admission_source() {
+    let policy = CodingPermissionPolicy::for_process_boundary(
+        CodingProcessBoundary::OuterAndInner,
+        CodingTrustMode::Reviewed,
+        NoSandboxReviewMode::Model,
+        None,
+    )
+    .expect("outer and inner should remain model-only without host fallback");
+
+    assert!(matches!(policy, CodingPermissionPolicy::Required));
+}
+
+#[test]
+fn fully_trusted_process_policy_does_not_need_a_host_admission_source() {
+    let policy = CodingPermissionPolicy::for_process_boundary(
+        CodingProcessBoundary::Unrestricted,
+        CodingTrustMode::FullyTrusted,
+        NoSandboxReviewMode::Host,
+        None,
+    )
+    .expect("fully trusted mode should not need a reviewer");
+
+    assert!(matches!(policy, CodingPermissionPolicy::FullyTrusted));
 }
 
 #[tokio::test(flavor = "current_thread")]
