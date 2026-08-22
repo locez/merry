@@ -139,10 +139,21 @@ and checkpoints. Without `--session-id` the run generates its own id, which the
 sessions carry no TUI metadata and so do not appear in the `merry resume`
 picker; address them by id.
 
+`--session-id` starts a session, so it refuses an id the store already holds
+(exit 2) rather than replacing that session's saved state. Continue an existing
+session with `--resume <session-id>` instead.
+
 A `TASK` of `-` reads the task text from stdin. Prefer it for generated or
 long prompts: an argv task is visible to every process listing on the host and
 is bounded by the kernel's per-argument limit. Empty or whitespace-only stdin
 is rejected as a usage error (exit 2).
+
+Reading the task from stdin consumes that stream, so `merry run -` answers
+permission review on the controlling terminal rather than on stdin. Piping
+approval answers alongside the task does not work: they would be read as part
+of the task. When the process has no controlling terminal, review has no way to
+ask and each request is denied with that reason on stderr, so grant the
+capabilities up front or pass the task on argv when a piped run needs approvals.
 
 TUI and `run` use outer+inner bubblewrap automatically. `--inner-sandbox`
 selects the Codex-compatible single inner sandbox, while `--no-sandbox`

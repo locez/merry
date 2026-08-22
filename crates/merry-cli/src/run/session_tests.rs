@@ -1,11 +1,12 @@
 use super::{
-    Args, CliError, RunExitStatus, RunSession, STDIN_TASK, default_run_session_id, resolve_task,
-    write_agent_loop_output,
+    Args, CliError, RunExitStatus, RunSession, STDIN_TASK, default_run_session_id,
+    refuse_reused_session_id, resolve_task, review_input_channel_for_task, write_agent_loop_output,
 };
 use crate::coding::{
     ActionProcessBackend, CodingSubagentsConfig, HeadlessCodingRuntimeInput, build_headless_coding,
     fixed_process_backend, resume_headless_coding,
 };
+use crate::headless_review::ReviewInputChannel;
 use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
 use clap::Parser;
 use merry::profiles::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
@@ -13,7 +14,10 @@ use merry_core::SessionId;
 use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelProvider, ModelResponse};
 use merry_process::ProcessSession;
 use merry_runtime::{AgentLoopConfig, ProcessRunner, StepContext, StepInput};
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[test]
 fn default_run_session_id_is_generated() {
@@ -261,4 +265,75 @@ async fn a_saved_run_session_resumes_with_its_recorded_transcript() {
         )),
         "the resumed session should keep the first answer: {transcript:?}"
     );
+}
+
+#[test]
+fn a_stdin_task_moves_permission_review_off_stdin() {
+    assert_eq!(
+        review_input_channel_for_task(STDIN_TASK),
+        ReviewInputChannel::ControllingTerminal,
+        "a `-` task consumes stdin, so review cannot also read it"
+    );
+    assert_eq!(
+        review_input_channel_for_task("fix the failing tests"),
+        ReviewInputChannel::Stdin,
+        "an argv task leaves stdin free for review answers"
+    );
+}
+
+/// Writes committed state for `session_id` and returns its `state.json` path.
+fn save_existing_session_state(sessions_dir: &Path, session_id: &str, bytes: &[u8]) -> PathBuf {
+    let session_dir = sessions_dir.join(session_id);
+    std::fs::create_dir_all(&session_dir).expect("session dir should be created");
+    let state_path = session_dir.join("state.json");
+    std::fs::write(&state_path, bytes).expect("existing session state should be written");
+    state_path
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_new_run_refuses_a_session_id_that_already_has_saved_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join("sessions");
+    let state_path = save_existing_session_state(&sessions_dir, "already-saved", b"existing state");
+    let store = merry_runtime::FileSessionStore::new(&sessions_dir);
+    let session_id = SessionId::new("already-saved").expect("valid session id");
+
+    let error = refuse_reused_session_id(&RunSession::New(session_id), &store)
+        .await
+        .expect_err("a new run must not take over a saved session id");
+
+    let message = usage_message(error);
+    assert!(
+        message.contains("--resume already-saved"),
+        "the refusal should point at the way to continue the session: {message}"
+    );
+    assert_eq!(
+        std::fs::read(&state_path).expect("saved state should still be readable"),
+        b"existing state",
+        "a refused run must leave the saved session untouched"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_new_run_accepts_a_session_id_the_store_does_not_hold() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = merry_runtime::FileSessionStore::new(temp.path().join("sessions"));
+    let session_id = SessionId::new("never-saved").expect("valid session id");
+
+    refuse_reused_session_id(&RunSession::New(session_id), &store)
+        .await
+        .expect("an unused session id should start a new run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resuming_a_saved_session_id_is_not_a_collision() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_dir = temp.path().join("sessions");
+    save_existing_session_state(&sessions_dir, "resume-me", b"existing state");
+    let store = merry_runtime::FileSessionStore::new(&sessions_dir);
+    let session_id = SessionId::new("resume-me").expect("valid session id");
+
+    refuse_reused_session_id(&RunSession::Resumed(session_id), &store)
+        .await
+        .expect("resuming is how an existing session id is meant to be reused");
 }

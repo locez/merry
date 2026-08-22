@@ -6,7 +6,7 @@ use crate::coding::{
     resume_headless_coding_composition_with_policy,
 };
 use crate::config::MerryConfig;
-use crate::headless_review::HeadlessPermissionReviewer;
+use crate::headless_review::{HeadlessPermissionReviewer, ReviewInputChannel};
 use crate::mcp_tools::discover_configured_mcp_tools;
 use crate::provider_config::{
     RuntimePrimaryProviderConfig, RuntimeProviderBundle, runtime_provider_bundle_from_config,
@@ -65,6 +65,10 @@ impl SettledRun {
 
 /// `TASK` value that reads the task text from stdin instead of argv.
 const STDIN_TASK: &str = "-";
+
+/// Recorded against every tool call a settled run never produced a result for.
+const ABANDONED_TOOL_CALL_REASON: &str =
+    "the headless run settled before this tool call produced a result";
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct Args {
@@ -126,6 +130,28 @@ fn parse_session_id(flag: &str, value: &str) -> Result<SessionId, CliError> {
     SessionId::new(value).map_err(|error| usage_error(format!("{flag}: {error}")))
 }
 
+/// Refuses a new run that would take over an id the store already holds.
+///
+/// Saving a session is an atomic replace of its `state.json`, so starting a new
+/// run under an existing id destroys that session's transcript, ledger,
+/// artifacts, and checkpoints with nothing left to resume. A typo or a reused
+/// id has to fail here, before the run consumes its task or starts a runtime.
+async fn refuse_reused_session_id(
+    session: &RunSession,
+    store: &FileSessionStore,
+) -> Result<(), CliError> {
+    let RunSession::New(id) = session else {
+        return Ok(());
+    };
+    if store.contains_session(id).await.map_err(unexpected)? {
+        return Err(usage_error(format!(
+            "session {id} already has saved state; pass --resume {id} to continue it, \
+             or choose a different --session-id"
+        )));
+    }
+    Ok(())
+}
+
 /// Reads the task from argv, or from `reader` when `TASK` is `-`.
 ///
 /// Reading the task from stdin keeps a large task off argv, where it would be
@@ -150,6 +176,19 @@ where
     Ok(text)
 }
 
+/// Chooses the channel that answers permission review for a run.
+///
+/// An argv task leaves stdin untouched, so review keeps reading it. A `-` task
+/// consumes stdin to end-of-file before the runtime starts, so review must ask
+/// somewhere else or report that it cannot ask at all.
+fn review_input_channel_for_task(task: &str) -> ReviewInputChannel {
+    if task == STDIN_TASK {
+        ReviewInputChannel::ControllingTerminal
+    } else {
+        ReviewInputChannel::Stdin
+    }
+}
+
 pub(crate) async fn run(
     args: &Args,
     sandbox_child_handoff: Option<SandboxChildHandoff>,
@@ -158,6 +197,8 @@ pub(crate) async fn run(
     fully_trusted: bool,
 ) -> Result<RunExitStatus, CliError> {
     let session = RunSession::from_args(args)?;
+    let session_store = FileSessionStore::default_store().map_err(unexpected)?;
+    refuse_reused_session_id(&session, &session_store).await?;
     let task = resolve_task(&args.task, tokio::io::stdin()).await?;
     let Some(_admission) =
         coding_agent_process_admission(sandbox_child_handoff, process_execution_mode).await
@@ -179,7 +220,6 @@ pub(crate) async fn run(
         process_execution_mode,
     )?;
     let extra_tools = discover_configured_mcp_tools(merry_config).await?;
-    let session_store = FileSessionStore::default_store().map_err(unexpected)?;
     let runtime_input = HeadlessCodingRuntimeInput {
         session_id: session.id().as_str(),
         root: &root,
@@ -231,7 +271,7 @@ pub(crate) async fn run(
     let input = StepInput::user_text(&task).map_err(unexpected)?;
     let context = StepContext::default()
         .with_generation_config(generation_config(merry_config).map_err(unexpected)?);
-    let review_task = headless_reviewer.start();
+    let review_task = headless_reviewer.start(review_input_channel_for_task(&args.task));
     run_agent_loop_with_persistence(
         &runtime,
         input,
@@ -320,19 +360,41 @@ async fn finish_settled_run(
         runtime_result,
         presentation_result,
     } = settled;
+    persist_settled_session(runtime, session_store, session_id).await?;
+    let status = runtime_result?;
+    presentation_result?;
+    review_result?;
+    Ok(status)
+}
+
+/// Records a result for every tool call the run left pending, then saves.
+///
+/// A run that fails mid-step settles with its tool call still unresolved, and
+/// the session store refuses that state because it cannot be resumed. Giving
+/// those calls a durable failed result is what makes a failed run's partial
+/// transcript resumable on the shipped path, rather than only under a reviewer
+/// that happens to submit results of its own.
+async fn persist_settled_session(
+    runtime: &Runtime,
+    session_store: FileSessionStore,
+    session_id: &SessionId,
+) -> Result<(), CliError> {
+    runtime
+        .abandon_pending_tool_calls(ABANDONED_TOOL_CALL_REASON)
+        .await
+        .map_err(|error| {
+            unexpected(format!(
+                "run finished but session {session_id} could not be made resume-safe: {error}"
+            ))
+        })?;
     runtime
         .save_session_to(session_store)
         .await
         .map_err(|error| {
             unexpected(format!(
-                "run finished but session {} could not be saved: {error}",
-                session_id
+                "run finished but session {session_id} could not be saved: {error}"
             ))
-        })?;
-    let status = runtime_result?;
-    presentation_result?;
-    review_result?;
-    Ok(status)
+        })
 }
 
 fn default_run_session_id() -> merry_core::SessionId {

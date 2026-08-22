@@ -313,6 +313,22 @@ impl FileSessionStore {
         &self.sessions_dir
     }
 
+    /// Reports whether this store already holds committed state for a session id.
+    ///
+    /// Saving is an atomic replace of `state.json`, so a new run that reuses an
+    /// id would silently overwrite that session's transcript, ledger,
+    /// artifacts, and checkpoints. Callers that start a session check this
+    /// first and refuse the id instead of destroying resumable state.
+    pub async fn contains_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionStoreError> {
+        let path = self.state_path(session_id);
+        tokio::fs::try_exists(&path)
+            .await
+            .map_err(|source| io_error(path, source))
+    }
+
     pub(crate) fn session_dir(&self, session_id: &SessionId) -> PathBuf {
         self.sessions_dir.join(session_id.as_str())
     }
@@ -811,5 +827,46 @@ mod tests {
             .discard()
             .await
             .expect("second staged state discards");
+    }
+
+    #[tokio::test]
+    async fn contains_session_reports_only_committed_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = FileSessionStore::new(temp.path());
+        let session_id = SessionId::new("session-store-collision").expect("valid session id");
+
+        assert!(
+            !store
+                .contains_session(&session_id)
+                .await
+                .expect("an empty store should be readable"),
+            "an unused session id has no saved state"
+        );
+
+        let staged = store
+            .stage_state_bytes(&session_id, br#"{"format_version":1,"value":"staged"}"#)
+            .await
+            .expect("state should stage");
+        assert!(
+            !store
+                .contains_session(&session_id)
+                .await
+                .expect("a staged store should be readable"),
+            "staged state is not yet a session another run could destroy"
+        );
+
+        staged
+            .commit()
+            .await
+            .expect("staged state should commit")
+            .require_durable()
+            .expect("commit should be durable");
+        assert!(
+            store
+                .contains_session(&session_id)
+                .await
+                .expect("a committed store should be readable"),
+            "committed state must be reported so a new run cannot replace it"
+        );
     }
 }

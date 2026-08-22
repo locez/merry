@@ -1,22 +1,20 @@
 use super::{HeadlessRunPersistence, RunExitStatus, run_agent_loop_with_persistence};
-use crate::cli_error::CliError;
+use crate::cli_error::{CliError, unexpected};
 use crate::coding::{
     ActionProcessBackend, CodingSubagentsConfig, HeadlessCodingRuntimeInput, build_headless_coding,
     fixed_process_backend, resume_headless_coding,
 };
+use crate::headless_review::{HeadlessPermissionReviewer, ReviewInputChannel};
 use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
 use merry::profiles::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
-use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, SessionId, ToolCallResult, ToolInputSchema,
-    ToolName, ToolOutput, ToolSpec,
-};
+use merry_core::{SessionId, ToolInputSchema, ToolName, ToolOutput, ToolSpec};
 use merry_llm::{
     FinishReason, ModelError, ModelEvent, ModelOutput, ModelProvider, ModelResponse, ModelToolCall,
     ModelToolCallId, ToolArguments,
 };
 use merry_process::ProcessSession;
 use merry_runtime::{
-    AgentLoopConfig, ArtifactContent, FileSessionStore, ProcessRunner, RegisteredTool, Runtime,
+    AgentLoopConfig, FileSessionStore, ProcessRunner, RegisteredTool, Runtime,
     SessionTranscriptItem, StepContext, StepInput, ToolExecutionContext, ToolExecutionError,
     ToolExecutor, ToolExecutorFuture,
 };
@@ -170,28 +168,23 @@ fn assert_transcript_contains_user_input(transcript: &[SessionTranscriptItem], e
     );
 }
 
-async fn resolve_pending_after_runtime_error(runtime: &Runtime) -> Result<(), CliError> {
-    let pending = runtime.pending_tool_calls().await;
-    let [call] = pending.as_slice() else {
-        panic!("runtime error should retain one pending tool call: {pending:?}");
-    };
-    let artifact = ArtifactRef::new(
-        ArtifactId::new("reviewer-runtime-recovery").expect("valid artifact id"),
-        ArtifactKind::Text,
+/// Text settlement records for a tool call the run never got a result for.
+const ABANDONED_TOOL_RESULT_TEXT: &str = concat!(
+    "Tool execution was abandoned: the headless run settled before this tool ",
+    "call produced a result"
+);
+
+fn assert_transcript_records_abandoned_tool_call(transcript: &[SessionTranscriptItem]) {
+    assert!(
+        transcript.iter().any(|item| matches!(
+            item,
+            SessionTranscriptItem::ToolResult {
+                output: Some(ToolOutput::Text { text }),
+                ..
+            } if text == ABANDONED_TOOL_RESULT_TEXT
+        )),
+        "settlement should record why the pending call never resolved: {transcript:?}"
     );
-    let diagnostic = ErrorInfo::new(
-        "reviewer_runtime_recovery",
-        "reviewer resolved a pending call after runtime settlement failed",
-    )
-    .expect("valid diagnostic");
-    runtime
-        .submit_tool_result(
-            ToolCallResult::failed(call.id().clone(), artifact, diagnostic),
-            ArtifactContent::text("executor outage was recorded for resume"),
-        )
-        .await
-        .expect("reviewer settlement should make the session resume-safe");
-    Ok(())
 }
 
 struct FailingWriter {
@@ -242,7 +235,6 @@ async fn runtime_settlement_error_is_persisted_and_partial_state_can_resume() {
         StepInput::user_text("retain this partial task").expect("valid input"),
         FailingWriter::new(io::ErrorKind::Other, "injected runtime output failure"),
         async {
-            resolve_pending_after_runtime_error(&runtime).await?;
             Err(CliError::Unexpected(
                 "injected runtime reviewer failure".to_owned(),
             ))
@@ -268,13 +260,7 @@ async fn runtime_settlement_error_is_persisted_and_partial_state_can_resume() {
     drop(runtime);
     let transcript = resumed_transcript(&session_id, &workspace, store).await;
     assert_transcript_contains_user_input(&transcript, "retain this partial task");
-    assert!(transcript.iter().any(|item| matches!(
-        item,
-        SessionTranscriptItem::ToolResult {
-            output: Some(ToolOutput::Text { text }),
-            ..
-        } if text == "executor outage was recorded for resume"
-    )));
+    assert_transcript_records_abandoned_tool_call(&transcript);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -299,7 +285,7 @@ async fn save_error_precedes_runtime_settlement_error() {
         &runtime,
         StepInput::user_text("save failure must win").expect("valid input"),
         &mut output,
-        resolve_pending_after_runtime_error(&runtime),
+        async { Ok(()) },
         HeadlessRunPersistence {
             loop_config: AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS)
                 .expect("valid config"),
@@ -557,4 +543,59 @@ async fn save_error_precedes_broken_pipe_and_reviewer_errors() {
         }
         other => panic!("save failure must not become BrokenPipe success, got {other:?}"),
     }
+}
+
+/// The shipped orchestration path, end to end: the real permission reviewer is
+/// the only thing that settles alongside the runtime.
+///
+/// The production reviewer only cancels and joins its task on shutdown; it
+/// never submits a tool result. A run that fails mid-call is therefore only
+/// resumable if settlement itself resolves what the runtime left pending.
+#[tokio::test(flavor = "current_thread")]
+async fn production_reviewer_shutdown_leaves_a_resumable_session() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace should be created");
+    let store = FileSessionStore::new(temp.path().join("sessions"));
+    let session_id = SessionId::new("production-reviewer-shutdown").expect("valid session id");
+    let tool_name = "production_shutdown_failure";
+    let runtime = build_runtime_with_tools(
+        &session_id,
+        &workspace,
+        Arc::new(infrastructure_error_provider(tool_name)),
+        vec![infrastructure_error_tool(tool_name)],
+    );
+    let reviewer = HeadlessPermissionReviewer::new();
+    // Production hands this source to the permission policy, which keeps the
+    // review task alive until shutdown cancels it.
+    let _source = reviewer.source();
+    let review_task = reviewer.start(ReviewInputChannel::Stdin);
+
+    let result = run_agent_loop_with_persistence(
+        &runtime,
+        StepInput::user_text("keep this task resumable").expect("valid input"),
+        Vec::new(),
+        async { review_task.finish().await.map_err(unexpected) },
+        HeadlessRunPersistence {
+            loop_config: AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS)
+                .expect("valid config"),
+            context: StepContext::default(),
+            events_jsonl: false,
+            session_store: store.clone(),
+            session_id: &session_id,
+        },
+    )
+    .await;
+    match result {
+        Err(CliError::Unexpected(message)) => assert!(
+            message.contains("temporary executor outage"),
+            "the runtime failure should survive a successful save: {message}"
+        ),
+        other => panic!("the runtime failure should be reported, got {other:?}"),
+    }
+
+    drop(runtime);
+    let transcript = resumed_transcript(&session_id, &workspace, store).await;
+    assert_transcript_contains_user_input(&transcript, "keep this task resumable");
+    assert_transcript_records_abandoned_tool_call(&transcript);
 }
