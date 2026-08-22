@@ -9,6 +9,28 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Where a headless run reads permission-review answers from.
+///
+/// `merry run -` reads the task from stdin to end-of-file, so stdin can no
+/// longer carry answers: reusing it would read that end-of-file and silently
+/// deny every request. Those runs answer on the controlling terminal instead,
+/// and deny with an explicit reason when the process has none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewInputChannel {
+    Stdin,
+    ControllingTerminal,
+}
+
+/// Reason recorded when a run has no channel to answer permission review on.
+const NO_REVIEW_INPUT_REASON: &str =
+    "headless permission review had no input channel; defaulting to deny";
+
+/// Operator-facing note explaining why a request was denied unanswered.
+const NO_REVIEW_INPUT_NOTICE: &str = concat!(
+    "\nNo input channel for permission review: the task was read from stdin and ",
+    "no controlling terminal is available. Denying.\n"
+);
+
 pub(crate) struct HeadlessPermissionReviewer {
     source: Arc<ChannelPermissionAdmissionSource>,
     requests: mpsc::Receiver<PermissionReviewRequest>,
@@ -34,7 +56,7 @@ impl HeadlessPermissionReviewer {
         Arc::clone(&self.source)
     }
 
-    pub(crate) fn start(self) -> HeadlessPermissionReviewTask {
+    pub(crate) fn start(self, channel: ReviewInputChannel) -> HeadlessPermissionReviewTask {
         let Self {
             requests,
             cancellation,
@@ -42,7 +64,9 @@ impl HeadlessPermissionReviewer {
         } = self;
         let task_cancellation = cancellation.clone();
         let handle = tokio::spawn(async move {
-            run_headless_permission_review(requests, task_cancellation).await
+            let input = open_review_input(channel).await;
+            run_headless_permission_review(requests, input, tokio::io::stderr(), task_cancellation)
+                .await
         });
         HeadlessPermissionReviewTask {
             cancellation,
@@ -63,12 +87,36 @@ impl HeadlessPermissionReviewTask {
     }
 }
 
-async fn run_headless_permission_review(
+/// Opens the reader that answers permission reviews for this run.
+///
+/// A run whose task came from stdin has already consumed that stream, so it
+/// falls back to the controlling terminal. `None` means review has no way to
+/// ask, which is reported per request rather than silently defaulting to deny.
+async fn open_review_input(
+    channel: ReviewInputChannel,
+) -> Option<Box<dyn AsyncBufRead + Unpin + Send>> {
+    match channel {
+        ReviewInputChannel::Stdin => Some(Box::new(BufReader::new(tokio::io::stdin()))),
+        ReviewInputChannel::ControllingTerminal => tokio::fs::File::open("/dev/tty")
+            .await
+            .ok()
+            .map(|terminal| {
+                Box::new(BufReader::new(terminal)) as Box<dyn AsyncBufRead + Unpin + Send>
+            }),
+    }
+}
+
+async fn run_headless_permission_review<R, W>(
     mut requests: mpsc::Receiver<PermissionReviewRequest>,
+    mut input: Option<R>,
+    output: W,
     cancellation: CancellationToken,
-) -> io::Result<()> {
-    let mut input = BufReader::new(tokio::io::stdin());
-    let mut output = BufWriter::new(tokio::io::stderr());
+) -> io::Result<()>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut output = BufWriter::new(output);
 
     loop {
         let Some(request) = (tokio::select! {
@@ -82,13 +130,13 @@ async fn run_headless_permission_review(
         if request.is_cancelled() {
             continue;
         }
-        review_request(request, &mut input, &mut output, &cancellation).await?;
+        review_request(request, input.as_mut(), &mut output, &cancellation).await?;
     }
 }
 
 async fn review_request<R, W>(
     request: PermissionReviewRequest,
-    input: &mut R,
+    input: Option<&mut R>,
     output: &mut W,
     cancellation: &CancellationToken,
 ) -> io::Result<()>
@@ -101,7 +149,11 @@ where
         .await?;
     output.flush().await?;
 
-    match read_headless_decision(input, output, cancellation).await? {
+    let decision = match input {
+        Some(input) => read_headless_decision(input, output, cancellation).await?,
+        None => HeadlessDecision::NoInputChannel,
+    };
+    match decision {
         HeadlessDecision::Approve => request
             .approve("approved by headless command-line review")
             .map_err(|error| {
@@ -123,6 +175,15 @@ where
                     "failed to deny headless permission review at input EOF: {error}"
                 ))
             }),
+        HeadlessDecision::NoInputChannel => {
+            output.write_all(NO_REVIEW_INPUT_NOTICE.as_bytes()).await?;
+            output.flush().await?;
+            request.deny(NO_REVIEW_INPUT_REASON).map_err(|error| {
+                io::Error::other(format!(
+                    "failed to deny headless permission review without an input channel: {error}"
+                ))
+            })
+        }
         HeadlessDecision::Cancelled => {
             let _ = request.deny("headless permission review was cancelled");
             Ok(())
@@ -135,6 +196,7 @@ enum HeadlessDecision {
     Approve,
     Deny,
     InputEnded,
+    NoInputChannel,
     Cancelled,
 }
 
@@ -220,10 +282,35 @@ fn format_permission_prompt(request: &PermissionReviewRequest) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{HeadlessDecision, parse_decision, read_headless_decision};
+    use super::{
+        HeadlessDecision, NO_REVIEW_INPUT_REASON, parse_decision, read_headless_decision,
+        review_request,
+    };
+    use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
+    use merry_runtime::{
+        ChannelPermissionAdmissionSource, PermissionAdmissionContext, PermissionAdmissionDecision,
+        PermissionAdmissionSource, PermissionRequest, parse_permission_request,
+    };
     use std::io::Cursor;
+    use std::sync::Arc;
     use tokio::io::BufReader;
     use tokio_util::sync::CancellationToken;
+
+    /// Reader type the no-input-channel case never constructs.
+    type UnusedReader = BufReader<Cursor<Vec<u8>>>;
+
+    fn network_permission_request() -> PermissionRequest {
+        let call = PendingToolCall::new(
+            ToolCallId::new("call-headless-review").expect("valid call id"),
+            ToolName::new("request_permissions").expect("valid tool name"),
+            ToolCallArguments::try_from(serde_json::json!({
+                "requested": { "network": true },
+                "for_action": { "command": "curl https://example.invalid", "cwd": null }
+            }))
+            .expect("valid tool call arguments"),
+        );
+        parse_permission_request(&call).expect("the request should parse")
+    }
 
     #[test]
     fn command_line_decision_defaults_to_deny() {
@@ -271,6 +358,90 @@ mod tests {
                 .await
                 .expect("cancellation should be handled"),
             HeadlessDecision::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn review_without_an_input_channel_denies_and_reports_why() {
+        let (source, mut requests) = ChannelPermissionAdmissionSource::channel(1);
+        let source = Arc::new(source);
+        let cancellation = CancellationToken::new();
+        let review = {
+            let source = Arc::clone(&source);
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                source
+                    .review(
+                        network_permission_request(),
+                        PermissionAdmissionContext::new(cancellation),
+                    )
+                    .await
+            })
+        };
+
+        let request = requests.recv().await.expect("the request should arrive");
+        let mut output = Vec::new();
+        review_request(
+            request,
+            None::<&mut UnusedReader>,
+            &mut output,
+            &cancellation,
+        )
+        .await
+        .expect("review without an input channel should settle the request");
+
+        let decision = review
+            .await
+            .expect("review task should join")
+            .expect("review should resolve");
+        match decision {
+            PermissionAdmissionDecision::Denied(review) => {
+                assert_eq!(review.rationale(), NO_REVIEW_INPUT_REASON);
+            }
+            PermissionAdmissionDecision::Approved(review) => panic!(
+                "an unanswerable request must not be approved: {}",
+                review.rationale()
+            ),
+        }
+        let prompt = String::from_utf8(output).expect("prompt output should be UTF-8");
+        assert!(
+            prompt.contains("No input channel for permission review"),
+            "the operator should be told why the request was denied unanswered: {prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn review_over_an_available_channel_still_approves() {
+        let (source, mut requests) = ChannelPermissionAdmissionSource::channel(1);
+        let source = Arc::new(source);
+        let cancellation = CancellationToken::new();
+        let review = {
+            let source = Arc::clone(&source);
+            let cancellation = cancellation.clone();
+            tokio::spawn(async move {
+                source
+                    .review(
+                        network_permission_request(),
+                        PermissionAdmissionContext::new(cancellation),
+                    )
+                    .await
+            })
+        };
+
+        let request = requests.recv().await.expect("the request should arrive");
+        let mut input = BufReader::new(Cursor::new(b"yes\n".to_vec()));
+        let mut output = Vec::new();
+        review_request(request, Some(&mut input), &mut output, &cancellation)
+            .await
+            .expect("an answered review should settle the request");
+
+        let decision = review
+            .await
+            .expect("review task should join")
+            .expect("review should resolve");
+        assert!(
+            matches!(decision, PermissionAdmissionDecision::Approved(_)),
+            "an answered request should be approved: {decision:?}"
         );
     }
 }
