@@ -120,9 +120,29 @@ target/release/merry run "fix the failing tests"
 # Machine-readable runtime events
 target/release/merry run --events-jsonl "inspect the current failure"
 
+# Read the task from stdin instead of argv
+printf '%s' "$task" | target/release/merry run -
+
+# Name a headless session, then continue it in a later run
+target/release/merry run --session-id migration-1 "start the migration"
+target/release/merry run --resume migration-1 "now update the tests"
+
 # Generate a command plan without executing it
 target/release/merry cmd "find the largest Rust files"
 ```
+
+Every `merry run` saves its session state under
+`$XDG_STATE_HOME/merry/sessions/<session-id>` when the run settles, so a later
+`--resume <session-id>` continues that session's ledger, transcript, artifacts,
+and checkpoints. Without `--session-id` the run generates its own id, which the
+`--events-jsonl` stream reports as `source.session_id` on every event. Headless
+sessions carry no TUI metadata and so do not appear in the `merry resume`
+picker; address them by id.
+
+A `TASK` of `-` reads the task text from stdin. Prefer it for generated or
+long prompts: an argv task is visible to every process listing on the host and
+is bounded by the kernel's per-argument limit. Empty or whitespace-only stdin
+is rejected as a usage error (exit 2).
 
 TUI and `run` use outer+inner bubblewrap automatically. `--inner-sandbox`
 selects the Codex-compatible single inner sandbox, while `--no-sandbox`

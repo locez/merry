@@ -1,8 +1,9 @@
-use crate::cli_error::{CliError, debug_openai_usage_error, stdout_error, unexpected};
+use crate::cli_error::{CliError, debug_openai_usage_error, stdout_error, unexpected, usage_error};
 use crate::coding::{
     CodingPermissionPolicy, CodingTrustMode, HeadlessCodingRuntimeInput, ProcessExecutionMode,
     action_process_runner_for_mode, build_headless_coding_with_policy_composition,
     coding_agent_process_admission, coding_agent_requires_sandbox_error,
+    resume_headless_coding_composition_with_policy,
 };
 use crate::config::MerryConfig;
 use crate::headless_review::HeadlessPermissionReviewer;
@@ -17,13 +18,13 @@ use crate::runtime_config::{
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use crate::tool_display::format_tool_call_progress;
 use futures_util::StreamExt;
-use merry_core::{ErrorInfo, RuntimeEvent, ToolCallResultStatus};
+use merry_core::{ErrorInfo, RuntimeEvent, SessionId, ToolCallResultStatus};
 use merry_runtime::{
-    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopResult, AgentLoopStatus, Runtime,
-    StepContext, StepInput,
+    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopResult, AgentLoopStatus, FileSessionStore,
+    Runtime, StepContext, StepInput,
 };
-use std::env;
-use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
+use std::{env, future::Future};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunExitStatus {
@@ -43,13 +44,110 @@ impl RunExitStatus {
     }
 }
 
+/// Runtime settlement plus the first failure encountered while presenting it.
+///
+/// Presentation is deliberately kept separate from settlement so stdout
+/// failure cannot cancel a run that can still reach a resume-safe boundary.
+#[derive(Debug)]
+struct SettledRun {
+    runtime_result: Result<RunExitStatus, CliError>,
+    presentation_result: Result<(), CliError>,
+}
+
+#[cfg(test)]
+impl SettledRun {
+    fn into_output_result(self) -> Result<RunExitStatus, CliError> {
+        let status = self.runtime_result?;
+        self.presentation_result?;
+        Ok(status)
+    }
+}
+
+/// `TASK` value that reads the task text from stdin instead of argv.
+const STDIN_TASK: &str = "-";
+
 #[derive(Debug, clap::Args)]
 pub(crate) struct Args {
     #[arg(long, help = "Print runtime events and final result as JSONL")]
     pub(crate) events_jsonl: bool,
 
-    #[arg(required = true, allow_hyphen_values = true, value_name = "TASK")]
+    #[arg(
+        long,
+        value_name = "SESSION_ID",
+        conflicts_with = "resume",
+        help = "Save the run under this session id instead of a generated one"
+    )]
+    pub(crate) session_id: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "SESSION_ID",
+        help = "Continue the saved session with this id instead of starting a new one"
+    )]
+    pub(crate) resume: Option<String>,
+
+    #[arg(
+        required = true,
+        allow_hyphen_values = true,
+        value_name = "TASK",
+        help = "Task text, or `-` to read the task from stdin"
+    )]
     pub(crate) task: String,
+}
+
+/// Session a run writes to, and whether it continues state saved by an
+/// earlier run.
+#[derive(Debug, PartialEq, Eq)]
+enum RunSession {
+    New(SessionId),
+    Resumed(SessionId),
+}
+
+impl RunSession {
+    fn from_args(args: &Args) -> Result<Self, CliError> {
+        match (args.session_id.as_deref(), args.resume.as_deref()) {
+            (Some(_), Some(_)) => Err(usage_error(
+                "--session-id and --resume cannot be used together",
+            )),
+            (None, Some(resumed)) => Ok(Self::Resumed(parse_session_id("--resume", resumed)?)),
+            (Some(requested), None) => Ok(Self::New(parse_session_id("--session-id", requested)?)),
+            (None, None) => Ok(Self::New(default_run_session_id())),
+        }
+    }
+
+    const fn id(&self) -> &SessionId {
+        match self {
+            Self::New(id) | Self::Resumed(id) => id,
+        }
+    }
+}
+
+fn parse_session_id(flag: &str, value: &str) -> Result<SessionId, CliError> {
+    SessionId::new(value).map_err(|error| usage_error(format!("{flag}: {error}")))
+}
+
+/// Reads the task from argv, or from `reader` when `TASK` is `-`.
+///
+/// Reading the task from stdin keeps a large task off argv, where it would be
+/// visible to every process listing on the host and bounded by the kernel's
+/// per-argument limit.
+async fn resolve_task<R>(task: &str, mut reader: R) -> Result<String, CliError>
+where
+    R: AsyncRead + Unpin,
+{
+    if task != STDIN_TASK {
+        return Ok(task.to_owned());
+    }
+
+    let mut text = String::new();
+    reader
+        .read_to_string(&mut text)
+        .await
+        .map_err(|error| unexpected(format!("could not read the task from stdin: {error}")))?;
+    if text.trim().is_empty() {
+        return Err(usage_error("the task read from stdin is empty"));
+    }
+    Ok(text)
 }
 
 pub(crate) async fn run(
@@ -59,6 +157,8 @@ pub(crate) async fn run(
     process_execution_mode: ProcessExecutionMode,
     fully_trusted: bool,
 ) -> Result<RunExitStatus, CliError> {
+    let session = RunSession::from_args(args)?;
+    let task = resolve_task(&args.task, tokio::io::stdin()).await?;
     let Some(_admission) =
         coding_agent_process_admission(sandbox_child_handoff, process_execution_mode).await
     else {
@@ -79,9 +179,9 @@ pub(crate) async fn run(
         process_execution_mode,
     )?;
     let extra_tools = discover_configured_mcp_tools(merry_config).await?;
-    let session_id = default_run_session_id();
+    let session_store = FileSessionStore::default_store().map_err(unexpected)?;
     let runtime_input = HeadlessCodingRuntimeInput {
-        session_id: session_id.as_str(),
+        session_id: session.id().as_str(),
         root: &root,
         provider,
         model,
@@ -114,22 +214,123 @@ pub(crate) async fn run(
         Some(headless_reviewer.source()),
     )
     .map_err(unexpected)?;
-    let coding_runtime =
-        build_headless_coding_with_policy_composition(runtime_input, permission_policy)?;
+    let coding_runtime = match &session {
+        RunSession::New(_) => {
+            build_headless_coding_with_policy_composition(runtime_input, permission_policy)?
+        }
+        RunSession::Resumed(id) => resume_headless_coding_composition_with_policy(
+            runtime_input,
+            session_store.clone(),
+            permission_policy,
+        )
+        .await
+        .map_err(|error| unexpected(format!("could not resume session {id}: {error}")))?,
+    };
     let loop_config = coding_runtime.loop_config();
     let runtime = coding_runtime.into_runtime();
-    let input = StepInput::user_text(&args.task).map_err(unexpected)?;
+    let input = StepInput::user_text(&task).map_err(unexpected)?;
     let context = StepContext::default()
         .with_generation_config(generation_config(merry_config).map_err(unexpected)?);
     let review_task = headless_reviewer.start();
-    let run_result = if args.events_jsonl {
-        write_agent_loop_jsonl_output(&runtime, input, loop_config, context, tokio::io::stdout())
-            .await
+    run_agent_loop_with_persistence(
+        &runtime,
+        input,
+        tokio::io::stdout(),
+        async { review_task.finish().await.map_err(unexpected) },
+        HeadlessRunPersistence {
+            loop_config,
+            context,
+            events_jsonl: args.events_jsonl,
+            session_store,
+            session_id: session.id(),
+        },
+    )
+    .await
+}
+
+/// Settles the runtime and permission reviewer before attempting persistence.
+///
+/// This is the production headless-run orchestration boundary. Presentation
+/// failures are retained while the runtime drains, then persistence is tried
+/// after reviewer shutdown. Final error selection happens only after that save
+/// attempt.
+struct HeadlessRunPersistence<'a> {
+    loop_config: AgentLoopConfig,
+    context: StepContext,
+    events_jsonl: bool,
+    session_store: FileSessionStore,
+    session_id: &'a SessionId,
+}
+
+async fn run_agent_loop_with_persistence<W, F>(
+    runtime: &Runtime,
+    input: StepInput,
+    writer: W,
+    review_result: F,
+    persistence: HeadlessRunPersistence<'_>,
+) -> Result<RunExitStatus, CliError>
+where
+    W: AsyncWrite + Unpin,
+    F: Future<Output = Result<(), CliError>>,
+{
+    let settled = if persistence.events_jsonl {
+        settle_agent_loop_jsonl_output(
+            runtime,
+            input,
+            persistence.loop_config,
+            persistence.context,
+            writer,
+        )
+        .await
     } else {
-        write_agent_loop_output(&runtime, input, loop_config, context, tokio::io::stdout()).await
+        settle_agent_loop_output(
+            runtime,
+            input,
+            persistence.loop_config,
+            persistence.context,
+            writer,
+        )
+        .await
     };
-    let review_result = review_task.finish().await.map_err(unexpected);
-    let status = run_result?;
+    let review_result = review_result.await;
+    finish_settled_run(
+        runtime,
+        persistence.session_store,
+        persistence.session_id,
+        settled,
+        review_result,
+    )
+    .await
+}
+
+/// Persists a settled run before selecting its final result.
+///
+/// A persistence failure takes precedence over runtime, stdout, or reviewer
+/// failures so the CLI cannot report only an earlier failure when durable state
+/// was not written. When persistence succeeds, errors are returned in runtime,
+/// presentation, then reviewer order.
+async fn finish_settled_run(
+    runtime: &Runtime,
+    session_store: FileSessionStore,
+    session_id: &SessionId,
+    settled: SettledRun,
+    review_result: Result<(), CliError>,
+) -> Result<RunExitStatus, CliError> {
+    let SettledRun {
+        runtime_result,
+        presentation_result,
+    } = settled;
+    runtime
+        .save_session_to(session_store)
+        .await
+        .map_err(|error| {
+            unexpected(format!(
+                "run finished but session {} could not be saved: {error}",
+                session_id
+            ))
+        })?;
+    let status = runtime_result?;
+    presentation_result?;
     review_result?;
     Ok(status)
 }
@@ -138,6 +339,7 @@ fn default_run_session_id() -> merry_core::SessionId {
     crate::session_id::new_ephemeral_session_id()
 }
 
+#[cfg(test)]
 pub(crate) async fn write_agent_loop_output<W>(
     runtime: &Runtime,
     input: StepInput,
@@ -148,20 +350,65 @@ pub(crate) async fn write_agent_loop_output<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let mut writer = BufWriter::new(writer);
-    let mut stream = runtime
-        .run_agent_loop_stream(input, context, config)
-        .map_err(unexpected)?;
-    let mut pending_commentary = None;
-    while let Some(event) = stream.next().await {
-        write_human_progress_event(&event, &mut pending_commentary, &mut writer).await?;
-    }
-    let result = stream.result().await.map_err(unexpected)?;
-    write_agent_loop_summary_to(&result, &mut writer).await?;
-    writer.flush().await.map_err(stdout_error)?;
-    Ok(RunExitStatus::from_agent_loop_result(&result))
+    settle_agent_loop_output(runtime, input, config, context, writer)
+        .await
+        .into_output_result()
 }
 
+async fn settle_agent_loop_output<W>(
+    runtime: &Runtime,
+    input: StepInput,
+    config: AgentLoopConfig,
+    context: StepContext,
+    writer: W,
+) -> SettledRun
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut writer = BufWriter::new(writer);
+    let mut stream = match runtime.run_agent_loop_stream(input, context, config) {
+        Ok(stream) => stream,
+        Err(error) => {
+            return SettledRun {
+                runtime_result: Err(unexpected(error)),
+                presentation_result: Ok(()),
+            };
+        }
+    };
+    let mut pending_commentary = None;
+    let mut presentation_error = None;
+    while let Some(event) = stream.next().await {
+        if presentation_error.is_none()
+            && let Err(error) =
+                write_human_progress_event(&event, &mut pending_commentary, &mut writer).await
+        {
+            presentation_error = Some(error);
+        }
+    }
+    let runtime_result = match stream.result().await.map_err(unexpected) {
+        Ok(result) => {
+            let status = RunExitStatus::from_agent_loop_result(&result);
+            if presentation_error.is_none() {
+                if let Err(error) = write_agent_loop_summary_to(&result, &mut writer).await {
+                    presentation_error = Some(error);
+                } else if let Err(error) = writer.flush().await.map_err(stdout_error) {
+                    presentation_error = Some(error);
+                }
+            }
+            Ok(status)
+        }
+        Err(error) => Err(error),
+    };
+    SettledRun {
+        runtime_result,
+        presentation_result: match presentation_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        },
+    }
+}
+
+#[cfg(test)]
 pub(crate) async fn write_agent_loop_jsonl_output<W>(
     runtime: &Runtime,
     input: StepInput,
@@ -172,21 +419,64 @@ pub(crate) async fn write_agent_loop_jsonl_output<W>(
 where
     W: AsyncWrite + Unpin,
 {
+    settle_agent_loop_jsonl_output(runtime, input, config, context, writer)
+        .await
+        .into_output_result()
+}
+
+async fn settle_agent_loop_jsonl_output<W>(
+    runtime: &Runtime,
+    input: StepInput,
+    config: AgentLoopConfig,
+    context: StepContext,
+    writer: W,
+) -> SettledRun
+where
+    W: AsyncWrite + Unpin,
+{
     let mut writer = BufWriter::new(writer);
-    let mut stream = runtime
-        .run_agent_loop_stream(input, context, config)
-        .map_err(unexpected)?;
+    let mut stream = match runtime.run_agent_loop_stream(input, context, config) {
+        Ok(stream) => stream,
+        Err(error) => {
+            return SettledRun {
+                runtime_result: Err(unexpected(error)),
+                presentation_result: Ok(()),
+            };
+        }
+    };
+    let mut presentation_error = None;
 
     while let Some(event) = stream.next().await {
-        write_public_runtime_event(&event, &mut writer).await?;
-        writer.flush().await.map_err(stdout_error)?;
+        if presentation_error.is_none() {
+            if let Err(error) = write_public_runtime_event(&event, &mut writer).await {
+                presentation_error = Some(error);
+            } else if let Err(error) = writer.flush().await.map_err(stdout_error) {
+                presentation_error = Some(error);
+            }
+        }
     }
 
-    let result = stream.result().await.map_err(unexpected)?;
-    let status = RunExitStatus::from_agent_loop_result(&result);
-    write_agent_loop_result(&result, &mut writer).await?;
-    writer.flush().await.map_err(stdout_error)?;
-    Ok(status)
+    let runtime_result = match stream.result().await.map_err(unexpected) {
+        Ok(result) => {
+            let status = RunExitStatus::from_agent_loop_result(&result);
+            if presentation_error.is_none() {
+                if let Err(error) = write_agent_loop_result(&result, &mut writer).await {
+                    presentation_error = Some(error);
+                } else if let Err(error) = writer.flush().await.map_err(stdout_error) {
+                    presentation_error = Some(error);
+                }
+            }
+            Ok(status)
+        }
+        Err(error) => Err(error),
+    };
+    SettledRun {
+        runtime_result,
+        presentation_result: match presentation_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        },
+    }
 }
 
 async fn write_agent_loop_summary_to<W>(
@@ -473,313 +763,10 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        RunExitStatus, default_run_session_id, write_agent_loop_jsonl_output,
-        write_agent_loop_output,
-    };
-    use crate::coding::{
-        CodingSubagentsConfig, HeadlessCodingRuntimeInput, build_headless_coding,
-        fixed_process_backend,
-    };
-    use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name, process_tool_call};
-    use merry::profiles::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
-    use merry_core::ToolName;
-    use merry_llm::{
-        FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
-        ToolArguments,
-    };
-    use merry_process::ProcessSession;
-    use merry_runtime::{AgentLoopConfig, ProcessRunner, StepContext, StepInput};
-    use std::{
-        io,
-        pin::Pin,
-        sync::Arc,
-        task::{Context, Poll},
-    };
-    use tokio::io::AsyncWrite;
+mod persistence_tests;
 
-    #[test]
-    fn default_run_session_id_is_generated() {
-        let first = default_run_session_id();
-        let second = default_run_session_id();
+#[cfg(test)]
+mod session_tests;
 
-        assert_ne!(first, second);
-        assert_ne!(first.as_str(), "run");
-    }
-
-    #[derive(Default)]
-    struct FlushCountingWriter {
-        bytes: Vec<u8>,
-        flushes: usize,
-    }
-
-    impl AsyncWrite for FlushCountingWriter {
-        fn poll_write(
-            mut self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<io::Result<usize>> {
-            self.bytes.extend_from_slice(buf);
-            Poll::Ready(Ok(buf.len()))
-        }
-
-        fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            self.flushes += 1;
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn writer_prints_final_output_without_event_jsonl() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(
-                vec![ModelOutput::text("done from run")],
-                FinishReason::Stop,
-                None,
-            ),
-        })]]);
-        let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
-        let permissioned_factory = Arc::new(
-            merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
-        );
-        let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
-            session_id: "run-writer-test",
-            root: &workspace,
-            process_backend: fixed_process_backend(ProcessSession::from_parts(
-                merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
-                runner,
-                permissioned_factory,
-            )),
-            provider: Arc::new(provider),
-            model: model_name(),
-            extra_tools: Vec::new(),
-            allow_hidden_workspace_paths: false,
-            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-            retry_policy: None,
-            context_compaction: None,
-            approval_review: None,
-            skill_roots: Vec::new(),
-            subagents: CodingSubagentsConfig::default(),
-            workspace_tool_limits: None,
-        })
-        .expect("runtime should build");
-
-        let mut output = Vec::new();
-        let status = write_agent_loop_output(
-            &runtime,
-            StepInput::user_text("finish").expect("valid input"),
-            AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
-            StepContext::default(),
-            &mut output,
-        )
-        .await
-        .expect("run output should write");
-
-        assert_eq!(status, RunExitStatus::Completed);
-        let text = String::from_utf8(output).expect("output should be utf-8");
-        assert_eq!(text, "done from run\n");
-        assert!(!text.contains("\"type\":\"session_started\""));
-        assert!(!text.contains("\"type\":\"agent_loop_result\""));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn writer_streams_progress_commentary_before_final_output() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-        let provider = ScriptedProvider::new(vec![
-            vec![
-                Ok(ModelEvent::OutputTextDelta {
-                    delta: "我先解析 baidu.com 的 DNS。".to_owned(),
-                }),
-                Ok(
-                    process_tool_call("run-progress-dns", &["getent", "hosts", "baidu.com"], None)
-                        .expect("valid process call"),
-                ),
-            ],
-            vec![Ok(ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::text("baidu.com resolves to 110.242.74.102")],
-                    FinishReason::Stop,
-                    None,
-                ),
-            })],
-        ]);
-        let runner: Arc<dyn ProcessRunner> =
-            Arc::new(FakeProcessRunner::succeeding("110.242.74.102 baidu.com\n"));
-        let permissioned_factory = Arc::new(
-            merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
-        );
-        let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
-            session_id: "run-progress-writer-test",
-            root: &workspace,
-            process_backend: fixed_process_backend(ProcessSession::from_parts(
-                merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
-                runner,
-                permissioned_factory,
-            )),
-            provider: Arc::new(provider),
-            model: model_name(),
-            extra_tools: Vec::new(),
-            allow_hidden_workspace_paths: false,
-            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-            retry_policy: None,
-            context_compaction: None,
-            approval_review: None,
-            skill_roots: Vec::new(),
-            subagents: CodingSubagentsConfig::default(),
-            workspace_tool_limits: None,
-        })
-        .expect("runtime should build");
-
-        let mut output = Vec::new();
-        let status = write_agent_loop_output(
-            &runtime,
-            StepInput::user_text("ping baidu.com").expect("valid input"),
-            AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
-            StepContext::default(),
-            &mut output,
-        )
-        .await
-        .expect("run output should write");
-
-        assert_eq!(status, RunExitStatus::Completed);
-        let text = String::from_utf8(output).expect("output should be utf-8");
-        assert_eq!(
-            text,
-            "我先解析 baidu.com 的 DNS。\n\ntool: run_process getent hosts baidu.com (.)\n\nbaidu.com resolves to 110.242.74.102\n"
-        );
-        assert!(!text.contains("\"type\":\"tool_call_pending\""));
-        assert!(!text.contains("\"type\":\"agent_loop_result\""));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn jsonl_writer_streams_agent_loop_result() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(
-                vec![ModelOutput::text("done from run")],
-                FinishReason::Stop,
-                None,
-            ),
-        })]]);
-        let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
-        let permissioned_factory = Arc::new(
-            merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
-        );
-        let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
-            session_id: "run-jsonl-writer-test",
-            root: &workspace,
-            process_backend: fixed_process_backend(ProcessSession::from_parts(
-                merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
-                runner,
-                permissioned_factory,
-            )),
-            provider: Arc::new(provider),
-            model: model_name(),
-            extra_tools: Vec::new(),
-            allow_hidden_workspace_paths: false,
-            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-            retry_policy: None,
-            context_compaction: None,
-            approval_review: None,
-            skill_roots: Vec::new(),
-            subagents: CodingSubagentsConfig::default(),
-            workspace_tool_limits: None,
-        })
-        .expect("runtime should build");
-
-        let mut output = FlushCountingWriter::default();
-        let status = write_agent_loop_jsonl_output(
-            &runtime,
-            StepInput::user_text("finish").expect("valid input"),
-            AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
-            StepContext::default(),
-            &mut output,
-        )
-        .await
-        .expect("run output should write");
-
-        assert_eq!(status, RunExitStatus::Completed);
-        assert!(
-            output.flushes > 1,
-            "JSONL mode should flush as events arrive"
-        );
-        let text = String::from_utf8(output.bytes).expect("output should be utf-8");
-        assert!(text.contains("\"type\":\"session_started\""));
-        assert!(text.contains("\"type\":\"agent_loop_result\""));
-        assert!(text.contains("\"status\":\"completed\""));
-        assert!(text.contains("done from run"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn writer_returns_incomplete_when_agent_loop_blocks() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-        let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(
-                vec![ModelOutput::tool_call(ModelToolCall::new(
-                    ModelToolCallId::new("call-read").expect("valid call id"),
-                    ToolName::new("workspace_read_file").expect("valid tool name"),
-                    ToolArguments::try_from(serde_json::json!({"path": "README.md"}))
-                        .expect("valid args"),
-                ))],
-                FinishReason::ToolCalls,
-                None,
-            ),
-        })]]);
-        let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
-        let permissioned_factory = Arc::new(
-            merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
-        );
-        let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
-            session_id: "run-blocked-writer-test",
-            root: &workspace,
-            process_backend: fixed_process_backend(ProcessSession::from_parts(
-                merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
-                runner,
-                permissioned_factory,
-            )),
-            provider: Arc::new(provider),
-            model: model_name(),
-            extra_tools: Vec::new(),
-            allow_hidden_workspace_paths: false,
-            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
-            retry_policy: None,
-            context_compaction: None,
-            approval_review: None,
-            skill_roots: Vec::new(),
-            subagents: CodingSubagentsConfig::default(),
-            workspace_tool_limits: None,
-        })
-        .expect("runtime should build");
-
-        let mut output = Vec::new();
-        let status = write_agent_loop_output(
-            &runtime,
-            StepInput::user_text("read README").expect("valid input"),
-            AgentLoopConfig::new(1).expect("valid config"),
-            StepContext::default(),
-            &mut output,
-        )
-        .await
-        .expect("run output should write");
-
-        assert_eq!(status, RunExitStatus::Incomplete);
-        let text = String::from_utf8(output).expect("output should be utf-8");
-        assert!(text.contains("tool: workspace_read_file path=README.md"));
-        assert!(text.contains("status: blocked"));
-        assert!(text.contains("reason: max model turns reached (1)"));
-    }
-}
+#[cfg(test)]
+mod output_tests;
