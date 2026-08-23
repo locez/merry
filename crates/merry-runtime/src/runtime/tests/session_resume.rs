@@ -3,9 +3,14 @@ use crate::SessionTranscriptItem;
 use crate::{
     CompiledContextSection, ContextCompiler, ContextEntry, ContextEvidence, ContextSummary,
     FINAL_OUTPUT_TOOL_NAME, FileSessionStore, ProjectRules, StepInput, TaskAnchor,
-    session::ModelTurnId,
+    session::ModelTurnId, session_store::SessionStoreCommitPause,
 };
-use merry_core::ToolCallResult;
+use futures_util::FutureExt;
+use merry_core::{
+    PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, ToolCallArguments, ToolCallResult,
+    ToolName,
+};
+use serde_json::json;
 
 #[tokio::test(flavor = "current_thread")]
 async fn builder_resumes_session_from_store_and_reinjects_construction_context() {
@@ -28,6 +33,65 @@ async fn builder_resumes_session_from_store_and_reinjects_construction_context()
 
     assert_eq!(resumed.session_id(), &session_id);
     assert!(resumed.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resumed_runtime_reopens_persisted_trajectory_for_append() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let session_id = session_id("runtime-resume-trajectory");
+    let runtime = Runtime::builder(session_id.clone())
+        .session_store(store.clone())
+        .build()
+        .expect("runtime builds");
+    let call = PendingToolCall::new(
+        merry_core::ToolCallId::new("trajectory-call").expect("valid call id"),
+        ToolName::new("lookup").expect("valid tool name"),
+        ToolCallArguments::try_from(json!({"query": "value"})).expect("valid arguments"),
+    );
+    let event = RuntimeJournalEvent::new(
+        session_id.clone(),
+        7,
+        RuntimeJournalPayload::ToolCallPending { call },
+    );
+    runtime.observe_recorded_journal_events(std::slice::from_ref(&event));
+    runtime.close_trajectory();
+    runtime
+        .save_session()
+        .await
+        .expect("trajectory session saves");
+
+    let resumed = Runtime::builder(session_id.clone())
+        .resume_from_store(store)
+        .await
+        .expect("runtime resumes");
+    let snapshot = resumed
+        .trajectory_snapshot()
+        .await
+        .expect("trajectory snapshot reads");
+
+    assert_eq!(snapshot.latest_sequence(), 7);
+    assert!(!snapshot.is_closed());
+    assert_eq!(snapshot.records().len(), 1);
+    assert_eq!(snapshot.records()[0].start_sequence(), 7);
+
+    let next_call = PendingToolCall::new(
+        merry_core::ToolCallId::new("trajectory-call-after-resume").expect("valid call id"),
+        ToolName::new("lookup").expect("valid tool name"),
+        ToolCallArguments::try_from(json!({"query": "next"})).expect("valid arguments"),
+    );
+    let next_event = RuntimeJournalEvent::new(
+        session_id,
+        8,
+        RuntimeJournalPayload::ToolCallPending { call: next_call },
+    );
+    resumed.observe_recorded_journal_events(std::slice::from_ref(&next_event));
+    let appended = resumed
+        .trajectory_snapshot()
+        .await
+        .expect("appended trajectory reads");
+    assert_eq!(appended.records().len(), 2);
+    assert_eq!(appended.latest_sequence(), 8);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -472,6 +536,75 @@ async fn dropping_text_stream_while_savepoint_is_blocked_keeps_terminal_batch_co
         session.model_turn_status(ModelTurnId::new(1)),
         Some(ModelTurnStatus::Completed)
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_journal_batch_waits_for_resume_savepoint_before_delivery() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pause = SessionStoreCommitPause::new();
+    let store = FileSessionStore::new(temp.path()).with_commit_pause_for_tests(pause.clone());
+    let session_id = session_id("runtime-terminal-savepoint-order");
+    let provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event_with(
+                vec![ModelOutput::text("durable terminal response")],
+                FinishReason::Stop,
+            ),
+        )])]);
+    let runtime = Runtime::builder(session_id.clone())
+        .session_store(store.clone())
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime builds");
+    let mut events = runtime
+        .step(
+            StepInput::user_text("wait for durable terminal output").expect("valid step input"),
+            StepContext::default(),
+        )
+        .expect("step starts");
+
+    assert!(matches!(
+        events.next().await.expect("session start event").payload,
+        RuntimeJournalPayload::SessionStarted
+    ));
+    assert!(matches!(
+        events.next().await.expect("step start event").payload,
+        RuntimeJournalPayload::StepStarted
+    ));
+
+    tokio::select! {
+        biased;
+        event = events.next() => {
+            panic!("terminal event became visible before savepoint durability: {event:?}");
+        }
+        () = pause.wait_until_committed() => {}
+    }
+    assert!(
+        events.next().now_or_never().is_none(),
+        "terminal event must remain blocked while the savepoint is paused"
+    );
+
+    pause.resume();
+    let terminal = events.next().await.expect("terminal output event");
+    assert!(matches!(
+        terminal.payload,
+        RuntimeJournalPayload::AssistantOutputRecorded { .. }
+    ));
+    let _remaining = events.collect::<Vec<_>>().await;
+
+    let resumed = Runtime::builder(session_id)
+        .resume_from_store(store)
+        .await
+        .expect("runtime resumes after terminal savepoint");
+    let snapshot = resumed
+        .trajectory_snapshot()
+        .await
+        .expect("trajectory snapshot reads");
+    assert_eq!(snapshot.latest_sequence(), 2);
+    assert!(snapshot.records().iter().any(|record| {
+        record.start_sequence() == 2
+            && record.status() == merry_core::TrajectoryRecordStatus::Succeeded
+    }));
 }
 
 #[tokio::test(flavor = "current_thread")]

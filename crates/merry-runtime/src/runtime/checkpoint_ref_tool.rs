@@ -10,7 +10,7 @@ use schemars::Schema;
 use serde_json::json;
 use std::sync::Arc;
 
-use super::{RuntimeInner, persist_resume_safe_savepoint_if_configured};
+use super::RuntimeInner;
 
 pub(super) const MERRY_READ_CHECKPOINT_REF_TOOL_NAME: &str = "merry_read_checkpoint_ref";
 const CHECKPOINT_REF_NOT_FOUND: &str = "checkpoint_ref_not_found";
@@ -186,7 +186,6 @@ pub(super) async fn execute_merry_read_checkpoint_ref_tool_call(
         }
         session.submit_tool_execution_outcome(pending.id(), status, content, diagnostic, None)?
     };
-    persist_resume_safe_savepoint_if_configured(inner).await;
     Ok(events)
 }
 

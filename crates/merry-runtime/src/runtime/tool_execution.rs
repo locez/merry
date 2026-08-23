@@ -29,7 +29,6 @@ use super::process_execution::{ProcessExecutionAdmission, execute_admitted_proce
 use super::{
     DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_NOT_REGISTERED, RuntimeInner,
     TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME, diagnostic_from_text,
-    persist_resume_safe_savepoint_if_configured,
 };
 
 const WORKSPACE_SEARCH_TEXT_TOOL_NAME: &str = "workspace_search_text";
@@ -117,7 +116,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 None,
             )?
         };
-        return persist_tool_events(inner, events).await;
+        return Ok(events);
     };
 
     if let Some(Err(error)) = inner.tool_registry.validate_tool_input(&pending) {
@@ -146,7 +145,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 None,
             )?
         };
-        return persist_tool_events(inner, events).await;
+        return Ok(events);
     }
 
     if is_merry_read_checkpoint_ref_tool(pending.name()) {
@@ -251,7 +250,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                             call_id, status, content, diagnostic, None,
                         )?
                     };
-                    return persist_tool_events(inner, events).await;
+                    return Ok(events);
                 }
                 Err(ToolExecutionError::Cancelled) => {
                     return Err(RuntimeError::ToolExecutionCancelled {
@@ -456,7 +455,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     )?
                 };
                 trace_denied_tool_execution(inner.session_id.as_str(), &pending, &events);
-                return persist_tool_events(inner, events).await;
+                return Ok(events);
             }
         } else if fully_trusted {
             // Explicit trusted mode authorizes configured mutating tools even
@@ -492,7 +491,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 )?
             };
             trace_denied_tool_execution(inner.session_id.as_str(), &pending, &events);
-            return persist_tool_events(inner, events).await;
+            return Ok(events);
         }
     }
 
@@ -641,7 +640,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
             execution_evidence,
         )?
     };
-    persist_tool_events(inner, events).await
+    Ok(events)
 }
 
 async fn resolve_tool_admission_denial(
@@ -687,7 +686,7 @@ async fn resolve_tool_admission_denial(
             None,
         )?
     };
-    persist_tool_events(inner, events).await
+    Ok(events)
 }
 
 fn plan_harness_violation(
@@ -805,7 +804,7 @@ async fn resolve_plan_harness_denial(
             None,
         )?
     };
-    persist_tool_events(inner, events).await
+    Ok(events)
 }
 
 fn changed_paths_from_proposal(proposal: &ActionProposal) -> Vec<String> {
@@ -832,14 +831,6 @@ async fn attribute_plan_effect_before_execution(
             call_id: pending.id().clone(),
             message: error.to_string(),
         })
-}
-
-async fn persist_tool_events(
-    inner: &RuntimeInner,
-    events: Vec<RuntimeJournalEvent>,
-) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
-    persist_resume_safe_savepoint_if_configured(inner).await;
-    Ok(events)
 }
 
 pub(super) fn denied_tool_action_outcome(pending: &PendingToolCall) -> crate::ToolExecutionOutcome {

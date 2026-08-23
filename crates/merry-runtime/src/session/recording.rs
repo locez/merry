@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     RuntimeError,
-    artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
+    artifact::{ArtifactContent, ArtifactContentPreview, ArtifactError, ArtifactRegistry},
     ledger::LedgerFactKind,
     plan::{PlanArtifactPromotion, PlanError},
 };
@@ -80,6 +80,14 @@ impl SessionState {
         artifact_id: &ArtifactId,
     ) -> Result<ArtifactContent, ArtifactError> {
         self.artifacts.read_content(artifact_id).cloned()
+    }
+
+    pub(crate) fn read_artifact_preview(
+        &self,
+        artifact_id: &ArtifactId,
+        max_bytes: usize,
+    ) -> Result<ArtifactContentPreview, ArtifactError> {
+        self.artifacts.read_content_preview(artifact_id, max_bytes)
     }
 
     pub(crate) fn validate_plan_refs(

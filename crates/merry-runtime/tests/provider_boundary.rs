@@ -3,7 +3,7 @@ use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
     PendingToolCall, PendingToolCallBatch, ProviderName, RuntimeJournalEvent,
     RuntimeJournalPayload, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus,
-    ToolInputSchema, ToolName, ToolSpec,
+    ToolInputSchema, ToolName, ToolSpec, TrajectoryLane,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,
@@ -1533,6 +1533,25 @@ async fn runtime_step_with_provider_includes_compiled_context_as_system_message(
     );
     assert_default_checkpoint_ref_tool(request.tools());
     assert!(!request.generation().allow_parallel_tool_calls());
+
+    let trajectory = runtime
+        .trajectory_snapshot()
+        .await
+        .expect("trajectory snapshot should be available");
+    assert!(
+        trajectory
+            .records()
+            .iter()
+            .all(|record| record.lane() != TrajectoryLane::System)
+    );
+    assert_eq!(trajectory.prompt().stable_blocks().len(), 1);
+    assert!(
+        trajectory.prompt().stable_blocks()[0]
+            .content()
+            .contains("You are Merry, a software engineering agent")
+    );
+    assert_eq!(trajectory.prompt().dynamic_context_count(), 1);
+    assert!(trajectory.prompt().latest_dynamic_sequence().is_some());
 }
 
 #[tokio::test(flavor = "current_thread")]

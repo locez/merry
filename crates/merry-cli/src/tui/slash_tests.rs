@@ -213,7 +213,6 @@ fn local_slash_commands_do_not_enter_user_history_or_either_runtime_lane() {
     );
     assert_eq!(help.input_text(), "");
     assert!(help.input_history_entries().is_empty());
-    assert!(help.artifact_timeline_indexes().is_empty());
     assert!(matches!(
         help.timeline().last(),
         Some(TimelineItem::LocalCommand { title, body })
@@ -234,7 +233,6 @@ fn local_slash_commands_do_not_enter_user_history_or_either_runtime_lane() {
                 && body.contains("Plan: none")
                 && body.contains("Workspace: /repo")
     ));
-    assert!(status.artifact_timeline_indexes().is_empty());
     assert!(
         status
             .timeline()
@@ -319,7 +317,7 @@ fn status_reports_every_runtime_state_and_the_current_plan_phase() {
 }
 
 #[test]
-fn palette_slash_commands_reveal_feedback_from_detail_and_plan_focus() {
+fn palette_slash_commands_reveal_feedback_from_plan_focus() {
     for (width, height) in [(50, 20), (80, 16), (120, 24)] {
         for (command, run_state, effect, expected) in [
             (
@@ -348,19 +346,12 @@ fn palette_slash_commands_reveal_feedback_from_detail_and_plan_focus() {
             ),
         ] {
             let mut state = state();
-            state.push_timeline_item(TimelineItem::Expanded {
-                title: "Previous artifact".to_owned(),
-                body: "old output".to_owned(),
-            });
-            state.select_previous_artifact();
             state.plan_mut().update_snapshot(plan_snapshot());
             assert!(state.plan_mut().open_and_focus());
             state.set_run_state(run_state);
 
-            assert!(state.is_artifact_reviewing());
             assert!(state.plan().is_focused());
             assert_eq!(run_palette_command(command, &mut state), effect);
-            assert!(!state.is_artifact_reviewing());
             assert!(state.plan().is_open());
             assert!(!state.plan().is_focused());
 
@@ -428,7 +419,7 @@ fn help_remains_complete_with_the_plan_open_at_80_by_16() {
 }
 
 #[test]
-fn local_slash_input_bypasses_review_confirmation_but_provider_input_does_not() {
+fn local_slash_input_bypasses_timeline_review_confirmation() {
     let mut timeline_review = state();
     timeline_review.push_timeline_item(TimelineItem::User {
         text: "earlier request".to_owned(),
@@ -448,71 +439,32 @@ fn local_slash_input_bypasses_review_confirmation_but_provider_input_does_not() 
         Some(TimelineItem::LocalCommand { title, .. }) if title == "Command help"
     ));
 
-    let mut artifact_review = state();
-    artifact_review.push_timeline_item(TimelineItem::Expanded {
-        title: "Previous artifact".to_owned(),
-        body: "old output".to_owned(),
-    });
-    artifact_review.select_previous_artifact();
-    artifact_review.insert_input_str("/sa");
+    let mut invalid_input = state();
+    invalid_input.insert_input_str("/unknown");
 
     assert_eq!(
-        handle_key_event(
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &mut artifact_review,
-        ),
-        ControllerEffect::SaveSession
-    );
-    assert!(!artifact_review.is_artifact_reviewing());
-    assert_eq!(artifact_review.input_text(), "");
-
-    let mut invalid_review = state();
-    invalid_review.push_timeline_item(TimelineItem::Expanded {
-        title: "Previous artifact".to_owned(),
-        body: "old output".to_owned(),
-    });
-    invalid_review.select_previous_artifact();
-    invalid_review.insert_input_str("/unknown");
-
-    assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut invalid_review),
+        handle_key_action(KeyAction::SubmitNext, &mut invalid_input),
         ControllerEffect::None
     );
-    assert!(!invalid_review.is_artifact_reviewing());
-    assert_eq!(invalid_review.input_text(), "/unknown");
+    assert_eq!(invalid_input.input_text(), "/unknown");
     assert!(matches!(
-        invalid_review.timeline().last(),
+        invalid_input.timeline().last(),
         Some(TimelineItem::Muted { title, .. }) if title == "Unknown command"
     ));
 
-    let mut provider_review = state();
-    provider_review.push_timeline_item(TimelineItem::Expanded {
-        title: "Previous artifact".to_owned(),
-        body: "old output".to_owned(),
-    });
-    provider_review.select_previous_artifact();
-    provider_review.insert_input_str("/tmp/file");
+    let mut provider_input = state();
+    provider_input.insert_input_str("/tmp/file");
 
     assert_eq!(
-        handle_key_action(KeyAction::SubmitBacklog, &mut provider_review),
-        ControllerEffect::None
-    );
-    assert!(!provider_review.is_artifact_reviewing());
-    assert_eq!(provider_review.input_text(), "/tmp/file");
-    assert_eq!(
-        handle_key_action(KeyAction::SubmitBacklog, &mut provider_review),
+        handle_key_action(KeyAction::SubmitBacklog, &mut provider_input),
         ControllerEffect::SubmitBacklog(text_submission("/tmp/file"))
     );
+    assert_eq!(provider_input.input_text(), "");
 }
 
 #[test]
 fn keyboard_stop_reveals_the_same_feedback_as_slash_stop() {
     let mut state = state();
-    state.push_timeline_item(TimelineItem::Expanded {
-        title: "Previous artifact".to_owned(),
-        body: "old output".to_owned(),
-    });
-    state.select_previous_artifact();
     state.plan_mut().update_snapshot(plan_snapshot());
     assert!(state.plan_mut().open_and_focus());
     state.set_run_state(InteractiveRunState::RunningModel);
@@ -521,7 +473,6 @@ fn keyboard_stop_reveals_the_same_feedback_as_slash_stop() {
     assert_eq!(effect, ControllerEffect::Interrupt);
     project_local_effect(&effect, &mut state);
 
-    assert!(!state.is_artifact_reviewing());
     assert!(state.plan().is_open());
     assert!(!state.plan().is_focused());
     assert!(matches!(

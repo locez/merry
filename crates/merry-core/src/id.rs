@@ -199,6 +199,7 @@ define_id!(PlanLeaseId, "PlanLeaseId");
 define_id!(PlanBindingId, "PlanBindingId");
 define_id!(PlanDirectiveId, "PlanDirectiveId");
 define_id!(PlanApprovalRequirementId, "PlanApprovalRequirementId");
+define_id!(TrajectoryRecordId, "TrajectoryRecordId");
 define_id!(ProviderName, "ProviderName");
 define_id!(ToolCallBatchId, "ToolCallBatchId");
 define_id!(ToolCallId, "ToolCallId", MAX_TOOL_CALL_ID_LEN);

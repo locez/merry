@@ -200,7 +200,8 @@ async fn install_compaction_transaction(
     }
 
     let prepared = prepare(&session)?;
-    let bundle = session.persistable_bundle_with_compaction(&prepared)?;
+    let trajectory_snapshot = inner.trajectory.snapshot();
+    let bundle = session.persistable_bundle_with_compaction(&prepared, &trajectory_snapshot)?;
     let Some(store) = store else {
         if token.is_cancelled() {
             return Err(compaction_cancelled_before_install());
@@ -209,6 +210,7 @@ async fn install_compaction_transaction(
         if token.is_cancelled() {
             return Err(compaction_cancelled_before_install());
         }
+        session.set_trajectory_snapshot(trajectory_snapshot);
         return Ok(session.commit_prepared_compaction_install(prepared));
     };
     drop(session);
@@ -222,7 +224,15 @@ async fn install_compaction_transaction(
                 return Err(compaction_cancelled_before_install());
             }
             let staged = store.stage_bundle(bundle).await?;
-            complete_staged_compaction(inner, staged, prepared, token, active_permit).await
+            complete_staged_compaction(
+                inner,
+                staged,
+                prepared,
+                trajectory_snapshot,
+                token,
+                active_permit,
+            )
+            .await
         }
         .await;
         if let Err(error) = &result {
@@ -253,6 +263,7 @@ async fn complete_staged_compaction(
     inner: Arc<RuntimeInner>,
     staged: StagedSessionBundle,
     prepared: PreparedCompactionInstall,
+    trajectory_snapshot: merry_core::TrajectorySnapshot,
     token: CancellationToken,
     _active_permit: ActiveStepPermit,
 ) -> Result<Option<CompactionOutcome>, RuntimeError> {
@@ -269,6 +280,7 @@ async fn complete_staged_compaction(
     }
     let commit = staged.commit().await?;
     let mut session = inner.session.lock().await;
+    session.set_trajectory_snapshot(trajectory_snapshot);
     let outcome = session.commit_prepared_compaction_install(prepared);
     drop(session);
     commit.require_durable()?;

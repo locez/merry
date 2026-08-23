@@ -7,9 +7,7 @@ pub(crate) enum PaletteCommand {
     ShowShortcuts,
     ShowHelp,
     ShowStatus,
-    FollowLatest,
-    ReviewPreviousArtifact,
-    ReviewNextArtifact,
+    OpenSessionInBrowser,
     ReviewPreviousUserInput,
     Interrupt,
     ResumeSuspended,
@@ -68,7 +66,7 @@ impl CommandSpec {
     }
 }
 
-const COMMANDS: [CommandSpec; 22] = [
+const COMMANDS: [CommandSpec; 20] = [
     CommandSpec::new(PaletteCommand::OpenSettings, "Merry", "Settings", None),
     CommandSpec::new(
         PaletteCommand::OpenProviders,
@@ -85,22 +83,10 @@ const COMMANDS: [CommandSpec; 22] = [
     CommandSpec::new(PaletteCommand::ShowHelp, "Merry", "Command help", None)
         .with_slash("help", "List slash commands and essential keys"),
     CommandSpec::new(
-        PaletteCommand::FollowLatest,
-        "Navigation",
-        "Follow latest",
-        Some(KeyAction::FollowLatestArtifact),
-    ),
-    CommandSpec::new(
-        PaletteCommand::ReviewPreviousArtifact,
-        "Navigation",
-        "Previous artifact",
-        Some(KeyAction::ReviewPreviousArtifact),
-    ),
-    CommandSpec::new(
-        PaletteCommand::ReviewNextArtifact,
-        "Navigation",
-        "Next artifact",
-        Some(KeyAction::ReviewNextArtifact),
+        PaletteCommand::OpenSessionInBrowser,
+        "Web",
+        "Open trajectory in browser",
+        Some(KeyAction::OpenSessionInBrowser),
     ),
     CommandSpec::new(
         PaletteCommand::ReviewPreviousUserInput,

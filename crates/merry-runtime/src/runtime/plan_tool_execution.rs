@@ -16,7 +16,7 @@ use merry_core::{
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 
-use super::{RuntimeInner, persist_resume_safe_savepoint_if_configured};
+use super::RuntimeInner;
 
 pub(super) async fn execute_plan_tool_call(
     inner: &RuntimeInner,
@@ -440,7 +440,6 @@ where
         )?
     };
     plan_events.extend(events);
-    persist_resume_safe_savepoint_if_configured(inner).await;
     Ok(plan_events)
 }
 
@@ -497,7 +496,6 @@ async fn submit_rejection(
             None,
         )?
     };
-    persist_resume_safe_savepoint_if_configured(inner).await;
     Ok(events)
 }
 

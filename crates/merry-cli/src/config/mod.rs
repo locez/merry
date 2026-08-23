@@ -651,15 +651,13 @@ pub(crate) struct TuiKeymapToml {
     pub(crate) cancel_input_or_quit: Option<String>,
     pub(crate) insert_newline: Option<String>,
     pub(crate) paste_image: Option<String>,
+    pub(crate) open_session_in_browser: Option<String>,
     pub(crate) toggle_plan: Option<String>,
     pub(crate) interrupt: Option<String>,
     pub(crate) quit: Option<String>,
     pub(crate) scroll_up: Option<String>,
     pub(crate) scroll_down: Option<String>,
     pub(crate) review_previous_user_input: Option<String>,
-    pub(crate) review_previous_artifact: Option<String>,
-    pub(crate) review_next_artifact: Option<String>,
-    pub(crate) follow_latest_artifact: Option<String>,
     pub(crate) history_previous: Option<String>,
     pub(crate) history_next: Option<String>,
     pub(crate) resume_suspended: Option<String>,
@@ -990,9 +988,7 @@ quit = "ctrl+q"
 scroll_up = "pageup"
 scroll_down = "pagedown"
 review_previous_user_input = "ctrl+u"
-review_previous_artifact = "ctrl+g"
-review_next_artifact = "ctrl+f"
-follow_latest_artifact = "ctrl+r"
+open_session_in_browser = "ctrl+g"
 history_previous = "up"
 history_next = "down"
 resume_suspended = "ctrl+n"
@@ -1013,17 +1009,15 @@ discard_suspended = "ctrl+d"
         assert_eq!(tui.keymap.cancel_input_or_quit.as_deref(), Some("ctrl+c"));
         assert_eq!(tui.keymap.insert_newline.as_deref(), Some("ctrl+j"));
         assert_eq!(tui.keymap.paste_image.as_deref(), Some("ctrl+v"));
+        assert_eq!(
+            tui.keymap.open_session_in_browser.as_deref(),
+            Some("ctrl+g")
+        );
         assert_eq!(tui.keymap.scroll_up.as_deref(), Some("pageup"));
         assert_eq!(
             tui.keymap.review_previous_user_input.as_deref(),
             Some("ctrl+u")
         );
-        assert_eq!(
-            tui.keymap.review_previous_artifact.as_deref(),
-            Some("ctrl+g")
-        );
-        assert_eq!(tui.keymap.review_next_artifact.as_deref(), Some("ctrl+f"));
-        assert_eq!(tui.keymap.follow_latest_artifact.as_deref(), Some("ctrl+r"));
         assert_eq!(tui.keymap.history_previous.as_deref(), Some("up"));
     }
 
@@ -1299,15 +1293,13 @@ roots = ["skills", "~/shared-skills", "/opt/company/skills"]
         assert_eq!(tui.keymap.insert_newline.as_deref(), Some("ctrl+j"));
         assert_eq!(tui.keymap.scroll_up.as_deref(), Some("pageup"));
         assert_eq!(
+            tui.keymap.open_session_in_browser.as_deref(),
+            Some("ctrl+g")
+        );
+        assert_eq!(
             tui.keymap.review_previous_user_input.as_deref(),
             Some("ctrl+u")
         );
-        assert_eq!(
-            tui.keymap.review_previous_artifact.as_deref(),
-            Some("ctrl+g")
-        );
-        assert_eq!(tui.keymap.review_next_artifact.as_deref(), Some("ctrl+f"));
-        assert_eq!(tui.keymap.follow_latest_artifact.as_deref(), Some("ctrl+r"));
         assert_eq!(tui.keymap.history_previous.as_deref(), Some("up"));
 
         let provider = config

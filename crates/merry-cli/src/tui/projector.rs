@@ -166,24 +166,17 @@ impl TuiProjector {
                 } else if let Some(exit_code) = process_exit_code
                     && let Some(tool) = tool.as_ref()
                 {
-                    let (body, focus_body) = process_output_bodies(&text).unwrap_or_else(|| {
-                        let body = compact_tool_output(&text);
-                        (body.clone(), body)
-                    });
+                    let body =
+                        process_output_bodies(&text).unwrap_or_else(|| compact_tool_output(&text));
                     state.replace_timeline_item(
                         tool.timeline_index,
-                        TimelineItem::ExpandedDetail {
+                        TimelineItem::Expanded {
                             title: completed_tool_title(tool, &format!("exit {exit_code}")),
                             body,
-                            focus_body,
                         },
                     );
                 } else if failed {
-                    let body = failed_tool_body(
-                        result.diagnostic(),
-                        tool.as_ref().map(|tool| tool.name.as_str()),
-                        &text,
-                    );
+                    let body = failed_tool_body(result.diagnostic(), &text);
                     let item = TimelineItem::Diagnostic {
                         title: tool.as_ref().map_or_else(
                             || "tool failed".to_owned(),
@@ -215,15 +208,13 @@ impl TuiProjector {
                         state.push_timeline_item(patch_item);
                     }
                 } else if let Some(tool) = tool.as_ref()
-                    && let Some((preview, focus_body)) =
-                        success_tool_bodies(tool.name.as_str(), &text)
+                    && let Some(preview) = success_tool_bodies(tool.name.as_str(), &text)
                 {
                     state.replace_timeline_item(
                         tool.timeline_index,
-                        TimelineItem::ExpandedDetail {
+                        TimelineItem::Expanded {
                             title: expanded_tool_title(tool),
                             body: preview,
-                            focus_body,
                         },
                     );
                 } else if let Some(tool) = tool.as_ref() {
@@ -440,25 +431,10 @@ fn completed_tool_title(tool: &StartedToolView, status: &str) -> String {
     format!("{} -> {status}", expanded_tool_title(tool))
 }
 
-fn failed_tool_body(
-    diagnostic: Option<&merry_core::ErrorInfo>,
-    tool_name: Option<&str>,
-    text: &str,
-) -> String {
-    let mut body = diagnostic
+fn failed_tool_body(diagnostic: Option<&merry_core::ErrorInfo>, text: &str) -> String {
+    diagnostic
         .map(|diagnostic| compact_failed_tool_body(diagnostic.code(), diagnostic.message(), text))
-        .unwrap_or_else(|| compact_tool_output(text));
-    // Keep exact process output available when the diagnostic is opened in Focus.
-    if tool_name == Some("run_process")
-        && let Some((_, focus_body)) = process_output_bodies(text)
-        && !focus_body.is_empty()
-    {
-        if !body.is_empty() {
-            body.push('\n');
-        }
-        body.push_str(&focus_body);
-    }
-    body
+        .unwrap_or_else(|| compact_tool_output(text))
 }
 
 fn tool_output_text(output: Option<ToolOutput>) -> String {
@@ -529,7 +505,7 @@ fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
     Some((server, tool))
 }
 
-fn success_tool_bodies(name: &str, output: &str) -> Option<(String, String)> {
+fn success_tool_bodies(name: &str, output: &str) -> Option<String> {
     match name {
         "run_process" => process_output_bodies(output),
         "request_permissions" => permission_output_bodies(output),
@@ -539,7 +515,7 @@ fn success_tool_bodies(name: &str, output: &str) -> Option<(String, String)> {
     }
 }
 
-fn permission_output_bodies(output: &str) -> Option<(String, String)> {
+fn permission_output_bodies(output: &str) -> Option<String> {
     let value = serde_json::from_str::<Value>(output).ok()?;
     if value.get("ok").and_then(Value::as_bool) != Some(true)
         || value.get("kind").and_then(Value::as_str) != Some("process_action")
@@ -555,20 +531,15 @@ fn permission_output_bodies(output: &str) -> Option<(String, String)> {
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     let body = format!("allowed: {rationale}\nprofile: {profile}");
-    Some((body.clone(), body))
+    Some(body)
 }
 
-fn read_file_output_bodies(output: &str) -> Option<(String, String)> {
+fn read_file_output_bodies(output: &str) -> Option<String> {
     let output = serde_json::from_str::<WorkspaceReadFileOutput>(output).ok()?;
     if !output.ok || output.tool.as_deref() != Some("workspace_read_file") {
         return None;
     }
 
-    let focus_body = if output.content.is_empty() {
-        format!("{} is empty", output.path)
-    } else {
-        output.content.clone()
-    };
     let mut lines = output
         .content
         .lines()
@@ -581,7 +552,7 @@ fn read_file_output_bodies(output: &str) -> Option<(String, String)> {
     if lines.is_empty() {
         lines.push(format!("{} is empty", output.path));
     }
-    Some((lines.join("\n"), focus_body))
+    Some(lines.join("\n"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -594,17 +565,12 @@ struct WorkspaceReadFileOutput {
     truncated: bool,
 }
 
-fn list_dir_output_bodies(output: &str) -> Option<(String, String)> {
+fn list_dir_output_bodies(output: &str) -> Option<String> {
     let output = serde_json::from_str::<WorkspaceListDirOutput>(output).ok()?;
     if !output.ok || output.tool.as_deref() != Some("workspace_list_dir") {
         return None;
     }
 
-    let all_lines = output
-        .entries
-        .iter()
-        .map(directory_entry_label)
-        .collect::<Vec<_>>();
     let mut preview_lines = output
         .entries
         .iter()
@@ -617,12 +583,7 @@ fn list_dir_output_bodies(output: &str) -> Option<(String, String)> {
     if preview_lines.is_empty() {
         preview_lines.push(format!("{} is empty", output.path));
     }
-    let focus_body = if all_lines.is_empty() {
-        format!("{} is empty", output.path)
-    } else {
-        all_lines.join("\n")
-    };
-    Some((preview_lines.join("\n"), focus_body))
+    Some(preview_lines.join("\n"))
 }
 
 fn directory_entry_label(entry: &WorkspaceListDirEntry) -> String {
@@ -646,7 +607,7 @@ struct WorkspaceListDirEntry {
     kind: String,
 }
 
-fn process_output_bodies(output: &str) -> Option<(String, String)> {
+fn process_output_bodies(output: &str) -> Option<String> {
     let value = serde_json::from_str::<Value>(output).ok()?;
     let stdout = value
         .pointer("/stdout/text")
@@ -668,17 +629,7 @@ fn process_output_bodies(output: &str) -> Option<(String, String)> {
         lines.push(format!("  exit {status}"));
     }
 
-    let mut focus_lines = Vec::new();
-    append_stream_full(&mut focus_lines, stdout);
-    append_stream_full(&mut focus_lines, stderr);
-    if focus_lines.is_empty()
-        && let Some(status) = status
-        && status != 0
-    {
-        focus_lines.push(format!("  exit {status}"));
-    }
-
-    (!lines.is_empty()).then(|| (lines.join("\n"), focus_lines.join("\n")))
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 fn process_exit_code(output: &str) -> Option<i64> {
@@ -704,11 +655,6 @@ fn append_stream_preview(lines: &mut Vec<String>, text: &str) {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .take(PROCESS_PREVIEW_MAX_LINES.saturating_sub(lines.len()));
-    lines.extend(stream_lines.map(|line| format!("  {line}")));
-}
-
-fn append_stream_full(lines: &mut Vec<String>, text: &str) {
-    let stream_lines = text.lines().filter(|line| !line.trim().is_empty());
     lines.extend(stream_lines.map(|line| format!("  {line}")));
 }
 

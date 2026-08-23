@@ -6,6 +6,7 @@ use crate::{
     RuntimeError, UserImageInput,
     artifact::{ArtifactContent, ArtifactError},
     compaction::CompactionError,
+    session_projection::SessionTrajectoryItem,
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, PendingToolCall, ToolCallId, ToolCallResult,
@@ -587,6 +588,75 @@ impl TryFrom<PersistedTranscriptItem> for TranscriptItem {
 }
 
 impl SessionState {
+    pub(crate) fn trajectory_items(&self) -> Result<Vec<SessionTrajectoryItem>, ArtifactError> {
+        self.transcript
+            .items()
+            .iter()
+            .map(|item| match item {
+                TranscriptItem::UserMessage {
+                    id,
+                    model_turn_id,
+                    artifact_id,
+                    ..
+                } => Ok(SessionTrajectoryItem::UserMessage {
+                    item_id: id.as_u64(),
+                    model_turn_id: model_turn_id.as_u64(),
+                    artifact: self.artifacts.read_ref(artifact_id)?.clone(),
+                    text: transcript_text(self, artifact_id, "user")?,
+                }),
+                TranscriptItem::AssistantText {
+                    id,
+                    model_turn_id,
+                    artifact_id,
+                } => Ok(SessionTrajectoryItem::AssistantText {
+                    item_id: id.as_u64(),
+                    model_turn_id: model_turn_id.as_u64(),
+                    artifact: self.artifacts.read_ref(artifact_id)?.clone(),
+                    text: transcript_text(self, artifact_id, "assistant")?,
+                }),
+                TranscriptItem::ToolCall {
+                    id,
+                    model_turn_id,
+                    call,
+                    ..
+                } => Ok(SessionTrajectoryItem::ToolCall {
+                    item_id: id.as_u64(),
+                    model_turn_id: model_turn_id.as_u64(),
+                    call: call.clone(),
+                }),
+                TranscriptItem::ToolResult {
+                    id,
+                    model_turn_id,
+                    call_id,
+                    result,
+                    artifact_id,
+                    ..
+                } => {
+                    let content = self.read_artifact_content(artifact_id)?;
+                    let output = match content {
+                        ArtifactContent::Text { content } => {
+                            Some(merry_core::ToolOutput::Text { text: content })
+                        }
+                        ArtifactContent::Json { content } => {
+                            Some(merry_core::ToolOutput::Json { json: content })
+                        }
+                        ArtifactContent::Binary { .. }
+                        | ArtifactContent::Image { .. }
+                        | ArtifactContent::Other { .. } => None,
+                    };
+                    Ok(SessionTrajectoryItem::ToolResult {
+                        item_id: id.as_u64(),
+                        model_turn_id: model_turn_id.as_u64(),
+                        call_id: call_id.clone(),
+                        result: result.clone(),
+                        artifact: self.artifacts.read_ref(artifact_id)?.clone(),
+                        output,
+                    })
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn full_transcript_snapshot(
         &self,
     ) -> Result<Vec<TranscriptItemSnapshot>, ArtifactError> {
@@ -749,6 +819,25 @@ impl SessionState {
 
         Ok(TranscriptImageSnapshot { artifact, input })
     }
+}
+
+fn transcript_text(
+    session: &SessionState,
+    artifact_id: &ArtifactId,
+    role: &'static str,
+) -> Result<String, ArtifactError> {
+    let content = session.read_artifact_content(artifact_id)?;
+    content
+        .as_text()
+        .map(str::to_owned)
+        .ok_or_else(|| ArtifactError::InvalidEvidenceLocator {
+            id: artifact_id.clone(),
+            reason: match role {
+                "user" => "user transcript artifact is not textual",
+                "assistant" => "assistant transcript artifact is not textual",
+                _ => "transcript artifact is not textual",
+            },
+        })
 }
 
 fn invalid_user_image_artifact(artifact_id: &ArtifactId, reason: &'static str) -> ArtifactError {

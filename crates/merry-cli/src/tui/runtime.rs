@@ -201,6 +201,10 @@ pub(crate) async fn start_tui_runtime_session(
 }
 
 impl TuiRuntimeSession {
+    pub(crate) fn runtime(&self) -> &Runtime {
+        &self.runtime
+    }
+
     pub(crate) fn enqueue_permission_review(
         &mut self,
         request: PermissionReviewRequest,

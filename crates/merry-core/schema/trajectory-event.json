@@ -1,0 +1,721 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TrajectoryEvent",
+  "description": "Incremental change published to Web and SDK observers.",
+  "oneOf": [
+    {
+      "description": "A complete snapshot, normally sent when a subscriber connects.",
+      "type": "object",
+      "properties": {
+        "snapshot": {
+          "$ref": "#/$defs/TrajectorySnapshot"
+        },
+        "type": {
+          "type": "string",
+          "const": "snapshot"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "snapshot"
+      ]
+    },
+    {
+      "description": "A record was inserted or updated.",
+      "type": "object",
+      "properties": {
+        "latest_sequence": {
+          "type": "string",
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "record": {
+          "$ref": "#/$defs/TrajectoryRecord"
+        },
+        "revision": {
+          "type": "string",
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "type": {
+          "type": "string",
+          "const": "record_upsert"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "revision",
+        "latest_sequence",
+        "record"
+      ]
+    },
+    {
+      "description": "Prompt evidence was inserted or its dynamic context count advanced.",
+      "type": "object",
+      "properties": {
+        "latest_sequence": {
+          "type": "string",
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "prompt": {
+          "$ref": "#/$defs/TrajectoryPromptSnapshot"
+        },
+        "revision": {
+          "type": "string",
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "type": {
+          "type": "string",
+          "const": "prompt_updated"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "revision",
+        "latest_sequence",
+        "prompt"
+      ]
+    },
+    {
+      "description": "The runtime session has closed.",
+      "type": "object",
+      "properties": {
+        "latest_sequence": {
+          "type": "string",
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "revision": {
+          "type": "string",
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "type": {
+          "type": "string",
+          "const": "session_closed"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "revision",
+        "latest_sequence"
+      ]
+    }
+  ],
+  "$defs": {
+    "ArtifactId": {
+      "description": "Validated ArtifactId newtype.",
+      "type": "string"
+    },
+    "ArtifactKind": {
+      "description": "Provider-neutral artifact kind.",
+      "oneOf": [
+        {
+          "description": "UTF-8 text.",
+          "type": "string",
+          "const": "text"
+        },
+        {
+          "description": "Structured JSON.",
+          "type": "string",
+          "const": "json"
+        },
+        {
+          "description": "Opaque binary data.",
+          "type": "string",
+          "const": "binary"
+        },
+        {
+          "description": "Image data.",
+          "type": "string",
+          "const": "image"
+        },
+        {
+          "description": "A provider-neutral kind not covered by the stable variants.",
+          "type": "string",
+          "const": "other"
+        }
+      ]
+    },
+    "ArtifactRef": {
+      "description": "Reference to an artifact recorded elsewhere.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Stable artifact identifier.",
+          "$ref": "#/$defs/ArtifactId"
+        },
+        "kind": {
+          "description": "Provider-neutral artifact kind.",
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "label": {
+          "description": "Optional human-readable label.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-merry-output-required": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind"
+      ]
+    },
+    "ErrorInfo": {
+      "description": "Serializable runtime diagnostic.\n\nThis type carries stable diagnostic text only; it does not serialize Rust\nerror internals such as source chains or backtraces.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "Stable diagnostic code or category.",
+          "type": "string"
+        },
+        "message": {
+          "description": "Human-readable diagnostic message.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "Schema": {
+      "type": [
+        "object",
+        "boolean"
+      ]
+    },
+    "SessionId": {
+      "description": "Validated SessionId newtype.",
+      "type": "string"
+    },
+    "ToolCallArguments": {
+      "description": "JSON object arguments supplied with a pending tool call.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "ToolCallId": {
+      "description": "Validated ToolCallId newtype.",
+      "type": "string"
+    },
+    "ToolInputSchema": {
+      "description": "JSON object schema accepted as tool input.",
+      "$ref": "#/$defs/Schema"
+    },
+    "ToolName": {
+      "description": "Provider-portable tool name.",
+      "type": "string",
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"
+    },
+    "ToolSpec": {
+      "description": "Provider-neutral tool specification.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "description": "Human-readable tool description.",
+          "type": "string"
+        },
+        "input_schema": {
+          "description": "Provider-neutral JSON schema for tool input.",
+          "$ref": "#/$defs/ToolInputSchema"
+        },
+        "name": {
+          "description": "Provider-portable tool name.",
+          "$ref": "#/$defs/ToolName"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "description",
+        "input_schema"
+      ]
+    },
+    "TrajectoryLane": {
+      "description": "Semantic lane used to render one trajectory record.",
+      "oneOf": [
+        {
+          "description": "User input and other session-owned input.",
+          "type": "string",
+          "const": "input"
+        },
+        {
+          "description": "Model output and model lifecycle activity.",
+          "type": "string",
+          "const": "model"
+        },
+        {
+          "description": "Tool calls and tool results.",
+          "type": "string",
+          "const": "tools"
+        },
+        {
+          "description": "Runtime lifecycle and diagnostic activity.",
+          "type": "string",
+          "const": "system"
+        }
+      ]
+    },
+    "TrajectoryPayload": {
+      "description": "Complete payload projection used by the Web inspector.",
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/TrajectoryPayloadKind"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "content",
+        "truncated"
+      ]
+    },
+    "TrajectoryPayloadKind": {
+      "description": "Kind of exact textual payload retained by the trajectory inspector.",
+      "oneOf": [
+        {
+          "description": "UTF-8 tool output or message text.",
+          "type": "string",
+          "const": "text"
+        },
+        {
+          "description": "JSON text returned by a tool.",
+          "type": "string",
+          "const": "json"
+        }
+      ]
+    },
+    "TrajectoryPromptBlock": {
+      "description": "A stable provider-visible prompt block retained once per session.",
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/TrajectoryRecordId"
+        },
+        "sequence_order": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "sequence_order",
+        "content",
+        "truncated"
+      ]
+    },
+    "TrajectoryPromptSnapshot": {
+      "description": "Prompt evidence kept separately from conversation records.",
+      "type": "object",
+      "properties": {
+        "dynamic_context_count": {
+          "type": "string",
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "latest_dynamic_sequence": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "stable_blocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrajectoryPromptBlock"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "stable_blocks",
+        "dynamic_context_count"
+      ]
+    },
+    "TrajectoryRecord": {
+      "description": "One normalized record in the trajectory read model.",
+      "type": "object",
+      "properties": {
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactRef"
+          }
+        },
+        "details": {
+          "$ref": "#/$defs/TrajectoryRecordDetails"
+        },
+        "diagnostic": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-merry-output-required": true
+        },
+        "end_sequence": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "finished_at_ms": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "id": {
+          "$ref": "#/$defs/TrajectoryRecordId"
+        },
+        "kind": {
+          "$ref": "#/$defs/TrajectoryRecordKind"
+        },
+        "label": {
+          "type": "string"
+        },
+        "lane": {
+          "$ref": "#/$defs/TrajectoryLane"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrajectoryRecordId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-merry-output-required": true
+        },
+        "sequence_order": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "start_sequence": {
+          "type": "string",
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "started_at_ms": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "status": {
+          "$ref": "#/$defs/TrajectoryRecordStatus"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-merry-output-required": true
+        },
+        "tool_call_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolCallId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-merry-output-required": true
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "lane",
+        "kind",
+        "label",
+        "status",
+        "start_sequence",
+        "sequence_order",
+        "artifacts",
+        "details"
+      ]
+    },
+    "TrajectoryRecordDetails": {
+      "description": "Detailed evidence for a trajectory record.",
+      "oneOf": [
+        {
+          "description": "No expanded content is available for this record.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Complete user/assistant text.",
+          "type": "object",
+          "properties": {
+            "content": {
+              "description": "Content retained for inspection.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Legacy truncation marker retained for snapshot compatibility.",
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "message"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "content",
+            "truncated"
+          ]
+        },
+        {
+          "description": "A model tool call and its optional result.",
+          "type": "object",
+          "properties": {
+            "tool": {
+              "description": "Tool call evidence.",
+              "$ref": "#/$defs/TrajectoryToolDetails"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "tool"
+          ]
+        }
+      ]
+    },
+    "TrajectoryRecordId": {
+      "description": "Validated TrajectoryRecordId newtype.",
+      "type": "string"
+    },
+    "TrajectoryRecordKind": {
+      "description": "Stable semantic kind for a trajectory record.",
+      "oneOf": [
+        {
+          "description": "User-provided input.",
+          "type": "string",
+          "const": "user_input"
+        },
+        {
+          "description": "Assistant/model output.",
+          "type": "string",
+          "const": "assistant_message"
+        },
+        {
+          "description": "A tool call requested by the model.",
+          "type": "string",
+          "const": "tool_call"
+        },
+        {
+          "description": "A legacy standalone tool result retained for persisted snapshot compatibility.\n\nNew runtime projections attach tool output to the corresponding `ToolCall`\nrecord instead of emitting this kind separately.",
+          "type": "string",
+          "const": "tool_result"
+        },
+        {
+          "description": "Context compaction or a compacted checkpoint.",
+          "type": "string",
+          "const": "compaction"
+        },
+        {
+          "description": "A runtime lifecycle or diagnostic record.",
+          "type": "string",
+          "const": "lifecycle"
+        }
+      ]
+    },
+    "TrajectoryRecordStatus": {
+      "description": "Current lifecycle status of a trajectory record.",
+      "oneOf": [
+        {
+          "description": "The runtime has accepted the record but work has not started.",
+          "type": "string",
+          "const": "pending"
+        },
+        {
+          "description": "Work represented by the record is in progress.",
+          "type": "string",
+          "const": "running"
+        },
+        {
+          "description": "Work completed successfully.",
+          "type": "string",
+          "const": "succeeded"
+        },
+        {
+          "description": "Work completed with a failure diagnostic.",
+          "type": "string",
+          "const": "failed"
+        },
+        {
+          "description": "Work stopped because cancellation was requested.",
+          "type": "string",
+          "const": "cancelled"
+        },
+        {
+          "description": "A lifecycle record is complete without success/failure semantics.",
+          "type": "string",
+          "const": "completed"
+        }
+      ]
+    },
+    "TrajectorySnapshot": {
+      "description": "Current normalized trajectory state for one session.",
+      "type": "object",
+      "properties": {
+        "closed": {
+          "type": "boolean",
+          "default": false,
+          "x-merry-output-required": true
+        },
+        "history_truncated_before": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "latest_sequence": {
+          "type": "string",
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "prompt": {
+          "$ref": "#/$defs/TrajectoryPromptSnapshot"
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TrajectoryRecord"
+          }
+        },
+        "revision": {
+          "type": "string",
+          "x-merry-output-required": true,
+          "x-merry-wire-type": "u64"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "tool_specs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolSpec"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "revision",
+        "latest_sequence",
+        "prompt",
+        "tool_specs",
+        "records"
+      ]
+    },
+    "TrajectoryToolDetails": {
+      "description": "Tool-specific evidence attached to one trajectory record.",
+      "type": "object",
+      "properties": {
+        "arguments": {
+          "$ref": "#/$defs/ToolCallArguments"
+        },
+        "arguments_json": {
+          "type": "string",
+          "default": "",
+          "x-merry-output-required": true
+        },
+        "output": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrajectoryPayload"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-merry-output-required": true
+        },
+        "tool_name": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolName"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-merry-output-required": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "arguments"
+      ]
+    }
+  }
+}

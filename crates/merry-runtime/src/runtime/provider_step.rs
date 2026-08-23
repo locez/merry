@@ -49,16 +49,19 @@ async fn has_unresolved_pending_tool_calls(inner: &RuntimeInner) -> bool {
 pub(super) struct ProviderStepControl<'a> {
     token: &'a CancellationToken,
     active_permit: &'a ActiveStepPermit,
+    step_sequence: u64,
 }
 
 impl<'a> ProviderStepControl<'a> {
     pub(super) const fn new(
         token: &'a CancellationToken,
         active_permit: &'a ActiveStepPermit,
+        step_sequence: u64,
     ) -> Self {
         Self {
             token,
             active_permit,
+            step_sequence,
         }
     }
 }
@@ -75,6 +78,7 @@ pub(super) async fn run_provider_step(
     let ProviderStepControl {
         token,
         active_permit,
+        step_sequence,
     } = control;
     if has_unresolved_pending_tool_calls(inner).await {
         tracing::debug!(
@@ -555,6 +559,9 @@ pub(super) async fn run_provider_step(
             return;
         }
     }
+    inner
+        .trajectory
+        .observe_model_request(&request, step_sequence);
     let automatic_compaction_enabled = inner.automatic_compaction.read().await.is_enabled();
     let usage_context_snapshot =
         step_usage_context_snapshot(request_budget.as_ref().ok(), automatic_compaction_enabled);

@@ -404,13 +404,11 @@ fn render_shortcuts(frame: &mut Frame<'_>, state: &TuiState) {
         shortcut_line_for_action(state, "Submit backlog", KeyAction::SubmitBacklog),
         shortcut_line_for_action(state, "Command palette", KeyAction::OpenCommandPanel),
         shortcut_line_for_action(state, "Toggle plan", KeyAction::TogglePlan),
-        shortcut_line_for_action(state, "Follow latest", KeyAction::FollowLatestArtifact),
         shortcut_line_for_action(
             state,
-            "Previous artifact",
-            KeyAction::ReviewPreviousArtifact,
+            "Open trajectory in browser",
+            KeyAction::OpenSessionInBrowser,
         ),
-        shortcut_line_for_action(state, "Next artifact", KeyAction::ReviewNextArtifact),
         shortcut_line_for_action(
             state,
             "Previous user input",

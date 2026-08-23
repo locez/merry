@@ -115,6 +115,7 @@
             session_store: None,
             tool_batch_active: AtomicBool::new(false),
             activity_hub: Arc::new(crate::SubagentActivityHub::new()),
+            trajectory: crate::trajectory::RuntimeObservability::new(session_id.clone(), Vec::new()),
         }
     }
 

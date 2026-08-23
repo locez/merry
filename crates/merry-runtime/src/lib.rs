@@ -63,6 +63,8 @@ mod token_estimate;
 mod tool;
 mod tool_admission;
 mod tool_input_validation;
+mod trajectory;
+mod trajectory_replay;
 mod user_input;
 mod workspace_scope;
 
@@ -72,8 +74,8 @@ pub use agent_loop::{
     DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS,
 };
 pub use artifact::{
-    ArtifactContent, ArtifactContentKind, ArtifactError, ArtifactRecord, ArtifactRegistry,
-    ImageArtifactMetadata, TextEvidencePage,
+    ArtifactContent, ArtifactContentKind, ArtifactContentPreview, ArtifactError, ArtifactRecord,
+    ArtifactRegistry, ImageArtifactMetadata, TextEvidencePage,
 };
 pub use checkpoint::{
     CheckpointEntry, CheckpointEntryId, CheckpointError, CheckpointHandoff,

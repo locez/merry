@@ -1,10 +1,9 @@
-use super::{
-    Runtime, RuntimeError, diagnostic_from_text, persist_resume_safe_savepoint_if_configured,
-};
+use super::{Runtime, RuntimeError, diagnostic_from_text};
 use crate::{
-    ArtifactContent, ContextEntry, ContextSummary, LedgerProjectionSnapshot,
-    SessionContextSnapshot, SessionTranscriptItem, events::ActiveStepPermit,
-    session::is_runtime_reserved_artifact_id, tool_input_validation::ToolInputValidationError,
+    ArtifactContent, ArtifactContentPreview, ContextEntry, ContextSummary,
+    LedgerProjectionSnapshot, SessionContextSnapshot, SessionTranscriptItem,
+    events::ActiveStepPermit, session::is_runtime_reserved_artifact_id,
+    tool_input_validation::ToolInputValidationError,
 };
 use merry_core::{
     ArtifactId, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, PendingToolCall,
@@ -46,10 +45,14 @@ impl Runtime {
             });
         }
 
-        let mut session = self.inner.session.lock().await;
-        session
-            .record_artifact_events(artifact, content)
-            .map_err(Into::into)
+        let events = {
+            let mut session = self.inner.session.lock().await;
+            session
+                .record_artifact_events(artifact, content)
+                .map_err(RuntimeError::from)?
+        };
+        self.observe_recorded_journal_events(&events);
+        Ok(events)
     }
 
     /// Resolves one pending tool call with an artifact-backed result.
@@ -95,7 +98,7 @@ impl Runtime {
             let mut session = self.inner.session.lock().await;
             session.submit_tool_result(result, content)?
         };
-        persist_resume_safe_savepoint_if_configured(&self.inner).await;
+        self.inner.commit_journal_events(&events).await;
         Ok(events)
     }
 
@@ -109,7 +112,7 @@ impl Runtime {
             let mut session = self.inner.session.lock().await;
             session.record_final_output(call.id().clone(), json)?
         };
-        persist_resume_safe_savepoint_if_configured(&self.inner).await;
+        self.inner.commit_journal_events(&output.1).await;
         Ok(output)
     }
 
@@ -131,7 +134,7 @@ impl Runtime {
                 None,
             )?
         };
-        persist_resume_safe_savepoint_if_configured(&self.inner).await;
+        self.inner.commit_journal_events(&events).await;
         Ok(events)
     }
 
@@ -155,7 +158,7 @@ impl Runtime {
                 None,
             )?
         };
-        persist_resume_safe_savepoint_if_configured(&self.inner).await;
+        self.inner.commit_journal_events(&events).await;
         Ok(events)
     }
 
@@ -231,7 +234,7 @@ impl Runtime {
                 None,
             )?
         };
-        persist_resume_safe_savepoint_if_configured(&self.inner).await;
+        self.inner.commit_journal_events(&events).await;
         Ok(events)
     }
 
@@ -263,6 +266,18 @@ impl Runtime {
         let session = self.inner.session.lock().await;
         session
             .read_artifact_content(artifact_id)
+            .map_err(Into::into)
+    }
+
+    /// Reads bounded artifact inspection data without cloning the full payload.
+    pub async fn read_artifact_preview(
+        &self,
+        artifact_id: &ArtifactId,
+        max_bytes: usize,
+    ) -> Result<ArtifactContentPreview, RuntimeError> {
+        let session = self.inner.session.lock().await;
+        session
+            .read_artifact_preview(artifact_id, max_bytes)
             .map_err(Into::into)
     }
 

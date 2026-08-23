@@ -122,6 +122,26 @@ impl ArtifactContent {
             Self::Image { bytes, .. } => bytes,
         }
     }
+
+    /// Creates a bounded text preview without cloning the full artifact.
+    #[must_use]
+    pub fn bounded_text(&self, max_bytes: usize) -> (Option<String>, bool) {
+        let Some(value) = self.as_text() else {
+            return (None, false);
+        };
+        if value.len() <= max_bytes {
+            return (Some(value.to_owned()), false);
+        }
+        let mut end = 0;
+        for (index, character) in value.char_indices() {
+            let next = index + character.len_utf8();
+            if next > max_bytes {
+                break;
+            }
+            end = next;
+        }
+        (Some(value[..end].to_owned()), true)
+    }
 }
 
 /// Optional metadata for image artifacts with a known decoded representation.
@@ -168,6 +188,41 @@ pub enum ArtifactContentKind {
     Image,
     /// Provider-neutral bytes for artifact kinds not covered by stable variants.
     Other,
+}
+
+/// Bounded inspection data for an artifact without exposing its full payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactContentPreview {
+    kind: ArtifactContentKind,
+    content: Option<String>,
+    truncated: bool,
+    byte_length: usize,
+}
+
+impl ArtifactContentPreview {
+    /// Returns the artifact content category.
+    #[must_use]
+    pub fn kind(&self) -> ArtifactContentKind {
+        self.kind
+    }
+
+    /// Returns the bounded text payload, when the artifact is textual.
+    #[must_use]
+    pub fn content(&self) -> Option<&str> {
+        self.content.as_deref()
+    }
+
+    /// Returns whether the exact textual payload exceeded the preview bound.
+    #[must_use]
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// Returns the exact artifact byte length.
+    #[must_use]
+    pub fn byte_length(&self) -> usize {
+        self.byte_length
+    }
 }
 
 /// A recorded artifact reference and its exact content.
@@ -395,6 +450,22 @@ impl ArtifactRegistry {
     /// Reads recorded exact content by artifact id.
     pub fn read_content(&self, id: &ArtifactId) -> Result<&ArtifactContent, ArtifactError> {
         self.read_record(id).map(ArtifactRecord::content)
+    }
+
+    /// Reads bounded inspection data without cloning the full artifact payload.
+    pub fn read_content_preview(
+        &self,
+        id: &ArtifactId,
+        max_bytes: usize,
+    ) -> Result<ArtifactContentPreview, ArtifactError> {
+        let content = self.read_content(id)?;
+        let (preview, truncated) = content.bounded_text(max_bytes);
+        Ok(ArtifactContentPreview {
+            kind: content.kind(),
+            content: preview,
+            truncated,
+            byte_length: content.as_bytes().len(),
+        })
     }
 
     /// Creates an evidence reference only if the target artifact and locator are readable.
@@ -837,5 +908,23 @@ mod tests {
             &original_record.content,
             &cloned_record.content
         ));
+    }
+
+    #[test]
+    fn bounded_preview_clones_only_a_utf8_safe_prefix() {
+        let mut registry = ArtifactRegistry::default();
+        let artifact = artifact_ref("preview", ArtifactKind::Text);
+        registry
+            .record(artifact.clone(), ArtifactContent::text("aébc"))
+            .expect("artifact should record");
+
+        let preview = registry
+            .read_content_preview(artifact.id(), 3)
+            .expect("preview should be readable");
+
+        assert_eq!(preview.kind(), super::ArtifactContentKind::Text);
+        assert_eq!(preview.content(), Some("aé"));
+        assert!(preview.truncated());
+        assert_eq!(preview.byte_length(), "aébc".len());
     }
 }

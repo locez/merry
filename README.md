@@ -22,7 +22,8 @@ deterministic; live provider checks are opt-in.
 - Runtime-owned sessions, ledger facts, artifacts, context compilation,
   checkpoints, cancellation, permission review, and structured final output.
 - A responsive terminal timeline with live deltas, compact tool activity,
-  on-demand details, queues, completion, resume, and a balanced magenta theme.
+  queues, completion, resume, and a balanced magenta theme. Detailed session
+  inspection is provided by the local Web trajectory page.
 - Thin Rust and Python facades over the same Rust-owned runtime.
 
 ## Build
@@ -31,9 +32,31 @@ Requirements:
 
 - Stable Rust with Rust 2024 edition support.
 - Linux and `bubblewrap` for the default TUI and `merry run` sandbox.
+- Node.js and npm when changing the local Web trajectory assets.
+
+The embedded Web assets are checked in so a clean Rust checkout can compile
+without a Node installation. Regenerate them after changing files under
+`web/`:
 
 ```bash
+cd web
+npm ci
+npm test
+cd ..
 cargo build --release -p merry-cli
+```
+
+`npm test` type-checks the TypeScript, runs the Web tests, and regenerates the
+tracked files in `crates/merry-web/assets/`. `cargo build` embeds those files
+into `target/release/merry`; it does not invoke Node or rebuild the Web assets.
+CI verifies that the generated files are current.
+
+When changing the Rust trajectory contract, refresh its canonical schema before
+running the Web checks:
+
+```bash
+cargo run -p merry-core --example trajectory-schema --quiet > crates/merry-core/schema/trajectory-event.json
+(cd web && npm test)
 ```
 
 The binary is `target/release/merry`.

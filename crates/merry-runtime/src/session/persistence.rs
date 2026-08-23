@@ -28,7 +28,7 @@ use crate::{
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, EvidenceRef, PendingToolCall, PlanSnapshot, SessionId,
-    SessionUsage, ToolCallId,
+    SessionUsage, ToolCallId, TrajectorySnapshot,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -64,6 +64,8 @@ struct StoredSessionDocument {
     registries: StoredRegistries,
     active_plan: Option<PersistedPlanState>,
     terminal_plans: Vec<PlanSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trajectory_snapshot: Option<TrajectorySnapshot>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -133,6 +135,7 @@ struct PersistableSessionView<'a> {
     resolved_tool_calls: &'a BTreeSet<ToolCallId>,
     active_plan: Option<&'a PlanState>,
     terminal_plans: &'a [PlanSnapshot],
+    trajectory_snapshot: Option<&'a TrajectorySnapshot>,
 }
 
 impl SessionState {
@@ -197,12 +200,14 @@ impl SessionState {
             resolved_tool_calls: &self.resolved_tool_calls,
             active_plan: self.active_plan.as_ref(),
             terminal_plans: &self.terminal_plans,
+            trajectory_snapshot: self.trajectory_snapshot.as_ref(),
         })
     }
 
     pub(crate) fn persistable_bundle_with_compaction(
         &self,
         prepared: &PreparedCompactionInstall,
+        trajectory_snapshot: &TrajectorySnapshot,
     ) -> Result<PersistableSessionBundle, SessionStoreError> {
         self.persistable_bundle_for(PersistableSessionView {
             transcript: prepared.transcript(),
@@ -217,6 +222,7 @@ impl SessionState {
             resolved_tool_calls: &self.resolved_tool_calls,
             active_plan: self.active_plan.as_ref(),
             terminal_plans: &self.terminal_plans,
+            trajectory_snapshot: Some(trajectory_snapshot),
         })
     }
 
@@ -237,6 +243,7 @@ impl SessionState {
             resolved_tool_calls: prepared.resolved_tool_calls(),
             active_plan: Some(prepared.active_plan()),
             terminal_plans: prepared.terminal_plans(),
+            trajectory_snapshot: self.trajectory_snapshot.as_ref(),
         })
     }
 
@@ -322,6 +329,7 @@ impl SessionState {
             },
             active_plan: view.active_plan.map(PlanState::persisted),
             terminal_plans: view.terminal_plans.to_vec(),
+            trajectory_snapshot: view.trajectory_snapshot.cloned(),
         };
         let document_bytes = serde_json::to_vec_pretty(&document)?;
         Ok(PersistableSessionBundle {
@@ -414,6 +422,7 @@ impl SessionState {
                 .into_iter()
                 .collect::<BTreeSet<_>>(),
             usage: document.usage,
+            trajectory_snapshot: document.trajectory_snapshot,
         };
 
         if let Some(anchor) = document.task_anchor {

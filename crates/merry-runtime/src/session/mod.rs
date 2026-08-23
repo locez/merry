@@ -11,7 +11,7 @@ use crate::{
     skill::SkillCatalog,
     summary_draft_promotion::SummaryDraftPromotionRegistry,
 };
-use merry_core::{PendingToolCall, PlanSnapshot, SessionId, ToolCallId};
+use merry_core::{PendingToolCall, PlanSnapshot, SessionId, ToolCallId, TrajectorySnapshot};
 use std::collections::BTreeSet;
 
 mod artifacts;
@@ -40,6 +40,7 @@ pub(crate) use self::{
     tool_result::{ProposedToolExecutionOutcome, ToolResultLedgerObservation},
     transcript::{Transcript, TranscriptItemSnapshot, UserInputOrigin},
 };
+pub(crate) use crate::session_projection::SessionTrajectoryItem;
 
 #[cfg(test)]
 pub(crate) use self::transcript::TranscriptItem;
@@ -71,6 +72,7 @@ pub(crate) struct SessionState {
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
     usage: Option<merry_core::SessionUsage>,
+    trajectory_snapshot: Option<TrajectorySnapshot>,
 }
 
 impl SessionState {
@@ -99,7 +101,16 @@ impl SessionState {
             pending_tool_calls: Vec::new(),
             resolved_tool_calls: BTreeSet::new(),
             usage: None,
+            trajectory_snapshot: None,
         }
+    }
+
+    pub(crate) fn trajectory_snapshot(&self) -> Option<TrajectorySnapshot> {
+        self.trajectory_snapshot.clone()
+    }
+
+    pub(crate) fn set_trajectory_snapshot(&mut self, snapshot: TrajectorySnapshot) {
+        self.trajectory_snapshot = Some(snapshot);
     }
 
     pub(crate) fn ledger_projection(&self) -> crate::ledger::LedgerProjectionSnapshot {

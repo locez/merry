@@ -12,7 +12,7 @@
             runtime_session_and_plan_controller(id.clone(), event_buffer_size);
         Runtime {
             inner: Arc::new(RuntimeInner {
-                session_id: id,
+                session_id: id.clone(),
                 session: session_state,
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),
@@ -46,6 +46,7 @@
                 session_store: None,
                 tool_batch_active: AtomicBool::new(false),
                 activity_hub: Arc::new(crate::SubagentActivityHub::new()),
+                trajectory: crate::trajectory::RuntimeObservability::new(id.clone(), Vec::new()),
             }),
         }
     }
@@ -56,7 +57,7 @@
             runtime_session_and_plan_controller(id.clone(), event_buffer_size);
         Runtime {
             inner: Arc::new(RuntimeInner {
-                session_id: id,
+                session_id: id.clone(),
                 session: session_state,
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),
@@ -90,6 +91,7 @@
                 session_store: None,
                 tool_batch_active: AtomicBool::new(false),
                 activity_hub: Arc::new(crate::SubagentActivityHub::new()),
+                trajectory: crate::trajectory::RuntimeObservability::new(id.clone(), Vec::new()),
             }),
         }
     }
@@ -104,7 +106,7 @@
             runtime_session_and_plan_controller(id.clone(), event_buffer_size);
         Runtime {
             inner: Arc::new(RuntimeInner {
-                session_id: id,
+                session_id: id.clone(),
                 session: session_state,
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),
@@ -138,6 +140,7 @@
                 session_store: None,
                 tool_batch_active: AtomicBool::new(false),
                 activity_hub: Arc::new(crate::SubagentActivityHub::new()),
+                trajectory: crate::trajectory::RuntimeObservability::new(id.clone(), Vec::new()),
             }),
         }
     }

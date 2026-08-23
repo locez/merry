@@ -1,0 +1,276 @@
+{
+  "events": [
+    {
+      "snapshot": {
+        "closed": false,
+        "history_truncated_before": null,
+        "latest_sequence": "43",
+        "prompt": {
+          "dynamic_context_count": "2",
+          "latest_dynamic_sequence": "41",
+          "stable_blocks": [
+            {
+              "content": "Stable runtime instructions",
+              "id": "prompt-1",
+              "sequence_order": 0,
+              "truncated": false
+            }
+          ]
+        },
+        "records": [
+          {
+            "artifacts": [],
+            "details": {
+              "content": "Inspect the repository",
+              "truncated": false,
+              "type": "message"
+            },
+            "diagnostic": null,
+            "end_sequence": "42",
+            "finished_at_ms": null,
+            "id": "input-1",
+            "kind": "user_input",
+            "label": "User input",
+            "lane": "input",
+            "parent_id": null,
+            "sequence_order": 0,
+            "start_sequence": "42",
+            "started_at_ms": null,
+            "status": "completed",
+            "summary": "Inspect the repository",
+            "tool_call_id": null,
+            "turn_id": "7"
+          },
+          {
+            "artifacts": [
+              {
+                "id": "artifact-1",
+                "kind": "text",
+                "label": "README.md"
+              }
+            ],
+            "details": {
+              "tool": {
+                "arguments": {
+                  "mode": "text",
+                  "path": "README.md"
+                },
+                "arguments_json": "{\"mode\":\"text\",\"path\":\"README.md\"}",
+                "output": {
+                  "content": "file contents",
+                  "kind": "text",
+                  "truncated": true
+                },
+                "tool_name": "read_file"
+              },
+              "type": "tool"
+            },
+            "diagnostic": null,
+            "end_sequence": "43",
+            "finished_at_ms": null,
+            "id": "tool-1",
+            "kind": "tool_call",
+            "label": "Read file",
+            "lane": "tools",
+            "parent_id": "input-1",
+            "sequence_order": 0,
+            "start_sequence": "43",
+            "started_at_ms": null,
+            "status": "succeeded",
+            "summary": "README.md",
+            "tool_call_id": "call-1",
+            "turn_id": "7"
+          }
+        ],
+        "revision": "1",
+        "session_id": "trajectory-contract",
+        "tool_specs": [
+          {
+            "description": "Read a UTF-8 file.",
+            "input_schema": {
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            },
+            "name": "read_file"
+          }
+        ]
+      },
+      "type": "snapshot"
+    },
+    {
+      "latest_sequence": "43",
+      "record": {
+        "artifacts": [
+          {
+            "id": "artifact-1",
+            "kind": "text",
+            "label": "README.md"
+          }
+        ],
+        "details": {
+          "tool": {
+            "arguments": {
+              "mode": "text",
+              "path": "README.md"
+            },
+            "arguments_json": "{\"mode\":\"text\",\"path\":\"README.md\"}",
+            "output": {
+              "content": "file contents",
+              "kind": "text",
+              "truncated": true
+            },
+            "tool_name": "read_file"
+          },
+          "type": "tool"
+        },
+        "diagnostic": null,
+        "end_sequence": "43",
+        "finished_at_ms": null,
+        "id": "tool-1",
+        "kind": "tool_call",
+        "label": "Read file",
+        "lane": "tools",
+        "parent_id": "input-1",
+        "sequence_order": 0,
+        "start_sequence": "43",
+        "started_at_ms": null,
+        "status": "succeeded",
+        "summary": "README.md",
+        "tool_call_id": "call-1",
+        "turn_id": "7"
+      },
+      "revision": "2",
+      "type": "record_upsert"
+    },
+    {
+      "latest_sequence": "43",
+      "prompt": {
+        "dynamic_context_count": "2",
+        "latest_dynamic_sequence": "41",
+        "stable_blocks": [
+          {
+            "content": "Stable runtime instructions",
+            "id": "prompt-1",
+            "sequence_order": 0,
+            "truncated": false
+          }
+        ]
+      },
+      "revision": "3",
+      "type": "prompt_updated"
+    },
+    {
+      "latest_sequence": "43",
+      "revision": "4",
+      "type": "session_closed"
+    }
+  ],
+  "snapshot": {
+    "closed": false,
+    "history_truncated_before": null,
+    "latest_sequence": "43",
+    "prompt": {
+      "dynamic_context_count": "2",
+      "latest_dynamic_sequence": "41",
+      "stable_blocks": [
+        {
+          "content": "Stable runtime instructions",
+          "id": "prompt-1",
+          "sequence_order": 0,
+          "truncated": false
+        }
+      ]
+    },
+    "records": [
+      {
+        "artifacts": [],
+        "details": {
+          "content": "Inspect the repository",
+          "truncated": false,
+          "type": "message"
+        },
+        "diagnostic": null,
+        "end_sequence": "42",
+        "finished_at_ms": null,
+        "id": "input-1",
+        "kind": "user_input",
+        "label": "User input",
+        "lane": "input",
+        "parent_id": null,
+        "sequence_order": 0,
+        "start_sequence": "42",
+        "started_at_ms": null,
+        "status": "completed",
+        "summary": "Inspect the repository",
+        "tool_call_id": null,
+        "turn_id": "7"
+      },
+      {
+        "artifacts": [
+          {
+            "id": "artifact-1",
+            "kind": "text",
+            "label": "README.md"
+          }
+        ],
+        "details": {
+          "tool": {
+            "arguments": {
+              "mode": "text",
+              "path": "README.md"
+            },
+            "arguments_json": "{\"mode\":\"text\",\"path\":\"README.md\"}",
+            "output": {
+              "content": "file contents",
+              "kind": "text",
+              "truncated": true
+            },
+            "tool_name": "read_file"
+          },
+          "type": "tool"
+        },
+        "diagnostic": null,
+        "end_sequence": "43",
+        "finished_at_ms": null,
+        "id": "tool-1",
+        "kind": "tool_call",
+        "label": "Read file",
+        "lane": "tools",
+        "parent_id": "input-1",
+        "sequence_order": 0,
+        "start_sequence": "43",
+        "started_at_ms": null,
+        "status": "succeeded",
+        "summary": "README.md",
+        "tool_call_id": "call-1",
+        "turn_id": "7"
+      }
+    ],
+    "revision": "1",
+    "session_id": "trajectory-contract",
+    "tool_specs": [
+      {
+        "description": "Read a UTF-8 file.",
+        "input_schema": {
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        "name": "read_file"
+      }
+    ]
+  }
+}

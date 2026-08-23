@@ -1,4 +1,4 @@
-use super::{RuntimeInner, diagnostic_from_text, persist_resume_safe_savepoint_if_configured};
+use super::{RuntimeInner, diagnostic_from_text};
 use crate::{
     ActionExecutionEvidence, ActionProposal, ArtifactContent, ProcessActionIntent,
     ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext,
@@ -203,7 +203,6 @@ pub(super) async fn execute_admitted_process_action(
             .with_observation(observation),
         )?
     };
-    persist_resume_safe_savepoint_if_configured(inner).await;
     Ok(merge_process_input_and_result_events(
         shell_input_artifact.map(|(_artifact, events)| events),
         result_events,

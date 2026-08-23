@@ -4,12 +4,9 @@ use super::{
     keymap::KeyAction,
     layout::{BottomPaneHeights, cockpit_layout},
     overlay::OverlayKeyResult,
-    preferences::{TuiPreferences, TuiPreferencesStore, TuiSettingsDefaults},
+    preferences::{TuiPreferences, TuiPreferencesStore},
     projector::TuiProjector,
-    provider_overlay::{
-        ModelListItem, ModelPickerTarget, ProviderDraftMode, ProviderFormSeed, ProviderFormValues,
-        ProviderListItem, ProviderOverlayAction,
-    },
+    provider_overlay::{ModelPickerTarget, ProviderFormValues},
     render,
     runtime::TuiRuntimeSession,
     state::{TimelineItem, TuiState},
@@ -17,45 +14,52 @@ use super::{
 };
 use crate::{
     cli_error::{CliError, unexpected},
-    config::{ProviderAlias, derive_provider_alias},
-    provider_management::{
-        ProviderDiscoveryDraft, ProviderManagementError, ProviderManagementService,
-    },
+    provider_management::ProviderManagementService,
+    web::{RuntimeWebService, open_in_browser},
 };
 use crossterm::event::{KeyCode, KeyEvent};
 use futures_util::StreamExt;
 use merry_core::QueuedInputLane;
 use merry_runtime::InterruptReason;
 use ratatui::layout::{Position, Rect, Size};
-use std::{collections::BTreeSet, time::Duration};
+use std::time::Duration;
 use tokio::{sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 
 const TIMELINE_SCROLL_STEP: usize = 5;
-const FOCUS_SCROLL_STEP: usize = 5;
 const PLAN_SCROLL_STEP: usize = 5;
 const TUI_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
-struct ModelDiscoveryCompletion {
-    generation: u64,
-    alias: String,
-    result: Result<Vec<ModelListItem>, String>,
+pub(super) struct ModelDiscoveryCompletion {
+    pub(super) generation: u64,
+    pub(super) alias: String,
+    pub(super) result: Result<Vec<super::provider_overlay::ModelListItem>, String>,
 }
 
 struct ClipboardImageCompletion {
     result: Result<DraftImage, String>,
 }
 
-struct ProviderController<'a> {
-    management: &'a mut ProviderManagementService,
-    discovery_tx: &'a mpsc::Sender<ModelDiscoveryCompletion>,
-    discovery_generation: &'a mut u64,
-    discovery_token: &'a mut Option<CancellationToken>,
+pub(super) struct ProviderController<'a> {
+    pub(super) management: &'a mut ProviderManagementService,
+    pub(super) discovery_tx: &'a mpsc::Sender<ModelDiscoveryCompletion>,
+    pub(super) discovery_generation: &'a mut u64,
+    pub(super) discovery_token: &'a mut Option<CancellationToken>,
 }
+
+pub(super) use super::controller_provider::provider_discovery_draft;
 
 struct InputHistoryController<'a> {
     store: &'a InputHistoryStore,
     warning_shown: &'a mut bool,
+}
+
+struct ControllerServices<'a> {
+    preferences_store: &'a TuiPreferencesStore,
+    input_history: InputHistoryController<'a>,
+    providers: ProviderController<'a>,
+    clipboard_image_tx: &'a mpsc::Sender<ClipboardImageCompletion>,
+    web_service: &'a mut RuntimeWebService,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +73,7 @@ pub(crate) enum ControllerEffect {
     DiscardSuspended,
     PersistPreferences(TuiPreferences),
     ApplyRuntimePreferences(TuiPreferences),
+    OpenSessionInBrowser,
     OpenProviderManager,
     OpenProviderForm,
     OpenProviderEditor(String),
@@ -127,6 +132,7 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             ControllerEffect::None
         }
         KeyAction::PasteImage => ControllerEffect::PasteImage,
+        KeyAction::OpenSessionInBrowser => ControllerEffect::OpenSessionInBrowser,
         KeyAction::OpenCommandPanel => {
             state.open_command_palette();
             ControllerEffect::None
@@ -142,9 +148,6 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
                 state.follow_latest();
                 state.plan_mut().leave_focus();
                 state.repeat_stop_feedback();
-                ControllerEffect::None
-            } else if state.is_artifact_reviewing() {
-                state.exit_artifact_review();
                 ControllerEffect::None
             } else if state.is_timeline_reviewing() {
                 state.exit_timeline_review();
@@ -164,18 +167,6 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
         }
         KeyAction::ReviewPreviousUserInput => {
             state.jump_to_previous_user_input();
-            ControllerEffect::None
-        }
-        KeyAction::ReviewPreviousArtifact => {
-            state.select_previous_artifact();
-            ControllerEffect::None
-        }
-        KeyAction::ReviewNextArtifact => {
-            state.select_next_artifact();
-            ControllerEffect::None
-        }
-        KeyAction::FollowLatestArtifact => {
-            state.follow_latest();
             ControllerEffect::None
         }
         KeyAction::HistoryPrevious => {
@@ -209,12 +200,9 @@ fn submit_input(
 }
 
 fn exit_review_if_active(state: &mut TuiState) -> bool {
-    let was_reviewing = state.is_timeline_reviewing() || state.is_artifact_reviewing();
+    let was_reviewing = state.is_timeline_reviewing();
     if state.is_timeline_reviewing() {
         state.exit_timeline_review();
-    }
-    if state.is_artifact_reviewing() {
-        state.exit_artifact_review();
     }
     was_reviewing
 }
@@ -312,7 +300,9 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
                 state.close_overlay();
                 ControllerEffect::DenyPermission(approval_id)
             }
-            OverlayKeyResult::Provider(action) => provider_overlay_effect(action),
+            OverlayKeyResult::Provider(action) => {
+                super::controller_provider::provider_overlay_effect(action)
+            }
         };
     }
 
@@ -373,58 +363,6 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
     ControllerEffect::None
 }
 
-fn provider_overlay_effect(action: ProviderOverlayAction) -> ControllerEffect {
-    match action {
-        ProviderOverlayAction::Consumed | ProviderOverlayAction::Back => ControllerEffect::None,
-        ProviderOverlayAction::OpenProviderManager => ControllerEffect::OpenProviderManager,
-        ProviderOverlayAction::OpenProviderForm => ControllerEffect::OpenProviderForm,
-        ProviderOverlayAction::OpenProviderEditor(alias) => {
-            ControllerEffect::OpenProviderEditor(alias)
-        }
-        ProviderOverlayAction::OpenModelPicker(alias) => ControllerEffect::OpenModelPicker(alias),
-        ProviderOverlayAction::BackToProviderForm => ControllerEffect::BackToProviderForm,
-        ProviderOverlayAction::DiscoverFormModels {
-            original_alias,
-            values,
-        } => ControllerEffect::DiscoverFormModels {
-            original_alias,
-            values,
-        },
-        ProviderOverlayAction::SaveProvider(values) => ControllerEffect::SaveProvider(values),
-        ProviderOverlayAction::UpdateProvider {
-            original_alias,
-            values,
-        } => ControllerEffect::UpdateProvider {
-            original_alias,
-            values,
-        },
-        ProviderOverlayAction::RefreshModels(alias) => ControllerEffect::RefreshModels(alias),
-        ProviderOverlayAction::RefreshFormModels => ControllerEffect::RefreshFormModels,
-        ProviderOverlayAction::DeleteProvider(alias) => ControllerEffect::DeleteProvider(alias),
-        ProviderOverlayAction::SelectProvider(alias) => ControllerEffect::SelectProvider { alias },
-        ProviderOverlayAction::SelectModel {
-            alias,
-            model,
-            target,
-        } => ControllerEffect::OpenReasoningPicker {
-            alias,
-            model,
-            target,
-        },
-        ProviderOverlayAction::SelectReasoning {
-            alias,
-            model,
-            reasoning_effort,
-            target,
-        } => ControllerEffect::ApplyProviderModel {
-            alias,
-            model,
-            reasoning_effort,
-            target,
-        },
-    }
-}
-
 fn preferences_effect(
     item: super::overlay::SettingItem,
     preferences: TuiPreferences,
@@ -465,8 +403,6 @@ pub(crate) fn handle_mouse_scroll_up(
         } else {
             state.plan_mut().scroll_up_by(PLAN_SCROLL_STEP);
         }
-    } else if position_in_focus_pane(position, terminal_size, state) {
-        state.scroll_focus_up_by(FOCUS_SCROLL_STEP);
     } else {
         state.scroll_timeline_up_by(TIMELINE_SCROLL_STEP);
     }
@@ -486,17 +422,9 @@ pub(crate) fn handle_mouse_scroll_down(
         } else {
             state.plan_mut().scroll_down_by(PLAN_SCROLL_STEP);
         }
-    } else if position_in_focus_pane(position, terminal_size, state) {
-        state.scroll_focus_down_by(FOCUS_SCROLL_STEP);
     } else {
         state.scroll_timeline_down_by(TIMELINE_SCROLL_STEP);
     }
-}
-
-fn position_in_focus_pane(position: Position, terminal_size: Size, state: &TuiState) -> bool {
-    cockpit_rects(terminal_size, state)
-        .detail
-        .is_some_and(|detail| detail.contains(position))
 }
 
 fn position_in_plan_pane(position: Position, terminal_size: Size, state: &TuiState) -> bool {
@@ -516,7 +444,6 @@ fn cockpit_rects(terminal_size: Size, state: &TuiState) -> super::layout::Timeli
             input: pane_heights.input,
             status: render::STATUS_HEIGHT,
         },
-        state.is_artifact_reviewing(),
         state.plan().is_open(),
         state.plan().is_focused(),
     )
@@ -538,6 +465,13 @@ pub(crate) async fn run_controller(
     let mut subagent_activity_open = true;
     let mut permission_requests_open = true;
     let mut input_history_warning_shown = false;
+    let mut web_service = RuntimeWebService::new(session.runtime().clone());
+    if let Err(error) = web_service.start().await {
+        state.push_timeline_item(TimelineItem::Diagnostic {
+            title: "Web service unavailable".to_owned(),
+            body: error.to_string(),
+        });
+    }
     state
         .plan_mut()
         .update_subagent_activity(session.subagent_activity.borrow().clone());
@@ -566,24 +500,28 @@ pub(crate) async fn run_controller(
                         let effect = handle_key_event(key, &mut state);
                         project_local_effect(&effect, &mut state);
                         render_once(&mut terminal, &state)?;
-                        let mut providers = ProviderController {
+                        let providers = ProviderController {
                             management: &mut provider_management,
                             discovery_tx: &model_discovery_tx,
                             discovery_generation: &mut model_discovery_generation,
                             discovery_token: &mut model_discovery_token,
                         };
-                        let mut input_history = InputHistoryController {
+                        let input_history = InputHistoryController {
                             store: &input_history_store,
                             warning_shown: &mut input_history_warning_shown,
+                        };
+                        let services = ControllerServices {
+                            preferences_store: &preferences_store,
+                            input_history,
+                            providers,
+                            clipboard_image_tx: &clipboard_image_tx,
+                            web_service: &mut web_service,
                         };
                         let should_quit = dispatch_effect(
                             effect,
                             &mut session,
                             &mut state,
-                            &preferences_store,
-                            &mut input_history,
-                            &mut providers,
-                            &clipboard_image_tx,
+                            services,
                         )
                         .await?;
                         if should_quit {
@@ -659,6 +597,8 @@ pub(crate) async fn run_controller(
         }
     }
 
+    web_service.shutdown().await.map_err(unexpected)?;
+
     Ok(())
 }
 
@@ -666,15 +606,29 @@ async fn dispatch_effect(
     effect: ControllerEffect,
     session: &mut TuiRuntimeSession,
     state: &mut TuiState,
-    preferences_store: &TuiPreferencesStore,
-    input_history: &mut InputHistoryController<'_>,
-    providers: &mut ProviderController<'_>,
-    clipboard_image_tx: &mpsc::Sender<ClipboardImageCompletion>,
+    services: ControllerServices<'_>,
 ) -> Result<bool, CliError> {
+    let ControllerServices {
+        preferences_store,
+        input_history,
+        providers,
+        clipboard_image_tx,
+        web_service,
+    } = services;
     if let Some(should_quit) =
         super::plan_controller::dispatch_effect(&effect, session, state).await
     {
         return Ok(should_quit);
+    }
+    if super::controller_provider::is_provider_effect(&effect) {
+        return super::controller_provider::dispatch_provider_effect(
+            effect,
+            session,
+            state,
+            preferences_store,
+            providers,
+        )
+        .await;
     }
     match effect {
         ControllerEffect::None => Ok(false),
@@ -716,6 +670,29 @@ async fn dispatch_effect(
         }
         ControllerEffect::PasteImage => {
             start_clipboard_image_read(clipboard_image_tx.clone());
+            Ok(false)
+        }
+        ControllerEffect::OpenSessionInBrowser => {
+            let url = match web_service.session_url(&session.metadata.session_id).await {
+                Ok(url) => url,
+                Err(error) => {
+                    state.push_timeline_item(TimelineItem::Diagnostic {
+                        title: "Web service unavailable".to_owned(),
+                        body: error.to_string(),
+                    });
+                    return Ok(false);
+                }
+            };
+            match open_in_browser(&url).await {
+                Ok(()) => state.push_timeline_item(TimelineItem::LocalCommand {
+                    title: "Trajectory opened".to_owned(),
+                    body: url,
+                }),
+                Err(error) => state.push_timeline_item(TimelineItem::Diagnostic {
+                    title: "Could not open browser".to_owned(),
+                    body: format!("{error}. Open this URL manually: {url}"),
+                }),
+            }
             Ok(false)
         }
         ControllerEffect::ApprovePermission(approval_id) => {
@@ -790,350 +767,6 @@ async fn dispatch_effect(
             state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
             Ok(false)
         }
-        ControllerEffect::OpenProviderManager => {
-            cancel_model_discovery(providers.discovery_token);
-            let items = provider_list_items(providers.management, state)?;
-            state.open_provider_manager(items);
-            Ok(false)
-        }
-        ControllerEffect::OpenProviderForm => {
-            cancel_model_discovery(providers.discovery_token);
-            let used = providers
-                .management
-                .profiles()
-                .map_err(unexpected)?
-                .into_iter()
-                .map(|profile| profile.alias().as_str().to_owned())
-                .collect::<BTreeSet<_>>();
-            let alias = derive_provider_alias("Provider", &used)
-                .map_err(unexpected)?
-                .as_str()
-                .to_owned();
-            state.open_provider_form(alias, used);
-            Ok(false)
-        }
-        ControllerEffect::OpenProviderEditor(alias) => {
-            cancel_model_discovery(providers.discovery_token);
-            let alias = ProviderAlias::new(&alias).map_err(unexpected)?;
-            let editable = match providers.management.editable_provider(&alias) {
-                Ok(editable) => editable,
-                Err(error) => {
-                    if matches!(&error, ProviderManagementError::ReadOnlyProvider { .. }) {
-                        state.show_info_dialog("Read-only provider", error.to_string());
-                    } else {
-                        state.set_provider_overlay_error(error.to_string());
-                    }
-                    return Ok(false);
-                }
-            };
-            let used = providers
-                .management
-                .profiles()
-                .map_err(unexpected)?
-                .into_iter()
-                .map(|profile| profile.alias().as_str().to_owned())
-                .collect::<BTreeSet<_>>();
-            state.open_provider_editor(
-                ProviderFormSeed {
-                    original_alias: editable.alias.as_str().to_owned(),
-                    display_name: editable.display_name,
-                    alias: editable.alias.as_str().to_owned(),
-                    kind: editable.kind,
-                    protocol: editable.protocol,
-                    base_url: editable.base_url,
-                    model: editable.default_model.as_str().to_owned(),
-                    reasoning_effort: editable.reasoning_effort,
-                },
-                used,
-            );
-            Ok(false)
-        }
-        ControllerEffect::OpenModelPicker(alias) => {
-            open_model_picker(
-                &alias,
-                providers.management,
-                state,
-                providers.discovery_tx,
-                providers.discovery_generation,
-                providers.discovery_token,
-            )
-            .await?;
-            Ok(false)
-        }
-        ControllerEffect::BackToProviderForm => {
-            cancel_model_discovery(providers.discovery_token);
-            state.back_overlay();
-            Ok(false)
-        }
-        ControllerEffect::DiscoverFormModels {
-            original_alias,
-            values,
-        } => {
-            cancel_model_discovery(providers.discovery_token);
-            let draft = match provider_discovery_draft(original_alias.as_deref(), &values) {
-                Ok(draft) => draft,
-                Err(error) => {
-                    state.set_provider_overlay_error(error.to_string());
-                    return Ok(false);
-                }
-            };
-            let alias = draft.alias().as_str().to_owned();
-            if !state.open_provider_form_model_picker(alias.clone(), values.display_name.clone()) {
-                state.set_provider_overlay_error(
-                    "provider form is no longer available for model discovery".to_owned(),
-                );
-                return Ok(false);
-            }
-            start_form_model_discovery(
-                alias,
-                draft,
-                providers.management.clone(),
-                providers.discovery_tx.clone(),
-                providers.discovery_generation,
-                providers.discovery_token,
-            );
-            Ok(false)
-        }
-        ControllerEffect::RefreshModels(alias) => {
-            state.mark_model_picker_loading(&alias);
-            start_model_discovery(
-                ProviderAlias::new(&alias).map_err(unexpected)?,
-                providers.management.clone(),
-                providers.discovery_tx.clone(),
-                providers.discovery_generation,
-                providers.discovery_token,
-            );
-            Ok(false)
-        }
-        ControllerEffect::RefreshFormModels => {
-            let Some((original_alias, values)) = state.provider_form_discovery_request() else {
-                state.set_provider_overlay_error(
-                    "provider form is no longer available for model discovery".to_owned(),
-                );
-                return Ok(false);
-            };
-            let draft = match provider_discovery_draft(original_alias.as_deref(), &values) {
-                Ok(draft) => draft,
-                Err(error) => {
-                    state.set_provider_overlay_error(error.to_string());
-                    return Ok(false);
-                }
-            };
-            let alias = draft.alias().as_str().to_owned();
-            state.mark_model_picker_loading(&alias);
-            start_form_model_discovery(
-                alias,
-                draft,
-                providers.management.clone(),
-                providers.discovery_tx.clone(),
-                providers.discovery_generation,
-                providers.discovery_token,
-            );
-            Ok(false)
-        }
-        ControllerEffect::DeleteProvider(alias) => {
-            let alias = ProviderAlias::new(&alias).map_err(unexpected)?;
-            if state.current_provider_alias() == Some(alias.as_str()) {
-                state.set_provider_overlay_error(
-                    "switch provider before deleting the active one".to_owned(),
-                );
-                return Ok(false);
-            }
-            if let Err(error) = providers.management.delete_provider(&alias).await {
-                state.set_provider_overlay_error(error.to_string());
-                return Ok(false);
-            }
-            let mut preferences = state.preferences().clone();
-            preferences
-                .clear_provider_state(alias.as_str())
-                .map_err(unexpected)?;
-            let preference_cleanup_error = preferences_store.save(&preferences).await.err();
-            state.replace_preferences(preferences);
-            if let Some(config) = providers.management.config().cloned() {
-                session.replace_config(config.clone());
-                state.replace_settings_defaults(
-                    TuiSettingsDefaults::from_config(Some(&config)).map_err(unexpected)?,
-                );
-            }
-            let items = provider_list_items(providers.management, state)?;
-            state.open_provider_manager(items);
-            if let Some(error) = preference_cleanup_error {
-                state.set_provider_overlay_error(format!(
-                    "Provider deleted, but its saved model preference could not be removed: {error}"
-                ));
-            }
-            Ok(false)
-        }
-        ControllerEffect::SaveProvider(values) => {
-            let (alias, model, draft) = match values.to_draft(ProviderDraftMode::Create) {
-                Ok(values) => values,
-                Err(error) => {
-                    state.set_provider_overlay_error(error.to_string());
-                    return Ok(false);
-                }
-            };
-            let reasoning_effort = draft.reasoning_effort().cloned();
-            if let Err(error) = providers.management.save_provider(draft).await {
-                state.set_provider_overlay_error(error.to_string());
-                return Ok(false);
-            }
-            let config = providers
-                .management
-                .config()
-                .cloned()
-                .ok_or_else(|| unexpected("saved provider config did not reload"))?;
-            session.replace_config(config.clone());
-            state.replace_settings_defaults(
-                TuiSettingsDefaults::from_config(Some(&config)).map_err(unexpected)?,
-            );
-            let mut preferences = state.preferences().clone();
-            preferences.provider = Some(alias.as_str().to_owned());
-            preferences
-                .set_model_for_provider(alias.as_str(), Some(model.as_str()))
-                .map_err(unexpected)?;
-            preferences
-                .set_reasoning_effort_for_provider(alias.as_str(), reasoning_effort)
-                .map_err(unexpected)?;
-            if let Err(error) = session.apply_preferences(&preferences).await {
-                state.set_provider_overlay_error(format!(
-                    "provider saved; switch failed: {error:?}"
-                ));
-                return Ok(false);
-            }
-            preferences_store
-                .save(&preferences)
-                .await
-                .map_err(unexpected)?;
-            state.replace_preferences(preferences);
-            state.set_model_label(session.model_label.clone());
-            state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
-            let items = provider_list_items(providers.management, state)?;
-            state.open_provider_manager(items);
-            Ok(false)
-        }
-        ControllerEffect::UpdateProvider {
-            original_alias,
-            values,
-        } => {
-            let original_alias = ProviderAlias::new(&original_alias).map_err(unexpected)?;
-            let (_, _, draft) = match values.to_draft(ProviderDraftMode::Update) {
-                Ok(values) => values,
-                Err(error) => {
-                    state.set_provider_overlay_error(error.to_string());
-                    return Ok(false);
-                }
-            };
-            if let Err(error) = providers
-                .management
-                .update_provider(&original_alias, draft)
-                .await
-            {
-                state.set_provider_overlay_error(error.to_string());
-                return Ok(false);
-            }
-            let config = providers
-                .management
-                .config()
-                .cloned()
-                .ok_or_else(|| unexpected("updated provider config did not reload"))?;
-            session.replace_config(config.clone());
-            state.replace_settings_defaults(
-                TuiSettingsDefaults::from_config(Some(&config)).map_err(unexpected)?,
-            );
-            // Provider configuration and the TUI's per-provider selection are
-            // separate stores. Editing a URL, key, or provider default must
-            // not replace the model/thinking pair selected for this provider.
-            // Model changes go through the model picker, which atomically
-            // updates the selection preferences.
-            let preferences = state.preferences().clone();
-            if let Err(error) = session.apply_preferences(&preferences).await {
-                state.set_provider_overlay_error(format!(
-                    "provider updated; runtime refresh failed: {error:?}"
-                ));
-                return Ok(false);
-            }
-            state.set_model_label(session.model_label.clone());
-            state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
-            let items = provider_list_items(providers.management, state)?;
-            state.open_provider_manager(items);
-            Ok(false)
-        }
-        ControllerEffect::SelectProvider { alias } => {
-            let alias = ProviderAlias::new(&alias).map_err(unexpected)?;
-            let mut preferences = state.preferences().clone();
-            preferences.provider = Some(alias.as_str().to_owned());
-            if let Err(error) = session.apply_preferences(&preferences).await {
-                state.set_provider_overlay_error(format!("switch failed: {error:?}"));
-                return Ok(false);
-            }
-            preferences_store
-                .save(&preferences)
-                .await
-                .map_err(unexpected)?;
-            state.replace_preferences(preferences);
-            state.set_model_label(session.model_label.clone());
-            state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
-            cancel_model_discovery(providers.discovery_token);
-            let items = provider_list_items(providers.management, state)?;
-            state.open_provider_manager(items);
-            Ok(false)
-        }
-        ControllerEffect::OpenReasoningPicker {
-            alias,
-            model,
-            target,
-        } => {
-            if !state.open_reasoning_picker(alias, model, target) {
-                state.set_provider_overlay_error(
-                    "model selection is no longer available for reasoning mode selection"
-                        .to_owned(),
-                );
-            }
-            Ok(false)
-        }
-        ControllerEffect::ApplyProviderModel {
-            alias,
-            model,
-            reasoning_effort,
-            target,
-        } => match target {
-            ModelPickerTarget::ActiveProvider => {
-                let alias = ProviderAlias::new(&alias).map_err(unexpected)?;
-                let mut preferences = state.preferences().clone();
-                preferences.provider = Some(alias.as_str().to_owned());
-                preferences
-                    .set_model_and_reasoning_for_provider(alias.as_str(), &model, reasoning_effort)
-                    .map_err(unexpected)?;
-                if let Err(error) = session.apply_preferences(&preferences).await {
-                    state.set_provider_overlay_error(format!("switch failed: {error:?}"));
-                    return Ok(false);
-                }
-                preferences_store
-                    .save(&preferences)
-                    .await
-                    .map_err(unexpected)?;
-                state.replace_preferences(preferences);
-                state.set_model_label(session.model_label.clone());
-                state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
-                if !state.restore_settings_after_reasoning_picker() {
-                    cancel_model_discovery(providers.discovery_token);
-                    let items = provider_list_items(providers.management, state)?;
-                    state.open_provider_manager(items);
-                }
-                Ok(false)
-            }
-            ModelPickerTarget::ProviderForm => {
-                cancel_model_discovery(providers.discovery_token);
-                if !state
-                    .select_provider_form_model_with_reasoning(&model, reasoning_effort.as_str())
-                {
-                    state.set_provider_overlay_error(
-                        "provider form is no longer available for the selected model".to_owned(),
-                    );
-                }
-                Ok(false)
-            }
-        },
         ControllerEffect::EnterPlanMode
         | ControllerEffect::ApprovePlan(_)
         | ControllerEffect::RevisePlan
@@ -1146,6 +779,7 @@ async fn dispatch_effect(
             session.save_on_exit().await?;
             Ok(true)
         }
+        _ => unreachable!("provider effect handled by the provider dispatcher"),
     }
 }
 
@@ -1173,155 +807,6 @@ pub(super) async fn persist_submitted_input_history(
             }
         }
     }
-}
-
-fn provider_list_items(
-    provider_management: &ProviderManagementService,
-    state: &TuiState,
-) -> Result<Vec<ProviderListItem>, CliError> {
-    provider_management
-        .profiles()
-        .map_err(unexpected)?
-        .into_iter()
-        .map(|profile| {
-            let model = state
-                .preferences()
-                .model_for_provider(profile.alias().as_str())
-                .or_else(|| profile.default_model().map(merry_llm::ModelName::as_str));
-            Ok(ProviderListItem::new(
-                profile.alias().as_str(),
-                profile.display_name(),
-                profile.kind(),
-                profile.source(),
-                profile.protocol(),
-                model,
-            ))
-        })
-        .collect()
-}
-
-async fn open_model_picker(
-    alias: &str,
-    provider_management: &ProviderManagementService,
-    state: &mut TuiState,
-    model_discovery_tx: &mpsc::Sender<ModelDiscoveryCompletion>,
-    model_discovery_generation: &mut u64,
-    model_discovery_token: &mut Option<CancellationToken>,
-) -> Result<(), CliError> {
-    let alias = ProviderAlias::new(alias).map_err(unexpected)?;
-    let profile = provider_management
-        .config()
-        .ok_or_else(|| unexpected("no provider config is loaded"))?
-        .provider_profile(alias.as_str())
-        .map_err(unexpected)?;
-    let cached = provider_management
-        .load_model_cache(&alias)
-        .await
-        .map_err(unexpected)?
-        .map(model_list_items)
-        .unwrap_or_default();
-    state.open_model_picker(
-        alias.as_str().to_owned(),
-        profile.display_name().to_owned(),
-        cached,
-    );
-    start_model_discovery(
-        alias,
-        provider_management.clone(),
-        model_discovery_tx.clone(),
-        model_discovery_generation,
-        model_discovery_token,
-    );
-    Ok(())
-}
-
-fn start_model_discovery(
-    alias: ProviderAlias,
-    provider_management: ProviderManagementService,
-    model_discovery_tx: mpsc::Sender<ModelDiscoveryCompletion>,
-    model_discovery_generation: &mut u64,
-    model_discovery_token: &mut Option<CancellationToken>,
-) {
-    cancel_model_discovery(model_discovery_token);
-    *model_discovery_generation = model_discovery_generation.wrapping_add(1);
-    let generation = *model_discovery_generation;
-    let token = CancellationToken::new();
-    *model_discovery_token = Some(token.clone());
-    tokio::spawn(async move {
-        let alias_text = alias.as_str().to_owned();
-        let result = provider_management
-            .discover_and_cache(&alias, token)
-            .await
-            .map(model_list_items)
-            .map_err(|error| error.to_string());
-        let _ = model_discovery_tx
-            .send(ModelDiscoveryCompletion {
-                generation,
-                alias: alias_text,
-                result,
-            })
-            .await;
-    });
-}
-
-pub(super) fn provider_discovery_draft(
-    original_alias: Option<&str>,
-    values: &ProviderFormValues,
-) -> Result<ProviderDiscoveryDraft, ProviderManagementError> {
-    let alias = ProviderAlias::new(values.alias.trim())?;
-    let original_alias = original_alias.map(ProviderAlias::new).transpose()?;
-    let api_key = (!values.api_key.trim().is_empty()).then(|| values.api_key.trim());
-    ProviderDiscoveryDraft::new(
-        alias,
-        original_alias,
-        values.kind,
-        values.protocol,
-        values.base_url.trim(),
-        api_key,
-    )
-}
-
-fn start_form_model_discovery(
-    alias: String,
-    draft: ProviderDiscoveryDraft,
-    provider_management: ProviderManagementService,
-    model_discovery_tx: mpsc::Sender<ModelDiscoveryCompletion>,
-    model_discovery_generation: &mut u64,
-    model_discovery_token: &mut Option<CancellationToken>,
-) {
-    cancel_model_discovery(model_discovery_token);
-    *model_discovery_generation = model_discovery_generation.wrapping_add(1);
-    let generation = *model_discovery_generation;
-    let token = CancellationToken::new();
-    *model_discovery_token = Some(token.clone());
-    tokio::spawn(async move {
-        let result = provider_management
-            .discover_from_draft(draft, token)
-            .await
-            .map(model_list_items)
-            .map_err(|error| error.to_string());
-        let _ = model_discovery_tx
-            .send(ModelDiscoveryCompletion {
-                generation,
-                alias,
-                result,
-            })
-            .await;
-    });
-}
-
-fn cancel_model_discovery(token: &mut Option<CancellationToken>) {
-    if let Some(token) = token.take() {
-        token.cancel();
-    }
-}
-
-fn model_list_items(catalog: merry_llm::ModelCatalog) -> Vec<ModelListItem> {
-    catalog
-        .into_models()
-        .into_iter()
-        .map(|model| ModelListItem::new(model.id().as_str(), model.owner()))
-        .collect()
 }
 
 pub(super) fn project_local_effect(effect: &ControllerEffect, state: &mut TuiState) {

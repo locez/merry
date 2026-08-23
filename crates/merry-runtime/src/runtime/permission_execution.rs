@@ -1,5 +1,5 @@
+use super::RuntimeInner;
 use super::process_execution::{ProcessExecutionAdmission, execute_admitted_process_action};
-use super::{RuntimeInner, persist_resume_safe_savepoint_if_configured};
 use crate::{
     ActionProposal, ProcessPermissionProfileId, RuntimeError, RuntimeModelRole,
     action_policy::ActionPolicyDecision,
@@ -48,7 +48,7 @@ pub(super) async fn execute_permission_request_tool_call(
                     None,
                 )?
             };
-            return persist_tool_events(inner, events).await;
+            return Ok(events);
         }
     };
 
@@ -70,7 +70,7 @@ pub(super) async fn execute_permission_request_tool_call(
                 None,
             )?
         };
-        return persist_tool_events(inner, events).await;
+        return Ok(events);
     };
 
     if let Err(error) = runner_factory.validate_request(&request) {
@@ -87,7 +87,7 @@ pub(super) async fn execute_permission_request_tool_call(
                 None,
             )?
         };
-        return persist_tool_events(inner, events).await;
+        return Ok(events);
     }
 
     let capabilities_are_satisfied = match runner_factory
@@ -108,7 +108,7 @@ pub(super) async fn execute_permission_request_tool_call(
                     None,
                 )?
             };
-            return persist_tool_events(inner, events).await;
+            return Ok(events);
         }
     };
     let action_requires_independent_review = match request.action() {
@@ -153,7 +153,7 @@ pub(super) async fn execute_permission_request_tool_call(
                     None,
                 )?
             };
-            return persist_tool_events(inner, events).await;
+            return Ok(events);
         }
     };
 
@@ -171,7 +171,7 @@ pub(super) async fn execute_permission_request_tool_call(
                 None,
             )?
         };
-        return persist_tool_events(inner, events).await;
+        return Ok(events);
     }
 
     let runner = runner_factory.runner_for(&request);
@@ -203,14 +203,6 @@ pub(super) async fn execute_permission_request_tool_call(
         context,
     )
     .await
-}
-
-async fn persist_tool_events(
-    inner: &RuntimeInner,
-    events: Vec<RuntimeJournalEvent>,
-) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
-    persist_resume_safe_savepoint_if_configured(inner).await;
-    Ok(events)
 }
 
 /// Result of reviewing a high-risk action without changing session grants.
@@ -293,9 +285,7 @@ pub(super) async fn review_process_action(
                 &events,
                 "review_failed",
             );
-            return Ok(HighRiskActionReview::Resolved(
-                persist_tool_events(inner, events).await?,
-            ));
+            return Ok(HighRiskActionReview::Resolved(events));
         }
     };
 
@@ -324,9 +314,7 @@ pub(super) async fn review_process_action(
             &events,
             "denied",
         );
-        return Ok(HighRiskActionReview::Resolved(
-            persist_tool_events(inner, events).await?,
-        ));
+        return Ok(HighRiskActionReview::Resolved(events));
     }
 
     Ok(HighRiskActionReview::Approved(decision.review().clone()))

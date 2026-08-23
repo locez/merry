@@ -33,6 +33,7 @@ pub struct ArtifactRef {
     /// Provider-neutral artifact kind.
     kind: ArtifactKind,
     /// Optional human-readable label.
+    #[schemars(extend("x-merry-output-required" = true))]
     label: Option<String>,
 }
 

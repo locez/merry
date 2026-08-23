@@ -153,37 +153,13 @@ pub(crate) struct PatchChangeView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum TimelineItem {
-    User {
-        text: String,
-        lane: QueuedInputLane,
-    },
-    Assistant {
-        text: String,
-    },
-    Muted {
-        title: String,
-        detail: String,
-    },
-    LocalCommand {
-        title: String,
-        body: String,
-    },
-    Expanded {
-        title: String,
-        body: String,
-    },
-    ExpandedDetail {
-        title: String,
-        body: String,
-        focus_body: String,
-    },
-    Diagnostic {
-        title: String,
-        body: String,
-    },
-    Patch {
-        changes: Vec<PatchChangeView>,
-    },
+    User { text: String, lane: QueuedInputLane },
+    Assistant { text: String },
+    Muted { title: String, detail: String },
+    LocalCommand { title: String, body: String },
+    Expanded { title: String, body: String },
+    Diagnostic { title: String, body: String },
+    Patch { changes: Vec<PatchChangeView> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,9 +177,7 @@ pub(crate) struct TuiState {
     queue_preview: QueuePreviewState,
     timeline: Vec<TimelineItem>,
     timeline_scroll_offset: usize,
-    focus_scroll_offset: usize,
     timeline_review_user_index: Option<usize>,
-    artifact_review_timeline_index: Option<usize>,
     pending_local_echoes: Vec<PendingLocalEcho>,
     pending_local_run_start: bool,
     stop_feedback: StopFeedbackState,
@@ -266,9 +240,7 @@ impl TuiState {
             queue_preview: QueuePreviewState::from_preview(QueuePreview::empty()),
             timeline: Vec::new(),
             timeline_scroll_offset: 0,
-            focus_scroll_offset: 0,
             timeline_review_user_index: None,
-            artifact_review_timeline_index: None,
             pending_local_echoes: Vec::new(),
             pending_local_run_start: false,
             stop_feedback: StopFeedbackState::Idle,
@@ -804,31 +776,9 @@ impl TuiState {
         })
     }
 
-    pub(crate) fn artifact_timeline_indexes(&self) -> Vec<usize> {
-        self.timeline
-            .iter()
-            .enumerate()
-            .filter_map(|(index, item)| item.is_artifact_candidate().then_some(index))
-            .collect()
-    }
-
-    pub(crate) fn selected_artifact_timeline_index(&self) -> Option<usize> {
-        if let Some(index) = self.artifact_review_timeline_index
-            && self
-                .timeline
-                .get(index)
-                .is_some_and(TimelineItem::is_artifact_candidate)
-        {
-            return Some(index);
-        }
-
-        self.artifact_timeline_indexes().last().copied()
-    }
-
     pub(crate) fn push_timeline_item(&mut self, item: TimelineItem) {
         self.timeline.push(item);
         self.timeline_scroll_offset = 0;
-        self.focus_scroll_offset = 0;
         self.timeline_review_user_index = None;
     }
 
@@ -845,7 +795,6 @@ impl TuiState {
             self.timeline.len().saturating_sub(1)
         };
         self.timeline_scroll_offset = 0;
-        self.focus_scroll_offset = 0;
         self.timeline_review_user_index = None;
         index
     }
@@ -894,7 +843,6 @@ impl TuiState {
         if let Some(slot) = self.timeline.get_mut(index) {
             *slot = item;
             self.timeline_scroll_offset = 0;
-            self.focus_scroll_offset = 0;
             self.timeline_review_user_index = None;
         }
     }
@@ -972,10 +920,6 @@ impl TuiState {
         self.timeline_scroll_offset
     }
 
-    pub(crate) fn focus_scroll_offset(&self) -> usize {
-        self.focus_scroll_offset
-    }
-
     pub(crate) fn timeline_review_user_index(&self) -> Option<usize> {
         self.timeline_review_user_index
     }
@@ -984,70 +928,15 @@ impl TuiState {
         self.timeline_review_user_index.is_some()
     }
 
-    pub(crate) fn is_artifact_reviewing(&self) -> bool {
-        self.artifact_review_timeline_index.is_some()
-    }
-
-    pub(crate) fn artifact_review_timeline_index(&self) -> Option<usize> {
-        self.artifact_review_timeline_index
-    }
-
     pub(crate) fn exit_timeline_review(&mut self) {
         self.timeline_review_user_index = None;
         self.timeline_scroll_offset = 0;
     }
 
-    pub(crate) fn exit_artifact_review(&mut self) {
-        self.artifact_review_timeline_index = None;
-        self.focus_scroll_offset = 0;
-    }
-
     pub(crate) fn follow_latest(&mut self) {
         self.timeline_scroll_offset = 0;
-        self.focus_scroll_offset = 0;
         self.timeline_review_user_index = None;
-        self.artifact_review_timeline_index = None;
         self.pending_empty_input_quit = false;
-    }
-
-    pub(crate) fn select_previous_artifact(&mut self) {
-        let indexes = self.artifact_timeline_indexes();
-        if self.artifact_review_timeline_index.is_none() {
-            self.artifact_review_timeline_index = indexes.last().copied();
-            self.focus_scroll_offset = 0;
-            self.pending_empty_input_quit = false;
-            return;
-        }
-        let Some(selected) = self.selected_artifact_timeline_index() else {
-            return;
-        };
-        let Some(position) = indexes.iter().position(|index| *index == selected) else {
-            return;
-        };
-        if position == 0 {
-            return;
-        }
-        self.pending_empty_input_quit = false;
-        self.artifact_review_timeline_index = Some(indexes[position - 1]);
-        self.focus_scroll_offset = 0;
-    }
-
-    pub(crate) fn select_next_artifact(&mut self) {
-        let Some(review_index) = self.artifact_review_timeline_index else {
-            return;
-        };
-        let indexes = self.artifact_timeline_indexes();
-        let Some(position) = indexes.iter().position(|index| *index == review_index) else {
-            self.artifact_review_timeline_index = None;
-            return;
-        };
-        self.pending_empty_input_quit = false;
-        if position + 1 >= indexes.len() {
-            self.artifact_review_timeline_index = None;
-        } else {
-            self.artifact_review_timeline_index = Some(indexes[position + 1]);
-        }
-        self.focus_scroll_offset = 0;
     }
 
     pub(crate) fn scroll_timeline_up(&mut self) {
@@ -1068,16 +957,6 @@ impl TuiState {
         self.pending_empty_input_quit = false;
         self.timeline_review_user_index = None;
         self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_sub(lines);
-    }
-
-    pub(crate) fn scroll_focus_up_by(&mut self, lines: usize) {
-        self.pending_empty_input_quit = false;
-        self.focus_scroll_offset = self.focus_scroll_offset.saturating_sub(lines);
-    }
-
-    pub(crate) fn scroll_focus_down_by(&mut self, lines: usize) {
-        self.pending_empty_input_quit = false;
-        self.focus_scroll_offset = self.focus_scroll_offset.saturating_add(lines);
     }
 
     pub(crate) fn jump_to_previous_user_input(&mut self) {
@@ -1312,19 +1191,6 @@ fn compact_title(text: &str) -> String {
         .take(MAX_CHARS.saturating_sub(1))
         .collect::<String>()
         + "..."
-}
-
-impl TimelineItem {
-    pub(crate) fn is_artifact_candidate(&self) -> bool {
-        matches!(
-            self,
-            TimelineItem::Muted { .. }
-                | TimelineItem::Expanded { .. }
-                | TimelineItem::ExpandedDetail { .. }
-                | TimelineItem::Diagnostic { .. }
-                | TimelineItem::Patch { .. }
-        )
-    }
 }
 
 fn merry_motion(elapsed: Duration) -> &'static str {

@@ -82,17 +82,9 @@ pub(crate) fn run_palette_command(
             });
             ControllerEffect::None
         }
-        PaletteCommand::FollowLatest => {
+        PaletteCommand::OpenSessionInBrowser => {
             state.close_overlay();
-            handle_key_action(KeyAction::FollowLatestArtifact, state)
-        }
-        PaletteCommand::ReviewPreviousArtifact => {
-            state.close_overlay();
-            handle_key_action(KeyAction::ReviewPreviousArtifact, state)
-        }
-        PaletteCommand::ReviewNextArtifact => {
-            state.close_overlay();
-            handle_key_action(KeyAction::ReviewNextArtifact, state)
+            handle_key_action(KeyAction::OpenSessionInBrowser, state)
         }
         PaletteCommand::ReviewPreviousUserInput => {
             state.close_overlay();

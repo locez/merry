@@ -1,4 +1,4 @@
-use super::{RuntimeInner, diagnostic_from_text, persist_resume_safe_savepoint_if_configured};
+use super::{RuntimeInner, diagnostic_from_text};
 use crate::{
     events::RuntimeJournalEventBatch,
     session::{ModelTurnId, ModelTurnStatus, SessionState},
@@ -56,12 +56,12 @@ pub(super) async fn send_assistant_text_output_completed_events(
         );
         return send_failed_event(inner, sender, token, diagnostic).await;
     };
-    permit.send(RuntimeJournalEventBatch::pair(
-        artifact_event,
-        completed_event,
-    ));
-
-    persist_resume_safe_savepoint_if_configured(inner).await;
+    inner
+        .emit_journal_batch_after_savepoint(
+            permit,
+            RuntimeJournalEventBatch::pair(artifact_event, completed_event),
+        )
+        .await;
     true
 }
 
@@ -87,7 +87,7 @@ pub(super) async fn send_assistant_text_output_delta_event(
         session.record_transient_event(RuntimeJournalPayload::AssistantOutputDelta { delta })
     };
 
-    permit.send(event.into());
+    inner.emit_journal_batch(permit, event.into());
     true
 }
 
@@ -148,7 +148,7 @@ pub(super) async fn send_model_tool_call_response_events(
                 }
                 None => tool_event.into(),
             };
-            permit.send(batch);
+            inner.emit_journal_batch(permit, batch);
 
             if token.is_cancelled() {
                 return false;
@@ -218,7 +218,7 @@ pub(super) async fn send_model_usage_updated_event(
         session.record_model_usage(model_usage, context, compaction)?
     };
 
-    permit.send(event.into());
+    inner.emit_journal_batch(permit, event.into());
     Ok(true)
 }
 
@@ -243,7 +243,7 @@ pub(super) async fn send_compaction_started_event(
         session.record_compaction_started()
     };
 
-    permit.send(event.into());
+    inner.emit_journal_batch(permit, event.into());
     true
 }
 
@@ -270,7 +270,7 @@ pub(super) async fn send_compaction_completed_event(
         session.record_compaction_completed(checkpoint_id, covered_history_item_count)
     };
 
-    permit.send(event.into());
+    inner.emit_journal_batch(permit, event.into());
     true
 }
 
@@ -296,7 +296,7 @@ async fn send_bridge_tool_call_requested_event(
         session.record_bridge_tool_call_requested(call)
     };
 
-    permit.send(event.into());
+    inner.emit_journal_batch(permit, event.into());
     true
 }
 
@@ -339,8 +339,9 @@ async fn send_bridge_tool_input_validation_failure_events(
                 );
                 return send_failed_event(inner, sender, token, diagnostic).await;
             };
-            permit.send(batch);
-            persist_resume_safe_savepoint_if_configured(inner).await;
+            inner
+                .emit_journal_batch_after_savepoint(permit, batch)
+                .await;
             true
         }
         Err(error) => {
@@ -440,7 +441,7 @@ async fn send_model_retry_event(
         }
         session.record_model_retry_event(kind)
     };
-    permit.send(event.into());
+    inner.emit_journal_batch(permit, event.into());
     true
 }
 
@@ -550,10 +551,31 @@ pub(super) async fn send_normal_event(
     };
 
     if let Some(event) = event {
-        permit.send(event.into());
+        inner.emit_journal_batch(permit, event.into());
     }
 
     true
+}
+
+pub(super) async fn send_step_started_event(
+    inner: &RuntimeInner,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
+    token: &CancellationToken,
+) -> Option<RuntimeJournalEvent> {
+    if token.is_cancelled() {
+        return None;
+    }
+
+    let permit = reserve_normal_event_slot(sender, token).await?;
+    let event = {
+        let mut session = inner.session.lock().await;
+        if token.is_cancelled() {
+            return None;
+        }
+        session.record_step_started()
+    };
+    inner.emit_journal_batch(permit, event.clone().into());
+    Some(event)
 }
 
 async fn reserve_normal_event_slot<'a>(
@@ -602,7 +624,7 @@ pub(super) async fn send_cancelled_event(
         let mut session = inner.session.lock().await;
         session.record_cancelled(diagnostic)
     };
-    permit.send(event.into());
+    inner.emit_journal_batch(permit, event.into());
     true
 }
 

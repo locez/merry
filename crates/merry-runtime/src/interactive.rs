@@ -17,8 +17,8 @@ use crate::{
 };
 use futures_util::StreamExt;
 use merry_core::{
-    InteractiveRunState, PendingToolCall, QueuedInputLane, RuntimeEvent, RuntimeJournalEvent,
-    RuntimeJournalPayload,
+    InteractiveRunState, PendingToolCall, QueuedInputLane, QueuedInputView, RuntimeEvent,
+    RuntimeJournalEvent, RuntimeJournalPayload,
 };
 use merry_llm::GenerationConfig;
 use std::{collections::BTreeSet, sync::Arc};
@@ -188,7 +188,9 @@ impl InteractiveProducer {
                 state: InteractiveRunState::Closed,
             })
             .await;
-        let _ = self.event_sender.send(RuntimeEvent::Closed).await;
+        self.runtime.close_trajectory();
+        let event = RuntimeEvent::Closed;
+        let _ = self.event_sender.send(event).await;
     }
 
     async fn run_next_burst(&mut self) -> bool {
@@ -342,15 +344,11 @@ impl InteractiveProducer {
         accepted: Option<(&[AcceptedQueuedInput], QueuedInputLane)>,
     ) -> Option<Vec<RuntimeJournalEvent>> {
         if let Some((accepted, lane)) = accepted {
-            if self
-                .event_sender
-                .send(RuntimeEvent::QueuedInputAccepted {
-                    lane,
-                    inputs: accepted.iter().map(|item| item.view().clone()).collect(),
-                })
-                .await
-                .is_err()
-            {
+            let inputs: Vec<QueuedInputView> =
+                accepted.iter().map(|item| item.view().clone()).collect();
+            self.runtime.record_queued_input_accepted(&inputs);
+            let event = RuntimeEvent::QueuedInputAccepted { lane, inputs };
+            if self.event_sender.send(event).await.is_err() {
                 return None;
             }
             if !self.send_queue_changed().await {

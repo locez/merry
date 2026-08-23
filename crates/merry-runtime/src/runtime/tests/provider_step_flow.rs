@@ -1,6 +1,37 @@
 use super::*;
 
 #[tokio::test(flavor = "current_thread")]
+async fn step_projection_is_updated_before_journal_stream_is_polled() {
+    let (provider_started_tx, provider_started_rx) = oneshot::channel();
+    let provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::PendingSetup(
+            provider_started_tx,
+        )]);
+    let runtime = runtime_with_provider("runtime-trajectory-before-poll", provider);
+
+    let stream = runtime
+        .step(
+            crate::StepInput::user_text("observe before polling").expect("valid step input"),
+            crate::StepContext::default(),
+        )
+        .expect("step should start");
+    provider_started_rx
+        .await
+        .expect("provider setup should reach the runtime");
+
+    let snapshot = runtime
+        .trajectory_snapshot()
+        .await
+        .expect("trajectory snapshot should be readable");
+    assert!(
+        snapshot.latest_sequence() >= 1,
+        "step lifecycle events must project before a consumer polls the journal stream"
+    );
+
+    drop(stream);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn provider_stream_context_uses_runtime_session_as_prompt_cache_key() {
     let provider = RecordingModelProvider::new();
     let runtime = Runtime::builder(session_id("runtime-cache-key"))

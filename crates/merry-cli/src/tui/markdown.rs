@@ -1,7 +1,9 @@
 use super::{
     highlight::highlight_code_to_lines,
-    render::{StyledTextPart, wrap_styled_parts, wrap_styled_parts_preserving_leading_whitespace},
     state::TuiState,
+    text_wrap::{
+        StyledTextPart, wrap_styled_parts, wrap_styled_parts_preserving_leading_whitespace,
+    },
     theme::SemanticColor,
 };
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};

@@ -24,6 +24,41 @@ pub enum SessionTranscriptItem {
     },
 }
 
+/// Complete transcript evidence used to rebuild the runtime trajectory after
+/// restoring a persisted session.
+///
+/// This stays internal to the runtime. The public transcript projection keeps
+/// its smaller compatibility surface, while trajectory replay retains the
+/// artifact identities needed to recover exact sequence and evidence links.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SessionTrajectoryItem {
+    UserMessage {
+        item_id: u64,
+        model_turn_id: u64,
+        artifact: ArtifactRef,
+        text: String,
+    },
+    AssistantText {
+        item_id: u64,
+        model_turn_id: u64,
+        artifact: ArtifactRef,
+        text: String,
+    },
+    ToolCall {
+        item_id: u64,
+        model_turn_id: u64,
+        call: PendingToolCall,
+    },
+    ToolResult {
+        item_id: u64,
+        model_turn_id: u64,
+        call_id: ToolCallId,
+        result: ToolCallResult,
+        artifact: ArtifactRef,
+        output: Option<ToolOutput>,
+    },
+}
+
 impl From<TranscriptItemSnapshot> for SessionTranscriptItem {
     fn from(value: TranscriptItemSnapshot) -> Self {
         match value {

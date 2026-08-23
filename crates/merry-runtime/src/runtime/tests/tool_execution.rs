@@ -1,4 +1,6 @@
 use super::*;
+use crate::{FileSessionStore, session_store::SessionStoreCommitPause};
+use merry_core::TrajectoryRecordStatus;
 
 #[tokio::test(flavor = "current_thread")]
 async fn read_only_registered_tool_executes_under_default_policy() {
@@ -33,6 +35,66 @@ async fn read_only_registered_tool_executes_under_default_policy() {
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
     assert!(runtime.pending_tool_calls().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tool_execution_persists_trajectory_before_returning_events() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pause = SessionStoreCommitPause::new();
+    let store = FileSessionStore::new(temp.path()).with_commit_pause_for_tests(pause.clone());
+    let session = "runtime-tool-trajectory-savepoint";
+    let resume_store = store.clone();
+    let executor = SuccessfulToolExecutor::new();
+    let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
+        session,
+        "trajectory_tool",
+        "trajectory-tool-call",
+        RegisteredTool::read_only(policy_tool_spec("trajectory_tool"), Arc::new(executor)),
+        |builder| builder.session_store(store).build(),
+    )
+    .await;
+    let call_id = pending.id().clone();
+    let task_runtime = runtime.clone();
+    let task = tokio::spawn(async move {
+        task_runtime
+            .execute_tool_call(&call_id, ToolExecutionContext::default())
+            .await
+    });
+
+    pause.wait_until_committed().await;
+    assert!(!task.is_finished());
+    pause.resume();
+    let events = task
+        .await
+        .expect("tool execution task joins")
+        .expect("tool execution succeeds");
+    let resolved_sequence = events
+        .iter()
+        .find(|event| {
+            matches!(
+                event.payload,
+                RuntimeJournalPayload::ToolCallResolved { .. }
+            )
+        })
+        .expect("tool call resolves")
+        .sequence;
+
+    let resumed = Runtime::builder(session_id(session))
+        .resume_from_store(resume_store)
+        .await
+        .expect("runtime resumes after tool savepoint");
+    let snapshot = resumed
+        .trajectory_snapshot()
+        .await
+        .expect("trajectory snapshot reads");
+    assert_eq!(snapshot.latest_sequence(), resolved_sequence);
+    let tool_record = snapshot
+        .records()
+        .iter()
+        .find(|record| record.tool_call_id().is_some())
+        .expect("tool trajectory record resumes");
+    assert_eq!(tool_record.status(), TrajectoryRecordStatus::Succeeded);
+    assert_eq!(tool_record.end_sequence(), Some(resolved_sequence));
 }
 
 #[tokio::test(flavor = "current_thread")]

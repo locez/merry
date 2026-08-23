@@ -12,6 +12,7 @@ members = [
     "crates/merry-provider-anthropic",
     "crates/merry",
     "crates/merry-cli",
+    "crates/merry-web",
     "crates/merry-py",
     "crates/merry-eval",
 ]
@@ -27,6 +28,7 @@ default-members = [
     "crates/merry-provider-anthropic",
     "crates/merry",
     "crates/merry-cli",
+    "crates/merry-web",
     "crates/merry-py",
     "crates/merry-eval",
 ]
@@ -38,6 +40,7 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
+axum = "=0.8.4"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
@@ -62,6 +65,7 @@ tokio = { version = "1", features = ["rt", "sync", "macros", "io-util", "fs", "p
 tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }
 tokio-util = "0.7"
 toml = "0.8"
+tower = "0.5"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }

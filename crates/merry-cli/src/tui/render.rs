@@ -1,26 +1,21 @@
 use super::{
-    highlight::highlight_code_to_lines,
     layout::{BottomPaneHeights, cockpit_layout},
     markdown::markdown_lines,
-    overlay_render,
-    panels::{
-        DirectoryEntryKind, DirectoryEntryView, FocusPanelBody, FocusPanelTone, FocusPanelView,
-        focus_panel_view,
+    overlay_render, plan_render,
+    state::{PatchChangeView, TimelineItem, TuiState},
+    text_wrap::{
+        StyledTextPart, inline_code_spans, semantic_style, truncate_chars, wrap_styled_parts,
     },
-    plan_render,
-    state::{PatchChangeView, PatchLineView, TimelineItem, TuiState},
     theme::{SemanticColor, dim_color},
 };
 use merry_core::QueuedInputLane;
 use ratatui::{
     Frame,
     layout::{Position, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
 const QUEUE_PREVIEW_HEIGHT: u16 = 5;
 const MAX_COMPLETION_PREVIEW_HEIGHT: u16 = 6;
 // Keep prefix eviction below the viewport start when Paragraph scroll exceeds u16.
@@ -43,7 +38,6 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
             input: pane_heights.input,
             status: STATUS_HEIGHT,
         },
-        state.is_artifact_reviewing(),
         state.plan().is_open(),
         state.plan().is_focused(),
     );
@@ -51,10 +45,6 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
     render_header(frame, state, rects.header);
     if rects.timeline.width > 0 && rects.timeline.height > 0 {
         render_timeline_pane(frame, state, rects.timeline);
-    }
-    if let Some(region) = rects.detail {
-        let view = focus_panel_view(state);
-        render_focus_pane(frame, state, region, &view);
     }
     if let Some(region) = rects.plan {
         plan_render::render_plan(frame, state, region);
@@ -281,166 +271,6 @@ fn styled_input_line(state: &TuiState, line: &str, image_placeholders: &[String]
     Line::from(spans)
 }
 
-fn render_focus_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect, view: &FocusPanelView) {
-    let inner = bordered_inner(region);
-    let lines = focus_lines(state, view, inner);
-    let color = match view.tone {
-        FocusPanelTone::Default => SemanticColor::ToolKeyword,
-        FocusPanelTone::Error => SemanticColor::Error,
-    };
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Plain)
-                .title(view.title.strip_prefix("FOCUS ").unwrap_or(&view.title))
-                .border_style(semantic_style(state, color))
-                .title_style(semantic_style(state, color).add_modifier(Modifier::BOLD)),
-        ),
-        region,
-    );
-}
-
-fn focus_lines(state: &TuiState, view: &FocusPanelView, region: Rect) -> Vec<Line<'static>> {
-    let mut lines = match &view.body {
-        FocusPanelBody::Empty => vec![Line::from(Span::styled(
-            "No focus item",
-            semantic_style(state, SemanticColor::Muted),
-        ))],
-        FocusPanelBody::Patch { changes } => patch_lines(state, changes),
-        FocusPanelBody::Source { path, content } => {
-            if let Some(lang) = source_lang_from_path(path) {
-                highlight_code_to_lines(content, lang, state.code_theme())
-            } else {
-                content
-                    .lines()
-                    .flat_map(|line| focus_text_wrapped_lines(state, line, region.width))
-                    .collect()
-            }
-        }
-        FocusPanelBody::DirectoryListing { entries } => {
-            directory_listing_lines(state, entries, region.width)
-        }
-        FocusPanelBody::CommandOutput { lines } => lines
-            .iter()
-            .flat_map(|line| focus_text_wrapped_lines(state, line, region.width))
-            .collect(),
-        FocusPanelBody::Text { lines } => {
-            if let Some(lang) = source_lang_from_focus_title(&view.title) {
-                highlight_code_to_lines(&lines.join("\n"), lang, state.code_theme())
-            } else {
-                lines
-                    .iter()
-                    .flat_map(|line| focus_text_wrapped_lines(state, line, region.width))
-                    .collect()
-            }
-        }
-    };
-
-    let max_lines = usize::from(region.height).max(1);
-    if lines.len() > max_lines {
-        let offset = state
-            .focus_scroll_offset()
-            .min(lines.len().saturating_sub(max_lines));
-        if offset > 0 {
-            lines = lines.into_iter().skip(offset).collect();
-        }
-        lines.truncate(max_lines.saturating_sub(1));
-        lines.push(Line::from(Span::styled(
-            "...",
-            semantic_style(state, SemanticColor::Muted),
-        )));
-    }
-    lines
-}
-
-fn source_lang_from_focus_title(title: &str) -> Option<&str> {
-    let path = title.strip_prefix("FOCUS Read ")?;
-    source_lang_from_path(path)
-}
-
-fn source_lang_from_path(path: &str) -> Option<&str> {
-    path.rsplit_once('.').map(|(_, extension)| extension)
-}
-
-fn directory_listing_lines(
-    state: &TuiState,
-    entries: &[DirectoryEntryView],
-    region_width: u16,
-) -> Vec<Line<'static>> {
-    entries
-        .iter()
-        .flat_map(|entry| directory_entry_lines(state, entry, region_width))
-        .collect()
-}
-
-fn directory_entry_lines(
-    state: &TuiState,
-    entry: &DirectoryEntryView,
-    region_width: u16,
-) -> Vec<Line<'static>> {
-    let style = directory_entry_style(state, entry);
-    wrap_styled_parts(
-        vec![StyledTextPart {
-            text: entry.path.clone(),
-            style,
-            atomic: false,
-        }],
-        region_width,
-    )
-}
-
-fn directory_entry_style(state: &TuiState, entry: &DirectoryEntryView) -> Style {
-    if entry.path.starts_with('.') {
-        return semantic_style(state, SemanticColor::Muted);
-    }
-    match entry.kind {
-        DirectoryEntryKind::Directory => {
-            semantic_style(state, SemanticColor::Command).add_modifier(Modifier::BOLD)
-        }
-        DirectoryEntryKind::File => semantic_style(state, SemanticColor::Assistant),
-    }
-}
-
-fn focus_text_wrapped_lines(state: &TuiState, line: &str, region_width: u16) -> Vec<Line<'static>> {
-    let base_style = semantic_style(state, SemanticColor::Assistant);
-    let Some((label, value)) = line.split_once(": ") else {
-        return inline_code_wrapped_lines(state, line, base_style, region_width);
-    };
-    if !matches!(label.trim(), "stdout" | "stderr") {
-        return inline_code_wrapped_lines(state, line, base_style, region_width);
-    }
-
-    let label_text = format!("{label}: ");
-    let label_width = UnicodeWidthStr::width(label_text.as_str());
-    let content_width = usize::from(region_width).saturating_sub(label_width).max(1);
-    let mut content_lines = inline_code_wrapped_lines(
-        state,
-        value,
-        semantic_style(state, SemanticColor::Muted),
-        u16::try_from(content_width).unwrap_or(u16::MAX),
-    );
-    if content_lines.is_empty() {
-        content_lines.push(Line::from(""));
-    }
-
-    let mut result = Vec::with_capacity(content_lines.len());
-    for (index, content_line) in content_lines.into_iter().enumerate() {
-        let prefix = if index == 0 {
-            label_text.clone()
-        } else {
-            " ".repeat(label_width)
-        };
-        let mut spans = vec![Span::styled(
-            prefix,
-            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-        )];
-        spans.extend(content_line.spans);
-        result.push(Line::from(spans));
-    }
-    result
-}
-
 fn set_input_cursor(frame: &mut Frame<'_>, region: Rect, cursor_column: usize, cursor_row: usize) {
     if region.width == 0 || region.height == 0 {
         return;
@@ -550,8 +380,7 @@ fn timeline_lines_compact(state: &TuiState, region: Rect) -> TimelineLines {
             TimelineItem::LocalCommand { title, body } => {
                 local_command_lines(state, title, body, region.width)
             }
-            TimelineItem::Expanded { title, body }
-            | TimelineItem::ExpandedDetail { title, body, .. } => {
+            TimelineItem::Expanded { title, body } => {
                 expanded_timeline_lines(state, title, body, region.width)
             }
             TimelineItem::Diagnostic { title, body } => {
@@ -782,7 +611,7 @@ fn expanded_timeline_lines(
     region_width: u16,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![expanded_title_line(state, title)];
-    if state.is_artifact_reviewing() || tool_title_line(state, title).is_none() {
+    if tool_title_line(state, title).is_none() {
         return lines;
     }
 
@@ -1081,85 +910,6 @@ fn user_lines(state: &TuiState, text: &str, lane: QueuedInputLane) -> Vec<Line<'
     lines
 }
 
-fn patch_lines(state: &TuiState, changes: &[PatchChangeView]) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    for change in changes {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "Edited {} (+{} -{})",
-                change.path, change.added, change.removed
-            ),
-            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(Span::styled(
-            format!(
-                "  {} hunk(s), {} -> {} bytes",
-                change.hunks,
-                change
-                    .bytes_before
-                    .map_or_else(|| "-".to_owned(), |bytes| bytes.to_string()),
-                change
-                    .bytes_after
-                    .map_or_else(|| "-".to_owned(), |bytes| bytes.to_string())
-            ),
-            semantic_style(state, SemanticColor::Muted),
-        )));
-        for line in &change.lines {
-            lines.push(patch_line(state, line));
-        }
-    }
-    lines
-}
-
-fn patch_line(state: &TuiState, line: &PatchLineView) -> Line<'static> {
-    let (marker, style) = match line.kind {
-        super::state::PatchLineKind::Context => (
-            " ",
-            semantic_style(state, SemanticColor::Focus).bg(Color::Reset),
-        ),
-        super::state::PatchLineKind::Add => ("+", diff_line_style(state, SemanticColor::DiffAdd)),
-        super::state::PatchLineKind::Remove => {
-            ("-", diff_line_style(state, SemanticColor::DiffDelete))
-        }
-    };
-
-    Line::from(vec![
-        Span::styled(
-            format_line_number(patch_display_line(line)),
-            patch_gutter_style(state),
-        ),
-        Span::styled(" ", patch_gutter_style(state)),
-        Span::styled(marker.to_owned(), style),
-        Span::styled(line.text.clone(), style),
-    ])
-}
-
-fn patch_display_line(line: &PatchLineView) -> Option<usize> {
-    match line.kind {
-        super::state::PatchLineKind::Context | super::state::PatchLineKind::Add => line.new_line,
-        super::state::PatchLineKind::Remove => line.old_line,
-    }
-}
-
-fn format_line_number(line: Option<usize>) -> String {
-    line.map_or_else(|| "    ".to_owned(), |line| format!("{line:>4}"))
-}
-
-fn patch_gutter_style(state: &TuiState) -> Style {
-    semantic_style(state, SemanticColor::Muted)
-}
-
-fn diff_line_style(state: &TuiState, slot: SemanticColor) -> Style {
-    let foreground = state.theme().color(slot);
-    let background = state.theme().color(slot).map(dim_color);
-    match (foreground, background) {
-        (Some(foreground), Some(background)) => Style::default().fg(foreground).bg(background),
-        (Some(foreground), None) => Style::default().fg(foreground),
-        (None, Some(background)) => Style::default().bg(background),
-        (None, None) => Style::default(),
-    }
-}
-
 fn queue_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
     let queue = state.queue_preview();
     vec![
@@ -1236,293 +986,4 @@ fn queue_lane(
             semantic_style(state, SemanticColor::Muted),
         ),
     ])
-}
-
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    if max_chars <= 3 {
-        return ".".repeat(max_chars);
-    }
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    text.chars().take(max_chars - 3).collect::<String>() + "..."
-}
-
-fn inline_code_wrapped_lines(
-    state: &TuiState,
-    text: &str,
-    base_style: Style,
-    region_width: u16,
-) -> Vec<Line<'static>> {
-    wrap_styled_parts(inline_code_parts(state, text, base_style), region_width)
-}
-
-fn inline_code_spans(state: &TuiState, text: &str, base_style: Style) -> Vec<Span<'static>> {
-    inline_code_parts(state, text, base_style)
-        .into_iter()
-        .map(|part| Span::styled(part.text, part.style))
-        .collect()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StyledTextPart {
-    pub(crate) text: String,
-    pub(crate) style: Style,
-    pub(crate) atomic: bool,
-}
-
-fn inline_code_parts(state: &TuiState, text: &str, base_style: Style) -> Vec<StyledTextPart> {
-    let mut spans = Vec::new();
-    let mut remainder = text;
-    loop {
-        let Some(start) = remainder.find('`') else {
-            if !remainder.is_empty() {
-                spans.push(StyledTextPart {
-                    text: remainder.to_owned(),
-                    style: base_style,
-                    atomic: false,
-                });
-            }
-            return spans;
-        };
-        let before = &remainder[..start];
-        if !before.is_empty() {
-            spans.push(StyledTextPart {
-                text: before.to_owned(),
-                style: base_style,
-                atomic: false,
-            });
-        }
-        let after_start = &remainder[start + 1..];
-        let Some(end) = after_start.find('`') else {
-            spans.push(StyledTextPart {
-                text: remainder[start..].to_owned(),
-                style: base_style,
-                atomic: false,
-            });
-            return spans;
-        };
-        let code = &after_start[..end];
-        spans.push(StyledTextPart {
-            text: format!(" {code} "),
-            style: inline_code_style(state, base_style),
-            atomic: true,
-        });
-        remainder = &after_start[end + 1..];
-    }
-}
-
-pub(crate) fn wrap_styled_parts(
-    parts: Vec<StyledTextPart>,
-    region_width: u16,
-) -> Vec<Line<'static>> {
-    wrap_styled_parts_with_policy(parts, region_width, false)
-}
-
-pub(crate) fn wrap_styled_parts_preserving_leading_whitespace(
-    parts: Vec<StyledTextPart>,
-    region_width: u16,
-) -> Vec<Line<'static>> {
-    wrap_styled_parts_with_policy(parts, region_width, true)
-}
-
-fn wrap_styled_parts_with_policy(
-    parts: Vec<StyledTextPart>,
-    region_width: u16,
-    preserve_leading_whitespace: bool,
-) -> Vec<Line<'static>> {
-    let max_width = usize::from(region_width).max(1);
-    let mut lines = Vec::new();
-    let mut current = Vec::new();
-    let mut current_width = 0;
-
-    for part in parts {
-        if part.atomic {
-            push_atomic_part(
-                part,
-                max_width,
-                &mut current,
-                &mut current_width,
-                &mut lines,
-            );
-        } else {
-            push_wrappable_part(
-                part,
-                max_width,
-                &mut current,
-                &mut current_width,
-                &mut lines,
-                preserve_leading_whitespace,
-            );
-        }
-    }
-
-    lines.push(Line::from(current));
-    lines
-}
-
-fn push_atomic_part(
-    part: StyledTextPart,
-    max_width: usize,
-    current: &mut Vec<Span<'static>>,
-    current_width: &mut usize,
-    lines: &mut Vec<Line<'static>>,
-) {
-    let width = UnicodeWidthStr::width(part.text.as_str());
-    if *current_width > 0 && *current_width + width > max_width {
-        lines.push(Line::from(std::mem::take(current)));
-        *current_width = 0;
-    }
-    *current_width += width;
-    current.push(Span::styled(part.text, part.style));
-}
-
-fn push_wrappable_part(
-    part: StyledTextPart,
-    max_width: usize,
-    current: &mut Vec<Span<'static>>,
-    current_width: &mut usize,
-    lines: &mut Vec<Line<'static>>,
-    preserve_leading_whitespace: bool,
-) {
-    for token in wrap_tokens(&part.text) {
-        push_wrappable_token(
-            token,
-            part.style,
-            max_width,
-            current,
-            current_width,
-            lines,
-            preserve_leading_whitespace,
-        );
-    }
-}
-
-fn wrap_tokens(text: &str) -> Vec<&str> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-
-    let mut tokens = Vec::new();
-    let mut token_start = 0;
-    let mut previous_was_whitespace: Option<bool> = None;
-    for (index, character) in text.char_indices() {
-        let is_whitespace = character.is_whitespace();
-        if let Some(previous) = previous_was_whitespace
-            && previous != is_whitespace
-        {
-            tokens.push(&text[token_start..index]);
-            token_start = index;
-        }
-        previous_was_whitespace = Some(is_whitespace);
-    }
-    tokens.push(&text[token_start..]);
-    tokens
-}
-
-fn push_wrappable_token(
-    token: &str,
-    style: Style,
-    max_width: usize,
-    current: &mut Vec<Span<'static>>,
-    current_width: &mut usize,
-    lines: &mut Vec<Line<'static>>,
-    preserve_leading_whitespace: bool,
-) {
-    if token.chars().all(char::is_whitespace) {
-        push_whitespace_token(
-            token,
-            style,
-            max_width,
-            current,
-            current_width,
-            lines,
-            preserve_leading_whitespace,
-        );
-        return;
-    }
-
-    let token_width = UnicodeWidthStr::width(token);
-    if token_width <= max_width {
-        if *current_width > 0 && *current_width + token_width > max_width {
-            lines.push(Line::from(std::mem::take(current)));
-            *current_width = 0;
-        }
-        current.push(Span::styled(token.to_owned(), style));
-        *current_width += token_width;
-        return;
-    }
-
-    push_long_token_by_char(token, style, max_width, current, current_width, lines);
-}
-
-fn push_whitespace_token(
-    token: &str,
-    style: Style,
-    max_width: usize,
-    current: &mut Vec<Span<'static>>,
-    current_width: &mut usize,
-    lines: &mut Vec<Line<'static>>,
-    preserve_leading_whitespace: bool,
-) {
-    if *current_width == 0 && !preserve_leading_whitespace {
-        return;
-    }
-
-    let token_width = UnicodeWidthStr::width(token);
-    if token_width > max_width {
-        push_long_token_by_char(token, style, max_width, current, current_width, lines);
-        return;
-    }
-
-    if *current_width > 0 && *current_width + token_width > max_width {
-        lines.push(Line::from(std::mem::take(current)));
-        *current_width = 0;
-        return;
-    }
-
-    current.push(Span::styled(token.to_owned(), style));
-    *current_width += token_width;
-}
-
-fn push_long_token_by_char(
-    token: &str,
-    style: Style,
-    max_width: usize,
-    current: &mut Vec<Span<'static>>,
-    current_width: &mut usize,
-    lines: &mut Vec<Line<'static>>,
-) {
-    let mut chunk = String::new();
-    for character in token.chars() {
-        let width = UnicodeWidthChar::width(character).unwrap_or(0);
-        if *current_width > 0 && *current_width + width > max_width {
-            if !chunk.is_empty() {
-                current.push(Span::styled(std::mem::take(&mut chunk), style));
-            }
-            lines.push(Line::from(std::mem::take(current)));
-            *current_width = 0;
-        }
-        chunk.push(character);
-        *current_width += width;
-    }
-    if !chunk.is_empty() {
-        current.push(Span::styled(chunk, style));
-    }
-}
-
-fn inline_code_style(state: &TuiState, base_style: Style) -> Style {
-    let foreground = state.theme().color(SemanticColor::Focus);
-    let mut style = base_style.add_modifier(Modifier::BOLD);
-    if let Some(foreground) = foreground {
-        style = style.fg(foreground);
-    }
-    style
-}
-
-fn semantic_style(state: &TuiState, slot: SemanticColor) -> Style {
-    state
-        .theme()
-        .color(slot)
-        .map_or_else(Style::default, |color| Style::default().fg(color))
 }

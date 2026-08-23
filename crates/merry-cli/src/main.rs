@@ -21,6 +21,7 @@ mod session_id;
 mod testing;
 mod tool_display;
 mod tui;
+mod web;
 
 use clap::Parser;
 use config::{MerryConfig, XdgPaths};

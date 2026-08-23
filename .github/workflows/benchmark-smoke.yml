@@ -53,6 +53,20 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
 
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build Web assets
+        working-directory: web
+        run: npm ci && npm test
+
+      - name: Verify checked-in Web assets
+        run: git diff --exit-code -- crates/merry-web/assets
+
       - name: Install musl linker
         run: |
           sudo apt-get update

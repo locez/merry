@@ -2,8 +2,10 @@
 //!
 //! The stream owns the lifetime of one active runtime step. Polling yields
 //! provider-neutral [`RuntimeJournalEvent`] values after session state has been
-//! recorded. Dropping the stream cancels and aborts the producer; the active
-//! step permit is released when that producer future stops and drops its state.
+//! recorded. The runtime updates read-model observers before enqueueing each
+//! batch, so consuming this stream is not required to keep projections current.
+//! Dropping the stream cancels and aborts the producer; the active step permit
+//! is released when that producer future stops and drops its state.
 
 use futures_core::Stream;
 use merry_core::RuntimeJournalEvent;
@@ -41,6 +43,18 @@ impl RuntimeJournalEventBatch {
                 events.pop().expect("one event remains"),
             ))),
             _ => Some(Self(RuntimeJournalEventBatchKind::Multiple(events))),
+        }
+    }
+
+    /// Visits events without consuming the batch before it enters the channel.
+    pub(crate) fn for_each(&self, mut visit: impl FnMut(&RuntimeJournalEvent)) {
+        match &self.0 {
+            RuntimeJournalEventBatchKind::Single(event) => visit(event),
+            RuntimeJournalEventBatchKind::Multiple(events) => {
+                for event in events {
+                    visit(event);
+                }
+            }
         }
     }
 

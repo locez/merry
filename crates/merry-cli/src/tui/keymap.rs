@@ -8,18 +8,15 @@ pub(crate) enum KeyAction {
     CancelInputOrQuit,
     InsertNewline,
     PasteImage,
+    OpenSessionInBrowser,
     Interrupt,
     OpenCommandPanel,
     TogglePlan,
-    OpenDetails,
     CloseOverlay,
     Quit,
     ScrollUp,
     ScrollDown,
     ReviewPreviousUserInput,
-    ReviewPreviousArtifact,
-    ReviewNextArtifact,
-    FollowLatestArtifact,
     HistoryPrevious,
     HistoryNext,
     ResumeSuspended,
@@ -109,15 +106,7 @@ impl Default for Keymap {
                 ),
                 (
                     KeyBinding::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
-                    KeyAction::ReviewPreviousArtifact,
-                ),
-                (
-                    KeyBinding::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
-                    KeyAction::ReviewNextArtifact,
-                ),
-                (
-                    KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
-                    KeyAction::FollowLatestArtifact,
+                    KeyAction::OpenSessionInBrowser,
                 ),
                 (
                     KeyBinding::new(KeyCode::Up, KeyModifiers::NONE),
@@ -153,6 +142,9 @@ impl Keymap {
         if let Some(binding) = config.paste_image.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::PasteImage);
         }
+        if let Some(binding) = config.open_session_in_browser.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::OpenSessionInBrowser);
+        }
         if let Some(binding) = config.toggle_plan.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::TogglePlan);
         }
@@ -170,15 +162,6 @@ impl Keymap {
         }
         if let Some(binding) = config.review_previous_user_input.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::ReviewPreviousUserInput);
-        }
-        if let Some(binding) = config.review_previous_artifact.as_deref() {
-            keymap.set_binding(parse_binding(binding)?, KeyAction::ReviewPreviousArtifact);
-        }
-        if let Some(binding) = config.review_next_artifact.as_deref() {
-            keymap.set_binding(parse_binding(binding)?, KeyAction::ReviewNextArtifact);
-        }
-        if let Some(binding) = config.follow_latest_artifact.as_deref() {
-            keymap.set_binding(parse_binding(binding)?, KeyAction::FollowLatestArtifact);
         }
         if let Some(binding) = config.history_previous.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::HistoryPrevious);

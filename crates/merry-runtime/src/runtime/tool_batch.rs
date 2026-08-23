@@ -1,4 +1,4 @@
-use super::{RuntimeInner, persist_resume_safe_savepoint_if_configured, tool_execution};
+use super::{RuntimeInner, tool_execution};
 use crate::{RuntimeError, ToolConcurrency, ToolExecutionContext};
 use futures_util::{StreamExt, stream};
 use merry_core::{PendingToolCall, RuntimeJournalEvent};
@@ -10,6 +10,14 @@ pub(crate) struct ToolBatchExecution {
 }
 
 impl ToolBatchExecution {
+    pub(crate) fn events(&self) -> &[RuntimeJournalEvent] {
+        &self.events
+    }
+
+    pub(crate) fn is_successful(&self) -> bool {
+        self.error.is_none()
+    }
+
     pub(crate) fn into_parts(self) -> (Vec<RuntimeJournalEvent>, Option<RuntimeError>) {
         (self.events, self.error)
     }
@@ -20,19 +28,10 @@ pub(super) async fn execute_tool_call_batch_with_active_permit(
     calls: Vec<PendingToolCall>,
     context: ToolExecutionContext,
 ) -> ToolBatchExecution {
-    let execution = {
+    {
         let _batch_scope = inner.begin_tool_batch();
         execute_tool_call_batch_inner(inner, calls, context).await
-    };
-
-    // Individual tool paths update in-memory state as their work completes,
-    // but a resume-safe session snapshot is only valid after the whole batch
-    // has resolved. Infrastructure failures leave pending calls for the
-    // interactive cleanup path, so it owns the next safe savepoint.
-    if execution.error.is_none() {
-        persist_resume_safe_savepoint_if_configured(inner).await;
     }
-    execution
 }
 
 async fn execute_tool_call_batch_inner(

@@ -16,6 +16,10 @@ merry-raw-docs/
 # Rust build outputs.
 target/
 
+# Local Web development dependencies and compiler output.
+web/node_modules/
+web/dist/
+
 # Python packaging/build outputs.
 .venv/
 __pycache__/

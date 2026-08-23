@@ -27,9 +27,11 @@ use crate::{
     step::{StepContext, StepInput},
     subagent::{PlanSubagentScope, SubagentActivityHub, SubagentActivityReceiver, SubagentManager},
     tool::{ToolExecutionContext, ToolRegistry},
+    trajectory::RuntimeObservability,
 };
 use merry_core::{
-    PendingToolCall, PlanHarnessSnapshot, RuntimeEvent, RuntimeJournalEvent, SessionId, ToolCallId,
+    PendingToolCall, PlanHarnessSnapshot, QueuedInputView, RuntimeEvent, RuntimeJournalEvent,
+    SessionId, ToolCallId,
 };
 use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
 use std::{
@@ -49,6 +51,7 @@ mod builder;
 mod checkpoint_ref_tool;
 mod diagnostics;
 mod journal_emission;
+mod journal_persistence;
 mod memory_activation;
 mod model_output;
 mod permission_execution;
@@ -73,7 +76,7 @@ use self::diagnostics::{
     diagnostic_from_text,
 };
 use self::journal_emission::{
-    send_cancelled_event, send_cancelled_if_requested, send_normal_event,
+    send_cancelled_event, send_cancelled_if_requested, send_normal_event, send_step_started_event,
 };
 #[cfg(test)]
 use self::memory_activation::memory_activation_seed_from_step_input;
@@ -209,8 +212,20 @@ impl Runtime {
         })
     }
 
-    pub(crate) fn session_id(&self) -> &SessionId {
+    pub fn session_id(&self) -> &SessionId {
         &self.inner.session_id
+    }
+
+    fn observe_recorded_journal_events(&self, events: &[RuntimeJournalEvent]) {
+        self.inner.project_journal_events(events);
+    }
+
+    pub(crate) fn record_queued_input_accepted(&self, inputs: &[QueuedInputView]) {
+        self.inner.trajectory.record_queued_input_accepted(inputs);
+    }
+
+    pub(crate) fn close_trajectory(&self) {
+        self.inner.trajectory.close();
     }
 
     /// Saves the current resume-safe session state to the provided store.
@@ -225,8 +240,10 @@ impl Runtime {
         store: FileSessionStore,
         _active_permit: &ActiveStepPermit,
     ) -> Result<(), RuntimeError> {
+        let trajectory = self.inner.trajectory.snapshot();
         let bundle = {
-            let session = self.inner.session.lock().await;
+            let mut session = self.inner.session.lock().await;
+            session.set_trajectory_snapshot(trajectory);
             session.persistable_bundle()?
         };
         store.write_bundle(bundle).await?;
@@ -432,6 +449,26 @@ impl Runtime {
         &self.inner.capabilities
     }
 
+    /// Returns the current runtime-owned trajectory projection.
+    pub async fn trajectory_snapshot(
+        &self,
+    ) -> Result<merry_core::TrajectorySnapshot, RuntimeError> {
+        Ok(self.inner.trajectory.snapshot())
+    }
+
+    /// Subscribes to trajectory changes and returns an atomic initial snapshot.
+    pub async fn trajectory_subscription(
+        &self,
+    ) -> Result<
+        (
+            merry_core::TrajectorySnapshot,
+            tokio::sync::broadcast::Receiver<merry_core::TrajectoryEvent>,
+        ),
+        RuntimeError,
+    > {
+        Ok(self.inner.trajectory.subscribe_with_snapshot())
+    }
+
     /// Returns the configured skill metadata for UI/SDK discovery.
     ///
     /// This exposes only metadata already stored in the session. Skill bodies
@@ -535,7 +572,13 @@ impl Runtime {
         context: ToolExecutionContext,
         _active_permit: &ActiveStepPermit,
     ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
-        tool_execution::execute_tool_call_with_active_permit(&self.inner, call_id, context).await
+        let result =
+            tool_execution::execute_tool_call_with_active_permit(&self.inner, call_id, context)
+                .await;
+        if let Ok(events) = &result {
+            self.inner.commit_journal_events(events).await;
+        }
+        result
     }
 
     pub(crate) async fn execute_tool_call_batch_with_active_permit(
@@ -544,7 +587,15 @@ impl Runtime {
         context: ToolExecutionContext,
         _active_permit: &ActiveStepPermit,
     ) -> tool_batch::ToolBatchExecution {
-        tool_batch::execute_tool_call_batch_with_active_permit(&self.inner, calls, context).await
+        let execution =
+            tool_batch::execute_tool_call_batch_with_active_permit(&self.inner, calls, context)
+                .await;
+        if execution.is_successful() {
+            self.inner.commit_journal_events(execution.events()).await;
+        } else {
+            self.inner.project_journal_events(execution.events());
+        }
+        execution
     }
 
     /// Payload-free summary of the installed compacted checkpoint, if any.
@@ -663,38 +714,6 @@ impl Runtime {
     }
 }
 
-async fn persist_resume_safe_savepoint_if_configured(inner: &RuntimeInner) {
-    if inner.tool_batch_active.load(Ordering::Acquire) {
-        return;
-    }
-    let Some(store) = inner.session_store.clone() else {
-        return;
-    };
-    let bundle = {
-        let session = inner.session.lock().await;
-        session.persistable_bundle_if_resume_safe()
-    };
-    let bundle = match bundle {
-        Ok(Some(bundle)) => bundle,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::warn!(
-                session_id = %inner.session_id,
-                error = %error,
-                "automatic session resume savepoint skipped"
-            );
-            return;
-        }
-    };
-    if let Err(error) = store.write_bundle(bundle).await {
-        tracing::warn!(
-            session_id = %inner.session_id,
-            error = %error,
-            "automatic session resume savepoint failed"
-        );
-    }
-}
-
 struct RuntimeInner {
     session_id: SessionId,
     session: Arc<Mutex<SessionState>>,
@@ -728,6 +747,7 @@ struct RuntimeInner {
     session_store: Option<FileSessionStore>,
     tool_batch_active: AtomicBool,
     activity_hub: Arc<SubagentActivityHub>,
+    trajectory: Arc<RuntimeObservability>,
 }
 
 impl RuntimeInner {
@@ -897,14 +917,10 @@ async fn run_step(
         return;
     }
 
-    if !send_normal_event(&inner, &sender, &token, |session| {
-        Some(session.record_step_started())
-    })
-    .await
-    {
+    let Some(step_started) = send_step_started_event(&inner, &sender, &token).await else {
         let _ = send_cancelled_if_requested(&inner, &sender, &token).await;
         return;
-    }
+    };
 
     if token.is_cancelled() {
         let _ = send_cancelled_event(&inner, &sender).await;
@@ -933,7 +949,7 @@ async fn run_step(
     provider_step::run_provider_step(
         &inner,
         &sender,
-        provider_step::ProviderStepControl::new(&token, &active_permit),
+        provider_step::ProviderStepControl::new(&token, &active_permit, step_started.sequence),
         input,
         generation_config,
         final_output_contract,

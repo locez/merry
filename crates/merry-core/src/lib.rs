@@ -11,6 +11,7 @@ pub mod runtime_event;
 pub mod schema;
 pub mod subagent_activity;
 pub mod tool;
+pub mod trajectory;
 pub mod usage;
 
 pub use artifact::{ArtifactKind, ArtifactRef};
@@ -20,7 +21,7 @@ pub use evidence::{EvidenceLocator, EvidenceRef};
 pub use id::{
     ArtifactId, PlanApprovalRequirementId, PlanAttemptId, PlanBindingId, PlanDirectiveId, PlanId,
     PlanLeaseId, PlanNodeId, ProviderName, SessionId, SkillId, SubagentId, SubagentTaskId,
-    ToolCallBatchId, ToolCallId, ToolName,
+    ToolCallBatchId, ToolCallId, ToolName, TrajectoryRecordId,
 };
 pub use journal::{RuntimeJournalEvent, RuntimeJournalPayload};
 pub use plan::{
@@ -42,6 +43,12 @@ pub use subagent_activity::{SubagentActivityPhase, SubagentActivitySnapshot};
 pub use tool::{
     PendingToolCall, PendingToolCallBatch, TOOL_CANCELLED_BY_USER_CODE, ToolCallArguments,
     ToolCallResult, ToolCallResultStatus, ToolSpec,
+};
+pub use trajectory::{
+    TrajectoryEvent, TrajectoryLane, TrajectoryPayload, TrajectoryPayloadKind,
+    TrajectoryPromptBlock, TrajectoryPromptSnapshot, TrajectoryRecord, TrajectoryRecordDetails,
+    TrajectoryRecordKind, TrajectoryRecordStatus, TrajectorySnapshot, TrajectoryToolDetails,
+    TrajectoryTurnId,
 };
 pub use usage::{
     CompactionUsageWindow, ContextWindowSource, ModelUsage, SessionUsage, UsageContextWindow,
