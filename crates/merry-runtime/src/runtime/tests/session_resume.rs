@@ -960,13 +960,19 @@ async fn abandoning_pending_tool_calls_makes_a_stalled_session_saveable() {
         ToolName::new("stalled_tool").expect("valid tool name"),
         ToolCallArguments::new(Default::default()),
     );
-    runtime
+    let call_id = call.id().clone();
+    let pending_event = runtime
         .inner
         .session
         .lock()
         .await
         .record_test_tool_call_pending(call)
         .expect("pending call records");
+    runtime.observe_recorded_journal_events(std::slice::from_ref(&pending_event));
+    let trajectory_before_abandonment = runtime
+        .trajectory_snapshot()
+        .await
+        .expect("trajectory snapshot reads");
 
     runtime
         .save_session_to(store.clone())
@@ -981,6 +987,23 @@ async fn abandoning_pending_tool_calls_makes_a_stalled_session_saveable() {
         1
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
+    let trajectory_after_abandonment = runtime
+        .trajectory_snapshot()
+        .await
+        .expect("trajectory snapshot reads");
+    assert!(
+        trajectory_after_abandonment.revision() > trajectory_before_abandonment.revision(),
+        "abandonment must advance the live trajectory projection"
+    );
+    let abandoned_record = trajectory_after_abandonment
+        .records()
+        .iter()
+        .find(|record| record.tool_call_id() == Some(&call_id))
+        .expect("abandoned tool remains visible in the trajectory");
+    assert_eq!(
+        abandoned_record.status(),
+        merry_core::TrajectoryRecordStatus::Failed
+    );
     runtime
         .save_session_to(store)
         .await

@@ -200,7 +200,7 @@ impl Runtime {
         _active_permit: &ActiveStepPermit,
     ) -> Result<(), RuntimeError> {
         let diagnostic = diagnostic_from_text(TOOL_ABANDONED_BY_SETTLEMENT_CODE, reason);
-        {
+        let events = {
             let mut session = self.inner.session.lock().await;
             session.submit_tool_execution_outcome(
                 call_id,
@@ -208,9 +208,9 @@ impl Runtime {
                 ArtifactContent::text(format!("Tool execution was abandoned: {reason}")),
                 Some(diagnostic),
                 None,
-            )?;
-        }
-        persist_resume_safe_savepoint_if_configured(&self.inner).await;
+            )?
+        };
+        self.inner.commit_journal_events(&events).await;
         Ok(())
     }
 
