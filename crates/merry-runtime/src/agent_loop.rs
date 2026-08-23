@@ -270,6 +270,19 @@ impl AgentLoopEventStream {
         }
     }
 
+    /// Cancels the loop producer and waits until its task has stopped.
+    ///
+    /// This is the output-boundary cancellation path: once a consumer cannot
+    /// accept another event, callers must stop provider/tool work before
+    /// settling and persisting the runtime state.
+    pub async fn cancel_and_wait(&mut self) {
+        self.loop_token.cancel();
+        if let Some(handle) = self.producer_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+
     /// Returns the next internal driver message.
     ///
     /// SDK bridge drivers use this to execute bridge tool calls without

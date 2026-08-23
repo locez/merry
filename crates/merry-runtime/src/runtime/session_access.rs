@@ -13,6 +13,9 @@ use merry_core::{
 };
 use std::sync::Arc;
 
+/// Diagnostic code recorded for a tool call a settling run gave up on.
+const TOOL_ABANDONED_BY_SETTLEMENT_CODE: &str = "tool_abandoned_by_run_settlement";
+
 impl Runtime {
     /// Records exact artifact state into the owning session and returns observable events.
     ///
@@ -154,6 +157,58 @@ impl Runtime {
         };
         persist_resume_safe_savepoint_if_configured(&self.inner).await;
         Ok(events)
+    }
+
+    /// Resolves every pending tool call with a durable failed result so the
+    /// session reaches a resume-safe boundary, returning how many were resolved.
+    ///
+    /// A run that settles while a tool call is still pending cannot be saved at
+    /// all: [`crate::SessionStoreError::UnsafePendingToolCalls`] rejects the
+    /// bundle, so the partial session is lost instead of persisted. Owners of
+    /// run settlement call this before saving to record why each call never
+    /// produced a result, which is what keeps a failed run resumable.
+    ///
+    /// This acquires the active-step permit and therefore cannot run while a
+    /// step, tool submission, or tool execution is in flight.
+    pub async fn abandon_pending_tool_calls(&self, reason: &str) -> Result<usize, RuntimeError> {
+        let active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
+            .ok_or_else(|| RuntimeError::StepAlreadyActive {
+                session_id: self.inner.session_id.clone(),
+            })?;
+        let pending = {
+            let session = self.inner.session.lock().await;
+            session.pending_tool_calls()
+        };
+        for call in &pending {
+            self.submit_tool_abandoned_failure_with_active_permit(
+                call.id(),
+                reason,
+                &active_permit,
+            )
+            .await?;
+        }
+        Ok(pending.len())
+    }
+
+    async fn submit_tool_abandoned_failure_with_active_permit(
+        &self,
+        call_id: &ToolCallId,
+        reason: &str,
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<(), RuntimeError> {
+        let diagnostic = diagnostic_from_text(TOOL_ABANDONED_BY_SETTLEMENT_CODE, reason);
+        {
+            let mut session = self.inner.session.lock().await;
+            session.submit_tool_execution_outcome(
+                call_id,
+                ToolCallResultStatus::Failed,
+                ArtifactContent::text(format!("Tool execution was abandoned: {reason}")),
+                Some(diagnostic),
+                None,
+            )?;
+        }
+        persist_resume_safe_savepoint_if_configured(&self.inner).await;
+        Ok(())
     }
 
     /// Converts an executor infrastructure failure into a durable failed

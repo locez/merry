@@ -24,8 +24,8 @@ use merry_llm::GenerationConfig;
 use merry_runtime::{
     AgentLoopControl, AgentLoopInput, AutomaticCompactionConfig, ChannelPermissionAdmissionSource,
     InteractivePrimaryModel, InteractiveRunEventStream, InteractiveSettingsUpdate,
-    InteractiveSubagentSettings, PermissionReviewRequest, Runtime, SessionTranscriptItem,
-    SkillMetadata, StepContext, SubagentActivityReceiver,
+    InteractiveSubagentSettings, PermissionReviewRequest, Runtime, SessionReservation,
+    SessionTranscriptItem, SkillMetadata, StepContext, SubagentActivityReceiver,
 };
 use std::{collections::VecDeque, env, num::NonZeroU64, path::PathBuf, sync::Arc};
 use tokio::sync::mpsc;
@@ -46,6 +46,7 @@ pub(crate) struct TuiRuntimeSession {
     merry_config: MerryConfig,
     pub(crate) permission_requests: mpsc::Receiver<PermissionReviewRequest>,
     pending_permission_reviews: VecDeque<PermissionReviewRequest>,
+    _session_reservation: SessionReservation,
 }
 
 pub(crate) async fn start_tui_runtime_session(
@@ -88,6 +89,11 @@ pub(crate) async fn start_tui_runtime_session(
         .map(|effort| effort.as_str().to_owned());
     let workspace_root = env::current_dir().map_err(unexpected)?;
     let (session_id, mut metadata, should_resume) = session_start(selection, &workspace_root);
+    let session_reservation = session_store
+        .session_state_store()
+        .reserve_session(&session_id)
+        .await
+        .map_err(unexpected)?;
     metadata.model = Some(model_label.clone());
     metadata.reasoning_effort = reasoning_effort_label.clone();
     let backend = action_process_runner_for_mode(
@@ -190,6 +196,7 @@ pub(crate) async fn start_tui_runtime_session(
         merry_config: owned_config,
         permission_requests,
         pending_permission_reviews: VecDeque::new(),
+        _session_reservation: session_reservation,
     })
 }
 

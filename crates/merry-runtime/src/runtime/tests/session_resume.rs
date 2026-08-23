@@ -813,3 +813,58 @@ fn model_tool_call(id: &str, name: &str, arguments: serde_json::Value) -> ModelT
         ToolArguments::try_from(arguments).expect("valid tool arguments"),
     )
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn abandoning_pending_tool_calls_makes_a_stalled_session_saveable() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let session_id = session_id("runtime-abandon-pending");
+    let runtime = Runtime::builder(session_id)
+        .build()
+        .expect("runtime builds");
+    let call = PendingToolCall::new(
+        ToolCallId::new("call-abandoned").expect("valid tool call id"),
+        ToolName::new("stalled_tool").expect("valid tool name"),
+        ToolCallArguments::new(Default::default()),
+    );
+    runtime
+        .inner
+        .session
+        .lock()
+        .await
+        .record_test_tool_call_pending(call)
+        .expect("pending call records");
+
+    runtime
+        .save_session_to(store.clone())
+        .await
+        .expect_err("a session holding a pending tool call must not be saved");
+
+    assert_eq!(
+        runtime
+            .abandon_pending_tool_calls("the run settled before this call resolved")
+            .await
+            .expect("pending calls resolve"),
+        1
+    );
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    runtime
+        .save_session_to(store)
+        .await
+        .expect("the session saves once nothing is pending");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn abandoning_pending_tool_calls_is_a_no_op_without_any() {
+    let runtime = Runtime::builder(session_id("runtime-abandon-none"))
+        .build()
+        .expect("runtime builds");
+
+    assert_eq!(
+        runtime
+            .abandon_pending_tool_calls("nothing to abandon")
+            .await
+            .expect("an idle runtime resolves nothing"),
+        0
+    );
+}
