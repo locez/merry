@@ -17,11 +17,12 @@ use crate::runtime_config::{
 };
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use crate::tool_display::format_tool_call_progress;
+use crate::tui::session_list::{TuiSessionMetadata, TuiSessionStore, now_unix_ms};
 use futures_util::StreamExt;
 use merry_core::{ErrorInfo, RuntimeEvent, SessionId, ToolCallResultStatus};
 use merry_runtime::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopResult, AgentLoopStatus, FileSessionStore,
-    Runtime, StepContext, StepInput,
+    Runtime, SessionReservation, StepContext, StepInput,
 };
 use std::{env, future::Future};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
@@ -130,26 +131,34 @@ fn parse_session_id(flag: &str, value: &str) -> Result<SessionId, CliError> {
     SessionId::new(value).map_err(|error| usage_error(format!("{flag}: {error}")))
 }
 
-/// Refuses a new run that would take over an id the store already holds.
+/// Reserves a run's session id and refuses a new run that already has state.
 ///
 /// Saving a session is an atomic replace of its `state.json`, so starting a new
 /// run under an existing id destroys that session's transcript, ledger,
 /// artifacts, and checkpoints with nothing left to resume. A typo or a reused
 /// id has to fail here, before the run consumes its task or starts a runtime.
-async fn refuse_reused_session_id(
+async fn reserve_run_session(
     session: &RunSession,
     store: &FileSessionStore,
-) -> Result<(), CliError> {
-    let RunSession::New(id) = session else {
-        return Ok(());
-    };
-    if store.contains_session(id).await.map_err(unexpected)? {
+) -> Result<SessionReservation, CliError> {
+    let reservation = store
+        .reserve_session(session.id())
+        .await
+        .map_err(unexpected)?;
+    if matches!(session, RunSession::New(_))
+        && store
+            .contains_session(session.id())
+            .await
+            .map_err(unexpected)?
+    {
         return Err(usage_error(format!(
-            "session {id} already has saved state; pass --resume {id} to continue it, \
-             or choose a different --session-id"
+            "session {} already has saved state; pass --resume {} to continue it, \
+             or choose a different --session-id",
+            session.id(),
+            session.id()
         )));
     }
-    Ok(())
+    Ok(reservation)
 }
 
 /// Reads the task from argv, or from `reader` when `TASK` is `-`.
@@ -198,7 +207,7 @@ pub(crate) async fn run(
 ) -> Result<RunExitStatus, CliError> {
     let session = RunSession::from_args(args)?;
     let session_store = FileSessionStore::default_store().map_err(unexpected)?;
-    refuse_reused_session_id(&session, &session_store).await?;
+    let _session_reservation = reserve_run_session(&session, &session_store).await?;
     let task = resolve_task(&args.task, tokio::io::stdin()).await?;
     let Some(_admission) =
         coding_agent_process_admission(sandbox_child_handoff, process_execution_mode).await
@@ -219,6 +228,7 @@ pub(crate) async fn run(
         action_process_backend_options(merry_config).map_err(unexpected)?,
         process_execution_mode,
     )?;
+    let headless_metadata = headless_session_metadata(&session_store, &session, &root).await?;
     let extra_tools = discover_configured_mcp_tools(merry_config).await?;
     let runtime_input = HeadlessCodingRuntimeInput {
         session_id: session.id().as_str(),
@@ -283,6 +293,7 @@ pub(crate) async fn run(
             events_jsonl: args.events_jsonl,
             session_store,
             session_id: session.id(),
+            metadata: headless_metadata,
         },
     )
     .await
@@ -291,15 +302,16 @@ pub(crate) async fn run(
 /// Settles the runtime and permission reviewer before attempting persistence.
 ///
 /// This is the production headless-run orchestration boundary. Presentation
-/// failures are retained while the runtime drains, then persistence is tried
-/// after reviewer shutdown. Final error selection happens only after that save
-/// attempt.
+/// failures stop the event producer at the output boundary; persistence is
+/// then attempted after reviewer shutdown. Final error selection happens only
+/// after that save attempt.
 struct HeadlessRunPersistence<'a> {
     loop_config: AgentLoopConfig,
     context: StepContext,
     events_jsonl: bool,
     session_store: FileSessionStore,
     session_id: &'a SessionId,
+    metadata: TuiSessionMetadata,
 }
 
 async fn run_agent_loop_with_persistence<W, F>(
@@ -337,6 +349,7 @@ where
         runtime,
         persistence.session_store,
         persistence.session_id,
+        persistence.metadata,
         settled,
         review_result,
     )
@@ -353,6 +366,7 @@ async fn finish_settled_run(
     runtime: &Runtime,
     session_store: FileSessionStore,
     session_id: &SessionId,
+    metadata: TuiSessionMetadata,
     settled: SettledRun,
     review_result: Result<(), CliError>,
 ) -> Result<RunExitStatus, CliError> {
@@ -360,7 +374,7 @@ async fn finish_settled_run(
         runtime_result,
         presentation_result,
     } = settled;
-    persist_settled_session(runtime, session_store, session_id).await?;
+    persist_settled_session(runtime, session_store, session_id, metadata).await?;
     let status = runtime_result?;
     presentation_result?;
     review_result?;
@@ -378,6 +392,7 @@ async fn persist_settled_session(
     runtime: &Runtime,
     session_store: FileSessionStore,
     session_id: &SessionId,
+    metadata: TuiSessionMetadata,
 ) -> Result<(), CliError> {
     runtime
         .abandon_pending_tool_calls(ABANDONED_TOOL_CALL_REASON)
@@ -388,13 +403,58 @@ async fn persist_settled_session(
             ))
         })?;
     runtime
-        .save_session_to(session_store)
+        .save_session_to(session_store.clone())
         .await
         .map_err(|error| {
             unexpected(format!(
                 "run finished but session {session_id} could not be saved: {error}"
             ))
-        })
+        })?;
+    write_headless_session_metadata(&session_store, metadata).await
+}
+
+async fn headless_session_metadata(
+    store: &FileSessionStore,
+    session: &RunSession,
+    workspace_root: &std::path::Path,
+) -> Result<TuiSessionMetadata, CliError> {
+    let tui_store = TuiSessionStore::new(store.sessions_dir().to_path_buf());
+    let session_id = session.id().clone();
+    let existing = tokio::task::spawn_blocking({
+        let tui_store = tui_store.clone();
+        let session_id = session_id.clone();
+        move || tui_store.read_metadata(&session_id)
+    })
+    .await
+    .map_err(unexpected)?
+    .map_err(unexpected)?;
+    let mut metadata = existing.unwrap_or_else(|| {
+        TuiSessionMetadata::new(
+            session_id.clone(),
+            workspace_root.to_path_buf(),
+            now_unix_ms(),
+        )
+    });
+    metadata.workspace_root = workspace_root.to_path_buf();
+    if matches!(session, RunSession::New(_)) {
+        metadata.headless = true;
+        if metadata.title.is_none() {
+            metadata.title = Some("Headless run".to_owned());
+        }
+    }
+    metadata.mark_active(now_unix_ms());
+    Ok(metadata)
+}
+
+async fn write_headless_session_metadata(
+    session_store: &FileSessionStore,
+    metadata: TuiSessionMetadata,
+) -> Result<(), CliError> {
+    let store = TuiSessionStore::new(session_store.sessions_dir().to_path_buf());
+    tokio::task::spawn_blocking(move || store.write_metadata(&metadata))
+        .await
+        .map_err(unexpected)?
+        .map_err(unexpected)
 }
 
 fn default_run_session_id() -> merry_core::SessionId {
@@ -440,11 +500,14 @@ where
     let mut pending_commentary = None;
     let mut presentation_error = None;
     while let Some(event) = stream.next().await {
-        if presentation_error.is_none()
-            && let Err(error) =
-                write_human_progress_event(&event, &mut pending_commentary, &mut writer).await
+        if let Err(error) =
+            write_human_progress_event(&event, &mut pending_commentary, &mut writer).await
         {
-            presentation_error = Some(error);
+            stream.cancel_and_wait().await;
+            return SettledRun {
+                runtime_result: Ok(RunExitStatus::Incomplete),
+                presentation_result: Err(error),
+            };
         }
     }
     let runtime_result = match stream.result().await.map_err(unexpected) {
@@ -511,9 +574,18 @@ where
     while let Some(event) = stream.next().await {
         if presentation_error.is_none() {
             if let Err(error) = write_public_runtime_event(&event, &mut writer).await {
-                presentation_error = Some(error);
-            } else if let Err(error) = writer.flush().await.map_err(stdout_error) {
-                presentation_error = Some(error);
+                stream.cancel_and_wait().await;
+                return SettledRun {
+                    runtime_result: Ok(RunExitStatus::Incomplete),
+                    presentation_result: Err(error),
+                };
+            }
+            if let Err(error) = writer.flush().await.map_err(stdout_error) {
+                stream.cancel_and_wait().await;
+                return SettledRun {
+                    runtime_result: Ok(RunExitStatus::Incomplete),
+                    presentation_result: Err(error),
+                };
             }
         }
     }

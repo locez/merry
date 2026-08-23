@@ -3,12 +3,16 @@ use std::{
     env,
     ffi::OsStr,
     fmt,
+    fs::{File, OpenOptions as StdOpenOptions},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use tokio::fs::OpenOptions;
 
 /// Identifies which persisted Plan snapshot failed document validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +40,7 @@ const TEMP_FILE_CREATE_ATTEMPTS: u32 = 1_024;
 const TEMP_FILE_PREFIX: &str = ".state.json.tmp-";
 const PLAN_OVERLAY_TEMP_FILE_PREFIX: &str = ".plan-state.json.tmp-";
 const PLAN_OVERLAY_FILE_NAME: &str = "plan-state.json";
+const SESSION_LOCK_FILE_NAME: &str = ".session.lock";
 
 #[cfg(test)]
 use std::sync::{
@@ -69,6 +74,8 @@ pub enum SessionStoreError {
         requested: SessionId,
         actual: SessionId,
     },
+    #[error("session {session_id} is already reserved by another run")]
+    SessionAlreadyReserved { session_id: SessionId },
     #[error(
         "session {session_id} has {pending_count} pending tool calls and cannot be saved at an incomplete tool boundary"
     )]
@@ -103,8 +110,8 @@ pub(crate) fn validate_plan_snapshot(
 /// File-backed session state storage with atomic replacement per write.
 ///
 /// Store clones are safe to use through one runtime's serialized session
-/// lifecycle. Independent runtimes must not concurrently mutate the same
-/// session id without external single-writer coordination.
+/// lifecycle. Callers that create or resume a live run should hold a
+/// [`SessionReservation`] for the session id while it is active.
 #[derive(Debug, Clone)]
 pub struct FileSessionStore {
     sessions_dir: PathBuf,
@@ -116,6 +123,14 @@ pub struct FileSessionStore {
     fail_commit: bool,
     #[cfg(test)]
     fail_directory_sync: bool,
+}
+
+/// Exclusive ownership of one session's on-disk state for the lifetime of a
+/// run. The operating-system file lock is released when this value is dropped,
+/// including when the owning process is terminated.
+#[derive(Debug)]
+pub struct SessionReservation {
+    _lock_file: File,
 }
 
 #[derive(Debug)]
@@ -311,6 +326,59 @@ impl FileSessionStore {
     #[must_use]
     pub fn sessions_dir(&self) -> &Path {
         &self.sessions_dir
+    }
+
+    /// Reserves exclusive write ownership of a session id until the returned
+    /// guard is dropped.
+    ///
+    /// The lock is acquired before callers inspect or write `state.json`, so
+    /// independent runs cannot both pass a check-then-save collision window.
+    /// The lock file is intentionally retained as an empty per-session inode;
+    /// it is not session state and is ignored by session discovery.
+    pub async fn reserve_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionReservation, SessionStoreError> {
+        let session_dir = self.session_dir(session_id);
+        tokio::fs::create_dir_all(&session_dir)
+            .await
+            .map_err(|source| io_error(session_dir.clone(), source))?;
+        let lock_path = session_dir.join(SESSION_LOCK_FILE_NAME);
+        let session_id = session_id.clone();
+        let lock_file = tokio::task::spawn_blocking({
+            let lock_path = lock_path.clone();
+            move || {
+                let mut options = StdOpenOptions::new();
+                options.read(true).write(true).create(true);
+                #[cfg(unix)]
+                options.mode(0o600);
+                let file = options
+                    .open(&lock_path)
+                    .map_err(|source| io_error(lock_path.clone(), source))?;
+                #[cfg(unix)]
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                    .map_err(|source| io_error(lock_path.clone(), source))?;
+                match file.try_lock() {
+                    Ok(()) => Ok(file),
+                    Err(std::fs::TryLockError::WouldBlock) => {
+                        Err(SessionStoreError::SessionAlreadyReserved {
+                            session_id: session_id.clone(),
+                        })
+                    }
+                    Err(std::fs::TryLockError::Error(source)) => Err(io_error(lock_path, source)),
+                }
+            }
+        })
+        .await
+        .map_err(|source| {
+            io_error(
+                lock_path,
+                std::io::Error::other(format!("session reservation task failed: {source}")),
+            )
+        })??;
+        Ok(SessionReservation {
+            _lock_file: lock_file,
+        })
     }
 
     /// Reports whether this store already holds committed state for a session id.
@@ -868,5 +936,42 @@ mod tests {
                 .expect("a committed store should be readable"),
             "committed state must be reported so a new run cannot replace it"
         );
+    }
+
+    #[tokio::test]
+    async fn session_reservation_is_exclusive_and_releases_on_drop() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = FileSessionStore::new(temp.path());
+        let session_id = SessionId::new("session-reservation").expect("valid session id");
+        let first = store
+            .reserve_session(&session_id)
+            .await
+            .expect("first reservation succeeds");
+        assert!(matches!(
+            store.reserve_session(&session_id).await,
+            Err(SessionStoreError::SessionAlreadyReserved { .. })
+        ));
+        drop(first);
+        store
+            .reserve_session(&session_id)
+            .await
+            .expect("dropping the reservation releases it");
+    }
+
+    #[tokio::test]
+    async fn concurrent_session_reservations_have_one_winner() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = FileSessionStore::new(temp.path());
+        let session_id = SessionId::new("session-reservation-race").expect("valid session id");
+        let (left, right) = tokio::join!(
+            store.reserve_session(&session_id),
+            store.reserve_session(&session_id)
+        );
+
+        assert_ne!(left.is_ok(), right.is_ok());
+        assert!(matches!(
+            left.as_ref().err().or_else(|| right.as_ref().err()),
+            Some(SessionStoreError::SessionAlreadyReserved { .. })
+        ));
     }
 }

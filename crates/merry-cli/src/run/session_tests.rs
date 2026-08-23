@@ -1,6 +1,6 @@
 use super::{
     Args, CliError, RunExitStatus, RunSession, STDIN_TASK, default_run_session_id,
-    refuse_reused_session_id, resolve_task, review_input_channel_for_task, write_agent_loop_output,
+    reserve_run_session, resolve_task, review_input_channel_for_task, write_agent_loop_output,
 };
 use crate::coding::{
     ActionProcessBackend, CodingSubagentsConfig, HeadlessCodingRuntimeInput, build_headless_coding,
@@ -298,7 +298,7 @@ async fn a_new_run_refuses_a_session_id_that_already_has_saved_state() {
     let store = merry_runtime::FileSessionStore::new(&sessions_dir);
     let session_id = SessionId::new("already-saved").expect("valid session id");
 
-    let error = refuse_reused_session_id(&RunSession::New(session_id), &store)
+    let error = reserve_run_session(&RunSession::New(session_id), &store)
         .await
         .expect_err("a new run must not take over a saved session id");
 
@@ -320,7 +320,7 @@ async fn a_new_run_accepts_a_session_id_the_store_does_not_hold() {
     let store = merry_runtime::FileSessionStore::new(temp.path().join("sessions"));
     let session_id = SessionId::new("never-saved").expect("valid session id");
 
-    refuse_reused_session_id(&RunSession::New(session_id), &store)
+    reserve_run_session(&RunSession::New(session_id), &store)
         .await
         .expect("an unused session id should start a new run");
 }
@@ -333,7 +333,7 @@ async fn resuming_a_saved_session_id_is_not_a_collision() {
     let store = merry_runtime::FileSessionStore::new(&sessions_dir);
     let session_id = SessionId::new("resume-me").expect("valid session id");
 
-    refuse_reused_session_id(&RunSession::Resumed(session_id), &store)
+    reserve_run_session(&RunSession::Resumed(session_id), &store)
         .await
         .expect("resuming is how an existing session id is meant to be reused");
 }

@@ -200,6 +200,7 @@ fn session_line(session: &TuiSessionMetadata) -> Line<'static> {
         .unwrap_or("Untitled session");
     let model = session.model.as_deref().unwrap_or("model -");
     let effort = session.reasoning_effort.as_deref().unwrap_or("-");
+    let origin = if session.headless { "headless" } else { "TUI" };
     Line::from(vec![
         Span::styled(title.to_owned(), Style::default().fg(Color::White)),
         Span::raw("  "),
@@ -211,6 +212,8 @@ fn session_line(session: &TuiSessionMetadata) -> Line<'static> {
         Span::styled(model.to_owned(), Style::default().fg(Color::LightMagenta)),
         Span::raw(" "),
         Span::styled(effort.to_owned(), Style::default().fg(Color::LightMagenta)),
+        Span::raw("  "),
+        Span::styled(origin.to_owned(), Style::default().fg(Color::DarkGray)),
     ])
 }
 
@@ -289,5 +292,19 @@ mod tests {
         assert!(text.contains("Merry Sessions"));
         assert!(text.contains("session session-a"));
         assert!(text.contains("Enter resume"));
+    }
+
+    #[test]
+    fn picker_marks_headless_sessions_separately_from_tui_sessions() {
+        let mut headless = metadata("headless-session", 10);
+        headless.headless = true;
+        let text = render_picker_to_text(
+            &SessionPickerState::new(vec![headless]),
+            Path::new("/repo"),
+            100,
+            12,
+        );
+
+        assert!(text.contains("headless"));
     }
 }

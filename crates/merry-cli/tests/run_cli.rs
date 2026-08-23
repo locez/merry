@@ -136,6 +136,42 @@ fn session_state_path(temp: &tempfile::TempDir, session_id: &str) -> std::path::
         .join("state.json")
 }
 
+fn session_metadata_path(temp: &tempfile::TempDir, session_id: &str) -> std::path::PathBuf {
+    temp.path()
+        .join("state/merry/sessions")
+        .join(session_id)
+        .join("meta.json")
+}
+
+#[test]
+fn a_headless_run_writes_picker_metadata_with_headless_origin() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    write_xdg_config(&temp, OFFLINE_PROVIDER_CONFIG);
+
+    let output = merry_without_openai_env_and_xdg(&temp)
+        .args([
+            "--no-sandbox",
+            "run",
+            "--session-id",
+            "picker-visible",
+            "a task",
+        ])
+        .output()
+        .expect("merry run should run");
+    assert!(
+        !output.status.success(),
+        "the offline provider should fail the run"
+    );
+
+    let metadata_path = session_metadata_path(&temp, "picker-visible");
+    let metadata: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&metadata_path).expect("headless metadata should be written"),
+    )
+    .expect("headless metadata should be valid JSON");
+    assert_eq!(metadata["headless"], true);
+    assert_eq!(metadata["session_id"], "picker-visible");
+}
+
 #[test]
 fn run_refuses_a_session_id_that_already_has_saved_state() {
     let temp = tempfile::tempdir().expect("tempdir should be created");

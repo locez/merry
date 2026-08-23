@@ -6,6 +6,7 @@ use crate::coding::{
 };
 use crate::headless_review::{HeadlessPermissionReviewer, ReviewInputChannel};
 use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
+use crate::tui::session_list::TuiSessionMetadata;
 use merry::profiles::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
 use merry_core::{SessionId, ToolInputSchema, ToolName, ToolOutput, ToolSpec};
 use merry_llm::{
@@ -137,6 +138,12 @@ fn build_runtime_with_tools(
     build_headless_coding(input).expect("runtime should build")
 }
 
+fn metadata(session_id: &SessionId, workspace: &Path) -> TuiSessionMetadata {
+    let mut metadata = TuiSessionMetadata::new(session_id.clone(), workspace.to_path_buf(), 0);
+    metadata.headless = true;
+    metadata
+}
+
 async fn resumed_transcript(
     session_id: &SessionId,
     workspace: &Path,
@@ -233,7 +240,7 @@ async fn runtime_settlement_error_is_persisted_and_partial_state_can_resume() {
     let result = run_agent_loop_with_persistence(
         &runtime,
         StepInput::user_text("retain this partial task").expect("valid input"),
-        FailingWriter::new(io::ErrorKind::Other, "injected runtime output failure"),
+        Vec::new(),
         async {
             Err(CliError::Unexpected(
                 "injected runtime reviewer failure".to_owned(),
@@ -246,6 +253,7 @@ async fn runtime_settlement_error_is_persisted_and_partial_state_can_resume() {
             events_jsonl: true,
             session_store: store.clone(),
             session_id: &session_id,
+            metadata: metadata(&session_id, &workspace),
         },
     )
     .await;
@@ -293,6 +301,7 @@ async fn save_error_precedes_runtime_settlement_error() {
             events_jsonl: false,
             session_store: FileSessionStore::new(invalid_store_root),
             session_id: &session_id,
+            metadata: metadata(&session_id, &workspace),
         },
     )
     .await;
@@ -307,17 +316,14 @@ async fn save_error_precedes_runtime_settlement_error() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn completed_jsonl_broken_pipe_drains_and_persists_before_success_mapping() {
+async fn completed_jsonl_broken_pipe_cancels_and_persists_before_error_mapping() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("workspace should be created");
     let store = FileSessionStore::new(temp.path().join("sessions"));
     let session_id = SessionId::new("completed-broken-pipe-save").expect("valid session id");
-    let runtime = build_runtime(
-        &session_id,
-        &workspace,
-        Arc::new(completing_provider("completed answer")),
-    );
+    let provider = completing_provider("completed answer");
+    let runtime = build_runtime(&session_id, &workspace, Arc::new(provider.clone()));
 
     let result = run_agent_loop_with_persistence(
         &runtime,
@@ -331,6 +337,7 @@ async fn completed_jsonl_broken_pipe_drains_and_persists_before_success_mapping(
             events_jsonl: true,
             session_store: store.clone(),
             session_id: &session_id,
+            metadata: metadata(&session_id, &workspace),
         },
     )
     .await;
@@ -367,6 +374,7 @@ async fn incomplete_terminal_run_is_persisted_and_remains_incomplete() {
             events_jsonl: false,
             session_store: store.clone(),
             session_id: &session_id,
+            metadata: metadata(&session_id, &workspace),
         },
     )
     .await
@@ -399,6 +407,7 @@ async fn incomplete_human_output_failure_still_persists() {
             events_jsonl: false,
             session_store: store.clone(),
             session_id: &session_id,
+            metadata: metadata(&session_id, &workspace),
         },
     )
     .await;
@@ -436,6 +445,7 @@ async fn output_error_precedes_reviewer_error_after_persistence() {
             events_jsonl: false,
             session_store: store.clone(),
             session_id: &session_id,
+            metadata: metadata(&session_id, &workspace),
         },
     )
     .await;
@@ -491,6 +501,7 @@ async fn reviewer_settles_before_persistence_and_its_error_is_returned_after_sav
             events_jsonl: false,
             session_store: store.clone(),
             session_id: &session_id,
+            metadata: metadata(&session_id, &workspace),
         },
     )
     .await;
@@ -533,6 +544,7 @@ async fn save_error_precedes_broken_pipe_and_reviewer_errors() {
             events_jsonl: false,
             session_store: FileSessionStore::new(invalid_store_root),
             session_id: &session_id,
+            metadata: metadata(&session_id, &workspace),
         },
     )
     .await;
@@ -583,6 +595,7 @@ async fn production_reviewer_shutdown_leaves_a_resumable_session() {
             events_jsonl: false,
             session_store: store.clone(),
             session_id: &session_id,
+            metadata: metadata(&session_id, &workspace),
         },
     )
     .await;

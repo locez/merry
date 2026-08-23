@@ -44,6 +44,8 @@ pub(crate) struct TuiSessionMetadata {
     pub(crate) title: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub(crate) headless: bool,
 }
 
 impl TuiSessionMetadata {
@@ -56,6 +58,7 @@ impl TuiSessionMetadata {
             title: None,
             model: None,
             reasoning_effort: None,
+            headless: false,
         }
     }
 
@@ -80,6 +83,20 @@ impl TuiSessionStore {
 
     pub(crate) fn metadata_path(&self, session_id: &SessionId) -> PathBuf {
         self.sessions_dir.join(session_id.as_str()).join(META_FILE)
+    }
+
+    pub(crate) fn read_metadata(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<TuiSessionMetadata>, TuiSessionListError> {
+        let path = self.metadata_path(session_id);
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|source| json_error(&path, source)),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(io_error(path, source)),
+        }
     }
 
     pub(crate) fn write_metadata(

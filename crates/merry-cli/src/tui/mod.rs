@@ -51,7 +51,7 @@ mod provider_selection;
 mod reasoning_picker;
 mod render;
 mod runtime;
-mod session_list;
+pub(crate) mod session_list;
 mod session_picker;
 mod state;
 mod status;
