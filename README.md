@@ -32,11 +32,11 @@ Requirements:
 
 - Stable Rust with Rust 2024 edition support.
 - Linux and `bubblewrap` for the default TUI and `merry run` sandbox.
-- Node.js and npm when changing the local Web trajectory assets.
+- Node.js and npm when building the local Web trajectory application.
 
-The embedded Web assets are checked in so a clean Rust checkout can compile
-without a Node installation. Regenerate them after changing files under
-`web/`:
+The Web application is built into the ignored `web/dist/` directory and is
+embedded into the Rust binary by `merry-web` at Cargo build time. Build it
+before compiling a Web-enabled Rust target:
 
 ```bash
 cd web
@@ -46,10 +46,10 @@ cd ..
 cargo build --release -p merry-cli
 ```
 
-`npm test` type-checks the TypeScript, runs the Web tests, and regenerates the
-tracked files in `crates/merry-web/assets/`. `cargo build` embeds those files
-into `target/release/merry`; it does not invoke Node or rebuild the Web assets.
-CI verifies that the generated files are current.
+`npm test` type-checks the TypeScript and runs the Web tests. `cargo build`
+embeds the files from `web/dist/` into `target/release/merry`; it does not
+invoke Node or rebuild the Web assets. CI verifies that the generated contract
+source is current.
 
 When changing the Rust trajectory contract, refresh its canonical schema before
 running the Web checks:

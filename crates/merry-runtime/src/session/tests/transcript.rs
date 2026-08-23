@@ -308,6 +308,7 @@ fn user_message_transcript_id_exhaustion_leaves_artifacts_and_ids_unchanged() {
         model_turns: [(turn_id, ModelTurnStatus::InProgress)]
             .into_iter()
             .collect(),
+        model_turn_sequences: std::collections::BTreeMap::new(),
         next_model_turn_id: 2,
     })
     .expect("exhausted transcript fixture should restore");

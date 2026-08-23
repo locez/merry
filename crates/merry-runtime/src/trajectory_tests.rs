@@ -451,13 +451,13 @@ fn restoring_snapshot_replays_transcript_tail_with_durable_sequences() {
         .record_assistant_text_output(continuation, "new answer".to_owned())
         .expect("new assistant records");
 
-    let replay_items = session
+    let session_trajectory = session
         .trajectory_items()
-        .expect("trajectory replay items are readable");
+        .expect("session trajectory is readable");
     let ledger = session.ledger_projection();
     let resumed = RuntimeObservability::new(session_id, Vec::new());
     resumed.restore_snapshot(persisted_snapshot, &session);
-    resumed.reconcile_from_session(&replay_items, &ledger);
+    resumed.reconcile_from_session(&session_trajectory, &ledger);
 
     let snapshot = resumed.snapshot();
     assert!(!snapshot.is_closed());
@@ -525,6 +525,44 @@ fn restoring_snapshot_replays_transcript_tail_with_durable_sequences() {
         record.kind() == TrajectoryRecordKind::AssistantMessage
             && record.summary() == Some("new answer")
     }));
+}
+
+#[test]
+fn replay_uses_model_turn_sequence_after_step_fails_before_turn_begins() {
+    let session_id = SessionId::new("trajectory-pre-turn-failure").expect("valid session id");
+    let mut session = SessionState::new(session_id.clone());
+
+    let first_step = session.record_step_started();
+    let first_turn = session
+        .begin_model_turn_at_sequence(first_step.sequence)
+        .expect("first turn begins");
+    session
+        .record_user_message_body(first_turn, "first input")
+        .expect("first input records");
+
+    let failed_step = session.record_step_started();
+    let second_step = session.record_step_started();
+    let second_turn = session
+        .begin_model_turn_at_sequence(second_step.sequence)
+        .expect("second turn begins");
+    session
+        .record_user_message_body(second_turn, "second input")
+        .expect("second input records");
+
+    let trajectory = session
+        .trajectory_items()
+        .expect("trajectory projection is readable");
+    let observability = RuntimeObservability::new(session_id, Vec::new());
+    observability.reconcile_from_session(&trajectory, &session.ledger_projection());
+
+    let snapshot = observability.snapshot();
+    let second = snapshot
+        .records()
+        .iter()
+        .find(|record| record.summary() == Some("second input"))
+        .expect("second input is replayed");
+    assert_eq!(second.start_sequence(), second_step.sequence);
+    assert_ne!(second.start_sequence(), failed_step.sequence);
 }
 
 #[test]

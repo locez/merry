@@ -575,7 +575,7 @@ pub(super) async fn run_provider_step(
             let _ = send_cancelled_event(inner, sender).await;
             return;
         }
-        match session.begin_model_turn() {
+        match session.begin_model_turn_at_sequence(step_sequence) {
             Ok(turn_id) => turn_id,
             Err(error) => {
                 drop(session);

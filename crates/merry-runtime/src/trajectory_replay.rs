@@ -5,7 +5,7 @@ use merry_core::{
     ArtifactRef, TrajectoryRecord, TrajectoryRecordId, TrajectoryRecordKind, TrajectorySnapshot,
     TrajectoryTurnId,
 };
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 
 /// Matches legacy records to the ordered transcript during projection replay.
 pub(crate) struct ReplayRecords {
@@ -106,6 +106,7 @@ fn take_record(
 /// Durable sequence queues used when a trajectory savepoint lags the session.
 pub(crate) struct ReplaySequences {
     step_sequences: Vec<u64>,
+    model_turn_sequences: BTreeMap<u64, u64>,
     tool_pending: VecDeque<u64>,
     last_tool_pending: Option<u64>,
     tool_resolved: VecDeque<u64>,
@@ -119,9 +120,14 @@ impl ReplaySequences {
     /// The transcript may contain records from before the persisted trajectory
     /// savepoint. Keep every queue, not only the savepoint tail, because legacy
     /// snapshots can contain the right records at synthetic sequence numbers.
-    pub(crate) fn from_ledger(baseline: u64, ledger: &LedgerProjectionSnapshot) -> Self {
+    pub(crate) fn from_ledger(
+        baseline: u64,
+        ledger: &LedgerProjectionSnapshot,
+        model_turn_sequences: &BTreeMap<u64, u64>,
+    ) -> Self {
         let mut replay = Self {
             step_sequences: Vec::new(),
+            model_turn_sequences: model_turn_sequences.clone(),
             tool_pending: VecDeque::new(),
             last_tool_pending: None,
             tool_resolved: VecDeque::new(),
@@ -170,12 +176,23 @@ impl ReplaySequences {
 
     /// Maps a transcript model turn to its durable step-start sequence.
     pub(crate) fn model_turn_sequence(&self, model_turn_id: u64) -> Option<u64> {
+        if let Some(sequence) = self.model_turn_sequences.get(&model_turn_id) {
+            return Some(*sequence);
+        }
         let index = usize::try_from(model_turn_id.checked_sub(1)?).ok()?;
         self.step_sequences.get(index).copied()
     }
 
     /// Maps a lifecycle sequence to the nearest preceding model turn.
     pub(crate) fn model_turn_id_for_sequence(&self, sequence: u64) -> Option<u64> {
+        if let Some((model_turn_id, _)) = self
+            .model_turn_sequences
+            .iter()
+            .filter(|(_, candidate)| **candidate <= sequence)
+            .max_by_key(|(_, candidate)| **candidate)
+        {
+            return Some(*model_turn_id);
+        }
         let index = self
             .step_sequences
             .partition_point(|candidate| *candidate <= sequence)

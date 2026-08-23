@@ -19,6 +19,7 @@ target/
 # Local Web development dependencies and compiler output.
 web/node_modules/
 web/dist/
+crates/merry-web/assets/
 
 # Python packaging/build outputs.
 .venv/

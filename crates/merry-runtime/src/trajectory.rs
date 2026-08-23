@@ -2,7 +2,7 @@
 
 use crate::{
     LedgerProjectionSnapshot, ProjectRules, PromptProfile, SessionTranscriptItem, SkillCatalog,
-    session::{SessionState, SessionTrajectoryItem},
+    session::{SessionState, SessionTrajectory, SessionTrajectoryItem},
     trajectory_replay::{ReplayRecords, ReplaySequences},
 };
 use merry_core::{
@@ -107,12 +107,13 @@ impl RuntimeObservability {
     /// and step starts, so replay does not invent a second sequence space.
     pub(crate) fn reconcile_from_session(
         &self,
-        items: &[SessionTrajectoryItem],
+        trajectory: &SessionTrajectory,
         ledger: &LedgerProjectionSnapshot,
     ) {
         let mut state = self.lock_state();
         let baseline = state.snapshot.latest_sequence();
-        let mut sequences = ReplaySequences::from_ledger(baseline, ledger);
+        let mut sequences =
+            ReplaySequences::from_ledger(baseline, ledger, &trajectory.model_turn_sequences);
         let mut replay_records = ReplayRecords::from_snapshot(&state.snapshot);
         let mut user_index = 0_usize;
         let mut active_turn_id = state.active_turn_id;
@@ -120,7 +121,7 @@ impl RuntimeObservability {
         let mut turn_by_model_turn = HashMap::<u64, Option<TrajectoryTurnId>>::new();
         let mut parent_by_turn = HashMap::<TrajectoryTurnId, TrajectoryRecordId>::new();
 
-        for (item_index, item) in items.iter().enumerate() {
+        for (item_index, item) in trajectory.items.iter().enumerate() {
             let sequence_order = u32::try_from(item_index).unwrap_or(u32::MAX);
             match item {
                 SessionTrajectoryItem::UserMessage {

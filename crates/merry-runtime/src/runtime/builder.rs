@@ -795,8 +795,8 @@ impl RuntimeBuilder {
             RuntimeObservability::new(self.session_id.clone(), tool_registry.tool_specs());
         if let Some(snapshot) = restored_trajectory {
             trajectory.restore_snapshot(snapshot, &session);
-            if let Some((items, ledger)) = trajectory_replay.as_ref() {
-                trajectory.reconcile_from_session(items, ledger);
+            if let Some((session_trajectory, ledger)) = trajectory_replay.as_ref() {
+                trajectory.reconcile_from_session(session_trajectory, ledger);
             }
         } else {
             trajectory.seed_prompt_profile(

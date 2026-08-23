@@ -5,7 +5,7 @@
   "scripts": {
     "generate:trajectory-contract": "node scripts/generate-trajectory-contract.mjs",
     "check:trajectory-contract": "node scripts/generate-trajectory-contract.mjs --check",
-    "build": "npm run generate:trajectory-contract && tsc --project tsconfig.json && mkdir -p ../crates/merry-web/assets && cp index.html ../crates/merry-web/assets/index.html && cp dist/index.js ../crates/merry-web/assets/app.js && cp dist/trajectory-contract.js ../crates/merry-web/assets/trajectory-contract.js && cp dist/trajectory-contract.generated.js ../crates/merry-web/assets/trajectory-contract.generated.js && cp dist/trajectory-message-model.js ../crates/merry-web/assets/trajectory-message-model.js && cp dist/trajectory-timeline.js ../crates/merry-web/assets/trajectory-timeline.js && cp dist/trajectory-format.js ../crates/merry-web/assets/trajectory-format.js && cp dist/trajectory-view.js ../crates/merry-web/assets/trajectory-view.js && cp src/app.css ../crates/merry-web/assets/app.css",
+    "build": "npm run generate:trajectory-contract && tsc --project tsconfig.json && cp dist/index.js dist/app.js && cp index.html dist/index.html && cp src/app.css dist/app.css",
     "test": "npm run build && node --test test/*.test.mjs"
   },
   "devDependencies": {

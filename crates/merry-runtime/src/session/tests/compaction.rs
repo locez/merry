@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 
 #[test]
 fn compaction_window_retains_complete_model_turns_without_splitting() {
@@ -502,6 +503,7 @@ fn compaction_structure_errors_map_to_stale_window() {
             items,
             next_id: TranscriptItemId::new(3),
             model_turns: model_turns.into_iter().collect(),
+            model_turn_sequences: BTreeMap::new(),
             next_model_turn_id,
         };
 

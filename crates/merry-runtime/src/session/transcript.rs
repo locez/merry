@@ -6,7 +6,7 @@ use crate::{
     RuntimeError, UserImageInput,
     artifact::{ArtifactContent, ArtifactError},
     compaction::CompactionError,
-    session_projection::SessionTrajectoryItem,
+    session_projection::{SessionTrajectory, SessionTrajectoryItem},
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, PendingToolCall, ToolCallId, ToolCallResult,
@@ -111,6 +111,8 @@ pub(crate) struct PersistedTranscript {
     pub(crate) items: Vec<PersistedTranscriptItem>,
     pub(crate) next_id: u64,
     pub(crate) model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
+    #[serde(default)]
+    pub(crate) model_turn_sequences: BTreeMap<ModelTurnId, u64>,
     pub(crate) next_model_turn_id: u64,
 }
 
@@ -217,6 +219,7 @@ pub(crate) struct Transcript {
     pub(super) items: Vec<TranscriptItem>,
     pub(super) next_id: TranscriptItemId,
     pub(super) model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
+    pub(super) model_turn_sequences: BTreeMap<ModelTurnId, u64>,
     pub(super) next_model_turn_id: ModelTurnId,
 }
 
@@ -227,6 +230,7 @@ impl Transcript {
             items: Vec::new(),
             next_id: TranscriptItemId::new(0),
             model_turns: BTreeMap::new(),
+            model_turn_sequences: BTreeMap::new(),
             next_model_turn_id: ModelTurnId::new(1),
         }
     }
@@ -431,6 +435,7 @@ impl Transcript {
                 .collect(),
             next_id: self.next_id.as_u64(),
             model_turns: self.model_turns.clone(),
+            model_turn_sequences: self.model_turn_sequences.clone(),
             next_model_turn_id: self.next_model_turn_id.as_u64(),
         }
     }
@@ -444,6 +449,7 @@ impl Transcript {
                 .collect::<Result<Vec<_>, _>>()?,
             next_id: TranscriptItemId::new(persisted.next_id),
             model_turns: persisted.model_turns,
+            model_turn_sequences: persisted.model_turn_sequences,
             next_model_turn_id: ModelTurnId::new(persisted.next_model_turn_id),
         };
         transcript.validate_persisted_turns()?;
@@ -588,8 +594,9 @@ impl TryFrom<PersistedTranscriptItem> for TranscriptItem {
 }
 
 impl SessionState {
-    pub(crate) fn trajectory_items(&self) -> Result<Vec<SessionTrajectoryItem>, ArtifactError> {
-        self.transcript
+    pub(crate) fn trajectory_items(&self) -> Result<SessionTrajectory, ArtifactError> {
+        let items = self
+            .transcript
             .items()
             .iter()
             .map(|item| match item {
@@ -654,7 +661,17 @@ impl SessionState {
                     })
                 }
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        let model_turn_sequences = self
+            .transcript
+            .model_turn_sequences()
+            .iter()
+            .map(|(turn_id, sequence)| (turn_id.as_u64(), *sequence))
+            .collect();
+        Ok(SessionTrajectory {
+            items,
+            model_turn_sequences,
+        })
     }
 
     pub(crate) fn full_transcript_snapshot(

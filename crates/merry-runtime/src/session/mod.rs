@@ -40,7 +40,7 @@ pub(crate) use self::{
     tool_result::{ProposedToolExecutionOutcome, ToolResultLedgerObservation},
     transcript::{Transcript, TranscriptItemSnapshot, UserInputOrigin},
 };
-pub(crate) use crate::session_projection::SessionTrajectoryItem;
+pub(crate) use crate::session_projection::{SessionTrajectory, SessionTrajectoryItem};
 
 #[cfg(test)]
 pub(crate) use self::transcript::TranscriptItem;

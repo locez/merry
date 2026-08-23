@@ -161,15 +161,31 @@ impl<'a> ModelTurn<'a> {
 }
 
 impl Transcript {
+    #[cfg(test)]
     pub(crate) fn begin_model_turn(&mut self) -> Result<ModelTurnId, RuntimeError> {
+        self.begin_model_turn_at_sequence(None)
+    }
+
+    pub(crate) fn begin_model_turn_at_sequence(
+        &mut self,
+        start_sequence: Option<u64>,
+    ) -> Result<ModelTurnId, RuntimeError> {
         let turn_id = self.next_model_turn_id;
         let next_model_turn_id = turn_id.checked_next()?;
         let previous = self
             .model_turns
             .insert(turn_id, ModelTurnStatus::InProgress);
         debug_assert!(previous.is_none());
+        if let Some(sequence) = start_sequence {
+            self.model_turn_sequences.insert(turn_id, sequence);
+        }
         self.next_model_turn_id = next_model_turn_id;
         Ok(turn_id)
+    }
+
+    #[must_use]
+    pub(crate) fn model_turn_sequences(&self) -> &BTreeMap<ModelTurnId, u64> {
+        &self.model_turn_sequences
     }
 
     pub(crate) fn close_model_response(
@@ -417,8 +433,17 @@ pub(super) fn invalid_turn_transition(
 }
 
 impl SessionState {
+    #[cfg(test)]
     pub(crate) fn begin_model_turn(&mut self) -> Result<ModelTurnId, RuntimeError> {
         self.transcript.begin_model_turn()
+    }
+
+    pub(crate) fn begin_model_turn_at_sequence(
+        &mut self,
+        start_sequence: u64,
+    ) -> Result<ModelTurnId, RuntimeError> {
+        self.transcript
+            .begin_model_turn_at_sequence(Some(start_sequence))
     }
 
     pub(crate) fn close_model_response(
@@ -474,6 +499,7 @@ mod tests {
             items: Vec::new(),
             next_id: super::super::transcript::TranscriptItemId::new(0),
             model_turns: BTreeMap::new(),
+            model_turn_sequences: BTreeMap::new(),
             next_model_turn_id: ModelTurnId::new(u64::MAX),
         };
         let before = transcript.persisted();
@@ -484,5 +510,19 @@ mod tests {
 
         assert!(matches!(error, RuntimeError::ModelTurnIdExhausted));
         assert_eq!(transcript.persisted(), before);
+    }
+
+    #[test]
+    fn model_turn_start_sequence_is_persisted() {
+        let mut transcript = Transcript::new();
+        let turn_id = transcript
+            .begin_model_turn_at_sequence(Some(41))
+            .expect("model turn should begin");
+
+        let persisted = transcript.persisted();
+        assert_eq!(persisted.model_turn_sequences.get(&turn_id), Some(&41));
+
+        let restored = Transcript::from_persisted(persisted).expect("transcript restores");
+        assert_eq!(restored.model_turn_sequences().get(&turn_id), Some(&41));
     }
 }

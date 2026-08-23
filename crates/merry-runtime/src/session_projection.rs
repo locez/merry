@@ -1,5 +1,6 @@
 use crate::{ArtifactContent, session::TranscriptItemSnapshot};
 use merry_core::{ArtifactRef, PendingToolCall, ToolCallId, ToolCallResult, ToolOutput};
+use std::collections::BTreeMap;
 
 /// Read-only public projection of persisted session transcript items.
 ///
@@ -57,6 +58,13 @@ pub(crate) enum SessionTrajectoryItem {
         artifact: ArtifactRef,
         output: Option<ToolOutput>,
     },
+}
+
+/// Complete transcript evidence and durable model-turn sequence associations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionTrajectory {
+    pub(crate) items: Vec<SessionTrajectoryItem>,
+    pub(crate) model_turn_sequences: BTreeMap<u64, u64>,
 }
 
 impl From<TranscriptItemSnapshot> for SessionTranscriptItem {
