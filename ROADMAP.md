@@ -16,7 +16,7 @@ issues. This file keeps only the major delivery sequence and its dependencies.
 - [x] [T3: Establish the unique CodingAgentProfile (implemented; shared facade/CLI profile, stable-prefix and admission evidence)](https://github.com/locez/merry/issues/12)
 - [x] [T4: Internal Coding Eval Suite (closed; no standalone runner)](https://github.com/locez/merry/issues/13)
 - [x] [T5: Unify CLI, Debug, and Rust Runtime Builder](https://github.com/locez/merry/issues/14) (shared builder, validated permission policy, parent-child inheritance tests, full Rust verification; read-only capability-closure follow-up deferred by approval)
-- [ ] [T6: Establish production reliability, security, and observability harness](https://github.com/locez/merry/issues/15)
+- [ ] [T6: Establish production reliability, security, and observability harness](https://github.com/locez/merry/issues/15) (deterministic PR gate and cross-layer failure evidence added; live/nightly coverage remains)
 - [ ] [T7: Release a stable Rust SDK](https://github.com/locez/merry/issues/16)
 - [ ] [T8: Align Python and Rust SDK capabilities](https://github.com/locez/merry/issues/17)
 - [ ] [T9: Integrate external coding-agent evaluation suites](https://github.com/locez/merry/issues/18)

@@ -80,9 +80,7 @@ fn parse_integral_decimal(raw: &str) -> Result<u64, &'static str> {
         return Err("number has an invalid exponent");
     }
 
-    let (whole, fraction) = mantissa
-        .split_once('.')
-        .map_or((mantissa, ""), |parts| parts);
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     if whole.is_empty() || !whole.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err("number has an invalid integer part");
     }

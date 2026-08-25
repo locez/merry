@@ -64,8 +64,7 @@ async fn failed_tool_result_status_diagnostic_and_content_are_compiled_without_r
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn submit_failed_tool_result_preserves_diagnostic_and_failure_artifact_without_failed_event()
-{
+async fn t6_failure_evidence_links_journal_artifact_ledger_and_trajectory() {
     let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
         vec![ModelOutput::tool_call(model_tool_call())],
         FinishReason::ToolCalls,
@@ -152,4 +151,48 @@ async fn submit_failed_tool_result_preserves_diagnostic_and_failure_artifact_wit
             },
         ]
     );
+
+    let pending_sequence = pending_events
+        .iter()
+        .find_map(|event| match event.payload {
+            RuntimeJournalPayload::ToolCallPending {
+                call: ref pending_call,
+            } if pending_call.id() == call.id() => Some(event.sequence),
+            _ => None,
+        })
+        .expect("pending tool event should have a journal sequence");
+    let resolved_sequence = events
+        .iter()
+        .find_map(|event| match event.payload {
+            RuntimeJournalPayload::ToolCallResolved {
+                result: ref resolved_result,
+            } if resolved_result.call_id() == call.id() => Some(event.sequence),
+            _ => None,
+        })
+        .expect("resolved tool event should have a journal sequence");
+    let trajectory = runtime
+        .trajectory_snapshot()
+        .await
+        .expect("trajectory snapshot should be available");
+    assert_eq!(trajectory.latest_sequence(), resolved_sequence);
+    let tool_record = trajectory
+        .records()
+        .iter()
+        .find(|record| record.tool_call_id() == Some(call.id()))
+        .expect("trajectory should locate the resolved tool call");
+    assert_eq!(tool_record.kind(), TrajectoryRecordKind::ToolCall);
+    assert_eq!(tool_record.status(), TrajectoryRecordStatus::Failed);
+    assert_eq!(tool_record.start_sequence(), pending_sequence);
+    assert_eq!(tool_record.end_sequence(), Some(resolved_sequence));
+    assert_eq!(tool_record.artifacts(), &[result_artifact]);
+    assert_eq!(
+        tool_record.diagnostic().map(merry_core::ErrorInfo::code),
+        Some("tool_failed")
+    );
+    assert!(matches!(
+        tool_record.details(),
+        TrajectoryRecordDetails::Tool { tool }
+            if tool.output().map(|output| output.content())
+                == Some(r#"{"stderr":"permission denied"}"#)
+    ));
 }

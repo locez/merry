@@ -517,7 +517,7 @@ async fn assert_provider_projection_has_six_raw_turns(
     assert_eq!(projection.len(), 12);
     let expected_users = &submitted_inputs[submitted_inputs.len() - 6..];
     let first_global_index = submitted_inputs.len() - 6;
-    for (index, pair) in projection.chunks_exact(2).enumerate() {
+    for (index, pair) in projection.as_chunks::<2>().0.iter().enumerate() {
         assert!(matches!(
             &pair[0],
             TranscriptItemSnapshot::UserMessage { text, .. } if text == &expected_users[index]

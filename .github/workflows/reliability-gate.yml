@@ -1,0 +1,120 @@
+name: Deterministic Reliability Gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reliability-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  rust:
+    name: Rust reliability and security
+    needs: web
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download tested Web assets
+        uses: actions/download-artifact@v4
+        with:
+          name: merry-web-dist
+          path: web/dist
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install shell and sandbox test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes bubblewrap ripgrep
+
+      - name: Enable unprivileged sandbox namespaces
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          bwrap --unshare-user --die-with-parent --ro-bind / / -- /usr/bin/true
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run named T6 evidence scenario
+        run: >-
+          cargo test --locked -p merry-runtime --test provider_boundary
+          t6_failure_evidence -- --nocapture
+
+      - name: Run deterministic security and lifecycle scenarios
+        run: |
+          set -euo pipefail
+          cargo test --locked -p merry-runtime --test provider_boundary provider_stream_eof_before_completed_emits_failed -- --nocapture
+          cargo test --locked -p merry-runtime --test provider_boundary provider_stream_error_emits_failed_without_step_completed -- --nocapture
+          cargo test --locked -p merry-runtime --test provider_boundary duplicate_tool_result_after_resolved_does_not_mutate_session -- --nocapture
+          cargo test --locked -p merry-runtime --test provider_boundary provider_cancel_keeps_tool_exchange_for_retry -- --nocapture
+          cargo test --locked -p merry-runtime --test cancellation cancelling_ -- --nocapture
+          cargo test --locked -p merry-runtime --test agent_loop agent_loop_process_command_invalid_arguments -- --nocapture
+          cargo test --locked -p merry-runtime --test agent_loop provider_request_trace_includes_checkpoint_budget_diagnostics -- --nocapture
+          cargo test --locked -p merry-tool-workspace --test runtime_integration denied_workspace_patch -- --nocapture
+          cargo test --locked -p merry-tool-workspace --test runtime_integration registered_list_dir_domain_failure -- --nocapture
+          cargo test --locked -p merry-process --lib bwrap_process_plan_hides_unapproved_host_integrations -- --nocapture
+          cargo test --locked -p merry-cli --bin merry settings_debug_does_not_include_secret_material -- --nocapture
+          cargo test --locked -p merry-cli --bin merry sandbox_rejects_symlinked_product_write_roots -- --nocapture
+
+      - name: Run deterministic Rust suite
+        run: cargo test --locked --all
+
+      - name: Run Rust lint gate
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Summarize deterministic diagnostics
+        if: always()
+        run: |
+          {
+            echo "## Deterministic reliability/security gate"
+            echo "- revision: \`${GITHUB_SHA}\`"
+            echo "- named evidence scenario: \`t6_failure_evidence\`"
+            echo "- live provider and Harbor: not used"
+            echo "- runtime event, artifact, ledger, trajectory, and test-result links are asserted by the named scenario"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  web:
+    name: Web trajectory contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build and test Web assets
+        working-directory: web
+        run: npm ci && npm test
+
+      - name: Verify generated Web sources
+        run: git diff --exit-code -- web/src/trajectory-contract.generated.ts
+
+      - name: Upload tested Web assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: merry-web-dist
+          path: web/dist
+          if-no-files-found: error

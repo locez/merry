@@ -952,7 +952,8 @@ async fn abandoning_pending_tool_calls_makes_a_stalled_session_saveable() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     let session_id = session_id("runtime-abandon-pending");
-    let runtime = Runtime::builder(session_id)
+    let runtime = Runtime::builder(session_id.clone())
+        .session_store(store.clone())
         .build()
         .expect("runtime builds");
     let call = PendingToolCall::new(
@@ -1004,10 +1005,38 @@ async fn abandoning_pending_tool_calls_makes_a_stalled_session_saveable() {
         abandoned_record.status(),
         merry_core::TrajectoryRecordStatus::Failed
     );
-    runtime
-        .save_session_to(store)
+    assert_eq!(
+        abandoned_record
+            .diagnostic()
+            .map(|diagnostic| diagnostic.code()),
+        Some("tool_abandoned_by_run_settlement")
+    );
+    drop(runtime);
+
+    let resumed = Runtime::builder(session_id)
+        .resume_from_store(store)
         .await
-        .expect("the session saves once nothing is pending");
+        .expect("the automatic savepoint resumes");
+    assert!(resumed.pending_tool_calls().await.is_empty());
+    let resumed_trajectory = resumed
+        .trajectory_snapshot()
+        .await
+        .expect("resumed trajectory snapshot reads");
+    let resumed_record = resumed_trajectory
+        .records()
+        .iter()
+        .find(|record| record.tool_call_id() == Some(&call_id))
+        .expect("the abandoned tool remains visible after resume");
+    assert_eq!(
+        resumed_record.status(),
+        merry_core::TrajectoryRecordStatus::Failed
+    );
+    assert_eq!(
+        resumed_record
+            .diagnostic()
+            .map(|diagnostic| diagnostic.code()),
+        Some("tool_abandoned_by_run_settlement")
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

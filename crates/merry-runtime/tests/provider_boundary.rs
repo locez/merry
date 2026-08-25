@@ -3,7 +3,8 @@ use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
     PendingToolCall, PendingToolCallBatch, ProviderName, RuntimeJournalEvent,
     RuntimeJournalPayload, SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus,
-    ToolInputSchema, ToolName, ToolSpec, TrajectoryLane,
+    ToolInputSchema, ToolName, ToolSpec, TrajectoryLane, TrajectoryRecordDetails,
+    TrajectoryRecordKind, TrajectoryRecordStatus,
 };
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelError, ModelEvent,

@@ -415,12 +415,15 @@ pub enum AgentLoopBlockedReason {
 pub struct AgentLoopError {
     events: Vec<RuntimeJournalEvent>,
     #[source]
-    source: RuntimeError,
+    source: Box<RuntimeError>,
 }
 
 impl AgentLoopError {
     fn new(events: Vec<RuntimeJournalEvent>, source: RuntimeError) -> Self {
-        Self { events, source }
+        Self {
+            events,
+            source: Box::new(source),
+        }
     }
 
     /// Runtime events collected before the method error.
@@ -438,7 +441,7 @@ impl AgentLoopError {
     /// Consumes the error into its preserved events and runtime error.
     #[must_use]
     pub fn into_parts(self) -> (Vec<RuntimeJournalEvent>, RuntimeError) {
-        (self.events, self.source)
+        (self.events, *self.source)
     }
 }
 
