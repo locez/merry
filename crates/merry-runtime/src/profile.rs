@@ -189,6 +189,12 @@ pub enum RuntimeProfileError {
         /// Duplicate tool name.
         name: ToolName,
     },
+    /// A profile tried to register a runtime-reserved tool name.
+    #[error("tool {name} is reserved by the runtime")]
+    ReservedToolName {
+        /// Rejected reserved tool name.
+        name: ToolName,
+    },
 }
 
 /// Accepted local workspace process lane carried by a runtime profile.
@@ -632,6 +638,9 @@ impl RuntimeProfileBuilder {
         let mut names = BTreeSet::new();
         for tool in &self.registered_tools {
             let name = tool.spec().name().clone();
+            if name.as_str() == crate::FINAL_OUTPUT_TOOL_NAME {
+                return Err(RuntimeProfileError::ReservedToolName { name });
+            }
             if !names.insert(name.clone()) {
                 return Err(RuntimeProfileError::DuplicateToolRegistration { name });
             }

@@ -12,6 +12,7 @@
 
 use crate::{
     ArtifactContent, ProcessActionError, ProcessActionIntent, ProcessExecutionEvidence,
+    final_output::FINAL_OUTPUT_TOOL_NAME,
     tool_input_validation::{CompiledToolInputValidator, ToolInputValidationError},
 };
 use merry_core::{
@@ -1220,6 +1221,9 @@ impl ToolRegistry {
 
         for tool in tools {
             let name = tool.spec().name().clone();
+            if name.as_str() == FINAL_OUTPUT_TOOL_NAME {
+                return Err(ToolRegistryError::ReservedName { name });
+            }
             let input_validator = CompiledToolInputValidator::compile(tool.spec().input_schema())
                 .map_err(|source| ToolRegistryError::InvalidToolInputSchema {
                 name: name.clone(),
@@ -1272,6 +1276,7 @@ impl ToolRegistry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ToolRegistryError {
     DuplicateName { name: ToolName },
+    ReservedName { name: ToolName },
     InvalidToolInputSchema { name: ToolName, message: String },
 }
 

@@ -10,7 +10,7 @@ use crate::checkpoint::CheckpointError;
 use crate::compaction::CompactionError;
 use crate::context::ContextError;
 use crate::session_store::SessionStoreError;
-use merry_core::{ArtifactId, CoreError, SessionId, ToolCallId, ToolName};
+use merry_core::{ArtifactId, CoreError, SessionId, ToolCallBatchId, ToolCallId, ToolName};
 use thiserror::Error;
 
 /// Errors raised by Merry runtime construction and step admission.
@@ -32,6 +32,15 @@ pub enum RuntimeError {
     InvalidStepInput {
         /// Actionable validation detail.
         reason: &'static str,
+    },
+
+    /// An agent-loop entry point received conflicting structured-output
+    /// contracts from its context and loop configuration.
+    #[error("invalid agent loop configuration: {source}")]
+    AgentLoopConfig {
+        /// Invalid loop configuration detail.
+        #[source]
+        source: crate::agent_loop::AgentLoopConfigError,
     },
 
     /// A child runtime factory could not materialize its runtime profile.
@@ -97,6 +106,69 @@ pub enum RuntimeError {
         call_id: ToolCallId,
     },
 
+    /// A bridge result submission did not contain any outcomes.
+    #[error("bridge tool result batch is empty in session {session_id}")]
+    BridgeToolResultBatchEmpty {
+        /// Session receiving the empty result batch.
+        session_id: SessionId,
+    },
+
+    /// A bridge result submission did not resolve exactly the requested calls.
+    #[error(
+        "bridge tool result batch does not match pending calls in session {session_id}: expected {expected_call_ids:?}, received {received_call_ids:?}"
+    )]
+    BridgeToolResultBatchMismatch {
+        /// Session receiving the mismatched result batch.
+        session_id: SessionId,
+        /// Call ids currently waiting for external execution.
+        expected_call_ids: Vec<ToolCallId>,
+        /// Call ids supplied by the external executor.
+        received_call_ids: Vec<ToolCallId>,
+    },
+
+    /// A bridge result was submitted for a different runtime-owned batch.
+    #[error(
+        "bridge tool result batch id does not match the pending batch in session {session_id}: expected {expected_batch_id}, received {received_batch_id}"
+    )]
+    BridgeToolResultBatchIdMismatch {
+        /// Session receiving the stale or mismatched result.
+        session_id: SessionId,
+        /// Runtime-owned batch id currently awaiting results.
+        expected_batch_id: ToolCallBatchId,
+        /// Batch id supplied by the host.
+        received_batch_id: ToolCallBatchId,
+    },
+
+    /// A host result could not be recorded, but the pending call can still be
+    /// resolved as a failed tool result so the model loop can recover.
+    #[error(
+        "bridge tool result was rejected in session {session_id}; the tool call was recorded as failed: {message}"
+    )]
+    BridgeToolResultRejected {
+        /// Session receiving the host result.
+        session_id: SessionId,
+        /// Original runtime validation or persistence detail.
+        message: String,
+    },
+
+    /// The run cannot read another message until its current host batch is resolved.
+    #[error(
+        "agent run has unresolved tool invocations in session {session_id} for batch {batch_id}"
+    )]
+    AgentRunToolInvocationsPending {
+        /// Session whose run is waiting for host results.
+        session_id: SessionId,
+        /// Batch that must be resolved first.
+        batch_id: ToolCallBatchId,
+    },
+
+    /// A host submitted results when the run has no active host batch.
+    #[error("agent run has no pending tool invocations in session {session_id}")]
+    NoPendingAgentRunToolInvocations {
+        /// Session receiving the submission.
+        session_id: SessionId,
+    },
+
     /// A tool result was submitted after the call had already been resolved.
     #[error("tool call {call_id} is already resolved in session {session_id}")]
     ToolCallAlreadyResolved {
@@ -110,6 +182,13 @@ pub enum RuntimeError {
     #[error("tool {name} is already registered")]
     DuplicateToolRegistration {
         /// Duplicate tool name.
+        name: ToolName,
+    },
+
+    /// Runtime-reserved provider-visible tool name was registered by an application.
+    #[error("tool name {name} is reserved by the runtime")]
+    ReservedToolName {
+        /// Rejected reserved tool name.
         name: ToolName,
     },
 
@@ -149,10 +228,10 @@ pub enum RuntimeError {
         message: String,
     },
 
-    /// A runtime-owned agent loop stream stopped before producing a terminal result.
-    #[error("agent loop stream closed for session {session_id}: {message}")]
-    AgentLoopStreamClosed {
-        /// Session whose stream ended unexpectedly.
+    /// A runtime-owned agent run stopped before producing a terminal result.
+    #[error("agent run closed for session {session_id}: {message}")]
+    AgentRunClosed {
+        /// Session whose run ended unexpectedly.
         session_id: SessionId,
         /// Actionable stream lifecycle detail.
         message: &'static str,
@@ -313,4 +392,27 @@ pub enum RuntimeError {
         /// Actionable model stream error.
         message: String,
     },
+}
+
+impl RuntimeError {
+    /// Returns whether a bridge result error can be corrected by resubmitting
+    /// the same active batch. This classification is shared by runtime and
+    /// language bindings so a binding cannot terminate a run on a validation
+    /// error that the host is expected to fix.
+    #[must_use]
+    pub fn is_retryable_bridge_tool_result(&self) -> bool {
+        matches!(
+            self,
+            Self::BridgeToolResultBatchEmpty { .. }
+                | Self::BridgeToolResultBatchMismatch { .. }
+                | Self::BridgeToolResultBatchIdMismatch { .. }
+                | Self::UnsupportedToolResultContent { .. }
+                | Self::Core {
+                    source: CoreError::InvalidToolCallResult { .. }
+                }
+                | Self::Artifact {
+                    source: ArtifactError::IncompatibleContent { .. }
+                }
+        )
+    }
 }

@@ -18,7 +18,6 @@ use crate::runtime_config::{
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use crate::tool_display::format_tool_call_progress;
 use crate::tui::session_list::{TuiSessionMetadata, TuiSessionStore, now_unix_ms};
-use futures_util::StreamExt;
 use merry_core::{ErrorInfo, RuntimeEvent, SessionId, ToolCallResultStatus};
 use merry_runtime::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopResult, AgentLoopStatus, FileSessionStore,
@@ -499,7 +498,37 @@ where
     };
     let mut pending_commentary = None;
     let mut presentation_error = None;
-    while let Some(event) = stream.next().await {
+    loop {
+        let event = match stream.next_message().await {
+            Ok(Some(merry_runtime::AgentRunMessage::Event(event))) => event,
+            Ok(Some(merry_runtime::AgentRunMessage::ToolInvocations { batch })) => {
+                stream.cancel_and_wait().await;
+                return SettledRun {
+                    runtime_result: Err(unexpected(format!(
+                        "CLI received {} host tool invocations, but this path requires runtime-owned tools",
+                        batch.calls().len()
+                    ))),
+                    presentation_result: Ok(()),
+                };
+            }
+            Ok(Some(_)) => {
+                stream.cancel_and_wait().await;
+                return SettledRun {
+                    runtime_result: Err(unexpected(
+                        "runtime emitted an unsupported agent run message",
+                    )),
+                    presentation_result: Ok(()),
+                };
+            }
+            Ok(None) => break,
+            Err(error) => {
+                stream.cancel_and_wait().await;
+                return SettledRun {
+                    runtime_result: Err(unexpected(error)),
+                    presentation_result: Ok(()),
+                };
+            }
+        };
         if let Err(error) =
             write_human_progress_event(&event, &mut pending_commentary, &mut writer).await
         {
@@ -571,7 +600,37 @@ where
     };
     let mut presentation_error = None;
 
-    while let Some(event) = stream.next().await {
+    loop {
+        let event = match stream.next_message().await {
+            Ok(Some(merry_runtime::AgentRunMessage::Event(event))) => event,
+            Ok(Some(merry_runtime::AgentRunMessage::ToolInvocations { batch })) => {
+                stream.cancel_and_wait().await;
+                return SettledRun {
+                    runtime_result: Err(unexpected(format!(
+                        "CLI received {} host tool invocations, but this path requires runtime-owned tools",
+                        batch.calls().len()
+                    ))),
+                    presentation_result: Ok(()),
+                };
+            }
+            Ok(Some(_)) => {
+                stream.cancel_and_wait().await;
+                return SettledRun {
+                    runtime_result: Err(unexpected(
+                        "runtime emitted an unsupported agent run message",
+                    )),
+                    presentation_result: Ok(()),
+                };
+            }
+            Ok(None) => break,
+            Err(error) => {
+                stream.cancel_and_wait().await;
+                return SettledRun {
+                    runtime_result: Err(unexpected(error)),
+                    presentation_result: Ok(()),
+                };
+            }
+        };
         if presentation_error.is_none() {
             if let Err(error) = write_public_runtime_event(&event, &mut writer).await {
                 stream.cancel_and_wait().await;

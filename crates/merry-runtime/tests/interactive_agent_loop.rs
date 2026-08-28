@@ -1,4 +1,4 @@
-use futures_util::{StreamExt, stream};
+use futures_util::stream;
 use merry_core::{
     InteractiveRunState, ModelUsage, PendingToolCall, PlanActivationSource,
     PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanHarnessSnapshot, PlanPhase,
@@ -13,14 +13,16 @@ use merry_llm::{
 };
 use merry_runtime::{
     AgentLoopConfig, AutomaticCompactionConfig, BeginPlanInput, ChildRuntimeFactory,
-    ChildRuntimeInput, CitationCompactionPolicy, FileSessionStore, InteractiveError,
-    InteractivePrimaryModel, InteractiveSettingsUpdate, InteractiveSubagentSettings,
-    InterruptReason, PlanApprovalInput, PlanChangeInput, PlanExecutionIntent, PlanNodeInput,
-    Runtime, SessionTranscriptItem, StepContext, SubagentConfig, SubagentManager, SubagentTaskSpec,
+    ChildRuntimeInput, CitationCompactionPolicy, FINAL_OUTPUT_TOOL_NAME, FileSessionStore,
+    FinalOutputContract, InteractiveError, InteractivePrimaryModel, InteractiveRunMessage,
+    InteractiveSettingsUpdate, InteractiveSubagentSettings, InterruptReason, PlanApprovalInput,
+    PlanChangeInput, PlanExecutionIntent, PlanNodeInput, Runtime, SessionTranscriptItem,
+    StepContext, StructuredOutputRetryPolicy, SubagentConfig, SubagentManager, SubagentTaskSpec,
     ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
     ToolExecutorFuture, UpdatePlanInput, WaitMode, subagent_registered_tools,
 };
-use schemars::Schema;
+use schemars::{JsonSchema, Schema};
+use serde::Deserialize;
 use serde_json::json;
 use std::{
     collections::BTreeMap,
@@ -104,6 +106,58 @@ fn tool_spec(name: &str) -> ToolSpec {
         ToolInputSchema::new(schema).expect("valid tool schema"),
     )
     .expect("valid tool spec")
+}
+
+fn final_output_contract() -> FinalOutputContract {
+    let schema = Schema::try_from(json!({
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": "Short final summary."
+            }
+        },
+        "required": ["summary"],
+        "additionalProperties": false
+    }))
+    .expect("final output schema should be valid");
+
+    FinalOutputContract::new(ToolInputSchema::new(schema).expect("schema should be an object"))
+        .expect("final output contract should be valid")
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct InteractiveStructuredAnswer {
+    #[schemars(description = "Numeric final answer.")]
+    answer: u64,
+}
+
+fn structured_final_output_contract() -> FinalOutputContract {
+    let schema = Schema::try_from(json!({
+        "type": "object",
+        "properties": {
+            "answer": {
+                "type": "integer",
+                "description": "Numeric final answer."
+            }
+        },
+        "required": ["answer"],
+        "additionalProperties": false
+    }))
+    .expect("structured output schema should be valid");
+
+    FinalOutputContract::new(ToolInputSchema::new(schema).expect("schema should be an object"))
+        .expect("final output contract should be valid")
+        .with_output_decoder::<InteractiveStructuredAnswer>()
+}
+
+fn final_output_call(id: &str, arguments: serde_json::Value) -> ModelToolCall {
+    ModelToolCall::new(
+        ModelToolCallId::new(id).expect("final output call id should be valid"),
+        ToolName::new(FINAL_OUTPUT_TOOL_NAME).expect("final output tool name should be valid"),
+        ToolArguments::try_from(arguments).expect("final output arguments should be an object"),
+    )
 }
 
 #[derive(Clone)]
@@ -369,7 +423,11 @@ async fn interactive_run_starts_waiting_for_input() {
         .expect("interactive run starts");
     let (mut stream, _input, _control) = run.split();
 
-    let event = stream.next().await.expect("state event");
+    let event = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("state event");
     assert!(matches!(
         event,
         RuntimeEvent::InteractiveRunStateChanged {
@@ -396,7 +454,11 @@ async fn interactive_control_saves_at_a_waiting_boundary_without_closing_the_run
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
     assert!(matches!(
-        stream.next().await.expect("waiting state"),
+        stream
+            .next_event()
+            .await
+            .expect("stream error")
+            .expect("waiting state"),
         RuntimeEvent::InteractiveRunStateChanged {
             state: InteractiveRunState::WaitingForInput
         }
@@ -432,7 +494,10 @@ async fn interactive_control_saves_at_a_waiting_boundary_without_closing_the_run
     );
 
     control.close().await.expect("interactive run closes");
-    stream.wait_until_closed().await;
+    stream
+        .wait_until_closed()
+        .await
+        .expect("interactive stream should close");
 }
 
 #[tokio::test]
@@ -450,7 +515,11 @@ async fn interactive_control_returns_waiting_save_failures_through_the_ack() {
         )
         .expect("interactive run starts");
     let (mut stream, _input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     let error = control
         .save_session_to(FileSessionStore::new(blocked_root))
@@ -459,7 +528,10 @@ async fn interactive_control_returns_waiting_save_failures_through_the_ack() {
     assert!(matches!(error, InteractiveError::Runtime { .. }));
 
     control.close().await.expect("interactive run closes");
-    stream.wait_until_closed().await;
+    stream
+        .wait_until_closed()
+        .await
+        .expect("interactive stream should close");
 }
 
 #[tokio::test]
@@ -474,7 +546,11 @@ async fn interactive_plan_mode_control_commits_and_streams_the_plan_snapshot() {
         )
         .expect("interactive run starts");
     let (mut stream, _input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     control
         .enter_plan_mode("user requested explicit planning")
@@ -482,7 +558,11 @@ async fn interactive_plan_mode_control_commits_and_streams_the_plan_snapshot() {
         .expect("plan mode control succeeds");
     let plan_event = timeout(Duration::from_secs(1), async {
         loop {
-            let event = stream.next().await.expect("interactive event");
+            let event = stream
+                .next_event()
+                .await
+                .expect("stream error")
+                .expect("interactive event");
             if matches!(event, RuntimeEvent::PlanUpdated { .. }) {
                 break event;
             }
@@ -520,7 +600,11 @@ async fn interactive_plan_controls_reject_while_the_main_model_phase_is_running(
         )
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
     input
         .submit_next("start blocking work")
         .await
@@ -586,7 +670,11 @@ async fn interactive_run_stops_before_another_model_turn_when_plan_awaits_approv
         )
         .expect("interactive run starts");
     let (mut stream, input, _control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input
         .submit_next("Create the plan, then wait for my approval")
@@ -645,7 +733,11 @@ async fn interactive_run_stops_before_another_model_turn_for_a_non_empty_plannin
         )
         .expect("interactive run starts");
     let (mut stream, input, _control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input
         .submit_next("Create a draft and let me approve it")
@@ -693,7 +785,11 @@ async fn plan_approval_triggers_a_model_continuation_with_explicit_approval() {
         )
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
     input
         .submit_next("Create the plan and wait for approval")
         .await
@@ -777,7 +873,11 @@ async fn interactive_run_continues_when_user_already_authorized_plan_execution()
         )
         .expect("interactive run starts");
     let (mut stream, input, _control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input
         .submit_next("Use this plan and execute it")
@@ -841,7 +941,11 @@ async fn submit_next_while_waiting_starts_model_turn() {
         .expect("interactive run starts");
     let (mut stream, input, _control) = run.split();
     assert!(matches!(
-        stream.next().await.expect("state event"),
+        stream
+            .next_event()
+            .await
+            .expect("stream error")
+            .expect("state event"),
         RuntimeEvent::InteractiveRunStateChanged {
             state: InteractiveRunState::WaitingForInput
         }
@@ -852,7 +956,7 @@ async fn submit_next_while_waiting_starts_model_turn() {
     assert_eq!(item.text(), "hello");
 
     let mut saw_accepted = false;
-    while let Some(event) = stream.next().await {
+    while let Some(event) = stream.next_event().await.expect("interactive stream error") {
         if matches!(event, RuntimeEvent::QueuedInputAccepted { .. }) {
             saw_accepted = true;
             break;
@@ -882,7 +986,11 @@ async fn interactive_settings_update_changes_the_next_request_generation_config(
         )
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("first").await.expect("first queued");
     wait_for_interactive_waiting(&mut stream).await;
@@ -935,7 +1043,11 @@ async fn interactive_settings_update_changes_the_next_request_primary_model() {
         )
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("first").await.expect("first queued");
     wait_for_interactive_waiting(&mut stream).await;
@@ -975,7 +1087,11 @@ async fn interactive_settings_update_changes_automatic_compaction_at_request_bou
         )
         .expect("interactive run starts");
     let (mut stream, _input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
     let policy =
         CitationCompactionPolicy::new(Some(128), Some(6144), 1).expect("valid compact policy");
     let updated = AutomaticCompactionConfig::enabled(policy);
@@ -1005,7 +1121,11 @@ async fn interactive_settings_update_changes_context_window_at_request_boundary(
         )
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("first").await.expect("first queued");
     wait_for_interactive_waiting(&mut stream).await;
@@ -1056,7 +1176,11 @@ async fn interactive_settings_update_does_not_interrupt_the_active_model_request
         )
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("first").await.expect("first queued");
     timeout(Duration::from_secs(1), started_rx)
@@ -1122,7 +1246,11 @@ async fn interactive_subagent_setting_keeps_the_tool_profile_stable() {
         )
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("first").await.expect("first queued");
     wait_for_interactive_waiting(&mut stream).await;
@@ -1194,13 +1322,13 @@ async fn interactive_ignores_stale_subagent_wakeup_after_wait_acknowledges_compl
         .expect("interactive run starts");
     let (mut events, _input, control) = run.split();
     assert!(matches!(
-        events.next().await,
+        events.next_event().await.expect("interactive stream error"),
         Some(RuntimeEvent::InteractiveRunStateChanged {
             state: InteractiveRunState::WaitingForInput
         })
     ));
 
-    let unexpected_event = timeout(Duration::from_millis(100), events.next()).await;
+    let unexpected_event = timeout(Duration::from_millis(100), events.next_event()).await;
     assert!(
         unexpected_event.is_err(),
         "an acknowledged completion must not start another model turn: {unexpected_event:?}"
@@ -1211,7 +1339,7 @@ async fn interactive_ignores_stale_subagent_wakeup_after_wait_acknowledges_compl
 }
 
 async fn wait_for_interactive_waiting(stream: &mut merry_runtime::InteractiveRunEventStream) {
-    while let Some(event) = stream.next().await {
+    while let Some(event) = stream.next_event().await.expect("interactive stream error") {
         if matches!(
             event,
             RuntimeEvent::InteractiveRunStateChanged {
@@ -1222,6 +1350,204 @@ async fn wait_for_interactive_waiting(stream: &mut merry_runtime::InteractiveRun
         }
     }
     panic!("interactive run closed before returning to waiting");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn interactive_structured_output_is_recorded_as_a_runtime_event() {
+    let provider = RecordingProvider::new_with_steps(vec![vec![Ok(completed_tool_call_event(
+        final_output_call(
+            "interactive-final-output",
+            json!({"summary": "interactive result"}),
+        ),
+    ))]]);
+    let runtime = Runtime::builder(session_id("interactive-structured-output"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default().with_final_output_contract(final_output_contract()),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+
+    let _ = stream
+        .next_event()
+        .await
+        .expect("initial event should be readable")
+        .expect("interactive run should remain open");
+    input
+        .submit_next("return a structured answer")
+        .await
+        .expect("input should be accepted");
+
+    let mut saw_final_output = false;
+    loop {
+        let event = timeout(Duration::from_secs(1), stream.next_event())
+            .await
+            .expect("structured interactive output should not deadlock")
+            .expect("interactive stream should remain healthy")
+            .expect("interactive stream should remain open");
+        match event {
+            RuntimeEvent::FinalOutputRecorded { .. } => saw_final_output = true,
+            RuntimeEvent::InteractiveRunStateChanged {
+                state: InteractiveRunState::WaitingForInput,
+            } if saw_final_output => break,
+            _ => {}
+        }
+    }
+
+    assert!(saw_final_output);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    assert_eq!(provider.recorded_requests().len(), 1);
+
+    control.close().await.expect("interactive run closes");
+    stream
+        .wait_until_closed()
+        .await
+        .expect("interactive stream closes");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn interactive_structured_output_retries_after_validation_failure() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_event(final_output_call(
+            "interactive-final-invalid",
+            json!({"answer": "not-a-number"}),
+        )))],
+        vec![Ok(completed_tool_call_event(final_output_call(
+            "interactive-final-valid",
+            json!({"answer": 42}),
+        )))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-structured-retry"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default()
+                .with_final_output_contract(structured_final_output_contract())
+                .with_structured_output_retry_policy(StructuredOutputRetryPolicy::new(1)),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+
+    let _ = stream
+        .next_event()
+        .await
+        .expect("initial event should be readable")
+        .expect("interactive run should remain open");
+    input
+        .submit_next("return a numeric structured answer")
+        .await
+        .expect("input should be accepted");
+
+    let mut saw_failed_output = false;
+    let mut saw_final_output = false;
+    loop {
+        let event = timeout(Duration::from_secs(1), stream.next_event())
+            .await
+            .expect("structured retry should not deadlock")
+            .expect("interactive stream should remain healthy")
+            .expect("interactive stream should remain open");
+        match event {
+            RuntimeEvent::ToolCallFinished { result, .. }
+                if result
+                    .diagnostic()
+                    .is_some_and(|diagnostic| diagnostic.code() == "tool_input_schema_invalid") =>
+            {
+                saw_failed_output = true;
+            }
+            RuntimeEvent::FinalOutputRecorded { .. } => saw_final_output = true,
+            RuntimeEvent::InteractiveRunStateChanged {
+                state: InteractiveRunState::WaitingForInput,
+            } if saw_final_output => break,
+            _ => {}
+        }
+    }
+
+    assert!(saw_failed_output);
+    assert!(saw_final_output);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    assert_eq!(provider.recorded_requests().len(), 2);
+
+    control.close().await.expect("interactive run closes");
+    stream
+        .wait_until_closed()
+        .await
+        .expect("interactive stream closes");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn interactive_wait_until_closed_preserves_unresolved_bridge_handoff() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_event(model_tool_call(
+            "wait-close-bridge",
+            "bridge_lookup",
+        )))],
+        vec![Ok(completed_text_event("bridge resolved"))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-wait-close-bridge"))
+        .model_provider(Arc::new(provider), model_name())
+        .allow_bridge_tools()
+        .register_tool(merry_runtime::RegisteredTool::bridge(tool_spec(
+            "bridge_lookup",
+        )))
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    input
+        .submit_next("use the bridge")
+        .await
+        .expect("input should be accepted");
+
+    let error = timeout(Duration::from_secs(1), stream.wait_until_closed())
+        .await
+        .expect("wait_until_closed should reach the bridge boundary")
+        .expect_err("wait_until_closed must not execute a bridge call");
+    assert!(matches!(
+        error,
+        merry_runtime::InteractiveError::ToolInvocationsRequireMessageProtocol { count: 1, .. }
+    ));
+
+    let message = stream
+        .next_message()
+        .await
+        .expect("preserved bridge handoff should be readable")
+        .expect("interactive run should remain open");
+    let merry_runtime::InteractiveRunMessage::ToolInvocations { batch } = message else {
+        panic!("wait_until_closed should preserve the bridge batch");
+    };
+    let outcome = batch
+        .calls()
+        .iter()
+        .map(|call| {
+            (
+                call.id().clone(),
+                ToolExecutionOutcome::succeeded_text("bridge result"),
+            )
+        })
+        .collect();
+    stream
+        .submit_tool_invocation_outcomes(batch.id(), outcome)
+        .await
+        .expect("preserved bridge batch should be resolvable");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    control.close().await.expect("interactive run closes");
+    stream
+        .wait_until_closed()
+        .await
+        .expect("interactive stream closes after handoff recovery");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1254,7 +1580,11 @@ async fn interactive_run_executes_parallel_safe_tool_batch_before_waiting() {
         .expect("interactive run starts");
     let (mut stream, input, _control) = run.split();
     assert!(matches!(
-        stream.next().await.expect("initial waiting state"),
+        stream
+            .next_event()
+            .await
+            .expect("stream error")
+            .expect("initial waiting state"),
         RuntimeEvent::InteractiveRunStateChanged {
             state: InteractiveRunState::WaitingForInput
         }
@@ -1267,7 +1597,7 @@ async fn interactive_run_executes_parallel_safe_tool_batch_before_waiting() {
     let observed = timeout(Duration::from_secs(1), async {
         let mut finished = 0;
         let mut saw_answer = false;
-        while let Some(event) = stream.next().await {
+        while let Some(event) = stream.next_event().await.expect("interactive stream error") {
             match event {
                 RuntimeEvent::ToolCallFinished { .. } => finished += 1,
                 RuntimeEvent::AssistantMessage { .. } => saw_answer = true,
@@ -1297,6 +1627,446 @@ async fn interactive_run_executes_parallel_safe_tool_batch_before_waiting() {
 }
 
 #[tokio::test]
+async fn interactive_bridge_calls_are_one_ordered_batch_and_require_completion() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_batch_event(vec![
+            model_tool_call("bridge-call-1", "bridge_lookup"),
+            model_tool_call("bridge-call-2", "bridge_lookup"),
+        ]))],
+        vec![Ok(completed_text_event("bridge complete"))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-bridge-batch"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .allow_bridge_tools()
+        .register_tool(merry_runtime::RegisteredTool::bridge(tool_spec(
+            "bridge_lookup",
+        )))
+        .build()
+        .expect("runtime builds");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    assert!(matches!(
+        stream
+            .next_message()
+            .await
+            .expect("initial message should be readable"),
+        Some(InteractiveRunMessage::Event(
+            RuntimeEvent::InteractiveRunStateChanged {
+                state: InteractiveRunState::WaitingForInput
+            }
+        ))
+    ));
+
+    input
+        .submit_next("use both bridge calls")
+        .await
+        .expect("input queued");
+
+    let (batch_id, calls) = timeout(Duration::from_secs(1), async {
+        loop {
+            match stream
+                .next_message()
+                .await
+                .expect("interactive bridge message should be readable")
+            {
+                Some(InteractiveRunMessage::Event(_)) => {}
+                Some(InteractiveRunMessage::ToolInvocations { batch }) => {
+                    break (batch.id().clone(), batch.calls().to_vec());
+                }
+                None => panic!("interactive run closed before bridge calls"),
+                _ => panic!("unsupported interactive message"),
+            }
+        }
+    })
+    .await
+    .expect("bridge request should be emitted");
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.id().as_str())
+            .collect::<Vec<_>>(),
+        ["bridge-call-1", "bridge-call-2"]
+    );
+    assert!(matches!(
+        stream.next_message().await,
+        Err(InteractiveError::ToolInvocationsPending { .. })
+    ));
+
+    let outcomes = calls
+        .iter()
+        .rev()
+        .map(|call| {
+            (
+                call.id().clone(),
+                ToolExecutionOutcome::succeeded_text(format!("result for {}", call.id())),
+            )
+        })
+        .collect();
+    stream
+        .submit_tool_invocation_outcomes(&batch_id, outcomes)
+        .await
+        .expect("complete bridge result batch should be accepted");
+
+    let observed = timeout(Duration::from_secs(1), async {
+        let mut finished = 0;
+        let mut saw_answer = false;
+        loop {
+            let Some(message) = stream
+                .next_message()
+                .await
+                .expect("interactive bridge continuation should be readable")
+            else {
+                break;
+            };
+            let InteractiveRunMessage::Event(event) = message else {
+                panic!("bridge request was emitted before the previous batch completed");
+            };
+            match event {
+                RuntimeEvent::ToolCallFinished { .. } => finished += 1,
+                RuntimeEvent::AssistantMessage { .. } => saw_answer = true,
+                RuntimeEvent::InteractiveRunStateChanged {
+                    state: InteractiveRunState::WaitingForInput,
+                } if saw_answer => return finished,
+                _ => {}
+            }
+        }
+        finished
+    })
+    .await
+    .expect("interactive bridge continuation should complete");
+    assert_eq!(observed, 2);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].batch_continuations()[0]
+            .results()
+            .iter()
+            .map(|result| result.call_id().as_str())
+            .collect::<Vec<_>>(),
+        ["bridge-call-1", "bridge-call-2"]
+    );
+
+    control.close().await.expect("interactive run closes");
+    stream
+        .wait_until_closed()
+        .await
+        .expect("interactive stream closes");
+}
+
+#[tokio::test]
+async fn interactive_next_event_preserves_bridge_handoff_for_message_protocol() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_batch_event(vec![
+            model_tool_call("bridge-event-1", "bridge_lookup"),
+            model_tool_call("bridge-event-2", "bridge_lookup"),
+        ]))],
+        vec![Ok(completed_text_event("bridge event complete"))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-event-bridge-recovery"))
+        .model_provider(Arc::new(provider), model_name())
+        .allow_bridge_tools()
+        .register_tool(merry_runtime::RegisteredTool::bridge(tool_spec(
+            "bridge_lookup",
+        )))
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+
+    assert!(matches!(
+        stream
+            .next_event()
+            .await
+            .expect("initial event should be readable"),
+        Some(RuntimeEvent::InteractiveRunStateChanged {
+            state: merry_core::InteractiveRunState::WaitingForInput
+        })
+    ));
+    input
+        .submit_next("use bridge tools through message recovery")
+        .await
+        .expect("input queued");
+
+    let handoff_error = timeout(Duration::from_secs(1), async {
+        loop {
+            match stream.next_event().await {
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("interactive run closed before bridge handoff"),
+                Err(error) => break error,
+            }
+        }
+    })
+    .await
+    .expect("next_event should report the bridge handoff promptly");
+    assert!(matches!(
+        handoff_error,
+        InteractiveError::ToolInvocationsRequireMessageProtocol { count: 2, .. }
+    ));
+
+    let message = stream
+        .next_message()
+        .await
+        .expect("preserved bridge handoff should be readable")
+        .expect("interactive run should remain open");
+    let InteractiveRunMessage::ToolInvocations { batch } = message else {
+        panic!("message recovery should return the preserved bridge batch");
+    };
+    assert_eq!(
+        batch
+            .calls()
+            .iter()
+            .map(|call| call.id().as_str())
+            .collect::<Vec<_>>(),
+        ["bridge-event-1", "bridge-event-2"]
+    );
+    let outcomes = batch
+        .calls()
+        .iter()
+        .map(|call| {
+            (
+                call.id().clone(),
+                ToolExecutionOutcome::succeeded_text(format!("result for {}", call.id())),
+            )
+        })
+        .collect();
+    stream
+        .submit_tool_invocation_outcomes(batch.id(), outcomes)
+        .await
+        .expect("recovered bridge batch should be accepted");
+
+    let mut saw_answer = false;
+    while let Some(message) = timeout(Duration::from_secs(1), stream.next_message())
+        .await
+        .expect("bridge continuation should complete")
+        .expect("interactive stream should remain healthy")
+    {
+        let InteractiveRunMessage::Event(event) = message else {
+            panic!("a second bridge handoff must not be emitted");
+        };
+        match event {
+            RuntimeEvent::AssistantMessage { .. } => saw_answer = true,
+            RuntimeEvent::InteractiveRunStateChanged {
+                state: merry_core::InteractiveRunState::WaitingForInput,
+            } if saw_answer => break,
+            _ => {}
+        }
+    }
+    assert!(saw_answer);
+
+    control.close().await.expect("interactive run closes");
+    stream
+        .wait_until_closed()
+        .await
+        .expect("interactive stream closes");
+}
+
+#[tokio::test]
+async fn interactive_mixed_model_batch_keeps_runtime_and_bridge_ownership_separate() {
+    let provider = RecordingProvider::new_with_steps(vec![
+        vec![Ok(completed_tool_call_batch_event(vec![
+            model_tool_call("native-call", "native_lookup"),
+            model_tool_call("bridge-call", "bridge_lookup"),
+        ]))],
+        vec![Ok(completed_text_event("mixed tools complete"))],
+    ]);
+    let runtime = Runtime::builder(session_id("interactive-mixed-tool-batch"))
+        .model_provider(Arc::new(provider), model_name())
+        .allow_bridge_tools()
+        .register_tool(merry_runtime::RegisteredTool::read_only(
+            tool_spec("native_lookup"),
+            Arc::new(BarrierToolExecutor::new(1)),
+        ))
+        .register_tool(merry_runtime::RegisteredTool::bridge(tool_spec(
+            "bridge_lookup",
+        )))
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+
+    let _ = stream
+        .next_message()
+        .await
+        .expect("initial message should be readable");
+    input
+        .submit_next("use one native and one bridge tool")
+        .await
+        .expect("input queued");
+
+    let mut native_finished = false;
+    let (batch_id, calls) = loop {
+        let message = timeout(Duration::from_secs(1), stream.next_message())
+            .await
+            .expect("mixed tool run should not deadlock")
+            .expect("interactive stream should remain healthy")
+            .expect("interactive stream should remain open");
+        match message {
+            InteractiveRunMessage::Event(event) => {
+                if let RuntimeEvent::ToolCallFinished { result, .. } = event
+                    && result.call_id().as_str() == "native-call"
+                {
+                    native_finished = true;
+                }
+            }
+            InteractiveRunMessage::ToolInvocations { batch } => {
+                assert!(native_finished, "native runtime tool must settle first");
+                break (batch.id().clone(), batch.calls().to_vec());
+            }
+            _ => panic!("unexpected future interactive message variant"),
+        }
+    };
+    assert_eq!(
+        calls
+            .iter()
+            .map(|call| call.id().as_str())
+            .collect::<Vec<_>>(),
+        ["bridge-call"]
+    );
+    stream
+        .submit_tool_invocation_outcomes(
+            &batch_id,
+            vec![(
+                calls[0].id().clone(),
+                ToolExecutionOutcome::succeeded_text("bridge result"),
+            )],
+        )
+        .await
+        .expect("bridge result should be accepted");
+
+    let mut bridge_finished = false;
+    let mut saw_answer = false;
+    while let Some(message) = timeout(Duration::from_secs(1), stream.next_message())
+        .await
+        .expect("mixed tool continuation should not deadlock")
+        .expect("interactive stream should remain healthy")
+    {
+        let InteractiveRunMessage::Event(event) = message else {
+            panic!("mixed tool run emitted a second bridge handoff");
+        };
+        match event {
+            RuntimeEvent::ToolCallFinished { result, .. }
+                if result.call_id().as_str() == "bridge-call" =>
+            {
+                bridge_finished = true
+            }
+            RuntimeEvent::AssistantMessage { text, .. } if text == "mixed tools complete" => {
+                saw_answer = true;
+            }
+            RuntimeEvent::InteractiveRunStateChanged {
+                state: InteractiveRunState::WaitingForInput,
+            } if saw_answer => break,
+            _ => {}
+        }
+    }
+    assert!(native_finished);
+    assert!(bridge_finished);
+    assert!(saw_answer);
+
+    control.close().await.expect("interactive run closes");
+    stream
+        .wait_until_closed()
+        .await
+        .expect("interactive stream closes");
+}
+
+#[tokio::test]
+async fn interrupt_settles_pending_interactive_bridge_calls() {
+    let provider = RecordingProvider::new_with_steps(vec![vec![Ok(completed_tool_call_event(
+        model_tool_call("bridge-call-interrupt", "bridge_lookup"),
+    ))]]);
+    let runtime = Runtime::builder(session_id("interactive-bridge-interrupt"))
+        .model_provider(Arc::new(provider), model_name())
+        .allow_bridge_tools()
+        .register_tool(merry_runtime::RegisteredTool::bridge(tool_spec(
+            "bridge_lookup",
+        )))
+        .build()
+        .expect("runtime builds");
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream
+        .next_message()
+        .await
+        .expect("initial state should be readable");
+    input
+        .submit_next("interrupt bridge")
+        .await
+        .expect("input queued");
+
+    loop {
+        match stream
+            .next_message()
+            .await
+            .expect("bridge request should be readable")
+        {
+            Some(InteractiveRunMessage::ToolInvocations { .. }) => break,
+            Some(InteractiveRunMessage::Event(_)) => {}
+            None => panic!("interactive run closed before bridge request"),
+            _ => panic!("unsupported interactive message"),
+        }
+    }
+    control
+        .interrupt(InterruptReason::User)
+        .await
+        .expect("interrupt should be accepted");
+
+    let mut saw_waiting = false;
+    while let Some(message) = timeout(Duration::from_secs(1), stream.next_message())
+        .await
+        .expect("interrupt settlement should complete")
+        .expect("interactive stream should remain healthy")
+    {
+        let InteractiveRunMessage::Event(event) = message else {
+            panic!("interrupt settlement must not emit another bridge request");
+        };
+        if matches!(
+            event,
+            RuntimeEvent::InteractiveRunStateChanged {
+                state: InteractiveRunState::WaitingForInput
+            }
+        ) {
+            saw_waiting = true;
+            break;
+        }
+    }
+    assert!(saw_waiting);
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    let after_interrupt = timeout(Duration::from_millis(100), stream.next_message()).await;
+    assert!(!matches!(
+        after_interrupt,
+        Ok(Err(InteractiveError::ToolInvocationsPending { .. }))
+    ));
+    control.close().await.expect("interactive run closes");
+    stream
+        .wait_until_closed()
+        .await
+        .expect("interactive stream closes");
+}
+
+#[tokio::test]
 async fn enqueue_while_waiting_starts_backlog_turn() {
     let provider = RecordingProvider::new();
     let runtime = Runtime::builder(session_id("interactive-backlog-waiting"))
@@ -1311,14 +2081,18 @@ async fn enqueue_while_waiting_starts_backlog_turn() {
         )
         .expect("interactive run starts");
     let (mut stream, input, _control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     let item = input.enqueue("later").await.expect("backlog queued");
     assert_eq!(item.lane(), QueuedInputLane::Backlog);
     assert_eq!(item.text(), "later");
 
     let mut saw_accepted = false;
-    while let Some(event) = stream.next().await {
+    while let Some(event) = stream.next_event().await.expect("interactive stream error") {
         if matches!(
             event,
             RuntimeEvent::QueuedInputAccepted {
@@ -1351,7 +2125,11 @@ async fn next_burst_before_boundary_becomes_two_user_messages_in_one_request() {
         )
         .expect("interactive run starts");
     let (mut stream, input, _control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("initial").await.expect("initial queued");
     started_rx.await.expect("first provider step starts");
@@ -1369,7 +2147,7 @@ async fn next_burst_before_boundary_becomes_two_user_messages_in_one_request() {
     release_tx.send(()).expect("first provider step released");
 
     let mut saw_two = false;
-    while let Some(event) = stream.next().await {
+    while let Some(event) = stream.next_event().await.expect("interactive stream error") {
         if let RuntimeEvent::QueuedInputAccepted {
             inputs,
             lane: QueuedInputLane::Next,
@@ -1414,14 +2192,18 @@ async fn close_during_running_model_reaches_closed_event() {
         )
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
     input.submit_next("initial").await.expect("initial queued");
     started_rx.await.expect("provider step starts");
 
     control.close().await.expect("close accepted");
 
     timeout(Duration::from_secs(1), async {
-        while let Some(event) = stream.next().await {
+        while let Some(event) = stream.next_event().await.expect("interactive stream error") {
             if matches!(event, RuntimeEvent::Closed) {
                 return;
             }
@@ -1449,7 +2231,11 @@ async fn next_burst_does_not_reorder_backlog() {
         )
         .expect("interactive run starts");
     let (mut stream, input, _control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("initial").await.expect("initial queued");
     started_rx.await.expect("first provider step starts");
@@ -1460,7 +2246,7 @@ async fn next_burst_does_not_reorder_backlog() {
     release_tx.send(()).expect("first provider step released");
 
     let mut accepted = Vec::new();
-    while let Some(event) = stream.next().await {
+    while let Some(event) = stream.next_event().await.expect("interactive stream error") {
         if let RuntimeEvent::QueuedInputAccepted { inputs, .. } = event {
             accepted.extend(
                 inputs
@@ -1475,7 +2261,7 @@ async fn next_burst_does_not_reorder_backlog() {
     }
     assert_eq!(accepted, vec!["next".to_owned()]);
 
-    while let Some(event) = stream.next().await {
+    while let Some(event) = stream.next_event().await.expect("interactive stream error") {
         if let RuntimeEvent::QueuedInputAccepted {
             inputs,
             lane: QueuedInputLane::Backlog,
@@ -1510,7 +2296,11 @@ async fn input_handle_updates_removes_and_reorders_pending_items() {
         )
         .expect("interactive run starts");
     let (mut stream, input, _control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("initial").await.expect("initial queued");
     started_rx.await.expect("first provider step starts");
@@ -1536,7 +2326,7 @@ async fn input_handle_updates_removes_and_reorders_pending_items() {
 
     release_tx.send(()).expect("first provider step released");
 
-    while let Some(event) = stream.next().await {
+    while let Some(event) = stream.next_event().await.expect("interactive stream error") {
         if let RuntimeEvent::QueuedInputAccepted {
             inputs,
             lane: QueuedInputLane::Backlog,
@@ -1571,7 +2361,11 @@ async fn interrupt_moves_existing_next_to_suspended_and_post_interrupt_next_runs
         )
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("initial").await.expect("initial queued");
     started_rx.await.expect("initial provider step starts");
@@ -1596,7 +2390,7 @@ async fn interrupt_moves_existing_next_to_suspended_and_post_interrupt_next_runs
     drop(release_tx);
 
     let mut saw_z = false;
-    while let Some(event) = stream.next().await {
+    while let Some(event) = stream.next_event().await.expect("interactive stream error") {
         if let RuntimeEvent::QueuedInputAccepted {
             inputs,
             lane: QueuedInputLane::Next,
@@ -1629,7 +2423,11 @@ async fn resume_suspended_accepts_suspended_burst_when_waiting() {
         )
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("initial").await.expect("initial queued");
     started_rx.await.expect("initial provider step starts");
@@ -1641,7 +2439,7 @@ async fn resume_suspended_accepts_suspended_burst_when_waiting() {
     drop(release_tx);
 
     let mut waiting = false;
-    while let Some(event) = stream.next().await {
+    while let Some(event) = stream.next_event().await.expect("interactive stream error") {
         if matches!(
             event,
             RuntimeEvent::InteractiveRunStateChanged {
@@ -1657,7 +2455,7 @@ async fn resume_suspended_accepts_suspended_burst_when_waiting() {
     control.resume_suspended().await.expect("suspended resumes");
 
     let mut saw_suspended = false;
-    while let Some(event) = stream.next().await {
+    while let Some(event) = stream.next_event().await.expect("interactive stream error") {
         if let RuntimeEvent::QueuedInputAccepted {
             inputs,
             lane: QueuedInputLane::Suspended,
@@ -1706,7 +2504,11 @@ async fn interrupt_during_tool_execution_closes_pending_tool_call() {
         )
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("start").await.expect("start queued");
     started_rx.await.expect("tool starts");
@@ -1716,7 +2518,7 @@ async fn interrupt_during_tool_execution_closes_pending_tool_call() {
         .expect("interrupt accepted");
 
     let mut saw_resolved = false;
-    while let Some(event) = stream.next().await {
+    while let Some(event) = stream.next_event().await.expect("interactive stream error") {
         if matches!(event, RuntimeEvent::ToolCallFinished { .. }) {
             saw_resolved = true;
             break;
@@ -1760,7 +2562,11 @@ async fn new_input_after_interrupt_still_executes_runtime_tool_calls() {
         )
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("first").await.expect("first queued");
     started_rx.await.expect("first tool starts");
@@ -1770,7 +2576,7 @@ async fn new_input_after_interrupt_still_executes_runtime_tool_calls() {
         .expect("interrupt accepted");
 
     let mut returned_to_waiting = false;
-    while let Some(event) = stream.next().await {
+    while let Some(event) = stream.next_event().await.expect("interactive stream error") {
         if matches!(
             event,
             RuntimeEvent::InteractiveRunStateChanged {
@@ -1790,7 +2596,7 @@ async fn new_input_after_interrupt_still_executes_runtime_tool_calls() {
         .expect("second queued after interrupt");
 
     let mut saw_second_tool_result = false;
-    while let Some(event) = stream.next().await {
+    while let Some(event) = stream.next_event().await.expect("interactive stream error") {
         if let RuntimeEvent::ToolCallFinished { result, .. } = event
             && result.call_id().as_str() == "call-after-interrupt"
         {
@@ -1827,7 +2633,11 @@ async fn interactive_tool_infrastructure_failure_returns_to_waiting() {
         )
         .expect("interactive run starts");
     let (mut stream, input, _control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("start").await.expect("input queued");
     wait_for_interactive_waiting(&mut stream).await;
@@ -1861,7 +2671,11 @@ async fn interactive_tool_batch_infrastructure_failure_resolves_all_pending_call
         )
         .expect("interactive run starts");
     let (mut stream, input, _control) = run.split();
-    let _ = stream.next().await.expect("waiting state");
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("waiting state");
 
     input.submit_next("start").await.expect("input queued");
     wait_for_interactive_waiting(&mut stream).await;

@@ -5,8 +5,8 @@
 //! - [`Runtime`] and [`RuntimeBuilder`] construct a session-scoped runtime.
 //! - [`StepInput`], [`StepContext`], and [`RuntimeJournalEventStream`] drive one
 //!   provider-neutral runtime step at a time.
-//! - [`RegisteredTool`] and [`ToolExecutor`] define the runtime-owned tool
-//!   executor path.
+//! - [`Tool`] defines the typed application-tool path; [`RegisteredTool`] and
+//!   [`ToolExecutor`] define the runtime-owned integration path.
 //! - [`Runtime::record_artifact`], [`Runtime::evidence_ref`], and
 //!   [`Runtime::ledger_projection`] expose session-owned artifact evidence and
 //!   ledger reads without leaking provider wire formats.
@@ -32,6 +32,7 @@ mod action_audit;
 mod action_policy;
 mod agent_loop;
 mod artifact;
+mod bridge;
 mod checkpoint;
 mod compaction;
 mod context;
@@ -62,6 +63,7 @@ mod summary_draft_promotion;
 mod token_estimate;
 mod tool;
 mod tool_admission;
+mod tool_api;
 mod tool_input_validation;
 mod trajectory;
 mod trajectory_replay;
@@ -69,9 +71,9 @@ mod user_input;
 mod workspace_scope;
 
 pub use agent_loop::{
-    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopError,
-    AgentLoopEventStream, AgentLoopResult, AgentLoopStatus, AgentLoopStreamMessage,
-    DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS,
+    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopError, AgentLoopResult,
+    AgentLoopStatus, AgentRun, AgentRunMessage, DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS,
+    StructuredOutputRetryPolicy,
 };
 pub use artifact::{
     ArtifactContent, ArtifactContentKind, ArtifactContentPreview, ArtifactError, ArtifactRecord,
@@ -103,7 +105,7 @@ pub use final_output::{
 pub use interactive::{
     AgentLoopControl, AgentLoopInput, InteractiveAgentRun, InteractiveError, InteractiveInputItem,
     InteractiveInputSnapshot, InteractivePrimaryModel, InteractiveRunEventStream, InteractiveRunId,
-    InteractiveSettingsUpdate, InteractiveSubagentSettings, InterruptReason,
+    InteractiveRunMessage, InteractiveSettingsUpdate, InteractiveSubagentSettings, InterruptReason,
 };
 pub use ledger::{
     CompactLedgerText, LedgerFactKind, LedgerProjection, LedgerProjectionSnapshot, LedgerScope,
@@ -166,6 +168,7 @@ pub use tool::{
     WorkspacePatchChangeEvidence, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
 };
 pub use tool_admission::ToolAdmission;
+pub use tool_api::{Tool, ToolBuildError};
 pub use user_input::{
     MAX_USER_IMAGE_DIMENSION, MAX_USER_IMAGE_PIXELS, MAX_USER_IMAGE_PNG_BYTES,
     MAX_USER_IMAGE_TOTAL_PNG_BYTES, MAX_USER_IMAGES, StepInput, UserImageInput, UserMessageInput,

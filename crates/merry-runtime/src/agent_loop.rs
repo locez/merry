@@ -6,22 +6,27 @@
 
 use crate::{
     FinalOutput, FinalOutputContract, Runtime, RuntimeError, RuntimeJournalEventStream,
-    StepContext, StepInput, ToolExecutionContext,
+    StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome,
+    bridge::{
+        BridgeToolResultCommand, BridgeToolResultPayload, receive_bridge_tool_result,
+        resolve_bridge_tool_result_command,
+    },
     events::{ActiveStepPermit, RuntimeEventProjector},
     subagent::completion_notification_text,
 };
-use futures_core::Stream;
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactKind, ErrorInfo, PendingToolCall, RuntimeEvent, RuntimeJournalEvent,
-    RuntimeJournalPayload, SessionId, SessionUsage, ToolCallId, ToolCallResult,
-    ToolCallResultStatus, ToolName,
+    ArtifactKind, ErrorInfo, PendingToolCall, PendingToolCallBatch, RuntimeEvent,
+    RuntimeJournalEvent, RuntimeJournalPayload, SessionId, SessionUsage, ToolCallBatchId,
+    ToolCallId, ToolCallResultStatus, ToolName,
 };
 use std::{
     collections::BTreeSet,
     num::NonZeroUsize,
-    pin::Pin,
-    task::{Context as TaskContext, Poll},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -29,6 +34,45 @@ use tokio_stream::wrappers::ReceiverStream;
 
 /// Generic SDK/runtime default for one top-level agent run.
 pub const DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS: usize = 128;
+
+/// Retry policy for application-level structured final-output decoding.
+///
+/// A retry is another model continuation in the same runtime session. The
+/// failed final-output call is recorded as a failed tool result before the
+/// continuation is started, so the model receives an actionable failure and
+/// the session remains resume-safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StructuredOutputRetryPolicy {
+    max_retries: usize,
+}
+
+impl StructuredOutputRetryPolicy {
+    /// Creates a policy with the supplied number of retries after the first
+    /// structured-output attempt.
+    #[must_use]
+    pub const fn new(max_retries: usize) -> Self {
+        Self { max_retries }
+    }
+
+    /// Returns a policy that does not retry a failed structured output.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self::new(0)
+    }
+
+    /// Returns the maximum number of retries after the first attempt.
+    #[must_use]
+    pub const fn max_retries(self) -> usize {
+        self.max_retries
+    }
+}
+
+impl Default for StructuredOutputRetryPolicy {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
 /// Configuration for [`Runtime::run_agent_loop`].
 ///
 /// `max_model_turns` bounds the number of model turns started by one loop run.
@@ -38,6 +82,7 @@ pub const DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS: usize = 128;
 pub struct AgentLoopConfig {
     max_model_turns: NonZeroUsize,
     final_output_contract: Option<FinalOutputContract>,
+    structured_output_retry_policy: StructuredOutputRetryPolicy,
 }
 
 impl AgentLoopConfig {
@@ -50,6 +95,7 @@ impl AgentLoopConfig {
         Ok(Self {
             max_model_turns,
             final_output_contract: None,
+            structured_output_retry_policy: StructuredOutputRetryPolicy::default(),
         })
     }
 
@@ -71,6 +117,35 @@ impl AgentLoopConfig {
     pub fn final_output_contract(&self) -> Option<&FinalOutputContract> {
         self.final_output_contract.as_ref()
     }
+
+    pub(crate) fn merge_context_final_output_contract(
+        mut self,
+        context_contract: Option<FinalOutputContract>,
+    ) -> Result<Self, AgentLoopConfigError> {
+        if context_contract.is_some() && self.final_output_contract.is_some() {
+            return Err(AgentLoopConfigError::FinalOutputContractConfiguredTwice);
+        }
+        if let Some(contract) = context_contract {
+            self.final_output_contract = Some(contract);
+        }
+        Ok(self)
+    }
+
+    /// Sets retries for an application-level structured-output decoder.
+    #[must_use]
+    pub fn with_structured_output_retry_policy(
+        mut self,
+        policy: StructuredOutputRetryPolicy,
+    ) -> Self {
+        self.structured_output_retry_policy = policy;
+        self
+    }
+
+    /// Returns the structured-output retry policy.
+    #[must_use]
+    pub fn structured_output_retry_policy(&self) -> StructuredOutputRetryPolicy {
+        self.structured_output_retry_policy
+    }
 }
 
 impl Default for AgentLoopConfig {
@@ -79,6 +154,7 @@ impl Default for AgentLoopConfig {
             max_model_turns: NonZeroUsize::new(DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS)
                 .expect("default agent loop model-turn budget is non-zero"),
             final_output_contract: None,
+            structured_output_retry_policy: StructuredOutputRetryPolicy::default(),
         }
     }
 }
@@ -90,6 +166,11 @@ pub enum AgentLoopConfigError {
     /// hide a caller configuration mistake.
     #[error("agent loop max_model_turns must be greater than zero")]
     MaxModelTurnsMustBeNonZero,
+    /// A single loop received its final-output contract from both public input
+    /// paths. Silent precedence would make structured-output behavior depend
+    /// on which entry point constructed the loop.
+    #[error("agent loop final-output contract was configured more than once")]
+    FinalOutputContractConfiguredTwice,
 }
 
 /// Result of a completed or policy-blocked agent loop run.
@@ -182,29 +263,35 @@ impl AgentLoopResult {
     }
 }
 
-/// Live event stream for one runtime-owned agent loop.
+/// Runtime-owned single-consumer protocol for one agent run.
 ///
-/// Polling yields runtime events as they become observable. [`Self::result`]
-/// drains any unconsumed events before returning the collected loop result or
-/// the runtime method error that stopped the loop.
-pub struct AgentLoopEventStream {
+/// [`Self::next_message`] is the only output path. It yields durable runtime
+/// events and explicit host-owned tool batches from the same ordered channel,
+/// so a consumer cannot accidentally skip a tool handoff by using an
+/// event-only stream. Runtime state owns the active batch and its lifecycle.
+pub struct AgentRun {
     session_id: SessionId,
-    events: ReceiverStream<AgentLoopStreamMessage>,
+    events: ReceiverStream<AgentRunMessage>,
     loop_token: tokio_util::sync::CancellationToken,
     producer_handle: Option<tokio::task::JoinHandle<()>>,
     result_receiver: Option<oneshot::Receiver<Result<AgentLoopResult, AgentLoopError>>>,
     bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
+    pending_tool_invocations: Option<PendingToolCallBatch>,
+    bridge_resolution_epoch: Arc<AtomicU64>,
+    observed_bridge_resolution_epoch: u64,
 }
 
-impl AgentLoopEventStream {
+impl AgentRun {
     fn new(
         session_id: SessionId,
-        events: ReceiverStream<AgentLoopStreamMessage>,
+        events: ReceiverStream<AgentRunMessage>,
         loop_token: tokio_util::sync::CancellationToken,
         producer_handle: tokio::task::JoinHandle<()>,
         result_receiver: oneshot::Receiver<Result<AgentLoopResult, AgentLoopError>>,
         bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
+        bridge_resolution_epoch: Arc<AtomicU64>,
     ) -> Self {
+        let observed_bridge_resolution_epoch = bridge_resolution_epoch.load(Ordering::Acquire);
         Self {
             session_id,
             events,
@@ -212,46 +299,114 @@ impl AgentLoopEventStream {
             producer_handle: Some(producer_handle),
             result_receiver: Some(result_receiver),
             bridge_sender,
+            pending_tool_invocations: None,
+            bridge_resolution_epoch,
+            observed_bridge_resolution_epoch,
         }
     }
 
-    /// Submits a result for a bridge tool call requested by this stream.
+    fn synchronize_bridge_resolution(&mut self) {
+        let epoch = self.bridge_resolution_epoch.load(Ordering::Acquire);
+        if epoch != self.observed_bridge_resolution_epoch {
+            self.pending_tool_invocations = None;
+            self.observed_bridge_resolution_epoch = epoch;
+        }
+    }
+
+    /// Submits a complete batch of host-executed tool outcomes.
     ///
-    /// Bridge execution happens in host SDK code, but the runtime stream owns
-    /// the loop continuation. The submitted result is recorded under the same
-    /// active loop permit before the loop starts the next provider step.
-    pub async fn submit_bridge_tool_result(
-        &self,
-        result: ToolCallResult,
-        content: crate::ArtifactContent,
+    /// The host may prepare results concurrently, then submit the complete set
+    /// in any order. The batch itself does not grant parallel-execution safety;
+    /// the runtime validates the complete set and records it in pending-call
+    /// order before starting the next model turn. Correctable validation errors
+    /// keep the batch pending; a non-correctable recording error is converted
+    /// into a failed tool result so the model loop can still recover.
+    pub async fn submit_bridge_tool_outcomes(
+        &mut self,
+        batch_id: &ToolCallBatchId,
+        outcomes: Vec<(ToolCallId, ToolExecutionOutcome)>,
     ) -> Result<(), RuntimeError> {
-        let call_id = result.call_id().clone();
+        let Some(expected_batch) = self.pending_tool_invocations.as_ref() else {
+            return Err(RuntimeError::NoPendingAgentRunToolInvocations {
+                session_id: self.session_id.clone(),
+            });
+        };
+        if expected_batch.id() != batch_id {
+            return Err(RuntimeError::BridgeToolResultBatchIdMismatch {
+                session_id: self.session_id.clone(),
+                expected_batch_id: expected_batch.id().clone(),
+                received_batch_id: batch_id.clone(),
+            });
+        }
+        if outcomes.is_empty() {
+            return Err(RuntimeError::BridgeToolResultBatchEmpty {
+                session_id: self.session_id.clone(),
+            });
+        }
+        let result = self
+            .submit_bridge_command(BridgeToolResultPayload::Outcomes {
+                batch_id: batch_id.clone(),
+                outcomes,
+            })
+            .await;
+        match &result {
+            Ok(()) => self.pending_tool_invocations = None,
+            Err(error) if error.is_retryable_bridge_tool_result() => {}
+            Err(_) => self.pending_tool_invocations = None,
+        }
+        result
+    }
+
+    async fn submit_bridge_command(
+        &self,
+        payload: BridgeToolResultPayload,
+    ) -> Result<(), RuntimeError> {
         let (ack_sender, ack_receiver) = oneshot::channel();
         let command = BridgeToolResultCommand {
-            result,
-            content,
+            payload,
             ack_sender,
         };
         self.bridge_sender
             .send(command)
             .await
-            .map_err(|_| RuntimeError::UnknownToolCall {
+            .map_err(|_| RuntimeError::AgentRunClosed {
                 session_id: self.session_id.clone(),
-                call_id: call_id.clone(),
+                message: "agent run closed before accepting the bridge tool result",
             })?;
         ack_receiver
             .await
-            .map_err(|_| RuntimeError::UnknownToolCall {
+            .map_err(|_| RuntimeError::AgentRunClosed {
                 session_id: self.session_id.clone(),
-                call_id,
+                message: "agent run closed before acknowledging the bridge tool result",
             })?
     }
 
-    /// Returns the collected loop result once the stream has completed.
+    /// Returns the collected loop result once the run has completed.
     ///
-    /// Any unconsumed events are drained before waiting for the result.
+    /// Unconsumed events are drained. An unresolved host-tool batch is reported
+    /// as an error and cancellation is requested so the producer cannot remain
+    /// blocked waiting for a result that the caller has abandoned.
     pub async fn result(&mut self) -> Result<AgentLoopResult, AgentLoopError> {
-        while self.next().await.is_some() {}
+        loop {
+            match self.next_message().await {
+                Ok(Some(AgentRunMessage::Event(_))) => {}
+                Ok(Some(AgentRunMessage::ToolInvocations { batch: _ })) => {
+                    self.request_cancel();
+                    self.pending_tool_invocations = None;
+                    return Err(agent_loop_stream_error(
+                        &self.session_id,
+                        Vec::new(),
+                        "agent run result requested before the host tool batch was resolved",
+                    ));
+                }
+                Ok(None) => break,
+                Err(source) => {
+                    self.request_cancel();
+                    self.pending_tool_invocations = None;
+                    return Err(AgentLoopError::new(Vec::new(), source));
+                }
+            }
+        }
 
         let Some(result_receiver) = self.result_receiver.take() else {
             return Err(agent_loop_stream_error(
@@ -277,48 +432,63 @@ impl AgentLoopEventStream {
     /// settling and persisting the runtime state.
     pub async fn cancel_and_wait(&mut self) {
         self.loop_token.cancel();
+        self.pending_tool_invocations = None;
+        // A producer may be waiting for capacity while publishing a durable
+        // event. Drain the bounded channel so cancellation can reach the
+        // runtime checkpoint instead of relying on task abortion.
+        while self.events.next().await.is_some() {}
         if let Some(handle) = self.producer_handle.take() {
-            handle.abort();
             let _ = handle.await;
         }
     }
 
-    /// Returns the next internal driver message.
+    /// Returns the next runtime-owned run message.
     ///
-    /// SDK bridge drivers use this to execute bridge tool calls without
+    /// SDK host adapters use this to execute bridge tool calls without
     /// exposing bridge handoff as a public [`RuntimeEvent`].
-    pub async fn next_driver_message(&mut self) -> Option<AgentLoopStreamMessage> {
-        self.events.next().await
-    }
-}
-
-struct BridgeToolResultCommand {
-    result: ToolCallResult,
-    content: crate::ArtifactContent,
-    ack_sender: oneshot::Sender<Result<(), RuntimeError>>,
-}
-
-impl Stream for AgentLoopEventStream {
-    type Item = RuntimeEvent;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            match Pin::new(&mut self.events).poll_next(cx) {
-                Poll::Ready(Some(AgentLoopStreamMessage::Event(event))) => {
-                    return Poll::Ready(Some(event));
-                }
-                Poll::Ready(Some(AgentLoopStreamMessage::BridgeToolRequest { .. })) => continue,
-                Poll::Ready(None) => {
-                    self.producer_handle.take();
-                    return Poll::Ready(None);
-                }
-                Poll::Pending => return Poll::Pending,
-            }
+    pub async fn next_message(&mut self) -> Result<Option<AgentRunMessage>, RuntimeError> {
+        self.synchronize_bridge_resolution();
+        if let Some(batch) = self.pending_tool_invocations.as_ref() {
+            return Err(RuntimeError::AgentRunToolInvocationsPending {
+                session_id: self.session_id.clone(),
+                batch_id: batch.id().clone(),
+            });
         }
+        let Some(message) = self.events.next().await else {
+            return Ok(None);
+        };
+        if let AgentRunMessage::ToolInvocations { batch } = &message {
+            if batch.calls().is_empty() {
+                return Err(RuntimeError::BridgeToolResultBatchEmpty {
+                    session_id: self.session_id.clone(),
+                });
+            }
+            self.pending_tool_invocations = Some(batch.clone());
+        }
+        Ok(Some(message))
+    }
+
+    /// Returns the next runtime-owned run message.
+    ///
+    /// This Rust convenience alias has the same message-first semantics as
+    /// [`Self::next_message`]; it never filters host-tool handoffs.
+    pub async fn next(&mut self) -> Result<Option<AgentRunMessage>, RuntimeError> {
+        self.next_message().await
+    }
+
+    /// Requests cancellation without waiting for the producer task to stop.
+    ///
+    /// This is intended for synchronous cleanup guards that cannot await, such
+    /// as a facade tool-invocation lease being dropped before it is resolved.
+    /// Callers that own an async lifecycle should prefer [`Self::cancel_and_wait`]
+    /// so producer completion and the terminal result are observed explicitly.
+    pub fn request_cancel(&mut self) {
+        self.loop_token.cancel();
+        self.pending_tool_invocations = None;
     }
 }
 
-impl Drop for AgentLoopEventStream {
+impl Drop for AgentRun {
     fn drop(&mut self) {
         self.loop_token.cancel();
         if let Some(handle) = self.producer_handle.take() {
@@ -327,34 +497,43 @@ impl Drop for AgentLoopEventStream {
     }
 }
 
-/// Internal agent-loop stream driver message.
-// Keep the public event inline to preserve the stable stream API and avoid per-event allocation.
+/// Message emitted by an [`AgentRun`].
+// Keep the public event inline to avoid an allocation for every streamed event.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum AgentLoopStreamMessage {
+pub enum AgentRunMessage {
     /// Public SDK/UI event.
     Event(RuntimeEvent),
-    /// Bridge tool request for SDK-internal execution.
-    BridgeToolRequest {
-        /// Tool call that must be executed by the bridge host.
-        call: PendingToolCall,
+    /// Ordered host-owned tool calls from one runtime execution wave.
+    ///
+    /// Runtime-owned calls from the same model response are executed internally
+    /// and are not emitted here. A single host call is represented as a
+    /// one-call batch; calls are never combined across model responses or
+    /// separate run reads.
+    ToolInvocations {
+        /// Runtime-owned batch ID and host-owned calls in provider/model order.
+        /// Every call must be resolved before the run can request the next
+        /// runtime execution wave or model response.
+        batch: PendingToolCallBatch,
     },
 }
 
-impl AgentLoopStreamMessage {
+impl AgentRunMessage {
     #[must_use]
     pub fn as_event(&self) -> Option<&RuntimeEvent> {
         match self {
             Self::Event(event) => Some(event),
-            Self::BridgeToolRequest { .. } => None,
+            Self::ToolInvocations { .. } => None,
         }
     }
 
+    /// Borrows the runtime-owned tool batch when this message carries a host
+    /// invocation handoff.
     #[must_use]
-    pub fn as_bridge_tool_request(&self) -> Option<&PendingToolCall> {
+    pub fn as_tool_invocations(&self) -> Option<&PendingToolCallBatch> {
         match self {
-            Self::BridgeToolRequest { call } => Some(call),
+            Self::ToolInvocations { batch } => Some(batch),
             Self::Event(_) => None,
         }
     }
@@ -470,15 +649,20 @@ impl Runtime {
         context: StepContext,
         config: AgentLoopConfig,
     ) -> Result<AgentLoopResult, AgentLoopError> {
+        let (loop_token, generation_config, context_contract) = context.into_parts();
+        let config = config
+            .merge_context_final_output_contract(context_contract)
+            .map_err(|source| {
+                AgentLoopError::new(Vec::new(), RuntimeError::AgentLoopConfig { source })
+            })?;
         let loop_permit = self
             .acquire_active_step_permit()
             .map_err(|source| AgentLoopError::new(Vec::new(), source))?;
-        let loop_token = context.cancellation_token().clone();
-        let generation_config = context.generation_config().clone();
         let mut next_input = Some(input);
         let mut deferred_user_input = None;
         let mut events = Vec::new();
         let mut model_turns_run = 0;
+        let mut structured_output_retries: usize = 0;
 
         tracing::info!(
             event = "runtime.loop.start",
@@ -717,6 +901,7 @@ impl Runtime {
                         .final_output_contract()
                         .map(|contract| contract.validate_call(&call))
                     {
+                        let error_message = error.message();
                         let mut failure_events = match self
                             .submit_tool_input_validation_failure_with_active_permit(
                                 &call,
@@ -736,30 +921,64 @@ impl Runtime {
                             }
                         };
                         events.append(&mut failure_events);
-
-                        if model_turns_run >= config.max_model_turns() {
-                            trace_loop_finish(
-                                self.session_id().as_str(),
-                                "blocked",
-                                model_turns_run,
-                                Some("max_model_turns_reached"),
-                            );
-                            let session_usage = self.usage().await;
-                            return Ok(AgentLoopResult::new(
-                                AgentLoopStatus::Blocked {
-                                    reason: AgentLoopBlockedReason::MaxModelTurnsReached {
-                                        max_model_turns: config.max_model_turns(),
-                                    },
-                                },
-                                events,
-                                model_turns_run,
-                                None,
-                                session_usage,
-                            ));
+                        structured_output_retries = structured_output_retries.saturating_add(1);
+                        if can_retry_structured_output(
+                            &config,
+                            structured_output_retries,
+                            model_turns_run,
+                        ) {
+                            next_input = Some(continuation_step_input());
+                            continue;
                         }
 
-                        next_input = Some(continuation_step_input());
-                        continue;
+                        return Ok(structured_output_failure_result(
+                            self,
+                            events,
+                            model_turns_run,
+                            error_message,
+                        )
+                        .await);
+                    }
+
+                    if let Some(contract) = config.final_output_contract()
+                        && let Err(error_message) = validate_final_output(contract, &call)
+                    {
+                        let mut failure_events = match self
+                            .submit_structured_output_failure_with_active_permit(
+                                call.id(),
+                                &error_message,
+                                &loop_permit,
+                            )
+                            .await
+                        {
+                            Ok(events) => events,
+                            Err(source) => {
+                                trace_loop_error(
+                                    self.session_id().as_str(),
+                                    model_turns_run,
+                                    &source,
+                                );
+                                return Err(AgentLoopError::new(events, source));
+                            }
+                        };
+                        events.append(&mut failure_events);
+                        structured_output_retries = structured_output_retries.saturating_add(1);
+                        if can_retry_structured_output(
+                            &config,
+                            structured_output_retries,
+                            model_turns_run,
+                        ) {
+                            next_input = Some(continuation_step_input());
+                            continue;
+                        }
+
+                        return Ok(structured_output_failure_result(
+                            self,
+                            events,
+                            model_turns_run,
+                            error_message,
+                        )
+                        .await);
                     }
 
                     let (final_output, mut final_events) =
@@ -968,22 +1187,28 @@ impl Runtime {
     /// Starts a bounded runtime-owned agent loop and returns live events.
     ///
     /// This has the same loop semantics as [`Runtime::run_agent_loop`], but it
-    /// yields each observed [`RuntimeJournalEvent`] as soon as the underlying step or
-    /// tool execution produces it. Dropping the returned stream cancels the loop
-    /// token and aborts the loop producer.
+    /// returns an [`AgentRun`] handle that yields each observed
+    /// [`RuntimeJournalEvent`] as soon as the underlying step or tool execution
+    /// produces it. Dropping the handle cancels the loop token and aborts the
+    /// loop producer as a final cleanup guard.
     pub fn run_agent_loop_stream(
         &self,
         input: StepInput,
         context: StepContext,
         config: AgentLoopConfig,
-    ) -> Result<AgentLoopEventStream, RuntimeError> {
+    ) -> Result<AgentRun, RuntimeError> {
+        let (parent_token, generation_config, context_contract) = context.into_parts();
+        let config = config
+            .merge_context_final_output_contract(context_contract)
+            .map_err(|source| RuntimeError::AgentLoopConfig { source })?;
         let loop_permit = self.acquire_active_step_permit()?;
-        let (parent_token, generation_config, _final_output_contract) = context.into_parts();
         let loop_token = parent_token.child_token();
         let producer_token = loop_token.clone();
         let (sender, receiver) = mpsc::channel(16);
         let (result_sender, result_receiver) = oneshot::channel();
         let (bridge_sender, bridge_receiver) = mpsc::channel(1);
+        let bridge_resolution_epoch = Arc::new(AtomicU64::new(0));
+        let producer_bridge_resolution_epoch = Arc::clone(&bridge_resolution_epoch);
         let runtime = self.clone();
         let session_id = self.session_id().clone();
         let producer_handle = tokio::spawn(async move {
@@ -996,18 +1221,20 @@ impl Runtime {
                 loop_permit,
                 sender,
                 bridge_receiver,
+                bridge_resolution_epoch: producer_bridge_resolution_epoch,
             })
             .await;
             let _ = result_sender.send(result);
         });
 
-        Ok(AgentLoopEventStream::new(
+        Ok(AgentRun::new(
             session_id,
             ReceiverStream::new(receiver),
             loop_token,
             producer_handle,
             result_receiver,
             bridge_sender,
+            bridge_resolution_epoch,
         ))
     }
 }
@@ -1019,8 +1246,9 @@ struct AgentLoopStreamProducer {
     generation_config: merry_llm::GenerationConfig,
     config: AgentLoopConfig,
     loop_permit: ActiveStepPermit,
-    sender: mpsc::Sender<AgentLoopStreamMessage>,
+    sender: mpsc::Sender<AgentRunMessage>,
     bridge_receiver: mpsc::Receiver<BridgeToolResultCommand>,
+    bridge_resolution_epoch: Arc<AtomicU64>,
 }
 
 async fn run_agent_loop_stream_producer(
@@ -1035,12 +1263,15 @@ async fn run_agent_loop_stream_producer(
         loop_permit,
         sender,
         mut bridge_receiver,
+        bridge_resolution_epoch,
     } = producer;
     let mut next_input = Some(input);
     let mut deferred_user_input = None;
     let mut events = Vec::new();
     let mut projector = RuntimeEventProjector::new();
     let mut model_turns_run = 0;
+    let mut bridge_batch_sequence = 0_u64;
+    let mut structured_output_retries: usize = 0;
 
     loop {
         if let Some(notification_input) = take_subagent_notification_input(&runtime).await {
@@ -1191,14 +1422,29 @@ async fn run_agent_loop_stream_producer(
                     ));
                 }
 
-                let mut runtime_wave = Vec::new();
+                let mut waves = Vec::new();
                 for call in calls {
                     match call {
-                        PendingLoopToolCall::Runtime(call) => runtime_wave.push(call),
-                        PendingLoopToolCall::Bridge(call) => {
+                        PendingLoopToolCall::Runtime(call) => match waves.last_mut() {
+                            Some(PendingLoopToolWave::Runtime(wave)) => wave.push(call),
+                            _ => waves.push(PendingLoopToolWave::Runtime(vec![call])),
+                        },
+                        PendingLoopToolCall::Bridge(call) => match waves.last_mut() {
+                            Some(PendingLoopToolWave::Bridge(wave)) => wave.push(call),
+                            _ => waves.push(PendingLoopToolWave::Bridge(vec![call])),
+                        },
+                        PendingLoopToolCall::FinalOutput(_) => {
+                            unreachable!("mixed final-output batches are rejected by provider step")
+                        }
+                    }
+                }
+
+                for wave in waves {
+                    match wave {
+                        PendingLoopToolWave::Runtime(calls) => {
                             if let Some(error) = execute_stream_runtime_batch(
                                 &runtime,
-                                std::mem::take(&mut runtime_wave),
+                                calls,
                                 &loop_token,
                                 &loop_permit,
                                 &mut projector,
@@ -1236,9 +1482,22 @@ async fn run_agent_loop_stream_producer(
                                     error,
                                 ));
                             }
-                            match receive_and_publish_bridge_tool_result(
+                        }
+                        PendingLoopToolWave::Bridge(calls) => {
+                            let batch_id = next_agent_run_batch_id(&mut bridge_batch_sequence)
+                                .map_err(|source| {
+                                    agent_loop_stream_error_with_source(
+                                        &runtime,
+                                        model_turns_run,
+                                        &events,
+                                        source,
+                                    )
+                                })?;
+                            match receive_and_publish_bridge_tool_results(
                                 &runtime,
-                                call,
+                                calls,
+                                batch_id,
+                                &bridge_resolution_epoch,
                                 &loop_token,
                                 &loop_permit,
                                 &mut bridge_receiver,
@@ -1273,43 +1532,7 @@ async fn run_agent_loop_stream_producer(
                                 }
                             }
                         }
-                        PendingLoopToolCall::FinalOutput(_) => {
-                            unreachable!("mixed final-output batches are rejected by provider step")
-                        }
                     }
-                }
-
-                if let Some(error) = execute_stream_runtime_batch(
-                    &runtime,
-                    runtime_wave,
-                    &loop_token,
-                    &loop_permit,
-                    &mut projector,
-                    &sender,
-                    &mut events,
-                )
-                .await
-                .map_err(|source| {
-                    agent_loop_stream_error_with_source(&runtime, model_turns_run, &events, source)
-                })? {
-                    if let RuntimeError::ToolExecutionCancelled { call_id, .. } = error {
-                        let session_usage = runtime.usage().await;
-                        return Ok(AgentLoopResult::new(
-                            AgentLoopStatus::Cancelled {
-                                diagnostic: tool_execution_cancelled_diagnostic(&call_id),
-                            },
-                            events,
-                            model_turns_run,
-                            None,
-                            session_usage,
-                        ));
-                    }
-                    return Err(agent_loop_stream_error_with_source(
-                        &runtime,
-                        model_turns_run,
-                        &events,
-                        error,
-                    ));
                 }
 
                 next_input = Some(continuation_step_input());
@@ -1373,6 +1596,7 @@ async fn run_agent_loop_stream_producer(
                         .final_output_contract()
                         .map(|contract| contract.validate_call(&call))
                     {
+                        let error_message = error.message();
                         let failure_events = runtime
                             .submit_tool_input_validation_failure_with_active_permit(
                                 &call,
@@ -1407,24 +1631,79 @@ async fn run_agent_loop_stream_producer(
                                 )
                             })?;
                         }
-
-                        if model_turns_run >= config.max_model_turns() {
-                            let session_usage = runtime.usage().await;
-                            return Ok(AgentLoopResult::new(
-                                AgentLoopStatus::Blocked {
-                                    reason: AgentLoopBlockedReason::MaxModelTurnsReached {
-                                        max_model_turns: config.max_model_turns(),
-                                    },
-                                },
-                                events,
-                                model_turns_run,
-                                None,
-                                session_usage,
-                            ));
+                        structured_output_retries = structured_output_retries.saturating_add(1);
+                        if can_retry_structured_output(
+                            &config,
+                            structured_output_retries,
+                            model_turns_run,
+                        ) {
+                            next_input = Some(continuation_step_input());
+                            continue;
                         }
 
-                        next_input = Some(continuation_step_input());
-                        continue;
+                        return Ok(structured_output_failure_result(
+                            &runtime,
+                            events,
+                            model_turns_run,
+                            error_message,
+                        )
+                        .await);
+                    }
+
+                    if let Some(contract) = config.final_output_contract()
+                        && let Err(error_message) = validate_final_output(contract, &call)
+                    {
+                        let failure_events = runtime
+                            .submit_structured_output_failure_with_active_permit(
+                                call.id(),
+                                &error_message,
+                                &loop_permit,
+                            )
+                            .await
+                            .map_err(|source| {
+                                agent_loop_stream_error_with_source(
+                                    &runtime,
+                                    model_turns_run,
+                                    &events,
+                                    source,
+                                )
+                            })?;
+
+                        for event in failure_events {
+                            publish_journal_event(
+                                &runtime,
+                                &mut projector,
+                                &sender,
+                                &mut events,
+                                event,
+                            )
+                            .await
+                            .map_err(|source| {
+                                agent_loop_stream_error_with_source(
+                                    &runtime,
+                                    model_turns_run,
+                                    &events,
+                                    source,
+                                )
+                            })?;
+                        }
+                        structured_output_retries = structured_output_retries.saturating_add(1);
+                        if can_retry_structured_output(
+                            &config,
+                            structured_output_retries,
+                            model_turns_run,
+                        ) {
+                            next_input = Some(continuation_step_input());
+                            continue;
+                        }
+
+                        return Ok(structured_output_failure_result(
+                            &runtime,
+                            events,
+                            model_turns_run,
+                            error_message,
+                        )
+                        .await);
                     }
 
                     let (final_output, events_for_final_output) =
@@ -1518,62 +1797,132 @@ async fn run_agent_loop_stream_producer(
                             }
                         }
                         PendingLoopToolCall::Bridge(call) => {
-                            let command = match receive_bridge_tool_result(
-                                &mut bridge_receiver,
-                                &loop_token,
+                            let batch = PendingToolCallBatch::new(
+                                next_agent_run_batch_id(&mut bridge_batch_sequence).map_err(
+                                    |source| {
+                                        agent_loop_stream_error_with_source(
+                                            &runtime,
+                                            model_turns_run,
+                                            &events,
+                                            source,
+                                        )
+                                    },
+                                )?,
+                                vec![call.clone()],
                             )
-                            .await
-                            {
-                                Some(command) => command,
-                                None if loop_token.is_cancelled() => {
-                                    let session_usage = runtime.usage().await;
-                                    return Ok(AgentLoopResult::new(
-                                        AgentLoopStatus::Cancelled {
-                                            diagnostic: agent_loop_cancelled_diagnostic(),
-                                        },
-                                        events,
-                                        model_turns_run,
-                                        None,
-                                        session_usage,
-                                    ));
-                                }
-                                None => {
-                                    return Err(agent_loop_stream_error(
-                                        runtime.session_id(),
-                                        events,
-                                        "bridge tool result channel closed before the call was resolved",
-                                    ));
-                                }
-                            };
-
-                            let call_id = command.result.call_id().clone();
-                            let result = if call_id == *call.id() {
-                                runtime
-                                    .submit_tool_result_with_active_permit(
-                                        command.result,
-                                        command.content,
-                                        &loop_permit,
-                                    )
-                                    .await
-                            } else {
-                                Err(RuntimeError::UnknownToolCall {
-                                    session_id: runtime.session_id().clone(),
-                                    call_id,
+                            .map_err(|source| {
+                                agent_loop_stream_error_with_source(
+                                    &runtime,
+                                    model_turns_run,
+                                    &events,
+                                    RuntimeError::from(source),
+                                )
+                            })?;
+                            sender
+                                .send(AgentRunMessage::ToolInvocations {
+                                    batch: batch.clone(),
                                 })
-                            };
-
-                            match result {
-                                Ok(events) => {
-                                    let _ = command.ack_sender.send(Ok(()));
-                                    events
-                                }
-                                Err(error) => {
-                                    let _ = command.ack_sender.send(Err(error));
-                                    return Err(agent_loop_stream_error(
+                                .await
+                                .map_err(|_| {
+                                    agent_loop_stream_error(
                                         runtime.session_id(),
-                                        events,
-                                        "bridge tool result could not be recorded",
-                                    ));
+                                        events.clone(),
+                                        "bridge invocation receiver closed before the request was delivered",
+                                    )
+                                })?;
+                            loop {
+                                let command = match receive_bridge_tool_result(
+                                    &mut bridge_receiver,
+                                    &loop_token,
+                                )
+                                .await
+                                {
+                                    Some(command) => command,
+                                    None if loop_token.is_cancelled() => {
+                                        let settlement = settle_cancelled_bridge_tool_calls(
+                                            &runtime,
+                                            batch.calls(),
+                                            &loop_permit,
+                                            &mut projector,
+                                            &sender,
+                                            &mut events,
+                                        )
+                                        .await;
+                                        bridge_resolution_epoch.fetch_add(1, Ordering::AcqRel);
+                                        settlement.map_err(|source| {
+                                            agent_loop_stream_error_with_source(
+                                                &runtime,
+                                                model_turns_run,
+                                                &events,
+                                                source,
+                                            )
+                                        })?;
+                                        let session_usage = runtime.usage().await;
+                                        return Ok(AgentLoopResult::new(
+                                            AgentLoopStatus::Cancelled {
+                                                diagnostic: agent_loop_cancelled_diagnostic(),
+                                            },
+                                            events,
+                                            model_turns_run,
+                                            None,
+                                            session_usage,
+                                        ));
+                                    }
+                                    None => {
+                                        return Err(agent_loop_stream_error(
+                                            runtime.session_id(),
+                                            events,
+                                            "bridge tool result channel closed before the call was resolved",
+                                        ));
+                                    }
+                                };
+
+                                let (ack_sender, result) = resolve_bridge_tool_result_command(
+                                    &runtime,
+                                    &batch,
+                                    command,
+                                    &loop_permit,
+                                )
+                                .await;
+                                match result {
+                                    Ok(events) => {
+                                        bridge_resolution_epoch.fetch_add(1, Ordering::AcqRel);
+                                        let _ = ack_sender.send(Ok(()));
+                                        break events;
+                                    }
+                                    Err(error) if error.is_retryable_bridge_tool_result() => {
+                                        let _ = ack_sender.send(Err(error));
+                                    }
+                                    Err(error) => {
+                                        let message = error.to_string();
+                                        let _ = ack_sender.send(Err(
+                                            RuntimeError::BridgeToolResultRejected {
+                                                session_id: runtime.session_id().clone(),
+                                                message: message.clone(),
+                                            },
+                                        ));
+                                        settle_failed_bridge_tool_calls(
+                                            &runtime,
+                                            batch.calls(),
+                                            &loop_permit,
+                                            &mut projector,
+                                            &sender,
+                                            &mut events,
+                                            &message,
+                                        )
+                                        .await
+                                        .map_err(
+                                            |source| {
+                                                agent_loop_stream_error_with_source(
+                                                    &runtime,
+                                                    model_turns_run,
+                                                    &events,
+                                                    source,
+                                                )
+                                            },
+                                        )?;
+                                        break Vec::new();
+                                    }
                                 }
                             }
                         }
@@ -1665,49 +2014,79 @@ async fn final_assistant_output_from_step(
     None
 }
 
-async fn record_final_output_tool_call(
+pub(crate) async fn record_final_output_tool_call(
     runtime: &Runtime,
     call: PendingToolCall,
 ) -> Result<(FinalOutput, Vec<RuntimeJournalEvent>), RuntimeError> {
     runtime.record_final_output_tool_call(call).await
 }
 
+pub(crate) fn validate_final_output(
+    contract: &FinalOutputContract,
+    call: &PendingToolCall,
+) -> Result<(), String> {
+    let json = serde_json::to_string(call.arguments().as_object())
+        .map_err(|source| format!("structured output could not be serialized: {source}"))?;
+    contract.validate_output(&json)
+}
+
+pub(crate) fn can_retry_structured_output(
+    config: &AgentLoopConfig,
+    retries: usize,
+    model_turns_run: usize,
+) -> bool {
+    retries <= config.structured_output_retry_policy().max_retries()
+        && model_turns_run < config.max_model_turns()
+}
+
+async fn structured_output_failure_result(
+    runtime: &Runtime,
+    events: Vec<RuntimeJournalEvent>,
+    model_turns_run: usize,
+    message: String,
+) -> AgentLoopResult {
+    tracing::debug!(
+        session_id = runtime.session_id().as_str(),
+        model_turns_run,
+        error = %message,
+        "structured output retry policy exhausted"
+    );
+    let session_usage = runtime.usage().await;
+    AgentLoopResult::new(
+        AgentLoopStatus::Failed {
+            diagnostic: ErrorInfo::new(
+                "structured_output_invalid",
+                "structured final output could not be decoded as the requested type",
+            )
+            .expect("static structured output diagnostic is valid"),
+        },
+        events,
+        model_turns_run,
+        None,
+        session_usage,
+    )
+}
+
 async fn publish_journal_event(
     runtime: &Runtime,
     projector: &mut RuntimeEventProjector,
-    sender: &mpsc::Sender<AgentLoopStreamMessage>,
+    sender: &mpsc::Sender<AgentRunMessage>,
     events: &mut Vec<RuntimeJournalEvent>,
     event: RuntimeJournalEvent,
 ) -> Result<(), RuntimeError> {
-    let bridge_call = match &event.payload {
-        RuntimeJournalPayload::BridgeToolCallRequested { call } => Some(call.clone()),
-        _ => None,
-    };
     let projected = projector.project(event.clone(), runtime).await?;
 
     events.push(event);
 
     if let Some(projected) = projected
         && sender
-            .send(AgentLoopStreamMessage::Event(projected))
+            .send(AgentRunMessage::Event(projected))
             .await
             .is_err()
     {
-        return Err(RuntimeError::AgentLoopStreamClosed {
+        return Err(RuntimeError::AgentRunClosed {
             session_id: runtime.session_id().clone(),
             message: "public event receiver closed before the event was delivered",
-        });
-    }
-
-    if let Some(call) = bridge_call
-        && sender
-            .send(AgentLoopStreamMessage::BridgeToolRequest { call })
-            .await
-            .is_err()
-    {
-        return Err(RuntimeError::AgentLoopStreamClosed {
-            session_id: runtime.session_id().clone(),
-            message: "bridge event receiver closed before the request was delivered",
         });
     }
 
@@ -1755,7 +2134,7 @@ fn agent_loop_stream_error(
 ) -> AgentLoopError {
     AgentLoopError::new(
         events,
-        RuntimeError::AgentLoopStreamClosed {
+        RuntimeError::AgentRunClosed {
             session_id: session_id.clone(),
             message,
         },
@@ -1799,6 +2178,7 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
     match error {
         RuntimeError::StepAlreadyActive { .. } => "step_already_active",
         RuntimeError::InvalidStepInput { .. } => "invalid_step_input",
+        RuntimeError::AgentLoopConfig { .. } => "agent_loop_config",
         RuntimeError::ChildRuntimeBuild { .. } => "child_runtime_build",
         RuntimeError::InvalidSubagentSelection { .. } => "invalid_subagent_selection",
         RuntimeError::PlanEffectAttribution { .. } => "plan_effect_attribution_failed",
@@ -1806,13 +2186,24 @@ fn runtime_error_code(error: &RuntimeError) -> &'static str {
         RuntimeError::InvalidUserImageInput { .. } => "invalid_user_image_input",
         RuntimeError::ReservedArtifactId { .. } => "reserved_artifact_id",
         RuntimeError::UnknownToolCall { .. } => "unknown_tool_call",
+        RuntimeError::BridgeToolResultBatchEmpty { .. } => "bridge_tool_result_batch_empty",
+        RuntimeError::BridgeToolResultBatchMismatch { .. } => "bridge_tool_result_batch_mismatch",
+        RuntimeError::BridgeToolResultBatchIdMismatch { .. } => {
+            "bridge_tool_result_batch_id_mismatch"
+        }
+        RuntimeError::AgentRunToolInvocationsPending { .. } => "agent_run_tool_invocations_pending",
+        RuntimeError::NoPendingAgentRunToolInvocations { .. } => {
+            "no_pending_agent_run_tool_invocations"
+        }
         RuntimeError::ToolCallAlreadyResolved { .. } => "tool_call_already_resolved",
         RuntimeError::DuplicateToolRegistration { .. } => "duplicate_tool_registration",
+        RuntimeError::ReservedToolName { .. } => "reserved_tool_name",
         RuntimeError::InvalidToolInputSchema { .. } => "invalid_tool_input_schema",
         RuntimeError::BridgeToolsNotAllowed { .. } => "bridge_tools_not_allowed",
         RuntimeError::ToolExecutionCancelled { .. } => "tool_execution_cancelled",
         RuntimeError::ToolExecutionFailed { .. } => "tool_execution_failed",
-        RuntimeError::AgentLoopStreamClosed { .. } => "agent_loop_stream_closed",
+        RuntimeError::AgentRunClosed { .. } => "agent_run_closed",
+        RuntimeError::BridgeToolResultRejected { .. } => "bridge_tool_result_rejected",
         RuntimeError::MissingActionExecutionEvidence { .. } => "missing_action_execution_evidence",
         RuntimeError::MutatingActionCommitLifecycleRequired { .. } => {
             "mutating_action_commit_lifecycle_required"
@@ -1891,6 +2282,11 @@ pub(crate) enum PendingLoopToolCall {
     Runtime(PendingToolCall),
     Bridge(PendingToolCall),
     FinalOutput(PendingToolCall),
+}
+
+enum PendingLoopToolWave {
+    Runtime(Vec<PendingToolCall>),
+    Bridge(Vec<PendingToolCall>),
 }
 
 pub(crate) fn classify_step_events(
@@ -1999,23 +2395,13 @@ fn classify_pending_tool_call(
     }
 }
 
-async fn receive_bridge_tool_result(
-    receiver: &mut mpsc::Receiver<BridgeToolResultCommand>,
-    token: &tokio_util::sync::CancellationToken,
-) -> Option<BridgeToolResultCommand> {
-    tokio::select! {
-        command = receiver.recv() => command,
-        () = token.cancelled() => None,
-    }
-}
-
 async fn execute_stream_runtime_batch(
     runtime: &Runtime,
     calls: Vec<PendingToolCall>,
     token: &tokio_util::sync::CancellationToken,
     loop_permit: &ActiveStepPermit,
     projector: &mut RuntimeEventProjector,
-    sender: &mpsc::Sender<AgentLoopStreamMessage>,
+    sender: &mpsc::Sender<AgentRunMessage>,
     events: &mut Vec<RuntimeJournalEvent>,
 ) -> Result<Option<RuntimeError>, RuntimeError> {
     if calls.is_empty() {
@@ -2037,57 +2423,160 @@ async fn execute_stream_runtime_batch(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn receive_and_publish_bridge_tool_result(
+async fn receive_and_publish_bridge_tool_results(
     runtime: &Runtime,
-    call: PendingToolCall,
+    calls: Vec<PendingToolCall>,
+    batch_id: ToolCallBatchId,
+    bridge_resolution_epoch: &AtomicU64,
     token: &tokio_util::sync::CancellationToken,
     loop_permit: &ActiveStepPermit,
     receiver: &mut mpsc::Receiver<BridgeToolResultCommand>,
     projector: &mut RuntimeEventProjector,
-    sender: &mpsc::Sender<AgentLoopStreamMessage>,
+    sender: &mpsc::Sender<AgentRunMessage>,
     events: &mut Vec<RuntimeJournalEvent>,
 ) -> Result<(), RuntimeError> {
-    let command = match receive_bridge_tool_result(receiver, token).await {
-        Some(command) => command,
-        None if token.is_cancelled() => {
-            return Err(RuntimeError::ToolExecutionCancelled {
-                session_id: runtime.session_id().clone(),
-                call_id: call.id().clone(),
-            });
-        }
-        None => {
-            return Err(RuntimeError::AgentLoopStreamClosed {
-                session_id: runtime.session_id().clone(),
-                message: "bridge tool result channel closed before the call was resolved",
-            });
-        }
+    let batch = PendingToolCallBatch::new(batch_id, calls).map_err(RuntimeError::from)?;
+    let request = AgentRunMessage::ToolInvocations {
+        batch: batch.clone(),
     };
-    let call_id = command.result.call_id().clone();
-    let result = if call_id == *call.id() {
-        runtime
-            .submit_tool_result_with_active_permit(command.result, command.content, loop_permit)
-            .await
-    } else {
-        Err(RuntimeError::UnknownToolCall {
+    sender
+        .send(request)
+        .await
+        .map_err(|_| RuntimeError::AgentRunClosed {
             session_id: runtime.session_id().clone(),
-            call_id,
-        })
-    };
+            message: "bridge invocation receiver closed before the request was delivered",
+        })?;
 
-    match result {
-        Ok(result_events) => {
-            let _ = command.ack_sender.send(Ok(()));
-            for event in result_events {
-                publish_journal_event(runtime, projector, sender, events, event).await?;
+    loop {
+        let command = match receive_bridge_tool_result(receiver, token).await {
+            Some(command) => command,
+            None if token.is_cancelled() => {
+                let Some(first_call) = batch.calls().first() else {
+                    return Err(RuntimeError::BridgeToolResultBatchEmpty {
+                        session_id: runtime.session_id().clone(),
+                    });
+                };
+                let settlement = settle_cancelled_bridge_tool_calls(
+                    runtime,
+                    batch.calls(),
+                    loop_permit,
+                    projector,
+                    sender,
+                    events,
+                )
+                .await;
+                bridge_resolution_epoch.fetch_add(1, Ordering::AcqRel);
+                settlement?;
+                return Err(RuntimeError::ToolExecutionCancelled {
+                    session_id: runtime.session_id().clone(),
+                    call_id: first_call.id().clone(),
+                });
             }
-            Ok(())
-        }
-        Err(error) => {
-            let _ = command.ack_sender.send(Err(error));
-            Err(RuntimeError::AgentLoopStreamClosed {
-                session_id: runtime.session_id().clone(),
-                message: "bridge tool result could not be recorded",
-            })
+            None => {
+                return Err(RuntimeError::AgentRunClosed {
+                    session_id: runtime.session_id().clone(),
+                    message: "bridge tool result channel closed before invocations were resolved",
+                });
+            }
+        };
+        let (ack_sender, result) =
+            resolve_bridge_tool_result_command(runtime, &batch, command, loop_permit).await;
+        match result {
+            Ok(result_events) => {
+                bridge_resolution_epoch.fetch_add(1, Ordering::AcqRel);
+                let _ = ack_sender.send(Ok(()));
+                for event in result_events {
+                    publish_journal_event(runtime, projector, sender, events, event).await?;
+                }
+                return Ok(());
+            }
+            Err(error) if error.is_retryable_bridge_tool_result() => {
+                let _ = ack_sender.send(Err(error));
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let _ = ack_sender.send(Err(RuntimeError::BridgeToolResultRejected {
+                    session_id: runtime.session_id().clone(),
+                    message: message.clone(),
+                }));
+                settle_failed_bridge_tool_calls(
+                    runtime,
+                    batch.calls(),
+                    loop_permit,
+                    projector,
+                    sender,
+                    events,
+                    &message,
+                )
+                .await?;
+                return Ok(());
+            }
         }
     }
+}
+
+async fn settle_cancelled_bridge_tool_calls(
+    runtime: &Runtime,
+    calls: &[PendingToolCall],
+    loop_permit: &ActiveStepPermit,
+    projector: &mut RuntimeEventProjector,
+    sender: &mpsc::Sender<AgentRunMessage>,
+    events: &mut Vec<RuntimeJournalEvent>,
+) -> Result<(), RuntimeError> {
+    let pending_ids = runtime
+        .pending_tool_calls()
+        .await
+        .into_iter()
+        .map(|call| call.id().clone())
+        .collect::<BTreeSet<_>>();
+
+    for call in calls.iter().filter(|call| pending_ids.contains(call.id())) {
+        let failure_events = runtime
+            .submit_tool_abandoned_failure_with_active_permit(
+                call.id(),
+                "agent run cancelled before the bridge tool result was submitted",
+                loop_permit,
+            )
+            .await?;
+        for event in failure_events {
+            publish_journal_event(runtime, projector, sender, events, event).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn settle_failed_bridge_tool_calls(
+    runtime: &Runtime,
+    calls: &[PendingToolCall],
+    loop_permit: &ActiveStepPermit,
+    projector: &mut RuntimeEventProjector,
+    sender: &mpsc::Sender<AgentRunMessage>,
+    events: &mut Vec<RuntimeJournalEvent>,
+    message: &str,
+) -> Result<(), RuntimeError> {
+    let pending_ids = runtime
+        .pending_tool_calls()
+        .await
+        .into_iter()
+        .map(|call| call.id().clone())
+        .collect::<BTreeSet<_>>();
+
+    for call in calls.iter().filter(|call| pending_ids.contains(call.id())) {
+        let failure_events = runtime
+            .submit_tool_execution_failure_with_active_permit(call.id(), message, loop_permit)
+            .await?;
+        for event in failure_events {
+            publish_journal_event(runtime, projector, sender, events, event).await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn next_agent_run_batch_id(sequence: &mut u64) -> Result<ToolCallBatchId, RuntimeError> {
+    let batch_id =
+        ToolCallBatchId::new(&format!("agent-run-batch-{sequence}")).map_err(RuntimeError::from)?;
+    *sequence = (*sequence).saturating_add(1);
+    Ok(batch_id)
 }

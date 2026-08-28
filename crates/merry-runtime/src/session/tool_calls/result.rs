@@ -1,6 +1,6 @@
 use super::SessionState;
 use crate::{
-    ActionExecutionEvidence, RuntimeError,
+    ActionExecutionEvidence, RuntimeError, ToolExecutionOutcome,
     artifact::{ArtifactContent, ArtifactError},
     ledger::{LedgerFactKind, LedgerUpdateKind},
     session::transcript::ToolResultPromptProjection,
@@ -9,6 +9,7 @@ use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, RuntimeJournalEvent, RuntimeJournalPayload,
     ToolCallId, ToolCallResult, ToolCallResultStatus,
 };
+use std::collections::{BTreeMap, BTreeSet};
 
 impl SessionState {
     pub(crate) fn record_final_output(
@@ -185,6 +186,110 @@ impl SessionState {
         };
 
         self.submit_tool_result(result, content)
+    }
+
+    pub(crate) fn submit_tool_execution_outcomes(
+        &mut self,
+        outcomes: Vec<(ToolCallId, ToolExecutionOutcome)>,
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+        if outcomes.is_empty() {
+            return Err(RuntimeError::BridgeToolResultBatchEmpty {
+                session_id: self.session_id.clone(),
+            });
+        }
+
+        self.validate_tool_execution_outcomes(&outcomes)?;
+
+        let mut outcomes_by_call_id = outcomes.into_iter().collect::<BTreeMap<_, _>>();
+        let ordered_outcomes = self
+            .pending_tool_calls
+            .iter()
+            .filter_map(|call| {
+                outcomes_by_call_id
+                    .remove(call.id())
+                    .map(|outcome| (call.id().clone(), outcome))
+            })
+            .collect::<Vec<_>>();
+        let mut events = Vec::new();
+        for (call_id, outcome) in ordered_outcomes {
+            let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
+            let mut call_events = self.submit_tool_execution_outcome(
+                &call_id,
+                status,
+                content,
+                diagnostic,
+                execution_evidence,
+            )?;
+            events.append(&mut call_events);
+        }
+        Ok(events)
+    }
+
+    fn validate_tool_execution_outcomes(
+        &self,
+        outcomes: &[(ToolCallId, ToolExecutionOutcome)],
+    ) -> Result<(), RuntimeError> {
+        let mut received_call_ids = BTreeSet::new();
+        for (call_id, outcome) in outcomes {
+            if !received_call_ids.insert(call_id.clone()) {
+                return Err(RuntimeError::BridgeToolResultBatchMismatch {
+                    session_id: self.session_id.clone(),
+                    expected_call_ids: self
+                        .pending_tool_calls
+                        .iter()
+                        .map(|call| call.id().clone())
+                        .collect(),
+                    received_call_ids: received_call_ids.into_iter().collect(),
+                });
+            }
+
+            if !self
+                .pending_tool_calls
+                .iter()
+                .any(|call| call.id() == call_id)
+            {
+                return if self.resolved_tool_calls.contains(call_id) {
+                    Err(RuntimeError::ToolCallAlreadyResolved {
+                        session_id: self.session_id.clone(),
+                        call_id: call_id.clone(),
+                    })
+                } else {
+                    Err(RuntimeError::UnknownToolCall {
+                        session_id: self.session_id.clone(),
+                        call_id: call_id.clone(),
+                    })
+                };
+            }
+
+            self.transcript
+                .model_turn_id_for_tool_call(call_id)
+                .ok_or_else(|| RuntimeError::TranscriptToolCallMissing {
+                    call_id: call_id.clone(),
+                })?;
+
+            let artifact_kind = self.tool_result_artifact_kind(outcome.content())?;
+            let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
+            let result = match outcome.status() {
+                ToolCallResultStatus::Succeeded => ToolCallResult::new(
+                    call_id.clone(),
+                    ToolCallResultStatus::Succeeded,
+                    artifact,
+                    outcome.diagnostic().cloned(),
+                )?,
+                ToolCallResultStatus::Failed => {
+                    let diagnostic = outcome.diagnostic().cloned().ok_or(RuntimeError::Core {
+                        source: merry_core::CoreError::InvalidToolCallResult {
+                            reason: "failed tool execution outcome must include a diagnostic",
+                        },
+                    })?;
+                    ToolCallResult::failed(call_id.clone(), artifact, diagnostic)
+                }
+            };
+            self.validate_tool_result_content(&result, outcome.content())?;
+            self.artifacts
+                .ensure_recordable(result.artifact(), outcome.content())?;
+        }
+        Ok(())
     }
 
     pub(super) fn record_tool_result_observation(&mut self, observation: LedgerUpdateKind) {

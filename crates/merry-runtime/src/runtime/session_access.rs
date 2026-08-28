@@ -102,6 +102,19 @@ impl Runtime {
         Ok(events)
     }
 
+    pub(crate) async fn submit_tool_execution_outcomes_with_active_permit(
+        &self,
+        outcomes: Vec<(ToolCallId, crate::ToolExecutionOutcome)>,
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+        let events = {
+            let mut session = self.inner.session.lock().await;
+            session.submit_tool_execution_outcomes(outcomes)?
+        };
+        self.inner.commit_journal_events(&events).await;
+        Ok(events)
+    }
+
     pub(crate) async fn record_final_output_tool_call(
         &self,
         call: PendingToolCall,
@@ -193,12 +206,12 @@ impl Runtime {
         Ok(pending.len())
     }
 
-    async fn submit_tool_abandoned_failure_with_active_permit(
+    pub(crate) async fn submit_tool_abandoned_failure_with_active_permit(
         &self,
         call_id: &ToolCallId,
         reason: &str,
         _active_permit: &ActiveStepPermit,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         let diagnostic = diagnostic_from_text(TOOL_ABANDONED_BY_SETTLEMENT_CODE, reason);
         let events = {
             let mut session = self.inner.session.lock().await;
@@ -211,7 +224,7 @@ impl Runtime {
             )?
         };
         self.inner.commit_journal_events(&events).await;
-        Ok(())
+        Ok(events)
     }
 
     /// Converts an executor infrastructure failure into a durable failed
@@ -230,6 +243,29 @@ impl Runtime {
                 call_id,
                 ToolCallResultStatus::Failed,
                 ArtifactContent::text(format!("Tool execution failed: {message}")),
+                Some(diagnostic),
+                None,
+            )?
+        };
+        self.inner.commit_journal_events(&events).await;
+        Ok(events)
+    }
+
+    pub(crate) async fn submit_structured_output_failure_with_active_permit(
+        &self,
+        call_id: &ToolCallId,
+        message: &str,
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+        let diagnostic = diagnostic_from_text("structured_output_invalid", message);
+        let events = {
+            let mut session = self.inner.session.lock().await;
+            session.submit_tool_execution_outcome(
+                call_id,
+                ToolCallResultStatus::Failed,
+                ArtifactContent::text(format!(
+                    "Structured output was invalid: {message}. Call merry_final_output again with a value matching the requested schema."
+                )),
                 Some(diagnostic),
                 None,
             )?

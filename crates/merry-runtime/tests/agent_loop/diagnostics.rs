@@ -363,7 +363,12 @@ async fn agent_loop_stream_infrastructure_error_preserves_events_and_pending_cal
                 AgentLoopConfig::default(),
             )
             .expect("agent loop stream should start");
-        while stream.next().await.is_some() {}
+        while stream
+            .next_message()
+            .await
+            .expect("agent run messages should be readable")
+            .is_some()
+        {}
         stream
             .result()
             .await

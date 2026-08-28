@@ -56,10 +56,35 @@ impl QueuedInputId {
 
 #[derive(Debug, Error)]
 pub enum InteractiveError {
+    /// The interactive producer ended without emitting the terminal closed event.
     #[error("interactive run {run_id:?} is closed")]
     RunClosed { run_id: InteractiveRunId },
+    /// The producer stopped before the stream's normal terminal event.
+    #[error(
+        "interactive run {run_id:?} producer stopped before the terminal closed event: {message}"
+    )]
+    ProducerStopped {
+        run_id: InteractiveRunId,
+        message: &'static str,
+    },
+    /// The producer task could not be joined successfully.
+    #[error("interactive run {run_id:?} producer task failed")]
+    ProducerTaskFailed { run_id: InteractiveRunId },
     #[error("interactive run {run_id:?} command channel is closed")]
     CommandChannelClosed { run_id: InteractiveRunId },
+    #[error("interactive run {run_id:?} has unresolved tool invocations")]
+    ToolInvocationsPending { run_id: InteractiveRunId },
+    #[error("interactive run {run_id:?} has no pending tool invocations")]
+    NoPendingToolInvocations { run_id: InteractiveRunId },
+    #[error(
+        "interactive run {run_id:?} emitted {count} tool invocations; consume them with the message protocol"
+    )]
+    ToolInvocationsRequireMessageProtocol {
+        run_id: InteractiveRunId,
+        count: usize,
+    },
+    #[error("interactive run {run_id:?} produced an invalid tool invocation batch")]
+    InvalidToolInvocationBatch { run_id: InteractiveRunId },
     #[error("invalid interactive input: {reason}")]
     InvalidInput { reason: &'static str },
     #[error("interactive input is unknown")]

@@ -2,8 +2,8 @@ use futures_util::{StreamExt, stream};
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, ModelUsage,
     PendingToolCall, ProviderName, RuntimeEvent, RuntimeJournalEvent, RuntimeJournalPayload,
-    SessionId, ToolCallId, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName,
-    ToolSpec,
+    SessionId, ToolCallBatchId, ToolCallId, ToolCallResult, ToolCallResultStatus, ToolInputSchema,
+    ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelInputItem,
@@ -12,16 +12,16 @@ use merry_llm::{
 };
 use merry_runtime::{
     ActionExecutionEvidence, ActionProposal, ActionProposalEvidence, AgentLoopBlockedReason,
-    AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, AgentLoopStreamMessage, ArtifactError,
-    AutomaticCompactionConfig, ChildRuntimeFactory, ChildRuntimeInput, CitationCompactionPolicy,
-    ContextEvidence, ContextSummary, FINAL_OUTPUT_TOOL_NAME, FinalOutputContract,
-    ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, ProjectRules, Runtime,
-    RuntimeError, RuntimeModelRole, StepContext, StepInput, SubagentConfig, SubagentManager,
-    SubagentStatusLabel, SubagentTaskSpec, TaskAnchor, ToolActionKind, ToolActionPreflight,
-    ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
-    process_command_tool,
+    AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, AgentRun, AgentRunMessage,
+    ArtifactError, AutomaticCompactionConfig, ChildRuntimeFactory, ChildRuntimeInput,
+    CitationCompactionPolicy, ContextEvidence, ContextSummary, FINAL_OUTPUT_TOOL_NAME,
+    FinalOutputContract, ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner,
+    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+    ProjectRules, Runtime, RuntimeError, RuntimeModelRole, StepContext, StepInput, SubagentConfig,
+    SubagentManager, SubagentStatusLabel, SubagentTaskSpec, TaskAnchor, ToolActionKind,
+    ToolActionPreflight, ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError,
+    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, WorkspacePatchExecutionEvidence,
+    WorkspacePatchProposal, process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Value, json};
@@ -107,6 +107,21 @@ fn artifact_id(value: &str) -> ArtifactId {
 
 fn tool_call_id(value: &str) -> ToolCallId {
     ToolCallId::new(value).expect("valid tool call id")
+}
+
+async fn next_agent_run_event(stream: &mut AgentRun) -> RuntimeEvent {
+    match stream
+        .next_message()
+        .await
+        .expect("agent run message should be readable")
+    {
+        Some(AgentRunMessage::Event(event)) => event,
+        Some(AgentRunMessage::ToolInvocations { .. }) => {
+            panic!("agent run emitted an unexpected host tool batch")
+        }
+        Some(_) => panic!("agent run emitted an unsupported message"),
+        None => panic!("agent run closed before the expected event"),
+    }
 }
 
 fn model_name() -> ModelName {
@@ -870,14 +885,18 @@ async fn run_agent_loop_stream_yields_step_events_before_provider_finishes() {
     started_rx
         .await
         .expect("provider should start and wait for release");
-    let first = tokio::time::timeout(Duration::from_millis(100), events.next())
-        .await
-        .expect("stream should yield before provider finishes")
-        .expect("session-start event should be present");
-    let second = tokio::time::timeout(Duration::from_millis(100), events.next())
-        .await
-        .expect("stream should yield before provider finishes")
-        .expect("step-start event should be present");
+    let first = tokio::time::timeout(
+        Duration::from_millis(100),
+        next_agent_run_event(&mut events),
+    )
+    .await
+    .expect("stream should yield before provider finishes");
+    let second = tokio::time::timeout(
+        Duration::from_millis(100),
+        next_agent_run_event(&mut events),
+    )
+    .await
+    .expect("stream should yield before provider finishes");
 
     assert_eq!(
         public_event_kind_names(&[first, second]),
@@ -887,7 +906,21 @@ async fn run_agent_loop_stream_yields_step_events_before_provider_finishes() {
     release_tx
         .send(())
         .expect("provider release receiver should still be waiting");
-    let remaining = events.collect::<Vec<_>>().await;
+    let mut remaining = Vec::new();
+    loop {
+        match events
+            .next_message()
+            .await
+            .expect("remaining agent run messages should be readable")
+        {
+            Some(AgentRunMessage::Event(event)) => remaining.push(event),
+            Some(AgentRunMessage::ToolInvocations { .. }) => {
+                panic!("agent run emitted an unexpected host tool batch")
+            }
+            Some(_) => panic!("agent run emitted an unsupported message"),
+            None => break,
+        }
+    }
     assert_eq!(
         public_event_kind_names(&remaining),
         ["AssistantMessage", "StepCompleted"]
@@ -913,19 +946,51 @@ async fn run_agent_loop_stream_resumes_same_loop_after_bridge_tool_result() {
         .expect("agent loop stream should start");
 
     let mut events = Vec::new();
-    while let Some(message) = stream.next_driver_message().await {
+    while let Some(message) = stream
+        .next_message()
+        .await
+        .expect("agent run message should be readable")
+    {
         match message {
-            AgentLoopStreamMessage::Event(event) => events.push(event),
-            AgentLoopStreamMessage::BridgeToolRequest { call } => {
+            AgentRunMessage::Event(event) => events.push(event),
+            AgentRunMessage::ToolInvocations { batch } => {
+                let [call] = batch.calls() else {
+                    panic!("one bridge call should be represented as a one-element batch");
+                };
                 assert_eq!(call.id().as_str(), "call-bridge");
-                let artifact = ArtifactRef::new(
-                    ArtifactId::new("sdk-bridge-result").expect("valid artifact id"),
-                    ArtifactKind::Json,
-                );
+                let batch_id = batch.id().clone();
+                let wrong_batch_id =
+                    ToolCallBatchId::new("wrong-batch").expect("valid test batch id");
+                let wrong_result = stream
+                    .submit_bridge_tool_outcomes(
+                        &wrong_batch_id,
+                        vec![(
+                            call.id().clone(),
+                            ToolExecutionOutcome::succeeded_json(r#"{"ok":true}"#),
+                        )],
+                    )
+                    .await
+                    .expect_err("a stale batch id must be rejected");
+                assert!(matches!(
+                    wrong_result,
+                    RuntimeError::BridgeToolResultBatchIdMismatch {
+                        expected_batch_id,
+                        received_batch_id,
+                        ..
+                    } if expected_batch_id == batch_id && received_batch_id == wrong_batch_id
+                ));
+                assert!(matches!(
+                    stream.next_message().await,
+                    Err(RuntimeError::AgentRunToolInvocationsPending { batch_id: pending_id, .. })
+                        if pending_id == batch_id
+                ));
                 stream
-                    .submit_bridge_tool_result(
-                        ToolCallResult::succeeded(tool_call_id("call-bridge"), artifact),
-                        merry_runtime::ArtifactContent::json(r#"{"ok":true}"#),
+                    .submit_bridge_tool_outcomes(
+                        &batch_id,
+                        vec![(
+                            tool_call_id("call-bridge"),
+                            ToolExecutionOutcome::succeeded_json(r#"{"ok":true}"#),
+                        )],
                     )
                     .await
                     .expect("bridge result should submit to the active loop");
@@ -985,22 +1050,36 @@ async fn run_agent_loop_stream_resumes_after_multiple_bridge_results_in_model_or
         .expect("agent loop stream should start");
 
     let mut requested = Vec::new();
-    while let Some(message) = stream.next_driver_message().await {
-        if let AgentLoopStreamMessage::BridgeToolRequest { call } = message {
-            let call_id = call.id().clone();
-            requested.push(call_id.as_str().to_owned());
-            let artifact = ArtifactRef::new(
-                ArtifactId::new(&format!("sdk-result-{}", call_id.as_str()))
-                    .expect("valid artifact id"),
-                ArtifactKind::Json,
+    while let Some(message) = stream
+        .next_message()
+        .await
+        .expect("agent run message should be readable")
+    {
+        if let AgentRunMessage::ToolInvocations { batch } = message {
+            requested.extend(
+                batch
+                    .calls()
+                    .iter()
+                    .map(|call| call.id().as_str().to_owned()),
             );
+            let outcomes = batch
+                .calls()
+                .iter()
+                .rev()
+                .map(|call| {
+                    (
+                        call.id().clone(),
+                        ToolExecutionOutcome::succeeded_json(format!(
+                            r#"{{"resolved":"{}"}}"#,
+                            call.id().as_str()
+                        )),
+                    )
+                })
+                .collect();
             stream
-                .submit_bridge_tool_result(
-                    ToolCallResult::succeeded(call_id, artifact),
-                    merry_runtime::ArtifactContent::json(r#"{"ok":true}"#),
-                )
+                .submit_bridge_tool_outcomes(batch.id(), outcomes)
                 .await
-                .expect("bridge result should submit to the active loop");
+                .expect("bridge result batch should submit to the active loop");
         }
     }
 
@@ -1019,6 +1098,81 @@ async fn run_agent_loop_stream_resumes_after_multiple_bridge_results_in_model_or
             .collect::<Vec<_>>(),
         ["call-bridge-1", "call-bridge-2"]
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn run_agent_loop_stream_cancellation_settles_pending_bridge_batch() {
+    let provider =
+        ScriptedModelProvider::new(vec![vec![Ok(completed_tool_call_batch_event(vec![
+            model_tool_call("call-bridge-cancel-1", "search_notes"),
+            model_tool_call("call-bridge-cancel-2", "search_notes"),
+        ]))]]);
+    let runtime = runtime_with_bridge_tool("agent-loop-stream-bridge-cancel", provider.clone());
+    let token = CancellationToken::new();
+    let mut stream = runtime
+        .run_agent_loop_stream(
+            StepInput::user_text("Search notes.").expect("valid step input"),
+            StepContext::new(token.clone()),
+            AgentLoopConfig::default(),
+        )
+        .expect("agent loop stream should start");
+
+    loop {
+        match stream
+            .next_message()
+            .await
+            .expect("agent run message should be readable")
+        {
+            Some(AgentRunMessage::Event(_)) => {}
+            Some(AgentRunMessage::ToolInvocations { batch }) => {
+                assert_eq!(batch.calls().len(), 2);
+                break;
+            }
+            Some(_) => panic!("agent run emitted an unsupported message"),
+            None => panic!("agent run closed before the bridge batch"),
+        }
+    }
+
+    token.cancel();
+    let cancellation_released_batch = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match stream.next_message().await {
+                Err(RuntimeError::AgentRunToolInvocationsPending { .. }) => {
+                    tokio::task::yield_now().await;
+                }
+                Ok(Some(_)) | Ok(None) | Err(_) => break true,
+            }
+        }
+    })
+    .await
+    .expect("producer cancellation should release the consumer batch");
+    assert!(cancellation_released_batch);
+    tokio::time::timeout(Duration::from_secs(1), stream.cancel_and_wait())
+        .await
+        .expect("cancelled bridge run should settle promptly");
+    let result = tokio::time::timeout(Duration::from_secs(1), stream.result())
+        .await
+        .expect("cancelled bridge run should return a result")
+        .expect("cancelled bridge run should produce a terminal result");
+
+    assert!(matches!(result.status(), AgentLoopStatus::Cancelled { .. }));
+    assert!(runtime.pending_tool_calls().await.is_empty());
+    let resolved = result
+        .events()
+        .iter()
+        .filter_map(|event| match &event.payload {
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(resolved.len(), 2);
+    assert!(resolved.iter().all(|result| {
+        result.status() == ToolCallResultStatus::Failed
+            && result
+                .diagnostic()
+                .is_some_and(|diagnostic| diagnostic.code() == "tool_abandoned_by_run_settlement")
+    }));
+    assert_eq!(provider.recorded_requests().len(), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1042,8 +1196,19 @@ async fn run_agent_loop_stream_completes_final_output_without_continuation_budge
         .expect("agent loop stream should start");
 
     let mut events = Vec::new();
-    while let Some(event) = stream.next().await {
-        events.push(event);
+    loop {
+        match stream
+            .next_message()
+            .await
+            .expect("agent run message should be readable")
+        {
+            Some(AgentRunMessage::Event(event)) => events.push(event),
+            Some(AgentRunMessage::ToolInvocations { .. }) => {
+                panic!("agent run emitted an unexpected host tool batch")
+            }
+            Some(_) => panic!("agent run emitted an unsupported message"),
+            None => break,
+        }
     }
     let result = stream.result().await.expect("stream should produce result");
 
@@ -1064,6 +1229,16 @@ async fn run_agent_loop_stream_completes_final_output_without_continuation_budge
             "ToolCallStarted",
             "FinalOutputRecorded",
         ]
+    );
+}
+
+#[test]
+fn structured_output_retries_are_opt_in() {
+    assert_eq!(
+        AgentLoopConfig::default()
+            .structured_output_retry_policy()
+            .max_retries(),
+        0
     );
 }
 
@@ -1110,6 +1285,55 @@ async fn agent_loop_completes_when_model_calls_final_output_tool() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn agent_loop_imports_final_output_contract_from_step_context() {
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_tool_call_event(
+        model_tool_call_with_arguments(
+            "call-context-final",
+            FINAL_OUTPUT_TOOL_NAME,
+            json!({"summary": "context contract"}),
+        ),
+    ))]]);
+    let runtime = runtime_with_provider("agent-loop-context-final-output", provider);
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text("Return structured order status.").expect("valid step input"),
+            StepContext::new(CancellationToken::new())
+                .with_final_output_contract(final_output_contract()),
+            AgentLoopConfig::default(),
+        )
+        .await
+        .expect("context final-output contract should be applied");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert!(result.final_output_json().is_some());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_rejects_duplicate_final_output_contract_sources() {
+    let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_text_event("unused"))]]);
+    let runtime = runtime_with_provider("agent-loop-duplicate-final-output", provider.clone());
+
+    let error = runtime
+        .run_agent_loop(
+            StepInput::user_text("Return structured order status.").expect("valid step input"),
+            StepContext::new(CancellationToken::new())
+                .with_final_output_contract(final_output_contract()),
+            AgentLoopConfig::default().with_final_output_contract(final_output_contract()),
+        )
+        .await
+        .expect_err("duplicate final-output contracts should be rejected");
+
+    assert!(matches!(
+        error.runtime_error(),
+        RuntimeError::AgentLoopConfig {
+            source: AgentLoopConfigError::FinalOutputContractConfiguredTwice,
+        }
+    ));
+    assert!(provider.recorded_requests().is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn final_output_tool_call_is_not_replayed_into_next_step_transcript() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(
@@ -1127,7 +1351,11 @@ async fn final_output_tool_call_is_not_replayed_into_next_step_transcript() {
         .run_agent_loop(
             StepInput::user_text("Return structured order status.").expect("valid step input"),
             StepContext::new(CancellationToken::new()),
-            AgentLoopConfig::default().with_final_output_contract(final_output_contract()),
+            AgentLoopConfig::default()
+                .with_final_output_contract(final_output_contract())
+                .with_structured_output_retry_policy(
+                    merry_runtime::StructuredOutputRetryPolicy::new(1),
+                ),
         )
         .await
         .expect("agent loop should run");
@@ -1180,7 +1408,11 @@ async fn invalid_final_output_tool_arguments_retry_as_failed_tool_result() {
         .run_agent_loop(
             StepInput::user_text("Return structured order status.").expect("valid step input"),
             StepContext::new(CancellationToken::new()),
-            AgentLoopConfig::default().with_final_output_contract(final_output_contract()),
+            AgentLoopConfig::default()
+                .with_final_output_contract(final_output_contract())
+                .with_structured_output_retry_policy(
+                    merry_runtime::StructuredOutputRetryPolicy::new(1),
+                ),
         )
         .await
         .expect("agent loop should run");
@@ -1546,8 +1778,19 @@ async fn agent_loop_stream_continues_after_invalid_bridge_tool_arguments_are_res
         .expect("agent loop stream should start");
 
     let mut events = Vec::new();
-    while let Some(event) = stream.next().await {
-        events.push(event);
+    loop {
+        match stream
+            .next_message()
+            .await
+            .expect("agent run message should be readable")
+        {
+            Some(AgentRunMessage::Event(event)) => events.push(event),
+            Some(AgentRunMessage::ToolInvocations { .. }) => {
+                panic!("agent run emitted an unexpected host tool batch")
+            }
+            Some(_) => panic!("agent run emitted an unsupported message"),
+            None => break,
+        }
     }
     let result = stream.result().await.expect("stream should produce result");
 

@@ -3,9 +3,9 @@ import time
 from uuid import UUID
 
 import pytest
+from _support import runtime_with_fake_response
 
 import merry
-from _support import runtime_with_fake_response
 
 
 async def _assert_runtime_run_returns_final_output_and_events():
@@ -243,12 +243,14 @@ async def _assert_stream_closed_after_bridge_result_returns_blocked_result():
         def __init__(self):
             self._events = [
                 {
-                    "type": "bridge_tool_request",
-                    "call": {
-                        "id": "call-bridge",
-                        "name": "probe_step",
-                        "arguments": {"value": "payload"},
-                    },
+                    "type": "tool_invocations",
+                    "invocations": [
+                        {
+                            "id": "call-bridge",
+                            "name": "probe_step",
+                            "arguments": {"value": "payload"},
+                        }
+                    ],
                 },
                 None,
             ]
@@ -256,7 +258,7 @@ async def _assert_stream_closed_after_bridge_result_returns_blocked_result():
         def next_blocking(self):
             return self._events.pop(0)
 
-        def submit_tool_success_json_blocking(self, _call_id, _artifact_id, _content_json):
+        def submit_tool_success_json_batch_blocking(self, _results):
             raise merry.NativeMerryError(
                 '{"code":"runtime.stream_closed","domain":"runtime",'
                 '"message":"Runtime event stream closed before accepting the bridge tool result.",'
@@ -300,6 +302,78 @@ async def _assert_stream_closed_after_bridge_result_returns_blocked_result():
 
 def test_stream_closed_after_bridge_result_returns_blocked_result():
     asyncio.run(_assert_stream_closed_after_bridge_result_returns_blocked_result())
+
+
+async def _assert_runtime_stream_submits_one_result_batch_for_multiple_invocations():
+    runtime = merry.Runtime.__new__(merry.Runtime)
+    calls = []
+    submissions = []
+
+    class NativeStream:
+        def __init__(self):
+            self._events = [
+                {
+                    "type": "tool_invocations",
+                    "invocations": [
+                        {
+                            "id": "call-bridge-1",
+                            "name": "probe_step",
+                            "arguments": {"value": "first"},
+                        },
+                        {
+                            "id": "call-bridge-2",
+                            "name": "probe_step",
+                            "arguments": {"value": "second"},
+                        },
+                    ],
+                },
+                None,
+            ]
+
+        def next_blocking(self):
+            return self._events.pop(0)
+
+        def submit_tool_success_json_batch_blocking(self, results):
+            submissions.append(results)
+
+        def result_blocking(self):
+            return {
+                "status": "completed",
+                "model_turns_run": 2,
+                "final_output": "done",
+                "final_output_json": None,
+                "events": [],
+            }
+
+    class NativeRuntime:
+        def run_stream_blocking(self, _task, _final_output_schema_json=None, _max_model_turns=None):
+            return NativeStream()
+
+    async def probe_step(value: str):
+        calls.append(value)
+        return {"value": value}
+
+    runtime._native = NativeRuntime()
+    runtime._tools = {"probe_step": merry.Tool.bridge(probe_step, description="Probe.", schema={})}
+
+    stream = runtime.stream("Run both probes.")
+    async for _event in stream:
+        pass
+
+    result = await stream.result()
+
+    assert calls == ["first", "second"]
+    assert submissions == [
+        [
+            ("call-bridge-1", '{"value": "first"}'),
+            ("call-bridge-2", '{"value": "second"}'),
+        ]
+    ]
+    assert result.status == "completed"
+
+
+def test_runtime_stream_submits_one_result_batch_for_multiple_invocations():
+    asyncio.run(_assert_runtime_stream_submits_one_result_batch_for_multiple_invocations())
 
 
 def test_runtime_default_constructor_returns_runtime_object():

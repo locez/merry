@@ -6,18 +6,33 @@ use crate::tool_input_validation::{
 use merry_core::{
     ArtifactRef, CoreError, PendingToolCall, ToolCallId, ToolInputSchema, ToolName, ToolSpec,
 };
+use serde::de::DeserializeOwned;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt, sync::Arc};
 use thiserror::Error;
+
+type OutputValidator = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
 /// Reserved provider-visible tool name used for structured terminal output.
 pub const FINAL_OUTPUT_TOOL_NAME: &str = "merry_final_output";
 
 /// Runtime-owned final-output contract rendered as a synthetic tool.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct FinalOutputContract {
     tool_spec: ToolSpec,
     input_validator: CompiledToolInputValidator,
+    output_validator: Option<OutputValidator>,
+}
+
+impl fmt::Debug for FinalOutputContract {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FinalOutputContract")
+            .field("tool_spec", &self.tool_spec)
+            .field("input_validator", &self.input_validator)
+            .field("output_validator", &self.output_validator.is_some())
+            .finish()
+    }
 }
 
 impl PartialEq for FinalOutputContract {
@@ -29,6 +44,10 @@ impl PartialEq for FinalOutputContract {
 impl FinalOutputContract {
     /// Creates a final-output contract from a JSON object schema.
     pub fn new(schema: ToolInputSchema) -> Result<Self, FinalOutputContractError> {
+        if !schema.is_object_schema() {
+            return Err(FinalOutputContractError::RootSchemaMustBeObject);
+        }
+        let schema = schema.require_object()?;
         let value = serde_json::to_value(schema.as_schema()).map_err(|source| {
             FinalOutputContractError::SchemaSerialization {
                 message: source.to_string(),
@@ -45,7 +64,27 @@ impl FinalOutputContract {
         Ok(Self {
             tool_spec,
             input_validator,
+            output_validator: None,
         })
+    }
+
+    /// Adds a typed output decoder used before the final output is recorded.
+    ///
+    /// Runtime still records the raw JSON as the authoritative final-output
+    /// artifact. The decoder only provides an additional application-level
+    /// validity check so a structured-output retry can happen inside the same
+    /// runtime loop and session.
+    #[must_use]
+    pub fn with_output_decoder<T>(mut self) -> Self
+    where
+        T: DeserializeOwned,
+    {
+        self.output_validator = Some(Arc::new(|json| {
+            serde_json::from_str::<T>(json)
+                .map(|_| ())
+                .map_err(|source| source.to_string())
+        }));
+        self
     }
 
     /// Borrows the reserved tool name.
@@ -65,6 +104,12 @@ impl FinalOutputContract {
         call: &PendingToolCall,
     ) -> Result<(), ToolInputValidationError> {
         self.input_validator.validate_call(call)
+    }
+
+    pub(crate) fn validate_output(&self, json: &str) -> Result<(), String> {
+        self.output_validator
+            .as_ref()
+            .map_or(Ok(()), |validator| validator(json))
     }
 }
 
@@ -116,6 +161,10 @@ pub enum FinalOutputContractError {
     /// Schema compilation failed.
     #[error("final output schema could not be compiled: {message}")]
     SchemaCompilation { message: String },
+    /// Structured final output is represented by one provider-visible object
+    /// tool call, so scalar and array root schemas are not supported.
+    #[error("final output schema root must describe a JSON object")]
+    RootSchemaMustBeObject,
     /// An object field is missing a useful provider-facing description.
     #[error("final output schema field {field} must include a description")]
     MissingFieldDescription { field: String },
@@ -281,5 +330,16 @@ mod tests {
             error.to_string(),
             "final output schema field summary.status must include a description"
         );
+    }
+
+    #[test]
+    fn final_output_contract_rejects_scalar_root_schema_explicitly() {
+        let error = FinalOutputContract::new(schema(json!({"type": "string"})))
+            .expect_err("structured final output must use an object schema");
+
+        assert!(matches!(
+            error,
+            FinalOutputContractError::RootSchemaMustBeObject
+        ));
     }
 }

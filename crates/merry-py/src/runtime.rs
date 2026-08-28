@@ -1,13 +1,12 @@
 use crate::{error, serde_py::json_to_py};
 use futures_core::Stream;
-use futures_util::StreamExt;
 use merry::providers::{
     AnthropicProviderConfig, OpenAiProtocol, OpenAiProviderConfig, RuntimeBuilderProviderExt,
     anthropic, openai_compatible,
 };
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, PendingToolCall, ProviderName,
-    QueuedInputLane, RuntimeEvent, SessionId, ToolCallId, ToolInputSchema, ToolName, ToolSpec,
+    ErrorInfo, PendingToolCall, ProviderName, QueuedInputLane, RuntimeEvent, SessionId,
+    ToolCallBatchId, ToolCallId, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
@@ -16,11 +15,10 @@ use merry_llm::{
     testing::FakeModelProvider,
 };
 use merry_runtime::{
-    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, ArtifactContent, FinalOutputContract,
-    InteractiveError, InteractiveInputItem, InteractiveInputSnapshot, InteractiveRunEventStream,
-    RegisteredTool, Runtime, RuntimeBuilder, SkillMetadata, StepContext, StepInput,
-    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
-    ToolExecutorFuture, ToolRunner,
+    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, FinalOutputContract, InteractiveError,
+    InteractiveInputItem, InteractiveInputSnapshot, InteractiveRunEventStream, RegisteredTool,
+    Runtime, RuntimeBuilder, SkillMetadata, StepContext, StepInput, ToolExecutionContext,
+    ToolExecutionError, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture, ToolRunner,
 };
 use pyo3::{
     prelude::*,
@@ -92,20 +90,22 @@ struct NativeRuntimeJournalEventStreamState {
     result: Option<AgentLoopResult>,
     error: Option<StreamRunnerError>,
     finished: bool,
+    tool_invocations_pending: bool,
+    pending_tool_batch_id: Option<ToolCallBatchId>,
 }
 
 struct InteractiveRunStreamState {
     stream: Option<InteractiveRunEventStream>,
-    driver_token: CancellationToken,
-    driver_handle: Option<thread::JoinHandle<()>>,
+    run_token: CancellationToken,
+    run_handle: Option<thread::JoinHandle<()>>,
     finished: bool,
 }
 
 impl InteractiveRunStreamState {
-    fn stop_driver(&mut self) {
+    fn stop_run(&mut self) {
         self.stream.take();
-        self.driver_token.cancel();
-        if let Some(handle) = self.driver_handle.take() {
+        self.run_token.cancel();
+        if let Some(handle) = self.run_handle.take() {
             let _ = handle.join();
         }
     }
@@ -113,7 +113,7 @@ impl InteractiveRunStreamState {
 
 impl Drop for InteractiveRunStreamState {
     fn drop(&mut self) {
-        self.stop_driver();
+        self.stop_run();
     }
 }
 
@@ -121,15 +121,18 @@ struct NativeInteractiveRun {
     stream: InteractiveRunEventStream,
     input: merry_runtime::AgentLoopInput,
     control: merry_runtime::AgentLoopControl,
-    driver_token: CancellationToken,
-    driver_handle: thread::JoinHandle<()>,
+    run_token: CancellationToken,
+    run_handle: thread::JoinHandle<()>,
 }
 
 // This is the hot cross-thread event path; boxing would allocate for every streamed event.
 #[allow(clippy::large_enum_variant)]
 enum StreamRunnerMessage {
     Event(RuntimeEvent),
-    BridgeToolRequest(PendingToolCall),
+    ToolInvocations {
+        batch_id: ToolCallBatchId,
+        calls: Vec<PendingToolCall>,
+    },
     Finished {
         result: Option<AgentLoopResult>,
     },
@@ -141,10 +144,9 @@ enum StreamRunnerMessage {
 }
 
 enum StreamRunnerCommand {
-    SubmitToolSuccessJson {
-        call_id: String,
-        artifact_id: String,
-        content_json: String,
+    SubmitToolSuccessJsonBatch {
+        batch_id: ToolCallBatchId,
+        results: Vec<(String, String)>,
         ack_sender: mpsc::Sender<Result<(), StreamRunnerError>>,
     },
 }
@@ -156,9 +158,16 @@ struct StreamRunnerError {
     hint: Option<&'static str>,
 }
 
+enum StreamCommandOutcome {
+    Accepted,
+    Retry,
+    Fatal(StreamRunnerError),
+}
+
 enum StreamReceiveError {
     Closed,
     Poisoned,
+    ToolInvocationsPending,
 }
 
 enum StreamResultError {
@@ -586,6 +595,8 @@ impl PyRuntime {
                 result: None,
                 error: None,
                 finished: false,
+                tool_invocations_pending: false,
+                pending_tool_batch_id: None,
             })),
         }
     }
@@ -601,20 +612,6 @@ impl PyRuntime {
         self.tools.push(tool);
         self.rebuild_runtime().map_err(error::runtime_error_to_py)?;
         Ok(())
-    }
-
-    fn submit_tool_success_json_blocking(
-        &self,
-        py: Python<'_>,
-        call_id: String,
-        artifact_id: String,
-        content_json: String,
-    ) -> PyResult<Py<PyAny>> {
-        let runtime = self.runtime.clone();
-        let result = py.detach(move || {
-            submit_tool_success_json_blocking(runtime, call_id, artifact_id, content_json)
-        })?;
-        runtime_events_to_python(py, &result)
     }
 
     #[pyo3(signature = (max_model_turns=None))]
@@ -653,6 +650,9 @@ impl NativeRuntimeJournalEventStream {
         let state = Arc::clone(&self.state);
         let message = py.detach(move || {
             let mut state = state.lock().map_err(|_| StreamReceiveError::Poisoned)?;
+            if state.tool_invocations_pending {
+                return Err(StreamReceiveError::ToolInvocationsPending);
+            }
             receive_stream_message(&mut state)
         });
 
@@ -660,8 +660,8 @@ impl NativeRuntimeJournalEventStream {
             Ok(StreamRunnerMessage::Event(event)) => {
                 Ok(Some(public_runtime_event_to_python(py, &event)?))
             }
-            Ok(StreamRunnerMessage::BridgeToolRequest(call)) => {
-                Ok(Some(bridge_tool_request_to_python(py, &call)?))
+            Ok(StreamRunnerMessage::ToolInvocations { calls, .. }) => {
+                Ok(Some(tool_invocations_to_python(py, &calls)?))
             }
             Ok(StreamRunnerMessage::Finished { .. }) | Err(StreamReceiveError::Closed) => Ok(None),
             Ok(StreamRunnerMessage::Error {
@@ -669,6 +669,11 @@ impl NativeRuntimeJournalEventStream {
                 message,
                 hint,
             }) => Err(error::runtime_message_to_py(code, &message, hint)),
+            Err(StreamReceiveError::ToolInvocationsPending) => Err(error::runtime_message_to_py(
+                "runtime.tool_invocations_pending",
+                "The active tool invocation batch must be submitted before reading the next message.",
+                Some("Submit one result for every emitted tool invocation."),
+            )),
             Err(StreamReceiveError::Poisoned) => Err(error::runtime_message_to_py(
                 "runtime.stream_poisoned",
                 "Runtime event stream receiver was poisoned.",
@@ -681,28 +686,80 @@ impl NativeRuntimeJournalEventStream {
         &self,
         py: Python<'_>,
         call_id: String,
-        artifact_id: String,
         content_json: String,
     ) -> PyResult<()> {
+        self.submit_tool_success_json_batch_blocking(py, vec![(call_id, content_json)])
+    }
+
+    fn submit_tool_success_json_batch_blocking(
+        &self,
+        py: Python<'_>,
+        results: Vec<(String, String)>,
+    ) -> PyResult<()> {
         let command_sender = self.command_sender.clone();
+        let state = Arc::clone(&self.state);
         py.detach(move || {
+            {
+                let state = state.lock().map_err(|_| {
+                    error::runtime_message_to_py(
+                        "runtime.stream_poisoned",
+                        "Runtime event stream state was poisoned.",
+                        Some("Retry the operation in a fresh Python process."),
+                    )
+                })?;
+                if !state.tool_invocations_pending {
+                    return Err(error::runtime_message_to_py(
+                        "runtime.tool_invocations_missing",
+                        "No tool invocation batch is waiting for results.",
+                        Some("Submit results only for the latest tool_invocations message."),
+                    ));
+                }
+            }
+            let batch_id = state
+                .lock()
+                .map_err(|_| {
+                    error::runtime_message_to_py(
+                        "runtime.stream_poisoned",
+                        "Runtime event stream state was poisoned.",
+                        Some("Retry the operation in a fresh Python process."),
+                    )
+                })?
+                .pending_tool_batch_id
+                .clone()
+                .ok_or_else(|| {
+                    error::runtime_message_to_py(
+                        "runtime.tool_invocations_missing",
+                        "No tool invocation batch is waiting for results.",
+                        Some("Submit results only for the latest tool_invocations message."),
+                    )
+                })?;
             let (ack_sender, ack_receiver) = mpsc::channel();
             command_sender
-                .send(StreamRunnerCommand::SubmitToolSuccessJson {
-                    call_id,
-                    artifact_id,
-                    content_json,
+                .send(StreamRunnerCommand::SubmitToolSuccessJsonBatch {
+                    batch_id,
+                    results,
                     ack_sender,
                 })
                 .map_err(|_| {
                     error::runtime_message_to_py(
                         "runtime.stream_closed",
                         "Runtime event stream closed before accepting the bridge tool result.",
-                        Some("Keep the active RuntimeStream open while the SDK bridge driver resolves bridge tools."),
+                        Some("Keep the active RuntimeStream open while the SDK host adapter resolves bridge tools."),
                     )
                 })?;
             match ack_receiver.recv() {
-                Ok(Ok(())) => Ok(()),
+                Ok(Ok(())) => {
+                    let mut state = state.lock().map_err(|_| {
+                        error::runtime_message_to_py(
+                            "runtime.stream_poisoned",
+                            "Runtime event stream state was poisoned.",
+                            Some("Retry the operation in a fresh Python process."),
+                        )
+                    })?;
+                    state.tool_invocations_pending = false;
+                    state.pending_tool_batch_id = None;
+                    Ok(())
+                }
                 Ok(Err(error)) => Err(error::runtime_message_to_py(
                     error.code,
                     &error.message,
@@ -711,7 +768,7 @@ impl NativeRuntimeJournalEventStream {
                 Err(_) => Err(error::runtime_message_to_py(
                     "runtime.stream_closed",
                     "Runtime event stream closed before recording the bridge tool result.",
-                    Some("Keep the active RuntimeStream open while the SDK bridge driver resolves bridge tools."),
+                        Some("Keep the active RuntimeStream open while the SDK host adapter resolves bridge tools."),
                 )),
             }
         })
@@ -724,9 +781,23 @@ impl NativeRuntimeJournalEventStream {
             let mut state = result_state
                 .lock()
                 .map_err(|_| StreamResultError::Receive(StreamReceiveError::Poisoned))?;
+            if state.tool_invocations_pending {
+                return Err(StreamResultError::Runtime {
+                    code: "runtime.tool_invocations_pending",
+                    message: "The active tool invocation batch must be submitted before reading the result.".to_owned(),
+                    hint: Some("Submit one result for every emitted tool invocation."),
+                });
+            }
             while !state.finished {
                 match receive_stream_message(&mut state)? {
-                    StreamRunnerMessage::Event(_) | StreamRunnerMessage::BridgeToolRequest(_) => {}
+                    StreamRunnerMessage::Event(_) => {}
+                    StreamRunnerMessage::ToolInvocations { .. } => {
+                        return Err(StreamResultError::Runtime {
+                            code: "runtime.tool_invocations_pending",
+                            message: "The active tool invocation batch must be submitted before reading the result.".to_owned(),
+                            hint: Some("Submit one result for every emitted tool invocation."),
+                        });
+                    }
                     StreamRunnerMessage::Finished { .. } => {}
                     StreamRunnerMessage::Error {
                         code,
@@ -782,6 +853,13 @@ impl NativeRuntimeJournalEventStream {
                     Some("Retry the operation or use Runtime.run(...)."),
                 ))
             }
+            Err(StreamResultError::Receive(StreamReceiveError::ToolInvocationsPending)) => {
+                Err(error::runtime_message_to_py(
+                    "runtime.tool_invocations_pending",
+                    "The active tool invocation batch must be submitted before reading the result.",
+                    Some("Submit one result for every emitted tool invocation."),
+                ))
+            }
             Err(StreamResultError::Runtime {
                 code,
                 message,
@@ -827,12 +905,19 @@ impl PyInteractiveRunEventStream {
                 state.stream.take().ok_or_else(interactive_stream_busy)?
             };
 
-            let event = block_on_interactive_future(async { stream.next().await })?;
+            let event = match block_on_interactive_result(async { stream.next_event().await }) {
+                Ok(event) => event,
+                Err(error) => {
+                    let mut state = state.lock().map_err(|_| interactive_stream_poisoned())?;
+                    state.stream = Some(stream);
+                    return Err(error);
+                }
+            };
             let mut state = state.lock().map_err(|_| interactive_stream_poisoned())?;
             if event.is_none() {
                 state.finished = true;
                 drop(stream);
-                state.stop_driver();
+                state.stop_run();
             } else {
                 state.stream = Some(stream);
             }
@@ -991,8 +1076,8 @@ impl PyInteractiveRun {
                 PyInteractiveRunEventStream {
                     state: Arc::new(Mutex::new(InteractiveRunStreamState {
                         stream: Some(run.stream),
-                        driver_token: run.driver_token,
-                        driver_handle: Some(run.driver_handle),
+                        run_token: run.run_token,
+                        run_handle: Some(run.run_handle),
                         finished: false,
                     })),
                 },
@@ -1016,10 +1101,15 @@ fn receive_stream_message(
         .map_err(|_| StreamReceiveError::Closed)?;
     match &message {
         StreamRunnerMessage::Event(event) => state.events.push(event.clone()),
-        StreamRunnerMessage::BridgeToolRequest(_) => {}
+        StreamRunnerMessage::ToolInvocations { batch_id, .. } => {
+            state.tool_invocations_pending = true;
+            state.pending_tool_batch_id = Some(batch_id.clone());
+        }
         StreamRunnerMessage::Finished { result } => {
             state.result = result.clone();
             state.finished = true;
+            state.tool_invocations_pending = false;
+            state.pending_tool_batch_id = None;
         }
         StreamRunnerMessage::Error { .. } => {
             if let StreamRunnerMessage::Error {
@@ -1035,6 +1125,8 @@ fn receive_stream_message(
                 });
             }
             state.finished = true;
+            state.tool_invocations_pending = false;
+            state.pending_tool_batch_id = None;
         }
     }
     Ok(message)
@@ -1619,10 +1711,10 @@ fn start_interactive_native(
     runtime: Runtime,
     config: AgentLoopConfig,
 ) -> PyResult<NativeInteractiveRun> {
-    let driver_token = CancellationToken::new();
-    let thread_token = driver_token.clone();
+    let run_token = CancellationToken::new();
+    let thread_token = run_token.clone();
     let (sender, receiver) = mpsc::channel();
-    let driver_handle = thread::spawn(move || {
+    let run_handle = thread::spawn(move || {
         let tokio_runtime = match build_python_tokio_runtime() {
             Ok(tokio_runtime) => tokio_runtime,
             Err(error) => {
@@ -1655,20 +1747,20 @@ fn start_interactive_native(
             stream,
             input,
             control,
-            driver_token,
-            driver_handle,
+            run_token,
+            run_handle,
         }),
         Ok(Err(error)) => {
-            driver_token.cancel();
-            let _ = driver_handle.join();
+            run_token.cancel();
+            let _ = run_handle.join();
             Err(error)
         }
         Err(_) => {
-            driver_token.cancel();
-            let _ = driver_handle.join();
+            run_token.cancel();
+            let _ = run_handle.join();
             Err(error::runtime_message_to_py(
                 "runtime.interactive_start_failed",
-                "Interactive run driver exited before startup completed.",
+                "Interactive run exited before startup completed.",
                 Some("Retry the operation in a fresh Python process."),
             ))
         }
@@ -1689,29 +1781,59 @@ async fn run_agent_loop_event_stream(
         .map_err(|source| source.to_string())?;
 
     loop {
-        tokio::select! {
-            message = stream.next_driver_message() => {
-                let Some(message) = message else {
-                    break;
-                };
-                let message = match message {
-                    merry_runtime::AgentLoopStreamMessage::Event(event) => {
-                        StreamRunnerMessage::Event(event)
-                    }
-                    merry_runtime::AgentLoopStreamMessage::BridgeToolRequest { call } => {
-                        StreamRunnerMessage::BridgeToolRequest(call)
-                    }
-                    _ => continue,
-                };
-                if sender.send(message).is_err() {
+        let message = match stream.next_message().await {
+            Ok(Some(message)) => message,
+            Ok(None) => break,
+            Err(error) => {
+                let _ = sender.send(StreamRunnerMessage::Error {
+                    code: "runtime.agent_run_error",
+                    message: error.to_string(),
+                    hint: Some("Inspect the active runtime run and tool result protocol."),
+                });
+                return Ok(());
+            }
+        };
+        match message {
+            merry_runtime::AgentRunMessage::Event(event) => {
+                if sender.send(StreamRunnerMessage::Event(event)).is_err() {
                     return Ok(());
                 }
             }
-            command = command_receiver.recv() => {
-                let Some(command) = command else {
+            merry_runtime::AgentRunMessage::ToolInvocations { batch } => {
+                if sender
+                    .send(StreamRunnerMessage::ToolInvocations {
+                        batch_id: batch.id().clone(),
+                        calls: batch.calls().to_vec(),
+                    })
+                    .is_err()
+                {
                     return Ok(());
-                };
-                handle_stream_command(&stream, command).await;
+                }
+                loop {
+                    let Some(command) = command_receiver.recv().await else {
+                        return Ok(());
+                    };
+                    match handle_stream_command(&mut stream, command).await {
+                        StreamCommandOutcome::Accepted => break,
+                        StreamCommandOutcome::Retry => continue,
+                        StreamCommandOutcome::Fatal(error) => {
+                            let _ = sender.send(StreamRunnerMessage::Error {
+                                code: error.code,
+                                message: error.message,
+                                hint: error.hint,
+                            });
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            _ => {
+                let _ = sender.send(StreamRunnerMessage::Error {
+                    code: "runtime.agent_run_protocol",
+                    message: "Runtime emitted an unsupported agent run message.".to_owned(),
+                    hint: Some("Inspect the runtime and binding versions together."),
+                });
+                return Ok(());
             }
         }
     }
@@ -1734,54 +1856,73 @@ async fn run_agent_loop_event_stream(
 }
 
 async fn handle_stream_command(
-    stream: &merry_runtime::AgentLoopEventStream,
+    stream: &mut merry_runtime::AgentRun,
     command: StreamRunnerCommand,
-) {
+) -> StreamCommandOutcome {
     match command {
-        StreamRunnerCommand::SubmitToolSuccessJson {
-            call_id,
-            artifact_id,
-            content_json,
+        StreamRunnerCommand::SubmitToolSuccessJsonBatch {
+            batch_id,
+            results,
             ack_sender,
         } => {
-            let result =
-                parse_stream_tool_success(call_id, artifact_id, content_json).map_err(|error| {
-                    StreamRunnerError {
+            let (result, outcome) = match parse_stream_tool_success_batch(results) {
+                Err(message) => {
+                    let error = StreamRunnerError {
                         code: "tool.result_invalid",
-                        message: error,
-                        hint: Some("Use the call id emitted by the active bridge tool request."),
-                    }
-                });
-            let result = match result {
-                Ok((result, content)) => stream
-                    .submit_bridge_tool_result(result, content)
+                        message,
+                        hint: Some(
+                            "Submit one valid JSON result for every emitted tool invocation.",
+                        ),
+                    };
+                    (Err(error.clone()), StreamCommandOutcome::Retry)
+                }
+                Ok(outcomes) => match stream
+                    .submit_bridge_tool_outcomes(&batch_id, outcomes)
                     .await
-                    .map_err(|source| StreamRunnerError {
-                        code: "runtime.error",
-                        message: source.to_string(),
-                        hint: Some("Inspect the active runtime stream and bridge tool call id."),
-                    }),
-                Err(error) => Err(error),
+                {
+                    Ok(()) => (Ok(()), StreamCommandOutcome::Accepted),
+                    Err(source) => {
+                        let error = StreamRunnerError {
+                            code: "runtime.error",
+                            message: source.to_string(),
+                            hint: Some(
+                                "Inspect the active runtime stream and tool invocation ids.",
+                            ),
+                        };
+                        let outcome = if source.is_retryable_bridge_tool_result() {
+                            StreamCommandOutcome::Retry
+                        } else {
+                            StreamCommandOutcome::Fatal(error.clone())
+                        };
+                        (Err(error), outcome)
+                    }
+                },
             };
             let _ = ack_sender.send(result);
+            outcome
         }
     }
 }
 
 fn parse_stream_tool_success(
     call_id: String,
-    artifact_id: String,
     content_json: String,
-) -> Result<(merry_core::ToolCallResult, ArtifactContent), String> {
+) -> Result<(ToolCallId, ToolExecutionOutcome), String> {
     let call_id = ToolCallId::new(&call_id).map_err(|source| source.to_string())?;
-    let artifact = ArtifactRef::new(
-        ArtifactId::new(&artifact_id).map_err(|source| source.to_string())?,
-        ArtifactKind::Json,
-    );
-    Ok((
-        merry_core::ToolCallResult::succeeded(call_id, artifact),
-        ArtifactContent::json(content_json),
-    ))
+    serde_json::from_str::<Value>(&content_json).map_err(|source| source.to_string())?;
+    Ok((call_id, ToolExecutionOutcome::succeeded_json(content_json)))
+}
+
+fn parse_stream_tool_success_batch(
+    results: Vec<(String, String)>,
+) -> Result<Vec<(ToolCallId, ToolExecutionOutcome)>, String> {
+    if results.is_empty() {
+        return Err("tool invocation result batch must not be empty".to_owned());
+    }
+    results
+        .into_iter()
+        .map(|(call_id, content_json)| parse_stream_tool_success(call_id, content_json))
+        .collect()
 }
 
 #[derive(Clone)]
@@ -1865,49 +2006,6 @@ fn agent_loop_config(
     }
 }
 
-fn submit_tool_success_json_blocking(
-    runtime: Runtime,
-    call_id: String,
-    artifact_id: String,
-    content_json: String,
-) -> PyResult<Vec<merry_core::RuntimeJournalEvent>> {
-    let tokio_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|source| {
-            error::runtime_message_to_py(
-                "runtime.tokio_init_failed",
-                &source.to_string(),
-                Some("Retry the operation in a fresh Python thread or process."),
-            )
-        })?;
-
-    tokio_runtime.block_on(async move {
-        let call_id = ToolCallId::new(&call_id).map_err(|source| {
-            error::runtime_message_to_py(
-                "tool.result_invalid",
-                &source.to_string(),
-                Some("Use the call id emitted by the runtime tool_call_pending event."),
-            )
-        })?;
-        let artifact = ArtifactRef::new(
-            ArtifactId::new(&artifact_id).map_err(|source| {
-                error::runtime_message_to_py(
-                    "tool.result_invalid",
-                    &source.to_string(),
-                    Some("Use a non-empty non-reserved artifact id."),
-                )
-            })?,
-            ArtifactKind::Json,
-        );
-        let result = merry_core::ToolCallResult::succeeded(call_id, artifact);
-        runtime
-            .submit_tool_result(result, ArtifactContent::json(content_json))
-            .await
-            .map_err(error::runtime_error_to_py)
-    })
-}
-
 fn agent_loop_result_to_python(
     py: Python<'_>,
     runtime: &Runtime,
@@ -1963,24 +2061,16 @@ fn project_public_events_blocking(
         .map_err(error::runtime_error_to_py)
 }
 
-fn runtime_events_to_python(
-    py: Python<'_>,
-    events: &[merry_core::RuntimeJournalEvent],
-) -> PyResult<Py<PyAny>> {
-    let value = serde_json::to_value(events).expect("RuntimeJournalEvent values must serialize");
-    json_to_py(py, &value)
-}
-
 fn public_runtime_event_to_python(py: Python<'_>, event: &RuntimeEvent) -> PyResult<Py<PyAny>> {
     let value = serde_json::to_value(event).expect("RuntimeEvent values must serialize");
     json_to_py(py, &value)
 }
 
-fn bridge_tool_request_to_python(py: Python<'_>, call: &PendingToolCall) -> PyResult<Py<PyAny>> {
+fn tool_invocations_to_python(py: Python<'_>, calls: &[PendingToolCall]) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
-    let call = serde_json::to_value(call).expect("PendingToolCall values must serialize");
-    dict.set_item("type", "bridge_tool_request")?;
-    dict.set_item("call", json_to_py(py, &call)?)?;
+    let calls = serde_json::to_value(calls).expect("PendingToolCall values must serialize");
+    dict.set_item("type", "tool_invocations")?;
+    dict.set_item("invocations", json_to_py(py, &calls)?)?;
     Ok(dict.unbind().into_any())
 }
 

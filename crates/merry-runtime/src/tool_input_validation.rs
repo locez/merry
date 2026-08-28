@@ -91,6 +91,20 @@ impl ToolInputValidationError {
     pub(crate) fn payload_for_call(&self, call: &PendingToolCall) -> Value {
         schema_failure_payload(call.name(), Some(call.id().as_str()), &self.violations)
     }
+
+    pub(crate) fn message(&self) -> String {
+        if self.violations.is_empty() {
+            return TOOL_INPUT_SCHEMA_INVALID_MESSAGE.to_owned();
+        }
+
+        let details = self
+            .violations
+            .iter()
+            .map(|violation| format!("{}: {}", violation.path, violation.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("{TOOL_INPUT_SCHEMA_INVALID_MESSAGE}: {details}")
+    }
 }
 
 /// Builds a failed tool-result artifact payload for invalid tool input.

@@ -1,7 +1,7 @@
 //! Runtime-owned parallel subagent tool contracts.
 
 use crate::{
-    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, AgentLoopStreamMessage, ArtifactContent,
+    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, AgentRunMessage, ArtifactContent,
     PlanSubagentControl, Runtime, RuntimeError, StepContext, StepInput, TaskAnchor,
     plan::{PlanController, SubagentPlanUpdateInput},
 };
@@ -1671,9 +1671,9 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
         };
 
         let mut bridge_request = None;
-        while let Some(message) = stream.next_driver_message().await {
+        while let Ok(Some(message)) = stream.next_message().await {
             match message {
-                AgentLoopStreamMessage::Event(event) => {
+                AgentRunMessage::Event(event) => {
                     if let Some(hub) = launch.activity_hub.as_deref()
                         && let Some(snapshot) =
                             activity_reducer.reduce(&event, crate::plan::unix_time_ms())
@@ -1681,8 +1681,8 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                         hub.publish(snapshot);
                     }
                 }
-                AgentLoopStreamMessage::BridgeToolRequest { call } => {
-                    bridge_request = Some(call);
+                AgentRunMessage::ToolInvocations { batch } => {
+                    bridge_request = batch.calls().first().cloned();
                     break;
                 }
             }

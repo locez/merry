@@ -122,6 +122,9 @@ fn runtime_profile_rejects_duplicate_tool_names() {
 
     match result {
         Err(merry_runtime::RuntimeProfileError::DuplicateToolRegistration { .. }) => {}
+        Err(merry_runtime::RuntimeProfileError::ReservedToolName { .. }) => {
+            panic!("the duplicate test should not use a reserved tool name")
+        }
         Ok(_) => panic!("duplicate profile tool names should be rejected"),
     }
 }

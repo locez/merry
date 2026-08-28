@@ -3,12 +3,14 @@ use super::{
     InterruptReason,
     types::{InputReceipt, InputRecord, InputRecords},
 };
+use crate::bridge::BridgeToolResultCommand;
 use crate::{FileSessionStore, PlanApprovalInput, UserMessageInput};
-use futures_core::Stream;
-use merry_core::{PlanNodeId, QueuedInputLane, RuntimeEvent};
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
+use merry_core::{
+    PendingToolCallBatch, PlanNodeId, QueuedInputLane, RuntimeEvent, ToolCallBatchId, ToolCallId,
+};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -17,63 +19,252 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
+/// Runtime message contract shared by interactive and non-interactive runs.
+pub use crate::agent_loop::AgentRunMessage as InteractiveRunMessage;
+
+/// Single-consumer output stream for one interactive run.
+///
+/// This stream intentionally does not implement `futures::Stream`: a host
+/// handoff is a protocol phase, not an ordinary event. Callers use
+/// [`Self::next_message`] and must submit the complete batch before reading the
+/// next message. This contract is shared by Rust and future foreign-language
+/// bindings.
 pub struct InteractiveRunEventStream {
-    inner: Option<ReceiverStream<RuntimeEvent>>,
+    inner: Option<ReceiverStream<InteractiveRunMessage>>,
     cancellation_token: CancellationToken,
-    producer_handle: Option<JoinHandle<()>>,
+    producer_handle: Option<JoinHandle<Result<(), InteractiveError>>>,
+    bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
+    run_id: InteractiveRunId,
+    pending_tool_invocations: Option<PendingToolCallBatch>,
+    unread_message: Option<InteractiveRunMessage>,
+    bridge_resolution_epoch: Arc<AtomicU64>,
+    observed_bridge_resolution_epoch: u64,
+    closed_event_observed: bool,
 }
 
 impl InteractiveRunEventStream {
     pub(super) fn new(
-        inner: ReceiverStream<RuntimeEvent>,
+        run_id: InteractiveRunId,
+        inner: ReceiverStream<InteractiveRunMessage>,
         cancellation_token: CancellationToken,
-        producer_handle: JoinHandle<()>,
+        producer_handle: JoinHandle<Result<(), InteractiveError>>,
+        bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
+        bridge_resolution_epoch: Arc<AtomicU64>,
     ) -> Self {
+        let observed_bridge_resolution_epoch = bridge_resolution_epoch.load(Ordering::Acquire);
         Self {
             inner: Some(inner),
             cancellation_token,
             producer_handle: Some(producer_handle),
+            bridge_sender,
+            run_id,
+            pending_tool_invocations: None,
+            unread_message: None,
+            bridge_resolution_epoch,
+            observed_bridge_resolution_epoch,
+            closed_event_observed: false,
         }
     }
 
-    pub async fn next_event(&mut self) -> Option<RuntimeEvent> {
-        use futures_util::StreamExt;
-
-        self.next().await
+    fn synchronize_bridge_resolution(&mut self) {
+        let epoch = self.bridge_resolution_epoch.load(Ordering::Acquire);
+        if epoch != self.observed_bridge_resolution_epoch {
+            self.pending_tool_invocations = None;
+            self.unread_message = None;
+            self.observed_bridge_resolution_epoch = epoch;
+        }
     }
 
-    pub async fn wait_until_closed(&mut self) {
-        use futures_util::StreamExt;
+    /// Returns the next ordered event or host tool handoff.
+    ///
+    /// Calling this while a previous tool batch is unresolved returns an
+    /// explicit error. A rejected result submission leaves the same batch
+    /// active so the host can correct and retry it.
+    pub async fn next_message(
+        &mut self,
+    ) -> Result<Option<InteractiveRunMessage>, InteractiveError> {
+        self.synchronize_bridge_resolution();
+        if self.pending_tool_invocations.is_some() {
+            return Err(InteractiveError::ToolInvocationsPending {
+                run_id: self.run_id,
+            });
+        }
 
-        if let Some(inner) = self.inner.as_mut() {
-            while let Some(event) = inner.next().await {
+        let message = self.receive_message().await;
+        let Some(message) = message else {
+            self.finish_after_eof().await?;
+            return Ok(None);
+        };
+
+        self.observe_terminal_message(&message);
+        self.mark_pending_tool_invocations(&message)?;
+        Ok(Some(message))
+    }
+
+    async fn receive_message(&mut self) -> Option<InteractiveRunMessage> {
+        if let Some(message) = self.unread_message.take() {
+            return Some(message);
+        }
+        use futures_util::StreamExt;
+        match self.inner.as_mut() {
+            Some(inner) => inner.next().await,
+            None => None,
+        }
+    }
+
+    fn observe_terminal_message(&mut self, message: &InteractiveRunMessage) {
+        if matches!(message, InteractiveRunMessage::Event(RuntimeEvent::Closed)) {
+            self.closed_event_observed = true;
+        }
+    }
+
+    async fn finish_producer(&mut self) -> Result<(), InteractiveError> {
+        let Some(handle) = self.producer_handle.take() else {
+            return Ok(());
+        };
+        match handle.await {
+            Ok(result) => result,
+            Err(_) => Err(InteractiveError::ProducerTaskFailed {
+                run_id: self.run_id,
+            }),
+        }
+    }
+
+    async fn finish_after_eof(&mut self) -> Result<(), InteractiveError> {
+        self.finish_producer().await?;
+        if self.closed_event_observed {
+            Ok(())
+        } else {
+            Err(InteractiveError::ProducerStopped {
+                run_id: self.run_id,
+                message: "output channel closed unexpectedly",
+            })
+        }
+    }
+
+    fn mark_pending_tool_invocations(
+        &mut self,
+        message: &InteractiveRunMessage,
+    ) -> Result<(), InteractiveError> {
+        let InteractiveRunMessage::ToolInvocations { batch } = message else {
+            return Ok(());
+        };
+        if batch.calls().is_empty() {
+            return Err(InteractiveError::InvalidToolInvocationBatch {
+                run_id: self.run_id,
+            });
+        }
+        self.pending_tool_invocations = Some(batch.clone());
+        Ok(())
+    }
+
+    /// Returns the next runtime event when no host handoff is encountered.
+    ///
+    /// Hosts that register bridge tools must use [`Self::next_message`] so the
+    /// tool batch and its completion path remain visible. If a bridge batch is
+    /// encountered, it remains unread and the caller can recover by switching
+    /// to `next_message`.
+    pub async fn next_event(&mut self) -> Result<Option<RuntimeEvent>, InteractiveError> {
+        self.synchronize_bridge_resolution();
+        if self.pending_tool_invocations.is_some() {
+            return Err(InteractiveError::ToolInvocationsPending {
+                run_id: self.run_id,
+            });
+        }
+        let Some(message) = self.receive_message().await else {
+            self.finish_after_eof().await?;
+            return Ok(None);
+        };
+        match message {
+            InteractiveRunMessage::Event(event) => {
                 if matches!(event, RuntimeEvent::Closed) {
-                    break;
+                    self.closed_event_observed = true;
                 }
+                Ok(Some(event))
+            }
+            InteractiveRunMessage::ToolInvocations { batch } => {
+                let count = batch.calls().len();
+                self.unread_message = Some(InteractiveRunMessage::ToolInvocations { batch });
+                Err(InteractiveError::ToolInvocationsRequireMessageProtocol {
+                    run_id: self.run_id,
+                    count,
+                })
+            }
+        }
+    }
+
+    /// Submits all outcomes for the currently emitted host tool batch.
+    ///
+    /// The runtime validates call ids, content, and result status. Validation
+    /// failures that are safe to correct are returned while the batch remains
+    /// pending. If runtime has already recorded the calls as failed, the
+    /// rejection is returned but the batch is released and the producer can
+    /// continue.
+    pub async fn submit_tool_invocation_outcomes(
+        &mut self,
+        batch_id: &ToolCallBatchId,
+        outcomes: Vec<(ToolCallId, crate::ToolExecutionOutcome)>,
+    ) -> Result<(), InteractiveError> {
+        if self.pending_tool_invocations.is_none() {
+            return Err(InteractiveError::NoPendingToolInvocations {
+                run_id: self.run_id,
+            });
+        }
+        if outcomes.is_empty() {
+            return Err(InteractiveError::InvalidToolInvocationBatch {
+                run_id: self.run_id,
+            });
+        }
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.bridge_sender
+            .send(BridgeToolResultCommand::outcomes(
+                batch_id.clone(),
+                outcomes,
+                ack_sender,
+            ))
+            .await
+            .map_err(|_| InteractiveError::RunClosed {
+                run_id: self.run_id,
+            })?;
+        let result = ack_receiver
+            .await
+            .map_err(|_| InteractiveError::RunClosed {
+                run_id: self.run_id,
+            })?;
+        if result.is_ok() {
+            self.pending_tool_invocations = None;
+        } else if let Err(error) = result {
+            if !error.is_retryable_bridge_tool_result() {
+                self.pending_tool_invocations = None;
+            }
+            return Err(InteractiveError::Runtime { source: error });
+        }
+        Ok(())
+    }
+
+    /// Requests cancellation of the producer without awaiting its shutdown.
+    ///
+    /// This is used by synchronous drop guards at the facade boundary. Callers
+    /// that own the async lifecycle should use `wait_until_closed` afterwards.
+    pub fn request_cancel(&self) {
+        self.cancellation_token.cancel();
+    }
+
+    /// Waits for the interactive producer to emit its terminal closed event.
+    ///
+    /// Ordinary runtime events are drained. If a host-tool handoff is reached,
+    /// this returns [`InteractiveError::ToolInvocationsRequireMessageProtocol`]
+    /// without consuming the handoff, so the caller can switch to
+    /// [`Self::next_message`] and resolve it. This method is therefore a
+    /// lifecycle drain, not an implicit host-tool executor.
+    pub async fn wait_until_closed(&mut self) -> Result<(), InteractiveError> {
+        while let Some(event) = self.next_event().await? {
+            if matches!(event, RuntimeEvent::Closed) {
+                break;
             }
         }
         self.inner.take();
-        if let Some(handle) = self.producer_handle.take() {
-            let _ = handle.await;
-        }
-    }
-}
-
-impl Stream for InteractiveRunEventStream {
-    type Item = RuntimeEvent;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let Some(inner) = self.inner.as_mut() else {
-            return Poll::Ready(None);
-        };
-
-        match Pin::new(inner).poll_next(cx) {
-            Poll::Ready(None) => {
-                self.producer_handle.take();
-                Poll::Ready(None)
-            }
-            poll => poll,
-        }
+        self.finish_producer().await
     }
 }
 

@@ -22,6 +22,29 @@ impl ToolInputSchema {
         Ok(Self(schema))
     }
 
+    /// Returns whether the schema describes the JSON object shape accepted by
+    /// a model tool call.
+    #[must_use]
+    pub fn is_object_schema(&self) -> bool {
+        self.0
+            .as_value()
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            == Some("object")
+    }
+
+    /// Requires the schema to describe a JSON object.
+    pub fn require_object(self) -> Result<Self, CoreError> {
+        if !self.is_object_schema() {
+            return Err(CoreError::InvalidSchema {
+                kind: "ToolInputSchema",
+                reason: "ToolInputSchema must describe a JSON object",
+            });
+        }
+
+        Ok(self)
+    }
+
     /// Borrows the wrapped schema.
     #[must_use]
     pub fn as_schema(&self) -> &Schema {

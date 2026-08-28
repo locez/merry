@@ -8,13 +8,17 @@ import queue
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, get_args, get_type_hints
 
 from pydantic import BaseModel
 
 from . import _merry
-from ._errors import MerryConfigError, MerryErrorInfo, NativeMerryError, _decode_native_error
+from ._errors import (
+    MerryConfigError,
+    MerryErrorInfo,
+    NativeMerryError,
+    _decode_native_error,
+)
 
 _WORKER_POLL_INTERVAL_SECONDS = 0.01
 _MERRY_TOOL_OPTIONS_ATTR = "__merry_tool_options__"
@@ -33,7 +37,7 @@ class RunResult:
 class RuntimeStream:
     def __init__(
         self,
-        runtime: "Runtime",
+        runtime: Runtime,
         task: str,
         final_output_model: type[BaseModel] | None = None,
         max_model_turns: int | None = None,
@@ -76,9 +80,9 @@ class RuntimeStream:
             if not isinstance(message, dict):
                 raise TypeError("native stream events must be dicts")
 
-            pending = _bridge_tool_request(message)
+            pending = _tool_invocation_batch(message)
             if pending is not None:
-                submitted = await self._resolve_bridge_tool_call(native_stream, pending)
+                submitted = await self._resolve_tool_invocation_batch(native_stream, pending)
                 if not submitted:
                     continue
                 continue
@@ -117,24 +121,24 @@ class RuntimeStream:
         )
         self._finished = True
 
-    async def _resolve_bridge_tool_call(
+    async def _resolve_tool_invocation_batch(
         self,
         native_stream: Any,
-        pending: dict[str, Any],
+        pending: list[dict[str, Any]],
     ) -> bool:
-        tool = self._runtime._tools.get(pending["name"])
-        if tool is None:
-            return True
-
-        output = await _call_tool(tool, pending["arguments"])
-        content_json = json.dumps(output, sort_keys=True)
-        artifact_id = f"python-tool-result-{len(self._events) + 1}"
+        results: list[tuple[str, str]] = []
+        for invocation in pending:
+            tool = self._runtime._tools.get(invocation["name"])
+            if tool is None:
+                raise RuntimeError(
+                    f"Tool {invocation['name']!r} was not registered for the active runtime."
+                )
+            output = await _call_tool(tool, invocation["arguments"])
+            results.append((invocation["id"], json.dumps(output, sort_keys=True)))
         try:
             await _run_in_worker(
-                native_stream.submit_tool_success_json_blocking,
-                pending["id"],
-                artifact_id,
-                content_json,
+                native_stream.submit_tool_success_json_batch_blocking,
+                results,
             )
         except NativeMerryError as error:
             decoded = _decode_native_error(error)
@@ -286,7 +290,7 @@ class WorkspaceConfig:
 class RuntimeConfig:
     provider: OpenAICompatibleProvider | AnthropicProvider
     workspace: WorkspaceConfig | None = None
-    tools: list["Tool" | Callable[..., object] | Callable[..., Awaitable[object]]] | None = None
+    tools: list[Tool | Callable[..., object] | Callable[..., Awaitable[object]]] | None = None
     session_id: str | None = None
 
 
@@ -318,7 +322,7 @@ class Tool:
         input_model: type[BaseModel] | None = None,
         output_model: type[BaseModel] | None = None,
         schema: Mapping[str, object] | None = None,
-    ) -> "Tool":
+    ) -> Tool:
         if input_model is not None:
             if schema is not None:
                 raise ValueError("Use input_model instead of raw schema for Pydantic tools.")
@@ -351,7 +355,7 @@ class Tool:
         input_model: type[BaseModel] | None = None,
         output_model: type[BaseModel] | None = None,
         schema: Mapping[str, object] | None = None,
-    ) -> "Tool":
+    ) -> Tool:
         options = _tool_options(handler)
         resolved_name = name or options.name or handler.__name__
         resolved_description = description or options.description or _function_description(handler)
@@ -670,27 +674,6 @@ class Runtime:
             return decorate
         return decorate(handler)
 
-    def _submit_tool_success_json_blocking(
-        self,
-        call_id: str,
-        artifact_id: str,
-        content_json: str,
-    ) -> list[dict[str, Any]]:
-        try:
-            events = self._native.submit_tool_success_json_blocking(
-                call_id,
-                artifact_id,
-                content_json,
-            )
-        except NativeMerryError as error:
-            raise _decode_native_error(error) from error
-        if not isinstance(events, list):
-            raise TypeError("native submit result events must be a list")
-        if not all(isinstance(event, dict) for event in events):
-            raise TypeError("native submit result events must contain dict items")
-        return list(events)
-
-
 def _run_result_from_native(
     raw: dict[str, Any],
     *,
@@ -788,20 +771,26 @@ def _interactive_input_items(
     return [InteractiveInputItem(native=item) for item in items]
 
 
-def _bridge_tool_request(message: dict[str, Any]) -> dict[str, Any] | None:
-    if message.get("type") != "bridge_tool_request":
+def _tool_invocation_batch(message: dict[str, Any]) -> list[dict[str, Any]] | None:
+    if message.get("type") != "tool_invocations":
         return None
-    call = message.get("call")
-    if not isinstance(call, dict):
-        raise TypeError("bridge_tool_request call must be a dict")
-    arguments = call.get("arguments")
-    if not isinstance(arguments, dict):
-        raise TypeError("bridge_tool_request arguments must be a dict")
-    name = call.get("name")
-    call_id = call.get("id")
-    if not isinstance(name, str) or not isinstance(call_id, str):
-        raise TypeError("bridge_tool_request id and name must be str")
-    return {"id": call_id, "name": name, "arguments": arguments}
+    invocations = message.get("invocations")
+    if not isinstance(invocations, list) or not invocations:
+        raise TypeError("tool_invocations invocations must be a non-empty list")
+
+    normalized: list[dict[str, Any]] = []
+    for invocation in invocations:
+        if not isinstance(invocation, dict):
+            raise TypeError("tool_invocations entries must be dicts")
+        arguments = invocation.get("arguments")
+        if not isinstance(arguments, dict):
+            raise TypeError("tool_invocations arguments must be dicts")
+        name = invocation.get("name")
+        call_id = invocation.get("id")
+        if not isinstance(name, str) or not isinstance(call_id, str):
+            raise TypeError("tool_invocations id and name must be str")
+        normalized.append({"id": call_id, "name": name, "arguments": arguments})
+    return normalized
 
 
 def _decorate_tool(
@@ -969,7 +958,11 @@ async def _run_in_worker(
     def worker() -> None:
         try:
             result_queue.put((True, func(*args)))
-        except BaseException as error:
+        except (asyncio.CancelledError, KeyboardInterrupt, SystemExit) as error:
+            result_queue.put((False, error))
+        # The worker boundary must forward arbitrary ordinary failures to the
+        # awaiting task instead of leaving it polling forever.
+        except Exception as error:  # noqa: BLE001 - intentional worker exception forwarding
             result_queue.put((False, error))
 
     thread = threading.Thread(target=worker, name="merry-sdk-worker", daemon=True)

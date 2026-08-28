@@ -703,6 +703,7 @@ impl RuntimeBuilder {
                 ToolRegistryError::DuplicateName { name } => {
                     RuntimeError::DuplicateToolRegistration { name }
                 }
+                ToolRegistryError::ReservedName { name } => RuntimeError::ReservedToolName { name },
                 ToolRegistryError::InvalidToolInputSchema { name, message } => {
                     RuntimeError::InvalidToolInputSchema { name, message }
                 }

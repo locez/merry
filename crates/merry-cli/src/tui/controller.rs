@@ -18,9 +18,8 @@ use crate::{
     web::{RuntimeWebService, open_in_browser},
 };
 use crossterm::event::{KeyCode, KeyEvent};
-use futures_util::StreamExt;
 use merry_core::QueuedInputLane;
-use merry_runtime::InterruptReason;
+use merry_runtime::{InteractiveRunMessage, InterruptReason};
 use ratatui::layout::{Position, Rect, Size};
 use std::time::Duration;
 use tokio::{sync::mpsc, time};
@@ -548,12 +547,27 @@ pub(crate) async fn run_controller(
                     }
                 }
             }
-            event = session.stream.next() => {
-                let Some(event) = event else {
+            message = session.stream.next_message() => {
+                let Some(message) = message.map_err(unexpected)? else {
                     break;
                 };
-                projector.apply(event, &mut state);
-                render_once(&mut terminal, &state)?;
+                match message {
+                    InteractiveRunMessage::Event(event) => {
+                        projector.apply(event, &mut state);
+                        render_once(&mut terminal, &state)?;
+                    }
+                    InteractiveRunMessage::ToolInvocations { batch } => {
+                        return Err(unexpected(format!(
+                            "Rust TUI received {} host tool invocations, but its coding profile requires runtime-owned tools",
+                            batch.calls().len()
+                        )));
+                    }
+                    _ => {
+                        return Err(unexpected(
+                            "Rust TUI received an unsupported interactive run message",
+                        ));
+                    }
+                }
             }
             activity = session.subagent_activity.changed(), if subagent_activity_open => {
                 match activity {
@@ -775,7 +789,11 @@ async fn dispatch_effect(
         ControllerEffect::Quit => {
             session.set_title(state.latest_user_input_title());
             session.control.close().await.map_err(unexpected)?;
-            session.stream.wait_until_closed().await;
+            session
+                .stream
+                .wait_until_closed()
+                .await
+                .map_err(unexpected)?;
             session.save_on_exit().await?;
             Ok(true)
         }

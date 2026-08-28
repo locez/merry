@@ -11,7 +11,7 @@ futures-util.workspace = true
 merry-core = { path = "../merry-core", version = "0.1.0" }
 merry-llm = { path = "../merry-llm", version = "0.1.0" }
 merry-mcp = { path = "../merry-mcp", version = "0.1.0" }
-merry = { path = "../merry", version = "0.1.0" }
+merry = { path = "../merry", version = "0.1.0", features = ["openai-compatible", "anthropic"] }
 merry-process = { path = "../merry-process", version = "0.1.0" }
 merry-provider-anthropic = { path = "../merry-provider-anthropic", version = "0.1.0" }
 merry-provider-openai = { path = "../merry-provider-openai", version = "0.1.0" }

@@ -7,6 +7,7 @@ use crate::{
 use futures_core::Stream;
 use merry_core::ProviderName;
 use std::{
+    collections::VecDeque,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
@@ -17,7 +18,7 @@ use std::{
 pub struct FakeModelProvider {
     name: ProviderName,
     capabilities: ModelCapabilities,
-    script: Arc<Vec<FakeStreamItem>>,
+    script: FakeProviderScript,
     recorded_requests: Arc<Mutex<Vec<ModelRequest>>>,
 }
 
@@ -36,10 +37,52 @@ impl FakeModelProvider {
         script: Vec<Result<ModelEvent, ModelError>>,
         capabilities: ModelCapabilities,
     ) -> Self {
+        Self::from_script(
+            FakeProviderScript::Repeat(Arc::new(
+                script.into_iter().map(FakeStreamItem::from).collect(),
+            )),
+            capabilities,
+        )
+    }
+
+    /// Creates a fake provider that consumes one scripted stream per model turn.
+    ///
+    /// This is useful for deterministic multi-turn tests where a tool result or
+    /// another continuation causes the runtime to open a new provider stream.
+    pub fn new_turns(turns: Vec<Vec<Result<ModelEvent, ModelError>>>) -> Self {
+        Self::with_turns_and_capabilities(
+            turns,
+            ModelCapabilities::new(true, true, false, true, None, None)
+                .expect("static capabilities are valid"),
+        )
+    }
+
+    /// Creates a per-turn fake provider with explicit capabilities.
+    pub fn with_turns_and_capabilities(
+        turns: Vec<Vec<Result<ModelEvent, ModelError>>>,
+        capabilities: ModelCapabilities,
+    ) -> Self {
+        let turns = turns
+            .into_iter()
+            .map(|turn| {
+                Arc::new(
+                    turn.into_iter()
+                        .map(FakeStreamItem::from)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        Self::from_script(
+            FakeProviderScript::Turns(Arc::new(Mutex::new(turns))),
+            capabilities,
+        )
+    }
+
+    fn from_script(script: FakeProviderScript, capabilities: ModelCapabilities) -> Self {
         Self {
             name: ProviderName::new("fake-model-provider").expect("static provider name is valid"),
             capabilities,
-            script: Arc::new(script.into_iter().map(FakeStreamItem::from).collect()),
+            script,
             recorded_requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -51,6 +94,23 @@ impl FakeModelProvider {
             .lock()
             .expect("fake provider request mutex should not be poisoned")
             .clone()
+    }
+
+    fn next_script(&self) -> Result<Arc<Vec<FakeStreamItem>>, ModelError> {
+        match &self.script {
+            FakeProviderScript::Repeat(script) => Ok(Arc::clone(script)),
+            FakeProviderScript::Turns(turns) => {
+                let mut turns = turns.lock().map_err(|_| {
+                    ModelError::provider(
+                        ProviderErrorKind::Other,
+                        "fake provider turn script mutex was poisoned",
+                    )
+                })?;
+                turns.pop_front().ok_or_else(|| {
+                    ModelError::invalid_request("fake provider turn script was exhausted")
+                })
+            }
+        }
     }
 }
 
@@ -73,13 +133,15 @@ impl ModelProvider for FakeModelProvider {
                 return Err(ModelError::Cancelled);
             }
 
+            let script = self.next_script()?;
+
             self.recorded_requests
                 .lock()
                 .expect("fake provider request mutex should not be poisoned")
                 .push(request);
 
             let stream = FakeEventStream {
-                script: Arc::clone(&self.script),
+                script,
                 index: 0,
                 completed: false,
                 cancellation_token: context.cancellation_token().clone(),
@@ -89,6 +151,12 @@ impl ModelProvider for FakeModelProvider {
             Ok(stream)
         })
     }
+}
+
+#[derive(Debug, Clone)]
+enum FakeProviderScript {
+    Repeat(Arc<Vec<FakeStreamItem>>),
+    Turns(Arc<Mutex<VecDeque<Arc<Vec<FakeStreamItem>>>>>),
 }
 
 #[derive(Debug, Clone)]
@@ -286,6 +354,38 @@ mod tests {
         let recorded_requests = provider.recorded_requests();
         assert_eq!(recorded_requests.len(), 1);
         assert_eq!(recorded_requests[0].tools(), &[tool]);
+    }
+
+    #[test]
+    fn fake_provider_consumes_one_turn_script_per_request() {
+        let first = ModelResponse::new(vec![ModelOutput::text("first")], FinishReason::Stop, None);
+        let second =
+            ModelResponse::new(vec![ModelOutput::text("second")], FinishReason::Stop, None);
+        let provider = FakeModelProvider::new_turns(vec![
+            vec![Ok(ModelEvent::Completed { response: first })],
+            vec![Ok(ModelEvent::Completed { response: second })],
+        ]);
+
+        let first_stream =
+            block_on(provider.stream_model(request(), ModelStreamContext::default()))
+                .expect("first fake setup should succeed");
+        let first_events: Vec<ModelEvent> =
+            block_on(first_stream.try_collect()).expect("first fake stream should succeed");
+        let second_stream =
+            block_on(provider.stream_model(request(), ModelStreamContext::default()))
+                .expect("second fake setup should succeed");
+        let second_events: Vec<ModelEvent> =
+            block_on(second_stream.try_collect()).expect("second fake stream should succeed");
+
+        assert!(matches!(
+            first_events.as_slice(),
+            [ModelEvent::Completed { response }] if response.outputs() == [ModelOutput::text("first")]
+        ));
+        assert!(matches!(
+            second_events.as_slice(),
+            [ModelEvent::Completed { response }] if response.outputs() == [ModelOutput::text("second")]
+        ));
+        assert_eq!(provider.recorded_requests().len(), 2);
     }
 
     #[test]

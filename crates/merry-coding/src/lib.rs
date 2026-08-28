@@ -31,8 +31,8 @@ use merry_process::ProcessSession;
 use merry_runtime::{
     AgentLoopConfig, PermissionAdmissionError, ProcessCommandToolError, ProcessRunner,
     ProjectRules, PromptBlock, PromptError, PromptProfile, RegisteredTool, RuntimeBuilder,
-    RuntimeError, RuntimeProfile, RuntimeProfileError, SkillCatalog, TaskAnchor, ToolActionKind,
-    ToolConcurrency, ToolRunner,
+    RuntimeError, RuntimeProfile, RuntimeProfileError, SkillCatalog, TaskAnchor, Tool,
+    ToolActionKind, ToolConcurrency, ToolRunner,
 };
 pub use merry_tool_workspace::{WorkspaceToolConfigError, WorkspaceToolLimits};
 use serde_json::Error as JsonError;
@@ -242,6 +242,7 @@ pub struct CodingAgentProfileBuilder {
     skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
     task_anchor: Option<TaskAnchor>,
+    tools: Vec<Tool>,
     registered_tools: Vec<RegisteredTool>,
 }
 
@@ -257,6 +258,7 @@ impl CodingAgentProfileBuilder {
             skill_catalog: None,
             project_rules: None,
             task_anchor: None,
+            tools: Vec::new(),
             registered_tools: Vec::new(),
         }
     }
@@ -275,6 +277,7 @@ impl CodingAgentProfileBuilder {
             skill_catalog: None,
             project_rules: None,
             task_anchor: None,
+            tools: Vec::new(),
             registered_tools: Vec::new(),
         }
     }
@@ -376,6 +379,7 @@ impl CodingAgentProfileBuilder {
     }
 
     /// Allows explicitly registered bridge tools in this coding profile.
+    #[doc(hidden)]
     #[must_use]
     pub fn allow_bridge_tools(mut self) -> Self {
         self.allow_bridge_tools = true;
@@ -403,7 +407,15 @@ impl CodingAgentProfileBuilder {
         self
     }
 
+    /// Adds a typed application tool after the canonical Merry-managed tools.
+    #[must_use]
+    pub fn tool(mut self, tool: Tool) -> Self {
+        self.tools.push(tool);
+        self
+    }
+
     /// Adds a runtime-owned tool after the canonical workspace tool catalog.
+    #[doc(hidden)]
     #[must_use]
     pub fn register_tool(mut self, tool: RegisteredTool) -> Self {
         self.registered_tools.push(tool);
@@ -411,6 +423,7 @@ impl CodingAgentProfileBuilder {
     }
 
     /// Adds runtime-owned tools in the supplied stable order.
+    #[doc(hidden)]
     #[must_use]
     pub fn register_tools<I>(mut self, tools: I) -> Self
     where
@@ -430,6 +443,7 @@ impl CodingAgentProfileBuilder {
             skill_catalog,
             project_rules,
             task_anchor,
+            tools,
             registered_tools,
         } = self;
         let workspace_hash_material = workspace.hash_material();
@@ -468,6 +482,9 @@ impl CodingAgentProfileBuilder {
         }
         if let Some(task_anchor) = task_anchor {
             builder = builder.task_anchor(task_anchor);
+        }
+        for tool in tools {
+            builder = builder.register_tool(tool.into_registered_tool());
         }
         for tool in registered_tools {
             builder = builder.register_tool(tool);

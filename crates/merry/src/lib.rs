@@ -1,21 +1,56 @@
 //! Public Rust facade for Merry.
 //!
 //! This crate is the interface layer for applications embedding Merry. It
-//! exposes small components for runtime construction: providers, profiles,
-//! tools, events, and stable errors. Lower-level crates still own their
-//! domains.
+//! exposes the high-level semantic agent API plus small components for runtime
+//! construction: providers, profiles, tools, events, and stable errors.
+//! Lower-level crates still own their domains.
 
-pub mod agent_loop;
-pub mod errors;
-pub mod events;
+mod agent;
+mod agent_loop;
+mod errors;
+mod interactive;
+mod profile;
 pub mod profiles;
 pub mod providers;
+#[doc(hidden)]
+pub mod runtime {
+    //! Explicit low-level runtime escape hatch for advanced integrations.
+
+    pub use merry_runtime::{
+        AgentLoopResult, AgentRun, AgentRunMessage, Runtime, RuntimeBuilder, RuntimeError,
+        RuntimeModelRole, RuntimeProfile, RuntimeProfileBuilder,
+    };
+}
+/// Hidden facade adapter types used by language bindings and low-level hosts.
+#[doc(hidden)]
+pub mod __internal {
+    pub use super::agent::{
+        AgentRun, AgentRunMessage, ToolInvocation, ToolInvocationBatch, ToolInvocationContent,
+        ToolInvocationContentError, ToolInvocationResult, ToolInvocationSubmission,
+    };
+    pub use super::interactive::{
+        InteractiveMessage, InteractiveToolInvocation, InteractiveToolInvocationBatch,
+    };
+    pub use super::stream::StructuredAgentRun;
+}
+mod run_result;
+mod stream;
 pub mod tools;
 
+pub use agent::{Agent, AgentBuilder, RunResult};
 pub use agent_loop::{coding_agent_loop_config, generic_agent_loop_config};
-pub use merry_core::SessionId;
-pub use merry_llm::ModelName;
-pub use merry_runtime::{
-    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, Runtime, RuntimeBuilder, RuntimeError,
-    RuntimeProfile, RuntimeProfileBuilder,
+pub use errors::{AgentBuildError, AgentError, AgentProfileError};
+pub use interactive::{
+    InteractiveControl, InteractiveEventStream, InteractiveInput, InteractiveInputItem,
+    InteractiveInputSnapshot, InteractiveRun,
 };
+pub use merry_core::RuntimeEvent;
+pub use merry_core::SessionId;
+pub use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
+pub use merry_runtime::{
+    AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, AutomaticCompactionConfig,
+    FileSessionStore, FinalOutput, InteractivePrimaryModel, StructuredOutputRetryPolicy,
+};
+pub use profile::{AgentProfile, AgentProfileContext};
+pub use stream::{AgentEventStream, StructuredAgentEventStream, StructuredRunResult};
+pub use tools::{Tool, ToolBuildError};
