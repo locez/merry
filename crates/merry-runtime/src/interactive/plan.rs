@@ -1,4 +1,4 @@
-use super::InteractiveProducer;
+use super::producer::InteractiveProducer;
 use crate::events::RuntimeEventProjector;
 use merry_core::{PlanAttemptOutcome, PlanPhase, RuntimeJournalEvent, RuntimeJournalPayload};
 
@@ -32,7 +32,7 @@ impl InteractiveProducer {
     ) -> bool {
         match event {
             Ok(event) => {
-                if super::is_plan_payload(&event.payload)
+                if super::producer::is_plan_payload(&event.payload)
                     && self.seen_plan_sequences.contains(&event.sequence)
                 {
                     return true;

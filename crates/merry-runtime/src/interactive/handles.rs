@@ -1,6 +1,6 @@
+use super::commands::InteractiveCommand;
 use super::{
-    InteractiveCommand, InteractiveError, InteractiveRunId, InteractiveSettingsUpdate,
-    InterruptReason,
+    InteractiveError, InteractiveRunId, InteractiveSettingsUpdate, InterruptReason,
     types::{InputReceipt, InputRecord, InputRecords},
 };
 use crate::bridge::BridgeToolResultCommand;
