@@ -570,6 +570,7 @@ fn non_empty_os_str(value: Option<&OsStr>) -> Option<&OsStr> {
     value.filter(|value| !value.is_empty())
 }
 
+#[cfg(unix)]
 async fn sync_parent_directory(path: &Path) -> Result<(), SessionStoreError> {
     let parent = path
         .parent()
@@ -584,6 +585,14 @@ async fn sync_parent_directory(path: &Path) -> Result<(), SessionStoreError> {
         .sync_all()
         .await
         .map_err(|source| io_error(parent.to_path_buf(), source))
+}
+
+#[cfg(not(unix))]
+async fn sync_parent_directory(_path: &Path) -> Result<(), SessionStoreError> {
+    // Windows does not support opening a directory through Tokio's file API
+    // for the Unix-style directory fsync used above. The temporary file is
+    // synced before rename, and rename remains the atomic commit point.
+    Ok(())
 }
 
 async fn write_temp_file(
