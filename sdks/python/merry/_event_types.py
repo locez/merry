@@ -178,7 +178,13 @@ class RuntimeToolOutput:
     def __post_init__(self) -> None:
         if not isinstance(self.kind, RuntimeToolOutputKind):
             raise TypeError("runtime tool output kind must be a RuntimeToolOutputKind")
-        _validate_text("runtime tool output", self.value, 1_048_576, allow_blank=True)
+        _validate_text(
+            "runtime tool output",
+            self.value,
+            1_048_576,
+            allow_blank=True,
+            allow_newline_tab=True,
+        )
         if self.kind is RuntimeToolOutputKind.JSON:
             try:
                 decoded: object = json.loads(self.value)
@@ -273,7 +279,9 @@ class QueuedInput:
     position: int
 
     def __post_init__(self) -> None:
-        _validate_text("queued input text", self.text, 1_048_576)
+        _validate_text(
+            "queued input text", self.text, 1_048_576, allow_newline_tab=True
+        )
         if not isinstance(self.lane, QueuedInputLane):
             raise TypeError("queued input lane must be a QueuedInputLane")
         _validate_nonnegative("queued input position", self.position)
@@ -326,7 +334,12 @@ def _validate_identifier(name: str, value: str, maximum: int) -> None:
 
 
 def _validate_text(
-    name: str, value: str, maximum: int, *, allow_blank: bool = False
+    name: str,
+    value: str,
+    maximum: int,
+    *,
+    allow_blank: bool = False,
+    allow_newline_tab: bool = False,
 ) -> None:
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a string")
@@ -334,7 +347,7 @@ def _validate_text(
         raise ValueError(f"{name} must not be blank")
     if len(value) > maximum:
         raise ValueError(f"{name} is too long")
-    if _contains_control(value):
+    if _contains_control(value, allow_newline_tab=allow_newline_tab):
         raise ValueError(f"{name} must not contain control characters")
 
 

@@ -13,8 +13,12 @@ JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"
 JsonObject: TypeAlias = dict[str, JsonValue]
 
 
-def _contains_control(value: str) -> bool:
-    return any(unicodedata.category(character) == "Cc" for character in value)
+def _contains_control(value: str, *, allow_newline_tab: bool = False) -> bool:
+    return any(
+        unicodedata.category(character) == "Cc"
+        and not (allow_newline_tab and character in {"\n", "\t"})
+        for character in value
+    )
 
 
 def require_json_value(value: object, label: str) -> JsonValue:

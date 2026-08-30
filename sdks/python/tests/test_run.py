@@ -92,6 +92,23 @@ def test_agent_run_preserves_event_order_and_terminal_result() -> None:
     assert all(isinstance(message, merry.Event) for message in result.events)
 
 
+def test_agent_run_preserves_multiline_assistant_output() -> None:
+    async def scenario() -> merry.RunResult[BaseModel]:
+        run = fake_agent("first line\nsecond line", session_id="multiline-run").stream(
+            "Return two lines."
+        )
+        while await run.next() is not None:
+            pass
+        return await run.result()
+
+    result = asyncio.run(scenario())
+
+    assert result.final_output == "first line\nsecond line"
+    message = result.events[2]
+    assert isinstance(message.payload, merry.AssistantMessagePayload)
+    assert message.payload.text == "first line\nsecond line"
+
+
 def test_result_requires_eof_and_cancel_is_idempotent() -> None:
     async def scenario() -> tuple[
         merry.RunResult[BaseModel], merry.RunResult[BaseModel]

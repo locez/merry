@@ -91,7 +91,13 @@ class AssistantMessagePayload(SourcedEventPayload):
 
     def __post_init__(self) -> None:
         _validate_event_source(self.source)
-        _validate_text("assistant message", self.text, 1_048_576, allow_blank=True)
+        _validate_text(
+            "assistant message",
+            self.text,
+            1_048_576,
+            allow_blank=True,
+            allow_newline_tab=True,
+        )
         if not isinstance(self.artifact, ArtifactReference):
             raise TypeError("assistant message artifact must be an ArtifactReference")
 
@@ -105,7 +111,11 @@ class AssistantMessageDeltaPayload(SourcedEventPayload):
     def __post_init__(self) -> None:
         _validate_event_source(self.source)
         _validate_text(
-            "assistant message delta", self.delta, 1_048_576, allow_blank=True
+            "assistant message delta",
+            self.delta,
+            1_048_576,
+            allow_blank=True,
+            allow_newline_tab=True,
         )
 
 

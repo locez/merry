@@ -55,7 +55,13 @@ class TextContent:
     text: str
 
     def __post_init__(self) -> None:
-        _validate_text("tool text content", self.text, 1_048_576, allow_blank=True)
+        _validate_text(
+            "tool text content",
+            self.text,
+            1_048_576,
+            allow_blank=True,
+            allow_newline_tab=True,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,7 +343,12 @@ class RunResult(Generic[OutputT]):
             raise TypeError("run result events must be a tuple of Event values")
         _validate_usize("model turns run", self.model_turns_run)
         if self.final_output is not None:
-            _validate_text("final output", self.final_output, 1_048_576)
+            _validate_text(
+                "final output",
+                self.final_output,
+                1_048_576,
+                allow_newline_tab=True,
+            )
         if self.final_output_json is not None:
             object.__setattr__(
                 self,
@@ -415,7 +426,12 @@ def _validate_tool_name(value: str) -> None:
 
 
 def _validate_text(
-    name: str, value: str, maximum: int, *, allow_blank: bool = False
+    name: str,
+    value: str,
+    maximum: int,
+    *,
+    allow_blank: bool = False,
+    allow_newline_tab: bool = False,
 ) -> None:
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a string")
@@ -423,7 +439,7 @@ def _validate_text(
         raise ValueError(f"{name} must not be blank")
     if len(value) > maximum:
         raise ValueError(f"{name} is too long")
-    if _contains_control(value):
+    if _contains_control(value, allow_newline_tab=allow_newline_tab):
         raise ValueError(f"{name} must not contain control characters")
 
 
