@@ -1,4 +1,5 @@
-use merry::__internal::{
+use merry::binding::OwnedAgentRunMessage;
+use merry::rust::{
     AgentRunMessage, InteractiveMessage, ToolInvocationContent, ToolInvocationResult,
     ToolInvocationSubmission,
 };
@@ -433,6 +434,85 @@ async fn bridge_requests_are_explicit_driver_messages() {
     assert_eq!(result.final_output(), Some("bridge complete"));
     assert!(saw_finished);
     assert!(saw_final_output);
+}
+
+#[tokio::test]
+async fn owned_binding_run_preserves_the_host_batch_contract() {
+    let call = ModelToolCall::new(
+        ModelToolCallId::new("call-owned-bridge").expect("test call id should be valid"),
+        ToolName::new("bridge_lookup").expect("bridge tool name should be valid"),
+        ToolArguments::try_from(json!({"key": "value"}))
+            .expect("bridge arguments should be an object"),
+    );
+    let provider = Arc::new(FakeModelProvider::new_turns(vec![
+        vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::tool_call(call)],
+                FinishReason::ToolCalls,
+                None,
+            ),
+        })],
+        vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text("owned bridge complete")],
+                FinishReason::Stop,
+                None,
+            ),
+        })],
+    ]));
+    let agent = AgentBuilder::new(session_id("owned-bridge-driver"))
+        .model_provider(provider, model_name())
+        .allow_bridge_tools()
+        .register_tool(bridge_tool())
+        .build()
+        .expect("bridge agent should build");
+    let mut run = agent
+        .stream_with_owned_tool_handoff("use the owned bridge")
+        .expect("owned stream should start");
+
+    loop {
+        let message = run
+            .next()
+            .await
+            .expect("owned driver should advance")
+            .expect("owned driver should emit a message");
+        match message {
+            OwnedAgentRunMessage::Event(_) => {}
+            OwnedAgentRunMessage::ToolInvocations { batch } => {
+                assert_eq!(batch.len(), 1);
+                assert_eq!(batch.invocations()[0].name().as_str(), "bridge_lookup");
+                let batch_id = batch.id().clone();
+                let call_id = batch.invocations()[0].id().clone();
+                assert!(matches!(
+                    run.next().await,
+                    Err(merry::AgentError::ToolInvocationBatchPending)
+                ));
+                let submission = run
+                    .submit_tool_invocation_results(
+                        &batch_id,
+                        vec![ToolInvocationResult::succeeded(
+                            call_id,
+                            ToolInvocationContent::text("resolved"),
+                        )],
+                    )
+                    .await
+                    .expect("owned bridge result should be accepted");
+                assert_eq!(submission, ToolInvocationSubmission::Accepted);
+                break;
+            }
+            _ => panic!("unexpected future owned run message variant"),
+        }
+    }
+
+    while run
+        .next()
+        .await
+        .expect("owned driver should continue")
+        .is_some()
+    {}
+    let result = run.result().await.expect("owned run should complete");
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(result.final_output(), Some("owned bridge complete"));
 }
 
 #[tokio::test]

@@ -231,20 +231,27 @@ fn build_runtime() -> Result<Runtime, Box<dyn std::error::Error>> {
 }
 ```
 
-Python bindings live in [`sdks/python`](sdks/python). Their primary interface
-is async event iteration:
+Python bindings live in [`sdks/python`](sdks/python). They expose the same
+Rust-owned agent lifecycle through typed async messages:
 
 ```python
-runtime = merry.Runtime.with_anthropic(
-    api_key="sk-ant-...",
-    model="claude-sonnet-4-5",
+agent = (
+    merry.Agent.builder("example")
+    .provider(
+        merry.Anthropic(
+            api_key="sk-ant-...",
+            model="claude-sonnet-4-5",
+        )
+    )
+    .build()
 )
-stream = runtime.stream("Inspect the repository")
+run = agent.stream("Inspect the repository")
 
-async for event in stream:
-    print(event["type"])
+async for message in run:
+    if isinstance(message, merry.Event):
+        print(message.type.value)
 
-result = await stream.result()
+result = await run.result()
 ```
 
 ## Verify

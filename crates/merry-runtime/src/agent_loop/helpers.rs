@@ -36,7 +36,7 @@ pub(crate) fn trace_loop_error(session_id: &str, model_turns_run: usize, source:
         session_id,
         "error",
         model_turns_run,
-        Some(runtime_error_code(source)),
+        Some(source.diagnostic_code()),
     );
 }
 
@@ -225,61 +225,6 @@ pub(crate) fn blocked_reason_code(reason: &AgentLoopBlockedReason) -> &'static s
         }
         AgentLoopBlockedReason::FinalOutputToolNotCalled => "final_output_tool_not_called",
         AgentLoopBlockedReason::BridgeToolCallRequested { .. } => "bridge_tool_call_requested",
-    }
-}
-
-fn runtime_error_code(error: &RuntimeError) -> &'static str {
-    match error {
-        RuntimeError::StepAlreadyActive { .. } => "step_already_active",
-        RuntimeError::InvalidStepInput { .. } => "invalid_step_input",
-        RuntimeError::AgentLoopConfig { .. } => "agent_loop_config",
-        RuntimeError::ChildRuntimeBuild { .. } => "child_runtime_build",
-        RuntimeError::InvalidSubagentSelection { .. } => "invalid_subagent_selection",
-        RuntimeError::PlanEffectAttribution { .. } => "plan_effect_attribution_failed",
-        RuntimeError::PlanSubagentAttemptInactive { .. } => "plan_subagent_attempt_inactive",
-        RuntimeError::InvalidUserImageInput { .. } => "invalid_user_image_input",
-        RuntimeError::ReservedArtifactId { .. } => "reserved_artifact_id",
-        RuntimeError::UnknownToolCall { .. } => "unknown_tool_call",
-        RuntimeError::BridgeToolResultBatchEmpty { .. } => "bridge_tool_result_batch_empty",
-        RuntimeError::BridgeToolResultBatchMismatch { .. } => "bridge_tool_result_batch_mismatch",
-        RuntimeError::BridgeToolResultBatchIdMismatch { .. } => {
-            "bridge_tool_result_batch_id_mismatch"
-        }
-        RuntimeError::AgentRunToolInvocationsPending { .. } => "agent_run_tool_invocations_pending",
-        RuntimeError::NoPendingAgentRunToolInvocations { .. } => {
-            "no_pending_agent_run_tool_invocations"
-        }
-        RuntimeError::ToolCallAlreadyResolved { .. } => "tool_call_already_resolved",
-        RuntimeError::DuplicateToolRegistration { .. } => "duplicate_tool_registration",
-        RuntimeError::ReservedToolName { .. } => "reserved_tool_name",
-        RuntimeError::InvalidToolInputSchema { .. } => "invalid_tool_input_schema",
-        RuntimeError::BridgeToolsNotAllowed { .. } => "bridge_tools_not_allowed",
-        RuntimeError::ToolExecutionCancelled { .. } => "tool_execution_cancelled",
-        RuntimeError::ToolExecutionFailed { .. } => "tool_execution_failed",
-        RuntimeError::AgentRunClosed { .. } => "agent_run_closed",
-        RuntimeError::BridgeToolResultRejected { .. } => "bridge_tool_result_rejected",
-        RuntimeError::MissingActionExecutionEvidence { .. } => "missing_action_execution_evidence",
-        RuntimeError::MutatingActionCommitLifecycleRequired { .. } => {
-            "mutating_action_commit_lifecycle_required"
-        }
-        RuntimeError::UnsupportedToolResultContent { .. } => "unsupported_tool_result_content",
-        RuntimeError::TranscriptItemIdExhausted => "transcript_item_id_exhausted",
-        RuntimeError::ModelTurnIdExhausted => "model_turn_id_exhausted",
-        RuntimeError::UnknownModelTurn { .. } => "unknown_model_turn",
-        RuntimeError::InvalidModelTurnTransition { .. } => "invalid_model_turn_transition",
-        RuntimeError::TranscriptToolCallMissing { .. } => "transcript_tool_call_missing",
-        RuntimeError::Core { .. } => "core_error",
-        RuntimeError::Artifact { .. } => "artifact_error",
-        RuntimeError::Context { .. } => "context_error",
-        RuntimeError::Checkpoint { .. } => "checkpoint_error",
-        RuntimeError::Compaction { .. } => "compaction_error",
-        RuntimeError::SessionStore { .. } => "session_store",
-        RuntimeError::MissingModelProvider { .. } => "missing_model_provider",
-        RuntimeError::CompactionModelRequest { .. } => "compaction_model_request",
-        RuntimeError::CompactionModelWindowTooSmall { .. } => "compaction_model_window_too_small",
-        RuntimeError::CompactionModelInputTooLarge { .. } => "compaction_model_input_too_large",
-        RuntimeError::CompactionModelSetup { .. } => "compaction_model_setup",
-        RuntimeError::CompactionModelStream { .. } => "compaction_model_stream",
     }
 }
 

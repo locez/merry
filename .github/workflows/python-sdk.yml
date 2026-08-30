@@ -1,0 +1,73 @@
+name: Python SDK
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-sdk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-sdk:
+    name: Python SDK checks (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: sdks/python/uv.lock
+
+      - name: Install Python dependencies
+        working-directory: sdks/python
+        run: uv sync --locked --python "${{ matrix.python-version }}"
+
+      - name: Build deterministic test extension
+        working-directory: sdks/python
+        run: uv run --with maturin maturin develop --uv --features test-utils
+
+      - name: Check Python formatting and lint
+        working-directory: sdks/python
+        run: |
+          uv run --with ruff --with ty ruff format --check .
+          uv run --with ruff --with ty ruff check .
+
+      - name: Check Python types
+        working-directory: sdks/python
+        run: uv run --with ruff --with ty ty check
+
+      - name: Run Python tests
+        working-directory: sdks/python
+        run: uv run --with pytest python -m pytest tests -q
+
+      - name: Compile examples and probes
+        working-directory: sdks/python
+        run: uv run python -m compileall -q examples probes
+
+      - name: Build default-feature wheel and source archive
+        working-directory: sdks/python
+        run: uv build

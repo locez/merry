@@ -10,9 +10,9 @@ use crate::{
     stream::{
         AgentEventStream, StructuredAgentEventStream, StructuredAgentRun, StructuredRunResult,
     },
-    tools::Tool,
+    tools::{Tool, ToolBuildError},
 };
-use merry_core::{SessionId, ToolInputSchema};
+use merry_core::{SessionId, ToolInputSchema, ToolName, ToolSpec};
 use merry_llm::{GenerationConfig, ModelName, ModelProvider};
 use merry_runtime::{
     AgentLoopConfig, FileSessionStore, FinalOutputContract, Runtime, RuntimeBuilder,
@@ -119,6 +119,34 @@ impl AgentBuilder {
             .runtime_builder
             .register_tool(tool.into_registered_tool());
         self
+    }
+
+    /// Registers a tool whose invocation is handed to the embedding host.
+    ///
+    /// The facade owns bridge registration and explicit opt-in. Bindings and
+    /// other foreign-language hosts only need to provide the provider-neutral
+    /// name, description, and object input schema; runtime admission and
+    /// result persistence remain in Rust.
+    pub fn bridge_tool(
+        self,
+        name: ToolName,
+        description: &str,
+        input_schema: ToolInputSchema,
+    ) -> Result<Self, AgentBuildError> {
+        let spec = ToolSpec::new(name, description, input_schema)
+            .map_err(ToolBuildError::from)
+            .map_err(|source| AgentBuildError::Tool { source })?;
+        Ok(self
+            .allow_bridge_tools()
+            .register_tool(merry_runtime::RegisteredTool::bridge(spec)))
+    }
+
+    /// Registers an already validated bridge tool specification.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bridge_tool_spec(self, spec: ToolSpec) -> Self {
+        self.allow_bridge_tools()
+            .register_tool(merry_runtime::RegisteredTool::bridge(spec))
     }
 
     /// Registers one low-level runtime or host integration tool.
@@ -278,6 +306,36 @@ impl Agent {
     #[doc(hidden)]
     pub fn stream_with_tool_handoff(&self, task: &str) -> Result<AgentRun, AgentError> {
         self.stream_with_config(task, self.loop_config.clone())
+    }
+
+    /// Starts an owned host-tool handoff stream for a foreign-language binding.
+    ///
+    /// The returned handle keeps the same message-first and batch-resolution
+    /// contract as [`Self::stream_with_tool_handoff`] without exposing Rust
+    /// borrow lifetimes to the binding layer.
+    pub fn stream_with_owned_tool_handoff(
+        &self,
+        task: &str,
+    ) -> Result<crate::binding::OwnedAgentRun, AgentError> {
+        self.stream_with_tool_handoff(task)
+            .map(crate::binding::OwnedAgentRun::from)
+    }
+
+    /// Starts an owned host-tool handoff stream with a runtime-owned final
+    /// structured-output contract.
+    pub fn stream_with_owned_tool_handoff_and_schema(
+        &self,
+        task: &str,
+        schema: ToolInputSchema,
+    ) -> Result<crate::binding::OwnedAgentRun, AgentError> {
+        let contract = FinalOutputContract::new(schema)
+            .map_err(|source| AgentError::FinalOutputContract { source })?;
+        let config = self
+            .loop_config
+            .clone()
+            .with_final_output_contract(contract);
+        self.stream_with_config(task, config)
+            .map(crate::binding::OwnedAgentRun::from)
     }
 
     /// Starts a live stream whose terminal result is decoded as `T`.

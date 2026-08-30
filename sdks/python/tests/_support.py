@@ -1,88 +1,121 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from typing import Protocol, TypeVar, runtime_checkable
+
+from pydantic import BaseModel
 
 import merry
 from merry import _merry
-from merry._errors import NativeMerryError, _decode_native_error
+from merry._json import JsonObject
+
+InputT = TypeVar("InputT", bound=BaseModel)
+OutputT = TypeVar("OutputT", bound=BaseModel)
 
 
-def runtime_with_fake_response(final_text: str) -> merry.Runtime:
-    runtime = merry.Runtime.__new__(merry.Runtime)
-    runtime._tools = {}
-    try:
-        runtime._native = _merry.Runtime._with_fake_response(final_text)
-    except NativeMerryError as error:
-        raise _decode_native_error(error) from error
-    return runtime
+@runtime_checkable
+class _FakeResponseFactory(Protocol):
+    def __call__(self, session_id: str, final_text: str, /) -> _merry.Agent: ...
 
 
-def runtime_with_scripted_tool_call(
+@runtime_checkable
+class _ScriptedToolFactory(Protocol):
+    def __call__(
+        self,
+        session_id: str,
+        tool_name: str,
+        arguments_json: str,
+        final_text: str,
+        /,
+    ) -> _merry.Agent: ...
+
+
+@runtime_checkable
+class _FinalOutputFactory(Protocol):
+    def __call__(
+        self, session_id: str, arguments_json: str, final_text: str, /
+    ) -> _merry.Agent: ...
+
+
+@runtime_checkable
+class _PendingResponseFactory(Protocol):
+    def __call__(self, session_id: str, /) -> _merry.Agent: ...
+
+
+def _fake_response_native(session_id: str, final_text: str) -> _merry.Agent:
+    factory: object = getattr(_merry, "test_agent_with_fake_response", None)
+    if not isinstance(factory, _FakeResponseFactory):
+        raise TypeError("test-utils native extension is required")
+    return factory(session_id, final_text)
+
+
+def _scripted_tool_native(
+    session_id: str,
+    tool_name: str,
+    arguments_json: str,
+    final_text: str,
+) -> _merry.Agent:
+    factory: object = getattr(_merry, "test_agent_with_scripted_tool_call", None)
+    if not isinstance(factory, _ScriptedToolFactory):
+        raise TypeError("test-utils native extension is required")
+    return factory(session_id, tool_name, arguments_json, final_text)
+
+
+def _final_output_native(
+    session_id: str, arguments_json: str, final_text: str
+) -> _merry.Agent:
+    factory: object = getattr(_merry, "test_agent_with_final_output", None)
+    if not isinstance(factory, _FinalOutputFactory):
+        raise TypeError("test-utils native extension is required")
+    return factory(session_id, arguments_json, final_text)
+
+
+def pending_native_agent(session_id: str) -> _merry.Agent:
+    factory: object = getattr(_merry, "test_agent_with_pending_response", None)
+    if not isinstance(factory, _PendingResponseFactory):
+        raise TypeError("test-utils native extension is required")
+    return factory(session_id)
+
+
+def fake_agent(
+    final_text: str = "done", *, session_id: str = "python-fake"
+) -> merry.Agent:
+    native = _fake_response_native(session_id, final_text)
+    return merry.Agent._from_native(native)
+
+
+def scripted_native_agent(
     *,
     tool_name: str,
-    arguments: Mapping[str, object],
-    final_text: str,
-) -> merry.Runtime:
-    runtime = merry.Runtime.__new__(merry.Runtime)
-    runtime._tools = {}
-    try:
-        runtime._native = _merry.Runtime._with_scripted_tool_call(
-            tool_name,
-            json.dumps(arguments, sort_keys=True),
-            final_text,
-        )
-    except NativeMerryError as error:
-        raise _decode_native_error(error) from error
-    return runtime
+    arguments: JsonObject,
+    final_text: str = "done",
+    session_id: str = "python-scripted",
+) -> _merry.Agent:
+    arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    return _scripted_tool_native(session_id, tool_name, arguments_json, final_text)
 
 
-def runtime_with_scripted_tool_calls(
+def scripted_agent(
+    tool: merry.Tool[InputT, OutputT],
     *,
-    calls: list[Mapping[str, object]],
-    final_text: str,
-) -> merry.Runtime:
-    runtime = merry.Runtime.__new__(merry.Runtime)
-    runtime._tools = {}
-    try:
-        runtime._native = _merry.Runtime._with_scripted_tool_calls(
-            json.dumps(calls, sort_keys=True),
-            final_text,
-        )
-    except NativeMerryError as error:
-        raise _decode_native_error(error) from error
-    return runtime
+    arguments: JsonObject,
+    final_text: str = "done",
+    session_id: str = "python-scripted",
+) -> merry.Agent:
+    native = scripted_native_agent(
+        tool_name=tool.name,
+        arguments=arguments,
+        final_text=final_text,
+        session_id=session_id,
+    )
+    return merry.Agent._from_native(native, tools=(tool,))
 
 
-def register_static_tool_failure(
-    runtime: merry.Runtime,
+def final_output_agent(
+    arguments: JsonObject,
     *,
-    name: str,
-    description: str,
-    diagnostic_code: str,
-    message: str,
-    content: Mapping[str, object],
-) -> None:
-    try:
-        runtime._native._register_static_tool_failure(
-            name,
-            description,
-            diagnostic_code,
-            message,
-            json.dumps(content, sort_keys=True),
-        )
-    except NativeMerryError as error:
-        raise _decode_native_error(error) from error
-
-
-def register_static_tool_exception(
-    runtime: merry.Runtime,
-    *,
-    name: str,
-    description: str,
-    message: str,
-) -> None:
-    try:
-        runtime._native._register_static_tool_exception(name, description, message)
-    except NativeMerryError as error:
-        raise _decode_native_error(error) from error
+    session_id: str = "python-final-output",
+) -> merry.Agent:
+    arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    native = _final_output_native(session_id, arguments_json, "unused")
+    return merry.Agent._from_native(native)

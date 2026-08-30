@@ -1,276 +1,236 @@
 # Merry Python SDK
 
-Python bindings for the Rust-owned Merry runtime.
+The Python package is an async-first ergonomic wrapper over the Rust-owned
+Merry facade. Python owns typed conversion and host-side callable execution;
+Rust owns sessions, events, artifacts, ledger state, permissions, retries,
+tool admission, and run lifecycle.
 
-The Python package is a thin facade over `merry._merry`; runtime state,
-events, artifacts, tool continuation, and bridge tool registration stay owned
-by Rust.
-
-## Build
+## Install
 
 From the repository root:
 
 ```bash
 cd sdks/python
 uv sync
-uv pip install --python .venv/bin/python --reinstall --editable .
+uv build
 ```
 
-After changing Rust code under `crates/merry-py`, `crates/merry-runtime`, or
-`crates/merry-core`, rebuild the editable extension:
+The package exposes the native extension as `merry._merry`. Application code
+should use the typed `merry` module instead of constructing native objects.
+
+## Examples
+
+The examples use the live OpenAI-compatible provider configured through
+`MERRY_OPENAI_API_KEY`, `MERRY_OPENAI_MODEL`, and the optional
+`MERRY_OPENAI_BASE_URL`:
 
 ```bash
-uv pip install --python .venv/bin/python --reinstall --editable .
+uv run examples/basic_agent.py       # event handling and terminal result
+uv run examples/tool_decorator.py    # @builder.tool host execution
+uv run examples/structured_output.py # two-field typed JSON output
+uv run examples/multi_runtime_orchestration.py  # compose independent runtimes
 ```
 
-## Live Provider Example
+Each agent has its own session id and Rust-owned lifecycle. Interactive and
+process-specific examples are intentionally omitted until those adapters are
+part of the Python capability matrix.
 
-`examples/basic_runtime.py` uses an OpenAI-compatible provider configured from
-environment variables. It consumes live runtime events first, then reads the
-final result from the same run:
+## Build An Agent
 
-```bash
-export MERRY_OPENAI_API_KEY=...
-export MERRY_OPENAI_MODEL=...
-export MERRY_OPENAI_BASE_URL=https://api.example.test/v1
-uv run examples/basic_runtime.py
-```
-
-To inspect concurrent independent multi-turn runtimes, run:
-
-```bash
-uv run examples/multi_runtime.py
-```
-
-The multi-runtime example runs three runtimes concurrently. Each runtime then
-runs three sequential turns and prints the runtime label, round number, runtime
-handle session id, the prompt-cache-key hint derived from that session id, the
-session id carried by every event, and provider-reported usage. Use it to check
-runtime isolation and event/session plumbing. Treat `cached_input_tokens` as a
-best-effort provider diagnostic; a zero value for one concurrent runtime is not
-by itself a wiring failure.
-
-To inspect one stable session with a deliberately long repeated prefix, run:
-
-```bash
-uv run examples/single_runtime_cache_probe.py
-```
-
-The cache probe runs one runtime for several sequential turns and prints the
-session id Merry uses as the OpenAI `prompt_cache_key` hint, the last-turn
-`cached_input_tokens` value when the provider reports it, and the full usage
-snapshot. It is a live observation probe, not a deterministic test: OpenAI
-prompt caching requires eligible long prompts, exact matching prefixes, and
-provider-side cache routing, so cache hits remain best-effort.
-
-`MERRY_OPENAI_BASE_URL` is optional when using the default OpenAI-compatible
-endpoint.
+Provider construction is performed by the Rust facade. The Python dataclasses
+only carry validated application configuration:
 
 ```python
-stream = runtime.stream("...")
+from pathlib import Path
 
-async for event in stream:
-    print(event["type"])
+import merry
 
-result = await stream.result()
-```
-
-To inspect a long-lived interactive run with separate event, input, and control
-handles, run:
-
-```bash
-uv run examples/interactive_agent.py
-```
-
-For a long-lived interactive agent run, split event consumption from input and
-control:
-
-```python
-run = runtime.start_interactive()
-
-asyncio.create_task(render(run.stream))
-
-await run.input.submit_next("Inspect the current failure.")
-backlog = await run.input.enqueue("After that, summarize the next step.")
-await backlog.update(backlog.text + " Keep it brief.")
-await run.control.interrupt()
-```
-
-`submit_next()` preempts backlog at the next boundary. `enqueue()` adds normal
-backlog input that the run consumes automatically and returns a pending input
-handle with `lane`, `text`, and `update()`/`remove()` methods. Only
-suspended input created by an interrupt requires explicit resume or discard.
-To reorder pending input, mutate a snapshot list and submit the whole order with
-`replace_pending_order(lane, items)`.
-
-Interactive input/control handles do not replace the existing `RuntimeStream`
-bridge-tool path; Python bridge tools continue to be resolved by consuming
-`runtime.stream(...)`.
-
-The same configuration can be passed directly:
-
-```python
-runtime = merry.Runtime(
-    config=merry.RuntimeConfig(
-        provider=merry.OpenAICompatibleProvider(
+agent = (
+    merry.Agent.builder(session_id="demo")
+    .provider(
+        merry.OpenAICompatible(
             api_key="...",
-            model="...",
+            model="gpt-4.1-mini",
             base_url="https://api.example.test/v1",
-            protocol="chat_completions",
-            retry=merry.ProviderRetryConfig(
-                max_attempts=6,
-                initial_delay_ms=1000,
-                max_delay_ms=120000,
-                max_elapsed_ms=300000,
-                jitter=True,
-            ),
         )
     )
+    .workspace(
+        merry.WorkspaceConfig(
+            root=Path("."),
+            patch=merry.PatchConfig(write_scope=["src"]),
+        )
+    )
+    .max_model_turns(32)
+    .build()
 )
 ```
 
-Python SDK retry is opt-in. When enabled, Merry retries transient provider
-setup or stream failures only before the first observable output delta or tool
-call. Once output is visible, errors are forwarded without replay, preventing
-duplicate text and duplicate tool calls.
+`WorkspaceConfig` maps to the Rust coding profile. Patch and forbidden paths
+are workspace-relative normalized paths; workspace roots themselves may be
+absolute. Every workspace limit is positive and is enforced again by Rust.
 
-Anthropic Messages uses the same runtime surface:
+Anthropic Messages uses the same builder:
 
 ```python
-runtime = merry.Runtime.with_anthropic(
-    api_key="...",
-    model="claude-sonnet-4-5",
-    default_max_output_tokens=4096,
+agent = (
+    merry.Agent.builder("anthropic-session")
+    .provider(merry.Anthropic(api_key="...", model="claude-sonnet-4-5"))
+    .build()
 )
 ```
 
-## Session Identity
+## Tool Decorator
 
-Python SDK runtimes are in-memory and ephemeral by default. Each `Runtime()`,
-`Runtime.from_env()`, or `Runtime.with_openai_compatible(...)` call creates a
-fresh random session id unless `session_id` is passed explicitly.
-
-Use an explicit session id when you want stable logs or future store/resume
-debugging:
-
-```python
-runtime = merry.Runtime.from_env(session_id="tenant-a.debug_1")
-```
-
-Session ids are filesystem-safe strings. They may contain ASCII letters,
-digits, `.`, `_`, and `-`.
-
-## Bridge Tool Example
-
-`examples/tool_bridge.py` uses the same OpenAI-compatible provider config,
-registers a Python bridge tool, streams events, then prints the final result:
-
-```bash
-uv run examples/tool_bridge.py
-```
-
-Tool inputs and outputs are declared with Pydantic models. Every model field
-must include a `Field(description=...)`; Merry rejects underspecified tool
-contracts before registering them with the Rust runtime.
+Tools use one Pydantic input model, one Pydantic output model, and an async
+handler. Every field must have a description so the generated provider-neutral
+schema is explicit:
 
 ```python
 from pydantic import BaseModel, ConfigDict, Field
 
-class LookupOrderInput(BaseModel):
+
+class LookupInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    order_id: str = Field(description="Stable order identifier to look up.")
+    order_id: str = Field(description="Stable order identifier.")
 
-class LookupOrderOutput(BaseModel):
+
+class LookupOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    order_id: str = Field(description="Stable order identifier that was looked up.")
-    status: str = Field(description="Current fulfillment status for the order.")
+    status: str = Field(description="Current fulfillment status.")
 
-async def lookup_order(args: LookupOrderInput) -> LookupOrderOutput:
+
+builder = merry.Agent.builder("tool-session")
+
+
+@builder.tool
+async def lookup_order(args: LookupInput) -> LookupOutput:
     """Look up an order by id."""
-    return LookupOrderOutput(order_id=args.order_id, status="shipped")
+    return LookupOutput(status="shipped")
 
-runtime.register_tool(lookup_order)
+
+agent = builder.provider(
+    merry.OpenAICompatible(api_key="...", model="gpt-4.1-mini")
+).build()
 ```
 
-`register_tool(func)` derives the tool name from `func.__name__`, the tool
-description from the function docstring, the input schema from the single
-Pydantic argument annotation, and the output contract from the return
-annotation.
+`@agent.tool` is also available after `build()` and before the first run. The
+decorator returns a typed `Tool[InputT, OutputT]`, which can be passed to
+`ToolRegistry` or called directly in tests. Duplicate names, reserved names,
+schema validation, admission, ordering, artifacts, and result persistence
+remain Rust responsibilities.
 
-The same tool can be registered directly on a runtime:
+Expected business failures should use `ToolDomainError`; they become a failed
+tool result and let the model continue. Unexpected handler exceptions become
+`MerryToolError` and cancel the run. Cancellation is propagated to the handler.
+
+## Streaming And Running
+
+`Agent.run()` is the convenient path: it executes registered Python tools and
+returns the Rust-owned terminal result. `Agent.stream()` exposes the explicit
+message protocol for hosts that need to render events or control tool calls:
 
 ```python
-@runtime.tool
-async def lookup_order(args: LookupOrderInput) -> LookupOrderOutput:
-    """Look up an order by id."""
-    return LookupOrderOutput(order_id=args.order_id, status="shipped")
+import merry
+
+run = agent.stream("Inspect the repository and summarize the result.")
+registry = merry.ToolRegistry([lookup_order])
+
+async for message in run:
+    if isinstance(message, merry.Event):
+        print(message.type.value)
+    elif isinstance(message, merry.ToolCallBatch):
+        await registry.execute(message)
+
+result = await run.result()
+assert result.status is merry.RunStatus.COMPLETED
 ```
 
-The native stream driver sends an internal bridge tool request to the Python
-wrapper, Python executes the registered handler, then Python submits the result
-back to the same Rust runtime session. Public events still show ordinary
-`tool_call_started` and `tool_call_finished` records. Bridge handlers run in the
-host Python process; Merry profiles do not sandbox arbitrary host code.
+`ToolCallBatch` is an exclusive Rust-owned lease. The complete result set must
+be submitted before reading the next message. `result()` is valid after EOF;
+`run.cancel()` and `close()` wait for a durable cancelled terminal result. The
+Python async task may be cancelled; the SDK requests Rust cancellation and
+re-raises `asyncio.CancelledError`.
+
+`AgentBuilder` is single-use for `build()` and `resume()`. A native operation
+that has consumed the builder also makes the Python builder terminal, including
+when that operation later fails. Start a new builder to retry that operation.
+
+For a simple host-controlled event iterator, use `agent.messages(...)`. It
+closes an unfinished run when the async iterator exits.
 
 ## Structured Final Output
 
-`final_output_model` asks the Rust runtime to expose a reserved terminal tool
-for the model to call when the task is complete. The model can still call normal
-runtime or bridge tools first; the run completes only when the reserved final
-output tool is called. Plain text completion is reported as `blocked` while this
-contract is active.
+Pass a Pydantic model to `run()` or `stream()` to install the Rust-owned final
+output contract:
 
 ```python
-class OrderStatusFinalOutput(BaseModel):
+class Answer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    order_id: str = Field(description="Stable order identifier in the final answer.")
-    status: str = Field(description="Final fulfillment status for the order.")
+    summary: str = Field(description="Concise answer summary.")
+    next_step: str = Field(description="One practical next step for the reader.")
 
-stream = runtime.stream(
-    "Use lookup_order with order_id A123, then submit the final structured order status.",
-    final_output_model=OrderStatusFinalOutput,
+
+result = await agent.run(
+    "Return JSON with exactly two fields: summary and next_step. "
+    "Summarize the repository and give one practical next step.",
+    final_output_model=Answer,
 )
-
-async for event in stream:
-    print(event["type"])
-
-result = await stream.result()
-print(result.final_output.status)
-print(result.final_output_json)
+assert result.structured_output is not None
+assert result.structured_output.summary
+assert result.structured_output.next_step
 ```
 
-`result.final_output` is an instance of the Pydantic model when
-`final_output_model` is provided. `result.final_output_json` keeps the exact JSON
-payload recorded by the Rust runtime.
+`final_output_json` is the exact JSON value recorded by Rust. Invalid Python
+model declarations fail before a run starts, a native final-output contract
+failure is `MerryConfigError`, and a recorded JSON value that cannot be decoded
+by the requested Pydantic model is `MerryOutputError`. Output state remains
+Rust-owned in every case.
 
-Run the live example:
+## Save And Resume
 
-```bash
-uv run examples/final_output_model.py
-```
-
-## Agent Loop Budget
-
-SDK runs use the Rust runtime's bounded agent loop. `max_model_turns` limits the
-number of model turns started by one `run(...)` or `stream(...)` call. The
-generic SDK default is 128 model turns. Runtime context compaction may happen
-within a run, but it does not reset this control-flow and cost budget.
+Session persistence is explicit and file-backed in the current SDK:
 
 ```python
-stream = runtime.stream(
-    "Run a task that may need many tool continuations.",
-    max_model_turns=32,
+from pathlib import Path
+
+store = Path("session.json")
+await agent.save_session()
+
+resumed = await (
+    merry.Agent.builder("demo")
+    .provider(merry.OpenAICompatible(api_key="...", model="gpt-4.1-mini"))
+    .session_store(store)
+    .resume()
 )
 ```
 
-Coding-agent product entry points should pass the coding profile default of
-1024 model turns for one top-level user task.
+An explicit path may be passed to `resume(path)` when it differs from the
+configured store path.
 
-## Tests
+The session document, ledger, artifact references, and resume validation are
+owned by Rust. Python only supplies the provider and store configuration.
+
+## Errors And Tests
+
+All native failures are mapped to `MerryError` subclasses carrying
+`MerryErrorInfo` (`code`, `domain`, `message`, `hint`, `retryability`, and
+bounded `context`). Provider secrets and rejected path values are not included
+in native diagnostics.
+
+Deterministic tests use a feature-gated Rust fake provider:
 
 ```bash
+cd sdks/python
+maturin develop --uv --features test-utils
+uv run --with ruff --with ty ruff check .
+uv run --with ruff --with ty ty check
 uv run --with pytest python -m pytest tests -q
+uv build
 ```
+
+The fake provider is not part of the default wheel feature set. See
+[`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md) for the Rust owner and test
+evidence for each public capability.
