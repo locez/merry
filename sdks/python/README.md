@@ -196,19 +196,20 @@ Session persistence is explicit and file-backed in the current SDK:
 ```python
 from pathlib import Path
 
-store = Path("session.json")
+store_root = Path("sessions")
 await agent.save_session()
 
 resumed = await (
     merry.Agent.builder("demo")
     .provider(merry.OpenAICompatible(api_key="...", model="gpt-4.1-mini"))
-    .session_store(store)
+    .session_store(store_root)
     .resume()
 )
 ```
 
-An explicit path may be passed to `resume(path)` when it differs from the
-configured store path.
+The configured path is a store root directory. Each session is persisted under
+`<store_root>/<session_id>/state.json`. An explicit root may be passed to
+`resume(path)` when it differs from the configured store root.
 
 The session document, ledger, artifact references, and resume validation are
 owned by Rust. Python only supplies the provider and store configuration.

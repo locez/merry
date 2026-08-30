@@ -308,6 +308,9 @@ impl FileSessionStore {
         Ok(Self::new(Self::default_sessions_dir()?))
     }
 
+    /// Creates a store rooted at a directory.
+    ///
+    /// Each session is stored below `<root>/<session_id>/state.json`.
     #[must_use]
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {

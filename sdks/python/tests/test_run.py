@@ -238,7 +238,7 @@ def test_session_store_save_and_resume_preserves_session_identity(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> str:
-        path = tmp_path / "session.json"
+        store_root = tmp_path / "sessions"
         provider = merry.OpenAICompatible(
             api_key="sk-test",
             model="gpt-test",
@@ -247,14 +247,14 @@ def test_session_store_save_and_resume_preserves_session_identity(
         agent = (
             merry.AgentBuilder("resume-test")
             .provider(provider)
-            .session_store(path)
+            .session_store(store_root)
             .build()
         )
         await agent.save_session()
         resumed = await (
             merry.AgentBuilder("resume-test")
             .provider(provider)
-            .session_store(path)
+            .session_store(store_root)
             .resume()
         )
         return resumed.session_id

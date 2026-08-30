@@ -105,7 +105,7 @@ class AgentBuilder:
         return self
 
     def session_store(self, path: PathInput) -> AgentBuilder:
-        """Configure the file store used by save and resume operations."""
+        """Configure the directory-backed store used by save and resume."""
 
         self._ensure_open()
         try:
