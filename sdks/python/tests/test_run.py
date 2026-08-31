@@ -192,24 +192,28 @@ def test_retryable_tool_result_error_keeps_the_batch_active() -> None:
             session_id="retryable-result",
         )
         run = merry.Agent._from_native(native).stream("Load the order.")
-        message = await run.next()
-        assert isinstance(message, merry.ToolCallBatch)
+        batch: merry.ToolCallBatch | None = None
+        while batch is None:
+            message = await run.next()
+            assert message is not None
+            if isinstance(message, merry.ToolCallBatch):
+                batch = message
 
         with pytest.raises(merry.MerryRuntimeError) as raised:
-            await message.submit(
+            await batch.submit(
                 [
                     merry.ToolResult.succeeded(
-                        message.invocations[0].id, merry.TextContent("")
+                        batch.invocations[0].id, merry.TextContent("")
                     )
                 ]
             )
         assert raised.value.code == "unsupported_tool_result_content"
         assert not run.finished
 
-        submission = await message.submit(
+        submission = await batch.submit(
             [
                 merry.ToolResult.succeeded(
-                    message.invocations[0].id,
+                    batch.invocations[0].id,
                     merry.TextContent("loaded"),
                 )
             ]
