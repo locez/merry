@@ -73,9 +73,9 @@ def test_agent_run_preserves_event_order_and_terminal_result() -> None:
     async def scenario() -> merry.RunResult[BaseModel]:
         agent = fake_agent("hello", session_id="event-order")
         run = agent.stream("Say hello.")
-        messages: list[merry.Event | merry.ToolCallBatch] = []
+        seen_messages: list[merry.Event | merry.ToolCallBatch] = []
         async for message in run:
-            messages.append(message)
+            seen_messages.append(message)
         return await run.result()
 
     result = asyncio.run(scenario())
@@ -181,6 +181,44 @@ def test_invalid_native_result_error_is_terminal_and_repeatable() -> None:
         assert raised.value.code == "protocol.native_result_invalid"
 
     assert native.result_calls == 1
+
+
+def test_retryable_tool_result_error_keeps_the_batch_active() -> None:
+    async def scenario() -> merry.RunResult[BaseModel]:
+        native = scripted_native_agent(
+            tool_name="lookup_order",
+            arguments={"order_id": "A123"},
+            final_text="Order loaded.",
+            session_id="retryable-result",
+        )
+        run = merry.Agent._from_native(native).stream("Load the order.")
+        message = await run.next()
+        assert isinstance(message, merry.ToolCallBatch)
+
+        with pytest.raises(merry.MerryRuntimeError) as raised:
+            await message.submit(
+                [merry.ToolResult.succeeded(message.invocations[0].id, merry.TextContent(""))]
+            )
+        assert raised.value.code == "unsupported_tool_result_content"
+        assert not run.finished
+
+        submission = await message.submit(
+            [
+                merry.ToolResult.succeeded(
+                    message.invocations[0].id,
+                    merry.TextContent("loaded"),
+                )
+            ]
+        )
+        assert submission is merry.ToolSubmission.ACCEPTED
+        while await run.next() is not None:
+            pass
+        return await run.result()
+
+    result = asyncio.run(scenario())
+
+    assert result.status is merry.RunStatus.COMPLETED
+    assert result.final_output == "Order loaded."
 
 
 def test_explicit_tool_batch_must_be_submitted_before_run_advances() -> None:

@@ -16,7 +16,7 @@ JsonObject: TypeAlias = dict[str, JsonValue]
 def _contains_control(value: str, *, allow_newline_tab: bool = False) -> bool:
     return any(
         unicodedata.category(character) == "Cc"
-        and not (allow_newline_tab and character in {"\n", "\t"})
+        and not (allow_newline_tab and character in {"\n", "\r", "\t"})
         for character in value
     )
 

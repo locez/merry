@@ -45,6 +45,7 @@ _NON_TERMINAL_ERROR_CODES = frozenset(
         "tool_batch_not_pending",
         "tool_batch_pending",
         "tool_batch_resolved",
+        "unsupported_tool_result_content",
     }
 )
 

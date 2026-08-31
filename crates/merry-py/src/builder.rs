@@ -137,7 +137,7 @@ impl PyAgentBuilder {
         }
         let profile = profile_builder
             .build()
-            .map_err(|error| error::profile_message_to_py(error.to_string()))?;
+            .map_err(error::profile_build_error_to_py)?;
         let builder = self.take_builder()?;
         self.inner = Some(
             builder

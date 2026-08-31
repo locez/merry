@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, TypeVar, overload
 
 from pydantic import BaseModel
@@ -17,7 +17,6 @@ from ._errors import (
     NativeMerryError,
     _decode_native_error,
 )
-from ._events import Event
 from ._json import dump_json, require_json_object
 from ._models import RunResult, ToolCallBatch
 from ._run import AgentRun
@@ -213,31 +212,6 @@ class Agent:
             if not run.finished:
                 await _cancel_run_preserving(run, shield=False)
             raise
-
-    async def messages(
-        self,
-        task: str,
-        *,
-        final_output_model: type[FinalOutputT] | None = None,
-    ) -> AsyncIterator[Event | ToolCallBatch[FinalOutputT]]:
-        """Yield run messages while retaining cancellation cleanup ownership."""
-
-        run = self.stream(task, final_output_model=final_output_model)
-        cleanup_attempted = False
-        try:
-            async for message in run:
-                yield message
-        except BaseException as error:
-            cleanup_attempted = True
-            if not run.finished:
-                await _cancel_run_preserving(
-                    run,
-                    shield=isinstance(error, asyncio.CancelledError),
-                )
-            raise
-        finally:
-            if not cleanup_attempted:
-                await run.close()
 
     async def save_session(self) -> None:
         """Persist the current Rust-owned session to its configured store."""

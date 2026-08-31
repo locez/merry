@@ -140,6 +140,18 @@ def test_invalid_workspace_and_limits_fail_before_native_build(tmp_path: Path) -
         merry.WorkspaceLimits(max_read_bytes=True)
 
 
+def test_workspace_diagnostic_does_not_expose_host_paths(tmp_path: Path) -> None:
+    provider = openai_provider()
+    missing_root = tmp_path / "customer-secret-project" / "missing-root"
+    builder = merry.AgentBuilder("workspace-diagnostic").provider(provider)
+
+    with pytest.raises(merry.MerryConfigError) as raised:
+        builder.workspace(merry.WorkspaceConfig(root=missing_root))
+
+    assert raised.value.info.message == "workspace tool configuration was rejected"
+    assert str(missing_root) not in raised.value.info.message
+
+
 def test_numeric_configuration_rejects_non_integer_values() -> None:
     class NonExactInt(int):
         pass

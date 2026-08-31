@@ -45,6 +45,8 @@ from pathlib import Path
 
 import merry
 
+store_root = Path("sessions")
+
 agent = (
     merry.Agent.builder(session_id="demo")
     .provider(
@@ -60,6 +62,7 @@ agent = (
             patch=merry.PatchConfig(write_scope=["src"]),
         )
     )
+    .session_store(store_root)
     .max_model_turns(32)
     .build()
 )
@@ -156,9 +159,6 @@ re-raises `asyncio.CancelledError`.
 `AgentBuilder` is single-use for `build()` and `resume()`. A native operation
 that has consumed the builder also makes the Python builder terminal, including
 when that operation later fails. Start a new builder to retry that operation.
-
-For a simple host-controlled event iterator, use `agent.messages(...)`. It
-closes an unfinished run when the async iterator exits.
 
 ## Structured Final Output
 

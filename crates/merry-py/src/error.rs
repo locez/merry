@@ -141,6 +141,35 @@ pub(crate) fn profile_message_to_py(message: impl Into<String>) -> PyErr {
     )
 }
 
+pub(crate) fn profile_build_error_to_py(
+    error: merry::profiles::CodingAgentProfileBuildError,
+) -> PyErr {
+    let message = match error {
+        merry::profiles::CodingAgentProfileBuildError::WorkspaceTools(_) => {
+            "workspace tool configuration was rejected"
+        }
+        merry::profiles::CodingAgentProfileBuildError::ProcessTool(_) => {
+            "process tool configuration was rejected"
+        }
+        merry::profiles::CodingAgentProfileBuildError::PermissionTool(_) => {
+            "permission tool configuration was rejected"
+        }
+        merry::profiles::CodingAgentProfileBuildError::Core(_) => {
+            "workspace profile protocol configuration was rejected"
+        }
+        merry::profiles::CodingAgentProfileBuildError::RuntimeProfile(_) => {
+            "workspace runtime profile configuration was rejected"
+        }
+        merry::profiles::CodingAgentProfileBuildError::HashSerialization(_) => {
+            "workspace profile identity could not be created"
+        }
+        merry::profiles::CodingAgentProfileBuildError::Prompt(_) => {
+            "workspace profile prompt configuration was rejected"
+        }
+    };
+    profile_message_to_py(message)
+}
+
 pub(crate) fn config_message_to_py(message: impl Into<String>) -> PyErr {
     message_to_py(
         "config.invalid",

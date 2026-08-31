@@ -9,7 +9,7 @@ the source of truth for every durable or policy-sensitive capability.
 | Session identity | `Agent.session_id` | `merry::Agent` / `SessionId` | `tests/test_builder.py`, `tests/test_run.py` |
 | Runtime events | immutable `Event` | `merry-core::RuntimeEvent`, runtime journal | `tests/test_run.py` |
 | Event payload contract | `EventType` plus typed payload union; unknown events are retained as `UnknownEventPayload` | `merry-core::RuntimeEvent` serde contract | `merry/_event_parser.py`, `tests/test_events.py` |
-| Streaming lifecycle | `AgentRun.next`, async iteration, `messages` | `merry::binding::OwnedAgentRun` | `tests/test_run.py` |
+| Streaming lifecycle | `Agent.stream` -> `AgentRun.next`, async iteration | `merry::binding::OwnedAgentRun` | `tests/test_run.py` |
 | Python tool decorator | `@builder.tool`, `@agent.tool`, `Tool` | Rust bridge tool registration; Python host registry for callables | `tests/test_tools.py` |
 | Tool batch contract | `ToolCallBatch.submit`, `ToolRegistry.execute` | Rust batch lease, ordering, admission, artifacts | `tests/test_run.py`, `tests/test_tools.py`, `crates/merry/tests/agent.rs` |
 | Tool domain failure | `ToolDomainError` -> `ToolResult` | Rust tool result/artifact continuation | `tests/test_tools.py` |
