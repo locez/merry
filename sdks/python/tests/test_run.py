@@ -197,7 +197,11 @@ def test_retryable_tool_result_error_keeps_the_batch_active() -> None:
 
         with pytest.raises(merry.MerryRuntimeError) as raised:
             await message.submit(
-                [merry.ToolResult.succeeded(message.invocations[0].id, merry.TextContent(""))]
+                [
+                    merry.ToolResult.succeeded(
+                        message.invocations[0].id, merry.TextContent("")
+                    )
+                ]
             )
         assert raised.value.code == "unsupported_tool_result_content"
         assert not run.finished
