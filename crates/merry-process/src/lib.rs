@@ -6,7 +6,10 @@
 //! platform can replace the concrete backend without changing coding
 //! composition or runtime call sites.
 
+mod bwrap_path;
 mod process_runner;
+
+pub use bwrap_path::resolve_bwrap_path;
 
 pub use process_runner::TokioProcessRunner;
 

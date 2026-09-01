@@ -281,80 +281,22 @@ fn plan_mounts_runtime_paths_and_workspace() {
         &["--perms", "0700", "--dir", SANDBOX_HOME]
     ));
     assert!(contains_sequence(&args, &["--dir", "/etc"]));
-    assert!(contains_sequence(&args, &["--ro-bind", "/usr", "/usr"]));
-    assert!(contains_sequence(&args, &["--ro-bind-try", "/bin", "/bin"]));
-    assert!(contains_sequence(&args, &["--ro-bind-try", "/lib", "/lib"]));
-    assert!(contains_sequence(
-        &args,
-        &["--ro-bind-try", "/lib64", "/lib64"]
-    ));
-    assert!(contains_sequence(&args, &["--ro-bind-try", "/opt", "/opt"]));
-    assert!(contains_sequence(
-        &args,
-        &[
-            "--dir",
-            "/etc",
-            "--ro-bind",
-            "/etc/ld.so.conf",
-            "/etc/ld.so.conf"
-        ]
-    ));
-    assert!(contains_sequence(
-        &args,
-        &[
-            "--dir",
-            "/etc",
-            "--ro-bind",
-            "/etc/resolv.conf",
-            "/etc/resolv.conf"
-        ]
-    ));
-    assert!(contains_sequence(
-        &args,
-        &["--dir", "/etc", "--ro-bind", "/etc/hosts", "/etc/hosts"]
-    ));
-    assert!(contains_sequence(
-        &args,
-        &[
-            "--dir",
-            "/etc",
-            "--ro-bind",
-            "/etc/nsswitch.conf",
-            "/etc/nsswitch.conf"
-        ]
-    ));
-    assert!(contains_sequence(
-        &args,
-        &[
-            "--dir",
-            "/etc",
-            "--ro-bind",
-            "/etc/ld.so.conf.d",
-            "/etc/ld.so.conf.d"
-        ]
-    ));
-    assert!(contains_sequence(
-        &args,
-        &["--dir", "/etc", "--ro-bind", "/etc/ssl", "/etc/ssl"]
-    ));
-    assert!(contains_sequence(
-        &args,
-        &[
-            "--dir",
-            "/etc",
-            "--ro-bind",
-            "/etc/ld.so.cache",
-            "/etc/ld.so.cache"
-        ]
-    ));
-    assert!(!contains_sequence(
-        &args,
-        &["--ro-bind-try", "/etc/ld.so.cache", "/etc/ld.so.cache"]
-    ));
-    assert!(!contains_sequence(
-        &args,
-        &["--ro-bind-try", "/etc/resolv.conf", "/etc/resolv.conf"]
-    ));
+    assert_ro_mount(&args, "--ro-bind", "/usr", "/usr");
+    for path in ["/bin", "/lib", "/lib64", "/opt"] {
+        if Path::new(path).exists() {
+            assert_ro_mount(&args, "--ro-bind-try", path, path);
+        }
+    }
+    for path in SANDBOX_ETC_READ_ONLY_FILE_PATHS {
+        if Path::new(path).exists() {
+            assert_ro_mount(&args, "--ro-bind", path, path);
+        }
+    }
+    for path in SANDBOX_ETC_READ_ONLY_DIR_PATHS {
+        if Path::new(path).exists() {
+            assert_ro_mount(&args, "--ro-bind", path, path);
+        }
+    }
     assert!(!contains_sequence(
         &args,
         &["--ro-bind-try", "/etc", "/etc"]
@@ -646,7 +588,7 @@ fn sandbox_rejects_conflicting_rules_for_the_same_path() {
 
 #[cfg(unix)]
 #[test]
-fn sandbox_rejects_symlinked_product_write_roots() {
+fn sandbox_supports_symlinked_product_write_roots() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().expect("temporary sandbox paths");
@@ -658,12 +600,114 @@ fn sandbox_rejects_symlinked_product_write_roots() {
     let mut host = sandbox_host();
     host.xdg_paths = XdgPaths::from_parts(
         PathBuf::from("/home/alice"),
-        Some(linked_config),
+        Some(linked_config.clone()),
         Some(temp.path().join("state")),
     );
 
-    let error = plan_sandbox(true, &host).expect_err("symlinked write root must fail closed");
-    assert!(matches!(error, Error::ProductPathContainsSymlink { .. }));
+    let Bootstrap::Reexec(plan) =
+        plan_sandbox(true, &host).expect("symlinked write root should be mountable")
+    else {
+        panic!("expected sandbox reexec plan");
+    };
+    let args = plan_args(&plan);
+    let config_dir = linked_config.join("merry");
+    let managed_config_dir = config_dir.join("managed");
+    let resolved_config_dir = real_config.join("merry");
+    let resolved_managed_config_dir = resolved_config_dir.join("managed");
+
+    assert!(contains_sequence(
+        &args,
+        &[
+            "--ro-bind-try",
+            resolved_config_dir.to_str().expect("UTF-8 test path"),
+            config_dir.to_str().expect("UTF-8 test path"),
+        ],
+    ));
+    assert!(contains_sequence(
+        &args,
+        &[
+            "--bind",
+            resolved_managed_config_dir
+                .to_str()
+                .expect("UTF-8 test path"),
+            managed_config_dir.to_str().expect("UTF-8 test path"),
+        ],
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn sandbox_mounts_symlinked_file_sources_at_their_logical_paths() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("temporary sandbox paths");
+    let real_file = temp.path().join("real.conf");
+    let linked_file = temp.path().join("resolv.conf");
+    std::fs::write(&real_file, "nameserver 192.0.2.1\n").expect("real file");
+    symlink(&real_file, &linked_file).expect("file symlink");
+
+    let mut args = Vec::new();
+    append_bind_file_args(&mut args, &linked_file, Path::new("/etc/resolv.conf"));
+    let args = plan_args(&Plan {
+        program: OsString::from("bwrap"),
+        args,
+        env: Vec::new(),
+    });
+
+    assert!(contains_sequence(
+        &args,
+        &[
+            "--ro-bind",
+            real_file.to_str().expect("UTF-8 test path"),
+            "/etc/resolv.conf",
+        ],
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bubblewrap_reads_a_symlinked_file_through_its_logical_mount_path() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("temporary sandbox paths");
+    let real_file = temp.path().join("real.conf");
+    let linked_file = temp.path().join("resolv.conf");
+    std::fs::write(&real_file, "nameserver 192.0.2.1\n").expect("real file");
+    symlink(&real_file, &linked_file).expect("file symlink");
+
+    let destination = Path::new("/etc/resolv.conf");
+    let mut args = vec![
+        os("--unshare-user"),
+        os("--die-with-parent"),
+        os("--ro-bind"),
+        os("/"),
+        os("/"),
+    ];
+    args.extend([
+        os("--ro-bind"),
+        merry_process::resolve_bwrap_path(&linked_file)
+            .as_os_str()
+            .to_owned(),
+        destination.as_os_str().to_owned(),
+    ]);
+    args.extend([
+        os("--"),
+        os("/usr/bin/cat"),
+        destination.as_os_str().to_owned(),
+    ]);
+
+    let output = match Command::new("bwrap").args(args).output() {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("bubblewrap test could not start: {error}"),
+    };
+
+    assert!(
+        output.status.success(),
+        "bubblewrap symlink mount probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"nameserver 192.0.2.1\n");
 }
 
 #[test]
@@ -1371,6 +1415,22 @@ fn args_without_sandbox_bootstrap_flags_preserves_shell_trailing_argv() {
             os(SANDBOX_CHILD_HANDOFF_ARG),
             os(SANDBOX_CHILD_HANDOFF_CLI_BWRAP),
         ]
+    );
+}
+
+fn assert_ro_mount(args: &[String], flag: &str, source: &str, destination: &str) {
+    let resolved_source = merry_process::resolve_bwrap_path(Path::new(source));
+    assert!(
+        contains_sequence(
+            args,
+            &[
+                flag,
+                resolved_source.to_str().expect("UTF-8 test path"),
+                destination,
+            ],
+        ),
+        "missing mount {flag} {} {destination}",
+        resolved_source.display()
     );
 }
 
