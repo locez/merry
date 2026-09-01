@@ -1,6 +1,6 @@
 //! Event-only Rust SDK streams.
 //!
-//! Host-owned tool handoff remains available through [`crate::__internal::AgentRun`]. The
+//! Host-owned tool handoff remains available through [`crate::rust::AgentRun`]. The
 //! normal facade stream is intentionally narrower: runtime executes ordinary
 //! Rust tools and this module exposes only durable runtime events.
 

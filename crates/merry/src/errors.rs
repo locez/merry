@@ -55,6 +55,34 @@ pub enum AgentBuildError {
         #[source]
         source: AgentProfileError,
     },
+    /// A provider-neutral application or bridge tool definition was invalid.
+    #[error("tool configuration is invalid: {source}")]
+    Tool {
+        /// Underlying tool contract failure.
+        #[source]
+        source: crate::tools::ToolBuildError,
+    },
+}
+
+impl AgentBuildError {
+    /// Returns the stable provider-neutral code for this construction failure.
+    #[must_use]
+    pub fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::MissingPrimaryProvider => "missing_primary_provider",
+            Self::Runtime { source } => source.diagnostic_code(),
+            Self::LoopConfig { .. } => "agent_loop_config",
+            Self::Profile { source } => match source {
+                AgentProfileError::ContextUnavailable => "profile_context_unavailable",
+                AgentProfileError::Runtime { source } => source.diagnostic_code(),
+                AgentProfileError::LoopConfig { .. } => "agent_loop_config",
+            },
+            Self::Tool { source } => match source {
+                crate::tools::ToolBuildError::Core(_) => "tool_core_error",
+                crate::tools::ToolBuildError::ReservedName { .. } => "reserved_tool_name",
+            },
+        }
+    }
 }
 
 impl From<RuntimeError> for AgentBuildError {
@@ -141,6 +169,12 @@ pub enum AgentError {
     /// A resolved or cancelled invocation batch was used again.
     #[error("tool invocation batch has already been resolved")]
     ToolInvocationBatchResolved,
+    /// The caller attempted to read or submit while a host batch is pending.
+    #[error("tool invocation batch must be submitted or cancelled before the run advances")]
+    ToolInvocationBatchPending,
+    /// The caller attempted to submit a result without an active host batch.
+    #[error("tool invocation batch is not pending")]
+    ToolInvocationBatchNotPending,
     /// The event-only stream encountered a host-owned tool handoff.
     #[error(
         "event-only agent stream encountered a host tool handoff; use stream_with_tool_handoff"
@@ -170,6 +204,29 @@ pub enum AgentError {
 }
 
 impl AgentError {
+    /// Returns the stable provider-neutral code for this operation failure.
+    #[must_use]
+    pub fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::Runtime { source } => source.diagnostic_code(),
+            Self::Loop { source } => source.runtime_error().diagnostic_code(),
+            Self::FinalOutputContract { .. } => "final_output_contract",
+            Self::StructuredOutputNotRecorded { .. } => "structured_output_not_recorded",
+            Self::StructuredOutputDecode { .. } => "structured_output_decode",
+            Self::Interactive { .. } => "interactive_error",
+            Self::ToolInvocationBatchMismatch { .. } => "tool_batch_mismatch",
+            Self::ToolInvocationBatchResolved => "tool_batch_resolved",
+            Self::ToolInvocationBatchPending => "tool_batch_pending",
+            Self::ToolInvocationBatchNotPending => "tool_batch_not_pending",
+            Self::ToolHandoffRequired => "tool_handoff_required",
+            Self::AgentRunNotFinished => "agent_run_not_finished",
+            Self::AgentRunResultConsumed => "agent_run_result_consumed",
+            Self::AgentRunResultMissing => "agent_run_result_missing",
+            Self::AgentRunProtocol { .. } => "agent_run_protocol",
+            Self::InteractiveProtocol { .. } => "interactive_protocol",
+        }
+    }
+
     /// Borrows the retained run when structured decoding failed after the
     /// runtime reached a terminal result.
     #[must_use]

@@ -1,51 +1,18 @@
-"""Async-first Python SDK for the Rust-owned Merry agent facade."""
+"""Public typed runtime event envelope and event contract exports."""
 
-from . import _merry as _merry
-from ._agent import Agent
-from ._builder import AgentBuilder
-from ._config import (
-    Anthropic,
-    OpenAICompatible,
-    PatchConfig,
-    WorkspaceConfig,
-    WorkspaceLimits,
-)
-from ._config import Anthropic as AnthropicProvider
-from ._config import OpenAICompatible as OpenAICompatibleProvider
-from ._errors import (
-    ErrorDomain,
-    MerryCompactionError,
-    MerryConfigError,
-    MerryContextError,
-    MerryError,
-    MerryErrorInfo,
-    MerryInternalError,
-    MerryOutputError,
-    MerryPolicyError,
-    MerryProviderError,
-    MerryRuntimeError,
-    MerryToolError,
-    NativeMerryError,
-    Retryability,
-    ToolDomainError,
-)
-from ._events import (
-    ArtifactReference,
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ._event_payloads import (
     AssistantMessageDeltaPayload,
     AssistantMessagePayload,
     ClosedPayload,
     CompactionCompletedPayload,
     CompactionStartedPayload,
-    Event,
-    EventDiagnostic,
-    EventPayload,
     EventPayloadValue,
-    EventSource,
-    EventType,
-    EvidenceReference,
     EvidenceReferencedPayload,
     FinalOutputRecordedPayload,
-    InteractiveRunState,
     InteractiveRunStateChangedPayload,
     ModelRetryAttemptStartedPayload,
     ModelRetryExhaustedPayload,
@@ -59,20 +26,10 @@ from ._events import (
     PlanProgressReviewRequestedPayload,
     PlanProgressUpdatedPayload,
     PlanUpdatedPayload,
-    QueuedInput,
     QueuedInputAcceptedPayload,
-    QueuedInputLane,
-    QueuedInputs,
     QueuedInputsChangedPayload,
-    RawEventData,
     RunCancelledPayload,
     RunFailedPayload,
-    RuntimeToolCall,
-    RuntimeToolCallBatch,
-    RuntimeToolOutput,
-    RuntimeToolOutputKind,
-    RuntimeToolResult,
-    RuntimeToolResultStatus,
     SessionStartedPayload,
     SkillUsedPayload,
     StepCompletedPayload,
@@ -82,7 +39,6 @@ from ._events import (
     SubagentFailedPayload,
     SubagentSpawnedPayload,
     SubagentStartedPayload,
-    SubagentStatus,
     SubagentStatusChangedPayload,
     ToolCallBatchStartedPayload,
     ToolCallFinishedPayload,
@@ -90,41 +46,51 @@ from ._events import (
     UnknownEventPayload,
     UsageUpdatedPayload,
 )
-from ._models import (
-    BlockedReason,
-    CompactionUsageWindow,
-    FinalOutputRecord,
-    JsonContent,
-    ModelUsage,
-    RunResult,
-    RunStatus,
-    SessionUsage,
-    TextContent,
-    ToolCall,
-    ToolCallBatch,
-    ToolDiagnostic,
-    ToolResult,
-    ToolSubmission,
-    UsageContextWindow,
+from ._event_types import (
+    ArtifactReference,
+    EventDiagnostic,
+    EventPayload,
+    EventSource,
+    EventType,
+    EvidenceReference,
+    InteractiveRunState,
+    QueuedInput,
+    QueuedInputLane,
+    QueuedInputs,
+    RawEventData,
+    RuntimeToolCall,
+    RuntimeToolCallBatch,
+    RuntimeToolOutput,
+    RuntimeToolOutputKind,
+    RuntimeToolResult,
+    RuntimeToolResultStatus,
+    SubagentStatus,
 )
-from ._tools import Tool, ToolHandler, ToolRegistry
 
-__version__ = _merry.version()
+
+@dataclass(frozen=True, slots=True)
+class Event:
+    """Typed runtime event with a discriminated provider-neutral payload."""
+
+    type: EventType
+    payload: EventPayloadValue
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.type, EventType):
+            raise TypeError("event type must be an EventType")
+        if not isinstance(self.payload, EventPayload):
+            raise TypeError("event payload must be a typed EventPayload")
+        if self.type is not self.payload.event_type:
+            raise ValueError("event type and payload discriminants must match")
+
 
 __all__ = [
-    "Agent",
-    "AgentBuilder",
-    "Anthropic",
-    "AnthropicProvider",
     "ArtifactReference",
     "AssistantMessageDeltaPayload",
     "AssistantMessagePayload",
-    "BlockedReason",
     "ClosedPayload",
     "CompactionCompletedPayload",
     "CompactionStartedPayload",
-    "CompactionUsageWindow",
-    "ErrorDomain",
     "Event",
     "EventDiagnostic",
     "EventPayload",
@@ -133,30 +99,12 @@ __all__ = [
     "EventType",
     "EvidenceReference",
     "EvidenceReferencedPayload",
-    "FinalOutputRecord",
     "FinalOutputRecordedPayload",
     "InteractiveRunState",
     "InteractiveRunStateChangedPayload",
-    "JsonContent",
-    "MerryCompactionError",
-    "MerryConfigError",
-    "MerryContextError",
-    "MerryError",
-    "MerryErrorInfo",
-    "MerryInternalError",
-    "MerryOutputError",
-    "MerryPolicyError",
-    "MerryProviderError",
-    "MerryRuntimeError",
-    "MerryToolError",
     "ModelRetryAttemptStartedPayload",
     "ModelRetryExhaustedPayload",
     "ModelRetryScheduledPayload",
-    "ModelUsage",
-    "NativeMerryError",
-    "OpenAICompatible",
-    "OpenAICompatibleProvider",
-    "PatchConfig",
     "PlanAttemptFinishedPayload",
     "PlanAttemptProgressReportedPayload",
     "PlanDirectiveUpdatedPayload",
@@ -172,11 +120,8 @@ __all__ = [
     "QueuedInputs",
     "QueuedInputsChangedPayload",
     "RawEventData",
-    "Retryability",
     "RunCancelledPayload",
     "RunFailedPayload",
-    "RunResult",
-    "RunStatus",
     "RuntimeToolCall",
     "RuntimeToolCallBatch",
     "RuntimeToolOutput",
@@ -184,7 +129,6 @@ __all__ = [
     "RuntimeToolResult",
     "RuntimeToolResultStatus",
     "SessionStartedPayload",
-    "SessionUsage",
     "SkillUsedPayload",
     "StepCompletedPayload",
     "StepStartedPayload",
@@ -195,23 +139,9 @@ __all__ = [
     "SubagentStartedPayload",
     "SubagentStatus",
     "SubagentStatusChangedPayload",
-    "TextContent",
-    "Tool",
-    "ToolCall",
-    "ToolCallBatch",
     "ToolCallBatchStartedPayload",
     "ToolCallFinishedPayload",
     "ToolCallStartedPayload",
-    "ToolDiagnostic",
-    "ToolDomainError",
-    "ToolHandler",
-    "ToolRegistry",
-    "ToolResult",
-    "ToolSubmission",
     "UnknownEventPayload",
-    "UsageContextWindow",
     "UsageUpdatedPayload",
-    "WorkspaceConfig",
-    "WorkspaceLimits",
-    "__version__",
 ]

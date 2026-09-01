@@ -252,11 +252,10 @@ impl Runtime {
 
     /// Saves the current resume-safe session state to the configured store.
     pub async fn save_session(&self) -> Result<(), RuntimeError> {
-        let store = self
-            .inner
-            .session_store
-            .clone()
-            .unwrap_or(FileSessionStore::default_store()?);
+        let store = match self.inner.session_store.clone() {
+            Some(store) => store,
+            None => FileSessionStore::default_store()?,
+        };
         self.save_session_to(store).await
     }
 

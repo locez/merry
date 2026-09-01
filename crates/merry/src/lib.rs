@@ -7,6 +7,7 @@
 
 mod agent;
 mod agent_loop;
+pub mod binding;
 mod errors;
 mod interactive;
 mod profile;
@@ -21,9 +22,13 @@ pub mod runtime {
         RuntimeModelRole, RuntimeProfile, RuntimeProfileBuilder,
     };
 }
-/// Hidden facade adapter types used by language bindings and low-level hosts.
+/// Rust-only lifetime-bearing adapter types for advanced hosts.
+///
+/// Foreign-language bindings must use [`binding`], whose owned protocol does
+/// not expose Rust lifetimes. This module is intentionally separate from that
+/// FFI contract and is hidden from generated API documentation.
 #[doc(hidden)]
-pub mod __internal {
+pub mod rust {
     pub use super::agent::{
         AgentRun, AgentRunMessage, ToolInvocation, ToolInvocationBatch, ToolInvocationContent,
         ToolInvocationContentError, ToolInvocationResult, ToolInvocationSubmission,
@@ -48,8 +53,9 @@ pub use merry_core::RuntimeEvent;
 pub use merry_core::SessionId;
 pub use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
 pub use merry_runtime::{
-    AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, AutomaticCompactionConfig,
-    FileSessionStore, FinalOutput, InteractivePrimaryModel, StructuredOutputRetryPolicy,
+    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus,
+    AutomaticCompactionConfig, FINAL_OUTPUT_TOOL_NAME, FileSessionStore, FinalOutput,
+    InteractivePrimaryModel, StructuredOutputRetryPolicy,
 };
 pub use profile::{AgentProfile, AgentProfileContext};
 pub use stream::{AgentEventStream, StructuredAgentEventStream, StructuredRunResult};

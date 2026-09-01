@@ -90,6 +90,10 @@ impl AgentRun {
         self.inner.request_cancel();
     }
 
+    pub(crate) fn into_owned(self) -> crate::binding::OwnedAgentRun {
+        crate::binding::OwnedAgentRun::new(self)
+    }
+
     /// Returns the next event or tool invocation batch.
     ///
     /// `Ok(None)` means the producer reached its terminal boundary. Runtime
@@ -97,6 +101,56 @@ impl AgentRun {
     /// end-of-stream. A returned tool invocation batch holds an exclusive
     /// borrow of this run until it is submitted or cancelled.
     pub async fn next_message(&mut self) -> Result<Option<AgentRunMessage<'_>>, AgentError> {
+        let Some(message) = self.next_runtime_message().await? else {
+            return Ok(None);
+        };
+
+        match message {
+            merry_runtime::AgentRunMessage::Event(event) => {
+                Ok(Some(AgentRunMessage::Event(Box::new(event))))
+            }
+            merry_runtime::AgentRunMessage::ToolInvocations { batch } => {
+                self.tool_invocation_message(batch.id().clone(), batch.calls().to_vec())
+            }
+            _ => Err(AgentError::AgentRunProtocol {
+                message: "runtime emitted an unsupported agent run message",
+            }),
+        }
+    }
+
+    pub(crate) async fn next_owned_message(
+        &mut self,
+    ) -> Result<Option<crate::binding::OwnedAgentRunMessage>, AgentError> {
+        let Some(message) = self.next_runtime_message().await? else {
+            return Ok(None);
+        };
+
+        match message {
+            merry_runtime::AgentRunMessage::Event(event) => Ok(Some(
+                crate::binding::OwnedAgentRunMessage::Event(Box::new(event)),
+            )),
+            merry_runtime::AgentRunMessage::ToolInvocations { batch } => {
+                let Some(batch) = crate::binding::OwnedToolInvocationBatch::new(
+                    batch.id().clone(),
+                    batch.calls().to_vec(),
+                ) else {
+                    return Err(AgentError::AgentRunProtocol {
+                        message: "runtime emitted an empty tool invocation batch",
+                    });
+                };
+                Ok(Some(
+                    crate::binding::OwnedAgentRunMessage::ToolInvocations { batch },
+                ))
+            }
+            _ => Err(AgentError::AgentRunProtocol {
+                message: "runtime emitted an unsupported agent run message",
+            }),
+        }
+    }
+
+    async fn next_runtime_message(
+        &mut self,
+    ) -> Result<Option<merry_runtime::AgentRunMessage>, AgentError> {
         if self.ended {
             return Ok(None);
         }
@@ -116,18 +170,7 @@ impl AgentRun {
             }
             return Ok(None);
         };
-
-        match message {
-            merry_runtime::AgentRunMessage::Event(event) => {
-                Ok(Some(AgentRunMessage::Event(Box::new(event))))
-            }
-            merry_runtime::AgentRunMessage::ToolInvocations { batch } => {
-                self.tool_invocation_message(batch.id().clone(), batch.calls().to_vec())
-            }
-            _ => Err(AgentError::AgentRunProtocol {
-                message: "runtime emitted an unsupported agent run message",
-            }),
-        }
+        Ok(Some(message))
     }
 
     /// Returns the next message using the idiomatic Rust name for this

@@ -1,22 +1,23 @@
 from __future__ import annotations
 
-import merry
 from pydantic import BaseModel, ConfigDict, Field
+
+import merry
 
 
 class FutureInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    value: str = Field(description="Value passed to the future-annotated tool.")
+    value: str = Field(description="Value passed to the tool.")
 
 
 class FutureOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    value: str = Field(description="Value returned by the future-annotated tool.")
+    value: str = Field(description="Value returned by the tool.")
 
 
-def test_tool_from_function_resolves_future_annotations():
+def test_tool_from_function_resolves_future_annotations() -> None:
     async def echo_value(args: FutureInput) -> FutureOutput:
         """Echo a value."""
         return FutureOutput(value=args.value)

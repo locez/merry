@@ -395,6 +395,61 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
+    /// Returns the stable provider-neutral code for this runtime failure.
+    #[must_use]
+    pub const fn diagnostic_code(&self) -> &'static str {
+        match self {
+            Self::StepAlreadyActive { .. } => "step_already_active",
+            Self::InvalidStepInput { .. } => "invalid_step_input",
+            Self::AgentLoopConfig { .. } => "agent_loop_config",
+            Self::ChildRuntimeBuild { .. } => "child_runtime_build",
+            Self::InvalidSubagentSelection { .. } => "invalid_subagent_selection",
+            Self::PlanEffectAttribution { .. } => "plan_effect_attribution_failed",
+            Self::PlanSubagentAttemptInactive { .. } => "plan_subagent_attempt_inactive",
+            Self::InvalidUserImageInput { .. } => "invalid_user_image_input",
+            Self::ReservedArtifactId { .. } => "reserved_artifact_id",
+            Self::UnknownToolCall { .. } => "unknown_tool_call",
+            Self::BridgeToolResultBatchEmpty { .. } => "bridge_tool_result_batch_empty",
+            Self::BridgeToolResultBatchMismatch { .. } => "bridge_tool_result_batch_mismatch",
+            Self::BridgeToolResultBatchIdMismatch { .. } => "bridge_tool_result_batch_id_mismatch",
+            Self::BridgeToolResultRejected { .. } => "bridge_tool_result_rejected",
+            Self::AgentRunToolInvocationsPending { .. } => "agent_run_tool_invocations_pending",
+            Self::NoPendingAgentRunToolInvocations { .. } => {
+                "no_pending_agent_run_tool_invocations"
+            }
+            Self::ToolCallAlreadyResolved { .. } => "tool_call_already_resolved",
+            Self::DuplicateToolRegistration { .. } => "duplicate_tool_registration",
+            Self::ReservedToolName { .. } => "reserved_tool_name",
+            Self::InvalidToolInputSchema { .. } => "invalid_tool_input_schema",
+            Self::BridgeToolsNotAllowed { .. } => "bridge_tools_not_allowed",
+            Self::ToolExecutionCancelled { .. } => "tool_execution_cancelled",
+            Self::ToolExecutionFailed { .. } => "tool_execution_failed",
+            Self::AgentRunClosed { .. } => "agent_run_closed",
+            Self::MissingActionExecutionEvidence { .. } => "missing_action_execution_evidence",
+            Self::MutatingActionCommitLifecycleRequired { .. } => {
+                "mutating_action_commit_lifecycle_required"
+            }
+            Self::UnsupportedToolResultContent { .. } => "unsupported_tool_result_content",
+            Self::TranscriptItemIdExhausted => "transcript_item_id_exhausted",
+            Self::ModelTurnIdExhausted => "model_turn_id_exhausted",
+            Self::UnknownModelTurn { .. } => "unknown_model_turn",
+            Self::InvalidModelTurnTransition { .. } => "invalid_model_turn_transition",
+            Self::TranscriptToolCallMissing { .. } => "transcript_tool_call_missing",
+            Self::Core { .. } => "core_error",
+            Self::Artifact { .. } => "artifact_error",
+            Self::Context { .. } => "context_error",
+            Self::Checkpoint { .. } => "checkpoint_error",
+            Self::Compaction { .. } => "compaction_error",
+            Self::SessionStore { .. } => "session_store",
+            Self::MissingModelProvider { .. } => "missing_model_provider",
+            Self::CompactionModelRequest { .. } => "compaction_model_request",
+            Self::CompactionModelWindowTooSmall { .. } => "compaction_model_window_too_small",
+            Self::CompactionModelInputTooLarge { .. } => "compaction_model_input_too_large",
+            Self::CompactionModelSetup { .. } => "compaction_model_setup",
+            Self::CompactionModelStream { .. } => "compaction_model_stream",
+        }
+    }
+
     /// Returns whether a bridge result error can be corrected by resubmitting
     /// the same active batch. This classification is shared by runtime and
     /// language bindings so a binding cannot terminate a run on a validation
