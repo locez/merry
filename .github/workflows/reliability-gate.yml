@@ -71,7 +71,7 @@ jobs:
           cargo test --locked -p merry-tool-workspace --test runtime_integration registered_list_dir_domain_failure -- --nocapture
           cargo test --locked -p merry-process --lib bwrap_process_plan_hides_unapproved_host_integrations -- --nocapture
           cargo test --locked -p merry-cli --bin merry settings_debug_does_not_include_secret_material -- --nocapture
-          cargo test --locked -p merry-cli --bin merry sandbox_rejects_symlinked_product_write_roots -- --nocapture
+          cargo test --locked -p merry-cli --bin merry sandbox_supports_symlinked_product_write_roots -- --nocapture
 
       - name: Run deterministic Rust suite
         run: cargo test --locked --all

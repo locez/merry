@@ -1,5 +1,6 @@
 use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
 use crate::provider_config::MERRY_OPENAI_DEBUG_ENV;
+use merry_process::resolve_bwrap_path;
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, HostIntegration, PathAccess, PathAccessRule,
     PathAccessRuleSource,
@@ -444,10 +445,6 @@ impl SandboxPathPlan {
             host.xdg_paths.state_dir().to_path_buf(),
             host.xdg_paths.managed_config_dir(),
         ];
-        for product_path in &product_paths {
-            validate_product_path_identity(product_path)?;
-        }
-
         validate_trusted_rule_conflicts(&host.trusted_path_rules)?;
         for rule in &host.trusted_path_rules {
             if rule.access() == PathAccess::Deny
@@ -479,46 +476,12 @@ impl SandboxPathPlan {
     }
 }
 
-fn validate_product_path_identity(path: &Path) -> Result<(), Error> {
-    let mut current = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
-            Component::RootDir => current.push(component.as_os_str()),
-            Component::CurDir => continue,
-            Component::ParentDir => {
-                current.pop();
-                continue;
-            }
-            Component::Normal(part) => current.push(part),
-        }
-
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(Error::ProductPathContainsSymlink {
-                    product_path: path.to_path_buf(),
-                    symlink_path: current,
-                });
-            }
-            Ok(_) => {}
-            Err(source) if source.kind() == io::ErrorKind::NotFound => break,
-            Err(source) => {
-                return Err(Error::ProductPathMetadata {
-                    path: current,
-                    source,
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
 fn validate_trusted_rule_conflicts(rules: &[PathAccessRule]) -> Result<(), Error> {
     for (index, rule) in rules.iter().enumerate() {
-        if let Some(conflicting) = rules[index + 1..]
-            .iter()
-            .find(|other| other.path() == rule.path() && other.access() != rule.access())
-        {
+        if let Some(conflicting) = rules[index + 1..].iter().find(|other| {
+            resolve_bwrap_path(other.path()) == resolve_bwrap_path(rule.path())
+                && other.access() != rule.access()
+        }) {
             return Err(Error::ConflictingTrustedPathRules {
                 path: rule.path().to_path_buf(),
                 first_access: rule.access(),
@@ -548,13 +511,17 @@ fn path_depth(path: &Path) -> usize {
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {
-    left.starts_with(right) || right.starts_with(left)
+    let left = resolve_bwrap_path(left);
+    let right = resolve_bwrap_path(right);
+    left.starts_with(&right) || right.starts_with(&left)
 }
 
 fn path_is_inside_product(path: &Path, product_paths: &[PathBuf]) -> bool {
+    let path = resolve_bwrap_path(path);
     product_paths
         .iter()
-        .any(|product_path| path.starts_with(product_path))
+        .map(|product_path| resolve_bwrap_path(product_path))
+        .any(|product_path| path.starts_with(&product_path))
 }
 
 fn ensure_host_log_directory(host: &Host) -> Result<(), Error> {
@@ -863,53 +830,31 @@ fn build_plan(
         os(SANDBOX_HOME_ROOT),
     ];
     if !Path::new(&home).starts_with(Path::new(SANDBOX_HOME_ROOT)) {
-        append_mount_parent_args(&mut args, home.as_os_str());
+        append_mount_parent_args(&mut args, Path::new(&home));
         args.extend([os("--tmpfs"), home.clone()]);
     }
     args.extend([os("--perms"), os("0700"), os("--dir"), home.clone()]);
     append_bind_dir_try_args(&mut args, &config_dir, &config_dir);
-    args.extend([
-        os("--ro-bind"),
-        os("/usr"),
-        os("/usr"),
-        os("--ro-bind-try"),
-        os("/bin"),
-        os("/bin"),
-        os("--ro-bind-try"),
-        os("/lib"),
-        os("/lib"),
-        os("--ro-bind-try"),
-        os("/lib64"),
-        os("/lib64"),
-        os("--ro-bind-try"),
-        os("/opt"),
-        os("/opt"),
-    ]);
+    append_bind_dir_args(&mut args, Path::new("/usr"), Path::new("/usr"));
+    for path in ["/bin", "/lib", "/lib64", "/opt"] {
+        append_bind_dir_try_args(&mut args, Path::new(path), Path::new(path));
+    }
     for path in SANDBOX_ETC_READ_ONLY_FILE_PATHS {
         if Path::new(path).exists() {
-            append_bind_file_args(&mut args, OsStr::new(path), OsStr::new(path));
+            append_bind_file_args(&mut args, Path::new(path), Path::new(path));
         }
     }
     for path in SANDBOX_ETC_READ_ONLY_DIR_PATHS {
         if Path::new(path).exists() {
-            append_bind_dir_args(&mut args, OsStr::new(path), OsStr::new(path));
+            append_bind_dir_args(&mut args, Path::new(path), Path::new(path));
         }
     }
-    args.extend([
-        os("--bind"),
-        cwd.clone(),
-        cwd.clone(),
-        os("--chdir"),
-        cwd.clone(),
-    ]);
+    append_bind_dir_rw_args(&mut args, &host.cwd, &host.cwd);
+    args.extend([os("--chdir"), cwd.clone()]);
     if let Some(log_settings) = host.log_settings.as_ref()
         && let Some(host_log_dir) = log_settings.path.parent()
     {
-        args.extend([
-            os("--bind"),
-            host_log_dir.as_os_str().to_owned(),
-            host_log_dir.as_os_str().to_owned(),
-        ]);
+        append_bind_dir_rw_args(&mut args, host_log_dir, host_log_dir);
     }
     for rule in &path_plan.development_rules {
         append_path_rule_args(&mut args, rule);
@@ -926,18 +871,10 @@ fn build_plan(
         append_path_rule_args(&mut args, rule);
     }
     for mount in &graphical_plan.mounts {
-        append_bind_file_args(
-            &mut args,
-            mount.source.as_os_str(),
-            mount.destination.as_os_str(),
-        );
+        append_bind_file_args(&mut args, &mount.source, &mount.destination);
     }
     for mount in &host_integration_plan.mounts {
-        append_bind_file_args(
-            &mut args,
-            mount.source.as_os_str(),
-            mount.destination.as_os_str(),
-        );
+        append_bind_file_args(&mut args, &mount.source, &mount.destination);
     }
     args.extend([
         os("--clearenv"),
@@ -1001,57 +938,70 @@ pub(crate) fn find_bwrap_in_path(
         .find(|candidate| file_exists(candidate))
 }
 
-fn append_bind_file_args(args: &mut Vec<OsString>, source: &OsStr, destination: &OsStr) {
+fn append_bind_file_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
     append_mount_parent_args(args, destination);
-    args.extend([os("--ro-bind"), source.to_owned(), destination.to_owned()]);
+    args.extend([
+        os("--ro-bind"),
+        resolve_bwrap_path(source).as_os_str().to_owned(),
+        destination.as_os_str().to_owned(),
+    ]);
 }
 
-fn append_bind_dir_args(args: &mut Vec<OsString>, source: &OsStr, destination: &OsStr) {
+fn append_bind_dir_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
     append_mount_parent_args(args, destination);
-    args.extend([os("--ro-bind"), source.to_owned(), destination.to_owned()]);
+    args.extend([
+        os("--ro-bind"),
+        resolve_bwrap_path(source).as_os_str().to_owned(),
+        destination.as_os_str().to_owned(),
+    ]);
 }
 
 fn append_bind_dir_try_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
-    append_mount_parent_args(args, destination.as_os_str());
+    append_mount_parent_args(args, destination);
     args.extend([
         os("--ro-bind-try"),
-        source.as_os_str().to_owned(),
+        resolve_bwrap_path(source).as_os_str().to_owned(),
         destination.as_os_str().to_owned(),
     ]);
 }
 
 fn append_bind_dir_rw_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
-    append_mount_parent_args(args, destination.as_os_str());
+    append_mount_parent_args(args, destination);
     args.extend([
         os("--bind"),
-        source.as_os_str().to_owned(),
+        resolve_bwrap_path(source).as_os_str().to_owned(),
         destination.as_os_str().to_owned(),
     ]);
 }
 
 fn append_path_rule_args(args: &mut Vec<OsString>, rule: &PathAccessRule) {
-    let path = rule.path().as_os_str();
+    let path = rule.path();
     match rule.access() {
         PathAccess::ReadOnly => {
             append_mount_parent_args(args, path);
-            args.extend([os("--ro-bind-try"), path.to_owned(), path.to_owned()]);
+            args.extend([
+                os("--ro-bind-try"),
+                resolve_bwrap_path(path).as_os_str().to_owned(),
+                path.as_os_str().to_owned(),
+            ]);
         }
         PathAccess::ReadWrite => {
             append_mount_parent_args(args, path);
-            args.extend([os("--bind-try"), path.to_owned(), path.to_owned()]);
+            args.extend([
+                os("--bind-try"),
+                resolve_bwrap_path(path).as_os_str().to_owned(),
+                path.as_os_str().to_owned(),
+            ]);
         }
         PathAccess::Deny => {
             append_mount_parent_args(args, path);
-            args.extend([os("--tmpfs"), path.to_owned()]);
+            args.extend([os("--tmpfs"), path.as_os_str().to_owned()]);
         }
     }
 }
 
-fn append_mount_parent_args(args: &mut Vec<OsString>, destination: &OsStr) {
-    let Some(destination) = destination.to_str() else {
-        return;
-    };
-    let Some(parent) = Path::new(destination).parent() else {
+fn append_mount_parent_args(args: &mut Vec<OsString>, destination: &Path) {
+    let Some(parent) = destination.parent() else {
         return;
     };
     let mut parents = parent
@@ -1217,7 +1167,7 @@ struct MountInfoMount<'a> {
 
 #[cfg(target_os = "linux")]
 fn filesystem_path_metadata(path: &Path) -> Option<HostPathMetadata> {
-    let metadata = fs::symlink_metadata(path).ok()?;
+    let metadata = fs::metadata(path).ok()?;
     let file_type = metadata.file_type();
     let kind = if file_type.is_socket() {
         HostPathKind::UnixSocket
@@ -1273,14 +1223,6 @@ pub(crate) enum Error {
         product_path: PathBuf,
         rule_path: PathBuf,
         access: PathAccess,
-    },
-    ProductPathContainsSymlink {
-        product_path: PathBuf,
-        symlink_path: PathBuf,
-    },
-    ProductPathMetadata {
-        path: PathBuf,
-        source: io::Error,
     },
     ConflictingTrustedPathRules {
         path: PathBuf,
@@ -1349,20 +1291,6 @@ impl fmt::Display for Error {
                 product_path.display(),
                 access.as_str(),
                 rule_path.display()
-            ),
-            Error::ProductPathContainsSymlink {
-                product_path,
-                symlink_path,
-            } => write!(
-                formatter,
-                "sandbox product path {} contains symlink component {}; refusing writable mount",
-                product_path.display(),
-                symlink_path.display()
-            ),
-            Error::ProductPathMetadata { path, source } => write!(
-                formatter,
-                "failed to inspect sandbox product path component {}: {source}",
-                path.display()
             ),
             Error::ConflictingTrustedPathRules {
                 path,

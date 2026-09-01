@@ -4,6 +4,7 @@
 //! [`merry_runtime::ProcessRunner`] boundary. It does not decide whether a process is
 //! admitted; callers must still opt in through runtime permission profiles.
 
+use crate::resolve_bwrap_path;
 use merry_runtime::{
     HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource, PermissionRequest,
     PermissionedProcessRunnerFactory, ProcessActionIntent, ProcessExitStatus, ProcessRunner,
@@ -780,8 +781,10 @@ fn effective_requested_path_access(
 ) -> Result<PathAccess, ProcessRunnerError> {
     if let Some(rule) = configured_rules
         .iter()
-        .filter(|rule| requested_path.starts_with(rule.path()) && rule.access() == PathAccess::Deny)
-        .max_by_key(|rule| path_depth(rule.path()))
+        .filter(|rule| {
+            path_matches_rule(requested_path, rule.path()) && rule.access() == PathAccess::Deny
+        })
+        .max_by_key(|rule| resolved_path_depth(rule.path()))
     {
         return Err(ProcessRunnerError::infrastructure(format!(
             "requested path `{}` is denied by configured path policy `{}`",
@@ -791,7 +794,7 @@ fn effective_requested_path_access(
     }
 
     if configured_rules.iter().any(|rule| {
-        requested_path.starts_with(rule.path())
+        path_matches_rule(requested_path, rule.path())
             && rule.access() == PathAccess::ReadOnly
             && rule.source() == PathAccessRuleSource::TrustedGlobalConfig
     }) {
@@ -812,15 +815,14 @@ fn path_rule_covers(
     if requested_access == PathAccess::Deny || is_git_metadata_path(requested_path) {
         return false;
     }
-    if rules
-        .iter()
-        .any(|rule| requested_path.starts_with(rule.path()) && rule.access() == PathAccess::Deny)
-    {
+    if rules.iter().any(|rule| {
+        path_matches_rule(requested_path, rule.path()) && rule.access() == PathAccess::Deny
+    }) {
         return false;
     }
     if requested_access == PathAccess::ReadWrite
         && rules.iter().any(|rule| {
-            requested_path.starts_with(rule.path())
+            path_matches_rule(requested_path, rule.path())
                 && rule.access() == PathAccess::ReadOnly
                 && matches!(
                     rule.source(),
@@ -835,11 +837,11 @@ fn path_rule_covers(
     rules
         .iter()
         .filter(|rule| {
-            requested_path.starts_with(rule.path())
+            path_matches_rule(requested_path, rule.path())
                 && rule.access() != PathAccess::Deny
                 && rule.source() != PathAccessRuleSource::GitMetadataBaseline
         })
-        .max_by_key(|rule| path_depth(rule.path()))
+        .max_by_key(|rule| resolved_path_depth(rule.path()))
         .is_some_and(|rule| rule.access().covers(requested_access))
 }
 
@@ -896,8 +898,8 @@ fn normalize_session_path_rules(rules: Vec<PathAccessRule>) -> Vec<PathAccessRul
     let mut retained = Vec::with_capacity(rules.len());
     for rule in rules {
         let covered_by_ancestor = retained.iter().any(|ancestor: &PathAccessRule| {
-            rule.path() != ancestor.path()
-                && rule.path().starts_with(ancestor.path())
+            resolve_bwrap_path(rule.path()) != resolve_bwrap_path(ancestor.path())
+                && path_matches_rule(rule.path(), ancestor.path())
                 && match ancestor.access() {
                     PathAccess::Deny => true,
                     PathAccess::ReadOnly => rule.access() == PathAccess::ReadOnly,
@@ -985,8 +987,19 @@ fn merged_path_rule(
 }
 
 fn is_git_metadata_path(path: &Path) -> bool {
-    path.components()
+    resolve_bwrap_path(path)
+        .components()
         .any(|component| matches!(component, Component::Normal(name) if name == OsStr::new(".git")))
+}
+
+fn path_matches_rule(path: &Path, rule_path: &Path) -> bool {
+    let path = resolve_bwrap_path(path);
+    let rule_path = resolve_bwrap_path(rule_path);
+    path == rule_path || path.starts_with(&rule_path)
+}
+
+fn resolved_path_depth(path: &Path) -> usize {
+    path_depth(&resolve_bwrap_path(path))
 }
 
 fn git_metadata_baseline_rule(path: impl Into<PathBuf>) -> PathAccessRule {
@@ -1131,7 +1144,9 @@ fn bwrap_process_plan_with_environment(
         os("--tmpfs"),
         os(ACTION_SANDBOX_TMPDIR),
         os("--bind"),
-        environment.tmp_source.as_os_str().to_owned(),
+        resolve_bwrap_path(&environment.tmp_source)
+            .as_os_str()
+            .to_owned(),
         os(ACTION_SANDBOX_TMPDIR),
     ];
     if !environment.home.exists() {
@@ -1145,23 +1160,10 @@ fn bwrap_process_plan_with_environment(
             environment.home.as_os_str().to_owned(),
         ]);
     }
-    args.extend([
-        os("--ro-bind"),
-        os("/usr"),
-        os("/usr"),
-        os("--ro-bind-try"),
-        os("/bin"),
-        os("/bin"),
-        os("--ro-bind-try"),
-        os("/lib"),
-        os("/lib"),
-        os("--ro-bind-try"),
-        os("/lib64"),
-        os("/lib64"),
-        os("--ro-bind-try"),
-        os("/opt"),
-        os("/opt"),
-    ]);
+    append_bwrap_dir_bind_args(&mut args, Path::new("/usr"), Path::new("/usr"));
+    for path in ["/bin", "/lib", "/lib64", "/opt"] {
+        append_bwrap_dir_bind_try_args(&mut args, Path::new(path), Path::new(path));
+    }
     for path in ACTION_SANDBOX_ETC_READ_ONLY_FILE_PATHS {
         if Path::new(path).exists() {
             append_bwrap_file_bind_args(&mut args, Path::new(path), Path::new(path));
@@ -1247,7 +1249,7 @@ fn append_bwrap_file_bind_args(args: &mut Vec<OsString>, source: &Path, destinat
     append_bwrap_mount_parent_args(args, destination);
     args.extend([
         os("--ro-bind"),
-        source.as_os_str().to_owned(),
+        resolve_bwrap_path(source).as_os_str().to_owned(),
         destination.as_os_str().to_owned(),
     ]);
 }
@@ -1289,7 +1291,16 @@ fn append_bwrap_dir_bind_args(args: &mut Vec<OsString>, source: &Path, destinati
     append_bwrap_mount_parent_args(args, destination);
     args.extend([
         os("--ro-bind"),
-        source.as_os_str().to_owned(),
+        resolve_bwrap_path(source).as_os_str().to_owned(),
+        destination.as_os_str().to_owned(),
+    ]);
+}
+
+fn append_bwrap_dir_bind_try_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
+    append_bwrap_mount_parent_args(args, destination);
+    args.extend([
+        os("--ro-bind-try"),
+        resolve_bwrap_path(source).as_os_str().to_owned(),
         destination.as_os_str().to_owned(),
     ]);
 }
@@ -1299,12 +1310,12 @@ fn append_bwrap_path_rule(args: &mut Vec<OsString>, path: &Path, access: PathAcc
     match access {
         PathAccess::ReadOnly => args.extend([
             os("--ro-bind-try"),
-            path.as_os_str().to_owned(),
+            resolve_bwrap_path(path).as_os_str().to_owned(),
             path.as_os_str().to_owned(),
         ]),
         PathAccess::ReadWrite => args.extend([
             os("--bind-try"),
-            path.as_os_str().to_owned(),
+            resolve_bwrap_path(path).as_os_str().to_owned(),
             path.as_os_str().to_owned(),
         ]),
         PathAccess::Deny => {
@@ -1318,12 +1329,12 @@ fn append_bwrap_required_path_rule(args: &mut Vec<OsString>, path: &Path, access
     match access {
         PathAccess::ReadOnly => args.extend([
             os("--ro-bind"),
-            path.as_os_str().to_owned(),
+            resolve_bwrap_path(path).as_os_str().to_owned(),
             path.as_os_str().to_owned(),
         ]),
         PathAccess::ReadWrite => args.extend([
             os("--bind"),
-            path.as_os_str().to_owned(),
+            resolve_bwrap_path(path).as_os_str().to_owned(),
             path.as_os_str().to_owned(),
         ]),
         PathAccess::Deny => args.extend([os("--tmpfs"), path.as_os_str().to_owned()]),
@@ -1340,7 +1351,7 @@ fn append_bwrap_git_metadata_baseline_rule(args: &mut Vec<OsString>, path: &Path
     append_bwrap_mount_parent_args(args, path);
     args.extend([
         os("--ro-bind"),
-        path.as_os_str().to_owned(),
+        resolve_bwrap_path(path).as_os_str().to_owned(),
         path.as_os_str().to_owned(),
     ]);
 }
@@ -1514,7 +1525,7 @@ mod tests {
     use super::{
         BwrapPermissionedProcessRunnerFactory, BwrapProcessEnvironment, BwrapProcessRunner,
         BwrapSessionPermissions, TokioProcessRunner, bwrap_process_plan,
-        bwrap_process_plan_with_environment, process_current_dir,
+        bwrap_process_plan_with_environment, process_current_dir, resolve_bwrap_path,
     };
     use crate::UnrestrictedPermissionedProcessRunnerFactory;
     use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
@@ -1601,9 +1612,14 @@ mod tests {
             &["--bind", "/workspace/merry", "/workspace/merry"]
         ));
         if Path::new("/etc/ld.so.cache").exists() {
+            let source = resolve_bwrap_path(Path::new("/etc/ld.so.cache"));
             assert!(contains_sequence(
                 &args,
-                &["--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache"]
+                &[
+                    "--ro-bind",
+                    source.to_str().expect("UTF-8 system path"),
+                    "/etc/ld.so.cache",
+                ]
             ));
         }
         assert!(contains_sequence(
@@ -1923,6 +1939,45 @@ mod tests {
         assert!(contains_sequence(&args, &["--tmpfs", "/home/merry/.ssh"]));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn bwrap_process_plan_mounts_symlinked_path_rules_at_logical_paths() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary path");
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        std::fs::create_dir_all(&real).expect("real directory");
+        symlink(&real, &link).expect("directory symlink");
+        let rule = PathAccessRule::new(
+            link.clone(),
+            PathAccess::ReadWrite,
+            PathAccessRuleSource::PermissionReview,
+        );
+
+        let environment =
+            BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/tmp")
+                .expect("environment layout should validate");
+        let plan = bwrap_process_plan_with_environment(
+            &intent(None),
+            Path::new("/workspace/merry"),
+            &environment,
+            true,
+            &[rule],
+            Path::new("/custom/bin/bwrap"),
+        );
+        let args = os_args(&plan.args);
+
+        assert!(contains_sequence(
+            &args,
+            &[
+                "--bind",
+                real.to_str().expect("UTF-8 test path"),
+                link.to_str().expect("UTF-8 test path"),
+            ],
+        ));
+    }
+
     #[test]
     fn bwrap_permissioned_factory_allows_network_only_when_requested() {
         let factory =
@@ -1958,6 +2013,54 @@ mod tests {
 
         assert!(os_args(&plan_without_network.args).contains(&"--unshare-net".to_owned()));
         assert!(!os_args(&plan_with_network.args).contains(&"--unshare-net".to_owned()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bwrap_permissioned_factory_matches_rules_through_symlink_aliases() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary path");
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        std::fs::create_dir_all(&real).expect("real directory");
+        symlink(&real, &link).expect("directory symlink");
+
+        let factory =
+            BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_path_rules([PathAccessRule::new(
+                    real.clone(),
+                    PathAccess::ReadWrite,
+                    PathAccessRuleSource::TrustedGlobalConfig,
+                )]);
+        let request = permission_request(json!({
+            "requested": {
+                "paths": [{
+                    "path": link.to_str().expect("UTF-8 test path"),
+                    "access": "rw"
+                }]
+            },
+            "for_action": { "command": "touch", "cwd": "." }
+        }));
+
+        assert!(
+            factory
+                .request_capabilities_are_satisfied(&request)
+                .expect("path capability should be evaluated")
+        );
+
+        let denied_factory =
+            BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+                .with_path_rules([PathAccessRule::new(
+                    real,
+                    PathAccess::Deny,
+                    PathAccessRuleSource::TrustedGlobalConfig,
+                )]);
+        assert!(
+            !denied_factory
+                .request_capabilities_are_satisfied(&request)
+                .expect("denied path capability should be evaluated")
+        );
     }
 
     #[test]
