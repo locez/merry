@@ -19,6 +19,13 @@ class _FakeResponseFactory(Protocol):
 
 
 @runtime_checkable
+class _StreamedTextDeltaFactory(Protocol):
+    def __call__(
+        self, session_id: str, delta: str, final_text: str, /
+    ) -> _merry.Agent: ...
+
+
+@runtime_checkable
 class _ScriptedToolFactory(Protocol):
     def __call__(
         self,
@@ -59,6 +66,19 @@ def _scripted_tool_native(
     if not isinstance(factory, _ScriptedToolFactory):
         raise TypeError("test-utils native extension is required")
     return factory(session_id, tool_name, arguments_json, final_text)
+
+
+def streamed_text_delta_agent(
+    *,
+    delta: str,
+    final_text: str = "done",
+    session_id: str = "python-streamed-delta",
+) -> merry.Agent:
+    factory: object = getattr(_merry, "test_agent_with_streamed_text_delta", None)
+    if not isinstance(factory, _StreamedTextDeltaFactory):
+        raise TypeError("test-utils native extension is required")
+    native = factory(session_id, delta, final_text)
+    return merry.Agent._from_native(native)
 
 
 def _final_output_native(

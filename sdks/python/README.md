@@ -218,8 +218,10 @@ owned by Rust. Python only supplies the provider and store configuration.
 
 All native failures are mapped to `MerryError` subclasses carrying
 `MerryErrorInfo` (`code`, `domain`, `message`, `hint`, `retryability`, and
-bounded `context`). Provider secrets and rejected path values are not included
-in native diagnostics.
+bounded `context`). Native diagnostic messages are operational details and may
+include values derived from the configured environment, such as filesystem
+paths. Treat exception messages as sensitive before forwarding or persisting
+them.
 
 Deterministic tests use a feature-gated Rust fake provider:
 

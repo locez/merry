@@ -17,6 +17,10 @@ use std::sync::Arc;
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(test_agent_with_fake_response, module)?)?;
     module.add_function(wrap_pyfunction!(
+        test_agent_with_streamed_text_delta,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
         test_agent_with_scripted_tool_call,
         module
     )?)?;
@@ -34,6 +38,25 @@ fn test_agent_with_fake_response(session_id: String, final_text: String) -> PyRe
             None,
         ),
     })]));
+    build_agent(session_id, provider)
+}
+
+#[pyfunction]
+fn test_agent_with_streamed_text_delta(
+    session_id: String,
+    delta: String,
+    final_text: String,
+) -> PyResult<PyAgent> {
+    let provider = Arc::new(FakeModelProvider::new(vec![
+        Ok(ModelEvent::OutputTextDelta { delta }),
+        Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text(&final_text)],
+                FinishReason::Stop,
+                None,
+            ),
+        }),
+    ]));
     build_agent(session_id, provider)
 }
 

@@ -10,6 +10,7 @@ from _support import (
     final_output_agent,
     pending_native_agent,
     scripted_native_agent,
+    streamed_text_delta_agent,
 )
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -107,6 +108,29 @@ def test_agent_run_preserves_multiline_assistant_output() -> None:
     message = result.events[2]
     assert isinstance(message.payload, merry.AssistantMessagePayload)
     assert message.payload.text == "first line\nsecond line"
+
+
+def test_pure_newline_delta_keeps_run_active() -> None:
+    async def scenario() -> merry.RunResult[BaseModel]:
+        run = streamed_text_delta_agent(
+            delta="\r\n",
+            final_text="Order loaded.",
+            session_id="newline-delta",
+        ).stream("Stream a result.")
+        while await run.next() is not None:
+            pass
+        return await run.result()
+
+    result = asyncio.run(scenario())
+
+    delta_payloads: list[merry.AssistantMessageDeltaPayload] = []
+    for event in result.events:
+        if isinstance(event.payload, merry.AssistantMessageDeltaPayload):
+            delta_payloads.append(event.payload)
+
+    assert result.status is merry.RunStatus.COMPLETED
+    assert result.final_output == "Order loaded."
+    assert [payload.delta for payload in delta_payloads] == ["\r\n"]
 
 
 def test_result_requires_eof_and_cancel_is_idempotent() -> None:

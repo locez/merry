@@ -196,13 +196,13 @@ def _parse_payload(
             return UsageUpdatedPayload(_parse_usage(data["usage"]), _source(data))
         case EventType.ASSISTANT_MESSAGE:
             return AssistantMessagePayload(
-                _required_string(data, "text"),
+                _event_text(data, "text"),
                 _artifact(data["artifact"]),
                 _source(data),
             )
         case EventType.ASSISTANT_MESSAGE_DELTA:
             return AssistantMessageDeltaPayload(
-                _required_string(data, "delta"), _source(data)
+                _event_text(data, "delta"), _source(data)
             )
         case EventType.TOOL_CALL_STARTED:
             return ToolCallStartedPayload(_tool_call(data["call"]), _source(data))
@@ -517,6 +517,13 @@ def _enum_value(enum_type: type[EnumT], value: object, label: str) -> EnumT:
         return enum_type(value)
     except ValueError as error:
         raise TypeError(f"{label} is unsupported") from error
+
+
+def _event_text(data: Mapping[str, JsonValue], key: str) -> str:
+    value = data[key]
+    if not isinstance(value, str):
+        raise TypeError(f"event field {key!r} must be a string")
+    return value
 
 
 def _required_string(data: Mapping[str, JsonValue], key: str) -> str:

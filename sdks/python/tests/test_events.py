@@ -49,6 +49,29 @@ def test_event_parser_preserves_line_breaks_in_assistant_text() -> None:
     assert message.payload.text == "line one\r\nline two\tcontinued"
 
 
+def test_event_parser_accepts_blank_assistant_text_and_delta() -> None:
+    delta = parse_event(
+        {
+            "type": "assistant_message_delta",
+            "delta": "",
+            "source": {"session_id": "session-1", "sequence": 1},
+        }
+    )
+    message = parse_event(
+        {
+            "type": "assistant_message",
+            "text": "",
+            "artifact": {"id": "artifact-1", "kind": "text", "label": None},
+            "source": {"session_id": "session-1", "sequence": 2},
+        }
+    )
+
+    assert isinstance(delta.payload, merry.AssistantMessageDeltaPayload)
+    assert delta.payload.delta == ""
+    assert isinstance(message.payload, merry.AssistantMessagePayload)
+    assert message.payload.text == ""
+
+
 def test_event_parser_retains_unknown_variants_without_string_dispatch() -> None:
     event = parse_event(
         {
