@@ -55,6 +55,10 @@ pub(crate) fn render_responses_request_with_prompt_cache_key(
             .map(|effort| ResponsesReasoning {
                 effort: effort.as_str(),
             }),
+        service_tier: request
+            .generation()
+            .service_tier()
+            .map(|tier| tier.as_str()),
         text: render_response_format(request.response_format())?,
         tool_choice: if tools.is_empty() { None } else { Some("auto") },
         tools,

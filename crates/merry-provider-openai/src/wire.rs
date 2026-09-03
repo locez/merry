@@ -17,6 +17,8 @@ pub(crate) struct ResponsesRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reasoning: Option<ResponsesReasoning<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) service_tier: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) text: Option<ResponsesText<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) tools: Vec<ResponsesTool<'a>>,

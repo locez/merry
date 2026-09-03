@@ -55,6 +55,10 @@ pub(crate) fn render_chat_request(request: &ModelRequest) -> Result<Value, OpenA
             .generation()
             .reasoning_effort()
             .map(|effort| effort.as_str()),
+        service_tier: request
+            .generation()
+            .service_tier()
+            .map(|tier| tier.as_str()),
         response_format,
         tools,
         tool_choice: has_tools.then_some("auto"),

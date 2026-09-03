@@ -23,7 +23,8 @@ mod tests {
         FinishReason, GenerationConfig, ModelContent, ModelEvent, ModelMessage, ModelMessageRole,
         ModelName, ModelOutput, ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat,
         ModelToolCall, ModelToolCallId, ModelToolContinuation, ModelToolResult,
-        ModelToolResultContent, ProviderErrorKind, ReasoningEffort, ToolArguments, Usage,
+        ModelToolResultContent, ProviderErrorKind, ReasoningEffort, ServiceTier, ToolArguments,
+        Usage,
     };
     use serde_json::{Value, json};
 
@@ -83,6 +84,16 @@ mod tests {
             GenerationConfig::default().with_reasoning_effort(Some(
                 ReasoningEffort::new("high").expect("valid reasoning effort"),
             )),
+        )
+        .expect("valid model request")
+    }
+
+    fn request_with_service_tier() -> ModelRequest {
+        ModelRequest::new(
+            ModelName::new("gpt-5.1").expect("valid model name"),
+            vec![message(ModelMessageRole::User, "Hello")],
+            Vec::new(),
+            GenerationConfig::default().with_service_tier(Some(ServiceTier::Priority)),
         )
         .expect("valid model request")
     }
@@ -371,6 +382,31 @@ mod tests {
         assert!(!object.contains_key("tools"));
         assert!(!object.contains_key("tool_choice"));
         assert!(!object.contains_key("max_output_tokens"));
+    }
+
+    #[test]
+    fn rendered_request_with_service_tier_uses_responses_service_tier_field() {
+        let rendered = crate::render::render_responses_request(&request_with_service_tier())
+            .expect("request should render");
+
+        assert_eq!(rendered["service_tier"], json!("priority"));
+    }
+
+    #[test]
+    fn rendered_request_without_service_tier_omits_service_tier_field() {
+        let rendered = crate::render::render_responses_request(&request_without_tools())
+            .expect("request should render");
+
+        assert!(rendered.get("service_tier").is_none());
+    }
+
+    #[test]
+    fn rendered_chat_request_with_service_tier_uses_service_tier_field() {
+        let rendered =
+            crate::chat_completions::render::render_chat_request(&request_with_service_tier())
+                .expect("request should render");
+
+        assert_eq!(rendered["service_tier"], json!("priority"));
     }
 
     #[test]

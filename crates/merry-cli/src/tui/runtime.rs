@@ -13,7 +13,7 @@ use crate::provider_config::{
 };
 use crate::runtime_config::{
     action_process_backend_options, automatic_compaction_config, main_reasoning_effort,
-    subagents_config,
+    main_service_tier, subagents_config,
 };
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use crate::tui::preferences::{CompactionStrategy, TuiPreferences};
@@ -460,7 +460,15 @@ fn generation_config_with_preferences(
     let reasoning_effort = preference_reasoning_effort
         .or(provider_reasoning_effort)
         .or(main_reasoning_effort(merry_config)?);
-    Ok(GenerationConfig::default().with_reasoning_effort(reasoning_effort))
+    let provider_service_tier = merry_config
+        .zip(selected_provider.as_deref())
+        .map(|(config, provider)| config.effective_provider_service_tier(provider))
+        .transpose()?
+        .flatten();
+    let service_tier = provider_service_tier.or(main_service_tier(merry_config)?);
+    Ok(GenerationConfig::default()
+        .with_reasoning_effort(reasoning_effort)
+        .with_service_tier(service_tier))
 }
 
 fn automatic_compaction_config_with_preferences(
