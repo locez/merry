@@ -274,10 +274,18 @@ impl OpenAiEventStreamEvents {
     }
 
     fn parse_bytes(&mut self, bytes: &[u8]) -> Result<(), OpenAiProviderError> {
-        for byte in bytes {
+        for (byte_offset, byte) in bytes.iter().enumerate() {
             self.line_buffer.push(*byte);
-            if *byte == b'\n' {
-                self.parse_buffered_line()?;
+            if *byte == b'\n'
+                && let Err(error) = self.parse_buffered_line()
+            {
+                tracing::debug!(
+                    chunk_byte_length = bytes.len(),
+                    chunk_byte_offset = byte_offset,
+                    buffered_line_byte_length = self.line_buffer.len(),
+                    "openai stream SSE line rejected"
+                );
+                return Err(error);
             }
         }
 

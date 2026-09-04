@@ -12,8 +12,11 @@ use merry_llm::{
     FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
     ToolArguments, Usage,
 };
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
+
+const OPENAI_COMPATIBLE_HEARTBEAT_EVENT: &str = "ping";
 
 #[allow(dead_code)]
 pub(crate) fn parse_responses_response(
@@ -93,21 +96,63 @@ impl ResponsesStreamParser {
             return Ok(Vec::new());
         }
         if data == "[DONE]" {
+            tracing::debug!(
+                event_type = "[DONE]",
+                data_byte_length = data.len(),
+                parser_completed = self.completed,
+                "openai Responses stream sentinel received"
+            );
             return Ok(Vec::new());
         }
+        let metadata = responses_stream_event_metadata(data);
         if self.completed {
+            if is_ignorable_post_completion_event(metadata.event_type) {
+                tracing::debug!(
+                    event_type = metadata.event_type.unwrap_or("<missing-or-invalid>"),
+                    sequence_number = ?metadata.sequence_number,
+                    data_byte_length = data.len(),
+                    parser_completed = self.completed,
+                    "openai Responses compatibility heartbeat ignored after response.completed"
+                );
+                return Ok(Vec::new());
+            }
+
+            tracing::warn!(
+                event_type = metadata.event_type.unwrap_or("<missing-or-invalid>"),
+                sequence_number = ?metadata.sequence_number,
+                data_byte_length = data.len(),
+                parser_completed = self.completed,
+                "openai Responses stream emitted an event after response.completed"
+            );
             return Err(OpenAiProviderError::protocol(
                 "stream emitted an event after completion",
             ));
         }
 
         let event: ResponsesStreamEvent = serde_json::from_str(data).map_err(|error| {
+            tracing::warn!(
+                event_type = metadata.event_type.unwrap_or("<missing-or-invalid>"),
+                sequence_number = ?metadata.sequence_number,
+                data_byte_length = data.len(),
+                "openai Responses stream event JSON rejected"
+            );
             OpenAiProviderError::protocol(format!(
                 "failed to parse Responses stream event: {error}"
             ))
         })?;
 
-        self.parse_event(event)
+        let result = self.parse_event(event);
+        tracing::debug!(
+            event_type = metadata.event_type.unwrap_or("<missing-or-invalid>"),
+            sequence_number = ?metadata.sequence_number,
+            data_byte_length = data.len(),
+            parser_completed_after = self.completed,
+            buffered_tool_call_count = self.tool_call_buffers.len(),
+            emitted_tool_call_count = self.tool_calls.len(),
+            parse_succeeded = result.is_ok(),
+            "openai Responses stream event applied"
+        );
+        result
     }
 
     pub(crate) fn finish(&self) -> Result<(), OpenAiProviderError> {
@@ -177,22 +222,13 @@ impl ResponsesStreamParser {
                 }
             },
             ResponsesStreamEvent::Completed { response } => {
-                self.completed = true;
-                Ok(vec![ModelEvent::Completed {
-                    response: self.completed_response(response)?,
-                }])
+                self.parse_terminal_response(response, "completed")
             }
             ResponsesStreamEvent::Incomplete { response } => {
-                Err(OpenAiProviderError::protocol(format!(
-                    "Responses stream ended incomplete with status {}",
-                    response.status.as_deref().unwrap_or("unknown")
-                )))
+                self.parse_terminal_response(response, "incomplete")
             }
             ResponsesStreamEvent::Failed { response } => {
-                Err(OpenAiProviderError::protocol(format!(
-                    "Responses stream failed with status {}",
-                    response.status.as_deref().unwrap_or("unknown")
-                )))
+                self.parse_terminal_response(response, "failed")
             }
             ResponsesStreamEvent::Error { code, message } => {
                 let code = code.unwrap_or_else(|| "unknown".to_owned());
@@ -203,6 +239,17 @@ impl ResponsesStreamParser {
                 )))
             }
         }
+    }
+
+    fn parse_terminal_response(
+        &mut self,
+        response: ResponsesResponse,
+        fallback_status: &'static str,
+    ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
+        self.completed = true;
+        Ok(vec![ModelEvent::Completed {
+            response: self.completed_response(response, fallback_status)?,
+        }])
     }
 
     fn merge_output_item(
@@ -227,6 +274,7 @@ impl ResponsesStreamParser {
     fn completed_response(
         &self,
         response: ResponsesResponse,
+        fallback_status: &'static str,
     ) -> Result<ModelResponse, OpenAiProviderError> {
         let usage = response.usage.map(usage_from_wire).transpose()?;
         if !self.tool_call_buffers.is_empty() {
@@ -237,10 +285,33 @@ impl ResponsesStreamParser {
 
         Ok(ModelResponse::new(
             stream_outputs(&self.aggregate_text, &self.tool_calls),
-            stream_finish_reason(&self.tool_calls),
+            if self.tool_calls.is_empty() {
+                parse_response_status(response.status.as_deref().or(Some(fallback_status)))?
+            } else {
+                FinishReason::ToolCalls
+            },
             usage,
         ))
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ResponsesStreamEventMetadata<'a> {
+    #[serde(rename = "type")]
+    event_type: Option<&'a str>,
+    #[serde(default)]
+    sequence_number: Option<u64>,
+}
+
+fn responses_stream_event_metadata(data: &str) -> ResponsesStreamEventMetadata<'_> {
+    serde_json::from_str(data).unwrap_or_default()
+}
+
+fn is_ignorable_post_completion_event(event_type: Option<&str>) -> bool {
+    // Some OpenAI-compatible gateways send a transport heartbeat after the
+    // terminal Responses event. It carries no response state, so it is safe
+    // to ignore while keeping all other post-completion events strict.
+    matches!(event_type, Some(OPENAI_COMPATIBLE_HEARTBEAT_EVENT))
 }
 
 fn is_ignorable_sse_field(field: &str) -> bool {
@@ -315,14 +386,6 @@ fn parse_response_status(status: Option<&str>) -> Result<FinishReason, OpenAiPro
             "unsupported Responses status `{other}`"
         ))),
         None => Ok(FinishReason::Stop),
-    }
-}
-
-fn stream_finish_reason(tool_calls: &[ModelToolCall]) -> FinishReason {
-    if tool_calls.is_empty() {
-        FinishReason::Stop
-    } else {
-        FinishReason::ToolCalls
     }
 }
 
