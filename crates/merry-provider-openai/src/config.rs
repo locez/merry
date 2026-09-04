@@ -2,7 +2,7 @@
 
 use crate::OpenAiProviderError;
 use merry_core::ProviderName;
-use merry_llm::ModelCapabilities;
+use merry_llm::{ModelCapabilities, ServiceTier};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -18,6 +18,25 @@ pub enum OpenAiProtocol {
     Responses,
     /// OpenAI Chat Completions API at `/chat/completions`.
     ChatCompletions,
+}
+
+impl OpenAiProtocol {
+    /// Returns whether a request on this protocol may carry `service_tier`.
+    ///
+    /// The `ultrafast` tier is exposed by the OpenAI Responses API only; Chat
+    /// Completions rejects it, so it is not a portable openai-compatible tier.
+    #[must_use]
+    pub const fn supports_service_tier(self, service_tier: ServiceTier) -> bool {
+        match service_tier {
+            ServiceTier::Ultrafast => matches!(self, Self::Responses),
+            ServiceTier::Auto
+            | ServiceTier::Default
+            | ServiceTier::Fast
+            | ServiceTier::Flex
+            | ServiceTier::Priority
+            | ServiceTier::Scale => true,
+        }
+    }
 }
 
 /// OpenAI-compatible provider configuration.

@@ -11,7 +11,7 @@ use merry_llm::{
     ModelProviderFuture, ModelRequest, ModelResponse, ModelResponseFormat, ModelStreamContext,
     ModelStructuredOutputFormat, ModelToolBatchContinuation, ModelToolCall, ModelToolCallBatch,
     ModelToolCallId, ModelToolContinuation, ModelToolResult, ModelToolResultContent,
-    ParallelToolCalls, ReasoningEffort, ToolArguments, Usage,
+    ParallelToolCalls, ReasoningEffort, ServiceTier, ToolArguments, Usage,
 };
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
@@ -306,6 +306,63 @@ fn generation_parallel_tool_calls_resolve_against_provider_capabilities() {
             "max_output_tokens": null,
             "parallel_tool_calls": "auto"
         })
+    );
+}
+
+#[test]
+fn service_tier_parses_supported_identifiers_and_rejects_unknown_values() {
+    for tier in ServiceTier::ALL {
+        assert_eq!(
+            ServiceTier::new(tier.as_str()).expect("tier is valid"),
+            tier
+        );
+        assert_eq!(tier.to_string(), tier.as_str());
+    }
+    assert_eq!(
+        ServiceTier::ALL.map(ServiceTier::as_str),
+        [
+            "ultrafast",
+            "auto",
+            "default",
+            "fast",
+            "flex",
+            "priority",
+            "scale"
+        ]
+    );
+    let error = ServiceTier::new("turbo").expect_err("unknown tier must be rejected");
+    assert!(
+        error.to_string().contains("turbo"),
+        "unexpected error: {error}"
+    );
+    assert!(ServiceTier::new("Priority").is_err());
+}
+
+#[test]
+fn generation_config_carries_optional_service_tier() {
+    let generation = GenerationConfig::default().with_service_tier(Some(ServiceTier::Flex));
+    assert_eq!(generation.service_tier(), Some(ServiceTier::Flex));
+    assert_eq!(
+        serde_json::to_value(&generation).expect("generation should serialize"),
+        json!({
+            "max_output_tokens": null,
+            "parallel_tool_calls": "auto",
+            "service_tier": "flex"
+        })
+    );
+    assert_json_round_trip(&generation);
+    let parsed: GenerationConfig = serde_json::from_value(json!({
+        "max_output_tokens": null,
+        "service_tier": "priority"
+    }))
+    .expect("generation should deserialize");
+    assert_eq!(parsed.service_tier(), Some(ServiceTier::Priority));
+    assert!(
+        serde_json::from_value::<GenerationConfig>(json!({
+            "max_output_tokens": null,
+            "service_tier": "turbo"
+        }))
+        .is_err()
     );
 }
 

@@ -199,6 +199,7 @@ impl ManagedProviderDefinition {
             reasoning_effort: self
                 .reasoning_effort
                 .map(|effort| effort.as_str().to_owned()),
+            service_tier: None,
             kind: Some(
                 match self.kind {
                     ManagedProviderKind::OpenAiCompatible => "openai-compatible",

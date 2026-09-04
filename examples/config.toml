@@ -153,6 +153,12 @@ model = "gpt-4.1-mini"
 # low, medium, high, xhigh, max, and ultra; custom provider-supported values
 # are also accepted.
 # reasoning_effort = "medium"
+# Optional. Sent as the OpenAI `service_tier` request field (Responses and Chat
+# Completions), and accepted for openai-compatible providers only. Supported
+# values: ultrafast, auto, default, fast, flex, priority, scale. The ultrafast
+# tier is Responses-only and requires protocol = "responses". Leave unset to
+# omit the field.
+# service_tier = "default"
 
 [providers.retry]
 # Provider-neutral retry policy for transient model setup or stream failures.
@@ -183,6 +189,9 @@ base_url = "https://api.openai.com/v1"
 # Optional provider-specific default used when this provider is selected in TUI.
 # The value may be any provider-supported reasoning identifier.
 # reasoning_effort = "medium"
+# Optional provider-specific service tier (openai-compatible providers only).
+# The ultrafast tier additionally requires protocol = "responses".
+# service_tier = "default"
 # Prefer api_key_file for local sandboxed smoke runs so the key stays in the
 # mounted config directory instead of argv or process environment.
 api_key_file = "secrets/openai.key"

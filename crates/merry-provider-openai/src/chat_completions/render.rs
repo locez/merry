@@ -2,7 +2,7 @@ use super::wire::{
     ChatContentPart, ChatImageUrl, ChatJsonSchema, ChatMessage, ChatRequest, ChatResponseFormat,
     ChatStreamOptions, ChatTool, ChatToolCall, ChatToolCallFunction, ChatToolFunction,
 };
-use crate::{OpenAiProviderError, image::png_data_url};
+use crate::{OpenAiProtocol, OpenAiProviderError, image::png_data_url};
 use merry_llm::{
     ModelContentPart, ModelInputItem, ModelMessageRole, ModelRequest, ModelResponseFormat,
 };
@@ -41,6 +41,17 @@ pub(crate) fn render_chat_request(request: &ModelRequest) -> Result<Value, OpenA
             },
         },
     });
+    let service_tier = match request.generation().service_tier() {
+        Some(service_tier)
+            if !OpenAiProtocol::ChatCompletions.supports_service_tier(service_tier) =>
+        {
+            return Err(OpenAiProviderError::invalid_request(format!(
+                "service_tier \"{service_tier}\" is not supported by the Chat Completions \
+                 protocol; it requires the Responses protocol"
+            )));
+        }
+        service_tier => service_tier.map(|tier| tier.as_str()),
+    };
     let has_tools = !tools.is_empty();
     let wire = ChatRequest {
         model: request.model().as_str(),
@@ -55,6 +66,7 @@ pub(crate) fn render_chat_request(request: &ModelRequest) -> Result<Value, OpenA
             .generation()
             .reasoning_effort()
             .map(|effort| effort.as_str()),
+        service_tier,
         response_format,
         tools,
         tool_choice: has_tools.then_some("auto"),

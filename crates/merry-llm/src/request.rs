@@ -194,6 +194,8 @@ pub struct GenerationConfig {
     parallel_tool_calls: ParallelToolCalls,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<ReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<ServiceTier>,
 }
 
 impl GenerationConfig {
@@ -216,6 +218,7 @@ impl GenerationConfig {
                 ParallelToolCalls::Disabled
             },
             reasoning_effort: None,
+            service_tier: None,
         })
     }
 
@@ -229,6 +232,13 @@ impl GenerationConfig {
     /// Returns a copy with an optional model reasoning-effort hint.
     pub fn with_reasoning_effort(mut self, reasoning_effort: Option<ReasoningEffort>) -> Self {
         self.reasoning_effort = reasoning_effort;
+        self
+    }
+
+    /// Returns a copy with an optional provider service-tier hint.
+    #[must_use]
+    pub fn with_service_tier(mut self, service_tier: Option<ServiceTier>) -> Self {
+        self.service_tier = service_tier;
         self
     }
 
@@ -275,6 +285,12 @@ impl GenerationConfig {
     pub fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
         self.reasoning_effort.as_ref()
     }
+
+    /// Optional provider service-tier hint (for example OpenAI `service_tier`).
+    #[must_use]
+    pub fn service_tier(&self) -> Option<ServiceTier> {
+        self.service_tier
+    }
 }
 
 #[derive(Deserialize)]
@@ -287,6 +303,8 @@ struct GenerationConfigWire {
     allow_parallel_tool_calls: Option<bool>,
     #[serde(default)]
     reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    service_tier: Option<ServiceTier>,
 }
 
 impl<'de> Deserialize<'de> for GenerationConfig {
@@ -313,7 +331,8 @@ impl<'de> Deserialize<'de> for GenerationConfig {
         Ok(Self::new(wire.max_output_tokens, false)
             .map_err(de::Error::custom)?
             .with_parallel_tool_calls(parallel_tool_calls)
-            .with_reasoning_effort(wire.reasoning_effort))
+            .with_reasoning_effort(wire.reasoning_effort)
+            .with_service_tier(wire.service_tier))
     }
 }
 
@@ -323,6 +342,7 @@ impl Default for GenerationConfig {
             max_output_tokens: None,
             parallel_tool_calls: ParallelToolCalls::Auto,
             reasoning_effort: None,
+            service_tier: None,
         }
     }
 }
@@ -400,6 +420,97 @@ impl<'de> Deserialize<'de> for ReasoningEffort {
     {
         let value = String::deserialize(deserializer)?;
         Self::try_from(value).map_err(de::Error::custom)
+    }
+}
+
+/// Provider service tier selecting request processing priority and pricing.
+///
+/// Values mirror the OpenAI `service_tier` request field. Providers that do
+/// not support service tiers ignore the value.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTier {
+    /// Lowest-latency processing.
+    Ultrafast,
+    /// Let the provider choose the tier based on account settings.
+    Auto,
+    /// Standard processing tier.
+    Default,
+    /// Fast processing tier.
+    Fast,
+    /// Flexible, lower-cost processing with higher latency.
+    Flex,
+    /// Priority processing.
+    Priority,
+    /// Scale tier processing.
+    Scale,
+}
+
+impl ServiceTier {
+    /// All supported service tiers in display order.
+    pub const ALL: [Self; 7] = [
+        Self::Ultrafast,
+        Self::Auto,
+        Self::Default,
+        Self::Fast,
+        Self::Flex,
+        Self::Priority,
+        Self::Scale,
+    ];
+
+    /// Parses a service tier from its wire identifier.
+    pub fn new(value: &str) -> Result<Self, ModelError> {
+        Self::ALL
+            .into_iter()
+            .find(|tier| tier.as_str() == value)
+            .ok_or_else(|| {
+                ModelError::invalid_request(format!(
+                    "ServiceTier {value:?} is not supported; expected one of {}",
+                    Self::ALL
+                        .iter()
+                        .map(|tier| tier.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            })
+    }
+
+    /// Returns the wire identifier for this tier.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ultrafast => "ultrafast",
+            Self::Auto => "auto",
+            Self::Default => "default",
+            Self::Fast => "fast",
+            Self::Flex => "flex",
+            Self::Priority => "priority",
+            Self::Scale => "scale",
+        }
+    }
+}
+
+impl fmt::Display for ServiceTier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ServiceTier {
+    type Err = ModelError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<&str> for ServiceTier {
+    type Error = ModelError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
     }
 }
 

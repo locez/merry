@@ -14,6 +14,8 @@ pub(crate) struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reasoning_effort: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) service_tier: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) response_format: Option<ChatResponseFormat<'a>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) tools: Vec<ChatTool<'a>>,

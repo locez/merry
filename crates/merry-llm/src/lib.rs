@@ -26,7 +26,7 @@ pub use provider::{ModelEventStream, ModelProvider, ModelProviderFuture, ModelSt
 pub use request::{
     GenerationConfig, ModelInputItem, ModelMessage, ModelMessageRole, ModelName, ModelRequest,
     ModelResponseFormat, ModelStructuredOutputFormat, ParallelToolCalls, ReasoningEffort,
-    RequestContentHash, ToolProfileHash,
+    RequestContentHash, ServiceTier, ToolProfileHash,
 };
 pub use response::{FinishReason, ModelOutput, ModelResponse};
 pub use retry::{

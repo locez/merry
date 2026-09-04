@@ -3,7 +3,7 @@ use crate::coding::ActionProcessBackendOptions;
 use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
 use crate::sandbox::default_inner_development_path_rules;
 use merry_core::SessionId;
-use merry_llm::{GenerationConfig, ReasoningEffort};
+use merry_llm::{GenerationConfig, ReasoningEffort, ServiceTier};
 use merry_runtime::{
     AutomaticCompactionConfig, PathAccess, PathAccessRule, PathAccessRuleSource, Runtime,
     RuntimeBuilder,
@@ -64,7 +64,20 @@ pub(crate) fn generation_config(
     config: Option<&MerryConfig>,
 ) -> Result<GenerationConfig, config::ConfigError> {
     let reasoning_effort = main_reasoning_effort(config)?;
-    Ok(GenerationConfig::default().with_reasoning_effort(reasoning_effort))
+    let service_tier = main_service_tier(config)?;
+    Ok(GenerationConfig::default()
+        .with_reasoning_effort(reasoning_effort)
+        .with_service_tier(service_tier))
+}
+
+pub(crate) fn main_service_tier(
+    config: Option<&MerryConfig>,
+) -> Result<Option<ServiceTier>, config::ConfigError> {
+    Ok(config
+        .map(MerryConfig::configured_default_provider)
+        .transpose()?
+        .flatten()
+        .and_then(|provider| provider.service_tier))
 }
 
 pub(crate) fn main_reasoning_effort(
@@ -138,7 +151,7 @@ mod tests {
     use crate::testing::ScriptedProvider;
     use merry_llm::{
         FinishReason, GenerationConfig, ModelCapabilities, ModelEvent, ModelName, ModelOutput,
-        ModelResponse,
+        ModelResponse, ServiceTier,
     };
     use merry_runtime::{PathAccessRuleSource, RuntimeModelRole, StepContext, StepInput};
     use std::{fs, path::PathBuf, sync::Arc};
@@ -274,6 +287,171 @@ api_key = "sk-test"
         assert_eq!(
             generation.reasoning_effort().map(|effort| effort.as_str()),
             None
+        );
+    }
+
+    #[test]
+    fn generation_config_uses_provider_default_service_tier_over_named_provider() {
+        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
+service_tier = "priority"
+
+[providers.openai-compatible]
+service_tier = "flex"
+api_key = "sk-test"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let generation = generation_config(Some(&config)).expect("generation config should load");
+
+        assert_eq!(generation.service_tier(), Some(ServiceTier::Priority));
+    }
+
+    #[test]
+    fn generation_config_falls_back_to_named_provider_service_tier() {
+        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
+
+[providers.openai-compatible]
+service_tier = "flex"
+api_key = "sk-test"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let generation = generation_config(Some(&config)).expect("generation config should load");
+
+        assert_eq!(generation.service_tier(), Some(ServiceTier::Flex));
+    }
+
+    #[test]
+    fn generation_config_omits_service_tier_when_unset() {
+        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
+
+[providers.openai-compatible]
+api_key = "sk-test"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let generation = generation_config(Some(&config)).expect("generation config should load");
+
+        assert_eq!(generation.service_tier(), None);
+    }
+
+    #[test]
+    fn invalid_service_tier_is_rejected() {
+        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-test"
+
+[providers.openai-compatible]
+service_tier = "turbo"
+api_key = "sk-test"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let error = generation_config(Some(&config)).expect_err("service tier should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("providers.openai-compatible.service_tier is invalid"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn service_tier_is_rejected_for_anthropic_providers() {
+        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "anthropic"
+model = "claude-test"
+
+[providers.anthropic]
+service_tier = "priority"
+api_key = "sk-test"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let error = generation_config(Some(&config)).expect_err("service tier should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("service_tier is only supported for openai-compatible providers"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn default_level_service_tier_is_rejected_for_anthropic_providers() {
+        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "anthropic"
+model = "claude-test"
+service_tier = "priority"
+
+[providers.anthropic]
+api_key = "sk-test"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let error = generation_config(Some(&config)).expect_err("service tier should be rejected");
+
+        assert!(
+            error.to_string().contains(
+                "providers.default.service_tier is only supported for openai-compatible providers"
+            ),
+            "unexpected error: {error}"
         );
     }
 

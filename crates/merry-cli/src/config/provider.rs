@@ -2,7 +2,7 @@ use super::{
     ConfigError, MerryConfig, default_true, managed_provider::ProviderAlias,
     resolve_config_relative_path,
 };
-use merry_llm::{ModelName, ModelRetryPolicy, ModelRetryPolicyError, ReasoningEffort};
+use merry_llm::{ModelName, ModelRetryPolicy, ModelRetryPolicyError, ReasoningEffort, ServiceTier};
 use merry_provider_openai::OpenAiProtocol;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt, fs, path::PathBuf};
@@ -64,10 +64,20 @@ impl MerryConfig {
         };
         let reasoning_effort =
             parse_provider_reasoning_effort(alias.as_str(), provider.reasoning_effort.as_deref())?;
+        let service_tier =
+            parse_provider_service_tier(alias.as_str(), provider.service_tier.as_deref())?;
         let protocol = match kind {
             ConfiguredProviderKind::OpenAiCompatible => Some(provider.protocol.unwrap_or_default()),
             ConfiguredProviderKind::Anthropic => None,
         };
+        if let Some(service_tier) = service_tier {
+            validate_service_tier_support(
+                &format!("providers.{alias}.service_tier"),
+                service_tier,
+                kind,
+                protocol,
+            )?;
+        }
 
         Ok(ConfiguredProviderProfile {
             alias,
@@ -76,6 +86,7 @@ impl MerryConfig {
             kind,
             protocol,
             reasoning_effort,
+            service_tier,
             source,
         })
     }
@@ -110,6 +121,45 @@ impl MerryConfig {
             Some(reasoning_effort) => Ok(Some(reasoning_effort)),
             None => self.provider_reasoning_effort(alias),
         }
+    }
+
+    pub(crate) fn provider_service_tier(
+        &self,
+        alias: &str,
+    ) -> Result<Option<ServiceTier>, ConfigError> {
+        Ok(self.provider_profile(alias)?.service_tier())
+    }
+
+    pub(crate) fn effective_provider_service_tier(
+        &self,
+        alias: &str,
+    ) -> Result<Option<ServiceTier>, ConfigError> {
+        let default_service_tier = self
+            .raw
+            .providers
+            .as_ref()
+            .and_then(|providers| providers.default.as_ref())
+            .filter(|default| default.provider == alias)
+            .and_then(|default| default.service_tier.as_deref())
+            .map(ServiceTier::new)
+            .transpose()
+            .map_err(|error| {
+                ConfigError::Invalid(format!(
+                    "providers.default.service_tier is invalid: {error}"
+                ))
+            })?;
+
+        let Some(service_tier) = default_service_tier else {
+            return self.provider_service_tier(alias);
+        };
+        let profile = self.provider_profile(alias)?;
+        validate_service_tier_support(
+            "providers.default.service_tier",
+            service_tier,
+            profile.kind(),
+            profile.protocol(),
+        )?;
+        Ok(Some(service_tier))
     }
 
     pub fn validate_provider_settings_if_present(&self) -> Result<(), ConfigError> {
@@ -159,10 +209,12 @@ impl MerryConfig {
             .ok_or_else(|| ConfigError::Invalid("[providers.default] is required".to_owned()))?;
         let provider = self.provider_by_alias(&default.provider)?;
         let reasoning_effort = self.effective_provider_reasoning_effort(&default.provider)?;
+        let service_tier = self.effective_provider_service_tier(&default.provider)?;
         Ok(EffectiveDefaultProviderConfig {
             alias: default.provider.clone(),
             model: default.model.clone(),
             reasoning_effort,
+            service_tier,
             provider,
         })
     }
@@ -196,27 +248,50 @@ impl MerryConfig {
         let api_key = resolve_api_key_source(alias, provider, &self.config_dir, &self.home)?;
         let reasoning_effort =
             parse_provider_reasoning_effort(alias, provider.reasoning_effort.as_deref())?;
+        let service_tier = parse_provider_service_tier(alias, provider.service_tier.as_deref())?;
+        let protocol = provider.protocol.unwrap_or_default();
         match kind {
-            "openai-compatible" => Ok(EffectiveProviderConfig::OpenAiCompatible(
-                EffectiveOpenAiProviderConfig {
-                    model: None,
-                    reasoning_effort,
-                    alias: alias.to_owned(),
-                    protocol: provider.protocol.unwrap_or_default(),
-                    base_url: provider.base_url.clone(),
-                    api_key,
-                },
-            )),
-            "anthropic" => Ok(EffectiveProviderConfig::Anthropic(
-                EffectiveAnthropicProviderConfig {
-                    alias: alias.to_owned(),
-                    reasoning_effort,
-                    base_url: provider.base_url.clone(),
-                    api_version: provider.api_version.clone(),
-                    default_max_output_tokens: provider.default_max_output_tokens,
-                    api_key,
-                },
-            )),
+            "openai-compatible" => {
+                if let Some(service_tier) = service_tier {
+                    validate_service_tier_support(
+                        &format!("providers.{alias}.service_tier"),
+                        service_tier,
+                        ConfiguredProviderKind::OpenAiCompatible,
+                        Some(protocol),
+                    )?;
+                }
+                Ok(EffectiveProviderConfig::OpenAiCompatible(
+                    EffectiveOpenAiProviderConfig {
+                        model: None,
+                        reasoning_effort,
+                        service_tier,
+                        alias: alias.to_owned(),
+                        protocol,
+                        base_url: provider.base_url.clone(),
+                        api_key,
+                    },
+                ))
+            }
+            "anthropic" => {
+                if let Some(service_tier) = service_tier {
+                    validate_service_tier_support(
+                        &format!("providers.{alias}.service_tier"),
+                        service_tier,
+                        ConfiguredProviderKind::Anthropic,
+                        None,
+                    )?;
+                }
+                Ok(EffectiveProviderConfig::Anthropic(
+                    EffectiveAnthropicProviderConfig {
+                        alias: alias.to_owned(),
+                        reasoning_effort,
+                        base_url: provider.base_url.clone(),
+                        api_version: provider.api_version.clone(),
+                        default_max_output_tokens: provider.default_max_output_tokens,
+                        api_key,
+                    },
+                ))
+            }
             other => Err(ConfigError::Invalid(format!(
                 "unsupported provider type {other:?} for [providers.{alias}]"
             ))),
@@ -237,6 +312,7 @@ impl MerryConfig {
         };
         provider.model = Some(default.model);
         provider.reasoning_effort = default.reasoning_effort;
+        provider.service_tier = default.service_tier;
         Ok(provider)
     }
 
@@ -297,11 +373,50 @@ fn parse_provider_reasoning_effort(
         })
 }
 
+fn parse_provider_service_tier(
+    alias: &str,
+    value: Option<&str>,
+) -> Result<Option<ServiceTier>, ConfigError> {
+    value.map(ServiceTier::new).transpose().map_err(|error| {
+        ConfigError::Invalid(format!(
+            "providers.{alias}.service_tier is invalid: {error}"
+        ))
+    })
+}
+
+/// Rejects a configured service tier the selected provider cannot carry.
+///
+/// `location` names the setting in the user's config so the message points at
+/// the key that has to change, which differs between `[providers.default]` and
+/// `[providers.<alias>]`.
+fn validate_service_tier_support(
+    location: &str,
+    service_tier: ServiceTier,
+    kind: ConfiguredProviderKind,
+    protocol: Option<OpenAiProtocol>,
+) -> Result<(), ConfigError> {
+    if kind != ConfiguredProviderKind::OpenAiCompatible {
+        return Err(ConfigError::Invalid(format!(
+            "{location} is only supported for openai-compatible providers"
+        )));
+    }
+    if !protocol
+        .unwrap_or_default()
+        .supports_service_tier(service_tier)
+    {
+        return Err(ConfigError::Invalid(format!(
+            "{location} value \"{service_tier}\" requires protocol = \"responses\""
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveDefaultProviderConfig {
     pub alias: String,
     pub model: String,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub service_tier: Option<ServiceTier>,
     pub provider: EffectiveProviderConfig,
 }
 
@@ -325,6 +440,7 @@ pub(crate) struct ConfiguredProviderProfile {
     kind: ConfiguredProviderKind,
     protocol: Option<OpenAiProtocol>,
     reasoning_effort: Option<ReasoningEffort>,
+    service_tier: Option<ServiceTier>,
     source: ProviderConfigSource,
 }
 
@@ -353,6 +469,10 @@ impl ConfiguredProviderProfile {
         self.reasoning_effort.as_ref()
     }
 
+    pub(crate) fn service_tier(&self) -> Option<ServiceTier> {
+        self.service_tier
+    }
+
     pub(crate) fn source(&self) -> ProviderConfigSource {
         self.source
     }
@@ -368,6 +488,7 @@ pub enum EffectiveProviderConfig {
 pub struct EffectiveOpenAiProviderConfig {
     pub model: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub service_tier: Option<ServiceTier>,
     pub alias: String,
     pub protocol: OpenAiProtocol,
     pub base_url: Option<String>,
@@ -380,6 +501,7 @@ impl fmt::Debug for EffectiveOpenAiProviderConfig {
             .debug_struct("EffectiveOpenAiProviderConfig")
             .field("model", &self.model)
             .field("reasoning_effort", &self.reasoning_effort)
+            .field("service_tier", &self.service_tier)
             .field("alias", &self.alias)
             .field("protocol", &self.protocol)
             .field("base_url", &self.base_url)
@@ -475,6 +597,7 @@ pub(super) struct DefaultProviderToml {
     pub(super) provider: String,
     model: String,
     reasoning_effort: Option<String>,
+    service_tier: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -483,6 +606,8 @@ pub(super) struct NamedProviderToml {
     pub(super) display_name: Option<String>,
     pub(super) default_model: Option<String>,
     pub(super) reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) service_tier: Option<String>,
     #[serde(rename = "type")]
     pub(super) kind: Option<String>,
     pub(super) protocol: Option<OpenAiProtocol>,
@@ -746,6 +871,95 @@ api_key = "sk-inline-secret"
     }
 
     #[test]
+    fn default_level_service_tier_is_rejected_for_anthropic_providers() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "claude"
+model = "claude-sonnet-test"
+service_tier = "priority"
+
+[providers.claude]
+type = "anthropic"
+api_key = "sk-ant-test"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should exist");
+
+        let error = config
+            .default_provider()
+            .expect_err("an Anthropic default provider must reject a service tier");
+
+        assert!(
+            error.to_string().contains(
+                "providers.default.service_tier is only supported for openai-compatible providers"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn ultrafast_service_tier_requires_the_responses_protocol() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config_text = |protocol: &str, tier_location: &str| {
+            let (default_tier, provider_tier) = match tier_location {
+                "default" => ("service_tier = \"ultrafast\"", ""),
+                _ => ("", "service_tier = \"ultrafast\""),
+            };
+            format!(
+                r#"
+[providers.default]
+provider = "compat"
+model = "gpt-test"
+{default_tier}
+
+[providers.compat]
+type = "openai-compatible"
+protocol = "{protocol}"
+{provider_tier}
+api_key = "sk-test"
+"#
+            )
+        };
+
+        for tier_location in ["default", "named"] {
+            let config = MerryConfig::load_optional_from_text(
+                Some(&config_text("chat_completions", tier_location)),
+                &paths,
+            )
+            .expect("config should parse")
+            .expect("config should exist");
+
+            let error = config
+                .default_provider()
+                .expect_err("ultrafast is a Responses-only tier");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires protocol = \"responses\""),
+                "unexpected error for the {tier_location} service_tier: {error}"
+            );
+
+            let default = MerryConfig::load_optional_from_text(
+                Some(&config_text("responses", tier_location)),
+                &paths,
+            )
+            .expect("config should parse")
+            .expect("config should exist")
+            .default_provider()
+            .expect("the Responses protocol accepts ultrafast");
+
+            assert_eq!(default.service_tier, Some(ServiceTier::Ultrafast));
+        }
+    }
+
+    #[test]
     fn parses_chat_completions_protocol_and_anthropic_provider() {
         let paths = XdgPaths::from_parts(home(), None, None);
         let openai = MerryConfig::load_optional_from_text(
@@ -885,6 +1099,7 @@ api_key = {api_key:?}
         let provider = EffectiveOpenAiProviderConfig {
             model: Some("gpt-test".to_owned()),
             reasoning_effort: Some(ReasoningEffort::new("high").expect("valid effort")),
+            service_tier: Some(ServiceTier::Priority),
             alias: "openai-compatible".to_owned(),
             protocol: OpenAiProtocol::Responses,
             base_url: Some("https://api.example.test/v1".to_owned()),

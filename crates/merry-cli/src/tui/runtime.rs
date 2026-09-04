@@ -460,7 +460,17 @@ fn generation_config_with_preferences(
     let reasoning_effort = preference_reasoning_effort
         .or(provider_reasoning_effort)
         .or(main_reasoning_effort(merry_config)?);
-    Ok(GenerationConfig::default().with_reasoning_effort(reasoning_effort))
+    // The service tier is provider-specific, so the selected provider owns it.
+    // It is never inherited from [providers.default] when that default names a
+    // different provider, which may not accept the tier at all.
+    let service_tier = merry_config
+        .zip(selected_provider.as_deref())
+        .map(|(config, provider)| config.effective_provider_service_tier(provider))
+        .transpose()?
+        .flatten();
+    Ok(GenerationConfig::default()
+        .with_reasoning_effort(reasoning_effort)
+        .with_service_tier(service_tier))
 }
 
 fn automatic_compaction_config_with_preferences(
@@ -590,6 +600,49 @@ api_key = "sk-alt-test"
         assert_eq!(
             generation.reasoning_effort().map(|effort| effort.as_str()),
             Some("high")
+        );
+    }
+
+    #[test]
+    fn selected_provider_does_not_inherit_the_default_provider_service_tier() {
+        let paths = XdgPaths::from_parts(std::path::PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "compat"
+model = "gpt-test"
+service_tier = "priority"
+
+[providers.compat]
+type = "openai-compatible"
+api_key = "sk-test"
+
+[providers.alt]
+type = "openai-compatible"
+default_model = "alt-model"
+api_key = "sk-alt-test"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should exist");
+        let mut preferences = TuiPreferences::default();
+        preferences.provider = Some("alt".to_owned());
+
+        let generation = generation_config_with_preferences(Some(&config), &preferences)
+            .expect("generation config should build");
+
+        assert_eq!(generation.service_tier(), None);
+
+        preferences.provider = Some("compat".to_owned());
+        let generation = generation_config_with_preferences(Some(&config), &preferences)
+            .expect("generation config should build");
+
+        assert_eq!(
+            generation.service_tier(),
+            Some(merry_llm::ServiceTier::Priority)
         );
     }
 
