@@ -10,6 +10,7 @@ merry-raw-docs/
 # Local agent/tool metadata.
 .agents/
 .codex/
+.direnv/
 .superpowers/
 .worktrees/
 
