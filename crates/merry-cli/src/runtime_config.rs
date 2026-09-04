@@ -425,6 +425,36 @@ api_key = "sk-test"
         );
     }
 
+    #[test]
+    fn default_level_service_tier_is_rejected_for_anthropic_providers() {
+        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "anthropic"
+model = "claude-test"
+service_tier = "priority"
+
+[providers.anthropic]
+api_key = "sk-test"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let error = generation_config(Some(&config)).expect_err("service tier should be rejected");
+
+        assert!(
+            error.to_string().contains(
+                "providers.default.service_tier is only supported for openai-compatible providers"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn configured_runtime_builder_applies_auto_compaction_config() {
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
