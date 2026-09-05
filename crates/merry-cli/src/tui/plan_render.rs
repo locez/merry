@@ -428,6 +428,7 @@ fn linked_subagent_lines(
         PlanLinkStatus::Completed => "completed",
         PlanLinkStatus::Failed => "failed",
         PlanLinkStatus::Cancelled => "cancelled",
+        PlanLinkStatus::Blocked => "blocked",
         PlanLinkStatus::Superseded => "superseded",
     };
     text(
@@ -472,8 +473,8 @@ fn linked_activity_line(
 
 fn format_execution_summary(summary: &merry_core::PlanExecutionSummary) -> String {
     format!(
-        "active {}  completed {}  failed {}  cancelled {}",
-        summary.active, summary.completed, summary.failed, summary.cancelled
+        "active {}  completed {}  failed {}  cancelled {}  blocked {}",
+        summary.active, summary.completed, summary.failed, summary.cancelled, summary.blocked
     )
 }
 
@@ -739,6 +740,7 @@ fn activity_phase_style(state: &TuiState, phase: merry_core::SubagentActivityPha
         merry_core::SubagentActivityPhase::Running => SemanticColor::Focus,
         merry_core::SubagentActivityPhase::Completed => SemanticColor::Success,
         merry_core::SubagentActivityPhase::Failed => SemanticColor::Error,
+        merry_core::SubagentActivityPhase::Blocked => SemanticColor::Warning,
         merry_core::SubagentActivityPhase::Cancelled => SemanticColor::Muted,
     };
     style(state, color)
@@ -751,6 +753,7 @@ fn activity_phase_label(phase: merry_core::SubagentActivityPhase) -> &'static st
         merry_core::SubagentActivityPhase::Waiting => "waiting",
         merry_core::SubagentActivityPhase::Completed => "completed",
         merry_core::SubagentActivityPhase::Failed => "failed",
+        merry_core::SubagentActivityPhase::Blocked => "blocked",
         merry_core::SubagentActivityPhase::Cancelled => "cancelled",
     }
 }

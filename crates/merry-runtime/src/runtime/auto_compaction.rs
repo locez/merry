@@ -129,6 +129,23 @@ async fn compact_prepared_context_inner(
             message: error.to_string(),
         })?;
     let provider = provider_config.provider();
+    let response_format_name = match request.response_format() {
+        Some(merry_llm::ModelResponseFormat::StructuredOutput(format)) => format.name(),
+        None => "none",
+    };
+    tracing::debug!(
+        event = "runtime.compaction.request",
+        session_id = inner.session_id.as_str(),
+        provider_name = provider.name().as_str(),
+        model = request.model().as_str(),
+        message_count = request.messages().len(),
+        estimated_input_tokens = crate::token_estimate::estimate_model_input_tokens(request.input()),
+        max_output_tokens = request.generation().max_output_tokens(),
+        response_format = response_format_name,
+        primary_window_tokens,
+        compactor_window_tokens = ?provider.capabilities().max_input_tokens(),
+        "compaction model request prepared"
+    );
     validate_compaction_model_window(
         provider.capabilities(),
         &request,

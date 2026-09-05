@@ -8,7 +8,8 @@ pub use merry_coding::{
     CodingModelRoleConfigError, CodingPermissionPolicy, CodingPermissionPolicyError,
     CodingProcessBoundary, CodingRuntime, CodingRuntimeBuildError, CodingRuntimeBuilder,
     CodingRuntimeInput, CodingSubagentsConfig, CodingTrustMode,
-    DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, MAX_ROOT_PROJECT_RULES_BYTES, NoSandboxReviewMode,
+    DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS,
+    MAX_ROOT_PROJECT_RULES_BYTES, MIN_CODING_SUBAGENT_MODEL_TURNS, NoSandboxReviewMode,
     ProjectRulesLoadError, ROOT_PROJECT_RULES_FILE, WorkspaceToolLimits, coding_agent,
     load_root_project_rules,
 };

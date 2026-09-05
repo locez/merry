@@ -88,7 +88,7 @@ enabled = false
 max_threads = 6
 max_depth = 1
 # Default model-turn budget for a child task when spawn_subagents omits it.
-max_model_turns = 1024
+max_model_turns = 2048
 
 # User-configured MCP servers are trusted external tools. HTTP MCP endpoints
 # are allowed to use the network because registering them in global config is

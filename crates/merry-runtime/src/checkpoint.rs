@@ -33,8 +33,8 @@ pub enum CheckpointError {
     #[error("checkpoint sequence range start {start} must be <= end {end}")]
     InvalidSequenceRange { start: u64, end: u64 },
 
-    #[error("checkpoint candidate JSON is invalid")]
-    InvalidCandidateJson,
+    #[error("checkpoint candidate JSON is invalid: {message}")]
+    InvalidCandidateJson { message: String },
 
     #[error("checkpoint entry {entry_id} requires a non-blank rationale")]
     EntryRationaleRequired { entry_id: String },
@@ -51,37 +51,8 @@ pub enum CheckpointError {
     #[error("initial checkpoint must not contain handoffs")]
     InitialCheckpointHasHandoffs,
 
-    #[error("previous checkpoint entry {old_id} has no handoff")]
-    MissingHandoff { old_id: String },
-
     #[error("checkpoint handoff for previous entry {old_id} is duplicated")]
     DuplicateHandoff { old_id: String },
-
-    #[error("checkpoint handoff references unknown previous entry {old_id}")]
-    UnknownHandoffOldId { old_id: String },
-
-    #[error("checkpoint keep handoff for {old_id} does not preserve the entry byte-for-byte")]
-    InvalidKeep { old_id: String },
-
-    #[error("checkpoint replace handoff for {old_id} did not remove the old entry")]
-    InvalidReplace { old_id: String },
-
-    #[error("checkpoint drop handoff for {old_id} did not remove the old entry")]
-    InvalidDrop { old_id: String },
-
-    #[error("checkpoint replace handoff for {old_id} has no replacement entry ids")]
-    ReplacementWithoutNewIds { old_id: String },
-
-    #[error("checkpoint replace handoff for {old_id} repeats replacement entry {new_id}")]
-    DuplicateReplacementEntry { old_id: String, new_id: String },
-
-    #[error(
-        "checkpoint replace handoff for {old_id} references previous entry {new_id} instead of a new entry"
-    )]
-    ReplacementEntryNotNew { old_id: String, new_id: String },
-
-    #[error("checkpoint replace handoff for {old_id} references missing new entry {new_id}")]
-    ReplacementEntryNotFound { old_id: String, new_id: String },
 
     #[error("checkpoint pinned ref {ref_id} does not exist in the ref manifest")]
     PinnedRefNotFound { ref_id: String },

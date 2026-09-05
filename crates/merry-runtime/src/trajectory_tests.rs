@@ -320,6 +320,77 @@ fn assistant_output_events_retain_exact_message_details() {
 }
 
 #[test]
+fn compaction_failure_closes_the_active_compaction_record_with_diagnostic() {
+    let session_id = SessionId::new("trajectory-compaction-failure").expect("valid session");
+    let observability = RuntimeObservability::new(session_id.clone(), Vec::new());
+    observability.observe_journal_event(&RuntimeJournalEvent::new(
+        session_id.clone(),
+        10,
+        RuntimeJournalPayload::CompactionStarted,
+    ));
+    observability.observe_journal_event(&RuntimeJournalEvent::new(
+        session_id,
+        11,
+        RuntimeJournalPayload::Failed {
+            diagnostic: merry_core::ErrorInfo::new(
+                "auto_compaction",
+                "OpenAI Responses request returned HTTP 400 (code: invalid_json_schema)",
+            )
+            .expect("valid diagnostic"),
+        },
+    ));
+
+    let snapshot = observability.snapshot();
+    let compaction = snapshot
+        .records()
+        .iter()
+        .find(|record| record.kind() == TrajectoryRecordKind::Compaction)
+        .expect("compaction record is retained");
+    assert_eq!(compaction.status(), TrajectoryRecordStatus::Failed);
+    assert_eq!(compaction.end_sequence(), Some(11));
+    assert_eq!(
+        compaction.diagnostic().map(merry_core::ErrorInfo::message),
+        Some("OpenAI Responses request returned HTTP 400 (code: invalid_json_schema)")
+    );
+    assert!(snapshot.records().iter().any(|record| {
+        record.label() == "Run failed" && record.status() == TrajectoryRecordStatus::Failed
+    }));
+}
+
+#[test]
+fn compaction_completion_closes_the_active_compaction_record() {
+    let session_id = SessionId::new("trajectory-compaction-completion").expect("valid session");
+    let observability = RuntimeObservability::new(session_id.clone(), Vec::new());
+    observability.observe_journal_event(&RuntimeJournalEvent::new(
+        session_id.clone(),
+        20,
+        RuntimeJournalPayload::CompactionStarted,
+    ));
+    observability.observe_journal_event(&RuntimeJournalEvent::new(
+        session_id,
+        21,
+        RuntimeJournalPayload::CompactionCompleted {
+            checkpoint_id: "checkpoint-21".to_owned(),
+            covered_history_item_count: 6,
+        },
+    ));
+
+    let snapshot = observability.snapshot();
+    let compactions = snapshot
+        .records()
+        .iter()
+        .filter(|record| record.kind() == TrajectoryRecordKind::Compaction)
+        .collect::<Vec<_>>();
+    assert_eq!(compactions.len(), 1);
+    assert_eq!(compactions[0].status(), TrajectoryRecordStatus::Completed);
+    assert_eq!(compactions[0].end_sequence(), Some(21));
+    assert_eq!(
+        compactions[0].summary(),
+        Some("Context checkpoint installed: checkpoint-21 (6 history items)")
+    );
+}
+
+#[test]
 fn restoring_snapshot_hydrates_missing_assistant_message_details() {
     let session_id = SessionId::new("trajectory-test").expect("valid session");
     let artifact = ArtifactRef::new(

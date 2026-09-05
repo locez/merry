@@ -15,6 +15,7 @@ use merry_llm::{
     GenerationConfig, ModelContent, ModelError, ModelMessage, ModelMessageRole, ModelName,
     ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat,
 };
+use schemars::Schema;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use thiserror::Error;
@@ -55,6 +56,9 @@ pub enum CompactionError {
 
     #[error("compaction model response shape is invalid: {reason}")]
     InvalidModelResponseShape { reason: &'static str },
+
+    #[error("compaction response schema construction failed: {reason}")]
+    ResponseSchema { reason: &'static str },
 }
 
 #[path = "compaction/window.rs"]
@@ -317,11 +321,15 @@ impl CitationCompactionInput {
             .chain(window.iter().flat_map(CitationCompactionModelTurn::ref_ids))
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
-        let model_supplied_ref_ids = manifest
+        let model_supplied_ref_ids: BTreeSet<CheckpointRefId> = manifest
             .refs()
             .iter()
             .filter(|reference| model_supplied_ref_names.contains(reference.id().as_str()))
             .map(|reference| reference.id().clone())
+            .collect();
+        let available_ref_ids = model_supplied_ref_ids
+            .iter()
+            .map(|ref_id| ref_id.as_str().to_owned())
             .collect();
         let pinned_refs = archived_refs
             .iter()
@@ -338,6 +346,7 @@ impl CitationCompactionInput {
                     .map(|anchor| anchor.objective().to_owned()),
                 current_user_input_excluded: true,
             },
+            available_ref_ids,
             previous_checkpoint,
             window,
         };
@@ -362,6 +371,14 @@ impl CitationCompactionInput {
                 message: error.to_string(),
             }
         })
+    }
+
+    /// Builds the exact structured-output schema for the references visible in
+    /// this compaction input.
+    pub fn model_response_schema(&self) -> Result<Schema, CompactionError> {
+        let available_ref_ids = self.available_ref_ids();
+        schema::citation_compaction_response_schema_for_refs(&available_ref_ids)
+            .map_err(|reason| CompactionError::ResponseSchema { reason })
     }
 
     #[must_use]
@@ -394,6 +411,14 @@ impl CitationCompactionInput {
 
     fn model_supplied_ref_ids(&self) -> &BTreeSet<CheckpointRefId> {
         &self.model_supplied_ref_ids
+    }
+
+    fn available_ref_ids(&self) -> Vec<&str> {
+        self.payload
+            .available_ref_ids
+            .iter()
+            .map(String::as_str)
+            .collect()
     }
 
     pub(crate) fn pinned_refs(&self) -> &BTreeSet<crate::CheckpointRefId> {
@@ -482,7 +507,10 @@ pub(crate) fn checkpoint_from_candidate_json(
         .into());
     }
 
-    let candidate = CompactedCheckpointCandidate::from_json(candidate_json)?;
+    let mut candidate = CompactedCheckpointCandidate::from_json(candidate_json)?;
+    if let Some(previous) = input.previous_checkpoint_snapshot() {
+        candidate.materialize_kept_entries(previous);
+    }
     validate_candidate_uses_model_supplied_refs(&candidate, input)?;
     let policy = CheckpointValidationPolicy::default();
     let checkpoint = match input.previous_checkpoint_snapshot() {
@@ -547,9 +575,12 @@ pub(crate) fn compile_citation_compaction_model_request(
     ];
     let generation =
         GenerationConfig::new(Some(input.resolved_budget().output_token_limit()), false)?;
+    let response_schema = input
+        .model_response_schema()
+        .map_err(|error| ModelError::invalid_request(error.to_string()))?;
     let response_format = ModelResponseFormat::StructuredOutput(ModelStructuredOutputFormat::new(
         "compacted_checkpoint_candidate",
-        citation_compaction_response_schema(),
+        response_schema,
     )?);
 
     ModelRequest::new_with_continuations_and_stable_prefix_and_response_format(
@@ -567,6 +598,7 @@ pub(crate) fn compile_citation_compaction_model_request(
 struct CitationCompactionPayload {
     policy: CitationCompactionPayloadPolicy,
     control: CitationCompactionControl,
+    available_ref_ids: Vec<String>,
     previous_checkpoint: Option<CitationCompactionPreviousCheckpoint>,
     window: Vec<CitationCompactionModelTurn>,
 }
@@ -710,7 +742,12 @@ mod tests {
         assert!(prompt.contains("Do not summarize the retained raw tail or current StepInput."));
         assert!(prompt.contains("Preserve confirmed decisions and rejected approaches"));
         assert!(prompt.contains("Preserve corrected misunderstandings"));
-        assert!(prompt.contains("Every previous checkpoint entry must have exactly one handoff."));
+        assert!(prompt.contains(
+            "Treat the eight section arrays as the complete new checkpoint. A previous entry omitted from those arrays is removed; omission does not require a drop handoff."
+        ));
+        assert!(prompt.contains(
+            "Use handoffs only as optional references. For keep, set old_id plus the required placeholders new_ids: null and reason: null; the runtime carries that prior entry forward exactly. For replace, use old_id and new_ids to record the relation to a new entry. Do not emit drop handoffs."
+        ));
     }
 
     #[test]
@@ -722,6 +759,12 @@ mod tests {
         assert!(!prompt.contains("one sentence"));
         assert!(prompt.contains("Do not limit the number of entries."));
         assert!(prompt.contains("Entries may use multiple sentences when needed."));
+        assert!(prompt.contains(
+            "Every checkpoint entry must cite at least one ref supplied in the compaction payload; never emit refs: []."
+        ));
+        assert!(prompt.contains(
+            "For every refs array, use only exact values from available_ref_ids; never derive a ref from another id or sequence number."
+        ));
         assert!(prompt.contains(
             "Do not copy ordinary command history, the execution ledger, or the task ledger into the checkpoint."
         ));
@@ -766,6 +809,7 @@ mod tests {
         .expect("payload parses");
 
         assert_eq!(payload["policy"]["target_output_tokens"], 420);
+        assert_eq!(payload["available_ref_ids"], serde_json::json!(["r1"]));
         assert_eq!(
             payload["policy"]
                 .as_object()
@@ -942,8 +986,32 @@ mod tests {
                 "handoffs"
             ])
         );
+        assert_eq!(
+            schema["properties"]["handoffs"]["items"]["properties"]["action"]["enum"],
+            serde_json::json!(["keep", "replace"])
+        );
+        assert_eq!(
+            schema["$defs"]["CheckpointEntryWire"]["properties"]["refs"]["minItems"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            schema["$defs"]["CheckpointEntryWire"]["properties"]["refs"]["items"]["enum"],
+            serde_json::json!(["r1"])
+        );
 
-        fn assert_strict_objects(value: &serde_json::Value, path: &str) {
+        fn schema_allows_null(value: &serde_json::Value) -> bool {
+            value.get("type").is_some_and(|type_value| {
+                type_value.as_str() == Some("null")
+                    || type_value
+                        .as_array()
+                        .is_some_and(|types| types.iter().any(|item| item.as_str() == Some("null")))
+            }) || value
+                .get("anyOf")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|schemas| schemas.iter().any(schema_allows_null))
+        }
+
+        fn assert_strict_objects(value: &serde_json::Value, path: &str, saw_rationale: &mut bool) {
             match value {
                 serde_json::Value::Object(object) => {
                     if object.get("type") == Some(&serde_json::Value::String("object".to_owned())) {
@@ -952,19 +1020,113 @@ mod tests {
                             Some(&serde_json::Value::Bool(false)),
                             "object schema at {path} must reject unknown fields"
                         );
+                        let properties = object
+                            .get("properties")
+                            .and_then(serde_json::Value::as_object)
+                            .cloned()
+                            .unwrap_or_default();
+                        let required = object
+                            .get("required")
+                            .and_then(serde_json::Value::as_array)
+                            .expect("strict object schemas must declare required");
+                        assert_eq!(
+                            required.len(),
+                            properties.len(),
+                            "object schema at {path} must require exactly its properties"
+                        );
+                        for property in properties.keys() {
+                            assert!(
+                                required.iter().any(|item| item.as_str() == Some(property)),
+                                "object schema at {path} must require {property}"
+                            );
+                            if property == "rationale" {
+                                *saw_rationale = true;
+                                assert!(
+                                    schema_allows_null(&properties[property]),
+                                    "rationale at {path} must remain nullable"
+                                );
+                            }
+                        }
                     }
                     for (key, child) in object {
-                        assert_strict_objects(child, &format!("{path}.{key}"));
+                        assert_strict_objects(child, &format!("{path}.{key}"), saw_rationale);
                     }
                 }
                 serde_json::Value::Array(items) => {
                     for (index, child) in items.iter().enumerate() {
-                        assert_strict_objects(child, &format!("{path}[{index}]"));
+                        assert_strict_objects(child, &format!("{path}[{index}]"), saw_rationale);
                     }
                 }
                 _ => {}
             }
         }
-        assert_strict_objects(schema, "schema");
+        let mut saw_rationale = false;
+        assert_strict_objects(schema, "schema", &mut saw_rationale);
+        assert!(
+            saw_rationale,
+            "checkpoint entry schema must include rationale"
+        );
+
+        fn assert_no_one_of(value: &serde_json::Value, path: &str) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    assert!(
+                        !object.contains_key("oneOf"),
+                        "schema at {path} must not use oneOf"
+                    );
+                    for (key, child) in object {
+                        assert_no_one_of(child, &format!("{path}.{key}"));
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for (index, child) in items.iter().enumerate() {
+                        assert_no_one_of(child, &format!("{path}[{index}]"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_no_one_of(schema, "schema");
+    }
+
+    #[test]
+    fn compaction_schema_allows_only_exact_available_ref_ids() {
+        let schema = schema::citation_compaction_response_schema_for_refs(&["h290", "h291"])
+            .expect("citation ref schema compiles");
+        let schema = serde_json::to_value(schema).expect("schema serializes");
+        let allowed =
+            &schema["$defs"]["CheckpointEntryWire"]["properties"]["refs"]["items"]["enum"];
+
+        assert_eq!(allowed, &serde_json::json!(["h290", "h291"]));
+        assert!(
+            !allowed
+                .as_array()
+                .expect("allowed refs are an array")
+                .iter()
+                .any(|ref_id| ref_id == "h1506")
+        );
+
+        let validator = jsonschema::validator_for(&schema).expect("schema validates");
+        let valid_candidate = serde_json::json!({
+            "confirmed_decisions": [],
+            "rejected_approaches": [],
+            "constraints_preferences_boundaries": [],
+            "corrected_misunderstandings": [],
+            "durable_conclusions": [{
+                "id": "entry-1",
+                "text": "A cited conclusion.",
+                "rationale": null,
+                "refs": ["h290"]
+            }],
+            "open_questions": [],
+            "current_progress_and_next_steps": [],
+            "exact_details": [],
+            "handoffs": []
+        });
+        assert!(validator.is_valid(&valid_candidate));
+
+        let mut invalid_candidate = valid_candidate.clone();
+        invalid_candidate["durable_conclusions"][0]["refs"] = serde_json::json!(["h1506"]);
+        assert!(!validator.is_valid(&invalid_candidate));
     }
 }

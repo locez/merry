@@ -59,11 +59,19 @@ Use the registered workspace and process tools according to their typed schemas.
 
 When a tool fails, preserve the failure evidence, determine whether the cause is validation, missing permission, unavailable capability, or an implementation error, and then either make a bounded recovery attempt or report the blocker. Do not repeat an identical failed action without new evidence or an explicit reviewed admission.
 
+For delegated coding work, each child max_model_turns covers its full lifecycle and must be at least 2048. The configured maximum may be larger. Reaching the limit is recoverable when that maximum leaves room: inspect the child status, then spawn a replacement with the same plan_client_key and a larger budget so it can continue from the shared workspace.
+
 Before finishing, verify the requested behavior with the narrowest deterministic checks that prove it. The final report is an evidence-backed summary: state what changed or was answered, name the checks that actually ran and their outcomes, distinguish skipped or blocked checks, and call out remaining risks. Never claim an unrun check succeeded.
 </merry_coding_policy>"#;
 
-/// Stable default coding loop budget owned by the coding composition layer.
-pub const DEFAULT_CODING_AGENT_MAX_MODEL_TURNS: usize = 1024;
+/// Minimum model-turn budget for a coding-profile child agent.
+pub const MIN_CODING_SUBAGENT_MODEL_TURNS: u32 = 2048;
+
+/// Default coding-profile ceiling for one child agent.
+pub const DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS: u32 = 2048;
+
+/// Maximum model-turn ceiling for the coding-profile main agent.
+pub const DEFAULT_CODING_AGENT_MAX_MODEL_TURNS: usize = usize::MAX;
 
 /// Final-report behavior for a coding-agent run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

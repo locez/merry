@@ -23,7 +23,9 @@ use super::provider_request::{
     request_context_budget, step_request_compile_diagnostic, step_request_inputs_from_session,
     step_usage_context_snapshot, trace_provider_request, trace_provider_request_budget_unavailable,
 };
-use super::{DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, RuntimeInner, diagnostic_from_text};
+use super::{
+    DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, RuntimeInner, diagnostic_from_text, runtime_error_message,
+};
 use crate::{
     CheckpointDecision, CompactionError,
     compaction::{CompactionPreparation, CompactionWindowBudget},
@@ -427,7 +429,8 @@ pub(super) async fn run_provider_step(
                             let _ = send_cancelled_event(inner, sender).await;
                             return;
                         }
-                        let diagnostic = diagnostic_from_text("auto_compaction", error.to_string());
+                        let diagnostic =
+                            diagnostic_from_text("auto_compaction", runtime_error_message(&error));
                         trace_provider_step_failed(&diagnostic);
                         let _ = send_failed_event(inner, sender, token, diagnostic).await;
                         return;

@@ -2466,8 +2466,11 @@ fn projector_replaces_compaction_progress_with_failure() {
     );
     projector.apply(
         RuntimeEvent::RunFailed {
-            diagnostic: ErrorInfo::new("auto_compaction", "compaction response was invalid")
-                .unwrap(),
+            diagnostic: ErrorInfo::new(
+                "auto_compaction",
+                "OpenAI Responses request to host api.example.test:443 returned HTTP 400 (type: invalid_request_error) (code: invalid_json_schema) (param: text.format.schema) (server error: Invalid schema for response_format 'compacted_checkpoint_candidate': Missing 'rationale'.)",
+            )
+            .unwrap(),
             source: source(),
         },
         &mut state,
@@ -2477,9 +2480,14 @@ fn projector_replaces_compaction_progress_with_failure() {
         state.timeline(),
         [TimelineItem::Diagnostic {
             title: "compaction failed".to_owned(),
-            body: "compaction response was invalid".to_owned(),
+            body: "OpenAI Responses request to host api.example.test:443 returned HTTP 400 (type: invalid_request_error) (code: invalid_json_schema) (param: text.format.schema) (server error: Invalid schema for response_format 'compacted_checkpoint_candidate': Missing 'rationale'.)".to_owned(),
         }]
     );
+    let rendered = render_to_text(&state, 120, 10);
+    assert!(rendered.contains("HTTP 400"));
+    assert!(rendered.contains("api.example.test:443"));
+    assert!(rendered.contains("invalid_json_schema"));
+    assert!(rendered.contains("Missing 'rationale'."));
 }
 
 #[test]

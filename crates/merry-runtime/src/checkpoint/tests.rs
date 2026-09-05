@@ -65,7 +65,7 @@ fn checkpoint_requires_all_eight_arrays_but_allows_them_to_be_empty() {
     let missing = EMPTY_CANDIDATE.replace("  \"exact_details\": [],\n", "");
     assert!(matches!(
         CompactedCheckpointCandidate::from_json(&missing),
-        Err(CheckpointError::InvalidCandidateJson)
+        Err(CheckpointError::InvalidCandidateJson { .. })
     ));
 }
 
@@ -183,7 +183,7 @@ fn first_checkpoint_rejects_handoffs() {
 }
 
 #[test]
-fn rolling_checkpoint_rejects_silently_missing_old_id() {
+fn rolling_checkpoint_removes_unmentioned_old_entries() {
     let previous = first_checkpoint(
         &EMPTY_CANDIDATE.replace(
             "  \"exact_details\": []",
@@ -191,22 +191,25 @@ fn rolling_checkpoint_rejects_silently_missing_old_id() {
         ),
         &["h1"],
     );
-    let error = CitationBackedCheckpoint::from_rolling_candidate(
+    let checkpoint = CitationBackedCheckpoint::from_rolling_candidate(
         CheckpointId::new("checkpoint-next").expect("valid id"),
         candidate(EMPTY_CANDIDATE),
         &previous,
         manifest("checkpoint-next", &["h1"]),
         CheckpointValidationPolicy::default(),
     )
-    .expect_err("old entry must be accounted for");
-    assert!(matches!(
-        error,
-        CheckpointError::MissingHandoff { old_id } if old_id == "d1"
-    ));
+    .expect("an omitted prior entry is removed from the next snapshot");
+    assert!(
+        checkpoint
+            .sections()
+            .entries(CheckpointSection::ExactDetail)
+            .is_empty()
+    );
+    assert!(checkpoint.handoffs().is_empty());
 }
 
 #[test]
-fn keep_requires_byte_identical_entry_in_same_section() {
+fn keep_reuses_the_previous_entry_exactly() {
     let previous_json = EMPTY_CANDIDATE.replace(
         "  \"confirmed_decisions\": []",
         "  \"confirmed_decisions\": [{\"id\":\"d1\",\"text\":\"Keep five turns.\",\"rationale\":\"Preserves continuity.\",\"refs\":[\"h1\",\"h2\"]}]",
@@ -215,7 +218,7 @@ fn keep_requires_byte_identical_entry_in_same_section() {
     let keep = |json: String| {
         json.replace(
             "  \"handoffs\": []",
-            "  \"handoffs\": [{\"action\":\"keep\",\"old_id\":\"d1\"}]",
+            "  \"handoffs\": [{\"action\":\"keep\",\"old_id\":\"d1\",\"new_ids\":null,\"reason\":null}]",
         )
     };
     let moved_section = previous_json
@@ -241,24 +244,35 @@ fn keep_requires_byte_identical_entry_in_same_section() {
             keep(previous_json.replace("[\"h1\",\"h2\"]", "[\"h2\",\"h1\"]")),
         ),
         ("section", keep(moved_section)),
+        ("omitted", keep(EMPTY_CANDIDATE.to_owned())),
     ] {
-        let error = CitationBackedCheckpoint::from_rolling_candidate(
+        let checkpoint = CitationBackedCheckpoint::from_rolling_candidate(
             CheckpointId::new(&format!("checkpoint-keep-{name}")).expect("valid id"),
             candidate(&changed),
             &previous,
             manifest(&format!("checkpoint-keep-{name}"), &["h1", "h2"]),
             CheckpointValidationPolicy::default(),
         )
-        .expect_err("changed keep must fail");
-        assert!(matches!(
-            error,
-            CheckpointError::InvalidKeep { old_id } if old_id == "d1"
-        ));
+        .expect("keep must use the previous entry as its source of truth");
+        assert_eq!(
+            checkpoint
+                .sections()
+                .entries(CheckpointSection::ConfirmedDecision),
+            previous
+                .sections()
+                .entries(CheckpointSection::ConfirmedDecision)
+        );
+        assert!(
+            checkpoint
+                .sections()
+                .entries(CheckpointSection::RejectedApproach)
+                .is_empty()
+        );
     }
 }
 
 #[test]
-fn replace_and_drop_require_valid_targets_and_reasons() {
+fn handoff_metadata_does_not_block_rolling_installation() {
     let previous = first_checkpoint(
         &EMPTY_CANDIDATE.replace(
             "  \"open_questions\": []",
@@ -270,43 +284,35 @@ fn replace_and_drop_require_valid_targets_and_reasons() {
         "  \"handoffs\": []",
         "  \"handoffs\": [{\"action\":\"replace\",\"old_id\":\"q1\",\"new_ids\":[],\"reason\":\"refined\"}]",
     );
-    assert!(matches!(
-        CompactedCheckpointCandidate::from_json(&replace_without_ids),
-        Err(CheckpointError::ReplacementWithoutNewIds { old_id }) if old_id == "q1"
-    ));
+    assert!(CompactedCheckpointCandidate::from_json(&replace_without_ids).is_ok());
 
     let drop_without_reason = EMPTY_CANDIDATE.replace(
         "  \"handoffs\": []",
         "  \"handoffs\": [{\"action\":\"drop\",\"old_id\":\"q1\",\"reason\":\"  \"}]",
     );
-    assert!(matches!(
-        CompactedCheckpointCandidate::from_json(&drop_without_reason),
-        Err(CheckpointError::BlankField {
-            field: "checkpoint handoff reason"
-        })
-    ));
+    assert!(CompactedCheckpointCandidate::from_json(&drop_without_reason).is_ok());
 
     let missing_target = EMPTY_CANDIDATE.replace(
         "  \"handoffs\": []",
         "  \"handoffs\": [{\"action\":\"replace\",\"old_id\":\"q1\",\"new_ids\":[\"q2\"],\"reason\":\"refined\"}]",
     );
-    let error = CitationBackedCheckpoint::from_rolling_candidate(
+    let checkpoint = CitationBackedCheckpoint::from_rolling_candidate(
         CheckpointId::new("checkpoint-replace").expect("valid id"),
         candidate(&missing_target),
         &previous,
         manifest("checkpoint-replace", &["h1"]),
         CheckpointValidationPolicy::default(),
     )
-    .expect_err("replace target must exist");
+    .expect("an unresolved replacement reference must not block installation");
     assert!(matches!(
-        error,
-        CheckpointError::ReplacementEntryNotFound { old_id, new_id }
-            if old_id == "q1" && new_id == "q2"
+        checkpoint.handoffs(),
+        [CheckpointHandoff::Replace { old_id, new_ids, .. }]
+            if old_id.as_str() == "q1" && new_ids.iter().map(CheckpointEntryId::as_str).eq(["q2"])
     ));
 }
 
 #[test]
-fn rolling_checkpoint_rejects_duplicate_and_unknown_old_ids() {
+fn rolling_checkpoint_rejects_duplicate_but_allows_unknown_old_ids() {
     let previous = first_checkpoint(
         &EMPTY_CANDIDATE.replace(
             "  \"open_questions\": []",
@@ -327,35 +333,38 @@ fn rolling_checkpoint_rejects_duplicate_and_unknown_old_ids() {
         "  \"handoffs\": []",
         "  \"handoffs\": [{\"action\":\"drop\",\"old_id\":\"other\",\"reason\":\"done\"}]",
     );
-    let error = CitationBackedCheckpoint::from_rolling_candidate(
+    let checkpoint = CitationBackedCheckpoint::from_rolling_candidate(
         CheckpointId::new("checkpoint-unknown-old").expect("valid id"),
         candidate(&unknown),
         &previous,
         manifest("checkpoint-unknown-old", &["h1"]),
         CheckpointValidationPolicy::default(),
     )
-    .expect_err("unknown old id must fail");
+    .expect("an unresolved handoff reference must not block installation");
     assert!(matches!(
-        error,
-        CheckpointError::UnknownHandoffOldId { old_id } if old_id == "other"
+        checkpoint.handoffs(),
+        [CheckpointHandoff::Drop { old_id, .. }] if old_id.as_str() == "other"
     ));
 }
 
 #[test]
-fn replacement_ids_must_be_unique() {
+fn replacement_ids_are_metadata_without_installation_validation() {
     let duplicate = EMPTY_CANDIDATE.replace(
         "  \"handoffs\": []",
         "  \"handoffs\": [{\"action\":\"replace\",\"old_id\":\"q1\",\"new_ids\":[\"q2\",\"q2\"],\"reason\":\"refined\"}]",
     );
+    let candidate = CompactedCheckpointCandidate::from_json(&duplicate)
+        .expect("duplicate replacement references must not invalidate the candidate");
     assert!(matches!(
-        CompactedCheckpointCandidate::from_json(&duplicate),
-        Err(CheckpointError::DuplicateReplacementEntry { old_id, new_id })
-            if old_id == "q1" && new_id == "q2"
+        candidate.handoffs(),
+        [CheckpointHandoff::Replace { old_id, new_ids, .. }]
+            if old_id.as_str() == "q1"
+                && new_ids.iter().map(CheckpointEntryId::as_str).eq(["q2", "q2"])
     ));
 }
 
 #[test]
-fn replacement_targets_must_be_new_but_can_merge_multiple_old_entries() {
+fn replacement_handoffs_are_metadata_and_can_merge_multiple_old_entries() {
     let previous_json = EMPTY_CANDIDATE.replace(
         "  \"open_questions\": []",
         "  \"open_questions\": [{\"id\":\"old1\",\"text\":\"First old question\",\"refs\":[\"h1\"]},{\"id\":\"old2\",\"text\":\"Second old question\",\"refs\":[\"h2\"]}]",
@@ -370,19 +379,14 @@ fn replacement_targets_must_be_new_but_can_merge_multiple_old_entries() {
             "  \"handoffs\": []",
             "  \"handoffs\": [{\"action\":\"keep\",\"old_id\":\"old1\"},{\"action\":\"replace\",\"old_id\":\"old2\",\"new_ids\":[\"old1\"],\"reason\":\"Incorrectly points at retained history.\"}]",
         );
-    let error = CitationBackedCheckpoint::from_rolling_candidate(
+    CitationBackedCheckpoint::from_rolling_candidate(
         CheckpointId::new("checkpoint-replace-old-target").expect("valid id"),
         candidate(&points_at_old),
         &previous,
         manifest("checkpoint-replace-old-target", &["h1", "h2"]),
         CheckpointValidationPolicy::default(),
     )
-    .expect_err("replacement targets must be genuinely new ids");
-    assert!(matches!(
-        error,
-        CheckpointError::ReplacementEntryNotNew { old_id, new_id }
-            if old_id == "old2" && new_id == "old1"
-    ));
+    .expect("replacement references do not have to target a new entry");
 
     let merged = EMPTY_CANDIDATE
         .replace(
@@ -411,21 +415,65 @@ fn candidate_and_handoff_objects_reject_unknown_fields() {
     );
     assert!(matches!(
         CompactedCheckpointCandidate::from_json(&top_level),
-        Err(CheckpointError::InvalidCandidateJson)
+        Err(CheckpointError::InvalidCandidateJson { .. })
     ));
 
     let handoff = EMPTY_CANDIDATE.replace(
         "  \"handoffs\": []",
-        "  \"handoffs\": [{\"action\":\"keep\",\"old_id\":\"q1\",\"reason\":\"not allowed\"}]",
+        "  \"handoffs\": [{\"action\":\"keep\",\"old_id\":\"q1\",\"unexpected\":\"not allowed\"}]",
     );
     assert!(matches!(
         CompactedCheckpointCandidate::from_json(&handoff),
-        Err(CheckpointError::InvalidCandidateJson)
+        Err(CheckpointError::InvalidCandidateJson { .. })
     ));
 }
 
 #[test]
-fn replace_and_drop_must_remove_the_old_entry() {
+fn candidate_parse_error_preserves_wire_details() {
+    let invalid = EMPTY_CANDIDATE.replace(
+        "  \"handoffs\": []",
+        "  \"handoffs\": [{\"action\":\"keep\",\"old_id\":\"q1\",\"unexpected\":true}]",
+    );
+    let error = CompactedCheckpointCandidate::from_json(&invalid)
+        .expect_err("unknown candidate fields must be rejected");
+    assert!(error.to_string().contains("unknown field"));
+}
+
+#[test]
+fn strict_handoff_placeholders_are_accepted_for_provider_schema() {
+    for handoff in [
+        r#"{"action":"keep","old_id":"d1","new_ids":null,"reason":null}"#,
+        r#"{"action":"keep","old_id":"d1","new_ids":[],"reason":""}"#,
+        r#"{"action":"replace","old_id":"q1","new_ids":["q2"],"reason":"refined"}"#,
+        r#"{"action":"drop","old_id":"q1","new_ids":null,"reason":"obsolete"}"#,
+        r#"{"action":"drop","old_id":"q1","new_ids":["ignored"],"reason":"obsolete"}"#,
+    ] {
+        let json = EMPTY_CANDIDATE.replace(
+            "  \"handoffs\": []",
+            &format!("  \"handoffs\": [{handoff}]"),
+        );
+        let candidate = candidate(&json);
+        assert_eq!(candidate.handoffs().len(), 1);
+    }
+}
+
+#[test]
+fn schema_valid_handoff_metadata_is_accepted() {
+    let json = EMPTY_CANDIDATE.replace(
+        "  \"handoffs\": []",
+        "  \"handoffs\": [{\"action\":\"replace\",\"old_id\":\"q1\",\"new_ids\":null,\"reason\":null}]",
+    );
+    let candidate = CompactedCheckpointCandidate::from_json(&json)
+        .expect("handoff metadata does not invalidate a structurally valid candidate");
+    assert!(matches!(
+        candidate.handoffs(),
+        [CheckpointHandoff::Replace { old_id, new_ids, reason }]
+            if old_id.as_str() == "q1" && new_ids.is_empty() && reason.is_empty()
+    ));
+}
+
+#[test]
+fn replace_and_drop_do_not_control_snapshot_entries() {
     let previous_json = EMPTY_CANDIDATE.replace(
         "  \"open_questions\": []",
         "  \"open_questions\": [{\"id\":\"q1\",\"text\":\"Old question\",\"refs\":[\"h1\"]}]",
@@ -444,30 +492,27 @@ fn replace_and_drop_must_remove_the_old_entry() {
             "  \"handoffs\": []",
             &format!("  \"handoffs\": [{{\"action\":\"{action}\",\"old_id\":\"q1\"{tail}}}]"),
         );
-        let error = CitationBackedCheckpoint::from_rolling_candidate(
+        let checkpoint = CitationBackedCheckpoint::from_rolling_candidate(
             CheckpointId::new(&format!("checkpoint-{action}-retains-old")).expect("valid id"),
             candidate(&next),
             &previous,
             manifest(&format!("checkpoint-{action}-retains-old"), &["h1"]),
             CheckpointValidationPolicy::default(),
         )
-        .expect_err("replace/drop must remove old entry");
-        match expected {
-            "replace" => assert!(matches!(
-                error,
-                CheckpointError::InvalidReplace { old_id } if old_id == "q1"
-            )),
-            "drop" => assert!(matches!(
-                error,
-                CheckpointError::InvalidDrop { old_id } if old_id == "q1"
-            )),
-            _ => unreachable!(),
-        }
+        .expect("snapshot entries, rather than handoff metadata, control installation");
+        assert_eq!(
+            checkpoint
+                .sections()
+                .entries(CheckpointSection::OpenQuestion)
+                .len(),
+            1,
+            "{expected} metadata must not remove an explicitly listed entry"
+        );
     }
 }
 
 #[test]
-fn rolling_checkpoint_accepts_keep_replace_drop_and_unrelated_new_entries() {
+fn rolling_checkpoint_omits_unlisted_entries_and_keeps_metadata() {
     let previous_json = EMPTY_CANDIDATE
         .replace(
             "  \"constraints_preferences_boundaries\": []",
@@ -480,10 +525,6 @@ fn rolling_checkpoint_accepts_keep_replace_drop_and_unrelated_new_entries() {
     let previous = first_checkpoint(&previous_json, &["h1", "h2", "h3"]);
     let next = EMPTY_CANDIDATE
         .replace(
-            "  \"constraints_preferences_boundaries\": []",
-            "  \"constraints_preferences_boundaries\": [{\"id\":\"keep1\",\"text\":\"Rust only.\",\"refs\":[\"h1\"]}]",
-        )
-        .replace(
             "  \"open_questions\": []",
             "  \"open_questions\": [{\"id\":\"replace2\",\"text\":\"Refined question\",\"refs\":[\"h2\"]}]",
         )
@@ -493,7 +534,7 @@ fn rolling_checkpoint_accepts_keep_replace_drop_and_unrelated_new_entries() {
         )
         .replace(
             "  \"handoffs\": []",
-            "  \"handoffs\": [{\"action\":\"keep\",\"old_id\":\"keep1\"},{\"action\":\"replace\",\"old_id\":\"replace1\",\"new_ids\":[\"replace2\"],\"reason\":\"Question refined.\"},{\"action\":\"drop\",\"old_id\":\"drop1\",\"reason\":\"No longer relevant.\"}]",
+            "  \"handoffs\": [{\"action\":\"replace\",\"old_id\":\"replace1\",\"new_ids\":[\"replace2\"],\"reason\":\"Question refined.\"},{\"action\":\"drop\",\"old_id\":\"drop1\",\"reason\":\"No longer relevant.\"}]",
         );
     let checkpoint = CitationBackedCheckpoint::from_rolling_candidate(
         CheckpointId::new("checkpoint-valid-roll").expect("valid id"),
@@ -504,8 +545,8 @@ fn rolling_checkpoint_accepts_keep_replace_drop_and_unrelated_new_entries() {
     )
     .expect("valid handoffs and unrelated new entries should pass");
 
-    assert_eq!(checkpoint.sections().entry_count(), 3);
-    assert_eq!(checkpoint.handoffs().len(), 3);
+    assert_eq!(checkpoint.sections().entry_count(), 2);
+    assert_eq!(checkpoint.handoffs().len(), 2);
     assert_eq!(
         checkpoint
             .manifest()
@@ -513,7 +554,7 @@ fn rolling_checkpoint_accepts_keep_replace_drop_and_unrelated_new_entries() {
             .iter()
             .map(|reference| reference.id().as_str())
             .collect::<Vec<_>>(),
-        ["h1", "h2", "h4"]
+        ["h2", "h4"]
     );
 }
 
@@ -618,7 +659,7 @@ fn persisted_checkpoint_round_trips_sections_and_handoffs() {
 }
 
 #[test]
-fn persisted_checkpoint_revalidates_current_handoff_invariants() {
+fn persisted_checkpoint_treats_handoffs_as_non_authoritative_metadata() {
     let previous = first_checkpoint(
         &EMPTY_CANDIDATE.replace(
             "  \"open_questions\": []",
@@ -645,54 +686,32 @@ fn persisted_checkpoint_revalidates_current_handoff_invariants() {
     .expect("rolling checkpoint validates");
     let persisted = serde_json::to_value(checkpoint.persisted()).expect("persisted serializes");
 
-    for (name, handoff, expected) in [
+    for (name, handoff) in [
         (
             "keep-missing",
             serde_json::json!({"action":"keep","old_id":"q1"}),
-            "keep",
         ),
         (
             "replace-retained",
             serde_json::json!({"action":"replace","old_id":"q2","new_ids":["q2"],"reason":"invalid"}),
-            "replace",
         ),
         (
             "drop-retained",
             serde_json::json!({"action":"drop","old_id":"q2","reason":"invalid"}),
-            "drop",
         ),
         (
             "replace-missing-target",
             serde_json::json!({"action":"replace","old_id":"q1","new_ids":["missing"],"reason":"invalid"}),
-            "missing-target",
         ),
     ] {
         let mut invalid = persisted.clone();
         invalid["handoffs"] = serde_json::json!([handoff]);
         let invalid = serde_json::from_value::<PersistedCitationBackedCheckpoint>(invalid)
             .expect("mutated persistence shape parses");
-        let error = CitationBackedCheckpoint::from_persisted(invalid)
-            .expect_err("invalid persisted handoff must be rejected");
-        match expected {
-            "keep" => assert!(matches!(
-                error,
-                CheckpointError::InvalidKeep { old_id } if old_id == "q1"
-            )),
-            "replace" => assert!(matches!(
-                error,
-                CheckpointError::InvalidReplace { old_id } if old_id == "q2"
-            )),
-            "drop" => assert!(matches!(
-                error,
-                CheckpointError::InvalidDrop { old_id } if old_id == "q2"
-            )),
-            "missing-target" => assert!(matches!(
-                error,
-                CheckpointError::ReplacementEntryNotFound { old_id, new_id }
-                    if old_id == "q1" && new_id == "missing"
-            )),
-            _ => unreachable!("unexpected case {name}"),
-        }
+        let loaded = CitationBackedCheckpoint::from_persisted(invalid).unwrap_or_else(|error| {
+            panic!("handoff metadata {name} must not block loading: {error}")
+        });
+        assert_eq!(loaded.sections().entry_count(), 1);
     }
 
     let mut invalid = persisted;
@@ -702,13 +721,9 @@ fn persisted_checkpoint_revalidates_current_handoff_invariants() {
     ]);
     let invalid = serde_json::from_value::<PersistedCitationBackedCheckpoint>(invalid)
         .expect("mutated persistence shape parses");
-    let error = CitationBackedCheckpoint::from_persisted(invalid)
-        .expect_err("replacement target declared as an old id must be rejected");
-    assert!(matches!(
-        error,
-        CheckpointError::ReplacementEntryNotNew { old_id, new_id }
-            if old_id == "q1" && new_id == "q2"
-    ));
+    let loaded = CitationBackedCheckpoint::from_persisted(invalid)
+        .expect("handoff lineage metadata must not block loading");
+    assert_eq!(loaded.sections().entry_count(), 1);
 }
 
 #[test]

@@ -14,6 +14,7 @@ pub enum SubagentActivityPhase {
     Completed,
     Failed,
     Cancelled,
+    Blocked,
 }
 
 /// Latest-value activity projection for one subagent task.

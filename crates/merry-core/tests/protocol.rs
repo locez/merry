@@ -164,6 +164,7 @@ fn subagent_activity_phases_use_stable_snake_case_json() {
         (SubagentActivityPhase::Completed, "completed"),
         (SubagentActivityPhase::Failed, "failed"),
         (SubagentActivityPhase::Cancelled, "cancelled"),
+        (SubagentActivityPhase::Blocked, "blocked"),
     ];
 
     for (phase, expected) in phases {

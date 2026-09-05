@@ -208,10 +208,18 @@ impl AnthropicStreamParser {
                 }])
             }
             AnthropicStreamEvent::Error { error } => {
-                Err(AnthropicProviderError::protocol(format!(
+                let mut message = format!(
                     "Anthropic stream returned error type {}",
                     error.kind.as_deref().unwrap_or("unknown")
-                )))
+                );
+                if let Some(server_message) = error
+                    .message
+                    .as_deref()
+                    .and_then(bounded_stream_error_message)
+                {
+                    message.push_str(&format!(" (server error: {server_message})"));
+                }
+                Err(AnthropicProviderError::protocol(message))
             }
             AnthropicStreamEvent::Ping | AnthropicStreamEvent::Other => Ok(Vec::new()),
         }
@@ -321,6 +329,38 @@ fn unexpected_sse_line(line: &str) -> AnthropicProviderError {
     ))
 }
 
+fn bounded_stream_error_message(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    if [
+        "sk-",
+        "rk-",
+        "bearer ",
+        "api_key",
+        "apikey",
+        "access_token",
+        "password",
+        "secret",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return None;
+    }
+
+    let sanitized: String = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let message = sanitized.trim();
+    (!message.is_empty()).then(|| message.chars().take(1_024).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +432,19 @@ mod tests {
             ModelError::from(error).kind(),
             ProviderErrorKind::InvalidToolCall
         );
+    }
+
+    #[test]
+    fn stream_error_preserves_safe_server_message() {
+        let mut parser = AnthropicStreamParser::new();
+        let error = parser
+            .parse_sse_line(
+                r#"data: {"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content is invalid"}}"#,
+            )
+            .expect_err("provider stream error should be surfaced");
+
+        let message = ModelError::from(error).message().to_owned();
+        assert!(message.contains("invalid_request_error"));
+        assert!(message.contains("server error: messages.0.content is invalid"));
     }
 }

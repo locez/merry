@@ -369,6 +369,97 @@ fn workspace_patch_executor_accepts_standard_patch_envelope_alias() {
 }
 
 #[test]
+fn workspace_patch_executor_ignores_context_only_hunks_when_editing() {
+    let temp = TempWorkspace::new("patch-context-only-hunk");
+    temp.write_text("note.txt", "alpha\nold value\nomega\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Workspace Patch
+*** Update File: note.txt
+@@
+-old value
++new value
+@@
+ omega
+*** End Workspace Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(
+        read_text(&temp.path().join("note.txt")),
+        "alpha\nnew value\nomega\n"
+    );
+    assert_eq!(json_content(&outcome)["changes"][0]["hunks"], 1);
+}
+
+#[test]
+fn workspace_patch_executor_rejects_an_update_with_only_context_hunks() {
+    let temp = TempWorkspace::new("patch-only-context-hunk");
+    temp.write_text("note.txt", "alpha\nold value\nomega\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Workspace Patch
+*** Update File: note.txt
+@@
+ old value
+*** End Workspace Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        WORKSPACE_PATCH_TOOL,
+        ERROR_INVALID_ARGUMENTS,
+        Some("note.txt"),
+        temp.path(),
+    );
+    assert!(
+        outcome
+            .diagnostic()
+            .expect("diagnostic")
+            .message()
+            .contains("at least one edited hunk")
+    );
+    assert_eq!(
+        read_text(&temp.path().join("note.txt")),
+        "alpha\nold value\nomega\n"
+    );
+}
+
+#[test]
+fn workspace_patch_executor_rejects_duplicate_begin_marker_without_mutation() {
+    let temp = TempWorkspace::new("patch-duplicate-begin");
+    temp.write_text("note.txt", "alpha\nold value\nomega\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Workspace Patch
+*** Begin Patch
+*** Update File: note.txt
+-old value
++new value
+*** End Workspace Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        WORKSPACE_PATCH_TOOL,
+        ERROR_INVALID_ARGUMENTS,
+        None,
+        temp.path(),
+    );
+    assert!(
+        outcome
+            .diagnostic()
+            .expect("diagnostic")
+            .message()
+            .contains("duplicate begin marker")
+    );
+    assert_eq!(
+        read_text(&temp.path().join("note.txt")),
+        "alpha\nold value\nomega\n"
+    );
+}
+
+#[test]
 fn workspace_patch_executor_reports_old_and_new_line_numbers_after_prior_hunk_delta() {
     let temp = TempWorkspace::new("patch-line-number-delta");
     temp.write_text(

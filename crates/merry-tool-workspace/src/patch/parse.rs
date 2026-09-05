@@ -65,6 +65,12 @@ pub(super) fn parse_workspace_patch(
             }
             break;
         }
+        if line == BEGIN_WORKSPACE || line == BEGIN_STANDARD {
+            return Err(WorkspacePatchParseError::new(
+                "workspace patch contains a duplicate begin marker; provide exactly one patch envelope",
+                None,
+            ));
+        }
 
         let (is_add, path) = if let Some(path) = line.strip_prefix(ADD_PREFIX) {
             (true, path.trim())
@@ -160,7 +166,7 @@ pub(super) fn parse_workspace_patch_update_hunks(
 
     if hunks.is_empty() {
         return Err(WorkspacePatchParseError::new(
-            "workspace patch update must contain at least one hunk",
+            "workspace patch update must contain at least one edited hunk; context-only hunks are ignored",
             Some(path.to_owned()),
         ));
     }
@@ -218,7 +224,7 @@ fn parse_workspace_patch_add_lines(
 fn push_workspace_patch_hunk(
     hunks: &mut Vec<WorkspacePatchHunk>,
     current: &mut Vec<WorkspacePatchLine>,
-    path: &str,
+    _path: &str,
 ) -> Result<(), WorkspacePatchParseError> {
     if current.is_empty() {
         return Ok(());
@@ -227,10 +233,7 @@ fn push_workspace_patch_hunk(
         lines: std::mem::take(current),
     };
     if !hunk.has_edit() {
-        return Err(WorkspacePatchParseError::new(
-            "workspace patch hunk must add or remove at least one line",
-            Some(path.to_owned()),
-        ));
+        return Ok(());
     }
     hunks.push(hunk);
     Ok(())

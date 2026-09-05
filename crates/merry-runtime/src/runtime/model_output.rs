@@ -127,5 +127,25 @@ pub(super) fn diagnostic_from_model_error(error: ModelError) -> ErrorInfo {
         ProviderErrorKind::Other => "model_other",
     };
 
-    diagnostic_from_text(code, error.to_string())
+    diagnostic_from_text(code, error.message())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::diagnostic_from_model_error;
+    use merry_llm::{ModelError, ProviderErrorKind};
+
+    #[test]
+    fn provider_diagnostic_keeps_actionable_message_without_display_wrapper() {
+        let diagnostic = diagnostic_from_model_error(ModelError::provider(
+            ProviderErrorKind::InvalidRequest,
+            "OpenAI Responses request to host api.example.test:443 returned HTTP 400 (server error: missing rationale)",
+        ));
+
+        assert_eq!(
+            diagnostic.message(),
+            "OpenAI Responses request to host api.example.test:443 returned HTTP 400 (server error: missing rationale)"
+        );
+        assert!(!diagnostic.message().contains("provider error ("));
+    }
 }

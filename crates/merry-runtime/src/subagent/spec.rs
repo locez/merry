@@ -8,6 +8,8 @@ use thiserror::Error;
 
 /// Maximum UTF-8 task text size accepted for one child task.
 pub(crate) const MAX_TASK_BYTES: usize = 16 * 1024;
+/// Default minimum model-turn budget for a generic child task.
+pub const DEFAULT_MIN_MODEL_TURNS: u32 = 1;
 /// Default bounded child loop model-turn count.
 ///
 /// A small single-digit budget is too restrictive for a child that needs to
@@ -32,6 +34,18 @@ pub enum SubagentError {
     /// The delegated task has no allowed model turns.
     #[error("max_model_turns must be greater than zero")]
     ZeroMaxModelTurns,
+    /// The delegated task requested more turns than the configured runtime limit.
+    #[error("max_model_turns {requested} exceeds configured maximum {maximum}")]
+    ExceedsConfiguredMaxModelTurns { requested: u32, maximum: u32 },
+    /// The delegated task requested fewer turns than the configured minimum.
+    #[error("max_model_turns {requested} is below configured minimum {minimum}")]
+    BelowConfiguredMinModelTurns { requested: u32, minimum: u32 },
+    /// The configured minimum is not a valid value.
+    #[error("minimum max_model_turns must be greater than zero")]
+    ZeroMinModelTurns,
+    /// The configured minimum is greater than the configured maximum.
+    #[error("minimum max_model_turns {minimum} exceeds configured maximum {maximum}")]
+    MinExceedsMaxModelTurns { minimum: u32, maximum: u32 },
     /// A path scope was not a normalized workspace-relative path.
     #[error("scope path must be relative and normalized: {path}")]
     InvalidScopePath {
@@ -69,6 +83,7 @@ pub enum SubagentError {
 pub struct SubagentConfig {
     max_threads: usize,
     max_depth: u8,
+    min_model_turns: u32,
     max_model_turns: u32,
 }
 
@@ -84,6 +99,7 @@ impl SubagentConfig {
         Ok(Self {
             max_threads,
             max_depth,
+            min_model_turns: DEFAULT_MIN_MODEL_TURNS,
             max_model_turns: DEFAULT_MAX_MODEL_TURNS,
         })
     }
@@ -94,8 +110,63 @@ impl SubagentConfig {
         if max_model_turns == 0 {
             return Err(SubagentError::ZeroMaxModelTurns);
         }
+        if self.min_model_turns > max_model_turns {
+            return Err(SubagentError::MinExceedsMaxModelTurns {
+                minimum: self.min_model_turns,
+                maximum: max_model_turns,
+            });
+        }
         self.max_model_turns = max_model_turns;
         Ok(self)
+    }
+
+    /// Replaces the minimum model-turn budget accepted for explicit child tasks.
+    pub fn with_min_model_turns(mut self, min_model_turns: u32) -> Result<Self, SubagentError> {
+        if min_model_turns == 0 {
+            return Err(SubagentError::ZeroMinModelTurns);
+        }
+        if min_model_turns > self.max_model_turns {
+            return Err(SubagentError::MinExceedsMaxModelTurns {
+                minimum: min_model_turns,
+                maximum: self.max_model_turns,
+            });
+        }
+        self.min_model_turns = min_model_turns;
+        Ok(self)
+    }
+
+    /// Replaces both model-turn bounds in one validated operation.
+    pub fn with_model_turn_bounds(
+        mut self,
+        min_model_turns: u32,
+        max_model_turns: u32,
+    ) -> Result<Self, SubagentError> {
+        if min_model_turns == 0 {
+            return Err(SubagentError::ZeroMinModelTurns);
+        }
+        if max_model_turns == 0 {
+            return Err(SubagentError::ZeroMaxModelTurns);
+        }
+        if min_model_turns > max_model_turns {
+            return Err(SubagentError::MinExceedsMaxModelTurns {
+                minimum: min_model_turns,
+                maximum: max_model_turns,
+            });
+        }
+        self.min_model_turns = min_model_turns;
+        self.max_model_turns = max_model_turns;
+        Ok(self)
+    }
+
+    /// Validates one explicit child budget against this runtime configuration.
+    pub fn validate_task_max_model_turns(self, requested: u32) -> Result<(), SubagentError> {
+        validate_task_max_model_turns(requested, self.min_model_turns, self.max_model_turns)
+    }
+
+    /// Returns the minimum model-turn budget accepted for an explicit child task.
+    #[must_use]
+    pub fn min_model_turns(self) -> u32 {
+        self.min_model_turns
     }
 
     /// Returns the maximum number of child agents allowed to run concurrently.
@@ -122,6 +193,7 @@ impl Default for SubagentConfig {
         Self {
             max_threads: DEFAULT_MAX_THREADS,
             max_depth: DEFAULT_MAX_DEPTH,
+            min_model_turns: DEFAULT_MIN_MODEL_TURNS,
             max_model_turns: DEFAULT_MAX_MODEL_TURNS,
         }
     }
@@ -144,6 +216,23 @@ pub struct SubagentTaskSpec {
     expected_output: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
     plan_client_key: Option<String>,
+}
+
+pub(crate) fn validate_task_max_model_turns(
+    requested: u32,
+    minimum: u32,
+    maximum: u32,
+) -> Result<(), SubagentError> {
+    if requested == 0 {
+        return Err(SubagentError::ZeroMaxModelTurns);
+    }
+    if requested < minimum {
+        return Err(SubagentError::BelowConfiguredMinModelTurns { requested, minimum });
+    }
+    if requested > maximum {
+        return Err(SubagentError::ExceedsConfiguredMaxModelTurns { requested, maximum });
+    }
+    Ok(())
 }
 
 impl SubagentTaskSpec {

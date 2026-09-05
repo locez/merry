@@ -203,7 +203,10 @@ mod tests {
             provider,
             model: ModelName::new("child-primary").expect("child model should be valid"),
             process_backend: process_backend(),
-            subagent_config: SubagentConfig::new(1, 1).expect("subagent config should be valid"),
+            subagent_config: SubagentConfig::new(1, 1)
+                .expect("subagent config should be valid")
+                .with_model_turn_bounds(2048, 2048)
+                .expect("coding subagent bounds should be valid"),
             automatic_compaction: AutomaticCompactionConfig::disabled(),
             policy,
         })

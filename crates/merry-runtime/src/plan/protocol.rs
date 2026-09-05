@@ -409,7 +409,7 @@ pub enum PlanChangeInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(
-    description = "Create or update the authored Plan tree. The first valid update creates the Plan. New nodes use client_key and omit id; existing nodes use id and omit client_key. Runtime-owned execution state, capabilities, attempts, leases, progress, and results are not authored here. The nested change.type discriminator is required.",
+    description = "Create or update the authored Plan tree. The first valid update creates the Plan. New nodes use client_key and omit id; existing nodes use id and omit client_key. Runtime-owned execution state, capabilities, attempts, leases, progress, and results are not authored here. The nested change.type discriminator is required. Keep reason, execution_intent, coordinator_node_id, and max_concurrency_hint at the top level alongside change; only the change discriminator and its variant-specific fields belong inside change.",
     example = update_plan_define_example()
 )]
 pub struct UpdatePlanInput {
@@ -441,7 +441,7 @@ pub struct UpdatePlanInput {
     /// Tagged JSON object with `type: define_plan`, `type: replace_subtree`, or
     /// `type: use_current_plan`. Never pass this field as a string.
     #[schemars(
-        description = "Required tagged change object. It must contain a nested string field type inside the change object; the field example shows a complete valid define_plan object. Valid values are define_plan, replace_subtree, and use_current_plan; do not omit type, put it on the outer update object, or pass change as a string.",
+        description = "Required tagged change object. It must contain a nested string field type inside the change object; the field example shows a complete valid define_plan object. Valid values are define_plan, replace_subtree, and use_current_plan; do not omit type, put it on the outer update object, move outer metadata into change, or pass change as a string.",
         example = update_plan_define_change_example()
     )]
     pub change: PlanChangeInput,

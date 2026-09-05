@@ -361,6 +361,17 @@ fn input_decode_rejection(
         "could not decode {} input at `{path}`: {detail}",
         pending.name(),
     );
+    if let Some(field) = misplaced_update_plan_field(pending) {
+        if inner.plan_subagent_scope.is_some() {
+            message.push_str(&format!(
+                ". `{field}` is not valid inside a scoped update_plan request; keep only `reason` and `change` at the top level"
+            ));
+        } else {
+            message.push_str(&format!(
+                ". `{field}` is an outer update_plan field and must be at the top level alongside `change`, not inside `change`"
+            ));
+        }
+    }
     let recovery = if pending.name().as_str() == UPDATE_PLAN_TOOL_NAME {
         let scoped = inner.plan_subagent_scope.is_some();
         if path == "change.type" {
@@ -377,14 +388,18 @@ fn input_decode_rejection(
         if scoped {
             serde_json::json!({
                 "next_tool": UPDATE_PLAN_TOOL_NAME,
-                "instruction": "Retry with valid JSON. The change field must be an object whose nested type is one of define_children or replace_subtree; do not put type on the outer update object.",
+                "instruction": "Retry with valid JSON. For a scoped update, put reason and change at the top level. The change field must be an object whose nested type is one of define_children or replace_subtree; do not put type or coordinator metadata on the outer update object.",
+                "outer_fields": ["reason", "change"],
+                "nested_change_fields": ["type", "expected_plan_revision", "children", "target_node_id", "expected_node_revision", "subtree"],
                 "required_field": "change.type",
                 "valid_types": ["define_children", "replace_subtree"],
             })
         } else {
             serde_json::json!({
                 "next_tool": UPDATE_PLAN_TOOL_NAME,
-                "instruction": "Retry with valid JSON. The change field must be an object whose nested type is one of define_plan, replace_subtree, or use_current_plan; do not put type on the outer update object.",
+                "instruction": "Retry with valid JSON. Put reason, execution_intent, coordinator_node_id, and max_concurrency_hint at the top level alongside change. Put only the nested change.type discriminator and its variant-specific fields inside change; do not move outer metadata into change or put type on the outer update object.",
+                "outer_fields": ["reason", "execution_intent", "coordinator_node_id", "max_concurrency_hint", "change"],
+                "nested_change_fields": ["type", "expected_plan_revision", "root", "target_node_id", "expected_node_revision", "subtree"],
                 "required_field": "change.type",
                 "example": crate::plan::update_plan_define_example(),
             })
@@ -410,8 +425,30 @@ fn input_decode_path(pending: &PendingToolCall) -> String {
     {
         return "change.type".to_owned();
     }
+    if let Some(field) = misplaced_update_plan_field(pending) {
+        return format!("change.{field}");
+    }
 
     "input".to_owned()
+}
+
+fn misplaced_update_plan_field(pending: &PendingToolCall) -> Option<&'static str> {
+    if pending.name().as_str() != UPDATE_PLAN_TOOL_NAME {
+        return None;
+    }
+    let change = pending
+        .arguments()
+        .as_object()
+        .get("change")
+        .and_then(serde_json::Value::as_object)?;
+    [
+        "reason",
+        "execution_intent",
+        "coordinator_node_id",
+        "max_concurrency_hint",
+    ]
+    .into_iter()
+    .find(|field| change.contains_key(*field))
 }
 
 async fn submit_succeeded<T>(
@@ -560,6 +597,14 @@ fn plan_error_rejection(error: &PlanError) -> PlanToolRejection {
         } => serde_json::json!({
             "next_action": "continue_current_plan",
             "instruction": "The Plan is already executing. Do not use update_plan with use_current_plan again. Continue ordinary work or inspect the current snapshot once with read_plan; revise only a mutable future subtree when the authored objective actually changed. If the user explicitly asked to start over, call update_plan with define_plan, a fresh root, and direct children; do not provide target_node_id."
+        }),
+        PlanError::WrongPhase {
+            actual: PlanPhase::Blocked,
+            ..
+        } => serde_json::json!({
+            "next_tool": "read_plan",
+            "next_action": "inspect_and_resume_blocked_execution",
+            "instruction": "The Plan is blocked because linked work stopped before completion. Read the current snapshot first. If the linked child status is blocked with subagent_max_model_turns_reached, do not use update_plan.replace_subtree: call spawn_subagents with the same authored plan_client_key and a larger budget within the configured maximum; use a larger value for complex tasks. The runtime will supersede the old blocked link and reopen the Plan while the replacement continues from the shared workspace."
         }),
         PlanError::WrongPhase {
             actual: PlanPhase::Completed | PlanPhase::Cancelled,
@@ -714,6 +759,57 @@ mod tests {
                 .expect("recovery instruction should be text")
                 .contains("Do not use update_plan with use_current_plan")
         );
+    }
+
+    #[test]
+    fn blocked_plan_recovery_explains_higher_budget_replacement() {
+        let rejection = plan_error_rejection(&PlanError::WrongPhase {
+            actual: PlanPhase::Blocked,
+            operation: "replace subtree",
+        });
+        assert_eq!(rejection.code, "plan_wrong_phase");
+        assert_eq!(
+            rejection.recovery["next_action"],
+            "inspect_and_resume_blocked_execution"
+        );
+        assert_eq!(rejection.recovery["next_tool"], "read_plan");
+        let instruction = rejection.recovery["instruction"]
+            .as_str()
+            .expect("recovery instruction should be text");
+        assert!(instruction.contains("subagent_max_model_turns_reached"));
+        assert!(instruction.contains("same authored plan_client_key"));
+        assert!(instruction.contains("within the configured maximum"));
+        assert!(instruction.contains("larger value for complex tasks"));
+        assert!(instruction.contains("shared workspace"));
+        assert!(instruction.contains("do not use update_plan.replace_subtree"));
+    }
+
+    #[test]
+    fn update_plan_decode_path_identifies_outer_metadata_nested_in_change() {
+        let pending = PendingToolCall::new(
+            merry_core::ToolCallId::new("call-update-plan").expect("valid call id"),
+            merry_core::ToolName::new(UPDATE_PLAN_TOOL_NAME).expect("valid tool name"),
+            merry_core::ToolCallArguments::try_from(serde_json::json!({
+                "change": {
+                    "type": "define_plan",
+                    "coordinator_node_id": null,
+                    "expected_plan_revision": 0,
+                    "root": {
+                        "client_key": "root",
+                        "objective": "Complete the work",
+                        "acceptance": ["Checks pass"],
+                        "depends_on": [],
+                        "children": []
+                    }
+                }
+            }))
+            .expect("object arguments"),
+        );
+
+        assert_eq!(input_decode_path(&pending), "change.coordinator_node_id");
+        let error = input_from_call::<UpdatePlanInput>(&pending)
+            .expect_err("nested coordinator metadata should be rejected");
+        assert_eq!(error.path, "change.coordinator_node_id");
     }
 
     #[test]

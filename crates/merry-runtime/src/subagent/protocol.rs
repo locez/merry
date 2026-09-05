@@ -3,7 +3,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::spec::MAX_TASK_BYTES;
+use super::spec::{DEFAULT_MIN_MODEL_TURNS, MAX_TASK_BYTES};
 
 /// Provider-visible input for `spawn_subagents`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -33,7 +33,7 @@ pub struct SpawnSubagentTaskInput {
     pub display_name: Option<String>,
     #[schemars(
         schema_with = "max_model_turns_schema",
-        description = "Optional positive maximum number of model turns for this child. Omit it to use the configured runtime default (1024 unless changed in runtime.subagents.max_model_turns)."
+        description = "Positive child model-turn budget for the full lifecycle, including tools, implementation, tests, verification, and reporting. Use enough turns for the task without exceeding the configured maximum. Omit it to use the configured default. If the limit is reached, the child reports a recoverable blocked result and the coordinator can respawn it with the same plan_client_key and a larger budget within the configured maximum."
     )]
     pub max_model_turns: Option<u32>,
     /// Exact registered Merry tool names the child may use. Names are copied
@@ -196,9 +196,9 @@ fn optional_scope_paths_schema(_: &mut schemars::SchemaGenerator) -> schemars::S
 fn max_model_turns_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::Schema::try_from(json!({
         "type": "integer",
-        "minimum": 1,
+        "minimum": DEFAULT_MIN_MODEL_TURNS,
         "default": super::spec::DEFAULT_MAX_MODEL_TURNS,
-        "description": "Positive child model-turn budget. Omit it to use the configured runtime default."
+        "description": "Positive child lifecycle model-turn budget. Use enough turns for the task without exceeding the configured maximum. Omit it for the configured default. A max_model_turns_reached result is recoverable: inspect it and spawn a replacement with the same plan_client_key and a larger budget within the configured maximum."
     }))
     .expect("static child model-turn schema is valid")
 }
@@ -258,6 +258,8 @@ pub enum SubagentStatusLabel {
     Completed,
     /// Child task failed.
     Failed,
+    /// Child task stopped before completion and can be replaced.
+    Blocked,
     /// Child task was cancelled.
     Cancelled,
 }
@@ -271,12 +273,16 @@ impl SubagentStatusLabel {
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
+            Self::Blocked => "blocked",
             Self::Cancelled => "cancelled",
         }
     }
 
     pub(super) fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Blocked | Self::Cancelled
+        )
     }
 }
 

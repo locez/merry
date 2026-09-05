@@ -62,6 +62,7 @@ fn recompute_link_projection(node: &mut merry_core::PlanNodeSnapshot) {
             PlanLinkStatus::Completed => summary.completed += 1,
             PlanLinkStatus::Failed => summary.failed += 1,
             PlanLinkStatus::Cancelled => summary.cancelled += 1,
+            PlanLinkStatus::Blocked => summary.blocked += 1,
             PlanLinkStatus::Superseded => {}
         }
     }

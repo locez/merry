@@ -26,8 +26,7 @@ use merry_runtime::{
     ProcessRunnerOutput, ProjectRules, RegisteredTool, Runtime, RuntimeModelRole,
     SessionTranscriptItem, SkillCatalog, SkillMetadata, StepContext, StepInput, TaskAnchor,
     ToolActionKind, ToolAdmission, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture, citation_compaction_response_schema,
-    citation_compaction_system_prompt, process_command_tool,
+    ToolExecutor, ToolExecutorFuture, citation_compaction_system_prompt, process_command_tool,
 };
 use schemars::Schema;
 use serde_json::{Map, Value, json};
@@ -494,7 +493,9 @@ async fn request_live_compaction_candidate(
     let response_format = ModelResponseFormat::StructuredOutput(
         ModelStructuredOutputFormat::new(
             "compacted_checkpoint_candidate",
-            citation_compaction_response_schema(),
+            input
+                .model_response_schema()
+                .expect("structured output schema is valid"),
         )
         .expect("structured output format is valid"),
     );

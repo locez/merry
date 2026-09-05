@@ -1,3 +1,4 @@
+use crate::RuntimeError;
 use merry_core::ErrorInfo;
 
 pub(super) const DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED: &str = "tool_call_result_required";
@@ -11,6 +12,15 @@ pub(super) const WORKSPACE_PATCH_TOOL_NAME: &str = "workspace_patch";
 pub(super) fn diagnostic_from_text(code: &'static str, message: impl AsRef<str>) -> ErrorInfo {
     let message = sanitize_diagnostic_message(message.as_ref());
     ErrorInfo::new(code, &message).expect("runtime diagnostic is sanitized and uses static code")
+}
+
+pub(super) fn runtime_error_message(error: &RuntimeError) -> String {
+    match error {
+        RuntimeError::CompactionModelRequest { message }
+        | RuntimeError::CompactionModelSetup { message }
+        | RuntimeError::CompactionModelStream { message } => message.clone(),
+        _ => error.to_string(),
+    }
 }
 
 fn sanitize_diagnostic_message(message: &str) -> String {

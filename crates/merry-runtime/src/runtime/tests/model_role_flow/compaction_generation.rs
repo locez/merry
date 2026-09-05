@@ -55,6 +55,10 @@ fn unavailable(message: &str) -> ModelError {
     ModelError::provider(ProviderErrorKind::Unavailable, message)
 }
 
+fn invalid_request(message: &str) -> ModelError {
+    ModelError::provider(ProviderErrorKind::InvalidRequest, message)
+}
+
 #[derive(Clone)]
 struct CancelOnCompletedCompactor {
     calls: Arc<AtomicUsize>,
@@ -179,6 +183,27 @@ async fn compactor_makes_at_most_two_total_provider_attempts() {
         1,
         "the third scripted failure must not be consumed"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn invalid_compactor_request_is_not_retried() {
+    let compactor = RecordingModelProvider::with_script(vec![
+        ScriptedModelProviderResponse::SetupError(invalid_request(
+            "HTTP 400 invalid_json_schema: missing rationale",
+        )),
+        completed_candidate(VALID_CANDIDATE),
+    ]);
+    let runtime = runtime_with_compactor("compaction-invalid-request", compactor.clone(), 64_000);
+    seed_two_history_items_for_compaction(&runtime).await;
+
+    let error = runtime
+        .compact_context_once(compaction_policy(), StepContext::default())
+        .await
+        .expect_err("invalid provider request should fail immediately");
+
+    assert!(error.to_string().contains("HTTP 400"));
+    assert_eq!(compactor.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(compactor.responses.lock().expect("response mutex").len(), 1);
 }
 
 fn repeated_failure(kind: &str) -> ScriptedModelProviderResponse {

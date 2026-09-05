@@ -2,10 +2,8 @@ use super::{
     CheckpointError, CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
     CheckpointValidationPolicy, candidate::CompactedCheckpointCandidate, format_ref_list,
 };
-use crate::checkpoint::candidate::{
-    CheckpointEntry, CheckpointEntryId, CheckpointHandoff, CheckpointSection, CheckpointSections,
-};
-use std::collections::{BTreeMap, BTreeSet};
+use crate::checkpoint::candidate::{CheckpointHandoff, CheckpointSection, CheckpointSections};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CitationBackedCheckpoint {
@@ -101,6 +99,11 @@ impl CitationBackedCheckpoint {
         pinned_refs: &BTreeSet<CheckpointRefId>,
         previous: PreviousCheckpointValidation<'_>,
     ) -> Result<Self, CheckpointError> {
+        let mut candidate = candidate;
+        if let PreviousCheckpointValidation::Rolling(previous) = &previous {
+            candidate.materialize_kept_entries(previous);
+        }
+
         let manifest_refs = manifest
             .refs()
             .iter()
@@ -130,13 +133,9 @@ impl CitationBackedCheckpoint {
             PreviousCheckpointValidation::Initial if !candidate.handoffs().is_empty() => {
                 return Err(CheckpointError::InitialCheckpointHasHandoffs);
             }
-            PreviousCheckpointValidation::Rolling(previous) => {
-                validate_rolling_handoffs(previous, &candidate)?;
-            }
-            PreviousCheckpointValidation::PrevalidatedPersistence => {
-                validate_persisted_handoffs(&candidate)?;
-            }
-            PreviousCheckpointValidation::Initial => {}
+            PreviousCheckpointValidation::Initial
+            | PreviousCheckpointValidation::Rolling(_)
+            | PreviousCheckpointValidation::PrevalidatedPersistence => {}
         }
 
         let (sections, handoffs) = candidate.into_parts();
@@ -198,142 +197,4 @@ enum PreviousCheckpointValidation<'a> {
     Initial,
     Rolling(&'a CitationBackedCheckpoint),
     PrevalidatedPersistence,
-}
-
-fn validate_rolling_handoffs(
-    previous: &CitationBackedCheckpoint,
-    candidate: &CompactedCheckpointCandidate,
-) -> Result<(), CheckpointError> {
-    let previous_entries = entry_map(previous.sections());
-    let candidate_entries = entry_map(candidate.sections());
-    let handoffs = candidate
-        .handoffs()
-        .iter()
-        .map(|handoff| (handoff.old_id().clone(), handoff))
-        .collect::<BTreeMap<_, _>>();
-
-    for old_id in handoffs.keys() {
-        if !previous_entries.contains_key(old_id) {
-            return Err(CheckpointError::UnknownHandoffOldId {
-                old_id: old_id.as_str().to_owned(),
-            });
-        }
-    }
-    for old_id in previous_entries.keys() {
-        if !handoffs.contains_key(old_id) {
-            return Err(CheckpointError::MissingHandoff {
-                old_id: old_id.as_str().to_owned(),
-            });
-        }
-    }
-
-    for (old_id, handoff) in handoffs {
-        let (old_section, old_entry) = previous_entries
-            .get(&old_id)
-            .expect("unknown handoff ids were rejected");
-        match handoff {
-            CheckpointHandoff::Keep { .. } => {
-                let Some((new_section, new_entry)) = candidate_entries.get(&old_id) else {
-                    return Err(CheckpointError::InvalidKeep {
-                        old_id: old_id.as_str().to_owned(),
-                    });
-                };
-                if old_section != new_section || old_entry != new_entry {
-                    return Err(CheckpointError::InvalidKeep {
-                        old_id: old_id.as_str().to_owned(),
-                    });
-                }
-            }
-            CheckpointHandoff::Replace { new_ids, .. } => {
-                if candidate_entries.contains_key(&old_id) {
-                    return Err(CheckpointError::InvalidReplace {
-                        old_id: old_id.as_str().to_owned(),
-                    });
-                }
-                for new_id in new_ids {
-                    if previous_entries.contains_key(new_id) {
-                        return Err(CheckpointError::ReplacementEntryNotNew {
-                            old_id: old_id.as_str().to_owned(),
-                            new_id: new_id.as_str().to_owned(),
-                        });
-                    }
-                    if !candidate_entries.contains_key(new_id) {
-                        return Err(CheckpointError::ReplacementEntryNotFound {
-                            old_id: old_id.as_str().to_owned(),
-                            new_id: new_id.as_str().to_owned(),
-                        });
-                    }
-                }
-            }
-            CheckpointHandoff::Drop { .. } => {
-                if candidate_entries.contains_key(&old_id) {
-                    return Err(CheckpointError::InvalidDrop {
-                        old_id: old_id.as_str().to_owned(),
-                    });
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_persisted_handoffs(
-    candidate: &CompactedCheckpointCandidate,
-) -> Result<(), CheckpointError> {
-    let candidate_entries = entry_map(candidate.sections());
-    let declared_old_ids = candidate
-        .handoffs()
-        .iter()
-        .map(|handoff| handoff.old_id().clone())
-        .collect::<BTreeSet<_>>();
-    for handoff in candidate.handoffs() {
-        let old_id = handoff.old_id();
-        match handoff {
-            CheckpointHandoff::Keep { .. } => {
-                if !candidate_entries.contains_key(old_id) {
-                    return Err(CheckpointError::InvalidKeep {
-                        old_id: old_id.as_str().to_owned(),
-                    });
-                }
-            }
-            CheckpointHandoff::Replace { new_ids, .. } => {
-                if candidate_entries.contains_key(old_id) {
-                    return Err(CheckpointError::InvalidReplace {
-                        old_id: old_id.as_str().to_owned(),
-                    });
-                }
-                for new_id in new_ids {
-                    if declared_old_ids.contains(new_id) {
-                        return Err(CheckpointError::ReplacementEntryNotNew {
-                            old_id: old_id.as_str().to_owned(),
-                            new_id: new_id.as_str().to_owned(),
-                        });
-                    }
-                    if !candidate_entries.contains_key(new_id) {
-                        return Err(CheckpointError::ReplacementEntryNotFound {
-                            old_id: old_id.as_str().to_owned(),
-                            new_id: new_id.as_str().to_owned(),
-                        });
-                    }
-                }
-            }
-            CheckpointHandoff::Drop { .. } => {
-                if candidate_entries.contains_key(old_id) {
-                    return Err(CheckpointError::InvalidDrop {
-                        old_id: old_id.as_str().to_owned(),
-                    });
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn entry_map(
-    sections: &CheckpointSections,
-) -> BTreeMap<CheckpointEntryId, (CheckpointSection, &CheckpointEntry)> {
-    sections
-        .iter()
-        .map(|(section, entry)| (entry.id().clone(), (section, entry)))
-        .collect()
 }

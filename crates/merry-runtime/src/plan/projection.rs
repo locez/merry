@@ -41,6 +41,7 @@ const COORDINATOR_RULES: &[&str] = &[
     "When delegating work, omit plan_client_key for an unbound child.",
     "If acceptance needs an explicit check, author that check as a direct verification child; runtime closes the root after every declared child completes.",
     "When the user asks to start over, use update_plan with define_plan and a fresh root plus direct children; do not provide target_node_id or other old runtime identities.",
+    "If a linked child is blocked by max_model_turns_reached, inspect its status and spawn a replacement with the same authored plan_client_key and a larger budget; do not use update_plan.replace_subtree to repair runtime-owned execution state.",
     "After a successful read_plan, use the returned snapshot; do not repeat read_plan unless runtime state has changed.",
     "Use ordinary run_process for a read-only check that fits the active process profile; request_permissions is only for an exact action rejected for a missing capability.",
 ];

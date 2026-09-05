@@ -69,6 +69,7 @@ impl ModelProvider for AnthropicProvider {
                     return Err(ModelError::Cancelled);
                 }
                 let endpoint = messages_endpoint(self.config.base_url())?;
+                let endpoint_host = bounded_endpoint_host(&endpoint);
                 let body = render_anthropic_request(&self.config, &request)?;
                 tracing::debug!(
                     event = "runtime.provider.request",
@@ -91,12 +92,20 @@ impl ModelProvider for AnthropicProvider {
                 let token = context.cancellation_token().clone();
                 let response = tokio::select! {
                     () = token.cancelled() => return Err(ModelError::Cancelled),
-                    response = request_builder.send() => response.map_err(map_transport_error)?,
+                    response = request_builder.send() => response.map_err(|error| {
+                        map_transport_error(error, endpoint_host.as_deref())
+                    })?,
                 };
                 let status = response.status();
                 if !status.is_success() {
                     let kind = classify_http_status(status);
-                    return Err(map_status_error(response, &token, kind).await);
+                    return Err(map_status_error(
+                        response,
+                        &token,
+                        kind,
+                        self.config.provider_name().as_str(),
+                    )
+                    .await);
                 }
                 let event_stream = stream::unfold(
                     AnthropicEventStreamState::new(response, token, stream_span),
@@ -114,6 +123,7 @@ struct AnthropicEventStreamState {
     events: AnthropicEventStreamEvents,
     token: tokio_util::sync::CancellationToken,
     span: tracing::Span,
+    endpoint_host: Option<String>,
     done: bool,
 }
 
@@ -123,11 +133,13 @@ impl AnthropicEventStreamState {
         token: tokio_util::sync::CancellationToken,
         span: tracing::Span,
     ) -> Self {
+        let endpoint_host = bounded_endpoint_host(response.url());
         Self {
             response,
             events: AnthropicEventStreamEvents::new(),
             token,
             span,
+            endpoint_host,
             done: false,
         }
     }
@@ -165,7 +177,13 @@ impl AnthropicEventStreamState {
                 Ok(Some(chunk)) => {
                     if let Err(error) = self.events.parse_bytes(&chunk) {
                         self.done = true;
-                        return Some((Err(error.into()), self));
+                        return Some((
+                            Err(add_stream_endpoint_context(
+                                error.into(),
+                                self.endpoint_host.as_deref(),
+                            )),
+                            self,
+                        ));
                     }
                 }
                 Ok(None) => match self.events.finish_stream_and_pop_pending() {
@@ -176,12 +194,21 @@ impl AnthropicEventStreamState {
                     }
                     Err(error) => {
                         self.done = true;
-                        return Some((Err(error.into()), self));
+                        return Some((
+                            Err(add_stream_endpoint_context(
+                                error.into(),
+                                self.endpoint_host.as_deref(),
+                            )),
+                            self,
+                        ));
                     }
                 },
                 Err(error) => {
                     self.done = true;
-                    return Some((Err(map_transport_error(error)), self));
+                    return Some((
+                        Err(map_transport_error(error, self.endpoint_host.as_deref())),
+                        self,
+                    ));
                 }
             }
         }
@@ -251,8 +278,10 @@ async fn map_status_error(
     mut response: reqwest::Response,
     token: &tokio_util::sync::CancellationToken,
     kind: ProviderErrorKind,
+    provider_name: &str,
 ) -> ModelError {
     let status = response.status();
+    let request_host = bounded_endpoint_host(response.url());
     let retry_after = response
         .headers()
         .get(reqwest::header::RETRY_AFTER)
@@ -279,24 +308,90 @@ async fn map_status_error(
             Ok(None) | Err(_) => break,
         }
     }
-    let error_type = anthropic_error_type(&body);
-    let mut message = format!("Anthropic Messages request returned HTTP {status}");
-    if let Some(error_type) = error_type {
-        message.push_str(&format!(" (type: {error_type})"));
+    let details = anthropic_provider_error_details(&body);
+    tracing::warn!(
+        event = "runtime.provider.http_error",
+        provider_name,
+        protocol = "Messages",
+        request_host = request_host.as_deref().unwrap_or(""),
+        http_status = status.as_u16(),
+        error_type = details
+            .as_ref()
+            .and_then(|details| details.error_type.as_deref())
+            .unwrap_or(""),
+        error_code = details
+            .as_ref()
+            .and_then(|details| details.code.as_deref())
+            .unwrap_or(""),
+        error_message = details
+            .as_ref()
+            .and_then(|details| details.message.as_deref())
+            .unwrap_or(""),
+        request_id = request_id.as_deref().unwrap_or(""),
+        "provider returned an HTTP error"
+    );
+    let message = format_provider_error_message(
+        status,
+        request_host.as_deref(),
+        details.as_ref(),
+        request_id.as_deref(),
+    );
+    AnthropicProviderError::provider_with_retry_after(kind, message, retry_after).into()
+}
+
+#[derive(Debug, Default)]
+struct ProviderErrorDetails {
+    error_type: Option<String>,
+    code: Option<String>,
+    message: Option<String>,
+}
+
+fn anthropic_provider_error_details(body: &[u8]) -> Option<ProviderErrorDetails> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let error = value.get("error")?;
+    let details = ProviderErrorDetails {
+        error_type: error
+            .get("type")
+            .and_then(Value::as_str)
+            .and_then(bounded_metadata),
+        code: error
+            .get("code")
+            .and_then(Value::as_str)
+            .and_then(bounded_metadata),
+        message: error
+            .get("message")
+            .and_then(Value::as_str)
+            .and_then(bounded_provider_error_message),
+    };
+    (details.error_type.is_some() || details.code.is_some() || details.message.is_some())
+        .then_some(details)
+}
+
+fn format_provider_error_message(
+    status: reqwest::StatusCode,
+    request_host: Option<&str>,
+    details: Option<&ProviderErrorDetails>,
+    request_id: Option<&str>,
+) -> String {
+    let mut message = request_host.map_or_else(
+        || format!("Anthropic Messages request returned HTTP {status}"),
+        |host| format!("Anthropic Messages request to host {host} returned HTTP {status}"),
+    );
+    if let Some(details) = details {
+        if let Some(error_type) = details.error_type.as_deref() {
+            message.push_str(&format!(" (type: {error_type})"));
+        }
+        if let Some(code) = details.code.as_deref() {
+            message.push_str(&format!(" (code: {code})"));
+        }
+        if let Some(provider_message) = details.message.as_deref() {
+            message.push_str(&format!(" (server error: {provider_message})"));
+        }
     }
     if let Some(request_id) = request_id {
         message.push_str(&format!(" (request_id: {request_id})"));
     }
-    AnthropicProviderError::provider_with_retry_after(kind, message, retry_after).into()
-}
-
-fn anthropic_error_type(body: &[u8]) -> Option<String> {
-    serde_json::from_slice::<Value>(body)
-        .ok()?
-        .get("error")?
-        .get("type")?
-        .as_str()
-        .and_then(bounded_metadata)
+    message
 }
 
 fn bounded_metadata(value: &str) -> Option<String> {
@@ -318,13 +413,79 @@ fn classify_http_status(status: reqwest::StatusCode) -> ProviderErrorKind {
     }
 }
 
-fn map_transport_error(error: reqwest::Error) -> ModelError {
-    AnthropicProviderError::provider_with_retry_after(
-        ProviderErrorKind::Unavailable,
-        format!("Anthropic Messages transport failed: {error}"),
-        None,
-    )
-    .into()
+fn map_transport_error(error: reqwest::Error, request_host: Option<&str>) -> ModelError {
+    let message = request_host.map_or_else(
+        || format!("Anthropic Messages transport failed: {error}"),
+        |host| {
+            format!("Anthropic Messages request to host {host} failed during transport: {error}")
+        },
+    );
+    AnthropicProviderError::provider_with_retry_after(ProviderErrorKind::Unavailable, message, None)
+        .into()
+}
+
+fn add_stream_endpoint_context(error: ModelError, request_host: Option<&str>) -> ModelError {
+    let Some(host) = request_host else {
+        return error;
+    };
+    let prefix = format!("Anthropic Messages stream from host {host}");
+    match error {
+        ModelError::InvalidRequest { reason } => {
+            ModelError::invalid_request(format!("{prefix} failed: {reason}"))
+        }
+        ModelError::Provider {
+            kind,
+            message,
+            retry_after,
+        } => ModelError::provider_with_retry_after(
+            kind,
+            format!("{prefix} failed: {message}"),
+            retry_after,
+        ),
+        ModelError::Cancelled => ModelError::Cancelled,
+    }
+}
+
+fn bounded_endpoint_host(url: &reqwest::Url) -> Option<String> {
+    let host = url.host_str()?;
+    let value = match url.port() {
+        Some(port) if host.contains(':') => format!("[{host}]:{port}"),
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    };
+    (!value.is_empty() && value.chars().count() <= 256).then_some(value)
+}
+
+fn bounded_provider_error_message(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    if [
+        "sk-",
+        "rk-",
+        "bearer ",
+        "api_key",
+        "apikey",
+        "access_token",
+        "password",
+        "secret",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return None;
+    }
+
+    let sanitized: String = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let message = sanitized.trim();
+    (!message.is_empty()).then(|| message.chars().take(1_024).collect())
 }
 
 #[cfg(test)]
@@ -339,12 +500,53 @@ mod tests {
                 .as_str(),
             "https://api.example.test/v1/messages"
         );
-        assert_eq!(
-            anthropic_error_type(
-                br#"{"error":{"type":"invalid_request_error","message":"secret prompt"}}"#
-            )
-            .as_deref(),
-            Some("invalid_request_error")
+        let details = anthropic_provider_error_details(
+            br#"{"error":{"type":"invalid_request_error","message":"safe server explanation"}}"#,
+        )
+        .expect("error details should parse");
+        assert_eq!(details.error_type.as_deref(), Some("invalid_request_error"));
+        assert_eq!(details.message.as_deref(), Some("safe server explanation"));
+    }
+
+    #[test]
+    fn provider_error_message_includes_host_and_safe_server_details() {
+        let body = br#"{
+            "error": {
+                "type": "invalid_request_error",
+                "message": "messages.0.content: text content is required"
+            }
+        }"#;
+        let details = anthropic_provider_error_details(body).expect("error details should parse");
+        let message = format_provider_error_message(
+            reqwest::StatusCode::BAD_REQUEST,
+            Some("api.anthropic.example:8443"),
+            Some(&details),
+            Some("req_abc-123"),
         );
+
+        assert!(message.contains("host api.anthropic.example:8443"));
+        assert!(message.contains("HTTP 400"));
+        assert!(message.contains("type: invalid_request_error"));
+        assert!(message.contains("server error: messages.0.content: text content is required"));
+        assert!(message.contains("request_id: req_abc-123"));
+    }
+
+    #[test]
+    fn provider_error_message_does_not_expose_secret_body_content() {
+        let body = br#"{
+            "error": {
+                "message": "request failed with api_key secret"
+            }
+        }"#;
+        let details = anthropic_provider_error_details(body);
+        let message = format_provider_error_message(
+            reqwest::StatusCode::BAD_REQUEST,
+            Some("api.anthropic.example"),
+            details.as_ref(),
+            None,
+        );
+
+        assert!(details.is_none());
+        assert!(!message.contains("api_key secret"));
     }
 }

@@ -181,6 +181,38 @@ impl CheckpointSections {
         })
     }
 
+    fn restore_entry_at(
+        &mut self,
+        section: CheckpointSection,
+        index: usize,
+        entry: CheckpointEntry,
+    ) {
+        let entry_id = entry.id().clone();
+        for candidate_section in CheckpointSection::ALL {
+            self.entries_mut(candidate_section)
+                .retain(|candidate| candidate.id() != &entry_id);
+        }
+        let insertion_index = index.min(self.entries(section).len());
+        self.entries_mut(section).insert(insertion_index, entry);
+    }
+
+    fn entries_mut(&mut self, section: CheckpointSection) -> &mut Vec<CheckpointEntry> {
+        match section {
+            CheckpointSection::ConfirmedDecision => &mut self.confirmed_decisions,
+            CheckpointSection::RejectedApproach => &mut self.rejected_approaches,
+            CheckpointSection::ConstraintPreferenceBoundary => {
+                &mut self.constraints_preferences_boundaries
+            }
+            CheckpointSection::CorrectedMisunderstanding => &mut self.corrected_misunderstandings,
+            CheckpointSection::DurableConclusion => &mut self.durable_conclusions,
+            CheckpointSection::OpenQuestion => &mut self.open_questions,
+            CheckpointSection::CurrentProgressAndNextStep => {
+                &mut self.current_progress_and_next_steps
+            }
+            CheckpointSection::ExactDetail => &mut self.exact_details,
+        }
+    }
+
     fn from_wire(wire: CompactedCheckpointCandidateWire) -> Result<Self, CheckpointError> {
         let sections = Self {
             confirmed_decisions: parse_entries(
@@ -291,25 +323,10 @@ impl CheckpointHandoff {
                 reason,
             } => {
                 let old_id = CheckpointEntryId::new(&old_id)?;
-                if new_ids.is_empty() {
-                    return Err(CheckpointError::ReplacementWithoutNewIds {
-                        old_id: old_id.as_str().to_owned(),
-                    });
-                }
-                validate_text_field("checkpoint handoff reason", &reason)?;
-                let mut seen = BTreeSet::new();
                 let new_ids = new_ids
                     .iter()
                     .map(|value| CheckpointEntryId::new(value))
                     .collect::<Result<Vec<_>, _>>()?;
-                for new_id in &new_ids {
-                    if !seen.insert(new_id.clone()) {
-                        return Err(CheckpointError::DuplicateReplacementEntry {
-                            old_id: old_id.as_str().to_owned(),
-                            new_id: new_id.as_str().to_owned(),
-                        });
-                    }
-                }
                 Ok(Self::Replace {
                     old_id,
                     new_ids,
@@ -318,7 +335,6 @@ impl CheckpointHandoff {
             }
             CheckpointHandoffWire::Drop { old_id, reason } => {
                 let old_id = CheckpointEntryId::new(&old_id)?;
-                validate_text_field("checkpoint handoff reason", &reason)?;
                 Ok(Self::Drop { old_id, reason })
             }
         }
@@ -333,8 +349,12 @@ pub struct CompactedCheckpointCandidate {
 
 impl CompactedCheckpointCandidate {
     pub fn from_json(input: &str) -> Result<Self, CheckpointError> {
-        let wire = serde_json::from_str::<CompactedCheckpointCandidateWire>(input)
-            .map_err(|_| CheckpointError::InvalidCandidateJson)?;
+        let wire =
+            serde_json::from_str::<CompactedCheckpointCandidateWire>(input).map_err(|error| {
+                CheckpointError::InvalidCandidateJson {
+                    message: error.to_string(),
+                }
+            })?;
         wire.try_into()
     }
 
@@ -346,6 +366,31 @@ impl CompactedCheckpointCandidate {
     #[must_use]
     pub fn handoffs(&self) -> &[CheckpointHandoff] {
         &self.handoffs
+    }
+
+    /// Restores entries explicitly referenced by rolling `keep` handoffs.
+    ///
+    /// The candidate section arrays are the complete next checkpoint. A prior entry that is
+    /// absent from both those arrays and the handoffs is intentionally removed; it must not be
+    /// converted into an implicit `keep`.
+    pub(crate) fn materialize_kept_entries(&mut self, previous: &CitationBackedCheckpoint) {
+        let kept_ids = self
+            .handoffs
+            .iter()
+            .filter_map(|handoff| match handoff {
+                CheckpointHandoff::Keep { old_id } => Some(old_id.clone()),
+                CheckpointHandoff::Replace { .. } | CheckpointHandoff::Drop { .. } => None,
+            })
+            .collect::<BTreeSet<_>>();
+
+        for section in CheckpointSection::ALL {
+            for (index, entry) in previous.sections().entries(section).iter().enumerate() {
+                if kept_ids.contains(entry.id()) {
+                    self.sections
+                        .restore_entry_at(section, index, entry.clone());
+                }
+            }
+        }
     }
 
     pub(super) fn into_parts(self) -> (CheckpointSections, Vec<CheckpointHandoff>) {
@@ -488,6 +533,7 @@ pub(crate) struct CompactedCheckpointCandidateWire {
     open_questions: Vec<CheckpointEntryWire>,
     current_progress_and_next_steps: Vec<CheckpointEntryWire>,
     exact_details: Vec<CheckpointEntryWire>,
+    #[schemars(with = "Vec<CheckpointHandoffSchemaWire>")]
     handoffs: Vec<CheckpointHandoffWire>,
 }
 
@@ -496,11 +542,29 @@ pub(crate) fn compacted_checkpoint_candidate_schema() -> Schema {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+#[schemars(inline)]
+enum CheckpointNullableString {
+    Value(String),
+    Null,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+#[schemars(inline)]
+enum CheckpointNullableEntryIds {
+    Values(Vec<String>),
+    Null,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct CheckpointEntryWire {
     id: String,
     text: String,
+    #[schemars(required, with = "CheckpointNullableString")]
     rationale: Option<String>,
+    #[schemars(length(min = 1))]
     refs: Vec<String>,
 }
 
@@ -519,8 +583,32 @@ impl From<&CheckpointEntry> for CheckpointEntryWire {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+enum CheckpointHandoffSchemaAction {
+    Keep,
+    Replace,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
+#[schemars(inline)]
+struct CheckpointHandoffSchemaWire {
+    /// Preserve a prior entry by reference or record its replacement.
+    action: CheckpointHandoffSchemaAction,
+    /// The id of the prior checkpoint entry being handed off.
+    old_id: String,
+    /// Replacement entry ids for replace, or null for keep.
+    #[schemars(required, with = "CheckpointNullableEntryIds")]
+    new_ids: Option<Vec<String>>,
+    /// Optional context for the reference; use null for keep.
+    #[schemars(required, with = "CheckpointNullableString")]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
 enum CheckpointHandoffWire {
     Keep {
         old_id: String,
@@ -534,6 +622,48 @@ enum CheckpointHandoffWire {
         old_id: String,
         reason: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CheckpointHandoffActionWire {
+    Keep,
+    Replace,
+    Drop,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointHandoffFields {
+    action: CheckpointHandoffActionWire,
+    old_id: String,
+    #[serde(default)]
+    new_ids: Option<Vec<String>>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for CheckpointHandoffWire {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let fields = CheckpointHandoffFields::deserialize(deserializer)?;
+        match fields.action {
+            CheckpointHandoffActionWire::Keep => Ok(Self::Keep {
+                old_id: fields.old_id,
+            }),
+            CheckpointHandoffActionWire::Replace => Ok(Self::Replace {
+                old_id: fields.old_id,
+                new_ids: fields.new_ids.unwrap_or_default(),
+                reason: fields.reason.unwrap_or_default(),
+            }),
+            CheckpointHandoffActionWire::Drop => Ok(Self::Drop {
+                old_id: fields.old_id,
+                reason: fields.reason.unwrap_or_default(),
+            }),
+        }
+    }
 }
 
 impl From<&CheckpointHandoff> for CheckpointHandoffWire {

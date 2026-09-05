@@ -2,6 +2,7 @@
 
 use crate::{
     OpenAiProviderError,
+    provider::{bounded_provider_error_message, bounded_provider_metadata},
     wire::{
         ResponsesOutputContent, ResponsesOutputItem, ResponsesResponse, ResponsesStreamEvent,
         ResponsesStreamOutputItem, ResponsesUsage,
@@ -231,9 +232,14 @@ impl ResponsesStreamParser {
                 self.parse_terminal_response(response, "failed")
             }
             ResponsesStreamEvent::Error { code, message } => {
-                let code = code.unwrap_or_else(|| "unknown".to_owned());
-                let message =
-                    message.unwrap_or_else(|| "provider returned stream error".to_owned());
+                let code = code
+                    .as_deref()
+                    .and_then(bounded_provider_metadata)
+                    .unwrap_or_else(|| "unknown".to_owned());
+                let message = message
+                    .as_deref()
+                    .and_then(bounded_provider_error_message)
+                    .unwrap_or_else(|| "provider returned stream error".to_owned());
                 Err(OpenAiProviderError::protocol(format!(
                     "Responses stream error {code}: {message}"
                 )))

@@ -86,6 +86,17 @@ impl ModelError {
         }
     }
 
+    /// Returns the actionable message without the provider-neutral display
+    /// wrapper used for top-level error formatting.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        match self {
+            Self::InvalidRequest { reason } => reason,
+            Self::Cancelled => "model stream cancelled",
+            Self::Provider { message, .. } => message,
+        }
+    }
+
     /// Returns a provider-supplied retry-after delay when available.
     #[must_use]
     pub fn retry_after(&self) -> Option<Duration> {

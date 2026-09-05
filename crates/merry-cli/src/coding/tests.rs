@@ -757,7 +757,10 @@ async fn exposes_subagent_tools_when_enabled() {
             extra_tools: Vec::new(),
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::enabled(
-                SubagentConfig::new(2, 1).expect("valid subagent config"),
+                SubagentConfig::new(2, 1)
+                    .expect("valid subagent config")
+                    .with_model_turn_bounds(2048, 2048)
+                    .expect("coding subagent bounds should be valid"),
             ),
             workspace_tool_limits: None,
         },
@@ -815,7 +818,7 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
                             ),
                             (
                                 "max_model_turns".to_owned(),
-                                Value::Number(serde_json::Number::from(1)),
+                                Value::Number(serde_json::Number::from(2048)),
                             ),
                             (
                                 "allowed_tools".to_owned(),
@@ -853,7 +856,10 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
             extra_tools: Vec::new(),
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::enabled(
-                SubagentConfig::new(2, 1).expect("valid subagent config"),
+                SubagentConfig::new(2, 1)
+                    .expect("valid subagent config")
+                    .with_model_turn_bounds(2048, 2048)
+                    .expect("coding subagent bounds should be valid"),
             ),
             workspace_tool_limits: None,
         },

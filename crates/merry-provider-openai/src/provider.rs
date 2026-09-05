@@ -89,6 +89,8 @@ impl ModelProvider for OpenAiProvider {
                     &event_stream_span,
                 )?;
                 tracing::trace!(event = "runtime.provider.request.rendered");
+                let endpoint_host = bounded_endpoint_host(&http_request.endpoint);
+                let protocol = self.config.protocol();
 
                 let mut request_builder = self
                     .client
@@ -106,7 +108,9 @@ impl ModelProvider for OpenAiProvider {
                         tracing::debug!("openai stream setup cancelled");
                         return Err(ModelError::Cancelled);
                     }
-                    response = request_builder.send() => response.map_err(map_transport_error)?,
+                    response = request_builder.send() => response.map_err(|error| {
+                        map_transport_error(error, protocol, endpoint_host.as_deref())
+                    })?,
                 };
 
                 let status = response.status();
@@ -115,9 +119,14 @@ impl ModelProvider for OpenAiProvider {
                 } else {
                     let error_kind = classify_http_status(status);
                     tracing::debug!("openai http status received and classified");
-                    let error =
-                        map_status_error(response, &token, error_kind, self.config.protocol())
-                            .await;
+                    let error = map_status_error(
+                        response,
+                        &token,
+                        error_kind,
+                        self.config.protocol(),
+                        self.config.provider_name().as_str(),
+                    )
+                    .await;
                     if matches!(error, ModelError::Cancelled) {
                         tracing::debug!("openai stream setup cancelled");
                     }
@@ -147,6 +156,8 @@ struct OpenAiEventStreamState {
     events: OpenAiEventStreamEvents,
     cancellation_token: tokio_util::sync::CancellationToken,
     span: tracing::Span,
+    endpoint_host: Option<String>,
+    protocol: OpenAiProtocol,
     done: bool,
 }
 
@@ -157,11 +168,14 @@ impl OpenAiEventStreamState {
         span: tracing::Span,
         protocol: OpenAiProtocol,
     ) -> Self {
+        let endpoint_host = bounded_endpoint_host(response.url());
         Self {
             response,
             events: OpenAiEventStreamEvents::new(protocol),
             cancellation_token,
             span,
+            endpoint_host,
+            protocol,
             done: false,
         }
     }
@@ -208,7 +222,14 @@ impl OpenAiEventStreamState {
                     if let Err(error) = self.events.parse_bytes(chunk.as_ref()) {
                         tracing::debug!("openai stream protocol error");
                         self.done = true;
-                        return Some((Err(error.into()), self));
+                        return Some((
+                            Err(add_stream_endpoint_context(
+                                error.into(),
+                                self.protocol,
+                                self.endpoint_host.as_deref(),
+                            )),
+                            self,
+                        ));
                     }
                 }
                 Ok(None) => match self.events.finish_stream_and_pop_pending() {
@@ -223,13 +244,27 @@ impl OpenAiEventStreamState {
                     Err(error) => {
                         tracing::debug!("openai stream protocol error");
                         self.done = true;
-                        return Some((Err(error.into()), self));
+                        return Some((
+                            Err(add_stream_endpoint_context(
+                                error.into(),
+                                self.protocol,
+                                self.endpoint_host.as_deref(),
+                            )),
+                            self,
+                        ));
                     }
                 },
                 Err(error) => {
                     tracing::debug!("openai stream transport error");
                     self.done = true;
-                    return Some((Err(map_transport_error(error)), self));
+                    return Some((
+                        Err(map_transport_error(
+                            error,
+                            self.protocol,
+                            self.endpoint_host.as_deref(),
+                        )),
+                        self,
+                    ));
                 }
             }
         }
@@ -488,8 +523,10 @@ async fn map_status_error(
     cancellation_token: &tokio_util::sync::CancellationToken,
     kind: ProviderErrorKind,
     protocol: OpenAiProtocol,
+    provider_name: &str,
 ) -> ModelError {
     let status = response.status();
+    let request_host = bounded_endpoint_host(response.url());
     let retry_after = response
         .headers()
         .get(reqwest::header::RETRY_AFTER)
@@ -513,18 +550,43 @@ async fn map_status_error(
             Ok(None) | Err(_) => break,
         }
     }
-    let error_code = provider_error_code(&body);
+    let details = provider_error_details(&body);
     let protocol_name = match protocol {
         OpenAiProtocol::Responses => "Responses",
         OpenAiProtocol::ChatCompletions => "Chat Completions",
     };
-    let mut message = format!("OpenAI {protocol_name} request returned HTTP {status}");
-    if let Some(error_code) = error_code {
-        message.push_str(&format!(" (code: {error_code})"));
-    }
-    if let Some(request_id) = request_id {
-        message.push_str(&format!(" (request_id: {request_id})"));
-    }
+    tracing::warn!(
+        event = "runtime.provider.http_error",
+        provider_name,
+        protocol = protocol_name,
+        request_host = request_host.as_deref().unwrap_or(""),
+        http_status = status.as_u16(),
+        error_type = details
+            .as_ref()
+            .and_then(|details| details.error_type.as_deref())
+            .unwrap_or(""),
+        error_code = details
+            .as_ref()
+            .and_then(|details| details.code.as_deref())
+            .unwrap_or(""),
+        error_param = details
+            .as_ref()
+            .and_then(|details| details.param.as_deref())
+            .unwrap_or(""),
+        error_message = details
+            .as_ref()
+            .and_then(|details| details.message.as_deref())
+            .unwrap_or(""),
+        request_id = request_id.as_deref().unwrap_or(""),
+        "provider returned an HTTP error"
+    );
+    let message = format_provider_error_message(
+        protocol_name,
+        status,
+        request_host.as_deref(),
+        details.as_ref(),
+        request_id.as_deref(),
+    );
 
     ModelError::from(OpenAiProviderError::provider_with_retry_after(
         kind,
@@ -546,16 +608,66 @@ fn classify_http_status(status: reqwest::StatusCode) -> ProviderErrorKind {
     match status.as_u16() {
         401 | 403 => ProviderErrorKind::Authentication,
         429 => ProviderErrorKind::RateLimited,
+        400..=499 => ProviderErrorKind::InvalidRequest,
         500..=599 => ProviderErrorKind::Unavailable,
         _ => ProviderErrorKind::Other,
     }
 }
 
-fn map_transport_error(error: reqwest::Error) -> ModelError {
+fn map_transport_error(
+    error: reqwest::Error,
+    protocol: OpenAiProtocol,
+    request_host: Option<&str>,
+) -> ModelError {
+    let protocol_name = openai_protocol_name(protocol);
+    let message = request_host.map_or_else(
+        || format!("OpenAI {protocol_name} transport failed: {error}"),
+        |host| {
+            format!(
+                "OpenAI {protocol_name} request to host {host} failed during transport: {error}"
+            )
+        },
+    );
     ModelError::from(OpenAiProviderError::provider(
         ProviderErrorKind::Unavailable,
-        format!("OpenAI Responses transport failed: {error}"),
+        message,
     ))
+}
+
+fn add_stream_endpoint_context(
+    error: ModelError,
+    protocol: OpenAiProtocol,
+    request_host: Option<&str>,
+) -> ModelError {
+    let Some(host) = request_host else {
+        return error;
+    };
+    let prefix = format!(
+        "OpenAI {} stream from host {host}",
+        openai_protocol_name(protocol)
+    );
+    match error {
+        ModelError::InvalidRequest { reason } => {
+            ModelError::invalid_request(format!("{prefix} failed: {reason}"))
+        }
+        ModelError::Provider {
+            kind,
+            message,
+            retry_after,
+        } => ModelError::provider_with_retry_after(
+            kind,
+            format!("{prefix} failed: {message}"),
+            retry_after,
+        ),
+        ModelError::Cancelled => ModelError::Cancelled,
+    }
+}
+
+fn openai_protocol_name(protocol: OpenAiProtocol) -> &'static str {
+    match protocol {
+        OpenAiProtocol::Responses => "Responses",
+        OpenAiProtocol::ChatCompletions => "Chat Completions",
+    }
 }
 
 fn parse_retry_after_header(value: &reqwest::header::HeaderValue) -> Option<Duration> {
@@ -563,17 +675,116 @@ fn parse_retry_after_header(value: &reqwest::header::HeaderValue) -> Option<Dura
     Some(Duration::from_secs(seconds))
 }
 
-fn provider_error_code(body: &[u8]) -> Option<String> {
-    let value = serde_json::from_slice::<Value>(body).ok()?;
-    let error = value.get("error")?;
-    error
-        .get("code")
-        .or_else(|| error.get("type"))
-        .and_then(Value::as_str)
-        .and_then(bounded_provider_metadata)
+#[derive(Debug, Default)]
+struct ProviderErrorDetails {
+    error_type: Option<String>,
+    code: Option<String>,
+    param: Option<String>,
+    message: Option<String>,
 }
 
-fn bounded_provider_metadata(value: &str) -> Option<String> {
+fn provider_error_details(body: &[u8]) -> Option<ProviderErrorDetails> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let error = value.get("error")?;
+    let details = ProviderErrorDetails {
+        error_type: error
+            .get("type")
+            .and_then(Value::as_str)
+            .and_then(bounded_provider_metadata),
+        code: error
+            .get("code")
+            .and_then(Value::as_str)
+            .and_then(bounded_provider_metadata),
+        param: error
+            .get("param")
+            .and_then(Value::as_str)
+            .and_then(bounded_provider_metadata),
+        message: error
+            .get("message")
+            .and_then(Value::as_str)
+            .and_then(bounded_provider_error_message),
+    };
+    (details.error_type.is_some()
+        || details.code.is_some()
+        || details.param.is_some()
+        || details.message.is_some())
+    .then_some(details)
+}
+
+fn format_provider_error_message(
+    protocol_name: &str,
+    status: reqwest::StatusCode,
+    request_host: Option<&str>,
+    details: Option<&ProviderErrorDetails>,
+    request_id: Option<&str>,
+) -> String {
+    let mut message = request_host.map_or_else(
+        || format!("OpenAI {protocol_name} request returned HTTP {status}"),
+        |host| format!("OpenAI {protocol_name} request to host {host} returned HTTP {status}"),
+    );
+    if let Some(details) = details {
+        if let Some(error_type) = details.error_type.as_deref() {
+            message.push_str(&format!(" (type: {error_type})"));
+        }
+        if let Some(code) = details.code.as_deref() {
+            message.push_str(&format!(" (code: {code})"));
+        }
+        if let Some(param) = details.param.as_deref() {
+            message.push_str(&format!(" (param: {param})"));
+        }
+        if let Some(provider_message) = details.message.as_deref() {
+            message.push_str(&format!(" (server error: {provider_message})"));
+        }
+    }
+    if let Some(request_id) = request_id {
+        message.push_str(&format!(" (request_id: {request_id})"));
+    }
+    message
+}
+
+fn bounded_endpoint_host(url: &reqwest::Url) -> Option<String> {
+    let host = url.host_str()?;
+    let value = match url.port() {
+        Some(port) if host.contains(':') => format!("[{host}]:{port}"),
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    };
+    (!value.is_empty() && value.chars().count() <= 256).then_some(value)
+}
+
+pub(crate) fn bounded_provider_error_message(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    if [
+        "sk-",
+        "rk-",
+        "bearer ",
+        "api_key",
+        "apikey",
+        "access_token",
+        "password",
+        "secret",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return None;
+    }
+
+    let sanitized: String = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let message = sanitized.trim();
+    (!message.is_empty()).then(|| message.chars().take(1_024).collect())
+}
+
+pub(crate) fn bounded_provider_metadata(value: &str) -> Option<String> {
     (!value.is_empty()
         && value.len() <= 128
         && value
@@ -586,7 +797,8 @@ fn bounded_provider_metadata(value: &str) -> Option<String> {
 mod tests {
     use super::{
         OpenAiEventStreamEvents, build_and_trace_responses_http_request, build_openai_http_request,
-        build_responses_http_request, classify_http_status, trace_openai_request_metadata,
+        build_responses_http_request, classify_http_status, format_provider_error_message,
+        trace_openai_request_metadata,
     };
     use crate::parse::ResponsesStreamParser;
     use crate::{OpenAiProtocol, OpenAiProviderConfig, OpenAiProviderError};
@@ -947,7 +1159,7 @@ mod tests {
         );
         assert_eq!(
             classify_http_status(reqwest::StatusCode::BAD_REQUEST),
-            ProviderErrorKind::Other
+            ProviderErrorKind::InvalidRequest
         );
     }
 
@@ -960,12 +1172,48 @@ mod tests {
             }
         }"#;
 
-        assert_eq!(
-            super::provider_error_code(body).as_deref(),
-            Some("invalid_request_error")
+        let details = super::provider_error_details(body).expect("error metadata should parse");
+        assert_eq!(details.code.as_deref(), Some("invalid_request_error"));
+        let message = format_provider_error_message(
+            "Responses",
+            reqwest::StatusCode::BAD_REQUEST,
+            None,
+            Some(&details),
+            None,
         );
+        assert!(!message.contains("prompt secret"));
+        assert!(!message.contains("sk-test"));
         assert!(super::bounded_provider_metadata("req_abc-123").is_some());
         assert!(super::bounded_provider_metadata("secret value with spaces").is_none());
+    }
+
+    #[test]
+    fn provider_error_message_preserves_safe_server_details() {
+        let body = br#"{
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_json_schema",
+                "param": "text.format.schema",
+                "message": "Invalid schema for response_format 'compacted_checkpoint_candidate': Missing 'rationale'."
+            }
+        }"#;
+        let details = super::provider_error_details(body).expect("error details should parse");
+        let message = format_provider_error_message(
+            "Responses",
+            reqwest::StatusCode::BAD_REQUEST,
+            Some("api.example.test:443"),
+            Some(&details),
+            Some("req_abc-123"),
+        );
+
+        assert!(message.contains("HTTP 400"));
+        assert!(message.contains("host api.example.test:443"));
+        assert!(message.contains("type: invalid_request_error"));
+        assert!(message.contains("code: invalid_json_schema"));
+        assert!(message.contains("param: text.format.schema"));
+        assert!(message.contains("server error: Invalid schema for response_format"));
+        assert!(message.contains("Missing 'rationale'."));
+        assert!(message.contains("request_id: req_abc-123"));
     }
 
     #[test]
@@ -1063,6 +1311,19 @@ mod tests {
                 .contains("unexpected Responses stream line")
         );
         assert!(error.to_string().contains("expected an SSE `data:` field"));
+    }
+
+    #[test]
+    fn responses_stream_error_preserves_safe_server_message() {
+        let mut parser = ResponsesStreamParser::new();
+        let error = parser
+            .parse_sse_line(
+                r#"data: {"type":"error","code":"invalid_request_error","message":"response schema is invalid"}"#,
+            )
+            .expect_err("provider stream error should be surfaced");
+
+        assert!(error.to_string().contains("invalid_request_error"));
+        assert!(error.to_string().contains("response schema is invalid"));
     }
 
     #[test]

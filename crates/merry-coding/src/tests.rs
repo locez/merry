@@ -228,7 +228,7 @@ fn coding_agent_profile_hash_tracks_tool_schema_and_coding_run_policy() {
 
     assert_ne!(base.profile_hash(), changed_schema.profile_hash());
     assert_ne!(base.profile_hash(), changed_policy.profile_hash());
-    assert_eq!(base.run_policy().max_model_turns(), 1024);
+    assert_eq!(base.run_policy().max_model_turns(), usize::MAX);
     assert_eq!(
         changed_policy
             .loop_config()
@@ -426,7 +426,7 @@ fn spawn_child_event() -> ModelEvent {
         ToolArguments::try_from(json!({
             "tasks": [{
                 "task": "Run the child permission task.",
-                "max_model_turns": 2,
+                "max_model_turns": 2048,
                 "allowed_tools": ["request_permissions"],
                 "write_scope": []
             }]
@@ -519,7 +519,10 @@ async fn run_parent_child_policy(
     .with_retry_policy(ModelRetryPolicy::disabled())
     .with_model_roles(model_roles)
     .with_subagents(CodingSubagentsConfig::enabled(
-        SubagentConfig::new(1, 1).expect("subagent limits should be valid"),
+        SubagentConfig::new(1, 1)
+            .expect("subagent limits should be valid")
+            .with_model_turn_bounds(2048, 2048)
+            .expect("coding subagent bounds should be valid"),
     ));
     let coding_runtime = CodingRuntimeBuilder::new(input)
         .permission_policy(permission)
@@ -580,7 +583,10 @@ async fn parent_builder_composes_full_coding_runtime_and_loop_policy() {
     let provider_input: Arc<dyn ModelProvider> = provider.clone();
     let model = ModelName::new("debug-model").expect("model name should be valid");
     let subagents = CodingSubagentsConfig::enabled(
-        SubagentConfig::new(2, 1).expect("subagent limits should be valid"),
+        SubagentConfig::new(2, 1)
+            .expect("subagent limits should be valid")
+            .with_model_turn_bounds(2048, 2048)
+            .expect("coding subagent bounds should be valid"),
     );
     let input = CodingRuntimeInput::new(
         SessionId::new("coding-parent-builder").expect("session id should be valid"),
@@ -829,7 +835,10 @@ async fn command_generation_builder_is_read_only_even_with_full_policy_inputs() 
         process_backend(),
     )
     .with_subagents(CodingSubagentsConfig::enabled(
-        SubagentConfig::new(2, 1).expect("subagent limits should be valid"),
+        SubagentConfig::new(2, 1)
+            .expect("subagent limits should be valid")
+            .with_model_turn_bounds(2048, 2048)
+            .expect("coding subagent bounds should be valid"),
     ));
 
     let coding_runtime = CodingRuntimeBuilder::for_command_generation(input)

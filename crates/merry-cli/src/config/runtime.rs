@@ -1,4 +1,5 @@
 use super::{ConfigError, MerryConfig, RuntimeModelToml, default_true, validate_model_text};
+use merry::profiles::{DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS, MIN_CODING_SUBAGENT_MODEL_TURNS};
 use merry_runtime::{AutomaticCompactionConfig, CitationCompactionPolicy};
 use serde::Deserialize;
 
@@ -195,7 +196,10 @@ impl SubagentsToml {
             self.max_depth.unwrap_or(defaults.max_depth()),
         )
         .map_err(|error| ConfigError::Invalid(error.to_string()))?
-        .with_max_model_turns(self.max_model_turns.unwrap_or(defaults.max_model_turns()))
+        .with_model_turn_bounds(
+            MIN_CODING_SUBAGENT_MODEL_TURNS,
+            self.max_model_turns.unwrap_or(defaults.max_model_turns()),
+        )
         .map_err(|error| ConfigError::Invalid(error.to_string()))?;
         Ok(SubagentsConfig {
             enabled: self.enabled,
@@ -204,10 +208,25 @@ impl SubagentsToml {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubagentsConfig {
     enabled: bool,
     limits: merry_runtime::SubagentConfig,
+}
+
+impl Default for SubagentsConfig {
+    fn default() -> Self {
+        let limits = merry_runtime::SubagentConfig::default()
+            .with_model_turn_bounds(
+                MIN_CODING_SUBAGENT_MODEL_TURNS,
+                DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS,
+            )
+            .expect("coding subagent default model-turn bounds are valid");
+        Self {
+            enabled: false,
+            limits,
+        }
+    }
 }
 
 impl SubagentsConfig {
@@ -231,7 +250,7 @@ impl SubagentsConfig {
             self.limits.max_depth(),
         )
         .map_err(|error| ConfigError::Invalid(error.to_string()))?
-        .with_max_model_turns(self.limits.max_model_turns())
+        .with_model_turn_bounds(self.limits.min_model_turns(), self.limits.max_model_turns())
         .map_err(|error| ConfigError::Invalid(error.to_string()))?;
         Ok(Self {
             enabled: enabled.unwrap_or(self.enabled),
@@ -389,7 +408,14 @@ retained_raw_tail_items = 10
             .subagents_config()
             .expect("default subagents config should validate");
         assert!(!missing.is_enabled());
-        assert_eq!(missing.limits(), merry_runtime::SubagentConfig::default());
+        assert_eq!(
+            missing.limits().min_model_turns(),
+            MIN_CODING_SUBAGENT_MODEL_TURNS
+        );
+        assert_eq!(
+            missing.limits().max_model_turns(),
+            DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS
+        );
 
         let enabled = MerryConfig::load_optional_from_text(
             Some(
@@ -398,7 +424,7 @@ retained_raw_tail_items = 10
 enabled = true
 max_threads = 3
 max_depth = 1
-max_model_turns = 96
+max_model_turns = 4096
 "#,
             ),
             &paths,
@@ -412,7 +438,7 @@ max_model_turns = 96
             enabled.limits(),
             merry_runtime::SubagentConfig::new(3, 1)
                 .expect("valid subagent config")
-                .with_max_model_turns(96)
+                .with_model_turn_bounds(MIN_CODING_SUBAGENT_MODEL_TURNS, 4096)
                 .expect("valid child model-turn limit")
         );
 

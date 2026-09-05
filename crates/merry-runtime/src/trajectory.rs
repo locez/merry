@@ -618,7 +618,7 @@ impl RuntimeObservability {
                 self.publish_tool_result(result, event.sequence, tool_output);
             }
             RuntimeJournalPayload::CompactionStarted => self.publish(
-                lifecycle_record(
+                compaction_record(
                     "compaction",
                     "Compaction",
                     TrajectoryRecordStatus::Running,
@@ -626,16 +626,17 @@ impl RuntimeObservability {
                 ),
                 event.sequence,
             ),
-            RuntimeJournalPayload::CompactionCompleted { checkpoint_id, .. } => {
-                let Some(mut record) = lifecycle_record(
-                    checkpoint_id,
-                    "Compaction",
-                    TrajectoryRecordStatus::Completed,
-                    event.sequence,
-                ) else {
+            RuntimeJournalPayload::CompactionCompleted {
+                checkpoint_id,
+                covered_history_item_count,
+            } => {
+                let Some(mut record) = self.active_compaction_record() else {
                     return;
                 };
-                record.set_summary(Some("Context checkpoint installed".to_owned()));
+                record.set_summary(Some(format!(
+                    "Context checkpoint installed: {checkpoint_id} ({covered_history_item_count} history items)"
+                )));
+                record.finish(TrajectoryRecordStatus::Completed, event.sequence);
                 self.publish(Some(record), event.sequence);
             }
             RuntimeJournalPayload::Cancelled { diagnostic } => {
@@ -651,6 +652,9 @@ impl RuntimeObservability {
                 );
             }
             RuntimeJournalPayload::Failed { diagnostic } => {
+                if diagnostic.code().starts_with("auto_compaction") {
+                    self.publish_active_compaction_failure(diagnostic, event.sequence);
+                }
                 self.publish(
                     lifecycle_failure_record(
                         "failed",
@@ -753,6 +757,29 @@ impl RuntimeObservability {
             }
         };
         let _ = self.updates.send(event);
+    }
+
+    fn publish_active_compaction_failure(&self, diagnostic: &ErrorInfo, sequence: u64) {
+        let Some(mut record) = self.active_compaction_record() else {
+            return;
+        };
+        record.set_summary(Some("Context checkpoint failed".to_owned()));
+        record.fail(diagnostic.clone(), sequence);
+        self.publish(Some(record), sequence);
+    }
+
+    fn active_compaction_record(&self) -> Option<TrajectoryRecord> {
+        let state = self.lock_state();
+        state
+            .snapshot
+            .records()
+            .iter()
+            .rev()
+            .find(|record| {
+                record.kind() == TrajectoryRecordKind::Compaction
+                    && record.status() == TrajectoryRecordStatus::Running
+            })
+            .cloned()
     }
 
     fn publish_session_closed(&self) {
@@ -880,12 +907,43 @@ fn lifecycle_record(
     status: TrajectoryRecordStatus,
     sequence: u64,
 ) -> Option<TrajectoryRecord> {
+    typed_lifecycle_record(
+        identity,
+        label,
+        TrajectoryRecordKind::Lifecycle,
+        status,
+        sequence,
+    )
+}
+
+fn compaction_record(
+    identity: &str,
+    label: &str,
+    status: TrajectoryRecordStatus,
+    sequence: u64,
+) -> Option<TrajectoryRecord> {
+    typed_lifecycle_record(
+        identity,
+        label,
+        TrajectoryRecordKind::Compaction,
+        status,
+        sequence,
+    )
+}
+
+fn typed_lifecycle_record(
+    identity: &str,
+    label: &str,
+    kind: TrajectoryRecordKind,
+    status: TrajectoryRecordStatus,
+    sequence: u64,
+) -> Option<TrajectoryRecord> {
     let identity = format!("{identity}-{sequence}");
     let mut record = record(
         "system",
         &identity,
         TrajectoryLane::System,
-        TrajectoryRecordKind::Lifecycle,
+        kind,
         status,
         sequence,
     )?;

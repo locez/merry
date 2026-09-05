@@ -4,7 +4,7 @@ use super::{
     protocol::{
         CancelSubagentsInput, SpawnSubagentTaskInput, SpawnSubagentsInput, WaitSubagentsInput,
     },
-    sanitize_diagnostic_message,
+    sanitize_diagnostic_message, validate_task_max_model_turns,
 };
 use crate::plan::projection::{CHILD_LINKED_SCOPE_GUIDANCE, LINKED_CHILD_DECOMPOSITION_GUIDANCE};
 use crate::{
@@ -18,17 +18,22 @@ use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 
 const WAIT_SEMANTIC_CHECKPOINT_GUIDANCE: &str = "Observe child statuses at semantic or terminal checkpoints; do not poll for high-frequency progress.";
+const CHILD_MODEL_TURN_GUIDANCE: &str = "max_model_turns covers the full child lifecycle, including tools, implementation, tests, verification, and reporting. Use enough turns for the task and never exceed the configured maximum. Omit it to use the configured default. If the limit is reached, the child is blocked but recoverable: inspect wait_subagents and spawn a replacement with the same plan_client_key and a larger budget within the configured maximum, continuing from the shared workspace.";
 
 /// Returns provider-visible subagent tool specs.
 pub fn subagent_tool_specs() -> Result<[ToolSpec; 3], merry_core::CoreError> {
-    subagent_tool_specs_with_default(super::DEFAULT_MAX_MODEL_TURNS)
+    subagent_tool_specs_with_bounds(
+        super::DEFAULT_MIN_MODEL_TURNS,
+        super::DEFAULT_MAX_MODEL_TURNS,
+    )
 }
 
-fn subagent_tool_specs_with_default(
-    default_max_model_turns: u32,
+fn subagent_tool_specs_with_bounds(
+    min_model_turns: u32,
+    max_model_turns: u32,
 ) -> Result<[ToolSpec; 3], merry_core::CoreError> {
     let mut spawn_schema = schemars::schema_for!(SpawnSubagentsInput);
-    if !set_max_model_turns_schema_default(&mut spawn_schema, default_max_model_turns) {
+    if !set_model_turns_schema_bounds(&mut spawn_schema, min_model_turns, max_model_turns) {
         return Err(merry_core::CoreError::InvalidSchema {
             kind: "SpawnSubagentsInput",
             reason: "generated schema is missing the max_model_turns property",
@@ -39,7 +44,7 @@ fn subagent_tool_specs_with_default(
         tool_spec_from_schema(
             SPAWN_SUBAGENTS_TOOL_NAME,
             &format!(
-                "Spawn bounded child agents for parallel delegated tasks. A terminal child result is delivered to the parent as a runtime update on the next model turn; it does not interrupt the current turn. Review that update before claiming the parent task is complete, and call wait_subagents when the compact result, diagnostics, or changed paths are needed. Omit max_model_turns to use the configured runtime default ({default_max_model_turns} unless changed by runtime policy). Use the structured scope fields when a child needs narrower boundaries; keep tasks[].task focused on the work and do not repeat scope declarations in task text. When binding a child to an authored Plan node, set plan_client_key to one of the authored strings in update_plan.bindable_plan_client_keys, such as `agent1_task`; never pass a runtime node id such as `plan-node-2`. When plan_client_key binds a child: {CHILD_LINKED_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process."
+                "Spawn bounded child agents for parallel delegated tasks. A terminal child result is delivered to the parent as a runtime update on the next model turn; it does not interrupt the current turn. Review that update before claiming the parent task is complete, and call wait_subagents when the compact result, diagnostics, or changed paths are needed. {CHILD_MODEL_TURN_GUIDANCE} The configured child model-turn range is {min_model_turns}..={max_model_turns}; explicit budgets outside it are rejected. Omit max_model_turns to use the configured default. Use the structured scope fields when a child needs narrower boundaries; keep tasks[].task focused on the work and do not repeat scope declarations in task text. When binding a child to an authored Plan node, set plan_client_key to one of the authored strings in update_plan.bindable_plan_client_keys, such as `agent1_task`; never pass a runtime node id such as `plan-node-2`. When plan_client_key binds a child: {CHILD_LINKED_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process."
             ),
             spawn_schema,
         )?,
@@ -61,7 +66,7 @@ pub fn subagent_registered_tools(
     manager: SubagentManager,
 ) -> Result<[RegisteredTool; 3], merry_core::CoreError> {
     let [spawn_spec, wait_spec, cancel_spec] =
-        subagent_tool_specs_with_default(manager.max_model_turns())?;
+        subagent_tool_specs_with_bounds(manager.min_model_turns(), manager.max_model_turns())?;
     Ok([
         RegisteredTool::new(
             spawn_spec,
@@ -113,7 +118,13 @@ impl ToolExecutor for SpawnSubagentsExecutor {
             let tasks = match input
                 .tasks
                 .into_iter()
-                .map(|task| task_spec_from_input(task, self.manager.max_model_turns()))
+                .map(|task| {
+                    task_spec_from_input(
+                        task,
+                        self.manager.min_model_turns(),
+                        self.manager.max_model_turns(),
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()
             {
                 Ok(tasks) => tasks,
@@ -268,16 +279,18 @@ fn tool_spec_from_schema(
     )
 }
 
-fn set_max_model_turns_schema_default(
+fn set_model_turns_schema_bounds(
     schema: &mut schemars::Schema,
-    default_max_model_turns: u32,
+    min_model_turns: u32,
+    max_model_turns: u32,
 ) -> bool {
-    set_max_model_turns_schema_default_in_value(schema.as_object_mut(), default_max_model_turns)
+    set_model_turns_schema_bounds_in_value(schema.as_object_mut(), min_model_turns, max_model_turns)
 }
 
-fn set_max_model_turns_schema_default_in_value(
+fn set_model_turns_schema_bounds_in_value(
     object: Option<&mut serde_json::Map<String, Value>>,
-    default_max_model_turns: u32,
+    min_model_turns: u32,
+    max_model_turns: u32,
 ) -> bool {
     let Some(object) = object else {
         return false;
@@ -289,17 +302,17 @@ fn set_max_model_turns_schema_default_in_value(
             .get_mut("max_model_turns")
             .and_then(Value::as_object_mut)
     {
-        field.insert(
-            "default".to_owned(),
-            serde_json::json!(default_max_model_turns),
-        );
+        field.insert("minimum".to_owned(), serde_json::json!(min_model_turns));
+        field.insert("default".to_owned(), serde_json::json!(max_model_turns));
+        field.insert("maximum".to_owned(), serde_json::json!(max_model_turns));
         found = true;
     }
 
     for child in object.values_mut() {
-        if set_max_model_turns_schema_default_in_value(
+        if set_model_turns_schema_bounds_in_value(
             child.as_object_mut(),
-            default_max_model_turns,
+            min_model_turns,
+            max_model_turns,
         ) {
             found = true;
         }
@@ -319,6 +332,7 @@ where
 
 fn task_spec_from_input(
     input: SpawnSubagentTaskInput,
+    min_model_turns: u32,
     default_max_model_turns: u32,
 ) -> Result<SubagentTaskSpec, InvalidSubagentToolArguments> {
     let SpawnSubagentTaskInput {
@@ -338,7 +352,10 @@ fn task_spec_from_input(
         .transpose()
         .map_err(|error| InvalidSubagentToolArguments::new(error.to_string()))?;
 
-    let mut task = SubagentTaskSpec::new(task, max_model_turns.unwrap_or(default_max_model_turns))
+    let max_model_turns = max_model_turns.unwrap_or(default_max_model_turns);
+    validate_task_max_model_turns(max_model_turns, min_model_turns, default_max_model_turns)
+        .map_err(InvalidSubagentToolArguments::from)?;
+    let mut task = SubagentTaskSpec::new(task, max_model_turns)
         .map_err(InvalidSubagentToolArguments::from)?
         .with_display_name(display_name);
     if let Some(allowed_tools) = allowed_tools {
@@ -574,7 +591,7 @@ mod tests {
         let valid_task = json!({
             "tasks": [{
                 "task": "Review the runtime.",
-                "max_model_turns": 1,
+                "max_model_turns": 20,
                 "read_scope": ["crates/merry-runtime"],
                 "write_scope": ["tmp/output"]
             }]
@@ -583,9 +600,15 @@ mod tests {
             panic!("valid task rejected by schema: {error}");
         }
 
+        assert_eq!(find_max_model_turns_minimum(spawn_schema), Some(1));
+
         let mut zero_turns = valid_task.clone();
         zero_turns["tasks"][0]["max_model_turns"] = json!(0);
         assert!(!spawn_validator.is_valid(&zero_turns));
+
+        let mut above_default = valid_task.clone();
+        above_default["tasks"][0]["max_model_turns"] = json!(1025);
+        assert!(!spawn_validator.is_valid(&above_default));
 
         let mut oversized_task = valid_task.clone();
         oversized_task["tasks"][0]["task"] = json!("x".repeat(16 * 1024 + 1));
@@ -794,7 +817,7 @@ mod tests {
     async fn spawn_tool_uses_manager_configured_default_max_model_turns() {
         let factory = Arc::new(CapturingChildFactory::default());
         let config = SubagentConfig::default()
-            .with_max_model_turns(96)
+            .with_max_model_turns(2048)
             .expect("positive child model-turn limit");
         let manager = SubagentManager::new(
             SessionId::new("configured-default").expect("valid session id"),
@@ -814,7 +837,7 @@ mod tests {
             .await
             .expect("spawn execution should succeed");
 
-        assert_eq!(factory.inputs()[0].task.max_model_turns(), 96);
+        assert_eq!(factory.inputs()[0].task.max_model_turns(), 2048);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1050,7 +1073,7 @@ mod tests {
     #[test]
     fn registered_subagent_schema_uses_manager_configured_model_turn_default() {
         let config = SubagentConfig::default()
-            .with_max_model_turns(96)
+            .with_max_model_turns(2048)
             .expect("positive child model-turn limit");
         let manager = SubagentManager::new(
             SessionId::new("configured-schema").expect("valid session id"),
@@ -1061,13 +1084,34 @@ mod tests {
         let schema =
             serde_json::to_value(tools[0].spec().input_schema()).expect("spawn schema serializes");
 
-        assert_eq!(find_max_model_turns_default(&schema), Some(96));
+        assert_eq!(find_max_model_turns_minimum(&schema), Some(1));
+        assert_eq!(find_max_model_turns_default(&schema), Some(2048));
+        assert_eq!(find_max_model_turns_maximum(&schema), Some(2048));
         assert!(
             tools[0]
                 .spec()
                 .description()
-                .contains("runtime default (96")
+                .contains("configured child model-turn range is 1..=2048")
         );
+    }
+
+    #[test]
+    fn registered_subagent_schema_uses_configured_model_turn_bounds() {
+        let config = SubagentConfig::default()
+            .with_model_turn_bounds(2048, 4096)
+            .expect("test model-turn bounds should be valid");
+        let manager = SubagentManager::new(
+            SessionId::new("configured-bounds").expect("valid session id"),
+            config,
+            Arc::new(CapturingChildFactory::default()),
+        );
+        let tools = subagent_registered_tools(manager).expect("registered tools should build");
+        let schema =
+            serde_json::to_value(tools[0].spec().input_schema()).expect("spawn schema serializes");
+
+        assert_eq!(find_max_model_turns_minimum(&schema), Some(2048));
+        assert_eq!(find_max_model_turns_default(&schema), Some(4096));
+        assert_eq!(find_max_model_turns_maximum(&schema), Some(4096));
     }
 
     fn find_max_model_turns_default(value: &Value) -> Option<u64> {
@@ -1083,5 +1127,35 @@ mod tests {
             return Some(default);
         }
         object.values().find_map(find_max_model_turns_default)
+    }
+
+    fn find_max_model_turns_minimum(value: &Value) -> Option<u64> {
+        let object = value.as_object()?;
+        if let Some(minimum) = object
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("max_model_turns"))
+            .and_then(Value::as_object)
+            .and_then(|field| field.get("minimum"))
+            .and_then(Value::as_u64)
+        {
+            return Some(minimum);
+        }
+        object.values().find_map(find_max_model_turns_minimum)
+    }
+
+    fn find_max_model_turns_maximum(value: &Value) -> Option<u64> {
+        let object = value.as_object()?;
+        if let Some(maximum) = object
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get("max_model_turns"))
+            .and_then(Value::as_object)
+            .and_then(|field| field.get("maximum"))
+            .and_then(Value::as_u64)
+        {
+            return Some(maximum);
+        }
+        object.values().find_map(find_max_model_turns_maximum)
     }
 }

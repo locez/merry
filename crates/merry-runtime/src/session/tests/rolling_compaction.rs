@@ -692,6 +692,17 @@ fn retained_archive_ref_stays_pinned_but_hidden_across_rolling_compactions() {
         !previous_ref_ids.contains(&result_ref.as_str()),
         "a pinned-only retained ref must not become previous-checkpoint evidence"
     );
+    let available_ref_ids = payload["available_ref_ids"]
+        .as_array()
+        .expect("available refs")
+        .iter()
+        .map(|ref_id| ref_id.as_str().expect("available ref id"))
+        .collect::<Vec<_>>();
+    assert!(available_ref_ids.contains(&"h0"));
+    assert!(
+        !available_ref_ids.contains(&result_ref.as_str()),
+        "a pinned-only retained ref must not become an available model ref"
+    );
 
     let error = checkpoint_from_candidate_json(
         second_input.manifest().checkpoint_id().clone(),

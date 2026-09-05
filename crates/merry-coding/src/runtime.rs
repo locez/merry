@@ -8,7 +8,7 @@
 use crate::child_runtime::{CodingChildRuntimeFactory, CodingRuntimeComposition};
 use crate::{
     CodingAgentProfile, CodingAgentProfileBuildError, CodingAgentProfileBuilder,
-    ProjectRulesLoadError, coding_agent, load_root_project_rules,
+    MIN_CODING_SUBAGENT_MODEL_TURNS, ProjectRulesLoadError, coding_agent, load_root_project_rules,
 };
 use merry_core::{CoreError, SessionId};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
@@ -17,7 +17,7 @@ use merry_runtime::{
     AgentLoopConfig, AgentLoopConfigError, AutomaticCompactionConfig, ChildRuntimeFactory,
     FileSessionStore, PermissionAdmissionSource, PermissionReviewMode, RegisteredTool, Runtime,
     RuntimeBuilder, RuntimeError, RuntimeModelRole, SkillCatalog, SkillError, SubagentConfig,
-    SubagentManager, subagent_registered_tools,
+    SubagentError, SubagentManager, subagent_registered_tools,
 };
 use merry_tool_workspace::WorkspaceToolLimits;
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
@@ -630,13 +630,18 @@ impl CodingRuntimeBuilder {
                 .accepted_process_session(process_session);
 
             if subagents.is_installed() {
+                let subagent_config = subagents.limits().with_model_turn_bounds(
+                    MIN_CODING_SUBAGENT_MODEL_TURNS,
+                    subagents.limits().max_model_turns(),
+                )?;
                 tracing::info!(
                     event = "runtime.subagents.enabled",
                     session_id = %session_id,
                     enabled = subagents.is_enabled(),
-                    max_threads = subagents.limits().max_threads(),
-                    max_depth = subagents.limits().max_depth(),
-                    max_model_turns = subagents.limits().max_model_turns(),
+                    max_threads = subagent_config.max_threads(),
+                    max_depth = subagent_config.max_depth(),
+                    min_model_turns = subagent_config.min_model_turns(),
+                    max_model_turns = subagent_config.max_model_turns(),
                     "runtime subagent tools installed"
                 );
                 let composition = CodingRuntimeComposition {
@@ -644,7 +649,7 @@ impl CodingRuntimeBuilder {
                     provider: Arc::clone(&provider),
                     model: model.clone(),
                     process_backend,
-                    subagent_config: subagents.limits(),
+                    subagent_config,
                     automatic_compaction,
                     policy: policy.clone(),
                 };
@@ -652,7 +657,7 @@ impl CodingRuntimeBuilder {
                     Arc::new(CodingChildRuntimeFactory::from_composition(composition));
                 let manager = SubagentManager::runtime_controlled(
                     session_id.clone(),
-                    subagents.limits(),
+                    subagent_config,
                     child_factory,
                     subagents.is_enabled(),
                 );
@@ -730,6 +735,9 @@ pub enum CodingRuntimeBuildError {
     /// The profile's coding loop policy was invalid.
     #[error(transparent)]
     LoopConfig(#[from] AgentLoopConfigError),
+    /// The coding profile's child-agent model-turn bounds were invalid.
+    #[error(transparent)]
+    SubagentConfig(#[from] SubagentError),
     /// Applying the profile to the runtime builder failed.
     #[error("failed to apply coding profile to runtime builder: {source}")]
     RuntimeProfileApply { source: RuntimeError },

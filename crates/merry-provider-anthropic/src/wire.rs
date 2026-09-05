@@ -162,4 +162,5 @@ pub(crate) struct AnthropicUsage {
 pub(crate) struct AnthropicStreamError {
     #[serde(rename = "type")]
     pub(crate) kind: Option<String>,
+    pub(crate) message: Option<String>,
 }

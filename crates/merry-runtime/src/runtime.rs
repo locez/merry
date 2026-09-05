@@ -73,7 +73,7 @@ use self::checkpoint_ref_tool::merry_read_checkpoint_ref_tool_name;
 use self::diagnostics::{
     DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED,
     DIAGNOSTIC_TOOL_NOT_REGISTERED, TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME,
-    diagnostic_from_text,
+    diagnostic_from_text, runtime_error_message,
 };
 use self::journal_emission::{
     send_cancelled_event, send_cancelled_if_requested, send_normal_event, send_step_started_event,

@@ -414,6 +414,86 @@ async fn rebinding_a_terminal_link_supersedes_stale_failure_and_reopens_plan() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn rebinding_a_blocked_link_reopens_plan_without_counting_failure() {
+    let (controller, _events) = controller(None);
+    controller
+        .begin(input("retry a blocked linked child"))
+        .await
+        .expect("begin succeeds");
+    controller
+        .update(UpdatePlanInput {
+            reason: "define retryable blocked linked task".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root: plan_leaf("blocked-retryable"),
+            },
+        })
+        .await
+        .expect("plan update succeeds");
+
+    let first = controller
+        .bind_subagent(
+            "blocked-retryable".to_owned(),
+            SubagentId::new("agent-blocked").expect("valid agent id"),
+            SubagentTaskId::new("task-blocked").expect("valid task id"),
+            10,
+        )
+        .await
+        .expect("first link binds");
+    controller
+        .update_subagent_link(first.binding_id.clone(), PlanLinkStatus::Blocked, 20)
+        .await
+        .expect("blocked link update commits");
+
+    let blocked = controller
+        .snapshot()
+        .await
+        .expect("snapshot reads")
+        .expect("active plan exists");
+    let node = blocked
+        .nodes
+        .iter()
+        .find(|node| node.client_key.as_deref() == Some("blocked-retryable"))
+        .expect("blocked node exists");
+    assert_eq!(node.status, PlanNodeStatus::Blocked);
+    assert_eq!(node.execution_summary.blocked, 1);
+    assert_eq!(node.execution_summary.failed, 0);
+    assert_eq!(blocked.phase, PlanPhase::Blocked);
+
+    let second = controller
+        .bind_subagent(
+            "blocked-retryable".to_owned(),
+            SubagentId::new("agent-retry-blocked").expect("valid agent id"),
+            SubagentTaskId::new("task-retry-blocked").expect("valid task id"),
+            30,
+        )
+        .await
+        .expect("replacement link binds");
+    let reopened = controller
+        .snapshot()
+        .await
+        .expect("snapshot reads")
+        .expect("active plan exists");
+    let node = reopened
+        .nodes
+        .iter()
+        .find(|node| node.client_key.as_deref() == Some("blocked-retryable"))
+        .expect("retryable node exists");
+    assert_eq!(node.execution_summary.blocked, 0);
+    assert_eq!(node.execution_summary.active, 1);
+    assert_eq!(node.status, PlanNodeStatus::InProgress);
+    assert_eq!(reopened.phase, PlanPhase::Executing);
+    assert!(node.links.iter().any(|link| {
+        link.binding_id == first.binding_id
+            && link.status == PlanLinkStatus::Superseded
+            && link.superseded_by == Some(second.binding_id.clone())
+    }));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn coordinator_cannot_replace_an_active_linked_node_or_its_ancestor() {
     let (controller, _events) = controller(None);
     controller

@@ -6,10 +6,11 @@ use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelOutput, ModelProvider,
     ModelRequest, ModelStreamContext, ProviderErrorKind,
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 const MAX_COMPACTION_PROVIDER_ATTEMPTS: usize = 2;
+const COMPACTION_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 pub(crate) fn validate_compaction_model_window(
     capabilities: &ModelCapabilities,
@@ -58,6 +59,15 @@ pub(crate) async fn generate_validated_compaction_candidate(
         if token.is_cancelled() {
             return Err(cancelled_setup_error("before compaction model setup"));
         }
+        tracing::debug!(
+            event = "runtime.compaction.attempt_started",
+            attempt,
+            max_attempts = MAX_COMPACTION_PROVIDER_ATTEMPTS,
+            model = request.model().as_str(),
+            message_count = request.messages().len(),
+            estimated_input_tokens = estimate_model_input_tokens(request.input()),
+            "starting compaction model attempt"
+        );
         let candidate = match run_compaction_attempt(
             provider.as_ref(),
             request.clone(),
@@ -67,12 +77,18 @@ pub(crate) async fn generate_validated_compaction_candidate(
         .await
         {
             Ok(candidate) => candidate,
-            Err(failure) if failure.cancelled => return Err(failure.error),
-            Err(failure) if attempt < MAX_COMPACTION_PROVIDER_ATTEMPTS => {
+            Err(failure) => {
+                trace_attempt_failure(attempt, &failure);
+                if failure.cancelled
+                    || !failure.retryable
+                    || attempt == MAX_COMPACTION_PROVIDER_ATTEMPTS
+                {
+                    return Err(failure.error);
+                }
                 trace_retry(attempt, &failure.error);
+                wait_before_compaction_retry(token).await?;
                 continue;
             }
-            Err(failure) => return Err(failure.error),
         };
 
         match checkpoint_from_candidate_json(
@@ -83,6 +99,7 @@ pub(crate) async fn generate_validated_compaction_candidate(
             Ok(_) => return Ok(candidate),
             Err(error) if attempt < MAX_COMPACTION_PROVIDER_ATTEMPTS => {
                 trace_retry(attempt, &error);
+                wait_before_compaction_retry(token).await?;
             }
             Err(error) => return Err(error),
         }
@@ -169,23 +186,35 @@ async fn run_compaction_attempt(
 }
 
 fn setup_failure(error: ModelError) -> AttemptFailure {
-    let cancelled = error.kind() == ProviderErrorKind::Cancelled;
+    let kind = error.kind();
     AttemptFailure {
         error: RuntimeError::CompactionModelSetup {
-            message: error.to_string(),
+            message: error.message().to_owned(),
         },
-        cancelled,
+        cancelled: kind == ProviderErrorKind::Cancelled,
+        retryable: is_retryable_provider_error(kind),
     }
 }
 
 fn stream_failure(error: ModelError) -> AttemptFailure {
-    let cancelled = error.kind() == ProviderErrorKind::Cancelled;
+    let kind = error.kind();
     AttemptFailure {
         error: RuntimeError::CompactionModelStream {
-            message: error.to_string(),
+            message: error.message().to_owned(),
         },
-        cancelled,
+        cancelled: kind == ProviderErrorKind::Cancelled,
+        retryable: is_retryable_provider_error(kind),
     }
+}
+
+fn is_retryable_provider_error(kind: ProviderErrorKind) -> bool {
+    !matches!(
+        kind,
+        ProviderErrorKind::InvalidRequest
+            | ProviderErrorKind::InvalidToolCall
+            | ProviderErrorKind::Cancelled
+            | ProviderErrorKind::Authentication
+    )
 }
 
 fn cancelled_setup_error(stage: &'static str) -> RuntimeError {
@@ -200,6 +229,14 @@ fn cancelled_stream_error(stage: &'static str) -> RuntimeError {
     }
 }
 
+async fn wait_before_compaction_retry(token: &CancellationToken) -> Result<(), RuntimeError> {
+    tokio::select! {
+        biased;
+        () = token.cancelled() => Err(cancelled_setup_error("before compaction retry")),
+        () = tokio::time::sleep(COMPACTION_RETRY_DELAY) => Ok(()),
+    }
+}
+
 fn trace_retry(attempt: usize, error: &RuntimeError) {
     tracing::debug!(
         event = "runtime.compaction.retry",
@@ -211,9 +248,22 @@ fn trace_retry(attempt: usize, error: &RuntimeError) {
     );
 }
 
+fn trace_attempt_failure(attempt: usize, failure: &AttemptFailure) {
+    tracing::debug!(
+        event = "runtime.compaction.attempt_failed",
+        attempt,
+        max_attempts = MAX_COMPACTION_PROVIDER_ATTEMPTS,
+        cancelled = failure.cancelled,
+        retryable = failure.retryable,
+        error = %failure.error,
+        "compaction model attempt failed"
+    );
+}
+
 struct AttemptFailure {
     error: RuntimeError,
     cancelled: bool,
+    retryable: bool,
 }
 
 impl AttemptFailure {
@@ -221,6 +271,7 @@ impl AttemptFailure {
         Self {
             error,
             cancelled: false,
+            retryable: true,
         }
     }
 
@@ -228,6 +279,7 @@ impl AttemptFailure {
         Self {
             error,
             cancelled: true,
+            retryable: false,
         }
     }
 }

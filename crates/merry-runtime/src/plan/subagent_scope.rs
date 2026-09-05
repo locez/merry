@@ -323,6 +323,7 @@ mod tests {
             PlanLinkStatus::Completed,
             PlanLinkStatus::Failed,
             PlanLinkStatus::Cancelled,
+            PlanLinkStatus::Blocked,
             PlanLinkStatus::Superseded,
         ] {
             let (controller, mut events) = controller(None);
@@ -710,6 +711,7 @@ mod tests {
             completed: 2,
             failed: 3,
             cancelled: 4,
+            blocked: 5,
         };
         let runtime_link = PlanLinkSnapshot {
             plan_id: defined.snapshot.plan_id.clone(),

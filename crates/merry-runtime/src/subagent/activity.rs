@@ -128,6 +128,7 @@ fn is_terminal_phase(phase: SubagentActivityPhase) -> bool {
         phase,
         SubagentActivityPhase::Completed
             | SubagentActivityPhase::Failed
+            | SubagentActivityPhase::Blocked
             | SubagentActivityPhase::Cancelled
     )
 }

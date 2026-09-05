@@ -483,7 +483,10 @@ pub(super) async fn bind_subagent(
             if existing.superseded_by.is_none()
                 && matches!(
                     existing.status,
-                    PlanLinkStatus::Completed | PlanLinkStatus::Failed | PlanLinkStatus::Cancelled
+                    PlanLinkStatus::Completed
+                        | PlanLinkStatus::Failed
+                        | PlanLinkStatus::Cancelled
+                        | PlanLinkStatus::Blocked
                 )
             {
                 existing.status = PlanLinkStatus::Superseded;
@@ -579,6 +582,7 @@ pub(super) async fn update_subagent_link(
             PlanLinkStatus::Completed
                 | PlanLinkStatus::Failed
                 | PlanLinkStatus::Cancelled
+                | PlanLinkStatus::Blocked
                 | PlanLinkStatus::Superseded
         )
         .then_some(now_ms);
@@ -627,6 +631,7 @@ fn recompute_link_projection(node: &mut merry_core::PlanNodeSnapshot) {
             PlanLinkStatus::Completed => summary.completed += 1,
             PlanLinkStatus::Failed => summary.failed += 1,
             PlanLinkStatus::Cancelled => summary.cancelled += 1,
+            PlanLinkStatus::Blocked => summary.blocked += 1,
             PlanLinkStatus::Superseded => {}
         }
     }
@@ -635,6 +640,8 @@ fn recompute_link_projection(node: &mut merry_core::PlanNodeSnapshot) {
         PlanNodeStatus::InProgress
     } else if summary.failed > 0 || summary.cancelled > 0 {
         PlanNodeStatus::Failed
+    } else if summary.blocked > 0 {
+        PlanNodeStatus::Blocked
     } else if summary.completed > 0 {
         PlanNodeStatus::Completed
     } else {

@@ -55,6 +55,9 @@ pub struct PlanExecutionSummary {
     pub completed: u32,
     pub failed: u32,
     pub cancelled: u32,
+    /// Linked work stopped before completion but may be replaced.
+    #[serde(default)]
+    pub blocked: u32,
 }
 
 /// Lifecycle state of one runtime-owned Plan/subagent association.
@@ -65,6 +68,8 @@ pub enum PlanLinkStatus {
     Completed,
     Failed,
     Cancelled,
+    /// Linked work stopped without completing and can be replaced.
+    Blocked,
     Superseded,
 }
 

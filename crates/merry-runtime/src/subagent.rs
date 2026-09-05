@@ -1,8 +1,9 @@
 //! Runtime-owned parallel subagent tool contracts.
 
 use crate::{
-    AgentLoopConfig, AgentLoopResult, AgentLoopStatus, AgentRunMessage, ArtifactContent,
-    PlanSubagentControl, Runtime, RuntimeError, StepContext, StepInput, TaskAnchor,
+    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopResult, AgentLoopStatus, AgentRunMessage,
+    ArtifactContent, PlanSubagentControl, Runtime, RuntimeError, StepContext, StepInput,
+    TaskAnchor,
     plan::{PlanController, SubagentPlanUpdateInput},
 };
 use activity::SubagentActivityReducer;
@@ -38,11 +39,11 @@ pub use protocol::{
 };
 #[cfg(test)]
 use spec::MAX_TASK_BYTES;
-use spec::validate_scope_path;
 pub use spec::{
-    DEFAULT_MAX_MODEL_TURNS, SubagentConfig, SubagentError, SubagentTaskSpec,
-    validate_no_write_scope_conflicts,
+    DEFAULT_MAX_MODEL_TURNS, DEFAULT_MIN_MODEL_TURNS, SubagentConfig, SubagentError,
+    SubagentTaskSpec, validate_no_write_scope_conflicts,
 };
+use spec::{validate_scope_path, validate_task_max_model_turns};
 pub use tools::{subagent_registered_tools, subagent_tool_specs};
 
 /// Formats terminal child statuses as a model-visible runtime continuation.
@@ -66,7 +67,7 @@ pub(crate) fn completion_notification_text(statuses: &[SubagentStatusView]) -> S
         text.push('\n');
     }
     text.push_str(
-        "Call wait_subagents with the listed agent ids when the compact result, diagnostics, or changed paths are needed.",
+        "Call wait_subagents with the listed agent ids when the compact result, diagnostics, or changed paths are needed. A blocked child caused by max_model_turns_reached is recoverable: spawn a replacement with the same plan_client_key and a larger budget within the configured maximum, continuing from the shared workspace.",
     );
     text
 }
@@ -343,6 +344,7 @@ pub(crate) fn plan_link_runtime_for_controller(
 pub struct SubagentManager {
     enabled: Arc<AtomicBool>,
     max_threads: Arc<AtomicUsize>,
+    min_model_turns: Arc<AtomicU32>,
     max_model_turns: Arc<AtomicU32>,
     has_agents: Arc<AtomicBool>,
     factory: Arc<dyn ChildRuntimeFactory>,
@@ -539,6 +541,7 @@ impl SubagentManager {
         Self {
             enabled: Arc::new(AtomicBool::new(enabled)),
             max_threads: Arc::new(AtomicUsize::new(config.max_threads())),
+            min_model_turns: Arc::new(AtomicU32::new(config.min_model_turns())),
             max_model_turns: Arc::new(AtomicU32::new(config.max_model_turns())),
             has_agents: Arc::new(AtomicBool::new(false)),
             factory,
@@ -666,6 +669,8 @@ impl SubagentManager {
     ) -> Result<(), RuntimeError> {
         self.max_threads
             .store(config.max_threads(), Ordering::Release);
+        self.min_model_turns
+            .store(config.min_model_turns(), Ordering::Release);
         self.max_model_turns
             .store(config.max_model_turns(), Ordering::Release);
         self.enabled.store(enabled, Ordering::Release);
@@ -696,8 +701,14 @@ impl SubagentManager {
             .collect()
     }
 
-    /// Returns the configured default model-turn budget for omitted child task
+    /// Returns the configured minimum model-turn budget for explicit child task
     /// inputs.
+    pub(crate) fn min_model_turns(&self) -> u32 {
+        self.min_model_turns.load(Ordering::Acquire)
+    }
+
+    /// Returns the configured maximum model-turn budget for explicit child task
+    /// inputs and the default for omitted budgets.
     pub(crate) fn max_model_turns(&self) -> u32 {
         self.max_model_turns.load(Ordering::Acquire)
     }
@@ -783,6 +794,17 @@ impl SubagentManager {
         let mut inherited_tasks = Vec::with_capacity(tasks.len());
         let mut rejected = Vec::new();
         for (task_index, task) in tasks.into_iter().enumerate() {
+            if let Err(error) = validate_task_max_model_turns(
+                task.max_model_turns(),
+                self.min_model_turns(),
+                self.max_model_turns(),
+            ) {
+                rejected.push(RejectedSubagentView {
+                    task_index,
+                    reason: error.to_string(),
+                });
+                continue;
+            }
             match self.apply_parent_capabilities(task) {
                 Ok(task) => inherited_tasks.push((task_index, task)),
                 Err(error) => rejected.push(RejectedSubagentView {
@@ -1893,6 +1915,7 @@ fn plan_link_status_for_agent(agent: &ManagedSubagent) -> PlanLinkStatus {
     match agent.status {
         SubagentStatusLabel::Completed => PlanLinkStatus::Completed,
         SubagentStatusLabel::Cancelled => PlanLinkStatus::Cancelled,
+        SubagentStatusLabel::Blocked => PlanLinkStatus::Blocked,
         SubagentStatusLabel::Failed => PlanLinkStatus::Failed,
         SubagentStatusLabel::Queued | SubagentStatusLabel::Running => PlanLinkStatus::Failed,
     }
@@ -1904,6 +1927,7 @@ fn terminal_activity_for_agent(
     let phase = match agent.status {
         SubagentStatusLabel::Completed => SubagentActivityPhase::Completed,
         SubagentStatusLabel::Failed => SubagentActivityPhase::Failed,
+        SubagentStatusLabel::Blocked => SubagentActivityPhase::Blocked,
         SubagentStatusLabel::Cancelled => SubagentActivityPhase::Cancelled,
         SubagentStatusLabel::Queued | SubagentStatusLabel::Running => return None,
     };
@@ -1979,6 +2003,7 @@ fn initial_summary(status: SubagentStatusLabel) -> String {
         SubagentStatusLabel::Running => "child running".to_owned(),
         SubagentStatusLabel::Completed => "child completed".to_owned(),
         SubagentStatusLabel::Failed => "child failed".to_owned(),
+        SubagentStatusLabel::Blocked => "child blocked".to_owned(),
         SubagentStatusLabel::Cancelled => "child cancelled".to_owned(),
     }
 }
@@ -2039,9 +2064,24 @@ fn apply_loop_result(
             agent.diagnostics = Some(diagnostic.clone());
         }
         AgentLoopStatus::Blocked { reason } => {
-            agent.status = SubagentStatusLabel::Failed;
-            agent.summary = format!("child blocked: {reason:?}");
-            agent.diagnostics = Some(error_info("subagent_blocked", format!("{reason:?}")));
+            agent.status = SubagentStatusLabel::Blocked;
+            match reason {
+                AgentLoopBlockedReason::MaxModelTurnsReached { max_model_turns } => {
+                    agent.summary = format!(
+                        "child blocked after {max_model_turns} model turns; spawn a replacement with a larger budget"
+                    );
+                    agent.diagnostics = Some(error_info(
+                        "subagent_max_model_turns_reached",
+                        format!(
+                            "child used all {max_model_turns} model turns. This is recoverable: inspect the returned status and spawn a replacement with the same plan_client_key and a larger budget within the configured maximum; use a larger value for complex tasks and continue from the shared workspace."
+                        ),
+                    ));
+                }
+                _ => {
+                    agent.summary = format!("child blocked: {reason:?}");
+                    agent.diagnostics = Some(error_info("subagent_blocked", format!("{reason:?}")));
+                }
+            }
         }
     }
 }
@@ -2304,6 +2344,15 @@ mod tests {
     fn subagent_config_uses_a_reasonable_child_model_turn_default() {
         assert_eq!(SubagentConfig::default().max_model_turns(), 1024);
         assert_eq!(DEFAULT_MAX_MODEL_TURNS, 1024);
+    }
+
+    #[test]
+    fn subagent_config_accepts_small_sdk_model_turn_budgets() {
+        let config = SubagentConfig::default()
+            .with_max_model_turns(20)
+            .expect("positive SDK budget should be accepted");
+
+        assert_eq!(config.max_model_turns(), 20);
     }
 
     #[test]
@@ -5050,5 +5099,51 @@ mod manager_tests {
             snapshot[0].status,
             SubagentStatusLabel::Running | SubagentStatusLabel::Completed
         ));
+    }
+
+    #[test]
+    fn max_model_turns_result_is_exposed_as_recoverable_blocked_child() {
+        let task = SubagentTaskSpec::new("Continue the implementation.", 40).expect("valid task");
+        let task_anchor = TaskAnchor::new(task.task()).expect("valid task anchor");
+        let agent_id = SubagentId::new("agent-budget-blocked").expect("valid agent id");
+        let task_id = SubagentTaskId::new("task-budget-blocked").expect("valid task id");
+        let mut agent = ManagedSubagent {
+            batch_id: 1,
+            agent_id,
+            task_id,
+            task,
+            task_anchor,
+            status: SubagentStatusLabel::Running,
+            summary: "child running".to_owned(),
+            result: None,
+            output_paths: Vec::new(),
+            changed_paths: Vec::new(),
+            diagnostics: None,
+            cancellation_token: CancellationToken::new(),
+            plan_link: None,
+            completion_notification_acknowledged: false,
+        };
+        let result = AgentLoopResult::new(
+            AgentLoopStatus::Blocked {
+                reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                    max_model_turns: 40,
+                },
+            },
+            Vec::new(),
+            40,
+            None,
+            None,
+        );
+
+        apply_loop_result(&mut agent, &result, ChildLoopProjection::default());
+
+        assert_eq!(agent.status, SubagentStatusLabel::Blocked);
+        assert_eq!(
+            agent.diagnostics.as_ref().map(ErrorInfo::code),
+            Some("subagent_max_model_turns_reached")
+        );
+        let diagnostic = agent.diagnostics.as_ref().expect("blocked diagnostic");
+        assert!(diagnostic.message().contains("same plan_client_key"));
+        assert!(diagnostic.message().contains("larger budget"));
     }
 }
