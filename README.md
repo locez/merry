@@ -128,6 +128,38 @@ provider = "openai-compatible"
 model = "gpt-4.1-mini"
 ```
 
+### MCP Availability
+
+Configured HTTP MCP servers are optional at startup: connection, authentication,
+and remote-protocol failures produce visible TUI warnings or headless stderr
+warnings while Merry continues. Invalid local configuration still fails validation.
+Discovery allows up to four concurrent servers, five seconds per server, and ten
+seconds overall. Headless JSONL output remains machine-readable.
+
+Each session freezes its external tool definitions, bindings, and order before
+the first model request. Resume restores that catalog even when a server is
+offline. Available executors may reconnect on use after a five-second cooldown.
+If an MCP endpoint returns HTTP 404 for an existing transport session, Merry
+treats that session as expired, rebuilds it on a later use, and does not replay
+the failed call;
+known-unavailable tools return recorded failures rather than leaving unresolved
+calls. Timed-out tool calls are not replayed: their side effects may be unknown.
+Authentication failures require correcting credentials and resuming the session;
+they are not retried on every tool invocation.
+
+New tools and incompatible definitions require a new session. Removing a server,
+narrowing its allowlist, or changing its endpoint disables affected saved tools
+without deleting their provider-visible definitions. A session that first starts
+without any known definitions does not silently gain tools after reconnecting.
+This prevents connectivity-induced prompt-prefix changes, not provider cache
+expiration or changes to other parts of the prompt.
+
+Session state uses format 4 and requires an external tool catalog, even when it
+is empty. Other formats are rejected without migration; Merry is not yet released
+and does not support historical session formats. Start a new session if a saved
+session uses an unsupported format. Catalogs do not store authentication headers
+or MCP transport session IDs.
+
 ## Use The CLI
 
 ```bash

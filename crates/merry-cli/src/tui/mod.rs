@@ -63,6 +63,8 @@ mod tool_error;
 #[cfg(test)]
 mod history_tests;
 #[cfg(test)]
+mod mcp_tests;
+#[cfg(test)]
 mod plan_tests;
 #[cfg(test)]
 mod slash_stop_tests;
@@ -183,6 +185,7 @@ pub(crate) async fn run(
             }
         }
     }
+    project_mcp_startup_warnings(&mut state, &session.startup_warnings);
     controller::run_controller(
         terminal,
         session,
@@ -192,6 +195,15 @@ pub(crate) async fn run(
         provider_management,
     )
     .await
+}
+
+fn project_mcp_startup_warnings(state: &mut TuiState, warnings: &[merry_mcp::McpServerDiagnostic]) {
+    for warning in warnings {
+        state.push_timeline_item(state::TimelineItem::Diagnostic {
+            title: "MCP startup warning".to_owned(),
+            body: crate::mcp_tools::format_mcp_warning(warning),
+        });
+    }
 }
 
 fn has_runtime_selection(config: Option<&MerryConfig>, preferences: &TuiPreferences) -> bool {

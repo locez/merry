@@ -36,7 +36,7 @@ use std::{
     sync::Arc,
 };
 
-const CURRENT_SESSION_STATE_FORMAT_VERSION: u32 = 3;
+const CURRENT_SESSION_STATE_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredSessionDocumentHeader {
@@ -66,6 +66,7 @@ struct StoredSessionDocument {
     terminal_plans: Vec<PlanSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     trajectory_snapshot: Option<TrajectorySnapshot>,
+    external_tool_catalog: merry_core::SessionToolCatalog,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -330,6 +331,7 @@ impl SessionState {
             active_plan: view.active_plan.map(PlanState::persisted),
             terminal_plans: view.terminal_plans.to_vec(),
             trajectory_snapshot: view.trajectory_snapshot.cloned(),
+            external_tool_catalog: self.external_tool_catalog.clone(),
         };
         let document_bytes = serde_json::to_vec_pretty(&document)?;
         Ok(PersistableSessionBundle {
@@ -423,6 +425,7 @@ impl SessionState {
                 .collect::<BTreeSet<_>>(),
             usage: document.usage,
             trajectory_snapshot: document.trajectory_snapshot,
+            external_tool_catalog: document.external_tool_catalog,
         };
 
         if let Some(anchor) = document.task_anchor {

@@ -35,12 +35,12 @@ impl JsonRpcRequest {
         }
     }
 
-    pub(crate) fn tools_list(id: u64) -> Self {
+    pub(crate) fn tools_list(id: u64, cursor: Option<&str>) -> Self {
         Self {
             jsonrpc: "2.0",
             id: Some(id),
             method: "tools/list",
-            params: None,
+            params: cursor.map(|cursor| json!({ "cursor": cursor })),
         }
     }
 
@@ -66,12 +66,7 @@ impl<T> JsonRpcResponse<T> {
         match (self.result, self.error) {
             (Some(result), None) => Ok(result),
             (None, Some(error)) => Err(error),
-            (Some(result), Some(_)) => Ok(result),
-            (None, None) => Err(JsonRpcError {
-                code: -32603,
-                message: "JSON-RPC response contained neither result nor error".to_owned(),
-                data: None,
-            }),
+            (Some(_), Some(_)) | (None, None) => Err(JsonRpcError { code: -32603 }),
         }
     }
 }
@@ -80,14 +75,14 @@ impl<T> JsonRpcResponse<T> {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct JsonRpcError {
     pub(crate) code: i64,
-    pub(crate) message: String,
-    pub(crate) data: Option<Value>,
 }
 
 /// `tools/list` response payload.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ToolsListResult {
     pub(crate) tools: Vec<McpTool>,
+    #[serde(default, rename = "nextCursor")]
+    pub(crate) next_cursor: Option<String>,
 }
 
 /// MCP tool descriptor.

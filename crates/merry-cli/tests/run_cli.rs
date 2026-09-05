@@ -18,6 +18,43 @@ api_key = \"sk-offline-not-used\"
 ";
 
 #[test]
+fn mcp_outage_warns_on_stderr_but_reaches_the_runtime_and_preserves_jsonl_output() {
+    let temp = tempfile::tempdir().unwrap();
+    write_xdg_config(
+        &temp,
+        &format!(
+            "{OFFLINE_PROVIDER_CONFIG}\n[providers.retry]\nenabled = false\n[mcp.offline]\nurl = 'http://127.0.0.1:9/mcp'\n"
+        ),
+    );
+    let output = merry_without_openai_env_and_xdg(&temp)
+        .args([
+            "--no-sandbox",
+            "run",
+            "--events-jsonl",
+            "--session-id",
+            "mcp-outage",
+            "continue without MCP",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Warning: MCP offline:"), "{stderr}");
+    assert!(stderr.contains("Merry continues"), "{stderr}");
+    let events = support::parse_jsonl(&output.stdout);
+    assert!(
+        events.iter().any(|event| event["type"] == "step_started"),
+        "{events:?}"
+    );
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(session_state_path(&temp, "mcp-outage")).unwrap())
+            .unwrap();
+    assert_eq!(
+        state["external_tool_catalog"]["entries"],
+        serde_json::json!([])
+    );
+}
+
+#[test]
 fn run_refuses_a_whitespace_only_stdin_task_before_emitting_events() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     write_xdg_config(&temp, OFFLINE_PROVIDER_CONFIG);

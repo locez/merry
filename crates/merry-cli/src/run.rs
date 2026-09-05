@@ -3,11 +3,11 @@ use crate::coding::{
     CodingPermissionPolicy, CodingTrustMode, HeadlessCodingRuntimeInput, ProcessExecutionMode,
     action_process_runner_for_mode, build_headless_coding_with_policy_composition,
     coding_agent_process_admission, coding_agent_requires_sandbox_error,
-    resume_headless_coding_composition_with_policy,
+    resume_headless_coding_composition_with_loaded_session,
 };
 use crate::config::MerryConfig;
 use crate::headless_review::{HeadlessPermissionReviewer, ReviewInputChannel};
-use crate::mcp_tools::discover_configured_mcp_tools;
+use crate::mcp_tools::{McpSession, discover_configured_mcp_tools, write_startup_warnings};
 use crate::provider_config::{
     RuntimePrimaryProviderConfig, RuntimeProviderBundle, runtime_provider_bundle_from_config,
 };
@@ -21,7 +21,7 @@ use crate::tui::session_list::{TuiSessionMetadata, TuiSessionStore, now_unix_ms}
 use merry_core::{ErrorInfo, RuntimeEvent, SessionId, ToolCallResultStatus};
 use merry_runtime::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopResult, AgentLoopStatus, FileSessionStore,
-    Runtime, SessionReservation, StepContext, StepInput,
+    LoadedSession, Runtime, SessionReservation, StepContext, StepInput,
 };
 use std::{env, future::Future};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
@@ -228,14 +228,31 @@ pub(crate) async fn run(
         process_execution_mode,
     )?;
     let headless_metadata = headless_session_metadata(&session_store, &session, &root).await?;
-    let extra_tools = discover_configured_mcp_tools(merry_config).await?;
+    let loaded_session = match &session {
+        RunSession::New(_) => None,
+        RunSession::Resumed(id) => Some(
+            LoadedSession::load(&session_store, id)
+                .await
+                .map_err(|error| unexpected(format!("could not resume session {id}: {error}")))?,
+        ),
+    };
+    let mcp_session =
+        loaded_session
+            .as_ref()
+            .map_or(McpSession::New, |loaded| McpSession::Resumed {
+                catalog: loaded.external_tool_catalog(),
+            });
+    let mcp = discover_configured_mcp_tools(merry_config, mcp_session).await?;
+    write_startup_warnings(&mut tokio::io::stderr(), &mcp.warnings)
+        .await
+        .map_err(unexpected)?;
     let runtime_input = HeadlessCodingRuntimeInput {
         session_id: session.id().as_str(),
         root: &root,
         provider,
         model,
         process_backend: backend,
-        extra_tools,
+        extra_tools: mcp.tools,
         allow_hidden_workspace_paths: false,
         automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
         retry_policy,
@@ -263,20 +280,20 @@ pub(crate) async fn run(
         Some(headless_reviewer.source()),
     )
     .map_err(unexpected)?;
-    let coding_runtime = match &session {
-        RunSession::New(_) => {
-            build_headless_coding_with_policy_composition(runtime_input, permission_policy)?
-        }
-        RunSession::Resumed(id) => resume_headless_coding_composition_with_policy(
+    let coding_runtime = match loaded_session {
+        None => build_headless_coding_with_policy_composition(runtime_input, permission_policy)?,
+        Some(loaded) => resume_headless_coding_composition_with_loaded_session(
             runtime_input,
-            session_store.clone(),
+            loaded,
             permission_policy,
-        )
-        .await
-        .map_err(|error| unexpected(format!("could not resume session {id}: {error}")))?,
+        )?,
     };
     let loop_config = coding_runtime.loop_config();
     let runtime = coding_runtime.into_runtime();
+    runtime
+        .save_session_to(session_store.clone())
+        .await
+        .map_err(unexpected)?;
     let input = StepInput::user_text(&task).map_err(unexpected)?;
     let context = StepContext::default()
         .with_generation_config(generation_config(merry_config).map_err(unexpected)?);

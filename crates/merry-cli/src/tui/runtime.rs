@@ -2,10 +2,10 @@ use crate::cli_error::{CliError, debug_openai_usage_error, unexpected};
 use crate::coding::{
     CodingPermissionPolicy, CodingTrustMode, HeadlessCodingRuntimeInput, ProcessExecutionMode,
     action_process_runner_for_mode, build_headless_coding_with_policy_composition,
-    coding_agent_process_admission, resume_headless_coding_composition_with_policy,
+    coding_agent_process_admission, resume_headless_coding_composition_with_loaded_session,
 };
 use crate::config::MerryConfig;
-use crate::mcp_tools::discover_configured_mcp_tools;
+use crate::mcp_tools::{McpSession, discover_configured_mcp_tools};
 use crate::provider_config::{
     RuntimePrimaryProviderConfig, RuntimeProviderBundle,
     runtime_primary_provider_from_config_with_override,
@@ -21,11 +21,13 @@ use crate::tui::session_list::{TuiSessionMetadata, TuiSessionStore, now_unix_ms}
 use crate::tui::session_picker::SessionPickerSelection;
 use merry_core::SessionId;
 use merry_llm::GenerationConfig;
+use merry_mcp::McpServerDiagnostic;
 use merry_runtime::{
     AgentLoopControl, AgentLoopInput, AutomaticCompactionConfig, ChannelPermissionAdmissionSource,
     InteractivePrimaryModel, InteractiveRunEventStream, InteractiveSettingsUpdate,
-    InteractiveSubagentSettings, PermissionReviewRequest, Runtime, SessionReservation,
-    SessionTranscriptItem, SkillMetadata, StepContext, SubagentActivityReceiver,
+    InteractiveSubagentSettings, LoadedSession, PermissionReviewRequest, Runtime,
+    SessionReservation, SessionTranscriptItem, SkillMetadata, StepContext,
+    SubagentActivityReceiver,
 };
 use std::{collections::VecDeque, env, num::NonZeroU64, path::PathBuf, sync::Arc};
 use tokio::sync::mpsc;
@@ -36,6 +38,7 @@ pub(crate) struct TuiRuntimeSession {
     pub(crate) reasoning_effort_label: Option<String>,
     pub(crate) metadata: TuiSessionMetadata,
     pub(crate) resumed: bool,
+    pub(crate) startup_warnings: Vec<McpServerDiagnostic>,
     runtime: Runtime,
     session_store: TuiSessionStore,
     pub(crate) stream: InteractiveRunEventStream,
@@ -103,7 +106,25 @@ pub(crate) async fn start_tui_runtime_session(
     )?;
     let (permission_source, permission_requests) = ChannelPermissionAdmissionSource::channel(8);
     let permission_source = Arc::new(permission_source);
-    let extra_tools = discover_configured_mcp_tools(merry_config).await?;
+    let state_store = session_store.session_state_store();
+    let loaded_session = if should_resume {
+        Some(
+            LoadedSession::load(&state_store, &session_id)
+                .await
+                .map_err(|error| {
+                    unexpected(format!("could not resume session {session_id}: {error}"))
+                })?,
+        )
+    } else {
+        None
+    };
+    let mcp_session =
+        loaded_session
+            .as_ref()
+            .map_or(McpSession::New, |loaded| McpSession::Resumed {
+                catalog: loaded.external_tool_catalog(),
+            });
+    let mcp = discover_configured_mcp_tools(merry_config, mcp_session).await?;
     let subagents = subagents_config(merry_config)
         .map_err(unexpected)?
         .with_overrides(
@@ -117,7 +138,7 @@ pub(crate) async fn start_tui_runtime_session(
         provider,
         model,
         process_backend: backend,
-        extra_tools,
+        extra_tools: mcp.tools,
         allow_hidden_workspace_paths: false,
         automatic_compaction: automatic_compaction_config_with_preferences(
             merry_config,
@@ -148,18 +169,20 @@ pub(crate) async fn start_tui_runtime_session(
         Some(permission_source),
     )
     .map_err(unexpected)?;
-    let coding_runtime = if should_resume {
-        resume_headless_coding_composition_with_policy(
+    let coding_runtime = match loaded_session {
+        Some(loaded) => resume_headless_coding_composition_with_loaded_session(
             runtime_input,
-            session_store.session_state_store(),
+            loaded,
             permission_policy,
-        )
-        .await?
-    } else {
-        build_headless_coding_with_policy_composition(runtime_input, permission_policy)?
+        )?,
+        None => build_headless_coding_with_policy_composition(runtime_input, permission_policy)?,
     };
     let loop_config = coding_runtime.loop_config();
     let runtime = coding_runtime.into_runtime();
+    runtime
+        .save_session_to(state_store)
+        .await
+        .map_err(unexpected)?;
     let skills = runtime.skills().await;
     let interactive = runtime
         .start_interactive_agent_run(
@@ -186,6 +209,7 @@ pub(crate) async fn start_tui_runtime_session(
         reasoning_effort_label,
         metadata,
         resumed: should_resume,
+        startup_warnings: mcp.warnings,
         runtime,
         session_store,
         stream,

@@ -73,10 +73,18 @@ pub(crate) struct SessionState {
     resolved_tool_calls: BTreeSet<ToolCallId>,
     usage: Option<merry_core::SessionUsage>,
     trajectory_snapshot: Option<TrajectorySnapshot>,
+    external_tool_catalog: merry_core::SessionToolCatalog,
 }
 
 impl SessionState {
     pub(crate) fn new(session_id: SessionId) -> Self {
+        Self::with_external_tool_catalog(session_id, merry_core::SessionToolCatalog::default())
+    }
+
+    pub(crate) fn with_external_tool_catalog(
+        session_id: SessionId,
+        external_tool_catalog: merry_core::SessionToolCatalog,
+    ) -> Self {
         Self {
             session_id,
             next_sequence: 0,
@@ -102,11 +110,16 @@ impl SessionState {
             resolved_tool_calls: BTreeSet::new(),
             usage: None,
             trajectory_snapshot: None,
+            external_tool_catalog,
         }
     }
 
     pub(crate) fn trajectory_snapshot(&self) -> Option<TrajectorySnapshot> {
         self.trajectory_snapshot.clone()
+    }
+
+    pub(crate) fn external_tool_catalog(&self) -> &merry_core::SessionToolCatalog {
+        &self.external_tool_catalog
     }
 
     pub(crate) fn set_trajectory_snapshot(&mut self, snapshot: TrajectorySnapshot) {

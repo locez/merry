@@ -185,6 +185,12 @@ pub enum RuntimeError {
         name: ToolName,
     },
 
+    /// A resumed session was constructed with a different external tool catalog.
+    #[error(
+        "external tool catalog differs from the saved session; restore its definitions and bind unavailable tools instead of removing or replacing them"
+    )]
+    ExternalToolCatalogMismatch,
+
     /// Runtime-reserved provider-visible tool name was registered by an application.
     #[error("tool name {name} is reserved by the runtime")]
     ReservedToolName {
@@ -419,6 +425,7 @@ impl RuntimeError {
             }
             Self::ToolCallAlreadyResolved { .. } => "tool_call_already_resolved",
             Self::DuplicateToolRegistration { .. } => "duplicate_tool_registration",
+            Self::ExternalToolCatalogMismatch => "external_tool_catalog_mismatch",
             Self::ReservedToolName { .. } => "reserved_tool_name",
             Self::InvalidToolInputSchema { .. } => "invalid_tool_input_schema",
             Self::BridgeToolsNotAllowed { .. } => "bridge_tools_not_allowed",

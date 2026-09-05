@@ -179,7 +179,8 @@ async fn session_state_round_trip_preserves_turns_user_artifact_and_projections(
 
 fn current_document() -> serde_json::Value {
     serde_json::json!({
-        "format_version": 3,
+        "format_version": 4,
+        "external_tool_catalog": { "format_version": 1, "entries": [] },
         "session_id": session_id(),
         "next_sequence": 0,
         "session_started": false,
@@ -973,7 +974,7 @@ async fn session_state_current_format_without_plan_round_trips_current_format() 
             .expect("rewritten state reads"),
     )
     .expect("rewritten state is JSON");
-    assert_eq!(rewritten["format_version"], 3);
+    assert_eq!(rewritten["format_version"], 4);
     assert_eq!(rewritten["active_plan"], serde_json::Value::Null);
     assert_eq!(rewritten["terminal_plans"], serde_json::json!([]));
 }

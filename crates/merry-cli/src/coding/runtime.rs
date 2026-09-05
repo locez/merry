@@ -7,8 +7,10 @@ use merry::profiles::{
 };
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 #[cfg(test)]
+use merry_runtime::FileSessionStore;
+#[cfg(test)]
 use merry_runtime::Runtime;
-use merry_runtime::{AutomaticCompactionConfig, FileSessionStore, RegisteredTool};
+use merry_runtime::{AutomaticCompactionConfig, LoadedSession, RegisteredTool};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -68,7 +70,8 @@ pub(crate) fn build_headless_coding_with_policy_composition(
         .map_err(CodingRuntimeError::from)
 }
 
-pub(crate) async fn resume_headless_coding_composition_with_policy(
+#[cfg(test)]
+async fn resume_headless_coding_composition_with_policy(
     input: HeadlessCodingRuntimeInput<'_>,
     store: FileSessionStore,
     permission: CodingPermissionPolicy,
@@ -76,6 +79,17 @@ pub(crate) async fn resume_headless_coding_composition_with_policy(
     build_coding_runtime_from_headless_input(input, permission)?
         .resume_from_store_without_automatic_savepoints(store)
         .await
+        .map_err(CodingRuntimeError::from)
+}
+
+pub(crate) fn resume_headless_coding_composition_with_loaded_session(
+    input: HeadlessCodingRuntimeInput<'_>,
+    loaded: LoadedSession,
+    permission: CodingPermissionPolicy,
+) -> Result<SharedCodingRuntime, CodingRuntimeError> {
+    build_coding_runtime_from_headless_input(input, permission)?
+        .with_loaded_session(loaded)
+        .build()
         .map_err(CodingRuntimeError::from)
 }
 

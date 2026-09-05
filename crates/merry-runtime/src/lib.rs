@@ -64,6 +64,7 @@ mod token_estimate;
 mod tool;
 mod tool_admission;
 mod tool_api;
+mod tool_catalog;
 mod tool_input_validation;
 mod trajectory;
 mod trajectory_replay;
@@ -169,6 +170,7 @@ pub use tool::{
 };
 pub use tool_admission::ToolAdmission;
 pub use tool_api::{Tool, ToolBuildError};
+pub use tool_catalog::LoadedSession;
 pub use user_input::{
     MAX_USER_IMAGE_DIMENSION, MAX_USER_IMAGE_PIXELS, MAX_USER_IMAGE_PNG_BYTES,
     MAX_USER_IMAGE_TOTAL_PNG_BYTES, MAX_USER_IMAGES, StepInput, UserImageInput, UserMessageInput,

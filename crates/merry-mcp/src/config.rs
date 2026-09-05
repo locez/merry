@@ -1,5 +1,5 @@
 /// Trusted HTTP MCP server configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct McpServerConfig {
     id: String,
     url: String,
@@ -8,6 +8,63 @@ pub struct McpServerConfig {
 }
 
 impl McpServerConfig {
+    pub(crate) fn validated_identity(
+        &self,
+    ) -> Result<(merry_core::ToolSourceId, merry_core::ToolSourceFingerprint), crate::McpError>
+    {
+        use reqwest::header::{HeaderName, HeaderValue};
+        use sha2::{Digest, Sha256};
+
+        let source = merry_core::ToolSourceId::new(&self.id)?;
+        crate::map_mcp_tool_names(&self.id, &[])?;
+        let url =
+            reqwest::Url::parse(&self.url).map_err(|_| crate::McpError::InvalidConfiguration {
+                reason: "MCP endpoint must be a valid absolute HTTP(S) URL",
+            })?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(crate::McpError::InvalidConfiguration {
+                reason: "MCP endpoint must use HTTP(S), without userinfo or fragments; use headers for authentication",
+            });
+        }
+        for (name, value) in &self.headers {
+            let header = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                crate::McpError::InvalidConfiguration {
+                    reason: "invalid MCP HTTP header name",
+                }
+            })?;
+            HeaderValue::from_str(value).map_err(|_| crate::McpError::InvalidConfiguration {
+                reason: "invalid MCP HTTP header value",
+            })?;
+            if matches!(
+                header.as_str(),
+                "host"
+                    | "content-length"
+                    | "transfer-encoding"
+                    | "mcp-session-id"
+                    | "mcp-protocol-version"
+            ) {
+                return Err(crate::McpError::InvalidConfiguration {
+                    reason: "MCP headers must not override transport-owned headers",
+                });
+            }
+        }
+        if let Some(tools) = &self.tools {
+            for name in tools {
+                merry_core::ToolBindingName::new(name)?;
+            }
+        }
+        let fingerprint = merry_core::ToolSourceFingerprint::new(&format!(
+            "{:x}",
+            Sha256::digest(url.as_str().as_bytes())
+        ))?;
+        Ok((source, fingerprint))
+    }
+
     /// Creates a builder for one trusted HTTP MCP server.
     #[must_use]
     pub fn builder(id: impl Into<String>, url: impl Into<String>) -> McpServerConfigBuilder {
@@ -45,12 +102,30 @@ impl McpServerConfig {
 }
 
 /// Builder for [`McpServerConfig`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct McpServerConfigBuilder {
     id: String,
     url: String,
     headers: Vec<(String, String)>,
     tools: Option<Vec<String>>,
+}
+
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpServerConfig")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for McpServerConfigBuilder {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("McpServerConfigBuilder")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl McpServerConfigBuilder {

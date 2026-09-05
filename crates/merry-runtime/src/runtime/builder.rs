@@ -3,8 +3,9 @@ use super::checkpoint_ref_tool::merry_read_checkpoint_ref_tool;
 use super::{AcceptedLocalWorkspaceProcessRunner, Runtime, RuntimeInner};
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, CitationCompactionPolicy, CompactedCheckpoint,
-    FileSessionStore, ProcessRunner, ProjectRules, PromptProfile, RuntimeCapabilities,
-    RuntimeError, RuntimeModelRole, RuntimeProfile, SkillCatalog, TaskAnchor, ToolAdmission,
+    FileSessionStore, LoadedSession, ProcessRunner, ProjectRules, PromptProfile,
+    RuntimeCapabilities, RuntimeError, RuntimeModelRole, RuntimeProfile, SkillCatalog, TaskAnchor,
+    ToolAdmission,
     artifact::ArtifactContent,
     memory::{MemoryActivationSource, StoredMemoryActivationSource},
     model_config::RuntimeModelConfigs,
@@ -636,6 +637,13 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Installs a session that was already loaded by the runtime boundary.
+    #[must_use]
+    pub fn with_loaded_session(mut self, loaded: LoadedSession) -> Self {
+        self.loaded_session = Some(loaded.into_state());
+        self
+    }
+
     /// Loads persisted session state from an injected filesystem store, then builds a runtime.
     pub async fn resume_from_store(
         mut self,
@@ -721,8 +729,14 @@ impl RuntimeBuilder {
         });
 
         let loaded_from_store = self.loaded_session.is_some();
+        let external_tool_catalog = tool_registry.external_tool_catalog()?;
         let mut session = match self.loaded_session {
-            Some(session) => session,
+            Some(session) => {
+                if session.external_tool_catalog() != &external_tool_catalog {
+                    return Err(RuntimeError::ExternalToolCatalogMismatch);
+                }
+                session
+            }
             None => {
                 if let Some(checkpoint) = self
                     .compacted_checkpoint
@@ -740,7 +754,10 @@ impl RuntimeBuilder {
                         }
                     }
                 }
-                let mut session = SessionState::new(self.session_id.clone());
+                let mut session = SessionState::with_external_tool_catalog(
+                    self.session_id.clone(),
+                    external_tool_catalog,
+                );
                 for (artifact, content) in self.compacted_checkpoint_evidence {
                     if crate::session::is_runtime_reserved_artifact_id(artifact.id()) {
                         return Err(RuntimeError::ReservedArtifactId {

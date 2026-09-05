@@ -976,6 +976,7 @@ mod tests {
     mod provider_step_turn_lifecycle;
     mod rolling_compaction;
     mod session_resume;
+    mod tool_catalog;
     mod tool_execution;
     mod tool_submit_cancellation;
     mod uncertainty_review;

@@ -93,6 +93,12 @@ max_model_turns = 2048
 # User-configured MCP servers are trusted external tools. HTTP MCP endpoints
 # are allowed to use the network because registering them in global config is
 # an explicit user grant.
+# Discovery failures warn and do not stop Merry (5 seconds per server, 10 seconds
+# total). Session tool definitions are frozen, including across resume. Offline
+# saved tools can reconnect on use after a short cooldown; calls are not replayed.
+# New tools, changed definitions, or changed endpoints require a new session.
+# Removing a server or narrowing its allowlist disables execution immediately on
+# the next resume, without deleting its saved provider-visible definitions.
 #
 # [mcp.context7]
 # url = "https://mcp.example.test/mcp"

@@ -1065,6 +1065,7 @@ fn validate_proposal_evidence_matches_action_kind(
 #[derive(Clone)]
 pub struct RegisteredTool {
     spec: ToolSpec,
+    external_binding: Option<merry_core::ExternalToolBinding>,
     executor: Arc<dyn ToolExecutor>,
     action_kind: ToolActionKind,
     proposals_enabled: bool,
@@ -1086,12 +1087,28 @@ impl RegisteredTool {
     ) -> Self {
         Self {
             spec,
+            external_binding: None,
             executor,
             action_kind,
             proposals_enabled: false,
             runner: ToolRunner::Runtime,
             concurrency: ToolConcurrency::Exclusive,
         }
+    }
+
+    /// Attaches a stable adapter binding for session catalog persistence.
+    ///
+    /// Binding metadata is never rendered into the model's tool definition.
+    #[must_use]
+    pub fn with_external_binding(mut self, binding: merry_core::ExternalToolBinding) -> Self {
+        self.external_binding = Some(binding);
+        self
+    }
+
+    /// Returns the adapter identity, if this tool belongs to an external catalog.
+    #[must_use]
+    pub fn external_binding(&self) -> Option<&merry_core::ExternalToolBinding> {
+        self.external_binding.as_ref()
     }
 
     /// Enables read-only proposal evidence for a mutating tool.
@@ -1129,6 +1146,7 @@ impl RegisteredTool {
     pub fn bridge(spec: ToolSpec) -> Self {
         Self {
             spec,
+            external_binding: None,
             executor: Arc::new(BridgeExecutor),
             action_kind: ToolActionKind::ReadOnly,
             proposals_enabled: false,
@@ -1251,6 +1269,23 @@ impl ToolRegistry {
             .filter_map(|name| self.tools.get(name))
             .map(|entry| entry.tool.spec().clone())
             .collect()
+    }
+
+    pub(crate) fn external_tool_catalog(
+        &self,
+    ) -> Result<merry_core::SessionToolCatalog, merry_core::CoreError> {
+        merry_core::SessionToolCatalog::new(
+            self.order
+                .iter()
+                .filter_map(|name| {
+                    let tool = &self.tools.get(name)?.tool;
+                    Some(merry_core::SessionToolCatalogEntry::new(
+                        tool.spec().clone(),
+                        tool.external_binding()?.clone(),
+                    ))
+                })
+                .collect(),
+        )
     }
 
     pub(crate) fn registered_tool(&self, name: &ToolName) -> Option<&RegisteredTool> {

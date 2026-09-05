@@ -15,9 +15,9 @@ use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_process::ProcessBackend;
 use merry_runtime::{
     AgentLoopConfig, AgentLoopConfigError, AutomaticCompactionConfig, ChildRuntimeFactory,
-    FileSessionStore, PermissionAdmissionSource, PermissionReviewMode, RegisteredTool, Runtime,
-    RuntimeBuilder, RuntimeError, RuntimeModelRole, SkillCatalog, SkillError, SubagentConfig,
-    SubagentError, SubagentManager, subagent_registered_tools,
+    FileSessionStore, LoadedSession, PermissionAdmissionSource, PermissionReviewMode,
+    RegisteredTool, Runtime, RuntimeBuilder, RuntimeError, RuntimeModelRole, SkillCatalog,
+    SkillError, SubagentConfig, SubagentError, SubagentManager, subagent_registered_tools,
 };
 use merry_tool_workspace::WorkspaceToolLimits;
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
@@ -480,6 +480,7 @@ pub struct CodingRuntimeBuilder {
     input: CodingRuntimeInput,
     variant: CodingRuntimeVariant,
     permission: CodingPermissionPolicy,
+    loaded_session: Option<LoadedSession>,
 }
 
 impl CodingRuntimeBuilder {
@@ -490,6 +491,7 @@ impl CodingRuntimeBuilder {
             input,
             variant: CodingRuntimeVariant::FullCoding,
             permission: CodingPermissionPolicy::default(),
+            loaded_session: None,
         }
     }
 
@@ -505,6 +507,7 @@ impl CodingRuntimeBuilder {
             input,
             variant: CodingRuntimeVariant::ReadOnlyCommandGeneration,
             permission: CodingPermissionPolicy::default(),
+            loaded_session: None,
         }
     }
 
@@ -512,6 +515,13 @@ impl CodingRuntimeBuilder {
     #[must_use]
     pub fn permission_policy(mut self, policy: CodingPermissionPolicy) -> Self {
         self.permission = policy;
+        self
+    }
+
+    /// Installs an already loaded session without performing another store read.
+    #[must_use]
+    pub fn with_loaded_session(mut self, loaded: LoadedSession) -> Self {
+        self.loaded_session = Some(loaded);
         self
     }
 
@@ -554,6 +564,7 @@ impl CodingRuntimeBuilder {
             input,
             variant,
             permission,
+            loaded_session,
         } = self;
         let CodingRuntimeInput {
             session_id,
@@ -673,6 +684,9 @@ impl CodingRuntimeBuilder {
             .apply_to(runtime_builder)
             .map_err(|source| CodingRuntimeBuildError::RuntimeProfileApply { source })?;
         runtime_builder = policy.apply_to(runtime_builder);
+        if let Some(loaded_session) = loaded_session {
+            runtime_builder = runtime_builder.with_loaded_session(loaded_session);
+        }
 
         Ok((runtime_builder, profile))
     }

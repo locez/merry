@@ -6,6 +6,18 @@ pub type McpResult<T> = Result<T, McpError>;
 /// Errors produced by MCP discovery and tool execution.
 #[derive(Debug, Error)]
 pub enum McpError {
+    /// A local configuration boundary failed before any discovery request.
+    #[error("invalid MCP configuration: {reason}")]
+    InvalidConfiguration { reason: &'static str },
+    /// A validated Merry contract could not be constructed.
+    #[error(transparent)]
+    Core(#[from] merry_core::CoreError),
+    /// An HTTP response exceeded the adapter's memory bound.
+    #[error("MCP response exceeded the size limit for server {server_id}")]
+    ResponseTooLarge { server_id: String },
+    /// Transport state became unavailable.
+    #[error("MCP transport state unavailable for server {server_id}")]
+    TransportState { server_id: String },
     /// HTTP transport failure.
     #[error("MCP HTTP request failed for server {server_id}: {source}")]
     Http {
@@ -13,6 +25,9 @@ pub enum McpError {
         #[source]
         source: reqwest::Error,
     },
+    /// The remote endpoint no longer recognizes the MCP transport session.
+    #[error("MCP session expired for server {server_id}")]
+    SessionExpired { server_id: String },
     /// JSON-RPC application-level error.
     #[error("MCP server {server_id} returned JSON-RPC error {code}: {message}")]
     JsonRpc {

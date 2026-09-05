@@ -16,6 +16,16 @@ use std::sync::Arc;
 const TOOL_ABANDONED_BY_SETTLEMENT_CODE: &str = "tool_abandoned_by_run_settlement";
 
 impl Runtime {
+    /// Returns the session's frozen external definitions, independently of availability.
+    pub async fn external_tool_catalog(&self) -> merry_core::SessionToolCatalog {
+        self.inner
+            .session
+            .lock()
+            .await
+            .external_tool_catalog()
+            .clone()
+    }
+
     /// Records exact artifact state into the owning session and returns observable events.
     ///
     /// When this is the first observable action in the session, `SessionStarted`

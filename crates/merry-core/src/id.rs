@@ -201,6 +201,10 @@ define_id!(PlanDirectiveId, "PlanDirectiveId");
 define_id!(PlanApprovalRequirementId, "PlanApprovalRequirementId");
 define_id!(TrajectoryRecordId, "TrajectoryRecordId");
 define_id!(ProviderName, "ProviderName");
+define_id!(ToolAdapterId, "ToolAdapterId");
+define_id!(ToolSourceId, "ToolSourceId");
+define_id!(ToolBindingName, "ToolBindingName", 1024);
+define_id!(ToolSourceFingerprint, "ToolSourceFingerprint");
 define_id!(ToolCallBatchId, "ToolCallBatchId");
 define_id!(ToolCallId, "ToolCallId", MAX_TOOL_CALL_ID_LEN);
 

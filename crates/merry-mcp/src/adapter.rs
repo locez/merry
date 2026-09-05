@@ -1,147 +1,129 @@
 use crate::{
-    McpError, McpResult, McpServerConfig,
-    client::McpHttpClient,
-    map_mcp_tool_names,
-    protocol::{McpTool, ToolsCallResult},
+    connection::{McpConnection, ToolUnavailable},
+    diagnostics::{McpFailureKind, McpServerIssue},
+    protocol::ToolsCallResult,
 };
-use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
+use merry_core::{ErrorInfo, PendingToolCall, SessionToolCatalogEntry};
 use merry_runtime::{
     RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
     ToolExecutor, ToolExecutorFuture,
 };
-use schemars::Schema;
-use serde_json::{Map, Value, json};
-use std::{collections::BTreeSet, sync::Arc};
+use serde_json::{Value, json};
+use std::sync::Arc;
 
 /// A registered MCP tool plus its provider-visible Merry name mapping.
 #[derive(Debug)]
 pub struct McpToolRegistration {
     pub tool: RegisteredTool,
-    pub server_id: String,
-    pub raw_tool_name: String,
 }
 
-/// Discovers tools exposed by configured MCP servers.
-pub async fn discover_mcp_tools(
-    servers: &[McpServerConfig],
-) -> McpResult<Vec<McpToolRegistration>> {
-    let mut registrations = Vec::new();
-    for server in servers {
-        let client = Arc::new(McpHttpClient::new(server.clone())?);
-        client.initialize().await?;
-        let tools = filter_allowed_tools(client.list_tools().await?.tools, server.tools());
-        let raw_names = tools
-            .iter()
-            .map(|tool| tool.name.as_str())
-            .collect::<Vec<_>>();
-        let mappings = map_mcp_tool_names(server.id(), &raw_names)?;
-
-        for (tool, mapping) in tools.into_iter().zip(mappings) {
-            let spec = mcp_tool_to_spec(server.id(), &tool, mapping.merry_name.clone())?;
-            let executor = Arc::new(McpToolExecutor {
-                client: Arc::clone(&client),
-                server_id: server.id().to_owned(),
-                raw_tool_name: mapping.raw_name.clone(),
-            });
-            registrations.push(McpToolRegistration {
-                tool: RegisteredTool::new(spec, executor, ToolActionKind::TrustedExternal),
-                server_id: server.id().to_owned(),
-                raw_tool_name: mapping.raw_name,
-            });
+impl McpToolRegistration {
+    pub(crate) fn new(entry: SessionToolCatalogEntry, binding: McpExecutionBinding) -> Self {
+        let executor = Arc::new(McpToolExecutor {
+            entry: entry.clone(),
+            binding,
+        });
+        Self {
+            tool: RegisteredTool::new(
+                entry.spec().clone(),
+                executor,
+                ToolActionKind::TrustedExternal,
+            )
+            .with_external_binding(entry.binding().clone()),
         }
     }
-    Ok(registrations)
 }
 
-fn filter_allowed_tools(tools: Vec<McpTool>, allowlist: Option<&[String]>) -> Vec<McpTool> {
-    let Some(allowlist) = allowlist else {
-        return tools;
-    };
-    let allowed = allowlist
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    tools
-        .into_iter()
-        .filter(|tool| allowed.contains(tool.name.as_str()))
-        .collect()
-}
-
-fn mcp_tool_to_spec(server_id: &str, tool: &McpTool, merry_name: ToolName) -> McpResult<ToolSpec> {
-    let normalized_schema = normalize_mcp_input_schema(tool.input_schema.clone());
-    let schema =
-        Schema::try_from(normalized_schema).map_err(|error| McpError::InvalidToolSchema {
-            server_id: server_id.to_owned(),
-            tool_name: tool.name.clone(),
-            message: error.to_string(),
-        })?;
-    let input_schema =
-        ToolInputSchema::new(schema).map_err(|error| McpError::InvalidToolSchema {
-            server_id: server_id.to_owned(),
-            tool_name: tool.name.clone(),
-            message: error.to_string(),
-        })?;
-    ToolSpec::new(
-        merry_name,
-        tool.description
-            .as_deref()
-            .unwrap_or("MCP tool exposed by a configured server"),
-        input_schema,
-    )
-    .map_err(|error| McpError::InvalidToolSchema {
-        server_id: server_id.to_owned(),
-        tool_name: tool.name.clone(),
-        message: error.to_string(),
-    })
-}
-
-fn normalize_mcp_input_schema(schema: Value) -> Value {
-    let mut object = match schema {
-        Value::Object(object) => object,
-        _ => Map::new(),
-    };
-
-    object
-        .entry("type")
-        .or_insert_with(|| Value::String("object".to_owned()));
-    if !matches!(object.get("properties"), Some(Value::Object(_))) {
-        object.insert("properties".to_owned(), Value::Object(Map::new()));
-    }
-
-    Value::Object(object)
+pub(crate) enum McpExecutionBinding {
+    Connection(Arc<McpConnection>),
+    Disabled(McpServerIssue),
 }
 
 struct McpToolExecutor {
-    client: Arc<McpHttpClient>,
-    server_id: String,
-    raw_tool_name: String,
+    entry: SessionToolCatalogEntry,
+    binding: McpExecutionBinding,
 }
 
 impl ToolExecutor for McpToolExecutor {
     fn execute<'a>(
         &'a self,
         call: PendingToolCall,
-        _context: ToolExecutionContext,
+        context: ToolExecutionContext,
     ) -> ToolExecutorFuture<'a> {
         Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ToolExecutionError::Cancelled);
+            }
+            let connection = match &self.binding {
+                McpExecutionBinding::Connection(connection) => connection,
+                McpExecutionBinding::Disabled(reason) => {
+                    return unavailable_outcome(
+                        "mcp_tool_unavailable",
+                        &format!(
+                            "MCP tool {} is disabled: {reason:?}. Start a new session after correcting configuration.",
+                            call.name()
+                        ),
+                    );
+                }
+            };
+            let client = tokio::select! {
+                biased;
+                () = context.cancellation_token().cancelled() => return Err(ToolExecutionError::Cancelled),
+                result = connection.client_for(&self.entry) => match result {
+                    Ok(client) => client,
+                    Err(ToolUnavailable::Discovery(failure)) => return unavailable_outcome("mcp_server_unavailable", &format!("MCP {} is unavailable: {}. This tool was not executed; use another tool or retry after the connection is restored.", self.entry.binding().source(), failure.kind)),
+                    Err(ToolUnavailable::DefinitionChanged) => return unavailable_outcome("mcp_tool_definition_changed", "The MCP tool definition no longer matches this session. The tool was not executed. Start a new session to load the new catalog."),
+                },
+            };
             let arguments = Value::Object(call.arguments().as_object().clone());
-            let result = self
-                .client
-                .call_tool(&self.raw_tool_name, arguments)
-                .await
-                .map_err(|source| ToolExecutionError::Infrastructure {
-                    message: format!(
-                        "MCP tool `{}` on server `{}` failed: {source}",
-                        self.raw_tool_name, self.server_id
-                    ),
-                })?;
+            let result = tokio::select! {
+                biased;
+                () = context.cancellation_token().cancelled() => return Err(ToolExecutionError::Cancelled),
+                result = client.call_tool(self.entry.binding().operation().as_str(), arguments) => result,
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    let failure = McpFailureKind::from_error(&error);
+                    connection.record_call_failure(&client, &error).await;
+                    if matches!(
+                        failure,
+                        McpFailureKind::Connection | McpFailureKind::SessionExpired
+                    ) || failure == McpFailureKind::Authentication
+                    {
+                        return unavailable_outcome(
+                            "mcp_server_unavailable",
+                            &format!(
+                                "MCP {}: {failure}. The tool could not be invoked.",
+                                self.entry.binding().source()
+                            ),
+                        );
+                    }
+                    return unavailable_outcome(
+                        "mcp_tool_outcome_unknown",
+                        &format!(
+                            "MCP {}: {failure}. The request may have executed but no valid result was received. Do not automatically repeat this operation; verify its effects first.",
+                            self.entry.binding().source()
+                        ),
+                    );
+                }
+            };
             Ok(mcp_call_result_to_outcome(
-                &self.server_id,
-                &self.raw_tool_name,
+                self.entry.binding().source().as_str(),
+                self.entry.binding().operation().as_str(),
                 result,
             ))
         })
     }
+}
+
+fn unavailable_outcome(
+    code: &str,
+    message: &str,
+) -> Result<ToolExecutionOutcome, ToolExecutionError> {
+    let diagnostic = ErrorInfo::new(code, message)
+        .map_err(|_| ToolExecutionError::infrastructure("invalid MCP diagnostic"))?;
+    Ok(ToolExecutionOutcome::failed_text(message, diagnostic))
 }
 
 fn mcp_call_result_to_outcome(
@@ -211,24 +193,6 @@ mod tests {
     use crate::protocol::{McpContent, ToolsCallResult};
     use merry_core::ToolCallResultStatus;
     use merry_runtime::ArtifactContent;
-    use serde_json::json;
-
-    #[test]
-    fn normalizes_object_schema_without_properties() {
-        let schema = normalize_mcp_input_schema(json!({ "type": "object" }));
-
-        assert_eq!(schema["properties"], json!({}));
-    }
-
-    #[test]
-    fn normalizes_null_properties_to_empty_object() {
-        let schema = normalize_mcp_input_schema(json!({
-            "type": "object",
-            "properties": null
-        }));
-
-        assert_eq!(schema["properties"], json!({}));
-    }
 
     #[test]
     fn converts_text_result_to_successful_outcome() {
