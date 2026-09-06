@@ -10,28 +10,31 @@ use crate::{
     permission::is_request_permissions_tool,
     plan::tools::is_plan_tool,
     process_tool::process_call_requests_permission,
+    runtime::{
+        APPLY_PATCH_TOOL_NAME, DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
+        DIAGNOSTIC_TOOL_NOT_REGISTERED, RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE,
+        checkpoint_ref_tool::{
+            execute_merry_read_checkpoint_ref_tool_call, is_merry_read_checkpoint_ref_tool,
+        },
+        diagnostic_from_text,
+        diagnostics::DIAGNOSTIC_TOOL_NOT_ADMITTED,
+        permission_execution::{
+            HighRiskActionReview, execute_permission_request_tool_call,
+            execute_process_permission_request_tool_call, review_process_action,
+        },
+        plan_tool_execution::execute_plan_tool_call,
+        process_execution::{ProcessExecutionAdmission, execute_admitted_process_action},
+        tool_execution::harness::plan_harness_violation,
+    },
     tool::{ActionProposalEvidence, ToolActionPreflight, ToolExecutionContext, ToolExecutionError},
 };
 use merry_core::{
-    CoreError, ErrorInfo, PendingToolCall, PlanHarnessSnapshot, RuntimeJournalEvent,
-    RuntimeJournalPayload, SessionId, ToolCallId, ToolCallResultStatus,
+    CoreError, ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
+    ToolCallId, ToolCallResultStatus,
 };
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
-use super::checkpoint_ref_tool::{
-    execute_merry_read_checkpoint_ref_tool_call, is_merry_read_checkpoint_ref_tool,
-};
-use super::diagnostics::DIAGNOSTIC_TOOL_NOT_ADMITTED;
-use super::permission_execution::{
-    HighRiskActionReview, execute_permission_request_tool_call,
-    execute_process_permission_request_tool_call, review_process_action,
-};
-use super::plan_tool_execution::execute_plan_tool_call;
-use super::process_execution::{ProcessExecutionAdmission, execute_admitted_process_action};
-use super::{
-    APPLY_PATCH_TOOL_NAME, DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_NOT_REGISTERED,
-    RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE, diagnostic_from_text,
-};
+mod harness;
 
 pub(super) async fn execute_tool_call_with_active_permit(
     inner: &Arc<RuntimeInner>,
@@ -699,94 +702,6 @@ async fn resolve_tool_admission_denial(
         )?
     };
     Ok(events)
-}
-
-fn plan_harness_violation(
-    harness: Option<&PlanHarnessSnapshot>,
-    pending: &PendingToolCall,
-    action_kind: crate::ToolActionKind,
-    proposal: Option<&ActionProposal>,
-) -> Option<ErrorInfo> {
-    let harness = harness?;
-    if !harness
-        .allowed_tools
-        .iter()
-        .any(|allowed| allowed == pending.name())
-    {
-        return Some(plan_harness_diagnostic(
-            "plan_harness_tool_denied",
-            format!(
-                "tool {} is outside the active plan node harness",
-                pending.name()
-            ),
-        ));
-    }
-
-    let explicit_path = pending
-        .arguments()
-        .as_object()
-        .get("path")
-        .and_then(serde_json::Value::as_str);
-    let effective_path = explicit_path;
-    if let Some(path) = effective_path {
-        let scopes = if action_kind == crate::ToolActionKind::WorkspaceWrite {
-            &harness.write_scope
-        } else {
-            &harness.read_scope
-        };
-        if !plan_harness_allows_path(harness, scopes, path) {
-            return Some(plan_harness_scope_diagnostic(path));
-        }
-    }
-
-    match proposal.map(ActionProposal::evidence) {
-        Some(ActionProposalEvidence::WorkspacePatch(patch)) => {
-            for change in patch.changes() {
-                if !plan_harness_allows_path(harness, &harness.write_scope, change.relative_path())
-                {
-                    return Some(plan_harness_scope_diagnostic(change.relative_path()));
-                }
-            }
-        }
-        Some(ActionProposalEvidence::ProcessAction(intent)) => {
-            let path = intent.cwd().unwrap_or(".");
-            let scopes = match crate::process::classify_process_intent(intent) {
-                crate::process::ProcessIntentClass::Informational => &harness.read_scope,
-                crate::process::ProcessIntentClass::LocalWorkspaceEffect
-                | crate::process::ProcessIntentClass::Unknown
-                | crate::process::ProcessIntentClass::Forbidden => &harness.write_scope,
-            };
-            if !plan_harness_allows_path(harness, scopes, path) {
-                return Some(plan_harness_scope_diagnostic(path));
-            }
-        }
-        None => {}
-    }
-    None
-}
-
-fn plan_harness_allows_path(harness: &PlanHarnessSnapshot, scopes: &[String], path: &str) -> bool {
-    let path = Path::new(path);
-    let in_scope = scopes
-        .iter()
-        .any(|scope| crate::workspace_scope::workspace_scope_contains(Path::new(scope), path));
-    let overlaps_forbidden = harness.forbidden_paths.iter().any(|forbidden| {
-        let forbidden = Path::new(forbidden);
-        crate::workspace_scope::workspace_scope_contains(forbidden, path)
-            || crate::workspace_scope::workspace_scope_contains(path, forbidden)
-    });
-    in_scope && !overlaps_forbidden
-}
-
-fn plan_harness_scope_diagnostic(path: &str) -> ErrorInfo {
-    plan_harness_diagnostic(
-        "plan_harness_scope_denied",
-        format!("workspace path {path} is outside the active plan node harness"),
-    )
-}
-
-fn plan_harness_diagnostic(code: &str, message: String) -> ErrorInfo {
-    ErrorInfo::new(code, &message).expect("runtime-owned plan harness diagnostic is valid")
 }
 
 async fn resolve_plan_harness_denial(

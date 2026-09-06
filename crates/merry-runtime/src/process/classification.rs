@@ -1,8 +1,22 @@
-use super::contracts::{
-    AcceptedLocalWorkspaceProcessAdmission, ProcessActionIntent, ProcessEnvPolicy,
-    ProcessPermissionProfileId,
+use crate::process::{
+    classification::shell::{
+        executable_name, executable_token_is, parse_plain_shell_command_sequence,
+        rough_shell_words, shell_command_without_assignment_prefix,
+        shell_like_process_input_from_argv, shell_process_input_from_argv,
+    },
+    contracts::{
+        AcceptedLocalWorkspaceProcessAdmission, ProcessActionIntent, ProcessEnvPolicy,
+        ProcessPermissionProfileId,
+    },
+};
+pub use shell::shell_command_for_argv;
+pub(crate) use shell::{
+    ShellProcessInput, shell_command_argv, shell_process_input, stable_process_input_fingerprint,
 };
 use std::path::Path;
+
+mod shell;
+
 impl AcceptedLocalWorkspaceProcessAdmission {
     pub(crate) fn matches_intent(self, intent: &ProcessActionIntent) -> bool {
         let required = required_process_permission_profile_id(intent);
@@ -25,127 +39,6 @@ pub enum ProcessIntentClass {
     Unknown,
     /// The argv is blocked by hard process policy.
     Forbidden,
-}
-
-/// Exact shell-wrapper input plus payload-free metadata helpers.
-///
-/// This value recognizes only the validated wrapper shape used by the current
-/// shell read-only lane. It is not a shell parser and it does not authorize
-/// execution by itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ShellProcessInput<'a> {
-    shell: &'a str,
-    flag: &'a str,
-    script: &'a str,
-}
-
-impl<'a> ShellProcessInput<'a> {
-    pub(crate) const fn shell(self) -> &'a str {
-        self.shell
-    }
-
-    pub(crate) const fn flag(self) -> &'a str {
-        self.flag
-    }
-
-    pub(crate) const fn script(self) -> &'a str {
-        self.script
-    }
-
-    pub(crate) const fn script_bytes(self) -> usize {
-        self.script.len()
-    }
-
-    pub(crate) fn script_fingerprint(self) -> String {
-        stable_process_input_fingerprint(self.script.as_bytes())
-    }
-}
-
-pub(crate) fn shell_process_input(intent: &ProcessActionIntent) -> Option<ShellProcessInput<'_>> {
-    shell_process_input_from_argv(intent.argv())
-}
-
-/// Converts one model-facing shell command into the platform process argv
-/// consumed by runtime policy and process runners.
-pub(crate) fn shell_command_argv(command: &str) -> Vec<String> {
-    #[cfg(windows)]
-    {
-        vec![
-            "powershell".to_owned(),
-            "-NoProfile".to_owned(),
-            "-Command".to_owned(),
-            command.to_owned(),
-        ]
-    }
-
-    #[cfg(not(windows))]
-    {
-        vec!["bash".to_owned(), "-lc".to_owned(), command.to_owned()]
-    }
-}
-
-/// Returns the command script represented by a platform shell argv wrapper.
-pub(crate) fn shell_command_from_argv(argv: &[String]) -> Option<&str> {
-    #[cfg(windows)]
-    {
-        match argv {
-            [shell, no_profile, flag, command]
-                if shell == "powershell" && no_profile == "-NoProfile" && flag == "-Command" =>
-            {
-                Some(command)
-            }
-            _ => None,
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        match argv {
-            [shell, flag, command] if shell == "bash" && matches!(flag.as_str(), "-c" | "-lc") => {
-                Some(command)
-            }
-            _ => None,
-        }
-    }
-}
-
-/// Converts an argv vector into one shell command string for a model-facing
-/// command field. Existing platform shell wrappers are unwrapped so their
-/// script is preserved; direct argv items are quoted for the host shell.
-#[must_use]
-pub fn shell_command_for_argv(argv: &[String]) -> String {
-    if let Some(command) = shell_command_from_argv(argv) {
-        return command.to_owned();
-    }
-
-    argv.iter()
-        .map(|argument| shell_quote_argument(argument))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-#[cfg(not(windows))]
-fn shell_quote_argument(argument: &str) -> String {
-    if !argument.is_empty() && argument.bytes().all(is_safe_shell_word_byte) {
-        return argument.to_owned();
-    }
-    format!("'{}'", argument.replace('\'', "'\\''"))
-}
-
-#[cfg(windows)]
-fn shell_quote_argument(argument: &str) -> String {
-    if !argument.is_empty() && argument.bytes().all(is_safe_shell_word_byte) {
-        return argument.to_owned();
-    }
-    format!("'{}'", argument.replace('\'', "''"))
-}
-
-fn is_safe_shell_word_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric()
-        || matches!(
-            byte,
-            b'_' | b'-' | b'.' | b'/' | b':' | b'=' | b'@' | b'%' | b'+'
-        )
 }
 
 /// Classifies a process intent using validated argv only.
@@ -260,61 +153,6 @@ fn is_read_only_plain_shell_process_argv(argv: &[String]) -> bool {
     })
 }
 
-fn shell_process_input_from_argv(argv: &[String]) -> Option<ShellProcessInput<'_>> {
-    #[cfg(windows)]
-    {
-        let [shell, no_profile, flag, script] = argv else {
-            return None;
-        };
-        if !is_supported_plain_shell_token(shell)
-            || no_profile != "-NoProfile"
-            || flag != "-Command"
-        {
-            return None;
-        }
-        Some(ShellProcessInput {
-            shell,
-            flag,
-            script,
-        })
-    }
-
-    #[cfg(not(windows))]
-    {
-        let [shell, flag, script] = argv else {
-            return None;
-        };
-        if !is_supported_plain_shell_token(shell) || !matches!(flag.as_str(), "-c" | "-lc") {
-            return None;
-        }
-        Some(ShellProcessInput {
-            shell,
-            flag,
-            script,
-        })
-    }
-}
-
-fn is_supported_plain_shell_token(shell: &str) -> bool {
-    #[cfg(windows)]
-    {
-        matches!(executable_name(shell).as_str(), "powershell" | "pwsh")
-    }
-
-    #[cfg(not(windows))]
-    matches!(shell, "bash" | "sh" | "zsh")
-}
-
-pub(crate) fn stable_process_input_fingerprint(bytes: &[u8]) -> String {
-    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    let hash = bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
-    });
-    format!("fnv1a64:{hash:016x}")
-}
-
 fn is_read_only_echo_args(args: &[String]) -> bool {
     !args.iter().any(|arg| arg.starts_with('-'))
 }
@@ -344,154 +182,6 @@ fn is_read_only_head_or_tail_args(args: &[String]) -> bool {
         }
         _ => false,
     }
-}
-
-fn parse_plain_shell_command_sequence(script: &str) -> Option<Vec<Vec<String>>> {
-    let mut chars = script.chars().peekable();
-    let mut commands = Vec::new();
-    let mut current_command = Vec::new();
-    let mut last_token_was_operator = false;
-
-    loop {
-        skip_shell_whitespace(&mut chars);
-        let Some(next) = chars.peek().copied() else {
-            break;
-        };
-
-        if is_shell_sequence_operator_start(next) {
-            parse_shell_sequence_operator(&mut chars)?;
-            if current_command.is_empty() {
-                return None;
-            }
-            commands.push(std::mem::take(&mut current_command));
-            last_token_was_operator = true;
-            continue;
-        }
-
-        let word = parse_plain_shell_word(&mut chars)?;
-        if word.is_empty() {
-            return None;
-        }
-        current_command.push(word);
-        last_token_was_operator = false;
-    }
-
-    if last_token_was_operator {
-        return None;
-    }
-    if !current_command.is_empty() {
-        commands.push(current_command);
-    }
-    if commands.is_empty() {
-        return None;
-    }
-
-    Some(commands)
-}
-
-fn skip_shell_whitespace(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    while chars
-        .peek()
-        .is_some_and(|character| character.is_whitespace())
-    {
-        chars.next();
-    }
-}
-
-fn parse_shell_sequence_operator(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-) -> Option<()> {
-    match chars.next()? {
-        ';' | '|' if chars.peek() != Some(&'|') => Some(()),
-        '|' if chars.peek() == Some(&'|') => {
-            chars.next();
-            Some(())
-        }
-        '&' if chars.peek() == Some(&'&') => {
-            chars.next();
-            Some(())
-        }
-        _ => None,
-    }
-}
-
-fn parse_plain_shell_word(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
-    let mut word = String::new();
-    while let Some(next) = chars.peek().copied() {
-        if next.is_whitespace() || is_shell_sequence_operator_start(next) {
-            break;
-        }
-
-        match next {
-            '\'' => {
-                chars.next();
-                parse_plain_single_quoted_shell_fragment(chars, &mut word)?;
-            }
-            '"' => {
-                chars.next();
-                parse_plain_double_quoted_shell_fragment(chars, &mut word)?;
-            }
-            character if shell_word_character_is_disallowed(character) => return None,
-            character => {
-                chars.next();
-                word.push(character);
-            }
-        }
-    }
-
-    Some(word)
-}
-
-fn parse_plain_single_quoted_shell_fragment(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    word: &mut String,
-) -> Option<()> {
-    for character in chars.by_ref() {
-        if character == '\'' {
-            return Some(());
-        }
-        word.push(character);
-    }
-    None
-}
-
-fn parse_plain_double_quoted_shell_fragment(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    word: &mut String,
-) -> Option<()> {
-    for character in chars.by_ref() {
-        match character {
-            '"' => return Some(()),
-            '$' | '`' | '\\' | '!' => return None,
-            _ => word.push(character),
-        }
-    }
-    None
-}
-
-fn is_shell_sequence_operator_start(character: char) -> bool {
-    matches!(character, ';' | '|' | '&')
-}
-
-fn shell_word_character_is_disallowed(character: char) -> bool {
-    matches!(
-        character,
-        '$' | '`'
-            | '\\'
-            | '<'
-            | '>'
-            | '('
-            | ')'
-            | '{'
-            | '}'
-            | '['
-            | ']'
-            | '*'
-            | '?'
-            | '~'
-            | '#'
-            | '!'
-    )
 }
 
 fn is_read_only_rg_single_argument(argument: &str) -> bool {
@@ -644,70 +334,6 @@ fn shell_script_contains_forbidden_process(script: &str) -> bool {
     shell_script_contains_obvious_forbidden_text(script)
 }
 
-fn shell_like_process_input_from_argv(argv: &[String]) -> Option<ShellProcessInput<'_>> {
-    #[cfg(windows)]
-    {
-        let [shell, no_profile, flag, script] = argv else {
-            return None;
-        };
-        if !is_supported_shell_executable_name(shell)
-            || no_profile != "-NoProfile"
-            || flag != "-Command"
-        {
-            return None;
-        }
-        Some(ShellProcessInput {
-            shell,
-            flag,
-            script,
-        })
-    }
-
-    #[cfg(not(windows))]
-    {
-        let [shell, flag, script] = argv else {
-            return None;
-        };
-        if !is_supported_shell_executable_name(shell) || !matches!(flag.as_str(), "-c" | "-lc") {
-            return None;
-        }
-        Some(ShellProcessInput {
-            shell,
-            flag,
-            script,
-        })
-    }
-}
-
-fn is_supported_shell_executable_name(shell: &str) -> bool {
-    #[cfg(windows)]
-    {
-        matches!(executable_name(shell).as_str(), "powershell" | "pwsh")
-    }
-
-    #[cfg(not(windows))]
-    matches!(executable_name(shell).as_str(), "bash" | "sh" | "zsh")
-}
-
-fn shell_command_without_assignment_prefix(command: &[String]) -> &[String] {
-    let executable_index = command
-        .iter()
-        .position(|word| !is_plain_shell_assignment_word(word))
-        .unwrap_or(command.len());
-    &command[executable_index..]
-}
-
-fn is_plain_shell_assignment_word(word: &str) -> bool {
-    let Some((name, value)) = word.split_once('=') else {
-        return false;
-    };
-    !name.is_empty()
-        && !value.is_empty()
-        && name.bytes().enumerate().all(|(index, byte)| {
-            byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
-        })
-}
-
 fn shell_script_contains_obvious_forbidden_text(script: &str) -> bool {
     let words = rough_shell_words(script);
     words.iter().enumerate().any(|(index, word)| {
@@ -718,32 +344,6 @@ fn shell_script_contains_obvious_forbidden_text(script: &str) -> bool {
                     FORBIDDEN_GIT_SUBCOMMANDS.contains(&subcommand.as_str())
                 }))
     })
-}
-
-fn rough_shell_words(script: &str) -> Vec<String> {
-    script
-        .split(|character: char| {
-            character.is_whitespace()
-                || matches!(
-                    character,
-                    ';' | '|' | '&' | '<' | '>' | '(' | ')' | '{' | '}' | '[' | ']' | '\'' | '"'
-                )
-        })
-        .filter(|word| !word.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-fn executable_name(argument: &str) -> String {
-    argument
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(argument)
-        .to_ascii_lowercase()
-}
-
-fn executable_token_is(argument: &str, expected: &str) -> bool {
-    argument == expected
 }
 
 const FORBIDDEN_PROCESS_EXECUTABLES: &[&str] = &[
