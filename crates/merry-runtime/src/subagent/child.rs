@@ -1,32 +1,26 @@
-use super::APPLY_PATCH_TOOL_NAME;
-use super::activity::SubagentActivityReducer;
-use super::manager::{ManagedSubagent, SubagentManagerState};
-use super::scheduler::{
-    ChildScheduler, ReservedChildStart, ReservedChildStartError, ReservedChildStartOutcome,
-    reserve_queued_starts_locked, start_reserved_children_iteratively,
-};
-use super::spec::validate_scope_path;
-use super::{
-    ChildRuntimeInput, ChildWorkspaceScope, PlanLinkRuntime, PlanSubagentScope,
-    SubagentActivityHub, SubagentManager, SubagentResultView, SubagentStatusLabel,
-    SubagentTaskSpec,
-};
 use crate::{
-    AgentLoopBlockedReason, AgentLoopConfig, AgentLoopResult, AgentLoopStatus, AgentRunMessage,
-    ArtifactContent, Runtime, StepContext, StepInput, TaskAnchor,
+    AgentLoopConfig, AgentRunMessage, Runtime, StepContext, StepInput, TaskAnchor,
+    subagent::{
+        ChildRuntimeInput, ChildWorkspaceScope, PlanLinkRuntime, PlanSubagentScope,
+        SubagentActivityHub, SubagentManager, SubagentStatusLabel, SubagentTaskSpec,
+        activity::SubagentActivityReducer,
+        manager::{ManagedSubagent, SubagentManagerState},
+        scheduler::{
+            ChildScheduler, ReservedChildStart, ReservedChildStartError, ReservedChildStartOutcome,
+            reserve_queued_starts_locked, start_reserved_children_iteratively,
+        },
+    },
 };
 use merry_core::{
-    ErrorInfo, PlanLinkSnapshot, PlanLinkStatus, RuntimeJournalEvent, RuntimeJournalPayload,
-    SubagentActivityPhase, SubagentId, SubagentTaskId, ToolCallResultStatus,
+    ErrorInfo, PlanLinkSnapshot, PlanLinkStatus, SubagentActivityPhase, SubagentId, SubagentTaskId,
 };
 use merry_llm::GenerationConfig;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
-    sync::Arc,
-};
+pub(super) use projection::{ChildLoopProjection, apply_loop_result};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+mod projection;
 
 pub(super) struct ChildLoopLaunch {
     pub(super) agent_id: SubagentId,
@@ -233,6 +227,7 @@ impl SubagentManager {
         let _ = self.start_reserved_children(to_start).await;
     }
 }
+
 pub(super) async fn spawn_reserved_child(
     scheduler: ChildScheduler,
     start: &ReservedChildStart,
@@ -683,135 +678,9 @@ pub(super) async fn update_plan_link_with_scheduler(
 pub(super) fn generation_config_for_child_task(task: &SubagentTaskSpec) -> GenerationConfig {
     GenerationConfig::default().with_reasoning_effort(task.reasoning_effort().cloned())
 }
+
 fn child_session_id() -> merry_core::SessionId {
     merry_core::SessionId::random()
-}
-#[derive(Debug, Default)]
-pub(super) struct ChildLoopProjection {
-    result: Option<SubagentResultView>,
-    changed_paths: Vec<String>,
-}
-
-impl ChildLoopProjection {
-    async fn from_result(runtime: &Runtime, result: &AgentLoopResult) -> Self {
-        let explicit_result = match result.status() {
-            AgentLoopStatus::Completed => result
-                .final_output()
-                .and_then(SubagentResultView::from_conclusion),
-            AgentLoopStatus::Failed { .. }
-            | AgentLoopStatus::Cancelled { .. }
-            | AgentLoopStatus::Blocked { .. } => None,
-        };
-
-        Self {
-            result: explicit_result,
-            changed_paths: changed_paths_from_child_events(runtime, result.events()).await,
-        }
-    }
-}
-
-pub(super) fn apply_loop_result(
-    agent: &mut ManagedSubagent,
-    result: &AgentLoopResult,
-    projection: ChildLoopProjection,
-) {
-    agent.result = projection.result;
-    agent.changed_paths = projection.changed_paths;
-
-    match result.status() {
-        AgentLoopStatus::Completed => {
-            agent.status = SubagentStatusLabel::Completed;
-            agent.summary = "child completed".to_owned();
-            agent.output_paths.clear();
-        }
-        AgentLoopStatus::Failed { diagnostic } => {
-            agent.status = SubagentStatusLabel::Failed;
-            agent.summary = format!("child failed: {}", diagnostic.message());
-            agent.diagnostics = Some(diagnostic.clone());
-        }
-        AgentLoopStatus::Cancelled { diagnostic } => {
-            agent.status = SubagentStatusLabel::Cancelled;
-            agent.summary = format!("child cancelled: {}", diagnostic.message());
-            agent.diagnostics = Some(diagnostic.clone());
-        }
-        AgentLoopStatus::Blocked { reason } => {
-            agent.status = SubagentStatusLabel::Blocked;
-            match reason {
-                AgentLoopBlockedReason::MaxModelTurnsReached { max_model_turns } => {
-                    agent.summary = format!(
-                        "child blocked after {max_model_turns} model turns; spawn a replacement with a larger budget"
-                    );
-                    agent.diagnostics = Some(error_info(
-                        "subagent_max_model_turns_reached",
-                        format!(
-                            "child used all {max_model_turns} model turns. This is recoverable: inspect the returned status and spawn a replacement with the same plan_client_key and a larger budget within the configured maximum; use a larger value for complex tasks and continue from the shared workspace."
-                        ),
-                    ));
-                }
-                _ => {
-                    agent.summary = format!("child blocked: {reason:?}");
-                    agent.diagnostics = Some(error_info("subagent_blocked", format!("{reason:?}")));
-                }
-            }
-        }
-    }
-}
-
-async fn changed_paths_from_child_events(
-    runtime: &Runtime,
-    events: &[RuntimeJournalEvent],
-) -> Vec<String> {
-    let mut pending_tool_names = BTreeMap::new();
-    let mut paths = BTreeSet::new();
-
-    for event in events {
-        match &event.payload {
-            RuntimeJournalPayload::ToolCallPending { call } => {
-                pending_tool_names.insert(call.id().clone(), call.name().clone());
-            }
-            RuntimeJournalPayload::ToolCallResolved { result }
-                if result.status() == ToolCallResultStatus::Succeeded
-                    && pending_tool_names
-                        .get(result.call_id())
-                        .is_some_and(|tool_name| tool_name.as_str() == APPLY_PATCH_TOOL_NAME) =>
-            {
-                let Ok(content) = runtime.read_artifact_content(result.artifact().id()).await
-                else {
-                    continue;
-                };
-                collect_apply_patch_changed_paths(&content, &mut paths);
-            }
-            _ => {}
-        }
-    }
-
-    paths.into_iter().collect()
-}
-
-fn collect_apply_patch_changed_paths(content: &ArtifactContent, paths: &mut BTreeSet<String>) {
-    let Some(text) = content.as_text() else {
-        return;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-        return;
-    };
-    if value.get("ok").and_then(serde_json::Value::as_bool) != Some(true)
-        || value.get("tool").and_then(serde_json::Value::as_str) != Some(APPLY_PATCH_TOOL_NAME)
-    {
-        return;
-    }
-
-    let Some(changes) = value.get("changes").and_then(serde_json::Value::as_array) else {
-        return;
-    };
-    for change in changes {
-        let Some(path) = change.get("path").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if validate_scope_path(PathBuf::from(path)).is_ok() {
-            paths.insert(path.to_owned());
-        }
-    }
 }
 
 async fn update_child_after_error(
