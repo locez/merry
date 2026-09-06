@@ -1,7 +1,6 @@
-//! Direct host-process execution backed by Tokio.
-
 use super::{
-    process_current_dir, run_spawned_process, validate_environment_name, validate_os_string,
+    environment::{process_current_dir, validate_environment_name, validate_os_string},
+    execution::run_spawned_process,
 };
 use merry_runtime::{
     ProcessActionIntent, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
