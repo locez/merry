@@ -1,169 +1,31 @@
-use super::{
+use crate::tui::{
     completion::{CompletionMenu, CompletionSources},
     input::{DraftImage, InputHistory, TextInput, TuiSubmission},
     keymap::Keymap,
-    overlay::{
-        MessageDialogKind, MessageDialogOverlay, Overlay, PlanPaletteContext, SettingsOverlay,
-        ShortcutsBack,
-    },
     plan::PlanUiState,
     preferences::{TuiPreferences, TuiSettingsDefaults},
-    provider_overlay::{
-        ModelListItem, ModelPickerOverlay, ProviderFormOverlay, ProviderFormSeed,
-        ProviderFormValues, ProviderListItem, ProviderManagerOverlay,
-    },
-    reasoning_picker::ReasoningPickerOverlay,
     status::{format_header_status_parts, format_session_usage_full},
     theme::TuiTheme,
 };
-use merry_core::{InteractiveRunState, QueuedInputLane, QueuedInputView, SessionUsage};
+use merry_core::{InteractiveRunState, QueuedInputLane, SessionUsage};
 use merry_runtime::SkillMetadata;
-use std::time::{Duration, Instant};
-use std::{collections::BTreeSet, path::PathBuf};
+use overlays::OverlayState;
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+pub(crate) use views::{
+    PatchChangeView, PatchLineKind, PatchLineView, QueuePreview, QueuePreviewItem,
+    QueuePreviewState, TimelineItem,
+};
+
+mod overlays;
+
+mod views;
 
 mod settings;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct QueuePreview {
-    pub(crate) next: Vec<QueuedInputView>,
-    pub(crate) suspended: Vec<QueuedInputView>,
-    pub(crate) backlog: Vec<QueuedInputView>,
-}
-
-#[allow(dead_code)]
-impl QueuePreview {
-    pub(crate) fn empty() -> Self {
-        Self {
-            next: Vec::new(),
-            suspended: Vec::new(),
-            backlog: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct QueuePreviewItem {
-    pub(crate) text: String,
-}
-
-#[allow(dead_code)]
-impl QueuePreviewItem {
-    pub(crate) fn display_text(&self, max_chars: usize) -> String {
-        if max_chars <= 3 {
-            return ".".repeat(max_chars);
-        }
-        if self.text.chars().count() <= max_chars {
-            return self.text.clone();
-        }
-        let prefix = self.text.chars().take(max_chars - 3).collect::<String>();
-        format!("{prefix}...")
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct QueuePreviewState {
-    pub(crate) next: Vec<QueuePreviewItem>,
-    pub(crate) suspended: Vec<QueuePreviewItem>,
-    pub(crate) backlog: Vec<QueuePreviewItem>,
-}
-
-impl QueuePreviewState {
-    fn from_preview(preview: QueuePreview) -> Self {
-        fn convert(items: Vec<QueuedInputView>) -> Vec<QueuePreviewItem> {
-            items
-                .into_iter()
-                .map(|item| QueuePreviewItem { text: item.text })
-                .collect()
-        }
-
-        Self {
-            next: convert(preview.next),
-            suspended: convert(preview.suspended),
-            backlog: convert(preview.backlog),
-        }
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.next.is_empty() && self.suspended.is_empty() && self.backlog.is_empty()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) enum PatchLineKind {
-    Context,
-    Add,
-    Remove,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct PatchLineView {
-    pub(crate) kind: PatchLineKind,
-    pub(crate) old_line: Option<usize>,
-    pub(crate) new_line: Option<usize>,
-    pub(crate) text: String,
-}
-
-#[allow(dead_code)]
-impl PatchLineView {
-    pub(crate) fn context(text: impl Into<String>, line: Option<usize>) -> Self {
-        Self {
-            kind: PatchLineKind::Context,
-            old_line: line,
-            new_line: line,
-            text: text.into(),
-        }
-    }
-
-    pub(crate) fn add(text: impl Into<String>, new_line: Option<usize>) -> Self {
-        Self {
-            kind: PatchLineKind::Add,
-            old_line: None,
-            new_line,
-            text: text.into(),
-        }
-    }
-
-    pub(crate) fn remove(text: impl Into<String>, old_line: Option<usize>) -> Self {
-        Self {
-            kind: PatchLineKind::Remove,
-            old_line,
-            new_line: None,
-            text: text.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct PatchChangeView {
-    pub(crate) path: String,
-    pub(crate) added: usize,
-    pub(crate) removed: usize,
-    pub(crate) hunks: usize,
-    pub(crate) bytes_before: Option<usize>,
-    pub(crate) bytes_after: Option<usize>,
-    pub(crate) lines: Vec<PatchLineView>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) enum TimelineItem {
-    User { text: String, lane: QueuedInputLane },
-    Assistant { text: String },
-    Muted { title: String, detail: String },
-    LocalCommand { title: String, body: String },
-    Expanded { title: String, body: String },
-    Diagnostic { title: String, body: String },
-    Patch { changes: Vec<PatchChangeView> },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct TuiState {
     workspace_root: PathBuf,
     model_label: String,
@@ -186,20 +48,10 @@ pub(crate) struct TuiState {
     last_completed_run_elapsed: Option<Duration>,
     pending_empty_input_quit: bool,
     usage: Option<SessionUsage>,
-    overlay: Option<Overlay>,
-    dialog_back: Option<Box<Overlay>>,
-    provider_overlay_back: Option<ProviderOverlayBack>,
-    provider_form_back: Option<ProviderFormOverlay>,
-    reasoning_picker_back: Option<Box<Overlay>>,
+    overlays: OverlayState,
     preferences: TuiPreferences,
     settings_defaults: TuiSettingsDefaults,
     plan: PlanUiState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ProviderOverlayBack {
-    CommandPalette,
-    Settings(SettingsOverlay),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,7 +71,6 @@ enum StopFeedbackState {
     Completed,
 }
 
-#[allow(dead_code)]
 impl TuiState {
     pub(crate) fn new(
         workspace_root: PathBuf,
@@ -249,11 +100,7 @@ impl TuiState {
             last_completed_run_elapsed: None,
             pending_empty_input_quit: false,
             usage: None,
-            overlay: None,
-            dialog_back: None,
-            provider_overlay_back: None,
-            provider_form_back: None,
-            reasoning_picker_back: None,
+            overlays: OverlayState::default(),
             preferences: TuiPreferences::default(),
             settings_defaults: TuiSettingsDefaults::default(),
             plan: PlanUiState::default(),
@@ -268,6 +115,7 @@ impl TuiState {
         &mut self.plan
     }
 
+    #[cfg(test)]
     pub(crate) fn input_mut(&mut self) -> &mut TextInput {
         &mut self.input
     }
@@ -277,6 +125,7 @@ impl TuiState {
         self.refresh_completion_menu();
     }
 
+    #[cfg(test)]
     pub(crate) fn input_text(&self) -> &str {
         self.input.text()
     }
@@ -289,10 +138,6 @@ impl TuiState {
         self.input.clear();
         self.completion_menu = None;
         self.pending_empty_input_quit = false;
-    }
-
-    pub(crate) fn input_viewport(&self, max_width: usize) -> super::input::TextInputViewport {
-        self.input.viewport(max_width)
     }
 
     pub(crate) fn input_viewport_rows(
@@ -347,6 +192,7 @@ impl TuiState {
         self.input_history.record(text);
     }
 
+    #[cfg(test)]
     pub(crate) fn input_history_entries(&self) -> &[String] {
         self.input_history.entries()
     }
@@ -357,6 +203,7 @@ impl TuiState {
         self.refresh_completion_menu();
     }
 
+    #[cfg(test)]
     pub(crate) fn insert_input_str(&mut self, text: &str) {
         self.pending_empty_input_quit = false;
         self.input.insert_str(text);
@@ -443,260 +290,6 @@ impl TuiState {
         &self.theme
     }
 
-    pub(crate) fn overlay(&self) -> Option<&Overlay> {
-        self.overlay.as_ref()
-    }
-
-    pub(crate) fn overlay_mut(&mut self) -> Option<&mut Overlay> {
-        self.overlay.as_mut()
-    }
-
-    pub(crate) fn insert_overlay_paste(&mut self, text: &str) -> bool {
-        let Some(overlay) = self.overlay.as_mut() else {
-            return false;
-        };
-        overlay.insert_paste(text);
-        true
-    }
-
-    pub(crate) fn open_command_palette(&mut self) {
-        self.completion_menu = None;
-        self.dialog_back = None;
-        self.provider_overlay_back = None;
-        self.overlay = Some(self.command_palette_overlay());
-    }
-
-    pub(crate) fn open_settings(&mut self) {
-        self.dialog_back = None;
-        self.provider_overlay_back = None;
-        self.overlay = Some(Overlay::settings());
-    }
-
-    pub(crate) fn open_provider_manager(&mut self, items: Vec<ProviderListItem>) {
-        self.provider_form_back = None;
-        self.reasoning_picker_back = None;
-        match self.overlay.take() {
-            Some(Overlay::CommandPalette(_)) => {
-                self.provider_overlay_back = Some(ProviderOverlayBack::CommandPalette);
-            }
-            Some(Overlay::Settings(settings)) => {
-                self.provider_overlay_back = Some(ProviderOverlayBack::Settings(settings));
-            }
-            Some(
-                Overlay::ProviderManager(_)
-                | Overlay::ProviderForm(_)
-                | Overlay::ModelPicker(_)
-                | Overlay::ReasoningPicker(_),
-            ) => {}
-            Some(
-                Overlay::PlanApproval(_)
-                | Overlay::PermissionReview(_)
-                | Overlay::Dialog(_)
-                | Overlay::Shortcuts(_),
-            )
-            | None => {
-                self.provider_overlay_back
-                    .get_or_insert(ProviderOverlayBack::CommandPalette);
-            }
-        }
-        let current = self.current_provider_alias().map(str::to_owned);
-        self.overlay = Some(Overlay::ProviderManager(ProviderManagerOverlay::new(
-            items,
-            current.as_deref(),
-        )));
-    }
-
-    pub(crate) fn open_provider_form(&mut self, alias: String, used_aliases: BTreeSet<String>) {
-        self.provider_form_back = None;
-        self.overlay = Some(Overlay::ProviderForm(ProviderFormOverlay::new(
-            alias,
-            used_aliases,
-        )));
-    }
-
-    pub(crate) fn open_provider_editor(
-        &mut self,
-        seed: ProviderFormSeed,
-        used_aliases: BTreeSet<String>,
-    ) {
-        self.provider_form_back = None;
-        self.overlay = Some(Overlay::ProviderForm(ProviderFormOverlay::edit(
-            seed,
-            used_aliases,
-        )));
-    }
-
-    pub(crate) fn open_model_picker(
-        &mut self,
-        alias: String,
-        display_name: String,
-        models: Vec<ModelListItem>,
-    ) {
-        self.provider_form_back = None;
-        self.reasoning_picker_back = None;
-        self.overlay = Some(Overlay::ModelPicker(ModelPickerOverlay::new(
-            alias,
-            display_name,
-            models,
-            true,
-        )));
-    }
-
-    pub(crate) fn open_provider_form_model_picker(
-        &mut self,
-        alias: String,
-        display_name: String,
-    ) -> bool {
-        let form = match self.overlay.take() {
-            Some(Overlay::ProviderForm(form)) => form,
-            overlay => {
-                self.overlay = overlay;
-                return false;
-            }
-        };
-        self.provider_form_back = Some(form);
-        self.overlay = Some(Overlay::ModelPicker(ModelPickerOverlay::for_provider_form(
-            alias,
-            display_name,
-            Vec::new(),
-        )));
-        true
-    }
-
-    pub(crate) fn open_reasoning_picker(
-        &mut self,
-        alias: String,
-        model: String,
-        target: super::provider_overlay::ModelPickerTarget,
-    ) -> bool {
-        let Some(previous) = self.overlay.take() else {
-            return false;
-        };
-        self.reasoning_picker_back = Some(Box::new(previous));
-        self.overlay = Some(Overlay::ReasoningPicker(ReasoningPickerOverlay::new(
-            alias, model, target,
-        )));
-        true
-    }
-
-    pub(crate) fn provider_form_discovery_request(
-        &self,
-    ) -> Option<(Option<String>, ProviderFormValues)> {
-        self.provider_form_back
-            .as_ref()
-            .map(ProviderFormOverlay::discovery_request)
-    }
-
-    pub(crate) fn select_provider_form_model_with_reasoning(
-        &mut self,
-        model: &str,
-        reasoning_effort: &str,
-    ) -> bool {
-        let Some(mut form) = self.provider_form_back.take() else {
-            return false;
-        };
-        form.set_model_and_reasoning(model, reasoning_effort);
-        self.overlay = Some(Overlay::ProviderForm(form));
-        self.reasoning_picker_back = None;
-        true
-    }
-
-    pub(crate) fn restore_settings_after_reasoning_picker(&mut self) -> bool {
-        let Some(back) = self.reasoning_picker_back.take() else {
-            return false;
-        };
-        match *back {
-            Overlay::Settings(settings) => {
-                self.overlay = Some(Overlay::Settings(settings));
-                true
-            }
-            overlay => {
-                self.reasoning_picker_back = Some(Box::new(overlay));
-                false
-            }
-        }
-    }
-
-    pub(crate) fn update_model_picker(
-        &mut self,
-        alias: &str,
-        result: Result<Vec<ModelListItem>, String>,
-    ) {
-        match result {
-            Ok(models) => {
-                if let Some(Overlay::ModelPicker(picker)) = self.overlay.as_mut()
-                    && picker.alias() == alias
-                {
-                    picker.set_models(models);
-                }
-            }
-            Err(error) => {
-                if self.overlay.as_ref().is_some_and(
-                    |overlay| matches!(overlay, Overlay::ModelPicker(picker) if picker.alias() == alias),
-                ) {
-                    self.show_error_dialog("Model discovery failed", error);
-                }
-            }
-        }
-    }
-
-    pub(crate) fn mark_model_picker_loading(&mut self, alias: &str) {
-        if let Some(Overlay::ModelPicker(picker)) = self.overlay.as_mut()
-            && picker.alias() == alias
-        {
-            picker.set_loading();
-        }
-    }
-
-    pub(crate) fn set_provider_overlay_error(&mut self, error: String) {
-        self.show_error_dialog("Provider error", error);
-    }
-
-    pub(crate) fn show_info_dialog(&mut self, title: &str, message: String) {
-        self.show_dialog(MessageDialogKind::Info, title, message);
-    }
-
-    pub(crate) fn open_plan_approval(&mut self) {
-        match (self.plan.approval_summary(), self.plan.approval_input()) {
-            (Ok(message), Ok(input)) => {
-                if !matches!(self.overlay, Some(Overlay::PlanApproval(_))) {
-                    self.dialog_back = self.overlay.take().map(Box::new);
-                }
-                self.overlay = Some(Overlay::plan_approval(message, input));
-            }
-            (Err(error), _) | (_, Err(error)) => {
-                self.show_error_dialog("Plan approval unavailable", error)
-            }
-        }
-    }
-
-    pub(crate) fn open_permission_review(&mut self, approval_id: String, body: String) {
-        self.completion_menu = None;
-        self.dialog_back = None;
-        self.provider_overlay_back = None;
-        self.overlay = Some(Overlay::permission_review(approval_id, body));
-    }
-
-    pub(crate) fn plan_approval_input(&self) -> Option<merry_runtime::PlanApprovalInput> {
-        match self.overlay.as_ref() {
-            Some(Overlay::PlanApproval(approval)) => Some(approval.input().clone()),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn show_error_dialog(&mut self, title: &str, message: String) {
-        self.show_dialog(MessageDialogKind::Error, title, message);
-    }
-
-    fn show_dialog(&mut self, kind: MessageDialogKind, title: &str, message: String) {
-        if !matches!(self.overlay, Some(Overlay::Dialog(_))) {
-            self.dialog_back = self.overlay.take().map(Box::new);
-        }
-        self.overlay = Some(Overlay::Dialog(MessageDialogOverlay::new(
-            kind, title, message,
-        )));
-    }
-
     pub(crate) fn replace_settings_defaults(&mut self, defaults: TuiSettingsDefaults) {
         self.settings_defaults = defaults;
     }
@@ -710,56 +303,6 @@ impl TuiState {
 
     pub(crate) fn replace_preferences(&mut self, preferences: TuiPreferences) {
         self.preferences = preferences;
-    }
-
-    pub(crate) fn open_shortcuts(&mut self) {
-        let back = match self.overlay.take() {
-            Some(Overlay::Settings(settings)) => ShortcutsBack::Settings(settings),
-            _ => ShortcutsBack::CommandPalette,
-        };
-        self.overlay = Some(Overlay::Shortcuts(back));
-    }
-
-    pub(crate) fn close_overlay(&mut self) {
-        self.overlay = None;
-        self.dialog_back = None;
-        self.provider_overlay_back = None;
-        self.provider_form_back = None;
-        self.reasoning_picker_back = None;
-    }
-
-    pub(crate) fn back_overlay(&mut self) {
-        let command_palette = self.command_palette_overlay();
-        self.overlay = match self.overlay.take() {
-            Some(Overlay::Shortcuts(ShortcutsBack::Settings(settings))) => {
-                Some(Overlay::Settings(settings))
-            }
-            Some(Overlay::Shortcuts(ShortcutsBack::CommandPalette))
-            | Some(Overlay::Settings(_)) => Some(command_palette.clone()),
-            Some(Overlay::ProviderManager(_)) => match self.provider_overlay_back.take() {
-                Some(ProviderOverlayBack::Settings(settings)) => Some(Overlay::Settings(settings)),
-                Some(ProviderOverlayBack::CommandPalette) | None => Some(command_palette),
-            },
-            Some(Overlay::PlanApproval(_) | Overlay::PermissionReview(_) | Overlay::Dialog(_)) => {
-                self.dialog_back.take().map(|overlay| *overlay)
-            }
-            Some(Overlay::ModelPicker(_)) => {
-                self.provider_form_back.take().map(Overlay::ProviderForm)
-            }
-            Some(Overlay::ReasoningPicker(_)) => {
-                self.reasoning_picker_back.take().map(|overlay| *overlay)
-            }
-            _ => None,
-        };
-    }
-
-    fn command_palette_overlay(&self) -> Overlay {
-        Overlay::command_palette_for_plan(PlanPaletteContext::from_snapshot(
-            self.plan.snapshot(),
-            self.plan.selected_node_id(),
-            self.plan.is_open(),
-            self.plan.is_focused(),
-        ))
     }
 
     pub(crate) fn timeline(&self) -> &[TimelineItem] {
@@ -939,12 +482,9 @@ impl TuiState {
         self.pending_empty_input_quit = false;
     }
 
+    #[cfg(test)]
     pub(crate) fn scroll_timeline_up(&mut self) {
         self.scroll_timeline_up_by(1);
-    }
-
-    pub(crate) fn scroll_timeline_down(&mut self) {
-        self.scroll_timeline_down_by(1);
     }
 
     pub(crate) fn scroll_timeline_up_by(&mut self, lines: usize) {
@@ -1071,6 +611,7 @@ impl TuiState {
         false
     }
 
+    #[cfg(test)]
     pub(crate) fn status_text(&self) -> String {
         self.status_parts().join("  ")
     }
@@ -1122,11 +663,6 @@ impl TuiState {
             InteractiveRunState::Interrupting => self.active_status_text("Interrupting", now),
             InteractiveRunState::Closed => "Closed".to_owned(),
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_active_run_started_at_for_test(&mut self, started_at: Instant) {
-        self.active_run_started_at = Some(started_at);
     }
 
     fn ready_status_text(&self) -> String {

@@ -27,35 +27,35 @@ impl TuiState {
     }
 
     pub(crate) fn selected_setting(&self) -> Option<SettingItem> {
-        match self.overlay.as_ref() {
+        match self.overlay() {
             Some(Overlay::Settings(settings)) => Some(settings.selected_item()),
             _ => None,
         }
     }
 
     pub(crate) fn settings_model_editor(&self) -> Option<&TextInput> {
-        match self.overlay.as_ref() {
+        match self.overlay() {
             Some(Overlay::Settings(settings)) => settings.model_editor(),
             _ => None,
         }
     }
 
     pub(crate) fn settings_context_window_editor(&self) -> Option<&TextInput> {
-        match self.overlay.as_ref() {
+        match self.overlay() {
             Some(Overlay::Settings(settings)) => settings.context_window_editor(),
             _ => None,
         }
     }
 
     pub(crate) fn settings_reasoning_editor(&self) -> Option<&TextInput> {
-        match self.overlay.as_ref() {
+        match self.overlay() {
             Some(Overlay::Settings(settings)) => settings.reasoning_editor(),
             _ => None,
         }
     }
 
     pub(crate) fn settings_notice(&self) -> Option<&str> {
-        match self.overlay.as_ref() {
+        match self.overlay() {
             Some(Overlay::Settings(settings)) => settings.notice(),
             _ => None,
         }
@@ -72,7 +72,7 @@ impl TuiState {
                     .map(str::to_owned)
             })
             .unwrap_or_default();
-        if let Some(Overlay::Settings(settings)) = self.overlay.as_mut() {
+        if let Some(Overlay::Settings(settings)) = self.overlay_mut() {
             settings.begin_model_edit(value);
         }
     }
@@ -104,7 +104,7 @@ impl TuiState {
             .context_window_tokens
             .map(|tokens| tokens.to_string())
             .unwrap_or_default();
-        if let Some(Overlay::Settings(settings)) = self.overlay.as_mut() {
+        if let Some(Overlay::Settings(settings)) = self.overlay_mut() {
             settings.begin_context_window_edit(value);
         }
     }
@@ -125,7 +125,7 @@ impl TuiState {
                     .map(str::to_owned)
             })
             .unwrap_or_default();
-        if let Some(Overlay::Settings(settings)) = self.overlay.as_mut() {
+        if let Some(Overlay::Settings(settings)) = self.overlay_mut() {
             settings.begin_reasoning_edit(value);
         }
     }
@@ -434,7 +434,7 @@ impl TuiState {
     }
 
     fn set_settings_notice(&mut self, notice: Option<String>) {
-        if let Some(Overlay::Settings(settings)) = self.overlay.as_mut() {
+        if let Some(Overlay::Settings(settings)) = self.overlay_mut() {
             settings.set_notice(notice);
         }
     }
