@@ -3,9 +3,10 @@
 Detailed scope, acceptance, evidence, and status live in the linked GitHub
 issues. This file keeps only the major delivery sequence and its dependencies.
 
-## Current Focus
+## Delivery Status
 
-- [x] [T0: Establish delivery baseline, roadmap, and architecture guard](https://github.com/locez/merry/issues/10)
+T0 through T8 are complete. T10 ownership-based architecture governance is also
+complete. T9 external benchmark evidence and T11 release closure remain open.
 
 ## Initiative
 
@@ -16,11 +17,11 @@ issues. This file keeps only the major delivery sequence and its dependencies.
 - [x] [T3: Establish the unique CodingAgentProfile (implemented; shared facade/CLI profile, stable-prefix and admission evidence)](https://github.com/locez/merry/issues/12)
 - [x] [T4: Internal Coding Eval Suite (closed; no standalone runner)](https://github.com/locez/merry/issues/13)
 - [x] [T5: Unify CLI, Debug, and Rust Runtime Builder](https://github.com/locez/merry/issues/14) (shared builder, validated permission policy, parent-child inheritance tests, full Rust verification; read-only capability-closure follow-up deferred by approval)
-- [ ] [T6: Establish production reliability, security, and observability harness](https://github.com/locez/merry/issues/15) (deterministic PR gate and cross-layer failure evidence added; live/nightly coverage remains)
-- [ ] [T7: Release a stable Rust SDK](https://github.com/locez/merry/issues/16)
-- [ ] [T8: Align Python and Rust SDK capabilities](https://github.com/locez/merry/issues/17)
-- [ ] [T9: Integrate external coding-agent evaluation suites](https://github.com/locez/merry/issues/18)
-- [ ] [T10: Split large Runtime and Binding modules by responsibility](https://github.com/locez/merry/issues/19)
+- [x] [T6: Establish production reliability, security, and observability harness](https://github.com/locez/merry/issues/15) (closed; deterministic PR gate, security/lifecycle regression coverage, and structured failure evidence)
+- [x] [T7: Release a stable Rust SDK](https://github.com/locez/merry/issues/16) (closed; typed facade, agent lifecycle, public event streams, and tool registration)
+- [x] [T8: Align Python and Rust SDK capabilities](https://github.com/locez/merry/issues/17) (closed; typed async SDK, Rust-owned lifecycle, capability-parity tests, and packaging checks)
+- [ ] [T9: Integrate external coding-agent evaluation suites](https://github.com/locez/merry/issues/18) (Harbor adapter and smoke workflow implemented; end-to-end Terminal-Bench and Rust SWE evidence remains)
+- [x] [T10: Split large Runtime and Binding modules by responsibility](https://github.com/locez/merry/issues/19) (ownership-based runtime, tools, CLI, and test decomposition; full Rust/Python verification)
 - [ ] [T11: Establish release gates and close the Definition of Done](https://github.com/locez/merry/issues/20)
 
 ## Dependency Order
