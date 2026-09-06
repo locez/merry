@@ -49,6 +49,11 @@ pub struct PlanApprovalInput {
 }
 
 /// Bounded exact-read selector for the active plan.
+#[merry_tools_macros::tool(
+    crate = "crate",
+    name = "read_plan",
+    description = "Read a bounded exact snapshot or subtree of the current durable plan."
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReadPlanInput {
@@ -109,6 +114,11 @@ pub struct PlanDecompositionInput {
 }
 
 /// Child-owned update to the subtree below one linked Plan node.
+#[merry_tools_macros::tool(
+    crate = "crate",
+    name = "update_plan",
+    description = "Update authored children or replace a mutable subtree below the linked task."
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SubagentPlanUpdateInput {
@@ -406,6 +416,11 @@ pub enum PlanChangeInput {
 }
 
 /// Coordinator-authored plan update.
+#[merry_tools_macros::tool(
+    crate = "crate",
+    name = "update_plan",
+    description = "Create or update the authored durable Plan tree."
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(

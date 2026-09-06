@@ -7,14 +7,14 @@ use crate::provider_config::{
 };
 use crate::runtime_config::automatic_compaction_config;
 use merry::profiles::{CodingRuntime, CodingRuntimeBuilder, CodingRuntimeInput};
-use merry_core::{ErrorInfo, PendingToolCall, SessionId, ToolInputSchema, ToolName, ToolSpec};
+use merry_core::{ErrorInfo, PendingToolCall, SessionId, ToolInputSchema};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{
     AgentLoopConfig, AgentLoopStatus, AutomaticCompactionConfig, RegisteredTool, Runtime,
     StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
     ToolExecutorFuture,
 };
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
@@ -32,6 +32,31 @@ mod tests;
 
 pub(crate) const CHECK_COMMAND_TOOL_NAME: &str = "cmd_check_command";
 const CHECK_COMMAND_INVALID_ARGUMENTS_CODE: &str = "cmd_check_command_invalid_arguments";
+
+#[merry::tool(
+    name = "cmd_check_command",
+    description = "Check whether command names are available in this environment without executing them."
+)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CmdCheckCommandInput {
+    #[schemars(schema_with = "cmd_check_programs_schema")]
+    programs: Vec<String>,
+}
+
+fn cmd_check_programs_schema(_: &mut SchemaGenerator) -> Schema {
+    Schema::try_from(serde_json::json!({
+        "type": "array",
+        "minItems": 1,
+        "description": "Program names to check in PATH before suggesting optional system commands.",
+        "items": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Executable name or shell builtin to check. Use a name such as `cargo`, not a full command or path."
+        }
+    }))
+    .expect("command check programs schema is valid")
+}
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct Args {
@@ -434,30 +459,7 @@ where
 fn cmd_check_command_tool(
     environment: CommandGenerationEnvironment,
 ) -> Result<RegisteredTool, CliError> {
-    let schema = serde_json::from_value::<ToolInputSchema>(serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "programs": {
-                "type": "array",
-                "items": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Executable name or shell builtin to check. Use a name such as `cargo`, not a full command or path."
-                },
-                "minItems": 1,
-                "description": "Program names to check in PATH before suggesting optional system commands."
-            }
-        },
-        "required": ["programs"]
-    }))
-    .map_err(unexpected)?;
-    let spec = ToolSpec::new(
-        ToolName::new(CHECK_COMMAND_TOOL_NAME).map_err(unexpected)?,
-        "Check whether command names are available in this environment without executing them.",
-        schema,
-    )
-    .map_err(unexpected)?;
+    let spec = CmdCheckCommandInput::tool_spec().map_err(|error| unexpected(error.to_string()))?;
 
     Ok(RegisteredTool::read_only(
         spec,
@@ -495,22 +497,12 @@ impl ToolExecutor for CmdCheckCommandExecutor {
 }
 
 fn cmd_check_programs_from_call(call: &PendingToolCall) -> Result<Vec<String>, String> {
-    let Some(value) = call.arguments().as_object().get("programs") else {
-        return Err("cmd_check_command requires programs".to_owned());
-    };
-    let Some(values) = value.as_array() else {
-        return Err("cmd_check_command programs must be an array".to_owned());
-    };
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            value
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| format!("cmd_check_command programs[{index}] must be a string"))
+    call.arguments()
+        .deserialize_as::<CmdCheckCommandInput>()
+        .map(|input| input.programs)
+        .map_err(|error| {
+            format!("cmd_check_command arguments must match the declared input schema: {error}")
         })
-        .collect()
 }
 
 fn cmd_check_invalid_arguments_outcome(message: String) -> ToolExecutionOutcome {

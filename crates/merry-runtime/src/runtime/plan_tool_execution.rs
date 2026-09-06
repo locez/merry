@@ -326,13 +326,13 @@ fn input_from_call<T>(pending: &PendingToolCall) -> Result<T, PlanInputDecodeErr
 where
     T: DeserializeOwned,
 {
-    serde_json::from_value(serde_json::Value::Object(
-        pending.arguments().as_object().clone(),
-    ))
-    .map_err(|error| PlanInputDecodeError {
-        path: input_decode_path(pending),
-        message: error.to_string(),
-    })
+    pending
+        .arguments()
+        .deserialize_as()
+        .map_err(|error| PlanInputDecodeError {
+            path: input_decode_path(pending),
+            message: error.to_string(),
+        })
 }
 
 async fn submit_input_decode_error(

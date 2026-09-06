@@ -121,6 +121,19 @@ pub enum ToolBuildError {
     },
 }
 
+impl From<ToolBuildError> for CoreError {
+    fn from(error: ToolBuildError) -> Self {
+        match error {
+            ToolBuildError::Core(source) => source,
+            ToolBuildError::ReservedName { name } => CoreError::InvalidIdentifier {
+                kind: "ToolName",
+                value: name.to_string(),
+                reason: "tool name is reserved",
+            },
+        }
+    }
+}
+
 struct TypedToolExecutor<I, O, F, Fut, E> {
     handler: F,
     input_marker: PhantomData<fn(I) -> O>,
@@ -141,9 +154,7 @@ where
         call: PendingToolCall,
         context: ToolExecutionContext,
     ) -> ToolExecutorFuture<'a> {
-        let input = match serde_json::from_value(serde_json::Value::Object(
-            call.arguments().as_object().clone(),
-        )) {
+        let input = match call.arguments().deserialize_as::<I>() {
             Ok(input) => input,
             Err(source) => {
                 return Box::pin(async move {

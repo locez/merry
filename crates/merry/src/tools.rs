@@ -5,4 +5,4 @@
 
 pub use merry_core::ToolSpec;
 pub use merry_runtime::{Tool, ToolBuildError};
-pub use merry_tools::tool;
+pub use merry_tools_macros::tool;

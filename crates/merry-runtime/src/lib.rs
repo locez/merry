@@ -65,6 +65,7 @@ mod tool;
 mod tool_admission;
 mod tool_api;
 mod tool_catalog;
+mod tool_input;
 mod tool_input_validation;
 mod trajectory;
 mod trajectory_replay;
@@ -112,7 +113,7 @@ pub use ledger::{
     CompactLedgerText, LedgerFactKind, LedgerProjection, LedgerProjectionSnapshot, LedgerScope,
     LedgerUpdate, LedgerUpdateKind, LedgerValidationError, LifecycleFact, TaskLedger,
 };
-pub use merry_core::ContextWindowSource;
+pub use merry_core::{ContextWindowSource, ToolSpec};
 pub use model_config::RuntimeModelRole;
 pub use permission::{
     ChannelPermissionAdmissionSource, HostIntegration, PermissionAdmissionContext,

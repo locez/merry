@@ -78,9 +78,10 @@ impl Parse for ToolArguments {
 ///
 /// On an async function with one input argument, this generates a
 /// `<function>_tool()` factory with the handler's visibility. On a struct, it generates an inherent
-/// `tool_spec()` factory using the struct's `Deserialize` and `JsonSchema`
-/// implementations. Runtime-owned executors can use the struct form while
-/// retaining custom policy, tracing, and cancellation behavior.
+/// `tool_spec()` and `tool_spec_with()` factories using the struct's
+/// `Deserialize` and `JsonSchema` implementations. Runtime-owned executors can
+/// use the struct form while retaining custom policy, tracing, and cancellation
+/// behavior.
 ///
 /// Renamed `merry` dependencies are resolved automatically. Use
 /// `crate = "crate"` to select a local re-export boundary explicitly.
@@ -176,9 +177,17 @@ fn expand_definition(
         #structure
 
         impl #structure_name {
+            /// Builds a provider-neutral tool specification with an explicit identity.
+            #visibility fn tool_spec_with(
+                name: impl ::core::convert::AsRef<str>,
+                description: impl ::core::convert::AsRef<str>,
+            ) -> ::core::result::Result<#crate_path::ToolSpec, #crate_path::ToolBuildError> {
+                #crate_path::Tool::spec_for::<Self>(name, description)
+            }
+
             /// Builds the provider-neutral tool specification for this input.
             #visibility fn tool_spec() -> ::core::result::Result<#crate_path::ToolSpec, #crate_path::ToolBuildError> {
-                #crate_path::Tool::spec_for::<Self>(#tool_name, #description)
+                Self::tool_spec_with(#tool_name, #description)
             }
         }
     })

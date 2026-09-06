@@ -6,6 +6,11 @@ use serde_json::json;
 use super::spec::{DEFAULT_MIN_MODEL_TURNS, MAX_TASK_BYTES};
 
 /// Provider-visible input for `spawn_subagents`.
+#[merry_tools_macros::tool(
+    crate = "crate",
+    name = "spawn_subagents",
+    description = "Spawn bounded child agents for parallel delegated tasks."
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnSubagentsInput {
@@ -134,6 +139,11 @@ pub enum WaitMode {
 }
 
 /// Provider-visible input for `wait_subagents`.
+#[merry_tools_macros::tool(
+    crate = "crate",
+    name = "wait_subagents",
+    description = "Inspect or wait for child agent statuses and compact results."
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WaitSubagentsInput {
@@ -156,6 +166,11 @@ pub struct WaitSubagentsInput {
 }
 
 /// Provider-visible input for `cancel_subagents`.
+#[merry_tools_macros::tool(
+    crate = "crate",
+    name = "cancel_subagents",
+    description = "Cancel selected child agents."
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CancelSubagentsInput {

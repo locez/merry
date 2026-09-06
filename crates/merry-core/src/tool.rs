@@ -4,7 +4,10 @@ use crate::{
     ArtifactRef, CoreError, ErrorInfo, ToolCallBatchId, ToolCallId, ToolInputSchema, ToolName,
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize, de};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, DeserializeOwned},
+};
 use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
@@ -35,6 +38,14 @@ impl ToolCallArguments {
     #[must_use]
     pub fn into_inner(self) -> Map<String, Value> {
         self.0
+    }
+
+    /// Decodes the object into a typed tool input at the runtime boundary.
+    pub fn deserialize_as<T>(&self) -> Result<T, serde_json::Error>
+    where
+        T: DeserializeOwned,
+    {
+        serde_json::from_value(Value::Object(self.0.clone()))
     }
 }
 
@@ -350,6 +361,11 @@ impl ToolSpec {
     #[must_use]
     pub fn input_schema(&self) -> &ToolInputSchema {
         &self.input_schema
+    }
+
+    /// Returns this specification with a validated replacement input schema.
+    pub fn with_input_schema(self, input_schema: ToolInputSchema) -> Result<Self, CoreError> {
+        Self::new(self.name, &self.description, input_schema)
     }
 }
 

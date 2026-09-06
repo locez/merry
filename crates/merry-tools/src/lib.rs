@@ -3,8 +3,8 @@
 //! This crate owns Merry-provided tool implementations and adapts filesystem
 //! bounded text reads and opt-in constrained workspace edits into
 //! runtime-registered tools without making the runtime own real workspace
-//! access policy. It also hosts the implementation dependency for the public
-//! `merry::tool` declaration macro.
+//! access policy. The public `merry::tool` declaration macro is re-exported by
+//! the facade crate; this crate only contains the implementation dependency.
 //!
 //! Path safety is scoped to trusted, stable workspace roots. The MVP rejects
 //! absolute paths, parent-directory traversal, ordinary dot components except
@@ -30,7 +30,6 @@ mod state;
 mod trace;
 
 pub use config::{WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceToolsConfig};
-pub use merry_tools_macros::tool;
 pub use registry::WorkspaceTools;
 
 /// Registered tool name for bounded read-only text ranges.

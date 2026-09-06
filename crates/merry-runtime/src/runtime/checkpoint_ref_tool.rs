@@ -3,10 +3,10 @@ use crate::{
     ToolExecutorFuture,
     tool::{RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionOutcome},
 };
-use merry_core::{
-    CoreError, ErrorInfo, PendingToolCall, RuntimeJournalEvent, ToolInputSchema, ToolName, ToolSpec,
-};
-use schemars::Schema;
+use merry_core::{CoreError, ErrorInfo, PendingToolCall, RuntimeJournalEvent, ToolName};
+use merry_tools_macros::tool;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -19,6 +19,37 @@ const CHECKPOINT_REF_ARGUMENTS_INVALID: &str = "checkpoint_ref_arguments_invalid
 const DEFAULT_CHECKPOINT_REF_PAGE_BYTES: usize = 4096;
 const MAX_CHECKPOINT_REF_PAGE_BYTES: usize = 16_384;
 
+#[tool(
+    crate = "crate",
+    name = "merry_read_checkpoint_ref",
+    description = "Read a bounded page from a ref's original artifact in the current compacted checkpoint."
+)]
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CheckpointRefInput {
+    #[serde(rename = "ref")]
+    #[schemars(
+        description = "Checkpoint ref id from the current compacted checkpoint, such as h42."
+    )]
+    reference: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Zero-based byte offset within the referenced artifact. Omit it to start at the beginning.",
+        range(min = 0)
+    )]
+    offset: usize,
+    #[serde(default = "default_checkpoint_ref_page_bytes")]
+    #[schemars(
+        description = "Maximum number of artifact bytes to return in this page. Omit it to use the 4096-byte default.",
+        range(min = 1, max = MAX_CHECKPOINT_REF_PAGE_BYTES)
+    )]
+    max_bytes: usize,
+}
+
+fn default_checkpoint_ref_page_bytes() -> usize {
+    DEFAULT_CHECKPOINT_REF_PAGE_BYTES
+}
+
 pub(super) fn merry_read_checkpoint_ref_tool_name() -> ToolName {
     ToolName::new(MERRY_READ_CHECKPOINT_REF_TOOL_NAME).expect("static tool name is valid")
 }
@@ -28,10 +59,9 @@ pub(super) fn is_merry_read_checkpoint_ref_tool(tool_name: &ToolName) -> bool {
 }
 
 pub(super) fn merry_read_checkpoint_ref_tool() -> Result<RegisteredTool, CoreError> {
-    let spec = ToolSpec::new(
-        merry_read_checkpoint_ref_tool_name(),
+    let spec = CheckpointRefInput::tool_spec_with(
+        merry_read_checkpoint_ref_tool_name().as_str(),
         "Read a bounded page from a ref's original artifact in the current compacted checkpoint.",
-        merry_read_checkpoint_ref_input_schema()?,
     )?;
     Ok(RegisteredTool::new(
         spec,
@@ -39,33 +69,6 @@ pub(super) fn merry_read_checkpoint_ref_tool() -> Result<RegisteredTool, CoreErr
         ToolActionKind::ReadOnly,
     )
     .with_parallel_safe_execution())
-}
-
-fn merry_read_checkpoint_ref_input_schema() -> Result<ToolInputSchema, CoreError> {
-    let schema = Schema::try_from(json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["ref"],
-        "properties": {
-            "ref": {
-                "type": "string",
-                "description": "Checkpoint ref id from the current compacted checkpoint, such as h42."
-            },
-            "offset": {
-                "type": "integer",
-                "minimum": 0,
-                "description": "Zero-based byte offset within the referenced artifact. Omit it to start at the beginning."
-            },
-            "max_bytes": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": MAX_CHECKPOINT_REF_PAGE_BYTES,
-                "description": "Maximum number of artifact bytes to return in this page. Omit it to use the 4096-byte default."
-            }
-        }
-    }))
-    .expect("static checkpoint ref schema should be a JSON object");
-    ToolInputSchema::new(schema)
 }
 
 fn checkpoint_ref_read_failed_outcome(ref_id: &str, error: &RuntimeError) -> ToolExecutionOutcome {
@@ -138,15 +141,15 @@ pub(super) async fn execute_merry_read_checkpoint_ref_tool_call(
     }
 
     let outcome = match checkpoint_ref_arguments(pending) {
-        Ok(CheckpointRefArguments {
-            ref_id: ref_value,
-            offset,
-            max_bytes,
-        }) => match CheckpointRefId::new(&ref_value) {
+        Ok(input) => match CheckpointRefId::new(&input.reference) {
             Ok(ref_id) => {
                 let page = {
                     let session = inner.session.lock().await;
-                    session.read_checkpoint_ref_page_with_source(&ref_id, offset, max_bytes)
+                    session.read_checkpoint_ref_page_with_source(
+                        &ref_id,
+                        input.offset,
+                        input.max_bytes,
+                    )
                 };
 
                 match page {
@@ -165,11 +168,11 @@ pub(super) async fn execute_merry_read_checkpoint_ref_tool_call(
                     }
                     Err(RuntimeError::Checkpoint {
                         source: CheckpointError::RefNotFound { .. },
-                    }) => checkpoint_ref_not_found_outcome(&ref_value),
-                    Err(error) => checkpoint_ref_read_failed_outcome(&ref_value, &error),
+                    }) => checkpoint_ref_not_found_outcome(&input.reference),
+                    Err(error) => checkpoint_ref_read_failed_outcome(&input.reference, &error),
                 }
             }
-            Err(_) => checkpoint_ref_not_found_outcome(&ref_value),
+            Err(_) => checkpoint_ref_not_found_outcome(&input.reference),
         },
         Err(reason) => checkpoint_ref_arguments_invalid_outcome(reason),
     };
@@ -189,46 +192,15 @@ pub(super) async fn execute_merry_read_checkpoint_ref_tool_call(
     Ok(events)
 }
 
-struct CheckpointRefArguments {
-    ref_id: String,
-    offset: usize,
-    max_bytes: usize,
-}
-
-fn checkpoint_ref_arguments(
-    pending: &PendingToolCall,
-) -> Result<CheckpointRefArguments, &'static str> {
-    let arguments = pending.arguments().as_object();
-    let offset = optional_page_argument(arguments, "offset", 0)?;
-    let max_bytes =
-        optional_page_argument(arguments, "max_bytes", DEFAULT_CHECKPOINT_REF_PAGE_BYTES)?;
-    if max_bytes == 0 || max_bytes > MAX_CHECKPOINT_REF_PAGE_BYTES {
+fn checkpoint_ref_arguments(pending: &PendingToolCall) -> Result<CheckpointRefInput, &'static str> {
+    let input = pending
+        .arguments()
+        .deserialize_as::<CheckpointRefInput>()
+        .map_err(|_| "checkpoint ref arguments must match the declared input schema")?;
+    if input.max_bytes == 0 || input.max_bytes > MAX_CHECKPOINT_REF_PAGE_BYTES {
         return Err("max_bytes must be between 1 and 16384");
     }
-
-    Ok(CheckpointRefArguments {
-        ref_id: arguments
-            .get("ref")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        offset,
-        max_bytes,
-    })
-}
-
-fn optional_page_argument(
-    arguments: &serde_json::Map<String, serde_json::Value>,
-    field: &'static str,
-    default: usize,
-) -> Result<usize, &'static str> {
-    let Some(value) = arguments.get(field) else {
-        return Ok(default);
-    };
-    let Some(value) = value.as_u64() else {
-        return Err("checkpoint ref page arguments must be non-negative integers");
-    };
-    usize::try_from(value).map_err(|_| "checkpoint ref page argument is outside platform bounds")
+    Ok(input)
 }
 
 #[cfg(test)]

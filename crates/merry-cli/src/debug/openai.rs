@@ -10,13 +10,15 @@ use crate::runtime_events::{
     first_pending_tool_call, write_runtime_events, write_runtime_step_events,
     write_runtime_step_events_to,
 };
-use merry_core::{PendingToolCall, SessionId, ToolInputSchema, ToolName, ToolSpec};
+use merry_core::{PendingToolCall, SessionId};
 use merry_llm::{GenerationConfig, ModelName};
 use merry_provider_openai::OpenAiProvider;
 use merry_runtime::{
     RegisteredTool, Runtime, StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome,
     ToolExecutor, ToolExecutorFuture,
 };
+use schemars::JsonSchema;
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
@@ -25,6 +27,13 @@ mod tests;
 
 const DEBUG_TOOL_NAME: &str = "debug_echo";
 const DEBUG_TOOL_CONTINUATION_INPUT: &str = "continue after debug tool";
+
+#[merry::tool(
+    name = "debug_echo",
+    description = "Return the fixed debug text provided by the CLI."
+)]
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DebugEchoInput {}
 
 pub(crate) async fn run(
     input: &str,
@@ -107,17 +116,8 @@ pub(crate) fn echo_tool(result: &str) -> Result<RegisteredTool, CliError> {
         ));
     }
 
-    let schema = serde_json::from_value::<ToolInputSchema>(serde_json::json!({
-        "type": "object",
-        "additionalProperties": true
-    }))
-    .map_err(debug_openai_usage_error)?;
-    let spec = ToolSpec::new(
-        ToolName::new(DEBUG_TOOL_NAME).map_err(debug_openai_usage_error)?,
-        "Return the fixed debug text provided by the CLI.",
-        schema,
-    )
-    .map_err(debug_openai_usage_error)?;
+    let spec =
+        DebugEchoInput::tool_spec().map_err(|error| debug_openai_usage_error(error.to_string()))?;
 
     Ok(RegisteredTool::read_only(
         spec,

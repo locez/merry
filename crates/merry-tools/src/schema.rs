@@ -23,9 +23,5 @@ pub(crate) fn with_property_limit(
         kind: "ToolInputSchema",
         reason: "bounded tool input schema is invalid",
     })?;
-    Ok(ToolSpec::new(
-        spec.name().clone(),
-        spec.description(),
-        ToolInputSchema::new(schema)?.require_object()?,
-    )?)
+    Ok(spec.with_input_schema(ToolInputSchema::new(schema)?.require_object()?)?)
 }

@@ -1,14 +1,16 @@
 use super::RuntimeInner;
 use super::process_execution::{ProcessExecutionAdmission, execute_admitted_process_action};
 use crate::{
-    ActionProposal, ProcessPermissionProfileId, RuntimeError, RuntimeModelRole,
+    ActionProposal, ProcessActionIntent, ProcessPermissionProfileId, RuntimeError,
+    RuntimeModelRole,
     action_policy::ActionPolicyDecision,
     permission::{
         ModelBackedPermissionAdmissionSource, PermissionAdmissionContext,
         PermissionAdmissionResult, PermissionAdmissionReview, PermissionAdmissionSource,
         PermissionRequest, PermissionedAction, permission_blocked_outcome,
         permission_denied_outcome, permission_invalid_arguments_outcome,
-        permission_request_from_call, permission_review_error_outcome,
+        permission_request_from_call, permission_request_from_process_call,
+        permission_review_error_outcome,
     },
     tool::{ActionProposalEvidence, ToolExecutionContext},
 };
@@ -52,6 +54,53 @@ pub(super) async fn execute_permission_request_tool_call(
         }
     };
 
+    execute_permissioned_process_request(inner, pending, request, context, attribute_plan_effect)
+        .await
+}
+
+pub(super) async fn execute_process_permission_request_tool_call(
+    inner: &Arc<RuntimeInner>,
+    pending: &PendingToolCall,
+    intent: &ProcessActionIntent,
+    context: ToolExecutionContext,
+    attribute_plan_effect: bool,
+) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+    let review_context = {
+        let session = inner.session.lock().await;
+        session.permission_review_context_snapshot()?
+    };
+    let request =
+        match permission_request_from_process_call(pending, intent.clone(), review_context) {
+            Ok(request) => request,
+            Err(error) => {
+                let outcome = permission_invalid_arguments_outcome(pending.name().as_str(), error);
+                let (status, content, diagnostic, execution_evidence) = outcome.into_parts();
+                debug_assert!(execution_evidence.is_none());
+                let events = {
+                    let mut session = inner.session.lock().await;
+                    session.submit_tool_execution_outcome(
+                        pending.id(),
+                        status,
+                        content,
+                        diagnostic,
+                        None,
+                    )?
+                };
+                return Ok(events);
+            }
+        };
+
+    execute_permissioned_process_request(inner, pending, request, context, attribute_plan_effect)
+        .await
+}
+
+async fn execute_permissioned_process_request(
+    inner: &Arc<RuntimeInner>,
+    pending: &PendingToolCall,
+    request: crate::PermissionRequest,
+    context: ToolExecutionContext,
+    attribute_plan_effect: bool,
+) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
     let Some(runner_factory) = inner.permissioned_process_runner_factory.clone() else {
         let outcome = permission_blocked_outcome(
             pending,

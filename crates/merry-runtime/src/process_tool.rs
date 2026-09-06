@@ -6,30 +6,88 @@
 //! runtime process policy and injected [`crate::ProcessRunner`] lanes.
 
 use crate::{
-    ActionProposal, ActionProposalEvidence, MAX_PROCESS_ARG_BYTES, MAX_PROCESS_CWD_BYTES,
-    ProcessActionIntent, ProcessEnvPolicy, RegisteredTool, ToolActionKind, ToolActionPreflight,
+    ActionProposal, ActionProposalEvidence, MAX_PROCESS_ARG_BYTES, ProcessActionIntent,
+    ProcessEnvPolicy, RegisteredTool, ToolActionKind, ToolActionPreflight,
     ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture, process::shell_command_argv,
+    ToolExecutor, ToolExecutorFuture,
+    permission::{
+        RequestedCapabilitiesInput, permission_reason_schema_for_schemars,
+        process_cwd_schema_for_schemars, requested_capabilities_schema_for_schemars,
+    },
+    process::shell_command_argv,
+    tool_input::deserialize_non_empty_process_command,
 };
-use merry_core::{CoreError, ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
-use serde_json::{Value, json};
+use merry_core::{CoreError, ErrorInfo, PendingToolCall, ToolName};
+use merry_tools_macros::tool;
+use schemars::JsonSchema;
+use serde::Deserialize;
+use serde_json::json;
 use std::sync::Arc;
 use thiserror::Error;
 
 const DEFAULT_PROCESS_TOOL_STDOUT_LIMIT_BYTES: usize = 64 * 1024;
 const DEFAULT_PROCESS_TOOL_STDERR_LIMIT_BYTES: usize = 64 * 1024;
 
+#[tool(
+    crate = "crate",
+    name = "run_process",
+    description = "Run a validated shell command through the runtime process policy."
+)]
+#[derive(Debug, JsonSchema)]
+struct ProcessCommandInput {
+    #[schemars(
+        description = "Shell command to execute. Newline and tab are allowed; other control characters are rejected. JSON strings must escape embedded control characters.",
+        length(min = 1, max = MAX_PROCESS_ARG_BYTES)
+    )]
+    command: String,
+    #[schemars(
+        schema_with = "process_cwd_schema_for_schemars",
+        description = "Optional workspace-relative working directory. Omit it, use \".\", or use null for the current workspace directory; an empty string is accepted as the same root default for compatibility."
+    )]
+    #[serde(default)]
+    cwd: String,
+    #[schemars(
+        schema_with = "permission_reason_schema_for_schemars",
+        description = "Optional short explanation of why the current task needs the requested capability. Use it only together with permissions."
+    )]
+    #[serde(default)]
+    reason: Option<String>,
+    #[schemars(schema_with = "requested_capabilities_schema_for_schemars")]
+    #[serde(default)]
+    permissions: Option<RequestedCapabilitiesInput>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessCommandInputWire {
+    #[serde(deserialize_with = "deserialize_non_empty_process_command")]
+    command: String,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    permissions: Option<RequestedCapabilitiesInput>,
+}
+
+impl<'de> Deserialize<'de> for ProcessCommandInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let input = ProcessCommandInputWire::deserialize(deserializer)?;
+        Ok(Self {
+            command: input.command,
+            cwd: input.cwd.unwrap_or_default(),
+            reason: input.reason,
+            permissions: input.permissions,
+        })
+    }
+}
+
 /// Errors raised while constructing the runtime-owned process command tool.
 #[derive(Debug, Error)]
 pub enum ProcessCommandToolError {
-    /// The static provider-visible input schema could not be decoded.
-    #[error("process command tool input schema could not be built: {source}")]
-    InputSchema {
-        /// Source schema decoding error.
-        #[source]
-        source: serde_json::Error,
-    },
-
     /// A Merry core protocol value rejected the tool definition.
     #[error(transparent)]
     Core {
@@ -41,16 +99,21 @@ pub enum ProcessCommandToolError {
 
 /// Creates a registered process command tool for runtime agent loops.
 ///
-/// The provider-visible tool accepts a JSON object with a shell `command` and
-/// nullable workspace-relative `cwd`. The returned registered tool is a
-/// `CommandExec` action with proposal evidence enabled, so admitted execution
-/// goes through runtime process policy and an injected [`crate::ProcessRunner`].
+/// The provider-visible tool accepts a JSON object with a shell `command`,
+/// nullable workspace-relative `cwd`, and optional capabilities to request
+/// before execution. The returned registered tool is a `CommandExec` action
+/// with proposal evidence enabled, so admitted execution goes through runtime
+/// process policy and an injected [`crate::ProcessRunner`].
 pub fn process_command_tool(
     name: ToolName,
     description: &str,
 ) -> Result<RegisteredTool, ProcessCommandToolError> {
-    let input_schema = process_command_tool_input_schema()?;
-    let spec = ToolSpec::new(name, description, input_schema)?;
+    let spec =
+        ProcessCommandInput::tool_spec_with(name.as_str(), description).map_err(|error| {
+            ProcessCommandToolError::Core {
+                source: error.into(),
+            }
+        })?;
     Ok(RegisteredTool::new(
         spec,
         Arc::new(ProcessCommandToolExecutor),
@@ -59,32 +122,12 @@ pub fn process_command_tool(
     .with_action_proposal())
 }
 
-fn process_command_tool_input_schema() -> Result<ToolInputSchema, ProcessCommandToolError> {
-    serde_json::from_value(json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "command": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": MAX_PROCESS_ARG_BYTES,
-                "description": "Shell command to execute. Newline and tab are allowed; other control characters are rejected. JSON strings must escape embedded control characters."
-            },
-            "cwd": {
-                "description": "Workspace-relative working directory. Use \".\" or null for the workspace root; an empty string is rejected by the provider contract.",
-                "anyOf": [
-                    { "type": "null" },
-                    {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": MAX_PROCESS_CWD_BYTES
-                    }
-                ]
-            }
-        },
-        "required": ["command", "cwd"]
-    }))
-    .map_err(|source| ProcessCommandToolError::InputSchema { source })
+pub(crate) fn process_call_requests_permission(call: &PendingToolCall) -> bool {
+    let arguments = call.arguments().as_object();
+    arguments.contains_key("permissions")
+        || arguments
+            .get("reason")
+            .is_some_and(|reason| !reason.is_null())
 }
 
 #[derive(Debug)]
@@ -150,18 +193,13 @@ impl ToolExecutor for ProcessCommandToolExecutor {
 fn process_intent_from_call(
     call: &PendingToolCall,
 ) -> Result<ProcessActionIntent, InvalidProcessCommandArguments> {
-    let arguments = call.arguments().as_object();
-    for key in arguments.keys() {
-        if key != "command" && key != "cwd" {
-            return Err(InvalidProcessCommandArguments::new(format!(
-                "unsupported argument field {key:?}"
-            )));
-        }
-    }
-
-    let command = command_from_arguments(arguments.get("command"))?;
-    let argv = shell_command_argv(&command);
-    let cwd = cwd_from_arguments(arguments.get("cwd"))?;
+    let input = call
+        .arguments()
+        .deserialize_as::<ProcessCommandInput>()
+        .map_err(|error| InvalidProcessCommandArguments::new(error.to_string()))?;
+    let _ = (&input.reason, &input.permissions);
+    let argv = shell_command_argv(&input.command);
+    let cwd = (!input.cwd.is_empty()).then_some(input.cwd);
 
     ProcessActionIntent::new(
         argv,
@@ -172,33 +210,6 @@ fn process_intent_from_call(
         DEFAULT_PROCESS_TOOL_STDERR_LIMIT_BYTES,
     )
     .map_err(|error| InvalidProcessCommandArguments::new(error.to_string()))
-}
-
-fn command_from_arguments(value: Option<&Value>) -> Result<String, InvalidProcessCommandArguments> {
-    let Some(Value::String(command)) = value else {
-        return Err(InvalidProcessCommandArguments::new(
-            "command must be a non-empty string",
-        ));
-    };
-    if command.is_empty() {
-        return Err(InvalidProcessCommandArguments::new(
-            "command must not be empty",
-        ));
-    }
-    Ok(command.clone())
-}
-
-fn cwd_from_arguments(
-    value: Option<&Value>,
-) -> Result<Option<String>, InvalidProcessCommandArguments> {
-    match value {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(cwd)) if cwd.is_empty() => Ok(None),
-        Some(Value::String(cwd)) => Ok(Some(cwd.clone())),
-        Some(_) => Err(InvalidProcessCommandArguments::new(
-            "cwd must be a string when provided",
-        )),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,7 +262,7 @@ fn invalid_arguments_outcome(
 mod tests {
     use super::{
         PROCESS_COMMAND_INVALID_ARGUMENTS_CODE, ProcessCommandToolExecutor,
-        process_intent_from_call,
+        process_call_requests_permission, process_intent_from_call,
     };
     use crate::{
         ActionProposalEvidence, ToolActionPreflight, ToolExecutionContext, ToolExecutor,
@@ -297,7 +308,13 @@ mod tests {
             schema["properties"]["cwd"]["description"]
                 .as_str()
                 .expect("cwd description should be text")
-                .contains("Use \".\" or null")
+                .contains("Omit it")
+        );
+        assert!(
+            schema["properties"]["cwd"]["description"]
+                .as_str()
+                .expect("cwd description should be text")
+                .contains("current workspace directory")
         );
         let cwd_string_schema = schema["properties"]["cwd"]["anyOf"]
             .as_array()
@@ -318,7 +335,13 @@ mod tests {
             schema["properties"]["command"]["maxLength"],
             crate::MAX_PROCESS_ARG_BYTES
         );
-        assert_eq!(schema["required"], json!(["command", "cwd"]));
+        assert_eq!(schema["required"], json!(["command"]));
+        assert!(
+            schema["properties"]["permissions"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("exact action"))
+        );
+        assert!(schema["properties"]["reason"]["description"].is_string());
     }
 
     #[test]
@@ -332,6 +355,29 @@ mod tests {
 
         assert_eq!(intent.argv(), shell_command_argv("ping -c 1 baidu.com"));
         assert_eq!(intent.cwd(), None);
+    }
+
+    #[test]
+    fn process_intent_from_call_defaults_omitted_cwd_to_workspace_root() {
+        let call = pending_call(json!({
+            "command": "pwd"
+        }));
+
+        let intent = process_intent_from_call(&call).expect("process intent should parse");
+
+        assert_eq!(intent.cwd(), None);
+    }
+
+    #[test]
+    fn nullable_permission_reason_is_treated_as_omitted() {
+        let call = pending_call(json!({
+            "command": "rg --files",
+            "cwd": null,
+            "reason": null,
+        }));
+
+        assert!(!process_call_requests_permission(&call));
+        process_intent_from_call(&call).expect("nullable reason should remain valid");
     }
 
     #[tokio::test(flavor = "current_thread")]

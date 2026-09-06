@@ -4,7 +4,7 @@ use merry_runtime::ToolBuildError;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-#[crate::tool(
+#[merry_tools_macros::tool(
     crate = "crate",
     name = "read_text",
     description = "Read a bounded one-based line range from a UTF-8 text file under a configured stable root. Omit start_line to begin at line 1 and omit max_lines to use the configured limit. Use multiple focused reads for larger files; do not request or assume complete-file content."
@@ -41,8 +41,7 @@ pub(crate) fn spec(limits: &WorkspaceToolLimits) -> Result<ToolSpec, ToolBuildEr
 }
 
 pub(super) fn parse(call: &PendingToolCall) -> Result<ReadTextInput, String> {
-    serde_json::from_value(serde_json::Value::Object(
-        call.arguments().as_object().clone(),
-    ))
-    .map_err(|error| format!("invalid read_text arguments: {error}"))
+    call.arguments()
+        .deserialize_as()
+        .map_err(|error| format!("invalid read_text arguments: {error}"))
 }

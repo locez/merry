@@ -11,8 +11,7 @@ use crate::{
     RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
     ToolExecutionResult, ToolExecutor, ToolExecutorFuture,
 };
-use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
-use schemars::JsonSchema;
+use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolSpec};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
@@ -32,29 +31,29 @@ fn subagent_tool_specs_with_bounds(
     min_model_turns: u32,
     max_model_turns: u32,
 ) -> Result<[ToolSpec; 3], merry_core::CoreError> {
-    let mut spawn_schema = schemars::schema_for!(SpawnSubagentsInput);
+    let spawn_description = format!(
+        "Spawn bounded child agents for parallel delegated tasks. A terminal child result is delivered to the parent as a runtime update on the next model turn; it does not interrupt the current turn. Review that update before claiming the parent task is complete, and call wait_subagents when the compact result, diagnostics, or changed paths are needed. {CHILD_MODEL_TURN_GUIDANCE} The configured child model-turn range is {min_model_turns}..={max_model_turns}; explicit budgets outside it are rejected. Omit max_model_turns to use the configured default. Use the structured scope fields when a child needs narrower boundaries; keep tasks[].task focused on the work and do not repeat scope declarations in task text. When binding a child to an authored Plan node, set plan_client_key to one of the authored strings in update_plan.bindable_plan_client_keys, such as `agent1_task`; never pass a runtime node id such as `plan-node-2`. When plan_client_key binds a child: {CHILD_LINKED_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process."
+    );
+    let spawn_spec =
+        SpawnSubagentsInput::tool_spec_with(SPAWN_SUBAGENTS_TOOL_NAME, &spawn_description)?;
+    let mut spawn_schema = spawn_spec.input_schema().as_schema().clone();
     if !set_model_turns_schema_bounds(&mut spawn_schema, min_model_turns, max_model_turns) {
         return Err(merry_core::CoreError::InvalidSchema {
             kind: "SpawnSubagentsInput",
             reason: "generated schema is missing the max_model_turns property",
         });
     }
+    let spawn_spec = spawn_spec.with_input_schema(ToolInputSchema::new(spawn_schema)?)?;
 
     Ok([
-        tool_spec_from_schema(
-            SPAWN_SUBAGENTS_TOOL_NAME,
-            &format!(
-                "Spawn bounded child agents for parallel delegated tasks. A terminal child result is delivered to the parent as a runtime update on the next model turn; it does not interrupt the current turn. Review that update before claiming the parent task is complete, and call wait_subagents when the compact result, diagnostics, or changed paths are needed. {CHILD_MODEL_TURN_GUIDANCE} The configured child model-turn range is {min_model_turns}..={max_model_turns}; explicit budgets outside it are rejected. Omit max_model_turns to use the configured default. Use the structured scope fields when a child needs narrower boundaries; keep tasks[].task focused on the work and do not repeat scope declarations in task text. When binding a child to an authored Plan node, set plan_client_key to one of the authored strings in update_plan.bindable_plan_client_keys, such as `agent1_task`; never pass a runtime node id such as `plan-node-2`. When plan_client_key binds a child: {CHILD_LINKED_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process."
-            ),
-            spawn_schema,
-        )?,
-        tool_spec::<WaitSubagentsInput>(
+        spawn_spec,
+        WaitSubagentsInput::tool_spec_with(
             WAIT_SUBAGENTS_TOOL_NAME,
             format!(
                 "Inspect or wait for child agent statuses and compact results. {WAIT_SEMANTIC_CHECKPOINT_GUIDANCE} timeout_ms is an observation deadline, not a task budget; zero returns an immediate status snapshot, while omission waits for the selected completion condition. A timed_out=true result is only a status snapshot, never completion. Claim completion only when terminal=true and the relevant statuses are terminal."
             ),
         )?,
-        tool_spec::<CancelSubagentsInput>(
+        CancelSubagentsInput::tool_spec_with(
             CANCEL_SUBAGENTS_TOOL_NAME,
             "Cancel selected child agents.",
         )?,
@@ -256,29 +255,6 @@ impl ToolExecutor for CancelSubagentsExecutor {
     }
 }
 
-fn tool_spec<T>(
-    name: &str,
-    description: impl Into<String>,
-) -> Result<ToolSpec, merry_core::CoreError>
-where
-    T: JsonSchema,
-{
-    let description = description.into();
-    tool_spec_from_schema(name, &description, schemars::schema_for!(T))
-}
-
-fn tool_spec_from_schema(
-    name: &str,
-    description: &str,
-    schema: schemars::Schema,
-) -> Result<ToolSpec, merry_core::CoreError> {
-    ToolSpec::new(
-        ToolName::new(name)?,
-        description,
-        ToolInputSchema::new(schema)?,
-    )
-}
-
 fn set_model_turns_schema_bounds(
     schema: &mut schemars::Schema,
     min_model_turns: u32,
@@ -324,10 +300,9 @@ fn input_from_call<T>(call: &PendingToolCall) -> Result<T, InvalidSubagentToolAr
 where
     T: DeserializeOwned,
 {
-    serde_json::from_value(serde_json::Value::Object(
-        call.arguments().as_object().clone(),
-    ))
-    .map_err(|error| InvalidSubagentToolArguments::new(format!("invalid tool input: {error}")))
+    call.arguments()
+        .deserialize_as()
+        .map_err(|error| InvalidSubagentToolArguments::new(format!("invalid tool input: {error}")))
 }
 
 fn task_spec_from_input(

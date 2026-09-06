@@ -321,6 +321,32 @@ let agent = merry::AgentBuilder::new(session_id)
 - Use `#[schemars(description = "...")]` when the model-facing field description
   should differ from its Rustdoc; the explicit description overrides the comment.
 
+Runtime-owned tools that need a custom executor can annotate the input struct
+instead. This generates only the schema factories; execution, policy, tracing,
+and cancellation stay explicit:
+
+```rust
+#[merry::tool(
+    name = "inspect_workspace",
+    description = "Inspect one bounded workspace path."
+)]
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct InspectWorkspaceInput {
+    #[schemars(description = "Workspace-relative path to inspect.")]
+    path: String,
+}
+
+let spec = InspectWorkspaceInput::tool_spec()?;
+let role_specific_spec = InspectWorkspaceInput::tool_spec_with(
+    "inspect_workspace",
+    "Inspect one bounded workspace path for the current role.",
+)?;
+```
+
+Use the generated `ToolSpec` with an explicitly constructed runtime
+`RegisteredTool` when the executor must remain runtime-owned.
+
 Merry derives the input schema, decodes arguments, and serializes the handler's
 return value. `Infallible` means this example cannot return a domain error; use
 your application's error type for fallible handlers. The macro does not register
