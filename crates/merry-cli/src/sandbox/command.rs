@@ -9,12 +9,12 @@ use crate::{
         SANDBOX_ETC_READ_ONLY_FILE_PATHS, SANDBOX_HOME_ROOT, SANDBOX_TMPDIR,
         host::{Host, HostPathProbe},
         integrations::{GraphicalAccessPlan, graphical_access_plan, host_integration_access_plan},
+        mounts::{MountOrigin, MountPlan, append_mount_parent_args},
         os,
         paths::SandboxPathPlan,
     },
 };
-use merry_process::resolve_bwrap_path;
-use merry_runtime::{PathAccess, PathAccessRule};
+use merry_runtime::PathAccess;
 use std::{
     env,
     ffi::{OsStr, OsString},
@@ -29,7 +29,7 @@ pub(super) fn build_plan(
     clipboard_access: ClipboardAccess,
     probe: &impl HostPathProbe,
     path_plan: &SandboxPathPlan,
-) -> Plan {
+) -> Result<Plan, Error> {
     let cwd = host.cwd.as_os_str().to_owned();
     let current_exe = host.current_exe.as_os_str().to_owned();
     let home = host.xdg_paths.home().as_os_str().to_owned();
@@ -68,48 +68,100 @@ pub(super) fn build_plan(
         args.extend([os("--tmpfs"), home.clone()]);
     }
     args.extend([os("--perms"), os("0700"), os("--dir"), home.clone()]);
-    append_bind_dir_try_args(&mut args, &config_dir, &config_dir);
-    append_bind_dir_args(&mut args, Path::new("/usr"), Path::new("/usr"));
+    let mut mounts = MountPlan::default();
+    mounts.bind(
+        &config_dir,
+        &config_dir,
+        PathAccess::ReadOnly,
+        true,
+        MountOrigin::System,
+    );
+    mounts.bind(
+        Path::new("/usr"),
+        Path::new("/usr"),
+        PathAccess::ReadOnly,
+        false,
+        MountOrigin::System,
+    );
     for path in ["/bin", "/lib", "/lib64", "/opt"] {
-        append_bind_dir_try_args(&mut args, Path::new(path), Path::new(path));
+        mounts.bind(
+            Path::new(path),
+            Path::new(path),
+            PathAccess::ReadOnly,
+            true,
+            MountOrigin::System,
+        );
     }
-    for path in SANDBOX_ETC_READ_ONLY_FILE_PATHS {
+    for path in SANDBOX_ETC_READ_ONLY_FILE_PATHS
+        .iter()
+        .chain(SANDBOX_ETC_READ_ONLY_DIR_PATHS)
+    {
         if Path::new(path).exists() {
-            append_bind_file_args(&mut args, Path::new(path), Path::new(path));
+            mounts.bind(
+                Path::new(path),
+                Path::new(path),
+                PathAccess::ReadOnly,
+                false,
+                MountOrigin::System,
+            );
         }
     }
-    for path in SANDBOX_ETC_READ_ONLY_DIR_PATHS {
-        if Path::new(path).exists() {
-            append_bind_dir_args(&mut args, Path::new(path), Path::new(path));
-        }
-    }
-    append_bind_dir_rw_args(&mut args, &host.cwd, &host.cwd);
-    args.extend([os("--chdir"), cwd.clone()]);
+    mounts.bind(
+        &host.cwd,
+        &host.cwd,
+        PathAccess::ReadWrite,
+        false,
+        MountOrigin::Workspace,
+    );
     if let Some(log_settings) = host.log_settings.as_ref()
         && let Some(host_log_dir) = log_settings.path.parent()
     {
-        append_bind_dir_rw_args(&mut args, host_log_dir, host_log_dir);
+        mounts.bind(
+            host_log_dir,
+            host_log_dir,
+            PathAccess::ReadWrite,
+            false,
+            MountOrigin::Workspace,
+        );
     }
     for rule in &path_plan.development_rules {
-        append_path_rule_args(&mut args, rule);
+        mounts.rule(rule, MountOrigin::Development);
     }
     for rule in &path_plan.trusted_rules {
-        append_path_rule_args(&mut args, rule);
+        mounts.rule(rule, MountOrigin::Trusted);
     }
-    // A trusted read-only parent may be overridden by a narrower product-owned
-    // write mount. Trusted read-only children are appended below to retain the
-    // user's narrower restriction.
-    append_bind_dir_rw_args(&mut args, &state_dir, &state_dir);
-    append_bind_dir_rw_args(&mut args, &managed_config_dir, &managed_config_dir);
+    mounts.bind(
+        &state_dir,
+        &state_dir,
+        PathAccess::ReadWrite,
+        false,
+        MountOrigin::Product,
+    );
+    mounts.bind(
+        &managed_config_dir,
+        &managed_config_dir,
+        PathAccess::ReadWrite,
+        false,
+        MountOrigin::Product,
+    );
     for rule in &path_plan.trusted_product_rules {
-        append_path_rule_args(&mut args, rule);
+        mounts.rule(rule, MountOrigin::ProductRestriction);
     }
-    for mount in &graphical_plan.mounts {
-        append_bind_file_args(&mut args, &mount.source, &mount.destination);
+    for mount in graphical_plan
+        .mounts
+        .iter()
+        .chain(&host_integration_plan.mounts)
+    {
+        mounts.bind(
+            &mount.source,
+            &mount.destination,
+            PathAccess::ReadOnly,
+            false,
+            MountOrigin::Integration,
+        );
     }
-    for mount in &host_integration_plan.mounts {
-        append_bind_file_args(&mut args, &mount.source, &mount.destination);
-    }
+    mounts.append_args(&mut args).map_err(Error::MountPlan)?;
+    args.extend([os("--chdir"), cwd.clone()]);
     args.extend([
         os("--clearenv"),
         os("--setenv"),
@@ -156,11 +208,11 @@ pub(super) fn build_plan(
     ]);
     args.extend(args_without_sandbox_bootstrap_flags(&host.args));
 
-    Plan {
+    Ok(Plan {
         program: bwrap.as_os_str().to_owned(),
         args,
         env: vec![(os("PATH"), path)],
-    }
+    })
 }
 
 pub(crate) fn find_bwrap_in_path(
@@ -170,87 +222,6 @@ pub(crate) fn find_bwrap_in_path(
     env::split_paths(path)
         .map(|directory| directory.join(BWRAP_PROGRAM))
         .find(|candidate| file_exists(candidate))
-}
-
-pub(super) fn append_bind_file_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
-    append_mount_parent_args(args, destination);
-    args.extend([
-        os("--ro-bind"),
-        resolve_bwrap_path(source).as_os_str().to_owned(),
-        destination.as_os_str().to_owned(),
-    ]);
-}
-
-pub(super) fn append_bind_dir_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
-    append_mount_parent_args(args, destination);
-    args.extend([
-        os("--ro-bind"),
-        resolve_bwrap_path(source).as_os_str().to_owned(),
-        destination.as_os_str().to_owned(),
-    ]);
-}
-
-pub(super) fn append_bind_dir_try_args(
-    args: &mut Vec<OsString>,
-    source: &Path,
-    destination: &Path,
-) {
-    append_mount_parent_args(args, destination);
-    args.extend([
-        os("--ro-bind-try"),
-        resolve_bwrap_path(source).as_os_str().to_owned(),
-        destination.as_os_str().to_owned(),
-    ]);
-}
-
-pub(super) fn append_bind_dir_rw_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
-    append_mount_parent_args(args, destination);
-    args.extend([
-        os("--bind"),
-        resolve_bwrap_path(source).as_os_str().to_owned(),
-        destination.as_os_str().to_owned(),
-    ]);
-}
-
-pub(super) fn append_path_rule_args(args: &mut Vec<OsString>, rule: &PathAccessRule) {
-    let path = rule.path();
-    match rule.access() {
-        PathAccess::ReadOnly => {
-            append_mount_parent_args(args, path);
-            args.extend([
-                os("--ro-bind-try"),
-                resolve_bwrap_path(path).as_os_str().to_owned(),
-                path.as_os_str().to_owned(),
-            ]);
-        }
-        PathAccess::ReadWrite => {
-            append_mount_parent_args(args, path);
-            args.extend([
-                os("--bind-try"),
-                resolve_bwrap_path(path).as_os_str().to_owned(),
-                path.as_os_str().to_owned(),
-            ]);
-        }
-        PathAccess::Deny => {
-            append_mount_parent_args(args, path);
-            args.extend([os("--tmpfs"), path.as_os_str().to_owned()]);
-        }
-    }
-}
-
-pub(super) fn append_mount_parent_args(args: &mut Vec<OsString>, destination: &Path) {
-    let Some(parent) = destination.parent() else {
-        return;
-    };
-    let mut parents = parent
-        .ancestors()
-        .take_while(|path| *path != Path::new("/"))
-        .collect::<Vec<_>>();
-    parents.reverse();
-
-    for parent in parents {
-        args.extend([os("--dir"), parent.as_os_str().to_owned()]);
-    }
 }
 
 pub(super) fn sandbox_path(host: &Host) -> OsString {

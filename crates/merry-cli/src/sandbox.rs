@@ -37,6 +37,8 @@ mod integrations;
 
 mod paths;
 
+mod mounts;
+
 #[cfg(test)]
 mod tests;
 
@@ -256,7 +258,7 @@ fn plan_bootstrap_with_probe_inner(
         clipboard_access,
         probe,
         &path_plan,
-    )))
+    )?))
 }
 
 pub(crate) fn os(value: &str) -> OsString {
@@ -296,6 +298,7 @@ pub(crate) enum Error {
         first_access: PathAccess,
         second_access: PathAccess,
     },
+    MountPlan(mounts::MountPlanError),
     Exec(io::Error),
 }
 
@@ -370,6 +373,7 @@ impl fmt::Display for Error {
                 first_access.as_str(),
                 second_access.as_str()
             ),
+            Error::MountPlan(error) => error.fmt(formatter),
             Error::Exec(error) => {
                 write!(
                     formatter,

@@ -1,10 +1,7 @@
 #[cfg(test)]
 use super::environment::{ACTION_SANDBOX_HOME_FALLBACK, ACTION_SANDBOX_PATH_FALLBACK};
 use super::{
-    environment::{
-        ACTION_SANDBOX_ETC_READ_ONLY_DIR_PATHS, ACTION_SANDBOX_ETC_READ_ONLY_FILE_PATHS,
-        ACTION_SANDBOX_TMPDIR, BwrapProcessEnvironment, process_current_dir,
-    },
+    environment::{ACTION_SANDBOX_TMPDIR, BwrapProcessEnvironment, process_current_dir},
     permissions::is_git_metadata_path,
 };
 use crate::resolve_bwrap_path;
@@ -96,20 +93,6 @@ pub(crate) fn bwrap_process_plan_with_environment(
             os("--dir"),
             environment.home.as_os_str().to_owned(),
         ]);
-    }
-    append_bwrap_dir_bind_args(&mut args, Path::new("/usr"), Path::new("/usr"));
-    for path in ["/bin", "/lib", "/lib64", "/opt"] {
-        append_bwrap_dir_bind_try_args(&mut args, Path::new(path), Path::new(path));
-    }
-    for path in ACTION_SANDBOX_ETC_READ_ONLY_FILE_PATHS {
-        if Path::new(path).exists() {
-            append_bwrap_file_bind_args(&mut args, Path::new(path), Path::new(path));
-        }
-    }
-    for path in ACTION_SANDBOX_ETC_READ_ONLY_DIR_PATHS {
-        if Path::new(path).exists() {
-            append_bwrap_dir_bind_args(&mut args, Path::new(path), Path::new(path));
-        }
     }
     if !network_allowed {
         args.push(os("--unshare-net"));
@@ -222,24 +205,6 @@ fn append_bwrap_host_integration_environment_args(
             }
         }
     }
-}
-
-fn append_bwrap_dir_bind_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
-    append_bwrap_mount_parent_args(args, destination);
-    args.extend([
-        os("--ro-bind"),
-        resolve_bwrap_path(source).as_os_str().to_owned(),
-        destination.as_os_str().to_owned(),
-    ]);
-}
-
-fn append_bwrap_dir_bind_try_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
-    append_bwrap_mount_parent_args(args, destination);
-    args.extend([
-        os("--ro-bind-try"),
-        resolve_bwrap_path(source).as_os_str().to_owned(),
-        destination.as_os_str().to_owned(),
-    ]);
 }
 
 fn append_bwrap_path_rule(args: &mut Vec<OsString>, path: &Path, access: PathAccess) {

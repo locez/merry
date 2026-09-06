@@ -10,20 +10,6 @@ pub(super) const BWRAP_PROGRAM: &str = "bwrap";
 pub(super) const ACTION_SANDBOX_HOME_FALLBACK: &str = "/home/merry";
 pub(super) const ACTION_SANDBOX_TMPDIR: &str = "/tmp";
 pub(super) const ACTION_SANDBOX_PATH_FALLBACK: &str = "/usr/local/bin:/usr/bin:/bin";
-pub(super) const ACTION_SANDBOX_ETC_READ_ONLY_FILE_PATHS: &[&str] = &[
-    "/etc/ld.so.cache",
-    "/etc/ld.so.conf",
-    "/etc/resolv.conf",
-    "/etc/hosts",
-    "/etc/nsswitch.conf",
-];
-pub(super) const ACTION_SANDBOX_ETC_READ_ONLY_DIR_PATHS: &[&str] = &[
-    "/etc/ld.so.conf.d",
-    "/etc/ssl",
-    "/etc/ca-certificates",
-    "/etc/pki",
-];
-
 /// Host-derived paths used to construct one action sandbox.
 ///
 /// The HOME, PATH, and non-policy environment variables preserve the caller's

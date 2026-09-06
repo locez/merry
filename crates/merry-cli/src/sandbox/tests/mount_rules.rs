@@ -2,7 +2,7 @@ use crate::{
     config::XdgPaths,
     sandbox::{
         Bootstrap, ClipboardAccess, Error, Plan, SANDBOX_MERRY_MANAGED_CONFIG_DIR,
-        command::append_bind_file_args,
+        mounts::{MountOrigin, MountPlan},
         os,
         tests::{
             FakeHostProbe, contains_sequence, plan_args, plan_sandbox, sandbox_host,
@@ -212,7 +212,15 @@ fn sandbox_mounts_symlinked_file_sources_at_their_logical_paths() {
     symlink(&real_file, &linked_file).expect("file symlink");
 
     let mut args = Vec::new();
-    append_bind_file_args(&mut args, &linked_file, Path::new("/etc/resolv.conf"));
+    let mut mounts = MountPlan::default();
+    mounts.bind(
+        &linked_file,
+        Path::new("/etc/resolv.conf"),
+        PathAccess::ReadOnly,
+        false,
+        MountOrigin::System,
+    );
+    mounts.append_args(&mut args).expect("file mount plan");
     let args = plan_args(&Plan {
         program: OsString::from("bwrap"),
         args,

@@ -16,8 +16,6 @@ pub use permissions::{
 pub use tokio_runner::TokioProcessRunner;
 
 #[cfg(test)]
-pub(crate) use crate::resolve_bwrap_path;
-#[cfg(test)]
 pub(crate) use environment::process_current_dir;
 #[cfg(test)]
 pub(crate) use sandbox::{bwrap_process_plan, bwrap_process_plan_with_environment};

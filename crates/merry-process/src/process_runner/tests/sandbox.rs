@@ -1,7 +1,7 @@
 use super::{contains_sequence, count_sequence, intent, os_args};
 use crate::process_runner::{
     BwrapProcessEnvironment, BwrapProcessRunner, bwrap_process_plan,
-    bwrap_process_plan_with_environment, process_current_dir, resolve_bwrap_path,
+    bwrap_process_plan_with_environment, process_current_dir,
 };
 use merry_runtime::{HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource};
 use std::ffi::OsString;
@@ -51,17 +51,7 @@ fn bwrap_process_plan_denies_network_by_default() {
         &args,
         &["--bind", "/workspace/merry", "/workspace/merry"]
     ));
-    if Path::new("/etc/ld.so.cache").exists() {
-        let source = resolve_bwrap_path(Path::new("/etc/ld.so.cache"));
-        assert!(contains_sequence(
-            &args,
-            &[
-                "--ro-bind",
-                source.to_str().expect("UTF-8 system path"),
-                "/etc/ld.so.cache",
-            ]
-        ));
-    }
+    assert!(contains_sequence(&args, &["--ro-bind", "/", "/"]));
     assert!(contains_sequence(
         &args,
         &["--chdir", "/workspace/merry/crates"]

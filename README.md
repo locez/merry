@@ -227,6 +227,14 @@ by action sandboxes. With `--no-sandbox`, action `/tmp` maps to the current
 process's validated `TMPDIR` directly. Debug commands remain unsandboxed unless
 `--with-sandbox` is supplied.
 
+Outer filesystem mounts are applied parent-first after resolving access-rule
+precedence. If an imported directory contains a symlink such as
+`/etc/resolv.conf`, Merry mounts the required target file without exposing its
+whole parent directory. Inner action sandboxes inherit these system mounts
+instead of repeating them; workspace overlays, read-only `.git` metadata,
+reviewed write grants, network isolation, and host-integration controls still
+apply.
+
 `[permissions].environment` applies only inside Merry-managed action processes.
 Assignments are injected after the sandbox defaults and may intentionally
 override them; they do not change the outer bootstrap or provider environment.
