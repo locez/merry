@@ -108,6 +108,7 @@ impl SubagentActivityHub {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn published_phases(&self) -> Vec<SubagentActivityPhase> {
         self.state
             .lock()
