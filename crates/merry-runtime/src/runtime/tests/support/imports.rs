@@ -17,7 +17,7 @@
         JudgmentRecord, JudgmentRiskLevel, JudgmentSource, JudgmentSourceKind,
         ModelBackedJudgmentSource,
     };
-    use crate::ledger::{LedgerFactKind, LedgerProjection, LedgerScope};
+    use crate::ledger::{LedgerFactKind, LedgerProjection};
     use crate::memory::{
         ActivatedMemory, MemoryActivationContext, MemoryActivationFuture, MemoryActivationReason,
         MemoryActivationScore, MemoryActivationSource, MemoryActivationSourceKind, MemoryError,
@@ -27,7 +27,7 @@
     use crate::plan::PlanController;
     use crate::process::{
         AcceptedLocalWorkspaceProcessAdmission, PermissionedProcessRunnerFactory,
-        ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
+        ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus,
         ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
         ProcessRunnerFuture, ProcessRunnerOutput, stable_process_input_fingerprint,
     };
