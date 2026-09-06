@@ -119,6 +119,22 @@ fn coding_agent_profile_owns_process_permission_and_patch_order() {
             "apply_patch",
         ]
     );
+    let process = &profile.registered_tools()[0];
+    assert!(
+        process
+            .spec()
+            .description()
+            .contains("omit cwd for the current workspace directory")
+    );
+    assert!(
+        process
+            .spec()
+            .description()
+            .contains("runtime will review before running this exact command")
+    );
+    let schema = process.spec().input_schema().as_schema().as_value();
+    assert_eq!(schema["required"], json!(["command"]));
+    assert!(schema["properties"]["permissions"].is_object());
 }
 
 #[test]
@@ -241,6 +257,16 @@ fn coding_agent_profile_owns_the_coding_prompt_and_hashes_its_exact_text() {
         prompt.stable_blocks()[0]
             .text()
             .contains("evidence-backed summary")
+    );
+    assert!(
+        prompt.stable_blocks()[0]
+            .text()
+            .contains("same `run_process` call under `permissions`")
+    );
+    assert!(
+        prompt.stable_blocks()[0]
+            .text()
+            .contains("discovered after a failed sandboxed attempt")
     );
 }
 

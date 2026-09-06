@@ -1,9 +1,9 @@
 //! Runtime-owned permission request and approval review primitives.
 //!
-//! Permission requests are generic action wrappers. A model first attempts a
-//! normal tool action, observes the durable result, then may request additional
-//! capabilities for an exact planned action. Runtime owns admission and, for the
-//! first process consumer, executes the exact action after approval.
+//! Permission requests wrap an exact planned action and its minimum capabilities.
+//! A process may declare known capabilities before execution; a failed sandboxed
+//! action may instead request capabilities discovered from its durable result.
+//! Runtime owns admission and executes the exact process action after approval.
 
 use crate::{PathAccess, ProcessActionIntent};
 use merry_core::{CoreError, PendingToolCall, ToolName};
