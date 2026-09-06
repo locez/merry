@@ -18,7 +18,7 @@ use crate::{
     },
 };
 use std::collections::BTreeSet;
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 pub(super) fn provider_overlay_effect(action: ProviderOverlayAction) -> ControllerEffect {
@@ -99,6 +99,7 @@ pub(super) async fn dispatch_provider_effect(
     state: &mut TuiState,
     preferences_store: &TuiPreferencesStore,
     providers: ProviderController<'_>,
+    background_tasks: &mut JoinSet<()>,
 ) -> Result<bool, CliError> {
     match effect {
         ControllerEffect::OpenProviderManager => {
@@ -167,6 +168,7 @@ pub(super) async fn dispatch_provider_effect(
                 providers.discovery_tx,
                 providers.discovery_generation,
                 providers.discovery_token,
+                background_tasks,
             )
             .await?;
             Ok(false)
@@ -202,6 +204,7 @@ pub(super) async fn dispatch_provider_effect(
                 providers.discovery_tx.clone(),
                 providers.discovery_generation,
                 providers.discovery_token,
+                background_tasks,
             );
             Ok(false)
         }
@@ -213,6 +216,7 @@ pub(super) async fn dispatch_provider_effect(
                 providers.discovery_tx.clone(),
                 providers.discovery_generation,
                 providers.discovery_token,
+                background_tasks,
             );
             Ok(false)
         }
@@ -239,6 +243,7 @@ pub(super) async fn dispatch_provider_effect(
                 providers.discovery_tx.clone(),
                 providers.discovery_generation,
                 providers.discovery_token,
+                background_tasks,
             );
             Ok(false)
         }
@@ -481,6 +486,7 @@ async fn open_model_picker(
     model_discovery_tx: &mpsc::Sender<ModelDiscoveryCompletion>,
     model_discovery_generation: &mut u64,
     model_discovery_token: &mut Option<CancellationToken>,
+    background_tasks: &mut JoinSet<()>,
 ) -> Result<(), CliError> {
     let alias = ProviderAlias::new(alias).map_err(unexpected)?;
     let profile = provider_management
@@ -505,6 +511,7 @@ async fn open_model_picker(
         model_discovery_tx.clone(),
         model_discovery_generation,
         model_discovery_token,
+        background_tasks,
     );
     Ok(())
 }
@@ -515,13 +522,14 @@ fn start_model_discovery(
     model_discovery_tx: mpsc::Sender<ModelDiscoveryCompletion>,
     model_discovery_generation: &mut u64,
     model_discovery_token: &mut Option<CancellationToken>,
+    background_tasks: &mut JoinSet<()>,
 ) {
     cancel_model_discovery(model_discovery_token);
     *model_discovery_generation = model_discovery_generation.wrapping_add(1);
     let generation = *model_discovery_generation;
     let token = CancellationToken::new();
     *model_discovery_token = Some(token.clone());
-    tokio::spawn(async move {
+    background_tasks.spawn(async move {
         let alias_text = alias.as_str().to_owned();
         let result = provider_management
             .discover_and_cache(&alias, token)
@@ -562,13 +570,14 @@ fn start_form_model_discovery(
     model_discovery_tx: mpsc::Sender<ModelDiscoveryCompletion>,
     model_discovery_generation: &mut u64,
     model_discovery_token: &mut Option<CancellationToken>,
+    background_tasks: &mut JoinSet<()>,
 ) {
     cancel_model_discovery(model_discovery_token);
     *model_discovery_generation = model_discovery_generation.wrapping_add(1);
     let generation = *model_discovery_generation;
     let token = CancellationToken::new();
     *model_discovery_token = Some(token.clone());
-    tokio::spawn(async move {
+    background_tasks.spawn(async move {
         let result = provider_management
             .discover_from_draft(draft, token)
             .await
