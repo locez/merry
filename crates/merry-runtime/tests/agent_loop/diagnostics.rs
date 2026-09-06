@@ -1,4 +1,31 @@
-use super::*;
+use crate::support::{
+    events::{assert_sanitized_policy_denial_json, event_kind_names, pending_tool_call},
+    models::{
+        ScriptedModelProvider, completed_text_event, completed_tool_call_event, model_name,
+        model_tool_call, model_tool_call_with_arguments,
+    },
+    process::RecordingProcessRunner,
+    runtime::{
+        artifact_id, run_default_loop, runtime_with_provider, runtime_with_tool,
+        runtime_with_tool_action, session_id,
+    },
+    tools::{BlockingToolExecutor, ScriptedToolExecutor},
+    tracing::capture_traces_for,
+};
+use merry_core::{
+    ArtifactKind, ArtifactRef, EvidenceLocator, RuntimeJournalPayload, ToolCallResultStatus,
+    ToolName,
+};
+use merry_llm::ModelCapabilities;
+use merry_runtime::{
+    AgentLoopConfig, AgentLoopStatus, ArtifactError, AutomaticCompactionConfig,
+    ProcessActionIntent, Runtime, RuntimeError, StepContext, StepInput, TaskAnchor, ToolActionKind,
+    process_command_tool,
+};
+use serde_json::{Value, json};
+use std::sync::Arc;
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test(flavor = "current_thread")]
 async fn agent_loop_process_command_invalid_arguments_resolve_failed_and_continue() {
