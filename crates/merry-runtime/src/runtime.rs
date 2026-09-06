@@ -47,6 +47,7 @@ mod plan_tool_protocol;
 mod process_execution;
 mod provider_request;
 mod provider_step;
+mod provider_stream;
 mod session_access;
 mod state;
 mod step;

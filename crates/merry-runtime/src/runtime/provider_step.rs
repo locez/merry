@@ -6,8 +6,7 @@ use super::journal_emission::{
     send_assistant_text_output_completed_events, send_assistant_text_output_delta_event,
     send_cancelled_event, send_compaction_completed_event, send_compaction_started_event,
     send_failed_event, send_model_tool_call_response_events, send_model_usage_updated_event,
-    stream_model_with_retry_policy, trace_provider_step_cancelled, trace_provider_step_failed,
-    wait_for_model_stream_item, wait_for_retrying_stream_setup,
+    trace_provider_step_cancelled, trace_provider_step_failed,
 };
 use super::memory_activation::{
     ActivationProjectionGuard, clear_current_activated_memories,
@@ -23,6 +22,9 @@ use super::provider_request::{
     compile_step_request_from_inputs, estimate_compaction_fixed_dynamic_tokens,
     request_context_budget, step_request_compile_diagnostic, step_request_inputs_from_session,
     step_usage_context_snapshot, trace_provider_request, trace_provider_request_budget_unavailable,
+};
+use super::provider_stream::{
+    stream_model_with_retry_policy, wait_for_model_stream_item, wait_for_retrying_stream_setup,
 };
 
 use super::{
