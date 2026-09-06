@@ -52,26 +52,29 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      - name: Verify scenario selection fails closed
+        run: bash .github/scripts/tests/cargo-test-scenario.sh
+
       - name: Run named T6 evidence scenario
         run: >-
-          cargo test --locked -p merry-runtime --test provider_boundary
-          t6_failure_evidence -- --nocapture
+          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test provider_boundary
+          t6_failure_evidence
 
       - name: Run deterministic security and lifecycle scenarios
         run: |
           set -euo pipefail
-          cargo test --locked -p merry-runtime --test provider_boundary provider_stream_eof_before_completed_emits_failed -- --nocapture
-          cargo test --locked -p merry-runtime --test provider_boundary provider_stream_error_emits_failed_without_step_completed -- --nocapture
-          cargo test --locked -p merry-runtime --test provider_boundary duplicate_tool_result_after_resolved_does_not_mutate_session -- --nocapture
-          cargo test --locked -p merry-runtime --test provider_boundary provider_cancel_keeps_tool_exchange_for_retry -- --nocapture
-          cargo test --locked -p merry-runtime --test cancellation cancelling_ -- --nocapture
-          cargo test --locked -p merry-runtime --test agent_loop agent_loop_process_command_invalid_arguments -- --nocapture
-          cargo test --locked -p merry-runtime --test agent_loop provider_request_trace_includes_checkpoint_budget_diagnostics -- --nocapture
-          cargo test --locked -p merry-tool-workspace --test runtime_integration denied_workspace_patch -- --nocapture
-          cargo test --locked -p merry-tool-workspace --test runtime_integration registered_list_dir_domain_failure -- --nocapture
-          cargo test --locked -p merry-process --lib bwrap_process_plan_hides_unapproved_host_integrations -- --nocapture
-          cargo test --locked -p merry-cli --bin merry settings_debug_does_not_include_secret_material -- --nocapture
-          cargo test --locked -p merry-cli --bin merry sandbox_supports_symlinked_product_write_roots -- --nocapture
+          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test provider_boundary provider_stream_eof_before_completed_emits_failed
+          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test provider_boundary provider_stream_error_emits_failed_without_step_completed
+          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test provider_boundary duplicate_tool_result_after_resolved_does_not_mutate_session
+          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test provider_boundary provider_cancel_keeps_tool_exchange_for_retry
+          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test cancellation cancelling_
+          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test agent_loop agent_loop_process_command_invalid_arguments
+          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test agent_loop provider_request_trace_includes_checkpoint_budget_diagnostics
+          bash .github/scripts/cargo-test-scenario.sh -p merry-tools --test runtime_integration denied_apply_patch
+          bash .github/scripts/cargo-test-scenario.sh -p merry-tools --test runtime_integration registered_read_text_domain_failure
+          bash .github/scripts/cargo-test-scenario.sh -p merry-process --lib bwrap_process_plan_hides_unapproved_host_integrations
+          bash .github/scripts/cargo-test-scenario.sh -p merry-cli --bin merry settings_debug_does_not_include_secret_material
+          bash .github/scripts/cargo-test-scenario.sh -p merry-cli --bin merry sandbox_supports_symlinked_product_write_roots
 
       - name: Run deterministic Rust suite
         run: cargo test --locked --all
