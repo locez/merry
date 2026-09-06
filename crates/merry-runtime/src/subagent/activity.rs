@@ -323,14 +323,14 @@ mod tests {
         let tool = reducer
             .reduce(
                 &RuntimeEvent::ToolCallStarted {
-                    call: tool_call("workspace_patch"),
+                    call: tool_call("apply_patch"),
                     source: source(),
                 },
                 20,
             )
             .expect("tool start projects activity");
         assert_eq!(tool.phase, SubagentActivityPhase::Running);
-        assert_eq!(tool.summary, "tool: workspace_patch");
+        assert_eq!(tool.summary, "tool: apply_patch");
         assert_eq!(reducer.last_valid(), Some(&tool));
 
         assert!(
