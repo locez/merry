@@ -1,8 +1,14 @@
-use super::{RunExitStatus, write_agent_loop_jsonl_output, write_agent_loop_output};
-use crate::coding::{
-    CodingSubagentsConfig, HeadlessCodingRuntimeInput, build_headless_coding, fixed_process_backend,
+use super::{
+    RunExitStatus,
+    output::{write_agent_loop_jsonl_output, write_agent_loop_output},
 };
-use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name, process_tool_call};
+use crate::{
+    coding::{
+        CodingSubagentsConfig, HeadlessCodingRuntimeInput, build_headless_coding,
+        fixed_process_backend,
+    },
+    testing::{FakeProcessRunner, ScriptedProvider, model_name, process_tool_call},
+};
 use merry::profiles::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
 use merry_core::ToolName;
 use merry_llm::{

@@ -1,12 +1,17 @@
-use super::{HeadlessRunPersistence, RunExitStatus, run_agent_loop_with_persistence};
-use crate::cli_error::{CliError, unexpected};
-use crate::coding::{
-    ActionProcessBackend, CodingSubagentsConfig, HeadlessCodingRuntimeInput, build_headless_coding,
-    fixed_process_backend, resume_headless_coding,
+use super::{
+    RunExitStatus,
+    persistence::{HeadlessRunPersistence, run_agent_loop_with_persistence},
 };
-use crate::headless_review::{HeadlessPermissionReviewer, ReviewInputChannel};
-use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
-use crate::tui::session_list::TuiSessionMetadata;
+use crate::{
+    cli_error::{CliError, unexpected},
+    coding::{
+        ActionProcessBackend, CodingSubagentsConfig, HeadlessCodingRuntimeInput,
+        build_headless_coding, fixed_process_backend, resume_headless_coding,
+    },
+    headless_review::{HeadlessPermissionReviewer, ReviewInputChannel},
+    testing::{FakeProcessRunner, ScriptedProvider, model_name},
+    tui::session_list::TuiSessionMetadata,
+};
 use merry::profiles::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
 use merry_core::{SessionId, ToolInputSchema, ToolName, ToolOutput, ToolSpec};
 use merry_llm::{

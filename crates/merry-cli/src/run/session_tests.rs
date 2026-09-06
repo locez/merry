@@ -1,13 +1,16 @@
 use super::{
     Args, CliError, RunExitStatus, RunSession, STDIN_TASK, default_run_session_id,
-    reserve_run_session, resolve_task, review_input_channel_for_task, write_agent_loop_output,
+    output::write_agent_loop_output, reserve_run_session, resolve_task,
+    review_input_channel_for_task,
 };
-use crate::coding::{
-    ActionProcessBackend, CodingSubagentsConfig, HeadlessCodingRuntimeInput, build_headless_coding,
-    fixed_process_backend, resume_headless_coding,
+use crate::{
+    coding::{
+        ActionProcessBackend, CodingSubagentsConfig, HeadlessCodingRuntimeInput,
+        build_headless_coding, fixed_process_backend, resume_headless_coding,
+    },
+    headless_review::ReviewInputChannel,
+    testing::{FakeProcessRunner, ScriptedProvider, model_name},
 };
-use crate::headless_review::ReviewInputChannel;
-use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name};
 use clap::Parser;
 use merry::profiles::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
 use merry_core::SessionId;
