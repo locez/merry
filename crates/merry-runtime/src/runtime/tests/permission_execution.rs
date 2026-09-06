@@ -1,4 +1,31 @@
-use super::*;
+use crate::{
+    PermissionReviewMode, RuntimeModelRole, RuntimeTrustLevel,
+    process::ProcessPermissionProfileId,
+    request_permissions_tool,
+    runtime::{
+        Runtime, RuntimeBuilder,
+        tests::support::{
+            common::{
+                RuntimeSessionStateTestExt, named_model, permission_review_completed_event,
+                session_id,
+            },
+            memory::record_prior_failed_tool_result,
+            model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
+            process::{
+                FakeProcessRunner, RecordingPermissionedProcessRunnerFactory,
+                StaticPermissionAdmissionSource,
+            },
+            tool_helpers::{
+                denied_action_content, event_kind_names_for_tool_execution,
+                invalid_permission_pending_tool_call, path_permission_pending_tool_call,
+                register_permission_pending_tool_with_builder, resolved_tool_result,
+            },
+        },
+    },
+    tool::ToolExecutionContext,
+};
+use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolCallResultStatus, ToolName};
+use std::sync::Arc;
 
 #[tokio::test(flavor = "current_thread")]
 async fn request_permissions_invalid_arguments_skip_review_and_runner() {

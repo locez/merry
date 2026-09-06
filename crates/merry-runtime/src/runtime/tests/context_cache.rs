@@ -1,4 +1,20 @@
-use super::*;
+use crate::{
+    CheckpointDecision, CitationCompactionPolicy, CompactedCheckpoint, RuntimeModelRole,
+    StepContext,
+    runtime::{
+        AutomaticCompactionConfig, Runtime, merry_read_checkpoint_ref_tool_name,
+        request_context_budget,
+        tests::support::{
+            common::{collect_step, completed_event_with, model_name, named_model, session_id},
+            memory::{ScriptedMemoryActivationSource, activated_memory, record_memory_artifact},
+            model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
+            runtime_factories::runtime_with_provider_and_memory_source,
+        },
+    },
+};
+use merry_core::RuntimeJournalPayload;
+use merry_llm::{FinishReason, GenerationConfig, ModelCapabilities, ModelOutput, ModelProvider};
+use std::sync::Arc;
 
 const CACHE_KEY_COMPACTION_CANDIDATE: &str = r#"{
   "confirmed_decisions": [],

@@ -1,17 +1,29 @@
-use super::*;
 use crate::{
-    CheckpointHandoffAction, CheckpointSection, ContextCompiler, FileSessionStore,
-    SessionTranscriptItem,
+    CheckpointHandoffAction, CheckpointId, CheckpointSection, CitationCompactionPolicy,
+    ContextCompiler, FileSessionStore, RuntimeModelRole, SessionTranscriptItem, StepContext,
+    runtime::{
+        AutomaticCompactionConfig, Runtime,
+        tests::support::{
+            common::{collect_step, completed_event_with, model_name, named_model, session_id},
+            model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
+        },
+    },
     session::{ModelTurnId, TranscriptItemSnapshot},
 };
-use merry_core::ArtifactId;
-use merry_llm::{ModelContent, ModelInputItem, ModelMessage};
+use merry_core::{ArtifactId, RuntimeJournalEvent, RuntimeJournalPayload, SessionId};
+use merry_llm::{
+    FinishReason, ModelCapabilities, ModelContent, ModelInputItem, ModelMessage, ModelMessageRole,
+    ModelOutput, ModelRequest,
+};
 use serde::Deserialize;
 use serde_json::Value;
+use std::sync::Arc;
 
 const FIXTURE_JSON: &str =
     include_str!("../../../tests/fixtures/citation_compaction_design_fixture.json");
+
 const DEEP_SOURCE_SENTINEL: &str = "SOURCE_SENTINEL_AFTER_BYTE_1200";
+
 const EXPECTED_ENTRY_COUNT: usize = 12;
 
 #[derive(Debug, Deserialize)]

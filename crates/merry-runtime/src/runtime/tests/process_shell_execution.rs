@@ -1,4 +1,26 @@
-use super::*;
+use crate::{
+    ArtifactError, RuntimeError,
+    action_audit::ActionAuditStatus,
+    action_policy::{ActionPolicyDisposition, ActionRiskTier},
+    ledger::{LedgerFactKind, LedgerProjection},
+    process::{ProcessPermissionProfileId, stable_process_input_fingerprint},
+    runtime::tests::support::{
+        common::{artifact_id, capture_traces_for},
+        process::{FakeProcessRunner, ProcessProposingToolExecutor},
+        tool_helpers::{
+            action_audit_records, event_kind_names_for_tool_execution, lifecycle_kinds,
+            policy_tool_spec, register_policy_pending_registered_tool_with_builder,
+            resolved_tool_result,
+        },
+    },
+    tool::{
+        ActionExecutionEvidence, ActionProposalEvidence, RegisteredTool, ToolActionKind,
+        ToolExecutionContext,
+    },
+};
+use merry_core::{EvidenceLocator, RuntimeJournalPayload};
+use serde_json::json;
+use std::sync::Arc;
 
 #[tokio::test(flavor = "current_thread")]
 async fn read_only_shell_process_requires_explicit_shell_runner_opt_in() {

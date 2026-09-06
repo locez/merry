@@ -1,4 +1,30 @@
-use super::*;
+use crate::{
+    memory::{MemoryActivationSourceKind, MemoryError, MemoryScope},
+    runtime::{
+        DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, memory_activation_seed_from_step_input,
+        tests::support::{
+            common::{
+                RuntimeSessionStateTestExt, collect_step, event_kind_names, failed_code,
+                pending_tool_call,
+            },
+            memory::{
+                ScriptedMemoryActivationResponse, ScriptedMemoryActivationSource, activated_memory,
+                activated_memory_with_unreadable_evidence,
+                assert_activated_memory_projection_cleared, compiled_context_snapshot, memory_item,
+                pending_memory_activation_source, record_memory_artifact, record_memory_item,
+            },
+            model_provider::RecordingModelProvider,
+            runtime_factories::{
+                runtime_with_provider, runtime_with_provider_and_memory_source,
+                runtime_without_provider_with_memory_source,
+            },
+        },
+    },
+};
+use futures_util::StreamExt;
+use merry_core::{RuntimeJournalEvent, RuntimeJournalPayload};
+use merry_llm::ModelMessageRole;
+use tokio_util::sync::CancellationToken;
 
 #[test]
 fn memory_activation_seed_uses_step_input_as_user_query_source() {

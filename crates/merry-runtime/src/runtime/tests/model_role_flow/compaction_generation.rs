@@ -1,4 +1,33 @@
-use super::*;
+use crate::{
+    CitationCompactionPolicy, RuntimeError, RuntimeModelRole, StepContext,
+    runtime::{
+        Runtime,
+        tests::{
+            model_role_flow::seed_two_history_items_for_compaction,
+            support::{
+                common::{
+                    capture_traces_for, completed_event, completed_event_with, model_name,
+                    model_tool_call, session_id,
+                },
+                model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
+            },
+        },
+    },
+};
+use merry_llm::{
+    FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
+    ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelStreamContext,
+    ProviderErrorKind,
+};
+use std::{
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 const VALID_CANDIDATE: &str = r#"{
   "confirmed_decisions": [],

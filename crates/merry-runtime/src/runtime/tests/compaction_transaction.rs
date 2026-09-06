@@ -1,11 +1,21 @@
-use super::*;
 use crate::{
-    CompactionError, FileSessionStore, StepInput, TaskAnchor,
+    CheckpointId, CitationCompactionPolicy, CompactionError, FileSessionStore, RuntimeError,
+    RuntimeModelRole, StepContext, StepInput, TaskAnchor,
+    runtime::{
+        AutomaticCompactionConfig, Runtime,
+        tests::support::{
+            common::{completed_event_with, model_name, named_model, session_id},
+            model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
+        },
+    },
     session::ModelTurnId,
     session_store::{SessionStoreCommitPause, SessionStoreStagePause},
 };
-use futures_util::FutureExt;
-use std::time::Duration;
+use futures_util::{FutureExt, StreamExt};
+use merry_core::{RuntimeJournalPayload, SessionId};
+use merry_llm::{FinishReason, ModelCapabilities, ModelOutput};
+use std::{sync::Arc, time::Duration};
+use tokio_util::sync::CancellationToken;
 
 const TRANSACTIONAL_COMPACTION_CANDIDATE: &str = r#"{
   "confirmed_decisions": [],

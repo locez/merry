@@ -1,4 +1,5 @@
-use super::*;
+use crate::runtime::{send_cancelled_event, tests::support::common::runtime_inner};
+use tokio::sync::mpsc;
 
 #[tokio::test(flavor = "current_thread")]
 async fn cancelled_event_send_returns_false_when_channel_is_closed() {
