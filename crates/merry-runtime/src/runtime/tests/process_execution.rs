@@ -344,7 +344,8 @@ async fn failed_process_action_artifact_explains_capability_recovery() {
     let message = payload["guidance"]["message"]
         .as_str()
         .expect("recovery guidance should be text");
-    assert!(message.contains("unavailable network"));
+    assert!(message.contains("network"));
+    assert!(message.contains("permissions"));
     assert!(message.contains("host integration"));
     assert!(message.contains("exact filesystem path"));
     assert!(!message.contains("stderr"));

@@ -9,6 +9,7 @@ use crate::{
     },
     permission::is_request_permissions_tool,
     plan::tools::is_plan_tool,
+    process_tool::process_call_requests_permission,
     tool::{ActionProposalEvidence, ToolActionPreflight, ToolExecutionContext, ToolExecutionError},
 };
 use merry_core::{
@@ -22,7 +23,8 @@ use super::checkpoint_ref_tool::{
 };
 use super::diagnostics::DIAGNOSTIC_TOOL_NOT_ADMITTED;
 use super::permission_execution::{
-    HighRiskActionReview, execute_permission_request_tool_call, review_process_action,
+    HighRiskActionReview, execute_permission_request_tool_call,
+    execute_process_permission_request_tool_call, review_process_action,
 };
 use super::plan_tool_execution::execute_plan_tool_call;
 use super::process_execution::{ProcessExecutionAdmission, execute_admitted_process_action};
@@ -285,6 +287,18 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 )
             {
                 return resolve_plan_harness_denial(inner, &pending, diagnostic).await;
+            }
+            if let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence()
+                && process_call_requests_permission(&pending)
+            {
+                return execute_process_permission_request_tool_call(
+                    inner,
+                    &pending,
+                    intent,
+                    context,
+                    active_plan_harness.is_some(),
+                )
+                .await;
             }
             let host_process_path_review = inner
                 .accepted_local_workspace_process_runner

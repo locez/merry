@@ -124,7 +124,9 @@ pub fn process_command_tool(
 
 pub(crate) fn process_call_requests_permission(call: &PendingToolCall) -> bool {
     let arguments = call.arguments().as_object();
-    arguments.contains_key("permissions")
+    arguments
+        .get("permissions")
+        .is_some_and(|permissions| !permissions.is_null())
         || arguments
             .get("reason")
             .is_some_and(|reason| !reason.is_null())
@@ -378,6 +380,17 @@ mod tests {
 
         assert!(!process_call_requests_permission(&call));
         process_intent_from_call(&call).expect("nullable reason should remain valid");
+    }
+
+    #[test]
+    fn nullable_permissions_are_treated_as_omitted() {
+        let call = pending_call(json!({
+            "command": "rg --files",
+            "permissions": null,
+        }));
+
+        assert!(!process_call_requests_permission(&call));
+        process_intent_from_call(&call).expect("nullable permissions should remain valid");
     }
 
     #[tokio::test(flavor = "current_thread")]

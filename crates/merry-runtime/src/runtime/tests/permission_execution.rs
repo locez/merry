@@ -140,6 +140,81 @@ async fn request_permissions_approved_by_review_executes_exact_process_action() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn run_process_inline_permissions_review_before_execution() {
+    let review_provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            permission_review_completed_event("approve", "The command needs network access."),
+        )])]);
+    let runner = FakeProcessRunner::succeeding();
+    let runner_factory = RecordingPermissionedProcessRunnerFactory::new(Arc::new(runner.clone()));
+    let pending = PendingToolCall::new(
+        ToolCallId::new("call-process-inline-permission").expect("valid call id"),
+        ToolName::new("run_process").expect("valid tool name"),
+        ToolCallArguments::try_from(serde_json::json!({
+            "command": "cargo fetch",
+            "cwd": ".",
+            "reason": "The dependency fetch needs network access.",
+            "permissions": { "network": true },
+        }))
+        .expect("valid process arguments"),
+    );
+    let runtime = Runtime::builder(session_id("runtime-process-inline-permission"))
+        .register_tool(
+            crate::process_command_tool(
+                ToolName::new("run_process").expect("valid tool name"),
+                "Run a process.",
+            )
+            .expect("process tool should build"),
+        )
+        .model_provider_for_role(
+            RuntimeModelRole::ApprovalReview,
+            Arc::new(review_provider.clone()),
+            named_model("fake/approval-review"),
+        )
+        .permissioned_process_runner_factory(Arc::new(runner_factory.clone()))
+        .build()
+        .expect("runtime should build");
+    {
+        let mut session = runtime.inner.session.lock().await;
+        session.record_session_started_if_needed();
+        session
+            .record_test_tool_call_pending(pending.clone())
+            .expect("pending call should record");
+    }
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("inline process permission should execute after review");
+
+    assert_eq!(review_provider.recorded_requests().len(), 1);
+    assert_eq!(runner_factory.call_count(), 1);
+    assert_eq!(runner_factory.observed_network_requests(), [true]);
+    assert_eq!(runner.call_count(), 1);
+    assert_eq!(
+        runner.observed_intents()[0].argv(),
+        ["bash", "-lc", "cargo fetch"]
+    );
+    let result = resolved_tool_result(&events);
+    assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
+    let content = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .expect("process artifact should be readable");
+    let payload: serde_json::Value = serde_json::from_str(
+        content
+            .as_text()
+            .expect("process result should be textual JSON"),
+    )
+    .expect("process result should parse as JSON");
+    assert_eq!(
+        payload["permission_profile_id"],
+        ProcessPermissionProfileId::APPROVED_PERMISSION_REQUEST.as_str()
+    );
+    assert_eq!(payload["permission_review"]["source"], "model");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn request_permissions_path_capability_uses_model_review_before_host_fallback() {
     let review_provider =
         RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
