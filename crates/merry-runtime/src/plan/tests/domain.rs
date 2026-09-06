@@ -5,7 +5,8 @@ use crate::plan::{
 use merry_core::{
     PlanActivationSource, PlanApprovalRequirementKind, PlanAttemptOutcome,
     PlanCapabilityEnvelopeSnapshot, PlanExecutorPolicy, PlanHarnessSnapshot, PlanId,
-    PlanNodeResult, PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, SessionId,
+    PlanNodeResult, PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot,
+    PlanResourcePolicySnapshot, SessionId,
 };
 use serde_json::json;
 
@@ -728,4 +729,65 @@ fn runtime_owned_harness_fields_do_not_change_through_plan_revision() {
         .find(|node| node.id == root_id)
         .expect("root remains present");
     assert_eq!(node.harness.write_scope, vec!["crates/runtime"]);
+}
+
+#[test]
+fn authored_status_accepts_declarative_values_and_rejects_runtime_values() {
+    for status in [
+        PlanNodeStatus::Pending,
+        PlanNodeStatus::InProgress,
+        PlanNodeStatus::Completed,
+        PlanNodeStatus::Failed,
+    ] {
+        let mut plan = crate::plan::domain::PlanState::empty(
+            PlanId::new("status-plan").expect("valid plan id"),
+            PlanActivationSource::Coordinator {
+                reason: "status test".to_owned(),
+                governing_skill_id: None,
+            },
+            PlanResourcePolicySnapshot::default(),
+        );
+        let mut root = leaf("root", "Status test");
+        root.status = Some(status);
+        let result = plan.update(UpdatePlanInput {
+            reason: "accept authored status".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root,
+            },
+        });
+        assert!(result.is_ok(), "{status:?} should be authored");
+    }
+
+    let mut plan = crate::plan::domain::PlanState::empty(
+        PlanId::new("runtime-status-plan").expect("valid plan id"),
+        PlanActivationSource::Coordinator {
+            reason: "status test".to_owned(),
+            governing_skill_id: None,
+        },
+        PlanResourcePolicySnapshot::default(),
+    );
+    let mut root = leaf("runtime-only", "Runtime-only status");
+    root.status = Some(PlanNodeStatus::Expanded);
+    let error = plan
+        .update(UpdatePlanInput {
+            reason: "reject runtime-owned status".to_owned(),
+            execution_intent: PlanExecutionIntent::ContinuePlanning,
+            coordinator_node_id: None,
+            max_concurrency_hint: None,
+            change: PlanChangeInput::DefinePlan {
+                expected_plan_revision: 0,
+                root,
+            },
+        })
+        .expect_err("runtime-only authored status must reject");
+    assert!(matches!(
+        error,
+        PlanError::InvalidAuthoredNodeStatus {
+            status: PlanNodeStatus::Expanded
+        }
+    ));
 }
