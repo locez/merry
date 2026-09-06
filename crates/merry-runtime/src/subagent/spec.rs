@@ -28,7 +28,7 @@ pub enum SubagentError {
     /// The delegated task text was blank.
     #[error("task must not be blank")]
     BlankTask,
-    /// The delegated task text exceeded [`MAX_TASK_BYTES`].
+    /// The delegated task text exceeded the 16 KiB UTF-8 limit.
     #[error("task is longer than the allowed maximum")]
     TaskTooLong,
     /// The delegated task has no allowed model turns.

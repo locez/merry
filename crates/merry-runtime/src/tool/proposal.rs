@@ -8,7 +8,7 @@ use thiserror::Error;
 
 /// Runtime-owned action category for registered tools.
 ///
-/// This metadata is intentionally not part of provider-visible [`ToolSpec`].
+/// This metadata is intentionally not part of provider-visible [`merry_core::ToolSpec`].
 /// Runtime policy uses it before invoking an executor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -101,7 +101,7 @@ pub enum AgentLoopStatus {
     /// The provider returned a final completed step.
     Completed,
     /// The runtime emitted a failed event. This is distinct from a method error
-    /// returned by [`Runtime::step`] or [`Runtime::execute_tool_call`].
+    /// returned by [`crate::Runtime::step`] or [`crate::Runtime::execute_tool_call`].
     Failed { diagnostic: ErrorInfo },
     /// The runtime emitted a cancelled event, or loop-owned tool execution was
     /// cancelled before producing a durable result.

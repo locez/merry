@@ -45,7 +45,7 @@ impl Default for StructuredOutputRetryPolicy {
     }
 }
 
-/// Configuration for [`Runtime::run_agent_loop`].
+/// Configuration for [`crate::Runtime::run_agent_loop`].
 ///
 /// `max_model_turns` bounds the number of model turns started by one loop run.
 /// Context compaction may happen within the run, but it does not reset this

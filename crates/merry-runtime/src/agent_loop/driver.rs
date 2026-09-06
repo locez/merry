@@ -582,7 +582,7 @@ impl Runtime {
     ///
     /// This has the same loop semantics as [`Runtime::run_agent_loop`], but it
     /// returns an [`AgentRun`] handle that yields each observed
-    /// [`RuntimeJournalEvent`] as soon as the underlying step or tool execution
+    /// [`merry_core::RuntimeJournalEvent`] as soon as the underlying step or tool execution
     /// produces it. Dropping the handle cancels the loop token and aborts the
     /// loop producer as a final cleanup guard.
     pub fn run_agent_loop_stream(
