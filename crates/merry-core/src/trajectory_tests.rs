@@ -1,4 +1,7 @@
-use super::*;
+use crate::{
+    SessionId, TrajectoryLane, TrajectoryRecord, TrajectoryRecordId, TrajectoryRecordKind,
+    TrajectoryRecordStatus, TrajectorySnapshot, TrajectoryTurnId,
+};
 
 #[test]
 fn trajectory_record_serialization_keeps_unknown_timing_explicit() {
@@ -97,4 +100,92 @@ fn persisted_closed_snapshot_can_be_reopened_for_resume() {
 
     snapshot.reopen();
     assert!(!snapshot.is_closed());
+}
+
+#[test]
+fn trajectory_wire_counters_preserve_full_width_and_nullable_timing() {
+    let record = TrajectoryRecord::new(
+        TrajectoryRecordId::new("counter-boundary").expect("valid id"),
+        TrajectoryLane::Model,
+        TrajectoryRecordKind::AssistantMessage,
+        "assistant".to_owned(),
+        TrajectoryRecordStatus::Running,
+        u64::MAX,
+    );
+    let base = serde_json::to_value(&record).expect("record serializes");
+    for counter in [
+        serde_json::json!(u64::MAX),
+        serde_json::json!(u64::MAX.to_string()),
+    ] {
+        let mut input = base.clone();
+        for field in [
+            "start_sequence",
+            "started_at_ms",
+            "finished_at_ms",
+            "turn_id",
+        ] {
+            input[field] = counter.clone();
+        }
+        let restored: TrajectoryRecord =
+            serde_json::from_value(input).expect("full-width counters");
+        assert_eq!(restored.start_sequence(), u64::MAX);
+        assert_eq!(restored.started_at_ms(), Some(u64::MAX));
+        assert_eq!(restored.finished_at_ms(), Some(u64::MAX));
+        assert_eq!(
+            restored.turn_id().map(TrajectoryTurnId::value),
+            Some(u64::MAX)
+        );
+        let encoded = serde_json::to_value(restored).expect("restored record serializes");
+        for field in [
+            "start_sequence",
+            "started_at_ms",
+            "finished_at_ms",
+            "turn_id",
+        ] {
+            assert_eq!(encoded[field], serde_json::json!(u64::MAX.to_string()));
+        }
+    }
+    let restored: TrajectoryRecord = serde_json::from_value(base).expect("nullable fields");
+    assert_eq!(restored.started_at_ms(), None);
+    assert_eq!(restored.finished_at_ms(), None);
+    assert_eq!(restored.turn_id(), None);
+}
+
+#[test]
+fn trajectory_wire_counters_reject_negative_fractional_and_overflow_values() {
+    let record = TrajectoryRecord::new(
+        TrajectoryRecordId::new("counter-boundary").expect("valid id"),
+        TrajectoryLane::Model,
+        TrajectoryRecordKind::AssistantMessage,
+        "assistant".to_owned(),
+        TrajectoryRecordStatus::Running,
+        1,
+    );
+    let base = serde_json::to_value(record).expect("record serializes");
+    for field in [
+        "start_sequence",
+        "started_at_ms",
+        "finished_at_ms",
+        "turn_id",
+    ] {
+        for invalid in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("-1"),
+            serde_json::json!(""),
+            serde_json::json!("18446744073709551616"),
+        ] {
+            let mut input = base.clone();
+            input[field] = invalid;
+            assert!(
+                serde_json::from_value::<TrajectoryRecord>(input).is_err(),
+                "{field}"
+            );
+        }
+    }
+    for zero in [serde_json::json!(0), serde_json::json!("0")] {
+        let mut input = base.clone();
+        input["turn_id"] = zero;
+        assert!(serde_json::from_value::<TrajectoryRecord>(input).is_err());
+    }
 }
