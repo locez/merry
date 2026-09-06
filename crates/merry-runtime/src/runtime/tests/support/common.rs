@@ -99,7 +99,7 @@
             tool_registry: ToolRegistry::default(),
             tool_admission: None,
             memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
-            allow_low_risk_workspace_patches: false,
+            allow_low_risk_apply_patches: false,
             low_risk_process_runner: None,
             read_only_shell_process_runner: None,
             accepted_local_workspace_process_runner: None,

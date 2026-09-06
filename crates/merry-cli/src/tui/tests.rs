@@ -21,7 +21,7 @@ use merry_core::{
     ToolCallBatchId, ToolCallId, ToolCallResult, ToolName, ToolOutput, UsageContextWindow,
 };
 use merry_runtime::{SessionTranscriptItem, SkillMetadata};
-use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
+use merry_tools::APPLY_PATCH_TOOL;
 use ratatui::{
     layout::{Position, Size},
     style::{Color, Modifier},
@@ -2250,11 +2250,7 @@ fn projector_rebuilds_resume_transcript_history() {
         TuiTheme::default(),
     );
     let mut projector = TuiProjector::default();
-    let call = pending_call_with_args(
-        "call-read",
-        "workspace_read_file",
-        json!({"path": "hello_world.py"}),
-    );
+    let call = pending_call_with_args("call-read", "read_text", json!({"path": "hello_world.py"}));
     let result = ToolCallResult::succeeded(
         call.id().clone(),
         ArtifactRef::new(
@@ -2284,7 +2280,7 @@ fn projector_rebuilds_resume_transcript_history() {
             output: Some(ToolOutput::Json {
                 json: json!({
                     "ok": true,
-                    "tool": "workspace_read_file",
+                    "tool": "read_text",
                     "path": "hello_world.py",
                     "content": "print('hi')\n",
                     "bytes": 12,
@@ -2307,7 +2303,7 @@ fn projector_rebuilds_resume_transcript_history() {
     assert!(matches!(
         &state.timeline()[2],
         TimelineItem::Expanded { title, body }
-            if title == "Read workspace_read_file path=hello_world.py"
+            if title == "Read read_text path=hello_world.py"
                 && body.contains("print('hi')")
     ));
 }
@@ -2553,7 +2549,7 @@ fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
 
     projector.apply(
         RuntimeEvent::ToolCallStarted {
-            call: pending_call("call-read", "workspace_read_file"),
+            call: pending_call("call-read", "read_text"),
             source: source(),
         },
         &mut state,
@@ -2573,7 +2569,7 @@ fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
     );
     projector.apply(
         RuntimeEvent::ToolCallStarted {
-            call: pending_call("call-patch", WORKSPACE_PATCH_TOOL),
+            call: pending_call("call-patch", APPLY_PATCH_TOOL),
             source: source(),
         },
         &mut state,
@@ -2832,15 +2828,11 @@ fn projector_expands_tool_batches_in_model_order() {
             batch: pending_batch(
                 "batch-1",
                 vec![
-                    pending_call_with_args(
-                        "call-first",
-                        "workspace_read_file",
-                        json!({"path": "first.rs"}),
-                    ),
+                    pending_call_with_args("call-first", "read_text", json!({"path": "first.rs"})),
                     pending_call_with_args(
                         "call-second",
-                        "workspace_list_dir",
-                        json!({"path": "src"}),
+                        "run_process",
+                        json!({"command": "rg --files", "cwd": "src"}),
                     ),
                 ],
             ),
@@ -2854,11 +2846,11 @@ fn projector_expands_tool_batches_in_model_order() {
         [
             TimelineItem::Muted {
                 title: "Read".to_owned(),
-                detail: "workspace_read_file path=first.rs".to_owned(),
+                detail: "read_text path=first.rs".to_owned(),
             },
             TimelineItem::Muted {
-                title: "Listed".to_owned(),
-                detail: "workspace_list_dir path=src".to_owned(),
+                title: "Ran".to_owned(),
+                detail: "rg --files (src)".to_owned(),
             },
         ]
     );
@@ -2876,7 +2868,7 @@ fn projector_keeps_non_patch_tool_results_compact_without_raw_json() {
 
     projector.apply(
         RuntimeEvent::ToolCallStarted {
-            call: pending_call("call-read", "workspace_read_file"),
+            call: pending_call("call-read", "read_text"),
             source: source(),
         },
         &mut state,
@@ -2888,7 +2880,7 @@ fn projector_keeps_non_patch_tool_results_compact_without_raw_json() {
                 text_artifact("read-output"),
             ),
             output: Some(ToolOutput::Json {
-                json: r#"{"ok":true,"tool":"workspace_read_file","path":"AGENTS.md","bytes":19704,"content":"large raw content"}"#.to_owned(),
+                json: r#"{"ok":true,"tool":"read_text","path":"AGENTS.md","bytes":19704,"content":"large raw content"}"#.to_owned(),
             }),
             source: source(),
         },
@@ -2899,7 +2891,7 @@ fn projector_keeps_non_patch_tool_results_compact_without_raw_json() {
     let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
         panic!("read tool result should expand to a compact preview");
     };
-    assert_eq!(title, "Read workspace_read_file");
+    assert_eq!(title, "Read read_text");
     assert!(!body.contains("AGENTS.md:1"));
     assert!(body.contains("large raw content"));
     assert!(!body.contains(r#""content":"#));
@@ -2917,11 +2909,7 @@ fn projector_shows_tool_call_arguments_without_completed_noise() {
 
     projector.apply(
         RuntimeEvent::ToolCallStarted {
-            call: pending_call_with_args(
-                "call-read",
-                "workspace_read_file",
-                json!({ "path": "AGENTS.md" }),
-            ),
+            call: pending_call_with_args("call-read", "read_text", json!({ "path": "AGENTS.md" })),
             source: source(),
         },
         &mut state,
@@ -2933,7 +2921,7 @@ fn projector_shows_tool_call_arguments_without_completed_noise() {
                 text_artifact("read-output"),
             ),
             output: Some(ToolOutput::Json {
-                json: r#"{"ok":true,"tool":"workspace_read_file","path":"AGENTS.md","bytes":19704,"content":"large raw content"}"#.to_owned(),
+                json: r#"{"ok":true,"tool":"read_text","path":"AGENTS.md","bytes":19704,"content":"large raw content"}"#.to_owned(),
             }),
             source: source(),
         },
@@ -2944,7 +2932,7 @@ fn projector_shows_tool_call_arguments_without_completed_noise() {
     let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
         panic!("read tool call should expand to a compact preview");
     };
-    assert_eq!(title, "Read workspace_read_file path=AGENTS.md");
+    assert_eq!(title, "Read read_text path=AGENTS.md");
     assert!(!body.contains("AGENTS.md:1"));
     assert!(body.contains("large raw content"));
     assert!(!body.contains("completed"));
@@ -3026,31 +3014,6 @@ fn projector_renders_mcp_tools_with_server_and_tool_label() {
         detail,
         "openaiDeveloperDocs/search_openai_docs query=\"Responses API streaming\""
     );
-}
-
-#[test]
-fn projector_renders_list_dir_as_listed_path_without_field_label() {
-    let mut state = TuiState::new(
-        "/repo".into(),
-        "gpt-test".to_owned(),
-        Keymap::default(),
-        TuiTheme::default(),
-    );
-    let mut projector = TuiProjector::default();
-
-    projector.apply(
-        RuntimeEvent::ToolCallStarted {
-            call: pending_call_with_args("call-list", "workspace_list_dir", json!({ "path": "." })),
-            source: source(),
-        },
-        &mut state,
-    );
-
-    let TimelineItem::Muted { title, detail } = &state.timeline()[0] else {
-        panic!("list tool call should render as a compact muted line");
-    };
-    assert_eq!(title, "Listed");
-    assert_eq!(detail, "workspace_list_dir path=.");
 }
 
 #[test]
@@ -3318,7 +3281,7 @@ fn projector_limits_process_preview_to_five_output_lines() {
 }
 
 #[test]
-fn projector_projects_workspace_patch_using_patch_tool_format() {
+fn projector_projects_apply_patch_using_patch_tool_format() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -3336,11 +3299,7 @@ fn projector_projects_workspace_patch_using_patch_tool_format() {
 
     projector.apply(
         RuntimeEvent::ToolCallStarted {
-            call: pending_call_with_args(
-                "call-patch",
-                WORKSPACE_PATCH_TOOL,
-                json!({ "patch": patch }),
-            ),
+            call: pending_call_with_args("call-patch", APPLY_PATCH_TOOL, json!({ "patch": patch })),
             source: source(),
         },
         &mut state,
@@ -3352,7 +3311,7 @@ fn projector_projects_workspace_patch_using_patch_tool_format() {
                 text_artifact("patch-output"),
             ),
             output: Some(ToolOutput::Json {
-                json: r#"{"ok":true,"tool":"workspace_patch","changes":[{"path":"crates/merry-cli/src/tui/render.rs","hunks":1,"bytes_before":120,"bytes_after":121,"lines":[{"kind":"context","old_line":10,"new_line":10,"text":"    let old = true;"},{"kind":"remove","old_line":11,"text":"    lines.push(old);"},{"kind":"add","new_line":11,"text":"    lines.push(new);"}]}]}"#.to_owned(),
+                json: r#"{"ok":true,"tool":"apply_patch","changes":[{"path":"crates/merry-cli/src/tui/render.rs","hunks":1,"bytes_before":120,"bytes_after":121,"lines":[{"kind":"context","old_line":10,"new_line":10,"text":"    let old = true;"},{"kind":"remove","old_line":11,"text":"    lines.push(old);"},{"kind":"add","new_line":11,"text":"    lines.push(new);"}]}]}"#.to_owned(),
             }),
             source: source(),
         },
@@ -3378,7 +3337,7 @@ fn projector_projects_workspace_patch_using_patch_tool_format() {
 }
 
 #[test]
-fn projector_projects_workspace_patch_add_file_line_numbers() {
+fn projector_projects_apply_patch_add_file_line_numbers() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -3391,7 +3350,7 @@ fn projector_projects_workspace_patch_add_file_line_numbers() {
         RuntimeEvent::ToolCallStarted {
             call: pending_call_with_args(
                 "call-add-file",
-                WORKSPACE_PATCH_TOOL,
+                APPLY_PATCH_TOOL,
                 json!({ "patch": patch }),
             ),
             source: source(),
@@ -3405,7 +3364,7 @@ fn projector_projects_workspace_patch_add_file_line_numbers() {
                 text_artifact("patch-output"),
             ),
             output: Some(ToolOutput::Json {
-                json: r#"{"ok":true,"tool":"workspace_patch","changes":[{"path":"hello.txt","hunks":1,"bytes_before":0,"bytes_after":12}]}"#.to_owned(),
+                json: r#"{"ok":true,"tool":"apply_patch","changes":[{"path":"hello.txt","hunks":1,"bytes_before":0,"bytes_after":12}]}"#.to_owned(),
             }),
             source: source(),
         },
@@ -3446,7 +3405,7 @@ fn projector_derives_patch_line_numbers_from_hunk_headers() {
         RuntimeEvent::ToolCallStarted {
             call: pending_call_with_args(
                 "call-numbered-patch",
-                WORKSPACE_PATCH_TOOL,
+                APPLY_PATCH_TOOL,
                 json!({ "patch": patch }),
             ),
             source: source(),
@@ -3460,7 +3419,7 @@ fn projector_derives_patch_line_numbers_from_hunk_headers() {
                 text_artifact("patch-output"),
             ),
             output: Some(ToolOutput::Json {
-                json: r#"{"ok":true,"tool":"workspace_patch","changes":[{"path":"hello_world.py","hunks":1,"bytes_before":209,"bytes_after":222}]}"#.to_owned(),
+                json: r#"{"ok":true,"tool":"apply_patch","changes":[{"path":"hello_world.py","hunks":1,"bytes_before":209,"bytes_after":222}]}"#.to_owned(),
             }),
             source: source(),
         },
@@ -3607,7 +3566,7 @@ fn projector_replaces_failed_patch_row_without_leaving_stale_pending_row() {
         RuntimeEvent::ToolCallStarted {
             call: pending_call_with_args(
                 "call-patch-fail",
-                WORKSPACE_PATCH_TOOL,
+                APPLY_PATCH_TOOL,
                 json!({ "patch": patch }),
             ),
             source: source(),
@@ -3620,7 +3579,7 @@ fn projector_replaces_failed_patch_row_without_leaving_stale_pending_row() {
                 ToolCallId::new("call-patch-fail").unwrap(),
                 text_artifact("patch-failure"),
                 ErrorInfo::new(
-                    "workspace_patch_preimage_mismatch",
+                    "apply_patch_preimage_mismatch",
                     "preimage text was not found in the target file",
                 )
                 .unwrap(),
@@ -3628,9 +3587,9 @@ fn projector_replaces_failed_patch_row_without_leaving_stale_pending_row() {
             output: Some(ToolOutput::Json {
                 json: json!({
                     "ok": false,
-                    "tool": "workspace_patch",
+                    "tool": "apply_patch",
                     "error": {
-                        "code": "workspace_patch_preimage_mismatch",
+                        "code": "apply_patch_preimage_mismatch",
                         "message": "preimage text was not found in the target file"
                     },
                     "recovery": {
@@ -3652,10 +3611,10 @@ fn projector_replaces_failed_patch_row_without_leaving_stale_pending_row() {
     let TimelineItem::Diagnostic { title, body } = &state.timeline()[0] else {
         panic!("failed patch tool should replace the pending row with a diagnostic");
     };
-    assert!(title.starts_with("Patch workspace_patch"));
+    assert!(title.starts_with("Patch apply_patch"));
     assert!(title.contains("crates/merry-cli/src/tui/render.rs"));
     assert!(title.ends_with("-> failed"));
-    assert!(body.contains("workspace_patch_preimage_mismatch"));
+    assert!(body.contains("apply_patch_preimage_mismatch"));
     assert!(body.contains("preimage text was not found"));
     assert!(body.contains("Read the current file content and retry"));
     assert!(
@@ -3665,7 +3624,7 @@ fn projector_replaces_failed_patch_row_without_leaving_stale_pending_row() {
 }
 
 #[test]
-fn renderer_shows_workspace_patch_as_edited_block() {
+fn renderer_shows_apply_patch_as_edited_block() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -3695,7 +3654,7 @@ fn renderer_shows_workspace_patch_as_edited_block() {
 }
 
 #[test]
-fn projector_expands_workspace_patch_by_tool_name() {
+fn projector_expands_apply_patch_by_tool_name() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -3706,7 +3665,7 @@ fn projector_expands_workspace_patch_by_tool_name() {
 
     projector.apply(
         RuntimeEvent::ToolCallStarted {
-            call: pending_call("call-patch", WORKSPACE_PATCH_TOOL),
+            call: pending_call("call-patch", APPLY_PATCH_TOOL),
             source: source(),
         },
         &mut state,
@@ -3718,7 +3677,7 @@ fn projector_expands_workspace_patch_by_tool_name() {
                 text_artifact("patch-output"),
             ),
             output: Some(ToolOutput::Json {
-                json: r#"{"tool":"workspace_patch","status":"applied"}"#.to_owned(),
+                json: r#"{"tool":"apply_patch","status":"applied"}"#.to_owned(),
             }),
             source: source(),
         },
@@ -3741,7 +3700,7 @@ fn projector_keeps_diff_like_non_patch_output_muted() {
 
     projector.apply(
         RuntimeEvent::ToolCallStarted {
-            call: pending_call("call-read", "workspace_read_file"),
+            call: pending_call("call-read", "read_text"),
             source: source(),
         },
         &mut state,
@@ -4988,14 +4947,14 @@ fn renderer_colors_common_tool_title_keywords() {
         detail: "query=hello_world.py".to_owned(),
     });
     state.push_timeline_item(TimelineItem::Expanded {
-        title: "Listed .".to_owned(),
+        title: "Ran .".to_owned(),
         body: "Cargo.toml".to_owned(),
     });
 
     let buffer = render_to_buffer(&state, 79, 18);
 
     assert_eq!(find_cell_color(&buffer, "Searched"), Some(Color::LightCyan));
-    assert_eq!(find_cell_color(&buffer, "Listed"), Some(Color::LightCyan));
+    assert_eq!(find_cell_color(&buffer, "Ran"), Some(Color::LightCyan));
     assert_eq!(
         find_cell_color(&buffer, "query=hello_world.py"),
         Some(Color::White)

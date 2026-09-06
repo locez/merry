@@ -16,7 +16,7 @@ merry-process = { path = "../merry-process", version = "0.1.0" }
 merry-provider-anthropic = { path = "../merry-provider-anthropic", version = "0.1.0" }
 merry-provider-openai = { path = "../merry-provider-openai", version = "0.1.0" }
 merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
-merry-tool-workspace = { path = "../merry-tool-workspace", version = "0.1.0" }
+merry-tools = { path = "../merry-tools", version = "0.1.0" }
 merry-web = { path = "../merry-web", version = "0.1.0" }
 pulldown-cmark.workspace = true
 # Paragraph::line_count keeps wrapped timeline viewport offsets exact.

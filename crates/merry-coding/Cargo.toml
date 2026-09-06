@@ -9,7 +9,7 @@ merry-core = { path = "../merry-core", version = "0.1.0" }
 merry-llm = { path = "../merry-llm", version = "0.1.0" }
 merry-process = { path = "../merry-process", version = "0.1.0" }
 merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
-merry-tool-workspace = { path = "../merry-tool-workspace", version = "0.1.0" }
+merry-tools = { path = "../merry-tools", version = "0.1.0" }
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

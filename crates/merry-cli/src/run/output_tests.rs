@@ -242,7 +242,7 @@ async fn writer_returns_incomplete_when_agent_loop_blocks() {
         response: ModelResponse::new(
             vec![ModelOutput::tool_call(ModelToolCall::new(
                 ModelToolCallId::new("call-read").expect("valid call id"),
-                ToolName::new("workspace_read_file").expect("valid tool name"),
+                ToolName::new("read_text").expect("valid tool name"),
                 ToolArguments::try_from(serde_json::json!({"path": "README.md"}))
                     .expect("valid args"),
             ))],
@@ -289,7 +289,7 @@ async fn writer_returns_incomplete_when_agent_loop_blocks() {
 
     assert_eq!(status, RunExitStatus::Incomplete);
     let text = String::from_utf8(output).expect("output should be utf-8");
-    assert!(text.contains("tool: workspace_read_file path=README.md"));
+    assert!(text.contains("tool: read_text path=README.md"));
     assert!(text.contains("status: blocked"));
     assert!(text.contains("reason: max model turns reached (1)"));
 }

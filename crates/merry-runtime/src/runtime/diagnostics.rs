@@ -7,7 +7,7 @@ pub(super) const DIAGNOSTIC_TOOL_NOT_ADMITTED: &str = "tool_not_admitted";
 pub(super) const DIAGNOSTIC_TOOL_NOT_REGISTERED: &str = "tool_not_registered";
 pub(super) const TOOL_ACTION_POLICY_DENIED_MESSAGE: &str =
     "tool action was blocked by runtime policy";
-pub(super) const WORKSPACE_PATCH_TOOL_NAME: &str = "workspace_patch";
+pub(super) const APPLY_PATCH_TOOL_NAME: &str = "apply_patch";
 
 pub(super) fn diagnostic_from_text(code: &'static str, message: impl AsRef<str>) -> ErrorInfo {
     let message = sanitize_diagnostic_message(message.as_ref());

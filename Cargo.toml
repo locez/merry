@@ -5,7 +5,8 @@ members = [
     "crates/merry-llm",
     "crates/merry-runtime",
     "crates/merry-process",
-    "crates/merry-tool-workspace",
+    "crates/merry-tools",
+    "crates/merry-tools-macros",
     "crates/merry-coding",
     "crates/merry-mcp",
     "crates/merry-provider-openai",
@@ -21,7 +22,8 @@ default-members = [
     "crates/merry-llm",
     "crates/merry-runtime",
     "crates/merry-process",
-    "crates/merry-tool-workspace",
+    "crates/merry-tools",
+    "crates/merry-tools-macros",
     "crates/merry-coding",
     "crates/merry-mcp",
     "crates/merry-provider-openai",
@@ -56,6 +58,10 @@ pulldown-cmark = "0.13"
 ratatui = "0.30"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 regex = "1"
+proc-macro2 = "1"
+proc-macro-crate = "3"
+quote = "1"
+syn = { version = "2", features = ["full"] }
 schemars = { version = "1.0", features = ["derive"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = "1.0"

@@ -1,0 +1,28 @@
+[package]
+name = "merry-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+merry-core = { path = "../merry-core", version = "0.1.0" }
+merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
+merry-tools-macros = { path = "../merry-tools-macros", version = "0.1.0" }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+merry-llm = { path = "../merry-llm", version = "0.1.0", features = ["test-utils"] }
+tokio-util.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

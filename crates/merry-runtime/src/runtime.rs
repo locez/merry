@@ -71,9 +71,9 @@ pub use self::builder::{AutomaticCompactionConfig, RuntimeBuilder};
 #[cfg(test)]
 use self::checkpoint_ref_tool::merry_read_checkpoint_ref_tool_name;
 use self::diagnostics::{
-    DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED,
-    DIAGNOSTIC_TOOL_NOT_REGISTERED, TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME,
-    diagnostic_from_text, runtime_error_message,
+    APPLY_PATCH_TOOL_NAME, DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
+    DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, DIAGNOSTIC_TOOL_NOT_REGISTERED,
+    TOOL_ACTION_POLICY_DENIED_MESSAGE, diagnostic_from_text, runtime_error_message,
 };
 use self::journal_emission::{
     send_cancelled_event, send_cancelled_if_requested, send_normal_event, send_step_started_event,
@@ -730,7 +730,7 @@ struct RuntimeInner {
     tool_registry: ToolRegistry,
     tool_admission: Option<crate::ToolAdmission>,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
-    allow_low_risk_workspace_patches: bool,
+    allow_low_risk_apply_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
     read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
     accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,

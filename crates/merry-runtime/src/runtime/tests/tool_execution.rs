@@ -224,7 +224,7 @@ async fn runtime_control_tool_resolves_even_if_token_is_cancelled_during_executi
 #[test]
 fn generic_executor_admission_allows_read_only_and_rejects_mutating_actions() {
     let session_id = SessionId::new("generic-executor-admission").expect("valid session id");
-    let pending = policy_pending_tool_call("call-admission", WORKSPACE_PATCH_TOOL_NAME);
+    let pending = policy_pending_tool_call("call-admission", APPLY_PATCH_TOOL_NAME);
 
     let read_only_decision = DefaultActionPolicy.decide(ToolActionKind::ReadOnly);
     admit_action_to_generic_executor(
@@ -280,7 +280,7 @@ fn generic_executor_admission_allows_read_only_and_rejects_mutating_actions() {
         ActionProposalEvidence::WorkspacePatch(patch),
     )
     .expect("test action proposal is valid");
-    let allowed_decision = ActionPolicyDecision::allow_low_risk_workspace_patch();
+    let allowed_decision = ActionPolicyDecision::allow_low_risk_apply_patch();
     admit_action_to_generic_executor(
         &pending,
         ToolActionKind::WorkspaceWrite,
@@ -298,7 +298,7 @@ fn generic_executor_admission_allows_read_only_and_rejects_mutating_actions() {
         Some(&proposal),
         &session_id,
     )
-    .expect_err("only workspace_patch may enter the low-risk patch lane");
+    .expect_err("only apply_patch may enter the low-risk patch lane");
     assert!(matches!(
         err,
         crate::RuntimeError::MutatingActionCommitLifecycleRequired {
@@ -648,17 +648,17 @@ async fn preflight_outcome_must_be_failed_to_resolve_without_policy_bypass() {
 async fn opt_in_workspace_write_patch_proposal_executes_and_records_execution_audit() {
     let executor = ProposingToolExecutor::immediate();
     let tool = RegisteredTool::new(
-        policy_tool_spec(WORKSPACE_PATCH_TOOL_NAME),
+        policy_tool_spec(APPLY_PATCH_TOOL_NAME),
         Arc::new(executor.clone()),
         ToolActionKind::WorkspaceWrite,
     )
     .with_action_proposal();
     let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
         "runtime-policy-proposed-workspace-write-opt-in",
-        WORKSPACE_PATCH_TOOL_NAME,
+        APPLY_PATCH_TOOL_NAME,
         "call-workspace-write-opt-in",
         tool,
-        |builder| builder.allow_low_risk_workspace_patches().build(),
+        |builder| builder.allow_low_risk_apply_patches().build(),
     )
     .await;
 
@@ -755,7 +755,7 @@ async fn opt_in_workspace_write_patch_proposal_rejects_non_patch_tool_name() {
         "policy_write_opt_in",
         "call-workspace-write-opt-in-wrong-tool",
         tool,
-        |builder| builder.allow_low_risk_workspace_patches().build(),
+        |builder| builder.allow_low_risk_apply_patches().build(),
     )
     .await;
 
@@ -794,17 +794,17 @@ async fn opt_in_workspace_write_patch_proposal_rejects_non_patch_tool_name() {
 async fn opt_in_workspace_write_patch_records_outcome_when_cancelled_after_side_effect() {
     let executor = CancellingOptInPatchExecutor::new();
     let tool = RegisteredTool::new(
-        policy_tool_spec(WORKSPACE_PATCH_TOOL_NAME),
+        policy_tool_spec(APPLY_PATCH_TOOL_NAME),
         Arc::new(executor.clone()),
         ToolActionKind::WorkspaceWrite,
     )
     .with_action_proposal();
     let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
         "runtime-policy-workspace-write-opt-in-cancel-after-side-effect",
-        WORKSPACE_PATCH_TOOL_NAME,
+        APPLY_PATCH_TOOL_NAME,
         "call-workspace-write-opt-in-cancel-after-side-effect",
         tool,
-        |builder| builder.allow_low_risk_workspace_patches().build(),
+        |builder| builder.allow_low_risk_apply_patches().build(),
     )
     .await;
     let token = CancellationToken::new();
@@ -848,17 +848,17 @@ async fn opt_in_workspace_write_patch_records_outcome_when_cancelled_after_side_
 async fn opt_in_workspace_write_patch_missing_execution_evidence_fails_closed() {
     let executor = ProposingToolExecutor::missing_execution_evidence();
     let tool = RegisteredTool::new(
-        policy_tool_spec(WORKSPACE_PATCH_TOOL_NAME),
+        policy_tool_spec(APPLY_PATCH_TOOL_NAME),
         Arc::new(executor.clone()),
         ToolActionKind::WorkspaceWrite,
     )
     .with_action_proposal();
     let (runtime, pending) = register_policy_pending_registered_tool_with_builder(
         "runtime-policy-workspace-write-opt-in-missing-evidence",
-        WORKSPACE_PATCH_TOOL_NAME,
+        APPLY_PATCH_TOOL_NAME,
         "call-workspace-write-opt-in-missing-evidence",
         tool,
-        |builder| builder.allow_low_risk_workspace_patches().build(),
+        |builder| builder.allow_low_risk_apply_patches().build(),
     )
     .await;
     let projection_before = runtime.ledger_projection().await;

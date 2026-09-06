@@ -1,3 +1,4 @@
+use crate::CODING_LOOP_PROCESS_TOOL;
 use crate::{CodingAgentProfileBuilder, runtime::CodingRuntimePolicy};
 use merry_llm::{ModelName, ModelProvider};
 use merry_process::ProcessBackend;
@@ -6,7 +7,6 @@ use merry_runtime::{
     Runtime, RuntimeError, SubagentConfig, SubagentManager, ToolAdmission,
     subagent_registered_tools,
 };
-use merry_tool_workspace::CODING_LOOP_PROCESS_TOOL;
 use std::sync::Arc;
 
 /// Coding-owned child runtime factory.

@@ -10,7 +10,7 @@ use merry_core::{
     ToolCallId, ToolCallResultStatus, ToolName, ToolOutput,
 };
 use merry_runtime::SessionTranscriptItem;
-use merry_tool_workspace::WORKSPACE_PATCH_TOOL;
+use merry_tools::APPLY_PATCH_TOOL;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -19,7 +19,6 @@ const PROCESS_PREVIEW_MAX_LINES: usize = 5;
 // This bounds the timeline preview only; the workspace tool and Focus retain the full file.
 const READ_FILE_PREVIEW_MAX_LINES: usize = 120;
 const READ_FILE_PREVIEW_MAX_CHARS: usize = 180;
-const LIST_DIR_PREVIEW_MAX_ENTRIES: usize = 80;
 
 #[derive(Debug, Default)]
 #[allow(dead_code)]
@@ -191,9 +190,9 @@ impl TuiProjector {
                     }
                 } else if tool
                     .as_ref()
-                    .is_some_and(|tool| tool.name.as_str() == WORKSPACE_PATCH_TOOL)
+                    .is_some_and(|tool| tool.name.as_str() == APPLY_PATCH_TOOL)
                 {
-                    let patch_item = parse_workspace_patch_view(
+                    let patch_item = parse_apply_patch_view(
                         &text,
                         tool.as_ref()
                             .and_then(|tool| tool.patch_argument.as_deref()),
@@ -461,15 +460,13 @@ fn tui_tool_title(name: &str) -> &'static str {
 
     match name {
         "run_process" => "Ran",
-        "workspace_read_file" => "Read",
-        "workspace_list_dir" => "Listed",
-        "workspace_search_text" => "Searched",
+        "read_text" => "Read",
         "request_permissions" => "Permission",
         "merry_read_checkpoint_ref" => "Retrieved",
         "spawn_subagents" => "Delegated",
         "wait_subagents" => "Waited",
         "cancel_subagents" => "Cancelled",
-        WORKSPACE_PATCH_TOOL => "Patch",
+        APPLY_PATCH_TOOL => "Patch",
         _ => "Tool",
     }
 }
@@ -509,8 +506,7 @@ fn success_tool_bodies(name: &str, output: &str) -> Option<String> {
     match name {
         "run_process" => process_output_bodies(output),
         "request_permissions" => permission_output_bodies(output),
-        "workspace_read_file" => read_file_output_bodies(output),
-        "workspace_list_dir" => list_dir_output_bodies(output),
+        "read_text" => read_text_output_bodies(output),
         _ => None,
     }
 }
@@ -534,9 +530,9 @@ fn permission_output_bodies(output: &str) -> Option<String> {
     Some(body)
 }
 
-fn read_file_output_bodies(output: &str) -> Option<String> {
-    let output = serde_json::from_str::<WorkspaceReadFileOutput>(output).ok()?;
-    if !output.ok || output.tool.as_deref() != Some("workspace_read_file") {
+fn read_text_output_bodies(output: &str) -> Option<String> {
+    let output = serde_json::from_str::<WorkspaceReadTextOutput>(output).ok()?;
+    if !output.ok || output.tool.as_deref() != Some("read_text") {
         return None;
     }
 
@@ -556,55 +552,13 @@ fn read_file_output_bodies(output: &str) -> Option<String> {
 }
 
 #[derive(Debug, Deserialize)]
-struct WorkspaceReadFileOutput {
+struct WorkspaceReadTextOutput {
     ok: bool,
     tool: Option<String>,
     path: String,
     content: String,
     #[serde(default)]
     truncated: bool,
-}
-
-fn list_dir_output_bodies(output: &str) -> Option<String> {
-    let output = serde_json::from_str::<WorkspaceListDirOutput>(output).ok()?;
-    if !output.ok || output.tool.as_deref() != Some("workspace_list_dir") {
-        return None;
-    }
-
-    let mut preview_lines = output
-        .entries
-        .iter()
-        .take(LIST_DIR_PREVIEW_MAX_ENTRIES)
-        .map(directory_entry_label)
-        .collect::<Vec<_>>();
-    if output.truncated {
-        preview_lines.push("... truncated".to_owned());
-    }
-    if preview_lines.is_empty() {
-        preview_lines.push(format!("{} is empty", output.path));
-    }
-    Some(preview_lines.join("\n"))
-}
-
-fn directory_entry_label(entry: &WorkspaceListDirEntry) -> String {
-    let suffix = if entry.kind == "directory" { "/" } else { "" };
-    format!("{}{}", entry.path, suffix)
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkspaceListDirOutput {
-    ok: bool,
-    tool: Option<String>,
-    path: String,
-    entries: Vec<WorkspaceListDirEntry>,
-    #[serde(default)]
-    truncated: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct WorkspaceListDirEntry {
-    path: String,
-    kind: String,
 }
 
 fn process_output_bodies(output: &str) -> Option<String> {
@@ -684,12 +638,12 @@ fn compact_tool_output(output: &str) -> String {
     compact
 }
 
-fn parse_workspace_patch_view(output: &str, patch_argument: Option<&str>) -> Option<TimelineItem> {
+fn parse_apply_patch_view(output: &str, patch_argument: Option<&str>) -> Option<TimelineItem> {
     let output = serde_json::from_str::<WorkspacePatchOutput>(output).ok()?;
-    if !output.ok || output.tool.as_deref() != Some(WORKSPACE_PATCH_TOOL) {
+    if !output.ok || output.tool.as_deref() != Some(APPLY_PATCH_TOOL) {
         return None;
     }
-    let parsed_patch = patch_argument.map(parse_workspace_patch_argument);
+    let parsed_patch = patch_argument.map(parse_apply_patch_argument);
     let changes = output
         .changes
         .into_iter()
@@ -786,7 +740,7 @@ impl ParsedPatchArgument {
     }
 }
 
-fn parse_workspace_patch_argument(patch: &str) -> ParsedPatchArgument {
+fn parse_apply_patch_argument(patch: &str) -> ParsedPatchArgument {
     let mut parsed = ParsedPatchArgument::default();
     let mut current_path: Option<String> = None;
     let mut current_lines = Vec::new();

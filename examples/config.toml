@@ -63,7 +63,7 @@ deny_paths = [
 
 [skills]
 # Skill metadata is projected into the cacheable stable prefix. Full SKILL.md
-# bodies remain on disk and are read through workspace_read_file only when used.
+# bodies remain on disk and are read through bounded read_text ranges only when used.
 enabled = true
 roots = [
   "skills",

@@ -20,7 +20,7 @@ the source of truth for every durable or policy-sensitive capability.
 | Structured-output retry policy | Not exposed in this slice | Rust `StructuredOutputRetryPolicy` | Deferred; Python does not duplicate retry state |
 | Save/resume | `save_session`, `session_store`, `resume` | Rust `FileSessionStore` and runtime session state | `tests/test_run.py`, Rust facade agent tests |
 | Multi-runtime orchestration | Compose independent `Agent` instances in host code | One Rust facade/runtime per session | `examples/multi_runtime_orchestration.py` |
-| Workspace config | `WorkspaceConfig`, `WorkspaceLimits`, `PatchConfig` | `merry-coding`, `merry-tool-workspace` | `tests/test_builder.py` |
+| Workspace config | `WorkspaceConfig`, `WorkspaceLimits`, `PatchConfig` | `merry-coding`, `merry-tools` | `tests/test_builder.py` |
 | Error parity | `MerryErrorInfo` and typed subclasses | `merry-core::MerryErrorInfo`, facade errors | `tests/test_errors.py`, `crates/merry-py/tests/bindings.rs` |
 | Interactive controls | Not exposed in this T8 slice | `merry::InteractiveRun` | Deferred follow-up; no unsupported Python config |
 | Process/session adapters | Not exposed in this T8 slice | `merry-process`, coding profile | Deferred follow-up; no unsupported Python config |

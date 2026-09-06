@@ -1325,7 +1325,6 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
     assert!(!base_instructions.contains("OpenAI"));
     assert!(!base_instructions.contains("Anthropic"));
     assert!(!base_instructions.contains("GPT-"));
-    assert!(!base_instructions.contains("workspace_search_text"));
     assert!(
         !request.messages()[0]
             .content()
@@ -2113,7 +2112,7 @@ async fn compiled_provider_request_skill_metadata_enters_stable_prefix_before_pr
         request.stable_prefix_messages()[1]
             .content()
             .as_text()
-            .contains("workspace_read_file")
+            .contains("read_text")
     );
     assert!(
         request.stable_prefix_messages()[1]
@@ -3249,7 +3248,7 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
 async fn reading_catalog_skill_file_emits_skill_used_event() {
     let call = model_tool_call_with_args(
         "call-read-skill",
-        "workspace_read_file",
+        "read_text",
         Map::from_iter([("path".to_owned(), Value::String("demo/SKILL.md".to_owned()))]),
     );
     let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_outputs_event(
@@ -3269,7 +3268,7 @@ async fn reading_catalog_skill_file_emits_skill_used_event() {
     let runtime = Runtime::builder(session_id("provider-skill-used"))
         .skill_catalog(catalog)
         .register_tool(RegisteredTool::read_only(
-            path_tool_spec("workspace_read_file"),
+            path_tool_spec("read_text"),
             Arc::new(ScriptedToolExecutor::succeeding_text("# Demo\n")),
         ))
         .model_provider(Arc::new(provider), model_name())

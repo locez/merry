@@ -120,7 +120,7 @@ pub struct RuntimeBuilder {
     compacted_checkpoint_evidence: Vec<(ArtifactRef, ArtifactContent)>,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_bridge_tools: bool,
-    allow_low_risk_workspace_patches: bool,
+    allow_low_risk_apply_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
     read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
     accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
@@ -163,7 +163,7 @@ impl RuntimeBuilder {
             compacted_checkpoint_evidence: Vec::new(),
             memory_activation_source: Arc::new(StoredMemoryActivationSource),
             allow_bridge_tools: false,
-            allow_low_risk_workspace_patches: false,
+            allow_low_risk_apply_patches: false,
             low_risk_process_runner: None,
             read_only_shell_process_runner: None,
             accepted_local_workspace_process_runner: None,
@@ -344,8 +344,8 @@ impl RuntimeBuilder {
         if parts.allow_bridge_tools {
             self = self.allow_bridge_tools();
         }
-        if parts.allow_low_risk_workspace_patches {
-            self = self.allow_low_risk_workspace_patches();
+        if parts.allow_low_risk_apply_patches {
+            self = self.allow_low_risk_apply_patches();
         }
         if let Some(runner) = parts.low_risk_process_runner {
             self = self.allow_low_risk_process_actions(runner);
@@ -485,8 +485,8 @@ impl RuntimeBuilder {
     /// denied unless the tool provides valid workspace patch proposal evidence
     /// and runtime construction explicitly enables this lane.
     #[must_use]
-    pub fn allow_low_risk_workspace_patches(mut self) -> Self {
-        self.allow_low_risk_workspace_patches = true;
+    pub fn allow_low_risk_apply_patches(mut self) -> Self {
+        self.allow_low_risk_apply_patches = true;
         self
     }
 
@@ -888,7 +888,7 @@ impl RuntimeBuilder {
                 tool_registry,
                 tool_admission: self.tool_admission,
                 memory_activation_source: self.memory_activation_source,
-                allow_low_risk_workspace_patches: self.allow_low_risk_workspace_patches,
+                allow_low_risk_apply_patches: self.allow_low_risk_apply_patches,
                 low_risk_process_runner: self.low_risk_process_runner,
                 read_only_shell_process_runner: self.read_only_shell_process_runner,
                 accepted_local_workspace_process_runner: self

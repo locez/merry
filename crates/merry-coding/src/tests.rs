@@ -67,10 +67,8 @@ fn workspace_profile_builds_read_tools_and_coding_defaults() {
         .iter()
         .map(|tool| tool.spec().name().as_str())
         .collect::<Vec<_>>();
-    assert!(tool_names.contains(&"workspace_read_file"));
-    assert!(tool_names.contains(&"workspace_list_dir"));
-    assert!(tool_names.contains(&"workspace_search_text"));
-    assert!(!tool_names.contains(&"workspace_patch"));
+    assert!(tool_names.contains(&"read_text"));
+    assert!(!tool_names.contains(&"apply_patch"));
     assert!(profile.runtime_profile().progress_commentary());
     assert_eq!(
         profile.runtime_profile().model_retry_policy(),
@@ -91,14 +89,7 @@ fn coding_agent_profile_has_one_canonical_workspace_tool_order() {
         .map(ToolName::as_str)
         .collect::<Vec<_>>();
 
-    assert_eq!(
-        tool_names,
-        vec![
-            "workspace_read_file",
-            "workspace_list_dir",
-            "workspace_search_text",
-        ]
-    );
+    assert_eq!(tool_names, vec!["read_text",]);
 }
 
 #[test]
@@ -124,10 +115,8 @@ fn coding_agent_profile_owns_process_permission_and_patch_order() {
         vec![
             "run_process",
             "request_permissions",
-            "workspace_read_file",
-            "workspace_list_dir",
-            "workspace_search_text",
-            "workspace_patch",
+            "read_text",
+            "apply_patch",
         ]
     );
 }
@@ -194,13 +183,7 @@ fn coding_agent_profile_hash_includes_advertised_tool_order() {
             .into_iter()
             .map(ToolName::as_str)
             .collect::<Vec<_>>(),
-        vec![
-            "workspace_read_file",
-            "workspace_list_dir",
-            "workspace_search_text",
-            "alpha",
-            "beta"
-        ]
+        vec!["read_text", "alpha", "beta"]
     );
 }
 
@@ -307,7 +290,7 @@ fn workspace_profile_can_enable_patch_tool() {
         profile
             .registered_tools()
             .iter()
-            .any(|tool| tool.spec().name().as_str() == "workspace_patch")
+            .any(|tool| tool.spec().name().as_str() == "apply_patch")
     );
 }
 
@@ -619,7 +602,7 @@ async fn parent_builder_composes_full_coding_runtime_and_loop_policy() {
     for tool in [
         "run_process",
         "request_permissions",
-        "workspace_patch",
+        "apply_patch",
         "spawn_subagents",
         "wait_subagents",
         "cancel_subagents",
@@ -850,11 +833,11 @@ async fn command_generation_builder_is_read_only_even_with_full_policy_inputs() 
         .into_iter()
         .map(ToolName::as_str)
         .collect::<Vec<_>>();
-    assert!(tool_names.contains(&"workspace_read_file"));
+    assert!(tool_names.contains(&"read_text"));
     for tool in [
         "run_process",
         "request_permissions",
-        "workspace_patch",
+        "apply_patch",
         "spawn_subagents",
         "wait_subagents",
         "cancel_subagents",

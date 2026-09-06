@@ -33,7 +33,7 @@ pub(crate) fn process_tool_call(
     );
     tool_call(
         call_id,
-        merry_tool_workspace::CODING_LOOP_PROCESS_TOOL,
+        merry::profiles::CODING_LOOP_PROCESS_TOOL,
         arguments,
     )
 }

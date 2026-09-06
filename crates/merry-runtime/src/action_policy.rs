@@ -131,7 +131,7 @@ impl ActionPolicyDecision {
 
     /// Allows an otherwise denied action after a narrow proposal-aware opt-in.
     #[must_use]
-    pub(crate) const fn allow_low_risk_workspace_patch() -> Self {
+    pub(crate) const fn allow_low_risk_apply_patch() -> Self {
         Self::new(
             ToolActionKind::WorkspaceWrite,
             ActionRiskTier::EditLow,
@@ -266,7 +266,7 @@ pub(crate) fn classify_tool_action_risk(
 
 /// Returns whether proposal evidence is compatible with the low-risk workspace patch lane.
 #[must_use]
-pub(crate) fn is_low_risk_workspace_patch_proposal(
+pub(crate) fn is_low_risk_apply_patch_proposal(
     action_kind: ToolActionKind,
     proposal: &ActionProposal,
 ) -> bool {
@@ -401,13 +401,13 @@ mod tests {
     fn pending_tool_call() -> PendingToolCall {
         PendingToolCall::new(
             ToolCallId::new("call-risk-classifier").expect("valid call id"),
-            ToolName::new("workspace_patch").expect("valid tool name"),
+            ToolName::new("apply_patch").expect("valid tool name"),
             ToolCallArguments::try_from(json!({ "patch": "*** Begin Workspace Patch\n*** Update File: notes/proposed.txt\n-old\n+new\n*** End Workspace Patch" }))
                 .expect("object arguments are valid"),
         )
     }
 
-    fn workspace_patch_proposal(call: &PendingToolCall) -> ActionProposal {
+    fn apply_patch_proposal(call: &PendingToolCall) -> ActionProposal {
         let patch = WorkspacePatchProposal::new(
             "notes/proposed.txt",
             3,
@@ -468,9 +468,9 @@ mod tests {
     }
 
     #[test]
-    fn classifier_assigns_low_edit_risk_for_workspace_patch_proposal() {
+    fn classifier_assigns_low_edit_risk_for_apply_patch_proposal() {
         let call = pending_tool_call();
-        let proposal = workspace_patch_proposal(&call);
+        let proposal = apply_patch_proposal(&call);
 
         assert_eq!(
             classify_tool_action_risk(ToolActionKind::WorkspaceWrite, Some(&proposal)),

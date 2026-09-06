@@ -708,15 +708,7 @@ fn strip_tool_title_detail<'a>(title: &'a str, keyword: &str) -> Option<&'a str>
     title.strip_prefix(keyword)?.strip_prefix(' ')
 }
 
-const TOOL_TITLE_KEYWORDS: &[&str] = &[
-    "Read",
-    "Listed",
-    "Searched",
-    "MCP",
-    "Permission",
-    "Patch",
-    "Tool",
-];
+const TOOL_TITLE_KEYWORDS: &[&str] = &["Read", "Searched", "MCP", "Permission", "Patch", "Tool"];
 
 fn tool_title_keyword(title: &str) -> Option<&'static str> {
     TOOL_TITLE_KEYWORDS

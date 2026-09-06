@@ -27,7 +27,7 @@ pub(crate) struct CodingRuntimeOptions {
     pub(crate) extra_tools: Vec<RegisteredTool>,
     pub(crate) skill_roots: Vec<PathBuf>,
     pub(crate) subagents: super::CodingSubagentsConfig,
-    pub(crate) workspace_tool_limits: Option<merry_tool_workspace::WorkspaceToolLimits>,
+    pub(crate) workspace_tool_limits: Option<merry_tools::WorkspaceToolLimits>,
 }
 
 pub(crate) struct HeadlessCodingRuntimeInput<'a> {
@@ -44,7 +44,7 @@ pub(crate) struct HeadlessCodingRuntimeInput<'a> {
     pub(crate) approval_review: Option<RuntimeRoleProviderConfig>,
     pub(crate) skill_roots: Vec<PathBuf>,
     pub(crate) subagents: super::CodingSubagentsConfig,
-    pub(crate) workspace_tool_limits: Option<merry_tool_workspace::WorkspaceToolLimits>,
+    pub(crate) workspace_tool_limits: Option<merry_tools::WorkspaceToolLimits>,
 }
 
 #[cfg(test)]

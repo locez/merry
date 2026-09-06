@@ -2370,11 +2370,11 @@ async fn continuation_control_prompt_is_not_recorded_as_user_history() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_completion() {
+async fn agent_loop_executes_opt_in_apply_patch_and_continues_to_final_completion() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_tool_call_event(model_tool_call(
             "call-patch-success",
-            "workspace_patch",
+            "apply_patch",
         )))],
         vec![Ok(completed_text_event("final after patch"))],
     ]);
@@ -2382,14 +2382,14 @@ async fn agent_loop_executes_opt_in_workspace_patch_and_continues_to_final_compl
     let runtime = Runtime::builder(session_id("agent-loop-opt-in-workspace-patch"))
         .register_tool(
             merry_runtime::RegisteredTool::new(
-                tool_spec("workspace_patch"),
+                tool_spec("apply_patch"),
                 Arc::new(executor.clone()),
                 ToolActionKind::WorkspaceWrite,
             )
             .with_action_proposal(),
         )
         .model_provider(Arc::new(provider.clone()), model_name())
-        .allow_low_risk_workspace_patches()
+        .allow_low_risk_apply_patches()
         .build()
         .expect("runtime should build");
 

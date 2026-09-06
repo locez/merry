@@ -19,7 +19,7 @@ use merry_runtime::{
     RegisteredTool, Runtime, RuntimeBuilder, RuntimeError, RuntimeModelRole, SkillCatalog,
     SkillError, SubagentConfig, SubagentError, SubagentManager, subagent_registered_tools,
 };
-use merry_tool_workspace::WorkspaceToolLimits;
+use merry_tools::WorkspaceToolLimits;
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 use thiserror::Error;
 

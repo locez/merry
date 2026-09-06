@@ -5,7 +5,7 @@ use merry_core::{
     ToolCallResultStatus,
 };
 
-const WORKSPACE_READ_FILE_TOOL_NAME: &str = "workspace_read_file";
+const READ_TEXT_TOOL_NAME: &str = "read_text";
 
 impl SessionState {
     pub(super) fn skill_used_event_for_read(
@@ -16,7 +16,7 @@ impl SessionState {
         if result.status() != ToolCallResultStatus::Succeeded {
             return None;
         }
-        if pending.name().as_str() != WORKSPACE_READ_FILE_TOOL_NAME {
+        if pending.name().as_str() != READ_TEXT_TOOL_NAME {
             return None;
         }
         let path = pending

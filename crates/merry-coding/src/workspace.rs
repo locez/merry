@@ -1,3 +1,4 @@
+use crate::{CODING_LOOP_PROCESS_TOOL, project_capabilities::project_capability_summary_for_root};
 use merry_core::ToolName;
 use merry_llm::ModelRetryPolicy;
 use merry_process::ProcessSession;
@@ -7,16 +8,15 @@ use merry_runtime::{
     RuntimeProfileBuilder, StaticPermissionedProcessRunnerFactory, process_command_tool,
     request_permissions_tool,
 };
-use merry_tool_workspace::{
-    CODING_LOOP_PROCESS_TOOL, ReadOnlyWorkspaceTools, WorkspaceToolConfigError,
-    WorkspaceToolLimits, WorkspaceToolsConfig,
+use merry_tools::{
+    WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceTools, WorkspaceToolsConfig,
 };
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 
 const PROJECT_CAPABILITY_CONTEXT_ID: &str = "project-capabilities";
 const CODING_WORKSPACE_CAPABILITY_SUMMARY: &str = "\
-Workspace coding profile:\n- Workspace file tool paths are relative to the single configured workspace root, not host-absolute paths. Read-only skill and other resource roots are separate from workspace writes.\n- Process execution runs through Merry runtime policy and the configured sandbox/profile, so filesystem and network access may be intentionally restricted; environment and host IPC access may also be intentionally restricted.\n- For run_process, provide one shell command string and set cwd to null or cwd=\".\" for the workspace root; do not pass a bash field, argv array, or empty cwd string.\n- The default process profile may block network access and paths outside the configured workspace or trusted path rules. Ordinary valid commands may still create directories and write workspace files.\n- A failed process action is the signal to recover. If the failure appears caused by unavailable network, filesystem, or host-integration access (including its required environment), call request_permissions for that exact action and request only the corresponding minimum capability before retrying it. Approved paths and host integrations remain available for later actions in this runtime session; network access must be requested again for every action that needs it.\n- Linux Unix sockets are filesystem paths. If a host resource is not represented by a named integration, request its exact socket/file path through requested.paths; the outer sandbox must already expose the path.\n- request_permissions must name the exact planned action and request only the minimum needed capability; the runtime may approve, deny, or fail the request.";
+Coding file capabilities:\n- `read_text` reads a bounded one-based line range from a known UTF-8 text path. Omit the range only to use the small configured default; use multiple focused reads instead of requesting a whole file. Paths are relative to configured roots, and skill/resource roots are read-only and separate from write scope.\n- `apply_patch` is the only file-edit tool. Use one patch envelope with localized Add File or Update File hunks; do not submit whole-file content for a small edit. Runtime admission, write scope, forbidden paths, and current-file preimages are enforced before writes.\n- `run_process` is the discovery and verification lane when configured. Prefer `rg --files`, focused literal `rg` searches, and bounded `sed -n '<start>,<end>p'` reads. Avoid broad recursive output and unbounded file reads.\n- Process execution runs through Merry runtime policy and the configured sandbox/profile, so filesystem and network access may be intentionally restricted; environment and host IPC access may also be intentionally restricted.\n- A failed process action is the signal to recover. If the failure appears caused by unavailable network, filesystem, or host-integration access, call `request_permissions` for that exact action and request only the corresponding minimum capability before retrying it. Approved paths and host integrations remain available for later actions in this runtime session; network access must be requested again for every action that needs it.\n- Linux Unix sockets are filesystem paths. If a host resource is not represented by a named integration, request its exact socket/file path through `requested.paths`; the outer sandbox must already expose the path.\n- `request_permissions` must name the exact planned action and request only the minimum needed capability; the runtime may approve, deny, or fail the request.";
 
 #[derive(Clone)]
 pub(crate) enum WorkspaceProcessRunnerConfig {
@@ -134,9 +134,13 @@ impl WorkspaceCodingProfileBuilder {
             .with_limits(self.limits)
             .with_patch_write_scope(self.patch_write_scope)
             .with_forbidden_paths(self.forbidden_paths);
-        let workspace_tools = ReadOnlyWorkspaceTools::new(config)?;
+        let project_summary = config
+            .roots()
+            .iter()
+            .find_map(|root| project_capability_summary_for_root(root));
+        let workspace_tools = WorkspaceTools::new(config)?;
 
-        let capability_summary = workspace_tools.project_metadata_summary().map_or_else(
+        let capability_summary = project_summary.map_or_else(
             || CODING_WORKSPACE_CAPABILITY_SUMMARY.to_owned(),
             |facts| format!("{CODING_WORKSPACE_CAPABILITY_SUMMARY}\n{facts}"),
         );
@@ -146,7 +150,7 @@ impl WorkspaceCodingProfileBuilder {
             .initial_context_summary(PROJECT_CAPABILITY_CONTEXT_ID, &capability_summary);
 
         if self.enable_patch_tool {
-            builder = builder.allow_low_risk_workspace_patches();
+            builder = builder.allow_low_risk_apply_patches();
         }
 
         if let Some(process_runner) = self.process_runner {
@@ -234,15 +238,9 @@ impl WorkspaceCodingProfileBuilder {
         }
         for (name, value) in [
             ("max-read-bytes", self.limits.max_read_bytes),
+            ("max-read-lines", self.limits.max_read_lines),
             ("max-write-bytes", self.limits.max_write_bytes),
             ("max-patch-bytes", self.limits.max_patch_bytes),
-            ("max-list-entries", self.limits.max_list_entries),
-            ("max-search-matches", self.limits.max_search_matches),
-            ("max-search-files", self.limits.max_search_files),
-            ("max-search-entries", self.limits.max_search_entries),
-            ("max-search-bytes", self.limits.max_search_bytes),
-            ("max-search-line-bytes", self.limits.max_search_line_bytes),
-            ("max-search-query-bytes", self.limits.max_search_query_bytes),
         ] {
             append_hash_field(&mut material, name, &value.to_string());
         }

@@ -15,7 +15,7 @@ pub(crate) fn format_tool_call_detail(
     arguments: &Map<String, Value>,
 ) -> Option<String> {
     match name {
-        "workspace_patch" => format_workspace_patch_call_detail(arguments),
+        "apply_patch" => format_apply_patch_call_detail(arguments),
         "run_process" => format_process_call_detail(arguments),
         _ => format_generic_tool_call_detail(arguments),
     }
@@ -38,9 +38,9 @@ fn join_progress_parts(prefix: &str, detail: Option<&str>) -> String {
     }
 }
 
-fn format_workspace_patch_call_detail(arguments: &Map<String, Value>) -> Option<String> {
+fn format_apply_patch_call_detail(arguments: &Map<String, Value>) -> Option<String> {
     let patch = arguments.get("patch")?.as_str()?;
-    let paths = workspace_patch_paths(patch);
+    let paths = apply_patch_paths(patch);
     let bytes = patch.len();
     let detail = match paths.as_slice() {
         [] => format!("patch={bytes} bytes"),
@@ -54,7 +54,7 @@ fn format_workspace_patch_call_detail(arguments: &Map<String, Value>) -> Option<
     Some(detail)
 }
 
-fn workspace_patch_paths(patch: &str) -> Vec<&str> {
+fn apply_patch_paths(patch: &str) -> Vec<&str> {
     patch
         .lines()
         .filter_map(|line| {
@@ -155,7 +155,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn workspace_patch_detail_names_patch_path_instead_of_argument_count() {
+    fn apply_patch_detail_names_patch_path_instead_of_argument_count() {
         let arguments = json!({
             "patch": "\
 *** Begin Patch
@@ -167,30 +167,30 @@ mod tests {
         });
 
         let detail =
-            format_tool_call_detail("workspace_patch", arguments.as_object().unwrap()).unwrap();
+            format_tool_call_detail("apply_patch", arguments.as_object().unwrap()).unwrap();
 
         assert!(detail.starts_with("patch=crates/merry-cli/src/tui/render.rs"));
         assert!(!detail.contains("args=1"));
     }
 
     #[test]
-    fn workspace_patch_detail_names_add_file_path() {
+    fn apply_patch_detail_names_add_file_path() {
         let arguments = json!({
             "patch": "*** Begin Patch\n*** Add File: notes/new.txt\n+hello\n*** End Patch"
         });
 
         let detail =
-            format_tool_call_detail("workspace_patch", arguments.as_object().unwrap()).unwrap();
+            format_tool_call_detail("apply_patch", arguments.as_object().unwrap()).unwrap();
 
         assert!(detail.starts_with("patch=notes/new.txt"));
     }
 
     #[test]
-    fn workspace_patch_detail_reports_malformed_patch_payload_size() {
+    fn apply_patch_detail_reports_malformed_patch_payload_size() {
         let arguments = json!({ "patch": "not a Merry patch" });
 
         let detail =
-            format_tool_call_detail("workspace_patch", arguments.as_object().unwrap()).unwrap();
+            format_tool_call_detail("apply_patch", arguments.as_object().unwrap()).unwrap();
 
         assert_eq!(detail, "patch=17 bytes");
     }
@@ -216,17 +216,16 @@ mod tests {
     #[test]
     fn known_tool_detail_keeps_all_top_level_arguments() {
         let arguments = json!({
-            "query": "tool_call",
             "path": "crates/merry-cli",
-            "max_matches": 50
+            "start_line": 10,
+            "max_lines": 50
         });
 
-        let detail =
-            format_tool_call_detail("workspace_search_text", arguments.as_object().unwrap());
+        let detail = format_tool_call_detail("read_text", arguments.as_object().unwrap());
 
         assert_eq!(
             detail.as_deref(),
-            Some("max_matches=50 path=crates/merry-cli query=tool_call")
+            Some("max_lines=50 path=crates/merry-cli start_line=10")
         );
     }
 

@@ -90,15 +90,9 @@ class AgentBuilder:
                 patch_scope,
                 forbidden,
                 config.limits.max_read_bytes,
+                config.limits.max_read_lines,
                 config.limits.max_write_bytes,
                 config.limits.max_patch_bytes,
-                config.limits.max_list_entries,
-                config.limits.max_search_matches,
-                config.limits.max_search_files,
-                config.limits.max_search_entries,
-                config.limits.max_search_bytes,
-                config.limits.max_search_line_bytes,
-                config.limits.max_search_query_bytes,
             )
         except NativeMerryError as error:
             self._handle_native_error(error)

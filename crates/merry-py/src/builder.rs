@@ -91,15 +91,9 @@ impl PyAgentBuilder {
         patch_write_scope: Option<Vec<String>>,
         forbidden_paths: Vec<String>,
         max_read_bytes: usize,
+        max_read_lines: usize,
         max_write_bytes: usize,
         max_patch_bytes: usize,
-        max_list_entries: usize,
-        max_search_matches: usize,
-        max_search_files: usize,
-        max_search_entries: usize,
-        max_search_bytes: usize,
-        max_search_line_bytes: usize,
-        max_search_query_bytes: usize,
     ) -> PyResult<()> {
         if roots.is_empty() {
             return Err(error::config_message_to_py(
@@ -113,15 +107,9 @@ impl PyAgentBuilder {
         .allow_hidden(allow_hidden)
         .limits(WorkspaceToolLimits {
             max_read_bytes,
+            max_read_lines,
             max_write_bytes,
             max_patch_bytes,
-            max_list_entries,
-            max_search_matches,
-            max_search_files,
-            max_search_entries,
-            max_search_bytes,
-            max_search_line_bytes,
-            max_search_query_bytes,
         })
         .forbidden_paths(forbidden_paths.into_iter().map(PathBuf::from));
         if enable_patch {

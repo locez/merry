@@ -4,8 +4,8 @@ use crate::{
     action_audit::ActionAuditPolicy,
     action_policy::{
         ActionPolicyDecision, DefaultActionPolicy, classify_tool_action_risk,
-        is_local_workspace_effect_process_action_proposal, is_low_risk_process_action_proposal,
-        is_low_risk_workspace_patch_proposal, is_read_only_shell_process_action_proposal,
+        is_local_workspace_effect_process_action_proposal, is_low_risk_apply_patch_proposal,
+        is_low_risk_process_action_proposal, is_read_only_shell_process_action_proposal,
     },
     permission::is_request_permissions_tool,
     plan::tools::is_plan_tool,
@@ -27,11 +27,9 @@ use super::permission_execution::{
 use super::plan_tool_execution::execute_plan_tool_call;
 use super::process_execution::{ProcessExecutionAdmission, execute_admitted_process_action};
 use super::{
-    DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_NOT_REGISTERED, RuntimeInner,
-    TOOL_ACTION_POLICY_DENIED_MESSAGE, WORKSPACE_PATCH_TOOL_NAME, diagnostic_from_text,
+    APPLY_PATCH_TOOL_NAME, DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_NOT_REGISTERED,
+    RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE, diagnostic_from_text,
 };
-
-const WORKSPACE_SEARCH_TEXT_TOOL_NAME: &str = "workspace_search_text";
 
 pub(super) async fn execute_tool_call_with_active_permit(
     inner: &Arc<RuntimeInner>,
@@ -300,11 +298,11 @@ pub(super) async fn execute_tool_call_with_active_permit(
                                 if crate::process::requires_host_process_path_review(intent)
                         )
                 });
-            if inner.allow_low_risk_workspace_patches
-                && pending.name().as_str() == WORKSPACE_PATCH_TOOL_NAME
-                && is_low_risk_workspace_patch_proposal(registered_tool.action_kind(), &proposal)
+            if inner.allow_low_risk_apply_patches
+                && pending.name().as_str() == APPLY_PATCH_TOOL_NAME
+                && is_low_risk_apply_patch_proposal(registered_tool.action_kind(), &proposal)
             {
-                policy_decision = ActionPolicyDecision::allow_low_risk_workspace_patch();
+                policy_decision = ActionPolicyDecision::allow_low_risk_apply_patch();
                 allowed_proposal = Some(proposal);
             } else if let Some(runner) = inner.low_risk_process_runner.clone()
                 && !host_process_path_review
@@ -715,8 +713,7 @@ fn plan_harness_violation(
         .as_object()
         .get("path")
         .and_then(serde_json::Value::as_str);
-    let effective_path = explicit_path
-        .or_else(|| (pending.name().as_str() == WORKSPACE_SEARCH_TEXT_TOOL_NAME).then_some("."));
+    let effective_path = explicit_path;
     if let Some(path) = effective_path {
         let scopes = if action_kind == crate::ToolActionKind::WorkspaceWrite {
             &harness.write_scope
@@ -922,7 +919,7 @@ pub(super) fn context_with_approved_proposal(
 ) -> ToolExecutionContext {
     match proposal.map(ActionProposal::evidence) {
         Some(ActionProposalEvidence::WorkspacePatch(patch)) => {
-            context.with_approved_workspace_patch(patch.clone())
+            context.with_approved_apply_patch(patch.clone())
         }
         Some(ActionProposalEvidence::ProcessAction(_)) | None => context,
     }
@@ -960,15 +957,14 @@ pub(super) fn admit_action_to_generic_executor(
         return Ok(());
     }
 
-    let low_risk_workspace_patch_admitted = decision.is_allowed()
+    let low_risk_apply_patch_admitted = decision.is_allowed()
         && decision.action_kind() == crate::ToolActionKind::WorkspaceWrite
         && decision.risk_tier() == crate::action_policy::ActionRiskTier::EditLow
-        && pending.name().as_str() == WORKSPACE_PATCH_TOOL_NAME
+        && pending.name().as_str() == APPLY_PATCH_TOOL_NAME
         && action_kind == crate::ToolActionKind::WorkspaceWrite
-        && proposal
-            .is_some_and(|proposal| is_low_risk_workspace_patch_proposal(action_kind, proposal));
+        && proposal.is_some_and(|proposal| is_low_risk_apply_patch_proposal(action_kind, proposal));
 
-    if !low_risk_workspace_patch_admitted {
+    if !low_risk_apply_patch_admitted {
         return Err(RuntimeError::MutatingActionCommitLifecycleRequired {
             session_id: session_id.clone(),
             call_id: pending.id().clone(),

@@ -369,7 +369,6 @@ mod tests {
             "OpenAI",
             "Anthropic",
             "GPT-",
-            "workspace_search_text",
             "roughly 120",
             "roughly 250",
             "merry_outer_sandbox:",

@@ -245,6 +245,8 @@ returns every result to the provider in the model's original call order.
 
 ## Embed Merry
 
+### Rust
+
 The `merry` crate is the public Rust facade. Provider builders produce the same
 provider-neutral component used by `RuntimeBuilder`:
 
@@ -262,6 +264,71 @@ fn build_runtime() -> Result<Runtime, Box<dyn std::error::Error>> {
         .build()?)
 }
 ```
+
+### Custom Rust Tools
+
+Declare custom tools through `merry::tool`; applications do not need to depend
+directly on `merry-tools` or `merry-tools-macros`. For an external project, add
+these dependencies, adjusting the path to your local Merry checkout:
+
+```toml
+[dependencies]
+merry = { path = "../merry/crates/merry" }
+serde = { version = "1", features = ["derive"] }
+schemars = { version = "1", features = ["derive"] }
+```
+
+A minimal tool has a typed input and an async handler:
+
+```rust
+use std::convert::Infallible;
+
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct GreetInput {
+    /// The person's name or preferred form of address, as provided by the user.
+    name: String,
+}
+
+#[merry::tool(description = "Generate a greeting for a person by name.")]
+async fn greet(input: GreetInput) -> Result<String, Infallible> {
+    Ok(format!("Hello, {}!", input.name))
+}
+```
+
+The macro generates `greet_tool()`. Register its result explicitly when building
+an agent, using your application's session ID and configured provider:
+
+```rust
+let agent = merry::AgentBuilder::new(session_id)
+    .provider(provider)
+    .tool(greet_tool()?)
+    .build()?;
+```
+
+- The generated factory has the same visibility as its handler.
+- The tool name defaults to the handler name (`greet`). Override it with
+  `#[merry::tool(name = "say_hello", description = "...")]`; the factory is still
+  named `greet_tool()`.
+- The required tool `description` explains what the tool does and when to use it.
+- Field `///` comments become JSON Schema `description` values visible to the
+  model. Describe each parameter's meaning and, where relevant, its format,
+  units, constraints, and behavior when omitted. Merry does not currently require
+  field descriptions, but they should be part of every tool declaration.
+- Use `#[schemars(description = "...")]` when the model-facing field description
+  should differ from its Rustdoc; the explicit description overrides the comment.
+
+Merry derives the input schema, decodes arguments, and serializes the handler's
+return value. `Infallible` means this example cannot return a domain error; use
+your application's error type for fallible handlers. The macro does not register
+tools globally or change execution policy. Renamed Cargo dependencies are supported
+automatically, and `crate = "path"` can select an explicit tool API boundary.
+Return types may use aliases of `Result`.
+
+### Python
 
 Python bindings live in [`sdks/python`](sdks/python). They expose the same
 Rust-owned agent lifecycle through typed async messages:

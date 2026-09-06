@@ -7,6 +7,7 @@
 //! second coding policy.
 
 mod child_runtime;
+mod project_capabilities;
 mod project_rules;
 mod runtime;
 mod workspace;
@@ -34,7 +35,7 @@ use merry_runtime::{
     RuntimeError, RuntimeProfile, RuntimeProfileError, SkillCatalog, TaskAnchor, Tool,
     ToolActionKind, ToolConcurrency, ToolRunner,
 };
-pub use merry_tool_workspace::{WorkspaceToolConfigError, WorkspaceToolLimits};
+pub use merry_tools::{WorkspaceToolConfigError, WorkspaceToolLimits};
 use serde_json::Error as JsonError;
 use std::{fmt, path::PathBuf, sync::Arc};
 use thiserror::Error;
@@ -55,7 +56,7 @@ pub const CODING_AGENT_DYNAMIC_CONTEXT_LAYOUT: &str =
 pub const CODING_AGENT_POLICY_PROMPT: &str = r#"<merry_coding_policy>
 This is a coding-agent run. Inspect the repository and its governing rules before changing files. Keep runtime state, task progress, artifacts, checkpoints, permissions, and tool results in their owning runtime contracts; do not treat a raw transcript as the source of truth.
 
-Use the registered workspace and process tools according to their typed schemas. Permission, phase, role, and workspace scope are runtime admission decisions. Do not try to obtain authority by inventing tools, changing tool schemas, or asking for a broader capability than the exact action needs.
+Use the registered file and process tools according to their typed schemas. Use `read_text` for a bounded line range from a known text file; never request complete-file content when a focused range is enough. Use `run_process` for repository discovery and verification when it is available, preferring bounded commands such as `rg --files`, a focused `rg` search, or `sed -n '<start>,<end>p'`. Avoid broad recursive output, `cat` on large files, and repeated exploratory calls. Use `apply_patch` for edits, keep hunks localized, and include only the smallest unique context needed. Permission, phase, role, and path scope are runtime admission decisions; do not invent tools or request broader capability than the exact action needs.
 
 When a tool fails, preserve the failure evidence, determine whether the cause is validation, missing permission, unavailable capability, or an implementation error, and then either make a bounded recovery attempt or report the blocker. Do not repeat an identical failed action without new evidence or an explicit reviewed admission.
 
@@ -329,7 +330,7 @@ impl CodingAgentProfileBuilder {
         self
     }
 
-    /// Sets workspace-relative paths that `workspace_patch` may write.
+    /// Sets workspace-relative paths that `apply_patch` may write.
     #[must_use]
     pub fn patch_write_scope<I, P>(mut self, paths: I) -> Self
     where
@@ -340,14 +341,14 @@ impl CodingAgentProfileBuilder {
         self
     }
 
-    /// Denies all `workspace_patch` writes.
+    /// Denies all `apply_patch` writes.
     #[must_use]
     pub fn read_only_patch_scope(mut self) -> Self {
         self.workspace = self.workspace.read_only_patch_scope();
         self
     }
 
-    /// Sets workspace-relative paths that `workspace_patch` must never write.
+    /// Sets workspace-relative paths that `apply_patch` must never write.
     #[must_use]
     pub fn forbidden_paths<I, P>(mut self, paths: I) -> Self
     where
@@ -631,7 +632,7 @@ fn coding_agent_profile_hash(
     append_hash_field(
         &mut material,
         "workspace-patches",
-        if profile.allow_low_risk_workspace_patches() {
+        if profile.allow_low_risk_apply_patches() {
             "on"
         } else {
             "off"
@@ -777,3 +778,6 @@ fn tool_concurrency_label(concurrency: ToolConcurrency) -> &'static str {
         ToolConcurrency::Exclusive => "exclusive",
     }
 }
+
+/// Coding-profile name for runtime-owned process execution.
+pub const CODING_LOOP_PROCESS_TOOL: &str = "run_process";

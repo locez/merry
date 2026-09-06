@@ -106,9 +106,11 @@ not require mechanically moving every existing module in one change.
 - `crates/merry-provider-openai` and `crates/merry-provider-anthropic` are
   provider adapters. They translate external protocols at the `merry-llm`
   boundary; wire structs and protocol details stay private to those crates.
-- `crates/merry-tool-workspace` and `crates/merry-mcp` are resource and tool
-  adapters. They connect workspace or MCP capabilities to runtime contracts
-  and do not own session, ledger, artifact, or policy state.
+- `crates/merry-tools` and `crates/merry-mcp` are resource and tool
+  adapters. `crates/merry-tools-macros` owns the Rust proc-macro implementation;
+  the public facade re-exports its supported macro surface from `merry`. These
+  crates connect workspace or MCP capabilities to runtime contracts and do not
+  own session, ledger, artifact, or policy state.
 - `crates/merry-coding` is the coding-composition owner for coding prompts,
   project rules, tool catalog, permission policy, validation, retry/recovery,
   and final reporting. The facade and product surfaces consume its typed

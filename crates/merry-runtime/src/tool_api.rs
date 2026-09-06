@@ -29,6 +29,26 @@ pub struct Tool {
 }
 
 impl Tool {
+    /// Creates a provider-neutral tool specification from a typed input.
+    ///
+    /// This is useful for runtime-owned executors that need the same schema
+    /// derivation as [`Self::new`] but must retain custom execution, tracing,
+    /// cancellation, or action-policy behavior.
+    pub fn spec_for<I>(
+        name: impl AsRef<str>,
+        description: impl AsRef<str>,
+    ) -> Result<ToolSpec, ToolBuildError>
+    where
+        I: DeserializeOwned + JsonSchema,
+    {
+        let name = ToolName::new(name.as_ref())?;
+        if name.as_str() == FINAL_OUTPUT_TOOL_NAME {
+            return Err(ToolBuildError::ReservedName { name });
+        }
+        let input_schema = ToolInputSchema::new(schemars::schema_for!(I))?.require_object()?;
+        Ok(ToolSpec::new(name, description.as_ref(), input_schema)?)
+    }
+
     /// Creates a typed asynchronous application tool.
     ///
     /// Handler errors become durable failed tool results, allowing the model
@@ -47,12 +67,7 @@ impl Tool {
         Fut: Future<Output = Result<O, E>> + Send + 'static,
         E: fmt::Display + Send + Sync + 'static,
     {
-        let name = ToolName::new(name.as_ref())?;
-        if name.as_str() == FINAL_OUTPUT_TOOL_NAME {
-            return Err(ToolBuildError::ReservedName { name });
-        }
-        let input_schema = ToolInputSchema::new(schemars::schema_for!(I))?.require_object()?;
-        let spec = ToolSpec::new(name, description.as_ref(), input_schema)?;
+        let spec = Self::spec_for::<I>(name, description)?;
         let executor = TypedToolExecutor {
             handler,
             input_marker: PhantomData,

@@ -12,12 +12,12 @@ use std::{
 
 use thiserror::Error;
 
-const SKILLS_INTRO: &str = "A skill is a set of local instructions stored in a `SKILL.md` file. The list below is for discovery only; skill bodies stay on disk until needed.";
+const SKILLS_INTRO: &str = "A skill is a set of local instructions stored in a `SKILL.md` file. The list below is metadata for discovery only; skill bodies stay on disk until needed.";
 const SKILLS_HOW_TO_USE: &str = r#"- If the user explicitly names a skill, including with a `$skill-name` token, use it for that turn.
 - If the task clearly matches a skill description, read that skill's `SKILL.md` before relying on it.
-- Use `workspace_read_file` to read the listed `SKILL.md`.
+- Use `read_text` with a bounded line range to read the listed `SKILL.md`; request further ranges only when the task needs them.
 - Resolve relative paths mentioned by `SKILL.md` relative to that skill directory.
-- Read only the referenced files needed for the task.
+- Read only the referenced files and ranges needed for the task.
 - Do not carry a skill body across unrelated turns unless it remains in raw context or is re-read."#;
 
 /// Errors raised while validating skill metadata or configured skill roots.
@@ -490,8 +490,8 @@ mod tests {
         assert!(rendered.contains("frontend-design"));
         assert!(rendered.contains("Use for polished frontend implementation."));
         assert!(rendered.contains("skills/frontend-design/SKILL.md"));
-        assert!(rendered.contains("workspace_read_file"));
-        assert!(rendered.contains("Read only the referenced files needed"));
+        assert!(rendered.contains("read_text"));
+        assert!(rendered.contains("Read only the referenced files and ranges needed"));
         assert!(!rendered.contains("# Frontend Design"));
         assert!(!rendered.contains("full skill body sentinel"));
     }

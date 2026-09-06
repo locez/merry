@@ -460,7 +460,7 @@
                 self.record_approved_proposal
                     .lock()
                     .expect("approved proposal records mutex should not be poisoned")
-                    .push(context.approved_workspace_patch().is_some());
+                    .push(context.approved_apply_patch().is_some());
                 self.side_effect.store(true, Ordering::SeqCst);
                 context.cancellation_token().cancel();
                 let evidence = WorkspacePatchExecutionEvidence::new(

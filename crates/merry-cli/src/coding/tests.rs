@@ -3,6 +3,7 @@ use super::{
     ProcessExecutionMode, build_coding_runtime, build_headless_coding,
     coding_agent_process_admission, fixed_process_backend, resume_headless_coding,
 };
+use merry::profiles::CODING_LOOP_PROCESS_TOOL;
 
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
 use crate::testing::{FakeProcessRunner, ScriptedProvider, model_name, workspace_tool_call};
@@ -21,7 +22,7 @@ use merry_runtime::{
     StepContext, StepInput, SubagentConfig, ToolExecutionContext, ToolExecutionOutcome,
     ToolExecutor, ToolExecutorFuture,
 };
-use merry_tool_workspace::{CODING_LOOP_PROCESS_TOOL, WORKSPACE_READ_FILE_TOOL};
+use merry_tools::READ_TEXT_TOOL;
 use serde_json::{Map, Value};
 use std::{path::Path, sync::Arc};
 
@@ -372,7 +373,7 @@ async fn resumed_coding_replaces_stale_project_capability_seed() {
         request_text.matches("summary:project-capabilities").count(),
         1
     );
-    assert!(request_text.contains("Workspace coding profile:"));
+    assert!(request_text.contains("Coding file capabilities:"));
     assert!(request_text.contains("Cargo.toml is present"));
     assert!(!request_text.contains(OLD_LANGUAGE_RULE));
     assert!(!request_text.contains(OLD_AGENTS_CAPABILITY));
@@ -448,12 +449,12 @@ async fn projects_skill_metadata_without_body() {
     assert!(stable_text.contains("Use for demo tasks."));
     assert!(stable_text.contains("demo/SKILL.md"));
     assert!(stable_text.contains("$skill-name"));
-    assert!(request_text.contains("workspace_read_file"));
-    assert!(request_text.contains("Workspace coding profile"));
+    assert!(request_text.contains("read_text"));
+    assert!(request_text.contains("Coding file capabilities"));
     assert!(request_text.contains("user's current input language"));
     assert!(request_text.contains("configured sandbox/profile"));
     assert!(request_text.contains("network access may be intentionally restricted"));
-    assert!(request_text.contains("call request_permissions for that exact action"));
+    assert!(request_text.contains("call `request_permissions` for that exact action"));
     assert!(!stable_text.contains("body sentinel"));
 }
 
@@ -507,7 +508,7 @@ async fn headless_runtime_uses_coding_agent_profile() {
         .map(|message| message.content().as_text())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(request_text.contains("Workspace coding profile"));
+    assert!(request_text.contains("Coding file capabilities"));
     assert!(request_text.contains("user's current input language"));
     assert!(
         request
@@ -595,7 +596,7 @@ async fn includes_skill_roots_in_workspace_read_tools() {
 
     let provider = ScriptedProvider::new(vec![vec![Ok(workspace_tool_call(
         "call-read-skill",
-        WORKSPACE_READ_FILE_TOOL,
+        READ_TEXT_TOOL,
         [(
             "path",
             serde_json::Value::String("demo/SKILL.md".to_owned()),
@@ -822,7 +823,7 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
                             ),
                             (
                                 "allowed_tools".to_owned(),
-                                Value::Array(vec![Value::String("workspace_read_file".to_owned())]),
+                                Value::Array(vec![Value::String("read_text".to_owned())]),
                             ),
                             ("write_scope".to_owned(), Value::Array(Vec::new())),
                         ]))]),
@@ -940,16 +941,14 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
     assert!(child_stable_text.contains("project-rules-source:AGENTS.md"));
     assert!(child_stable_text.contains("Child must receive root rule sentinel."));
     assert!(!child_stable_text.contains("Child must not reread changed root rule sentinel."));
-    assert!(child_tool_names.contains(&"workspace_read_file"));
+    assert!(child_tool_names.contains(&"read_text"));
     assert_eq!(
         child_tool_names,
         [
             "run_process",
             "request_permissions",
-            "workspace_read_file",
-            "workspace_list_dir",
-            "workspace_search_text",
-            "workspace_patch",
+            "read_text",
+            "apply_patch",
             "spawn_subagents",
             "wait_subagents",
             "cancel_subagents",

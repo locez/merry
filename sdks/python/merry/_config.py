@@ -86,28 +86,16 @@ class WorkspaceLimits:
     """Positive bounds applied by Rust-owned workspace tools."""
 
     max_read_bytes: int = 1024 * 1024
+    max_read_lines: int = 200
     max_write_bytes: int = 1024 * 1024
     max_patch_bytes: int = 128 * 1024
-    max_list_entries: int = 512
-    max_search_matches: int = 100
-    max_search_files: int = 1_000
-    max_search_entries: int = 10_000
-    max_search_bytes: int = 8 * 1024 * 1024
-    max_search_line_bytes: int = 8 * 1024
-    max_search_query_bytes: int = 1024
 
     def __post_init__(self) -> None:
         for name, value in (
             ("max_read_bytes", self.max_read_bytes),
+            ("max_read_lines", self.max_read_lines),
             ("max_write_bytes", self.max_write_bytes),
             ("max_patch_bytes", self.max_patch_bytes),
-            ("max_list_entries", self.max_list_entries),
-            ("max_search_matches", self.max_search_matches),
-            ("max_search_files", self.max_search_files),
-            ("max_search_entries", self.max_search_entries),
-            ("max_search_bytes", self.max_search_bytes),
-            ("max_search_line_bytes", self.max_search_line_bytes),
-            ("max_search_query_bytes", self.max_search_query_bytes),
         ):
             require_positive_int(name, value)
 

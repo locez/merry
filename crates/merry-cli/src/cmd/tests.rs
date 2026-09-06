@@ -1,12 +1,11 @@
 use super::*;
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
 use crate::testing::{ScriptedProvider, tool_call, workspace_tool_call};
+use merry::profiles::CODING_LOOP_PROCESS_TOOL;
 use merry_core::RuntimeJournalPayload;
 use merry_llm::{FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse};
 use merry_runtime::{ArtifactContent, StepContext, StepInput, ToolExecutionContext};
-use merry_tool_workspace::{
-    CODING_LOOP_PROCESS_TOOL, WORKSPACE_PATCH_TOOL, WORKSPACE_READ_FILE_TOOL,
-};
+use merry_tools::{APPLY_PATCH_TOOL, READ_TEXT_TOOL};
 use serde_json::Value;
 use std::{
     io,
@@ -145,9 +144,9 @@ async fn command_generation_runtime_is_read_only_workspace_only() {
         .iter()
         .map(|tool| tool.name().as_str())
         .collect::<Vec<_>>();
-    assert!(tool_names.contains(&WORKSPACE_READ_FILE_TOOL));
+    assert!(tool_names.contains(&READ_TEXT_TOOL));
     assert!(tool_names.contains(&CHECK_COMMAND_TOOL_NAME));
-    assert!(!tool_names.contains(&WORKSPACE_PATCH_TOOL));
+    assert!(!tool_names.contains(&APPLY_PATCH_TOOL));
     assert!(!tool_names.contains(&CODING_LOOP_PROCESS_TOOL));
 }
 

@@ -237,7 +237,7 @@ pub struct RuntimeProfile {
     initial_context_summaries: BTreeMap<String, String>,
     registered_tools: Vec<RegisteredTool>,
     allow_bridge_tools: bool,
-    allow_low_risk_workspace_patches: bool,
+    allow_low_risk_apply_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
     read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
     accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunnerProfile>,
@@ -308,8 +308,8 @@ impl RuntimeProfile {
 
     /// Returns whether low-risk workspace patches are allowed.
     #[must_use]
-    pub const fn allow_low_risk_workspace_patches(&self) -> bool {
-        self.allow_low_risk_workspace_patches
+    pub const fn allow_low_risk_apply_patches(&self) -> bool {
+        self.allow_low_risk_apply_patches
     }
 
     /// Returns the low-risk process action runner.
@@ -393,7 +393,7 @@ impl RuntimeProfile {
             initial_context_summaries: self.initial_context_summaries,
             registered_tools: self.registered_tools,
             allow_bridge_tools: self.allow_bridge_tools,
-            allow_low_risk_workspace_patches: self.allow_low_risk_workspace_patches,
+            allow_low_risk_apply_patches: self.allow_low_risk_apply_patches,
             low_risk_process_runner: self.low_risk_process_runner,
             read_only_shell_process_runner: self.read_only_shell_process_runner,
             accepted_local_workspace_process_runner: self.accepted_local_workspace_process_runner,
@@ -417,7 +417,7 @@ pub(crate) struct RuntimeProfileParts {
     pub(crate) initial_context_summaries: BTreeMap<String, String>,
     pub(crate) registered_tools: Vec<RegisteredTool>,
     pub(crate) allow_bridge_tools: bool,
-    pub(crate) allow_low_risk_workspace_patches: bool,
+    pub(crate) allow_low_risk_apply_patches: bool,
     pub(crate) low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
     pub(crate) read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
     pub(crate) accepted_local_workspace_process_runner:
@@ -442,7 +442,7 @@ pub struct RuntimeProfileBuilder {
     initial_context_summaries: BTreeMap<String, String>,
     registered_tools: Vec<RegisteredTool>,
     allow_bridge_tools: bool,
-    allow_low_risk_workspace_patches: bool,
+    allow_low_risk_apply_patches: bool,
     low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
     read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
     accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunnerProfile>,
@@ -468,7 +468,7 @@ impl RuntimeProfileBuilder {
             initial_context_summaries: BTreeMap::new(),
             registered_tools: Vec::new(),
             allow_bridge_tools: false,
-            allow_low_risk_workspace_patches: false,
+            allow_low_risk_apply_patches: false,
             low_risk_process_runner: None,
             read_only_shell_process_runner: None,
             accepted_local_workspace_process_runner: None,
@@ -539,8 +539,8 @@ impl RuntimeProfileBuilder {
 
     /// Allows validated low-risk workspace patch proposals.
     #[must_use]
-    pub fn allow_low_risk_workspace_patches(mut self) -> Self {
-        self.allow_low_risk_workspace_patches = true;
+    pub fn allow_low_risk_apply_patches(mut self) -> Self {
+        self.allow_low_risk_apply_patches = true;
         self
     }
 
@@ -654,7 +654,7 @@ impl RuntimeProfileBuilder {
             initial_context_summaries: self.initial_context_summaries,
             registered_tools: self.registered_tools,
             allow_bridge_tools: self.allow_bridge_tools,
-            allow_low_risk_workspace_patches: self.allow_low_risk_workspace_patches,
+            allow_low_risk_apply_patches: self.allow_low_risk_apply_patches,
             low_risk_process_runner: self.low_risk_process_runner,
             read_only_shell_process_runner: self.read_only_shell_process_runner,
             accepted_local_workspace_process_runner: self.accepted_local_workspace_process_runner,

@@ -59,4 +59,4 @@ pub use merry_runtime::{
 };
 pub use profile::{AgentProfile, AgentProfileContext};
 pub use stream::{AgentEventStream, StructuredAgentEventStream, StructuredRunResult};
-pub use tools::{Tool, ToolBuildError};
+pub use tools::{Tool, ToolBuildError, ToolSpec, tool};

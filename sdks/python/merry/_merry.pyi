@@ -24,15 +24,9 @@ class AgentBuilder:
         patch_write_scope: list[str] | None,
         forbidden_paths: list[str],
         max_read_bytes: int,
+        max_read_lines: int,
         max_write_bytes: int,
         max_patch_bytes: int,
-        max_list_entries: int,
-        max_search_matches: int,
-        max_search_files: int,
-        max_search_entries: int,
-        max_search_bytes: int,
-        max_search_line_bytes: int,
-        max_search_query_bytes: int,
     ) -> None: ...
     def register_bridge_tool(
         self, name: str, description: str, schema_json: str
