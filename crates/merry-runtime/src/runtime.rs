@@ -39,6 +39,7 @@ mod journal_emission;
 mod journal_persistence;
 mod memory_activation;
 mod model_output;
+mod model_turn_lifecycle;
 mod permission_execution;
 mod plan_tool_execution;
 mod process_execution;
