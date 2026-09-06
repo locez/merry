@@ -1,11 +1,11 @@
-use super::auto_compaction::default_automatic_compaction_policy;
 use super::checkpoint_ref_tool::merry_read_checkpoint_ref_tool;
-use super::{AcceptedLocalWorkspaceProcessRunner, Runtime, RuntimeInner};
+use super::config::AutomaticCompactionConfig;
+use super::state::AcceptedLocalWorkspaceProcessRunner;
+use super::{Runtime, RuntimeInner};
 use crate::{
-    AcceptedLocalWorkspaceProcessAdmission, CitationCompactionPolicy, CompactedCheckpoint,
-    FileSessionStore, LoadedSession, ProcessRunner, ProjectRules, PromptProfile,
-    RuntimeCapabilities, RuntimeError, RuntimeModelRole, RuntimeProfile, SkillCatalog, TaskAnchor,
-    ToolAdmission,
+    AcceptedLocalWorkspaceProcessAdmission, CompactedCheckpoint, FileSessionStore, LoadedSession,
+    ProcessRunner, ProjectRules, PromptProfile, RuntimeCapabilities, RuntimeError,
+    RuntimeModelRole, RuntimeProfile, SkillCatalog, TaskAnchor, ToolAdmission,
     artifact::ArtifactContent,
     memory::{MemoryActivationSource, StoredMemoryActivationSource},
     model_config::RuntimeModelConfigs,
@@ -40,57 +40,6 @@ use std::{
 use tokio::sync::{Mutex, RwLock};
 
 const DEFAULT_EVENT_BUFFER_SIZE: usize = 16;
-
-/// Runtime-owned policy for automatic checkpoint compaction.
-///
-/// This controls the pre-provider hard-watermark compaction path. Manual
-/// [`Runtime::compact_context_once`] calls still take an explicit
-/// [`CitationCompactionPolicy`] so tests and callers can run one-off compaction
-/// passes without mutating runtime construction policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AutomaticCompactionConfig {
-    enabled: bool,
-    policy: CitationCompactionPolicy,
-}
-
-impl AutomaticCompactionConfig {
-    /// Enables automatic hard-watermark compaction with the provided policy.
-    #[must_use]
-    pub fn enabled(policy: CitationCompactionPolicy) -> Self {
-        Self {
-            enabled: true,
-            policy,
-        }
-    }
-
-    /// Disables automatic hard-watermark compaction.
-    ///
-    /// The policy remains populated with defaults so disabled configs can be
-    /// inspected or re-enabled by callers without constructing a dummy policy.
-    #[must_use]
-    pub fn disabled() -> Self {
-        Self {
-            enabled: false,
-            policy: default_automatic_compaction_policy(),
-        }
-    }
-
-    #[must_use]
-    pub fn is_enabled(self) -> bool {
-        self.enabled
-    }
-
-    #[must_use]
-    pub fn policy(self) -> CitationCompactionPolicy {
-        self.policy
-    }
-}
-
-impl Default for AutomaticCompactionConfig {
-    fn default() -> Self {
-        Self::enabled(default_automatic_compaction_policy())
-    }
-}
 
 /// Builder for a Merry runtime.
 ///

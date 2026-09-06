@@ -15,10 +15,6 @@ use merry_llm::ModelStreamContext;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-pub(super) fn default_automatic_compaction_policy() -> CitationCompactionPolicy {
-    CitationCompactionPolicy::default()
-}
-
 pub(super) async fn compaction_preparation_for_hard_watermark(
     inner: &RuntimeInner,
     policy: CitationCompactionPolicy,

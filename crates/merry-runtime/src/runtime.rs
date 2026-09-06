@@ -6,49 +6,34 @@
 //! provider wire details behind the `merry-llm` provider boundary.
 
 use crate::{
-    AcceptedLocalWorkspaceProcessAdmission, CheckpointRefId, CitationCompactionInput,
-    CitationCompactionPolicy, CompactedCheckpointSummary, CompactionError, CompactionOutcome,
-    FileSessionStore, ProcessRunner, RuntimeCapabilities, RuntimeError, RuntimeModelRole,
+    CheckpointRefId, CitationCompactionInput, CitationCompactionPolicy, CompactedCheckpointSummary,
+    CompactionError, CompactionOutcome, FileSessionStore, RuntimeCapabilities, RuntimeError,
     TextEvidencePage,
     events::{
-        ActiveStepPermit, RuntimeEventProjector, RuntimeEventStream, RuntimeJournalEventBatch,
-        RuntimeJournalEventStream,
+        ActiveStepPermit, RuntimeEventProjector, RuntimeEventStream, RuntimeJournalEventStream,
     },
     judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
-    memory::MemoryActivationSource,
-    model_config::{ModelProviderConfig, RuntimeModelConfigs},
-    permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
+    model_config::ModelProviderConfig,
     plan::{
-        BeginPlanInput, BeginPlanOutput, PlanController, PlanControllerError,
-        PlanControllerEventReceiver, PlanSubagentControl, PlanUpdateOutput, UpdatePlanInput,
+        BeginPlanInput, BeginPlanOutput, PlanControllerError, PlanControllerEventReceiver,
+        PlanUpdateOutput, UpdatePlanInput,
     },
-    process::PermissionedProcessRunnerFactory,
-    session::SessionState,
     step::{StepContext, StepInput},
-    subagent::{PlanSubagentScope, SubagentActivityHub, SubagentActivityReceiver, SubagentManager},
-    tool::{ToolExecutionContext, ToolRegistry},
-    trajectory::RuntimeObservability,
+    subagent::{SubagentActivityReceiver, SubagentManager},
+    tool::ToolExecutionContext,
 };
 use merry_core::{
-    PendingToolCall, PlanHarnessSnapshot, QueuedInputView, RuntimeEvent, RuntimeJournalEvent,
-    SessionId, ToolCallId,
+    PendingToolCall, QueuedInputView, RuntimeEvent, RuntimeJournalEvent, SessionId, ToolCallId,
 };
-use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
-use std::{
-    num::{NonZeroU64, NonZeroUsize},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-};
-use tokio::sync::{Mutex, Notify, RwLock, mpsc};
-use tokio_stream::wrappers::ReceiverStream;
+use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
+use std::{num::NonZeroU64, sync::Arc};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tracing::Instrument;
 
 mod auto_compaction;
 mod builder;
 mod checkpoint_ref_tool;
+mod config;
 mod diagnostics;
 mod journal_emission;
 mod journal_persistence;
@@ -60,6 +45,8 @@ mod process_execution;
 mod provider_request;
 mod provider_step;
 mod session_access;
+mod state;
+mod step;
 mod tool_batch;
 mod tool_execution;
 
@@ -67,21 +54,22 @@ use self::auto_compaction::{
     compact_context_once_inner, compaction_input_for_policy,
     install_citation_compaction_candidate_transactionally,
 };
-pub use self::builder::{AutomaticCompactionConfig, RuntimeBuilder};
+pub use self::builder::RuntimeBuilder;
 #[cfg(test)]
 use self::checkpoint_ref_tool::merry_read_checkpoint_ref_tool_name;
+pub use self::config::AutomaticCompactionConfig;
 use self::diagnostics::{
     APPLY_PATCH_TOOL_NAME, DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
     DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, DIAGNOSTIC_TOOL_NOT_REGISTERED,
     TOOL_ACTION_POLICY_DENIED_MESSAGE, diagnostic_from_text, runtime_error_message,
 };
-use self::journal_emission::{
-    send_cancelled_event, send_cancelled_if_requested, send_normal_event, send_step_started_event,
-};
+#[cfg(test)]
+use self::journal_emission::send_cancelled_event;
 #[cfg(test)]
 use self::memory_activation::memory_activation_seed_from_step_input;
 #[cfg(test)]
 use self::provider_request::{request_context_budget, step_usage_context_snapshot};
+use self::state::RuntimeInner;
 #[cfg(test)]
 use self::tool_execution::admit_action_to_generic_executor;
 
@@ -494,52 +482,6 @@ impl Runtime {
         self.inner.progress_commentary
     }
 
-    pub(crate) fn step_with_active_permit(
-        &self,
-        input: StepInput,
-        context: StepContext,
-        active_permit: ActiveStepPermit,
-    ) -> Result<RuntimeJournalEventStream, RuntimeError> {
-        let (parent_token, generation_config, final_output_contract) = context.into_parts();
-        let step_token = parent_token.child_token();
-        let producer_token = step_token.clone();
-        let (sender, receiver) = mpsc::channel(self.inner.event_buffer_size.get());
-        let inner = Arc::clone(&self.inner);
-        let producer_span = tracing::debug_span!(
-            "runtime.step",
-            session_id = self.inner.session_id.as_str(),
-            event_buffer_size = self.inner.event_buffer_size.get(),
-            provider_configured = self
-                .inner
-                .model_configs
-                .contains_role(RuntimeModelRole::Primary),
-            max_output_tokens = ?generation_config.max_output_tokens(),
-            allow_parallel_tool_calls = generation_config.allow_parallel_tool_calls(),
-        );
-
-        let producer_handle = tokio::spawn(
-            async move {
-                run_step(
-                    inner,
-                    sender,
-                    producer_token,
-                    input,
-                    generation_config,
-                    final_output_contract,
-                    active_permit,
-                )
-                .await;
-            }
-            .instrument(producer_span),
-        );
-
-        Ok(RuntimeJournalEventStream::new(
-            ReceiverStream::new(receiver),
-            step_token,
-            producer_handle,
-        ))
-    }
-
     /// Executes one pending tool call through a runtime-registered executor.
     ///
     /// Runtime code owns the resulting artifact id and `ToolCallResult`.
@@ -713,122 +655,6 @@ impl Runtime {
     }
 }
 
-struct RuntimeInner {
-    session_id: SessionId,
-    session: Arc<Mutex<SessionState>>,
-    active_step: Arc<AtomicBool>,
-    memory_projection_epoch: AtomicU64,
-    event_buffer_size: NonZeroUsize,
-    max_parallel_tool_calls: NonZeroUsize,
-    model_configs: RuntimeModelConfigs,
-    primary_model_override: RwLock<Option<ModelProviderConfig>>,
-    automatic_compaction: RwLock<AutomaticCompactionConfig>,
-    context_window_tokens: RwLock<Option<NonZeroU64>>,
-    capabilities: RuntimeCapabilities,
-    prompt_profile: crate::PromptProfile,
-    progress_commentary: bool,
-    tool_registry: ToolRegistry,
-    tool_admission: Option<crate::ToolAdmission>,
-    memory_activation_source: Arc<dyn MemoryActivationSource>,
-    allow_low_risk_apply_patches: bool,
-    low_risk_process_runner: Option<Arc<dyn ProcessRunner>>,
-    read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
-    accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
-    runtime_trust_level: RuntimeTrustLevel,
-    permission_review_mode: PermissionReviewMode,
-    permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
-    permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
-    subagent_manager: Option<SubagentManager>,
-    coordinator_plan_tools: bool,
-    plan_controller: PlanController,
-    plan_subagent_control: Option<PlanSubagentControl>,
-    plan_subagent_scope: Option<PlanSubagentScope>,
-    session_store: Option<FileSessionStore>,
-    tool_batch_active: AtomicBool,
-    activity_hub: Arc<SubagentActivityHub>,
-    trajectory: Arc<RuntimeObservability>,
-}
-
-impl RuntimeInner {
-    fn begin_tool_batch(&self) -> ToolBatchScope<'_> {
-        debug_assert!(!self.tool_batch_active.swap(true, Ordering::AcqRel));
-        ToolBatchScope { inner: self }
-    }
-
-    fn tool_batch_active(&self) -> bool {
-        self.tool_batch_active.load(Ordering::Acquire)
-    }
-
-    async fn active_subagent_plan_harness(
-        &self,
-    ) -> Result<PlanHarnessSnapshot, PlanControllerError> {
-        self.plan_subagent_control
-            .as_ref()
-            .expect("subagent harness is requested only for a bound runtime")
-            .active_harness()
-            .await
-    }
-
-    async fn record_plan_runtime_effect(
-        &self,
-        changed_paths: Vec<String>,
-    ) -> Result<(), PlanControllerError> {
-        let now_ms = crate::plan::unix_time_ms();
-        if let Some(control) = self.plan_subagent_control.as_ref() {
-            control
-                .record_runtime_effect(changed_paths, now_ms)
-                .await
-                .map(|_| ())
-        } else {
-            self.plan_controller
-                .record_runtime_effect(
-                    crate::plan::execution::PlanAttemptActor {
-                        executor_session_id: self.session_id.clone(),
-                    },
-                    changed_paths,
-                    now_ms,
-                )
-                .await
-                .map(|_| ())
-        }
-    }
-
-    async fn model_config(&self, role: RuntimeModelRole) -> Option<ModelProviderConfig> {
-        if role == RuntimeModelRole::Primary
-            && let Some(config) = self.primary_model_override.read().await.as_ref()
-        {
-            return Some(config.clone());
-        }
-        self.model_configs.get(role)
-    }
-
-    async fn model_config_with_primary_fallback(
-        &self,
-        role: RuntimeModelRole,
-    ) -> Option<ModelProviderConfig> {
-        if role != RuntimeModelRole::Primary
-            && let Some(config) = self.model_configs.get(role)
-        {
-            return Some(config);
-        }
-        self.model_config(RuntimeModelRole::Primary).await
-    }
-
-    fn visible_tool_specs(&self) -> Vec<merry_core::ToolSpec> {
-        self.tool_registry.tool_specs()
-    }
-}
-
-struct ToolBatchScope<'a> {
-    inner: &'a RuntimeInner,
-}
-
-impl Drop for ToolBatchScope<'_> {
-    fn drop(&mut self) {
-        debug_assert!(self.inner.tool_batch_active.swap(false, Ordering::AcqRel));
-    }
-}
-
 impl Runtime {
     /// Returns the automatic compaction policy used by subsequent requests.
     pub async fn automatic_compaction_config(&self) -> AutomaticCompactionConfig {
@@ -874,89 +700,6 @@ impl Runtime {
         *self.inner.context_window_tokens.write().await = context_window_tokens;
     }
 }
-
-#[derive(Clone)]
-struct AcceptedLocalWorkspaceProcessRunner {
-    admission: AcceptedLocalWorkspaceProcessAdmission,
-    runner: Arc<dyn ProcessRunner>,
-}
-
-async fn run_step(
-    inner: Arc<RuntimeInner>,
-    sender: mpsc::Sender<RuntimeJournalEventBatch>,
-    token: CancellationToken,
-    input: StepInput,
-    generation_config: GenerationConfig,
-    final_output_contract: Option<crate::FinalOutputContract>,
-    active_permit: ActiveStepPermit,
-) {
-    tracing::debug!(category = "started", "runtime step started");
-
-    if token.is_cancelled() {
-        tracing::debug!(category = "pre_cancelled", "runtime step pre-cancelled");
-        let _ = send_cancelled_event(&inner, &sender).await;
-        return;
-    }
-
-    if !send_normal_event(&inner, &sender, &token, |session| {
-        session.record_session_started_if_needed()
-    })
-    .await
-    {
-        tracing::debug!(
-            category = "session_start_not_sent",
-            "runtime session-start event not sent"
-        );
-        let _ = send_cancelled_if_requested(&inner, &sender, &token).await;
-        return;
-    }
-
-    if token.is_cancelled() {
-        let _ = send_cancelled_event(&inner, &sender).await;
-        return;
-    }
-
-    let Some(step_started) = send_step_started_event(&inner, &sender, &token).await else {
-        let _ = send_cancelled_if_requested(&inner, &sender, &token).await;
-        return;
-    };
-
-    if token.is_cancelled() {
-        let _ = send_cancelled_event(&inner, &sender).await;
-        return;
-    }
-
-    let Some(provider_config) = inner.model_config(RuntimeModelRole::Primary).await else {
-        tracing::debug!(
-            category = "no_provider_completion",
-            "runtime step completing without provider"
-        );
-        if !send_normal_event(&inner, &sender, &token, |session| {
-            Some(session.record_step_completed())
-        })
-        .await
-        {
-            let _ = send_cancelled_if_requested(&inner, &sender, &token).await;
-        }
-        return;
-    };
-
-    tracing::debug!(
-        category = "provider_path_entered",
-        "runtime provider path entered"
-    );
-    provider_step::run_provider_step(
-        &inner,
-        &sender,
-        provider_step::ProviderStepControl::new(&token, &active_permit, step_started.sequence),
-        input,
-        generation_config,
-        final_output_contract,
-        provider_config,
-    )
-    .await;
-}
-
 #[cfg(test)]
 mod tests {
     mod bridge_tool_flow;
