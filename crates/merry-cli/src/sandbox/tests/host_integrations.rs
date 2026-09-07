@@ -55,6 +55,7 @@ fn sandbox_exposes_configured_host_integrations_as_outer_ceiling() {
     host.host_integration_environment = HostIntegrationEnvironment {
         ssh_agent_socket: Some(PathBuf::from("/run/user/1000/ssh-agent.sock")),
         session_bus_address: Some(os("unix:path=/run/user/1000/bus")),
+        gpg_agent_sockets: None,
     };
     let probe = FakeHostProbe::default()
         .socket("/run/user/1000/ssh-agent.sock", 1_000)
@@ -88,6 +89,131 @@ fn sandbox_exposes_configured_host_integrations_as_outer_ceiling() {
             "unix:path=/run/user/1000/bus"
         ]
     ));
+}
+
+#[test]
+fn native_gpg_mount_imports_only_public_keyring_files_and_native_socket() {
+    let mut host = sandbox_host();
+    host.host_integrations = vec![HostIntegration::GpgAgent];
+    host.host_integration_environment.gpg_agent_sockets = Some(
+        merry_process::GpgAgentSockets::new("/custom/keyring", "/custom/runtime/native")
+            .unwrap()
+            .with_auxiliary_sockets([PathBuf::from("/custom/runtime/ssh")])
+            .unwrap(),
+    );
+    let probe = FakeHostProbe::default()
+        .socket("/custom/runtime/native", 1_000)
+        .socket("/custom/runtime/ssh", 1_000)
+        .regular_file("/custom/keyring/pubring.kbx", 1_000)
+        .regular_file("/custom/keyring/trustdb.gpg", 1_000)
+        .regular_file("/custom/keyring/gpg.conf", 1_000)
+        .regular_file("/custom/keyring/secring.gpg", 1_000)
+        .directory("/custom", 1_000, 0o700)
+        .directory("/custom/runtime", 1_000, 0o700);
+    let Bootstrap::Reexec(plan) =
+        plan_bootstrap_with_probe(true, ClipboardAccess::Disabled, &host, &probe).unwrap()
+    else {
+        panic!("expected outer sandbox");
+    };
+    let args = plan_args(&plan);
+    assert!(contains_sequence(
+        &args,
+        &["--perms", "0700", "--dir", "/custom"]
+    ));
+    assert!(contains_sequence(
+        &args,
+        &["--perms", "0700", "--dir", "/custom/runtime"]
+    ));
+    assert!(contains_sequence(
+        &args,
+        &[
+            "--ro-bind",
+            "/custom/runtime/native",
+            "/custom/runtime/native"
+        ]
+    ));
+    assert!(contains_sequence(
+        &args,
+        &["--setenv", "GNUPGHOME", "/custom/keyring"]
+    ));
+    assert!(contains_sequence(
+        &args,
+        &[
+            "--ro-bind",
+            "/custom/keyring/pubring.kbx",
+            "/custom/keyring/pubring.kbx"
+        ]
+    ));
+    for path in [
+        "/custom/runtime/ssh",
+        "/custom/runtime",
+        "/custom/keyring",
+        "/custom/keyring/trustdb.gpg",
+        "/custom/keyring/gpg.conf",
+        "/custom/keyring/secring.gpg",
+    ] {
+        assert!(!contains_sequence(&args, &["--ro-bind", path, path]));
+        assert!(!contains_sequence(&args, &["--bind", path, path]));
+    }
+}
+
+#[test]
+fn ssh_trust_files_are_opt_in_and_never_override_a_path_deny() {
+    use merry_runtime::{PathAccess, PathAccessRule, PathAccessRuleSource};
+    let fixture = tempfile::Builder::new()
+        .prefix("merry-ssh-trust-")
+        .tempdir_in("/var/tmp")
+        .unwrap();
+    let home = fixture.path().join("home");
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    let probe = FakeHostProbe::default()
+        .regular_file(home.join(".ssh/known_hosts").to_str().unwrap(), 1_000)
+        .regular_file(home.join(".ssh/known_hosts2").to_str().unwrap(), 1_000)
+        .regular_file(home.join(".ssh/id_ed25519").to_str().unwrap(), 1_000)
+        .regular_file(home.join(".ssh/config").to_str().unwrap(), 1_000);
+    for (enabled, denied) in [(false, false), (true, false), (true, true)] {
+        let mut host = sandbox_host();
+        host.xdg_paths = crate::config::XdgPaths::from_parts(
+            home.clone(),
+            Some(fixture.path().join("config")),
+            Some(fixture.path().join("state")),
+        );
+        if enabled {
+            host.host_integrations = vec![HostIntegration::SshAgent];
+        }
+        if denied {
+            host.trusted_path_rules.push(PathAccessRule::new(
+                home.join(".ssh"),
+                PathAccess::Deny,
+                PathAccessRuleSource::TrustedGlobalConfig,
+            ));
+        }
+        let Bootstrap::Reexec(plan) =
+            plan_bootstrap_with_probe(true, ClipboardAccess::Disabled, &host, &probe).unwrap()
+        else {
+            panic!("outer plan");
+        };
+        let args = plan_args(&plan);
+        for path in [
+            home.join(".ssh/known_hosts"),
+            home.join(".ssh/known_hosts2"),
+        ] {
+            assert_eq!(
+                contains_sequence(
+                    &args,
+                    &["--ro-bind", path.to_str().unwrap(), path.to_str().unwrap()]
+                ),
+                enabled && !denied
+            );
+        }
+        for path in [home.join(".ssh/id_ed25519"), home.join(".ssh/config")] {
+            assert!(
+                !args
+                    .iter()
+                    .any(|argument| argument == path.to_str().unwrap())
+            );
+        }
+    }
 }
 
 #[test]

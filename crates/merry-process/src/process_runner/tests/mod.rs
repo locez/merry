@@ -2,7 +2,15 @@ use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
 use merry_runtime::{PermissionRequest, PermissionedAction, ProcessActionIntent, ProcessEnvPolicy};
 use std::ffi::OsString;
 
+#[cfg(target_os = "linux")]
+mod agents;
 mod execution;
+#[cfg(target_os = "linux")]
+mod mount_initialization;
+#[cfg(target_os = "linux")]
+mod path_review;
+#[cfg(target_os = "linux")]
+mod path_review_aliases;
 mod permissions;
 mod sandbox;
 

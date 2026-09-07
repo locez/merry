@@ -70,7 +70,7 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
 #[test]
 fn narrow_header_preserves_context_pressure_before_secondary_usage() {
     let mut state = TuiState::new(
-        "/home/locez/source/rust/merry".into(),
+        "/home/alice/source/rust/merry".into(),
         "gpt-5.6-sol xhigh".to_owned(),
         Keymap::default(),
         TuiTheme::default(),

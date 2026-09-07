@@ -225,6 +225,8 @@ fn sandbox_mounts_symlinked_file_sources_at_their_logical_paths() {
         program: OsString::from("bwrap"),
         args,
         env: Vec::new(),
+        #[cfg(target_os = "linux")]
+        ssh_config: merry_process::BwrapSshConfigFiles::default(),
     });
 
     assert!(contains_sequence(
@@ -368,6 +370,9 @@ fn sandbox_prepares_provider_and_state_write_roots_before_building_mounts() {
 
 #[test]
 fn plan_applies_trusted_global_path_rules_as_outer_guard() {
+    let fixture = tempfile::tempdir().unwrap();
+    let denied = fixture.path().join("protected");
+    std::fs::create_dir(&denied).unwrap();
     let mut host = sandbox_host();
     host.trusted_path_rules = vec![
         PathAccessRule::new(
@@ -381,7 +386,7 @@ fn plan_applies_trusted_global_path_rules_as_outer_guard() {
             PathAccessRuleSource::TrustedGlobalConfig,
         ),
         PathAccessRule::new(
-            PathBuf::from("/home/alice/.ssh"),
+            denied.clone(),
             PathAccess::Deny,
             PathAccessRuleSource::TrustedGlobalConfig,
         ),
@@ -401,5 +406,8 @@ fn plan_applies_trusted_global_path_rules_as_outer_guard() {
         &args,
         &["--bind-try", "/workspace/shared", "/workspace/shared"]
     ));
-    assert!(contains_sequence(&args, &["--tmpfs", "/home/alice/.ssh"]));
+    assert!(contains_sequence(
+        &args,
+        &["--tmpfs", denied.to_str().unwrap()]
+    ));
 }

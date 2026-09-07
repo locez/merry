@@ -22,6 +22,68 @@ use tokio_util::sync::CancellationToken;
 
 const RESOLVER_CONTENT: &str = "nameserver 192.0.2.1\n";
 
+#[test]
+fn denied_regular_file_does_not_break_outer_startup_or_hide_siblings() {
+    let fixture = tempfile::tempdir().unwrap();
+    fs::write(fixture.path().join("denied"), "synthetic protected content").unwrap();
+    fs::write(fixture.path().join("sibling"), "public sibling").unwrap();
+    let mut mounts = system_mounts();
+    mounts.bind(
+        fixture.path(),
+        Path::new("/fixture"),
+        PathAccess::ReadOnly,
+        false,
+        MountOrigin::Trusted,
+    );
+    mounts.bind(
+        &fixture.path().join("denied"),
+        Path::new("/fixture/denied"),
+        PathAccess::Deny,
+        false,
+        MountOrigin::Trusted,
+    );
+    let output = execute(
+        mounts,
+        &shell_command(
+            "test ! -s /fixture/denied; test \"$(cat /fixture/sibling)\" = 'public sibling'",
+        ),
+    );
+    assert_success(output);
+    assert_eq!(
+        fs::read_to_string(fixture.path().join("denied")).unwrap(),
+        "synthetic protected content"
+    );
+}
+
+#[test]
+fn missing_deny_target_is_an_actionable_preflight_error() {
+    let fixture = tempfile::tempdir().unwrap();
+    let target = fixture.path().join("absent");
+    let mut mounts = system_mounts();
+    mounts.bind(
+        fixture.path(),
+        Path::new("/fixture"),
+        PathAccess::ReadOnly,
+        false,
+        MountOrigin::Trusted,
+    );
+    mounts.bind(
+        &target,
+        Path::new("/fixture/absent"),
+        PathAccess::Deny,
+        false,
+        MountOrigin::Trusted,
+    );
+    let error = mounts.append_args(&mut Vec::new()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("create the configured target first"),
+        "{error}"
+    );
+    assert!(!target.exists());
+}
+
 struct ResolverFixture {
     root: tempfile::TempDir,
     config: PathBuf,
@@ -455,11 +517,18 @@ fn outer_and_inner_preserve_system_reads_and_git_admission() {
 
 async fn assert_inner_admission() {
     let session_permissions = BwrapSessionPermissions::new();
-    let rules = [PathAccessRule::new(
+    let mut rules = vec![PathAccessRule::new(
         "/workspace/secrets",
         PathAccess::Deny,
         PathAccessRuleSource::TrustedGlobalConfig,
     )];
+    for suffix in [".rustup/toolchains", ".cargo/bin", ".local/bin", ".cache"] {
+        rules.push(PathAccessRule::new(
+            Path::new("/home/merry").join(suffix),
+            PathAccess::ReadOnly,
+            PathAccessRuleSource::DefaultDevelopmentBaseline,
+        ));
+    }
     let runner = BwrapProcessRunner::new_at_workspace_root("/workspace")
         .with_session_permissions(session_permissions.clone())
         .with_path_rules(rules.clone());
@@ -481,9 +550,10 @@ async fn assert_inner_admission() {
         .await
         .expect("inner action");
     assert!(output.ok(), "inner admission failed: {output:?}");
+    assert_eq!(fs::read_dir("/home/merry").unwrap().count(), 0);
     let factory = BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace")
-        .with_session_permissions(session_permissions)
-        .with_path_rules(rules);
+        .with_path_rules(rules)
+        .with_session_permissions(session_permissions);
     let call = PendingToolCall::new(
         ToolCallId::new("review-git-write").unwrap(),
         ToolName::new("request_permissions").unwrap(),

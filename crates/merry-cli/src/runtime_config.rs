@@ -99,23 +99,20 @@ pub(crate) fn action_process_backend_options(
         .unwrap_or_else(|| PathBuf::from("/home/merry"));
     let mut path_rules = default_inner_development_path_rules(&home);
     if let Some(config) = config {
-        for rule in config.trusted_global_path_rules()? {
-            let (access, source) = match rule.access() {
-                PathAccess::ReadWrite => (
-                    PathAccess::ReadOnly,
-                    PathAccessRuleSource::TrustedGlobalConfigWritableCeiling,
-                ),
-                PathAccess::ReadOnly | PathAccess::Deny => {
-                    (rule.access(), PathAccessRuleSource::TrustedGlobalConfig)
-                }
-            };
-            path_rules.push(PathAccessRule::new(
-                rule.path().to_path_buf(),
-                access,
-                source,
-            ));
-        }
+        path_rules.extend(config.trusted_global_path_rules()?);
     }
+    let private_paths = if let Some(config) = config {
+        config.private_process_paths()?
+    } else {
+        let paths = XdgPaths::from_env()?;
+        vec![
+            paths.config_dir().to_path_buf(),
+            paths.state_dir().to_path_buf(),
+        ]
+    };
+    path_rules.extend(private_paths.into_iter().map(|path| {
+        PathAccessRule::new(path, PathAccess::Deny, PathAccessRuleSource::ProductPrivate)
+    }));
     let host_integrations = config
         .map(MerryConfig::host_integrations)
         .unwrap_or_default();
@@ -140,6 +137,43 @@ pub(crate) fn configured_runtime_builder(
         .automatic_compaction(automatic_compaction_config(config).map_err(unexpected)?))
 }
 
+pub(crate) async fn prepared_action_process_backend_options(
+    config: Option<&MerryConfig>,
+    mode: crate::coding::ProcessExecutionMode,
+) -> Result<ActionProcessBackendOptions, CliError> {
+    let options = action_process_backend_options(config).map_err(unexpected)?;
+    if !mode.uses_inner_sandbox() {
+        return Ok(options);
+    }
+    let paths = XdgPaths::from_env().map_err(unexpected)?;
+    let home = config
+        .map(MerryConfig::home)
+        .unwrap_or_else(|| paths.home());
+    match merry_process::GpgAgentSockets::discover(home, options.environment_overrides())
+        .await
+        .map_err(unexpected)?
+    {
+        Some(sockets) => {
+            if options
+                .host_integrations()
+                .contains(&merry_runtime::HostIntegration::GpgAgent)
+            {
+                sockets.validate_public_key_access().map_err(unexpected)?;
+            }
+            Ok(options.with_gpg_agent_sockets(sockets))
+        }
+        None if options
+            .host_integrations()
+            .contains(&merry_runtime::HostIntegration::GpgAgent) =>
+        {
+            Err(unexpected(
+                "gpg_agent requires gpgconf in PATH for socket discovery",
+            ))
+        }
+        None => Ok(options),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -157,7 +191,7 @@ mod tests {
     use std::{fs, path::PathBuf, sync::Arc};
 
     #[test]
-    fn action_backend_keeps_outer_path_grants_as_inner_reviewable_read_only() {
+    fn action_backend_preauthorizes_explicit_path_access() {
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
         let config = MerryConfig::load_optional_from_text(
             Some(
@@ -187,11 +221,8 @@ readwrite_paths = ["/srv/trusted-writable"]
             .iter()
             .find(|rule| rule.path() == std::path::Path::new("/srv/trusted-writable"))
             .expect("configured writable ceiling should remain visible to the inner runner");
-        assert_eq!(writable.access(), merry_runtime::PathAccess::ReadOnly);
-        assert_eq!(
-            writable.source(),
-            PathAccessRuleSource::TrustedGlobalConfigWritableCeiling
-        );
+        assert_eq!(writable.access(), merry_runtime::PathAccess::ReadWrite);
+        assert_eq!(writable.source(), PathAccessRuleSource::TrustedGlobalConfig);
         assert!(options.path_rules().iter().any(|rule| {
             rule.source() == PathAccessRuleSource::DefaultDevelopmentBaseline
                 && rule.access() == merry_runtime::PathAccess::ReadOnly
@@ -232,6 +263,53 @@ api_key_file = "managed/secrets/opencode.key"
 
         validate_loaded_config(Some(&config), &paths)
             .expect("provider catalog should not require a default selection");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn product_private_paths_are_not_inherited_as_task_grants() {
+        use merry_process::{LocalProcessBackend, ProcessBackend, ProcessBackendMode};
+        use merry_runtime::{ProcessActionIntent, ProcessEnvPolicy, ProcessRunnerContext};
+        let fixture = tempfile::tempdir().unwrap();
+        let paths = XdgPaths::from_parts(
+            fixture.path().to_path_buf(),
+            Some(fixture.path().join("config")),
+            Some(fixture.path().join("state")),
+        );
+        fs::create_dir_all(paths.config_dir()).unwrap();
+        fs::create_dir_all(paths.state_dir()).unwrap();
+        let workspace = fixture.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(paths.config_file(), "private config fixture").unwrap();
+        fs::write(paths.state_dir().join("session"), "private session fixture").unwrap();
+        let credential = paths.config_base_dir().join("provider-key");
+        fs::write(&credential, "synthetic credential fixture").unwrap();
+        let config = MerryConfig::load_optional_from_text(Some("[providers.test]\ntype = 'openai-compatible'\nbase_url = 'https://provider.example.test'\napi_key_file = '../provider-key'\n"), &paths).unwrap().unwrap();
+        let options = action_process_backend_options(Some(&config)).unwrap();
+        let backend =
+            LocalProcessBackend::new(&workspace, ProcessBackendMode::Isolated, options).unwrap();
+        let session = backend.new_session();
+        for path in [
+            paths.config_file().to_path_buf(),
+            paths.state_dir().join("session"),
+            credential,
+        ] {
+            let intent = ProcessActionIntent::new(
+                vec!["/usr/bin/cat".into(), path.to_str().unwrap().into()],
+                None,
+                ProcessEnvPolicy::empty(),
+                None,
+                1024,
+                1024,
+            )
+            .unwrap();
+            let output = session
+                .runner()
+                .run(intent, ProcessRunnerContext::new(Default::default()))
+                .await
+                .unwrap();
+            assert_eq!(output.stdout_text(), "", "{output:?}");
+        }
     }
 
     #[test]

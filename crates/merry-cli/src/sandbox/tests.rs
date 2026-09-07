@@ -21,7 +21,7 @@ impl FakeHostProbe {
     fn socket(mut self, path: &str, owner_uid: u32) -> Self {
         self.metadata.insert(
             PathBuf::from(path),
-            HostPathMetadata::new(HostPathKind::UnixSocket, owner_uid),
+            HostPathMetadata::new(HostPathKind::UnixSocket, owner_uid, 0o600),
         );
         self
     }
@@ -29,7 +29,7 @@ impl FakeHostProbe {
     fn regular_file(mut self, path: &str, owner_uid: u32) -> Self {
         self.metadata.insert(
             PathBuf::from(path),
-            HostPathMetadata::new(HostPathKind::RegularFile, owner_uid),
+            HostPathMetadata::new(HostPathKind::RegularFile, owner_uid, 0o600),
         );
         self
     }
@@ -37,7 +37,15 @@ impl FakeHostProbe {
     fn other(mut self, path: &str, owner_uid: u32) -> Self {
         self.metadata.insert(
             PathBuf::from(path),
-            HostPathMetadata::new(HostPathKind::Other, owner_uid),
+            HostPathMetadata::new(HostPathKind::Other, owner_uid, 0o600),
+        );
+        self
+    }
+
+    fn directory(mut self, path: &str, owner_uid: u32, mode: u32) -> Self {
+        self.metadata.insert(
+            PathBuf::from(path),
+            HostPathMetadata::new(HostPathKind::Directory, owner_uid, mode),
         );
         self
     }
@@ -144,3 +152,9 @@ mod runtime_evidence;
 
 #[cfg(target_os = "linux")]
 mod mount_execution;
+
+#[cfg(target_os = "linux")]
+mod gpg_public;
+
+#[cfg(target_os = "linux")]
+mod ssh;

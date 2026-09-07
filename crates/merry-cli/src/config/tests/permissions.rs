@@ -5,6 +5,49 @@ use merry_runtime::{PathAccess, PathAccessRuleSource};
 use std::path::{Path, PathBuf};
 
 #[test]
+fn review_paths_restrict_declared_subtrees_without_changing_preauthorization() {
+    let paths = XdgPaths::from_parts(home(), None, None);
+    let config = MerryConfig::load_optional_from_text(
+        Some(
+            r#"
+[permissions]
+readonly_paths = ["/abc"]
+readwrite_paths = ["/shared"]
+review_paths = ["/abc/d", "/shared/private"]
+"#,
+        ),
+        &paths,
+    )
+    .unwrap()
+    .unwrap();
+    let rules = config.trusted_global_path_rules().unwrap();
+    assert_eq!(rules.len(), 4);
+    assert!(!rules[0].review_required());
+    assert!(!rules[1].review_required());
+    assert_eq!(rules[1].access(), PathAccess::ReadWrite);
+    assert_eq!(rules[2].path(), Path::new("/abc/d"));
+    assert_eq!(rules[2].access(), PathAccess::ReadOnly);
+    assert!(rules[2].review_required());
+    assert_eq!(rules[3].access(), PathAccess::ReadWrite);
+    assert!(rules[3].review_required());
+}
+
+#[test]
+fn review_paths_cannot_create_grants_or_override_denial() {
+    let paths = XdgPaths::from_parts(home(), None, None);
+    for input in [
+        "readonly_paths = ['/abc']\nreview_paths = ['/elsewhere']",
+        "readonly_paths = ['/abc']\ndeny_paths = ['/abc/d']\nreview_paths = ['/abc/d/secret']",
+    ] {
+        let config =
+            MerryConfig::load_optional_from_text(Some(&format!("[permissions]\n{input}")), &paths)
+                .unwrap()
+                .unwrap();
+        assert!(config.trusted_global_path_rules().is_err());
+    }
+}
+
+#[test]
 fn parses_trusted_global_path_rules() {
     let paths = XdgPaths::from_parts(home(), None, None);
     let config = MerryConfig::load_optional_from_text(
@@ -78,6 +121,7 @@ fn parses_host_integrations_for_outer_sandbox_ceiling() {
 [permissions]
 ssh_agent = true
 dbus = true
+gpg_agent = true
 "#,
         ),
         &paths,
@@ -89,7 +133,8 @@ dbus = true
         config.host_integrations(),
         vec![
             merry_runtime::HostIntegration::SshAgent,
-            merry_runtime::HostIntegration::SessionBus
+            merry_runtime::HostIntegration::SessionBus,
+            merry_runtime::HostIntegration::GpgAgent,
         ]
     );
 }

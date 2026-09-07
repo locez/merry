@@ -7,9 +7,21 @@
 //! composition or runtime call sites.
 
 mod bwrap_path;
+mod gpg;
+mod host_resources;
 mod process_runner;
+mod sandbox_fs;
+mod sandbox_path;
+#[cfg(target_os = "linux")]
+mod ssh_config;
 
 pub use bwrap_path::resolve_bwrap_path;
+pub use gpg::GpgAgentSockets;
+pub use host_resources::{HostPathKind, HostPathMetadata, ssh_known_hosts};
+pub use sandbox_fs::BwrapMaskKind;
+pub use sandbox_path::{SandboxPathError, resolve_sandbox_path};
+#[cfg(target_os = "linux")]
+pub use ssh_config::BwrapSshConfigFiles;
 
 pub use process_runner::TokioProcessRunner;
 
@@ -148,6 +160,7 @@ pub struct ProcessBackendOptions {
     path_rules: Vec<PathAccessRule>,
     /// Named host integrations available to sandboxed actions.
     host_integrations: Vec<HostIntegration>,
+    gpg_agent_sockets: Option<GpgAgentSockets>,
     /// Environment assignments validated and applied by the host backend.
     environment_overrides: Vec<(OsString, OsString)>,
 }
@@ -173,6 +186,13 @@ impl ProcessBackendOptions {
         host_integrations: impl IntoIterator<Item = HostIntegration>,
     ) -> Self {
         self.host_integrations = host_integrations.into_iter().collect();
+        self
+    }
+
+    /// Installs explicitly discovered native and auxiliary GnuPG socket paths.
+    #[must_use]
+    pub fn with_gpg_agent_sockets(mut self, sockets: GpgAgentSockets) -> Self {
+        self.gpg_agent_sockets = Some(sockets);
         self
     }
 
@@ -299,10 +319,13 @@ impl LocalProcessBackend {
         options: ProcessBackendOptions,
     ) -> Result<Self, ProcessBackendError> {
         let workspace_root = workspace_root.into();
-        let environment = BwrapProcessEnvironment::from_current_process()
+        let mut environment = BwrapProcessEnvironment::from_current_process()
             .with_host_integrations(options.host_integrations)
             .with_overrides(options.environment_overrides)?
             .validate_for_workspace(&workspace_root)?;
+        if let Some(sockets) = options.gpg_agent_sockets {
+            environment = environment.with_gpg_agent_sockets(sockets);
+        }
         Ok(Self::from_sandboxed_parts(
             workspace_root,
             environment,

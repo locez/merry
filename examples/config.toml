@@ -22,16 +22,32 @@
 profile = "default"
 
 [permissions]
-# Global config is user-trusted and defines the outer sandbox ceiling. These
-# paths are not inner default grants: an inner process still requests the exact
-# path for its action. Project-local config should not be used for silent
-# host-wide grants because coding agents may edit the project tree.
+# Global config is user-trusted: readonly_paths/readwrite_paths define both the
+# outer ceiling and inner preauthorization. review_paths adds per-action review
+# to a declared subtree without raising its access ceiling. deny_paths always
+# wins. Project-local config must not silently authorize host-wide access.
 #
-# Optional host IPC integrations. These are explicit outer-sandbox ceilings and
+# Optional host integrations. These are explicit outer-sandbox ceilings and
 # enabled integrations are forwarded to inner process sandboxes when available.
 # dbus is the D-Bus session bus, including Secret Service/keyring access.
 # ssh_agent = true
+# gpg_agent = true
 # dbus = true
+# ssh_agent also exposes ~/.ssh/known_hosts and known_hosts2 read-only. It does
+# not import private keys or ~/.ssh/config, enable networking, accept new host
+# keys, or bypass deny_paths / review_paths. A blanket ~/.ssh deny still blocks
+# these trust files; choose narrower deny paths if they should remain readable.
+# Already-visible system SSH configuration is kept, not disabled. Safe root-owned
+# ssh_config files and static Includes use private read-only snapshots to retain
+# OpenSSH ownership checks across user namespaces. Host files are never changed.
+# gpg_agent enables the native GPG socket discovered with gpgconf --list-dirs,
+# independently of ssh_agent (including GPG's SSH endpoint). It also imports
+# pubring.kbx / pubring.gpg read-only; no extra readonly_paths is needed. Inner
+# actions use a private temporary GNUPGHOME view for locks and a fresh trustdb.
+# Host private keys, configuration, and trust state are not imported. Public-key
+# reads still obey deny_paths / review_paths. Keyboxd databases are not yet
+# supported and produce an explicit error, not an implicit host write grant.
+# Neither a readonly mount nor network isolation prevents Unix socket access.
 # Permission reviews in --no-sandbox remain host-interactive by default. Set
 # this to "model" to review with the configured model first and fall back to
 # the host only when that model review is unavailable. TUI reviews use their
@@ -49,6 +65,15 @@ readwrite_paths = [
   "company-work",
 ]
 
+# Each entry must exist and be within a declared readonly/readwrite grant.
+# With readonly_paths = ["/abc"] and review_paths = ["/abc/d"], /abc/e stays
+# readable but /abc/d is hidden until an exact path request is approved. The
+# approval lasts for that action only, and cannot upgrade the read-only ceiling.
+# For ~/.config, include it in readonly_paths and review_paths together.
+review_paths = []
+
+# Deny targets must exist; missing targets fail preflight without host mkdir.
+# Create the target first or protect an existing ancestor instead.
 deny_paths = [
   "~/.ssh",
 ]

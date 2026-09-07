@@ -8,6 +8,7 @@ use crate::sandbox::{
 };
 use merry_runtime::HostIntegration;
 use std::{
+    collections::BTreeSet,
     env,
     ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf},
@@ -26,6 +27,7 @@ pub(crate) struct GraphicalEnvironment {
 pub(crate) struct HostIntegrationEnvironment {
     pub(super) ssh_agent_socket: Option<PathBuf>,
     pub(super) session_bus_address: Option<OsString>,
+    pub(super) gpg_agent_sockets: Option<merry_process::GpgAgentSockets>,
 }
 
 impl HostIntegrationEnvironment {
@@ -33,6 +35,7 @@ impl HostIntegrationEnvironment {
         Self {
             ssh_agent_socket: env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
             session_bus_address: env::var_os("DBUS_SESSION_BUS_ADDRESS"),
+            gpg_agent_sockets: None,
         }
     }
 }
@@ -53,6 +56,7 @@ impl GraphicalEnvironment {
 pub(super) struct GraphicalAccessPlan {
     pub(super) mounts: Vec<GraphicalMount>,
     pub(super) environment: Vec<(OsString, OsString)>,
+    pub(super) private_directories: BTreeSet<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -105,6 +109,17 @@ pub(super) fn host_integration_access_plan(
     for integration in &host.host_integrations {
         match integration {
             HostIntegration::SshAgent => {
+                for path in merry_process::ssh_known_hosts(host.xdg_paths.home()) {
+                    if probe
+                        .metadata(&path)
+                        .is_some_and(|metadata| metadata.kind() == HostPathKind::RegularFile)
+                    {
+                        plan.mounts.push(GraphicalMount {
+                            source: path.clone(),
+                            destination: path,
+                        });
+                    }
+                }
                 let Some(socket) = host
                     .host_integration_environment
                     .ssh_agent_socket
@@ -143,6 +158,44 @@ pub(super) fn host_integration_access_plan(
                 plan.environment
                     .push((os("DBUS_SESSION_BUS_ADDRESS"), address.clone()));
             }
+            HostIntegration::GpgAgent => {
+                let Some(sockets) = &host.host_integration_environment.gpg_agent_sockets else {
+                    continue;
+                };
+                plan.private_directories
+                    .insert(sockets.home().to_path_buf());
+                plan.environment
+                    .push((os("GNUPGHOME"), sockets.home().as_os_str().to_owned()));
+                for path in sockets.public_keyrings() {
+                    if probe
+                        .metadata(&path)
+                        .is_some_and(|metadata| metadata.kind() == HostPathKind::RegularFile)
+                    {
+                        plan.mounts.push(GraphicalMount {
+                            source: path.clone(),
+                            destination: path,
+                        });
+                    }
+                }
+                if !host_owned_socket(host, probe, sockets.agent()) {
+                    continue;
+                }
+                for directory in sockets.agent().ancestors().skip(1) {
+                    if directory != Path::new("/")
+                        && probe.metadata(directory).is_some_and(|metadata| {
+                            metadata.kind() == HostPathKind::Directory
+                                && metadata.owner_uid() == host.current_uid
+                                && metadata.mode() & 0o777 == 0o700
+                        })
+                    {
+                        plan.private_directories.insert(directory.to_path_buf());
+                    }
+                }
+                plan.mounts.push(GraphicalMount {
+                    source: sockets.agent().to_path_buf(),
+                    destination: sockets.agent().to_path_buf(),
+                });
+            }
         }
     }
 
@@ -150,9 +203,9 @@ pub(super) fn host_integration_access_plan(
 }
 
 pub(super) fn host_owned_socket(host: &Host, probe: &impl HostPathProbe, path: &Path) -> bool {
-    probe.metadata(path).is_some_and(|metadata| {
-        metadata.kind == HostPathKind::UnixSocket && metadata.owner_uid == host.current_uid
-    })
+    probe
+        .metadata(path)
+        .is_some_and(|metadata| metadata.is_owned_socket(host.current_uid))
 }
 
 pub(super) fn session_bus_socket_path(address: &OsStr) -> Option<PathBuf> {
@@ -190,8 +243,7 @@ pub(super) fn wayland_socket_path(host: &Host, probe: &impl HostPathProbe) -> Op
         runtime_dir.join(display)
     };
     let metadata = probe.metadata(&socket)?;
-    (metadata.kind == HostPathKind::UnixSocket && metadata.owner_uid == host.current_uid)
-        .then_some(socket)
+    metadata.is_owned_socket(host.current_uid).then_some(socket)
 }
 
 pub(super) fn x11_connection(
@@ -200,13 +252,13 @@ pub(super) fn x11_connection(
 ) -> Option<(String, PathBuf, PathBuf)> {
     let display = parse_local_x11_display(host.graphical_environment.display.as_deref()?)?;
     let socket = PathBuf::from(format!("/tmp/.X11-unix/X{}", display.number));
-    if probe.metadata(&socket)?.kind != HostPathKind::UnixSocket {
+    if probe.metadata(&socket)?.kind() != HostPathKind::UnixSocket {
         return None;
     }
 
     let authority = x11_authority_path(&host.graphical_environment)?;
     let metadata = probe.metadata(&authority)?;
-    if metadata.kind != HostPathKind::RegularFile || metadata.owner_uid != host.current_uid {
+    if metadata.kind() != HostPathKind::RegularFile || metadata.owner_uid() != host.current_uid {
         return None;
     }
 

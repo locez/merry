@@ -216,12 +216,14 @@ selects the explicit unrestricted host mode: process actions inherit the host
 filesystem, environment, and permissions without any bubblewrap namespace.
 Both inner modes start from a read-only view of their parent filesystem, so
 ordinary commands can see host configuration and toolchains. The inner action
-policy controls workspace writes, network access, and modeled host integrations
-(currently the SSH agent and D-Bus session bus). It is not a general pathname-
-IPC filter: in `--inner-sandbox`, a host Unix socket that is visible through the
-inherited read-only filesystem can still be reached. In the default outer+inner
-mode, the outer sandbox limits which host paths are visible before the inner
-action starts.
+policy controls workspace writes, network access, path review, and modeled host
+integrations (SSH agent, native GPG agent, and D-Bus session bus). It masks known
+unapproved socket endpoints, including endpoints under `/tmp`, rather than
+hiding their entire shared parent directory. It is not a general IPC filter:
+unmodeled Unix sockets visible through the inherited filesystem may remain
+reachable even with read-only mounts and network isolation. In the default
+outer+inner mode, the outer sandbox limits which host paths are visible before
+the inner action starts.
 In the normal mode, the outer `/tmp` is a session-scoped in-memory tmpfs reused
 by action sandboxes. With `--no-sandbox`, action `/tmp` maps to the current
 process's validated `TMPDIR` directly. Debug commands remain unsandboxed unless
@@ -232,8 +234,106 @@ precedence. If an imported directory contains a symlink such as
 `/etc/resolv.conf`, Merry mounts the required target file without exposing its
 whole parent directory. Inner action sandboxes inherit these system mounts
 instead of repeating them; workspace overlays, read-only `.git` metadata,
-reviewed write grants, network isolation, and host-integration controls still
-apply.
+reviewed grants, network isolation, and host-integration controls still apply.
+Optional development paths such as `.rustup/toolchains` remain built in, but
+missing sources are skipped without creating directories beneath a read-only
+HOME. This applies to both inner-only and outer+inner execution.
+
+Trusted `readonly_paths` and `readwrite_paths` are preauthorized in the inner
+sandbox at their declared access level. `review_paths` marks existing subtrees
+within these grants for **per-action** review, without adding a new grant or
+raising the access ceiling. For example:
+
+```toml
+[permissions]
+readonly_paths = ["~/.config"]
+review_paths = ["~/.config"]
+```
+
+With `readonly_paths = ["/abc"]` and `review_paths = ["/abc/d"]`, `/abc/e` remains
+readable; `/abc/d` is masked until the action explicitly requests that path or a
+specific descendant through `run_process.permissions` or `request_permissions`.
+Approval stays read-only and is not reused by later actions. A broader parent
+grant does not unlock a separately reviewed child; nested review markers and
+`deny_paths` still apply. Denied paths cannot be approved. Merry's configuration,
+state directories, and configured provider credential files are product-private
+and are not exposed to task processes merely because Merry itself needs them.
+
+Enforcement uses mount namespaces, not shell-path parsing: scripts receive the
+same restricted view. Directories are replaced with empty read-only mounts and
+individual files with empty read-only placeholders; an empty result or missing
+file inside the sandbox does not prove that the host path is absent. There is no
+transparent retry or automatic elevation. Known symlink and inherited bind-mount
+aliases receive the same restrictions. This is pathname isolation, not content
+tracking: separately copied data and arbitrary hard-link aliases are not covered.
+Missing or unprotectable review and explicit deny targets fail closed during
+preflight, before any action starts. Create the configured target first or protect
+an existing ancestor. Merry never creates host paths to install these masks;
+optional, absent development mounts remain skippable.
+
+`ssh_agent`, `gpg_agent`, and `dbus` are independent preauthorizations for
+available, user-owned sockets. A missing agent does not prevent ordinary actions
+from starting; explicitly requesting an unavailable endpoint reports an error. Native GPG
+socket discovery uses `gpgconf --list-dirs` and honors `GNUPGHOME`; it does not
+assume sockets live in `.gnupg` or `/run`. Outer scaffolding preserves private
+socket-directory permissions without importing their other contents.
+
+`ssh_agent = true` also exposes `~/.ssh/known_hosts` and `known_hosts2` read-only,
+without granting access to private keys, `~/.ssh/config`, or the network. These
+files still obey `deny_paths` and `review_paths`; an explicit deny of the entire
+`.ssh` directory blocks them as well. Existing host identities can be checked,
+but new or changed host keys are not automatically accepted and host trust files
+are not made writable. No `StrictHostKeyChecking` or SSH configuration override
+is injected.
+
+System SSH configuration already exposed by the filesystem policy remains
+available, independently of `ssh_agent`. Before entering a user namespace, Merry
+validates regular configuration files against OpenSSH's owner/write-mode rules.
+Safe root-owned files that would otherwise become UID 65534 are supplied as
+unchanged, read-only private snapshots at their original paths. Snapshots travel
+through sealed anonymous-memory FDs and are consumed by bubblewrap; the host
+files are never modified. Both the outer and inner mount plans preserve path
+denials and per-action review. This does not import `/etc/ssh` if it was not
+already exposed or make unsafe/unknown ownership acceptable.
+
+Snapshot discovery starts at `/etc/ssh/ssh_config` and follows static recursive
+`Include` paths, quoted filenames, globs, and symlinks within the allowed view.
+Connection-dependent percent tokens, environment/tilde expansion, and unsupported
+Include patterns are left to OpenSSH and are not automatically snapshotted. This
+is scoped SSH compatibility, not a global UID remapping for other programs.
+Configuration copies last for the corresponding sandbox lifetime; restart the
+outer sandbox to pick up host changes.
+
+Bounded SSH discovery or read failures disable only this compatibility adaptation:
+Merry reports a warning, preserves the original mounts, and lets unrelated actions
+start. OpenSSH may still reject incompatible ownership; its security checks are
+never disabled. Errors resolving the admitted path policy remain fatal.
+
+Runtime owns the session capability store and retention decisions. Process adapters
+consume read-only snapshots and report normalized path constraints; they do not
+record grants. Each preparation captures a fresh mount-alias view, shared by path
+review, masking, and client-resource discovery, rather than caching the filesystem
+for an entire session.
+
+`gpg_agent = true` also imports the conventional public-key stores
+(`pubring.kbx` and legacy `pubring.gpg`) read-only, without additional
+`readonly_paths`. Each inner action gets a private, temporary `GNUPGHOME` view
+at the original path for locks and a fresh trust database. These client writes
+never modify the host keyring, even when the host directory is declared read-only.
+Host private-key files, configuration, and trust state are not automatically
+imported. Listing public keys and verifying signatures do not require a running
+agent; a valid signature does not imply host ownertrust was imported. This
+file-based integration does not yet support keyboxd databases: their presence
+is reported explicitly rather than forwarding a writable host keyboxd interface
+or presenting a stale file-based keyring.
+
+Public-key sources still obey `deny_paths` and `review_paths`. A path grant does
+not authorize an otherwise masked agent socket. If a socket is also under
+`review_paths`, both the integration and the exact path approval are required.
+GPG's extra/browser and keyboxd endpoints are not implicitly exposed. No host
+keyring is made writable as a workaround.
+Direct `merry-process` consumers supply discovered `GpgAgentSockets` explicitly;
+the CLI performs discovery when preparing sandboxed process backends.
 
 `[permissions].environment` applies only inside Merry-managed action processes.
 Assignments are injected after the sandbox defaults and may intentionally

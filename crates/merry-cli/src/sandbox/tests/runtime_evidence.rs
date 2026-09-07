@@ -22,7 +22,7 @@ fn runtime_profile_requires_tmpfs_home_tmp_and_expected_env() {
     );
     assert_eq!(
         runtime_profile_from_evidence(
-            Some(OsStr::new("/home/locez")),
+            Some(OsStr::new("/home/alice")),
             Some(OsStr::new(SANDBOX_TMPDIR)),
             Some(mountinfo),
         ),

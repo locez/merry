@@ -140,6 +140,11 @@ pub use process::{
     StaticPermissionedProcessRunnerFactory, is_low_risk_process_action_intent,
     is_read_only_shell_process_action_intent, shell_command_for_argv,
 };
+pub use process::{
+    PreparedProcessPermission, ProcessPathGrant, ProcessPathGrantConstraint,
+    ProcessSessionPermissionSnapshot, ProcessSessionPermissionView, ProcessSessionPermissions,
+    SessionPermissionedProcessRunnerFactory,
+};
 pub use process_tool::{ProcessCommandToolError, process_command_tool};
 pub use profile::{
     AcceptedLocalWorkspaceProcessRunnerProfile, PathAccess, PathAccessRule, PathAccessRuleSource,

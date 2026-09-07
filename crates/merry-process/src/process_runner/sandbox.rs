@@ -7,6 +7,7 @@ use super::{
 use crate::resolve_bwrap_path;
 use merry_runtime::{
     HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource, ProcessActionIntent,
+    ProcessRunnerError,
 };
 use std::{
     ffi::{OsStr, OsString},
@@ -22,6 +23,8 @@ pub(crate) struct BwrapProcessPlan {
     pub(super) program: OsString,
     pub(super) args: Vec<OsString>,
     pub(super) cwd: PathBuf,
+    #[cfg(target_os = "linux")]
+    pub(super) ssh_config: crate::BwrapSshConfigFiles,
 }
 
 #[cfg(test)]
@@ -40,6 +43,7 @@ pub(crate) fn bwrap_process_plan(
         host_integrations: Vec::new(),
         ssh_agent_socket: None,
         session_bus_address: None,
+        gpg_agent_sockets: None,
     };
     bwrap_process_plan_with_environment(
         intent,
@@ -49,6 +53,7 @@ pub(crate) fn bwrap_process_plan(
         path_rules,
         bwrap_program,
     )
+    .expect("valid test sandbox plan")
 }
 
 pub(crate) fn bwrap_process_plan_with_environment(
@@ -58,7 +63,9 @@ pub(crate) fn bwrap_process_plan_with_environment(
     network_allowed: bool,
     path_rules: &[PathAccessRule],
     bwrap_program: &Path,
-) -> BwrapProcessPlan {
+) -> Result<BwrapProcessPlan, ProcessRunnerError> {
+    let view =
+        super::path_view::ActionPathView::prepare(path_rules, &environment.tmp_source, cwd_root)?;
     let cwd = process_current_dir(Some(cwd_root), intent);
     let mut args = vec![
         os("--unshare-user"),
@@ -97,11 +104,11 @@ pub(crate) fn bwrap_process_plan_with_environment(
     if !network_allowed {
         args.push(os("--unshare-net"));
     }
-    for path in environment.host_integration_hidden_paths() {
-        append_bwrap_hidden_host_integration_args(&mut args, &path);
-    }
     append_bwrap_required_path_rule(&mut args, cwd_root, PathAccess::ReadWrite);
     for rule in path_rules {
+        if rule.review_required() || rule.access() == PathAccess::Deny {
+            continue;
+        }
         if rule.source() == PathAccessRuleSource::GitMetadataBaseline {
             append_bwrap_git_metadata_baseline_rule(&mut args, rule.path());
         } else if rule.source() == PathAccessRuleSource::PermissionReview
@@ -119,8 +126,44 @@ pub(crate) fn bwrap_process_plan_with_environment(
             append_bwrap_path_rule(&mut args, rule.path(), rule.access());
         }
     }
+    super::restricted_mounts::append(&mut args, path_rules, &environment.tmp_source, &view)?;
+    #[cfg(target_os = "linux")]
+    let ssh_config =
+        crate::BwrapSshConfigFiles::prepare(Path::new("/etc/ssh/ssh_config"), |path| {
+            view.source(path)
+        })?;
+    #[cfg(target_os = "linux")]
+    ssh_config.append_args(&mut args);
+    if environment
+        .host_integrations
+        .contains(&HostIntegration::SshAgent)
+    {
+        for path in crate::ssh_known_hosts(&environment.home) {
+            let source = resolve_bwrap_path(&path);
+            if source.is_file() && view.visible(&path) && view.visible(&source) {
+                args.extend([
+                    os("--ro-bind"),
+                    source.into_os_string(),
+                    path.into_os_string(),
+                ]);
+            }
+        }
+    }
+    if let Some(sockets) = environment.gpg_client() {
+        super::gpg_client::append(&mut args, sockets, cwd_root, &view)?;
+    }
     for (_, socket, _) in environment.host_integration_bindings() {
-        append_bwrap_host_integration_mount_args(&mut args, &socket);
+        if view.visible(&resolve_bwrap_path(&socket)) {
+            append_bwrap_host_integration_mount_args(&mut args, &socket);
+        }
+    }
+    let aliases = &view.aliases;
+    for path in environment.host_integration_hidden_paths() {
+        for (path, source) in aliases.action_paths(&path, &environment.tmp_source) {
+            if source.exists() && view.visible(&path) {
+                append_bwrap_hidden_host_integration_args(&mut args, &path);
+            }
+        }
     }
     args.extend([
         os("--chdir"),
@@ -141,6 +184,13 @@ pub(crate) fn bwrap_process_plan_with_environment(
     for (name, value) in &environment.overrides {
         args.extend([os("--setenv"), name.clone(), value.clone()]);
     }
+    if let Some(sockets) = environment.gpg_client() {
+        args.extend([
+            os("--setenv"),
+            os("GNUPGHOME"),
+            sockets.home().as_os_str().to_owned(),
+        ]);
+    }
     args.extend([
         os("--unsetenv"),
         os("SSH_AUTH_SOCK"),
@@ -158,25 +208,25 @@ pub(crate) fn bwrap_process_plan_with_environment(
     args.push(os("--"));
     args.extend(intent.argv().iter().map(OsString::from));
 
-    BwrapProcessPlan {
+    Ok(BwrapProcessPlan {
         program: bwrap_program.as_os_str().to_owned(),
         args,
         cwd,
-    }
+        #[cfg(target_os = "linux")]
+        ssh_config,
+    })
 }
 
 fn append_bwrap_file_bind_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
-    append_bwrap_mount_parent_args(args, destination);
     args.extend([
         os("--ro-bind"),
         resolve_bwrap_path(source).as_os_str().to_owned(),
-        destination.as_os_str().to_owned(),
+        resolve_bwrap_path(destination).as_os_str().to_owned(),
     ]);
 }
 
 fn append_bwrap_hidden_host_integration_args(args: &mut Vec<OsString>, path: &Path) {
-    append_bwrap_mount_parent_args(args, path);
-    args.extend([os("--tmpfs"), path.as_os_str().to_owned()]);
+    crate::BwrapMaskKind::NonDirectory.append(args, path);
 }
 
 fn append_bwrap_host_integration_mount_args(args: &mut Vec<OsString>, socket: &Path) {
@@ -204,11 +254,17 @@ fn append_bwrap_host_integration_environment_args(
                 ]);
             }
         }
+        HostIntegration::GpgAgent => {
+            if let Some(home) = address {
+                args.extend([os("--setenv"), os("GNUPGHOME"), home.to_owned()]);
+            }
+        }
     }
 }
 
 fn append_bwrap_path_rule(args: &mut Vec<OsString>, path: &Path, access: PathAccess) {
-    append_bwrap_mount_parent_args(args, path);
+    let resolved = resolve_bwrap_path(path);
+    let path = resolved.as_path();
     match access {
         PathAccess::ReadOnly => args.extend([
             os("--ro-bind-try"),
@@ -221,12 +277,15 @@ fn append_bwrap_path_rule(args: &mut Vec<OsString>, path: &Path, access: PathAcc
             path.as_os_str().to_owned(),
         ]),
         PathAccess::Deny => {
+            append_bwrap_mount_parent_args(args, path);
             args.extend([os("--tmpfs"), path.as_os_str().to_owned()]);
         }
     }
 }
 
 fn append_bwrap_required_path_rule(args: &mut Vec<OsString>, path: &Path, access: PathAccess) {
+    let resolved = resolve_bwrap_path(path);
+    let path = resolved.as_path();
     append_bwrap_mount_parent_args(args, path);
     match access {
         PathAccess::ReadOnly => args.extend([

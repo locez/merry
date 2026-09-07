@@ -68,6 +68,14 @@ pub(super) fn build_plan(
         args.extend([os("--tmpfs"), home.clone()]);
     }
     args.extend([os("--perms"), os("0700"), os("--dir"), home.clone()]);
+    for directory in &host_integration_plan.private_directories {
+        args.extend([
+            os("--perms"),
+            os("0700"),
+            os("--dir"),
+            directory.as_os_str().to_owned(),
+        ]);
+    }
     let mut mounts = MountPlan::default();
     mounts.bind(
         &config_dir,
@@ -160,6 +168,13 @@ pub(super) fn build_plan(
             MountOrigin::Integration,
         );
     }
+    #[cfg(target_os = "linux")]
+    let ssh_config = mounts
+        .append_args_with_ssh_config(&mut args)
+        .map_err(Error::MountPlan)?;
+    #[cfg(target_os = "linux")]
+    ssh_config.append_args(&mut args);
+    #[cfg(not(target_os = "linux"))]
     mounts.append_args(&mut args).map_err(Error::MountPlan)?;
     args.extend([os("--chdir"), cwd.clone()]);
     args.extend([
@@ -212,6 +227,8 @@ pub(super) fn build_plan(
         program: bwrap.as_os_str().to_owned(),
         args,
         env: vec![(os("PATH"), path)],
+        #[cfg(target_os = "linux")]
+        ssh_config,
     })
 }
 
@@ -302,6 +319,9 @@ pub(super) fn exec_plan(plan: &Plan) -> io::Error {
     use std::os::unix::process::CommandExt;
 
     let mut command = std::process::Command::new(&plan.program);
+    if let Err(error) = plan.ssh_config.configure_command(&mut command) {
+        return io::Error::other(error);
+    }
     command.args(&plan.args).env_clear().envs(plan.env.clone());
     command.exec()
 }

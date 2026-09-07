@@ -238,7 +238,9 @@ fn bwrap_permissioned_factory_reuses_parent_path_grants_for_descendants() {
     }));
 
     let _ = factory.runner_for(&parent_request);
-    let descendant_runner = factory.build_runner(&descendant_read_write_request);
+    let descendant_runner = factory
+        .backend()
+        .build_runner(&descendant_read_write_request);
     let descendant_plan = descendant_runner
         .plan_for(request_process_intent(&descendant_read_write_request))
         .expect("covered descendant process plan should build");
@@ -307,7 +309,7 @@ fn bwrap_permissioned_factory_keeps_network_scoped_to_current_action() {
     }));
 
     let _ = factory.runner_for(&network_request);
-    let approved_runner = factory.build_runner(&network_request);
+    let approved_runner = factory.backend().build_runner(&network_request);
     let approved_plan = approved_runner
         .plan_for(request_process_intent(&network_request))
         .expect("approved network process plan should build");
@@ -359,7 +361,7 @@ fn bwrap_permissioned_factory_requires_git_write_per_action() {
     let _ = factory.runner_for(&parent_request);
     let _ = factory.runner_for(&git_request);
 
-    let current_git_runner = factory.build_runner(&git_request);
+    let current_git_runner = factory.backend().build_runner(&git_request);
     let current_git_plan = current_git_runner
         .plan_for(request_process_intent(&git_request))
         .expect("the reviewed git action should build");
@@ -508,11 +510,16 @@ fn bwrap_git_baseline_checks_only_workspace_and_requested_git_paths() {
 }
 
 #[test]
+#[cfg(unix)]
 fn bwrap_permissioned_factory_keeps_approved_host_integrations_for_later_actions() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("agent.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let socket_path = socket.to_str().unwrap();
     let mut environment =
         BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/tmp")
             .expect("environment layout should validate");
-    environment.ssh_agent_socket = Some(PathBuf::from("/run/user/1000/ssh-agent.sock"));
+    environment.ssh_agent_socket = Some(socket.clone());
     let session_permissions = BwrapSessionPermissions::new();
     let factory = BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
         .with_bwrap_program("/custom/bin/bwrap")
@@ -543,11 +550,7 @@ fn bwrap_permissioned_factory_keeps_approved_host_integrations_for_later_actions
 
     assert!(contains_sequence(
         &args,
-        &[
-            "--ro-bind",
-            "/run/user/1000/ssh-agent.sock",
-            "/run/user/1000/ssh-agent.sock"
-        ]
+        &["--ro-bind", socket_path, socket_path]
     ));
 }
 

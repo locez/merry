@@ -12,11 +12,19 @@ impl ProcessRunner for BwrapProcessRunner {
         intent: ProcessActionIntent,
         context: ProcessRunnerContext,
     ) -> ProcessRunnerFuture<'a> {
-        let plan = match self.plan_for(&intent) {
-            Ok(plan) => plan,
-            Err(error) => return Box::pin(async move { Err(error) }),
-        };
-        Box::pin(async move { run_process_plan(plan, intent, context).await })
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ProcessRunnerError::Cancelled);
+            }
+            let runner = self.clone();
+            let plan_intent = intent.clone();
+            let plan = tokio::task::spawn_blocking(move || runner.plan_for(&plan_intent))
+                .await
+                .map_err(|error| {
+                    ProcessRunnerError::infrastructure(format!("sandbox planning failed: {error}"))
+                })??;
+            run_process_plan(plan, intent, context).await
+        })
     }
 }
 async fn run_process_plan(
@@ -29,6 +37,8 @@ async fn run_process_plan(
     }
 
     let mut command = tokio::process::Command::new(&plan.program);
+    #[cfg(target_os = "linux")]
+    plan.ssh_config.configure_command(command.as_std_mut())?;
     command
         .args(&plan.args)
         .current_dir(&plan.cwd)

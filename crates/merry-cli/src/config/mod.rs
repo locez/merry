@@ -10,6 +10,7 @@ use thiserror::Error;
 
 pub(crate) mod managed_provider;
 mod mcp;
+mod path_review;
 mod paths;
 pub use paths::XdgPaths;
 use paths::{resolve_config_relative_path, resolve_path_access_rule_path, resolve_user_path};
@@ -53,6 +54,7 @@ pub enum ConfigError {
 pub struct MerryConfig {
     raw: MerryConfigToml,
     config_dir: PathBuf,
+    state_dir: PathBuf,
     home: PathBuf,
     managed_provider_aliases: BTreeSet<String>,
 }
@@ -94,6 +96,7 @@ impl MerryConfig {
         Ok(Some(Self {
             raw,
             config_dir: paths.config_dir().to_path_buf(),
+            state_dir: paths.state_dir().to_path_buf(),
             home: paths.home().to_path_buf(),
             managed_provider_aliases,
         }))
@@ -111,6 +114,7 @@ impl MerryConfig {
         Ok(Some(Self {
             raw,
             config_dir: paths.config_dir().to_path_buf(),
+            state_dir: paths.state_dir().to_path_buf(),
             home: paths.home().to_path_buf(),
             managed_provider_aliases: BTreeSet::new(),
         }))
@@ -155,11 +159,29 @@ impl MerryConfig {
             .unwrap_or_default()
     }
 
-    /// Returns user-configured path rules for the outer sandbox ceiling.
+    /// Resolves product-owned directories and credential files without reading secrets.
+    pub(crate) fn private_process_paths(&self) -> Result<Vec<PathBuf>, ConfigError> {
+        let mut paths = vec![self.config_dir.clone(), self.state_dir.clone()];
+        if let Some(providers) = &self.raw.providers {
+            for path in providers
+                .named
+                .values()
+                .filter_map(|provider| provider.api_key_file.as_deref())
+            {
+                paths.push(resolve_config_relative_path(
+                    path,
+                    &self.config_dir,
+                    &self.home,
+                )?);
+            }
+        }
+        Ok(paths)
+    }
+
+    /// Returns preauthorized path access and action-scoped review restrictions.
     ///
-    /// These rules do not become inner action grants automatically; an inner
-    /// process still needs an approved request for a path outside its default
-    /// development baseline.
+    /// Outer sandboxes enforce the access ceiling. Inner sandboxes withhold
+    /// only paths marked for review and product-owned private resources.
     pub fn trusted_global_path_rules(&self) -> Result<Vec<PathAccessRule>, ConfigError> {
         let Some(permissions) = self.raw.permissions.as_ref() else {
             return Ok(Vec::new());
@@ -197,6 +219,12 @@ impl MerryConfig {
                 PathAccessRuleSource::TrustedGlobalConfig,
             ));
         }
+        path_review::append_review_rules(
+            &mut rules,
+            &permissions.review_paths,
+            &self.config_dir,
+            &self.home,
+        )?;
         Ok(rules)
     }
 
@@ -213,6 +241,9 @@ impl MerryConfig {
         }
         if permissions.dbus.unwrap_or(false) {
             integrations.push(HostIntegration::SessionBus);
+        }
+        if permissions.gpg_agent.unwrap_or(false) {
+            integrations.push(HostIntegration::GpgAgent);
         }
         integrations
     }
@@ -369,6 +400,7 @@ struct GlobalToml {
 struct PermissionsToml {
     ssh_agent: Option<bool>,
     dbus: Option<bool>,
+    gpg_agent: Option<bool>,
     no_sandbox_review: Option<NoSandboxReviewToml>,
     #[serde(default)]
     readonly_paths: Vec<String>,
@@ -376,6 +408,8 @@ struct PermissionsToml {
     readwrite_paths: Vec<String>,
     #[serde(default)]
     deny_paths: Vec<String>,
+    #[serde(default)]
+    review_paths: Vec<String>,
     #[serde(default)]
     paths: Vec<PathRuleToml>,
     #[serde(default)]

@@ -76,7 +76,8 @@ fn bwrap_process_plan_applies_user_environment_overrides_after_defaults() {
         true,
         &[],
         Path::new("/custom/bin/bwrap"),
-    );
+    )
+    .expect("sandbox plan");
     let args = os_args(&plan.args);
 
     assert!(contains_sequence(
@@ -101,12 +102,21 @@ fn bwrap_process_plan_applies_user_environment_overrides_after_defaults() {
 }
 
 #[test]
+#[cfg(unix)]
 fn bwrap_process_plan_materializes_host_integrations_and_keeps_parent_environment() {
+    let fixture = tempfile::tempdir().unwrap();
+    let ssh = fixture.path().join("ssh.sock");
+    let bus = fixture.path().join("bus");
+    let _ssh_listener = std::os::unix::net::UnixListener::bind(&ssh).unwrap();
+    let _bus_listener = std::os::unix::net::UnixListener::bind(&bus).unwrap();
+    let ssh_path = ssh.to_str().unwrap();
+    let bus_path = bus.to_str().unwrap();
+    let address = format!("unix:path={bus_path}");
     let mut environment =
         BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/tmp")
             .expect("environment layout should validate");
-    environment.ssh_agent_socket = Some(PathBuf::from("/run/user/1000/ssh-agent.sock"));
-    environment.session_bus_address = Some(OsString::from("unix:path=/run/user/1000/bus"));
+    environment.ssh_agent_socket = Some(ssh.clone());
+    environment.session_bus_address = Some(OsString::from(&address));
     let environment = environment
         .with_host_integrations([HostIntegration::SshAgent, HostIntegration::SessionBus]);
     let plan = bwrap_process_plan_with_environment(
@@ -116,12 +126,13 @@ fn bwrap_process_plan_materializes_host_integrations_and_keeps_parent_environmen
         true,
         &[],
         Path::new("/custom/bin/bwrap"),
-    );
+    )
+    .expect("sandbox plan");
     let args = os_args(&plan.args);
 
     assert!(!args.iter().any(|arg| arg == "--clearenv"));
     assert!(contains_sequence(&args, &["--ro-bind", "/", "/"]));
-    assert!(contains_sequence(&args, &["--tmpfs", "/run/user/1000"]));
+    assert!(!contains_sequence(&args, &["--tmpfs", "/run/user/1000"]));
     assert!(contains_sequence(
         &args,
         &[
@@ -131,39 +142,29 @@ fn bwrap_process_plan_materializes_host_integrations_and_keeps_parent_environmen
             "DBUS_SESSION_BUS_ADDRESS"
         ]
     ));
+    assert!(contains_sequence(&args, &["--ro-bind", ssh_path, ssh_path]));
+    assert!(contains_sequence(&args, &["--ro-bind", bus_path, bus_path]));
     assert!(contains_sequence(
         &args,
-        &[
-            "--ro-bind",
-            "/run/user/1000/ssh-agent.sock",
-            "/run/user/1000/ssh-agent.sock"
-        ]
+        &["--setenv", "SSH_AUTH_SOCK", ssh_path]
     ));
     assert!(contains_sequence(
         &args,
-        &["--ro-bind", "/run/user/1000/bus", "/run/user/1000/bus"]
-    ));
-    assert!(contains_sequence(
-        &args,
-        &["--setenv", "SSH_AUTH_SOCK", "/run/user/1000/ssh-agent.sock"]
-    ));
-    assert!(contains_sequence(
-        &args,
-        &[
-            "--setenv",
-            "DBUS_SESSION_BUS_ADDRESS",
-            "unix:path=/run/user/1000/bus"
-        ]
+        &["--setenv", "DBUS_SESSION_BUS_ADDRESS", &address]
     ));
 }
 
 #[test]
+#[cfg(unix)]
 fn bwrap_process_plan_hides_unapproved_host_integrations() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("agent.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let socket_path = socket.to_str().unwrap();
     let mut environment =
         BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/tmp")
             .expect("environment layout should validate");
-    environment.ssh_agent_socket = Some(PathBuf::from("/run/user/1000/gnupg/S.gpg-agent.ssh"));
-    environment.session_bus_address = Some(OsString::from("unix:path=/run/user/1000/bus"));
+    environment.ssh_agent_socket = Some(socket.clone());
     let plan = bwrap_process_plan_with_environment(
         &intent(None),
         Path::new("/workspace/merry"),
@@ -171,25 +172,25 @@ fn bwrap_process_plan_hides_unapproved_host_integrations() {
         true,
         &[],
         Path::new("/custom/bin/bwrap"),
-    );
+    )
+    .expect("sandbox plan");
     let args = os_args(&plan.args);
 
-    assert!(contains_sequence(&args, &["--tmpfs", "/run/user/1000"]));
-    assert!(!contains_sequence(
+    assert!(contains_sequence(
         &args,
-        &[
-            "--ro-bind",
-            "/run/user/1000/gnupg/S.gpg-agent.ssh",
-            "/run/user/1000/gnupg/S.gpg-agent.ssh"
-        ]
+        &["--ro-bind", "/dev/null", socket_path]
     ));
     assert!(!contains_sequence(
         &args,
-        &[
-            "--setenv",
-            "SSH_AUTH_SOCK",
-            "/run/user/1000/gnupg/S.gpg-agent.ssh"
-        ]
+        &["--tmpfs", directory.path().to_str().unwrap()]
+    ));
+    assert!(!contains_sequence(
+        &args,
+        &["--ro-bind", socket_path, socket_path]
+    ));
+    assert!(!contains_sequence(
+        &args,
+        &["--setenv", "SSH_AUTH_SOCK", socket_path]
     ));
 }
 
@@ -206,7 +207,8 @@ fn bwrap_process_plan_preserves_action_tmp_when_host_socket_is_under_it() {
         true,
         &[],
         Path::new("/custom/bin/bwrap"),
-    );
+    )
+    .expect("sandbox plan");
     let args = os_args(&plan.args);
 
     assert_eq!(count_sequence(&args, &["--tmpfs", "/tmp"]), 1);
@@ -271,7 +273,8 @@ fn bwrap_process_plan_inherits_parent_filesystem_without_clearing_environment() 
         true,
         &[],
         Path::new("/custom/bin/bwrap"),
-    );
+    )
+    .expect("sandbox plan");
     let args = os_args(&plan.args);
 
     assert!(contains_sequence(&args, &["--ro-bind", "/", "/"]));
@@ -329,6 +332,9 @@ fn bwrap_process_plan_allows_network_when_configured() {
 
 #[test]
 fn bwrap_process_plan_applies_path_rules() {
+    let fixture = tempfile::tempdir().unwrap();
+    let denied = fixture.path().join("protected");
+    std::fs::create_dir(&denied).unwrap();
     let runner = BwrapProcessRunner::new_at_workspace_root("/workspace/merry").with_path_rules([
         PathAccessRule::new(
             PathBuf::from("/var/log"),
@@ -341,7 +347,7 @@ fn bwrap_process_plan_applies_path_rules() {
             PathAccessRuleSource::TrustedGlobalConfig,
         ),
         PathAccessRule::new(
-            PathBuf::from("/home/merry/.ssh"),
+            denied.clone(),
             PathAccess::Deny,
             PathAccessRuleSource::TrustedGlobalConfig,
         ),
@@ -363,12 +369,15 @@ fn bwrap_process_plan_applies_path_rules() {
         &args,
         &["--bind-try", "/cache", "/cache"]
     ));
-    assert!(contains_sequence(&args, &["--tmpfs", "/home/merry/.ssh"]));
+    assert!(contains_sequence(
+        &args,
+        &["--tmpfs", denied.to_str().unwrap()]
+    ));
 }
 
 #[cfg(unix)]
 #[test]
-fn bwrap_process_plan_mounts_symlinked_path_rules_at_logical_paths() {
+fn bwrap_process_plan_mounts_symlinked_path_rules_at_inherited_targets() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().expect("temporary path");
@@ -391,7 +400,8 @@ fn bwrap_process_plan_mounts_symlinked_path_rules_at_logical_paths() {
         true,
         &[rule],
         Path::new("/custom/bin/bwrap"),
-    );
+    )
+    .expect("sandbox plan");
     let args = os_args(&plan.args);
 
     assert!(contains_sequence(
@@ -399,7 +409,7 @@ fn bwrap_process_plan_mounts_symlinked_path_rules_at_logical_paths() {
         &[
             "--bind",
             real.to_str().expect("UTF-8 test path"),
-            link.to_str().expect("UTF-8 test path"),
+            real.to_str().expect("UTF-8 test path"),
         ],
     ));
 }

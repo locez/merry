@@ -5,7 +5,12 @@
 
 mod environment;
 mod execution;
+mod gpg_client;
+mod mount_aliases;
+mod path_view;
 mod permissions;
+mod restricted_mounts;
+mod review;
 mod sandbox;
 mod tokio_runner;
 

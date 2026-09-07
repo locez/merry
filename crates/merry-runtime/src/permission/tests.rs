@@ -40,7 +40,7 @@ fn permission_request_parses_named_host_integrations() {
     let request = permission_request_from_call(
         &call(json!({
             "requested": {
-                "host_integrations": ["dbus", "ssh-agent"]
+                "host_integrations": ["gpg-agent", "dbus", "ssh-agent"]
             },
             "for_action": { "command": "gh auth status", "cwd": null }
         })),
@@ -53,12 +53,13 @@ fn permission_request_parses_named_host_integrations() {
         &[
             RequestedCapability::HostIntegration(HostIntegration::SshAgent),
             RequestedCapability::HostIntegration(HostIntegration::SessionBus),
+            RequestedCapability::HostIntegration(HostIntegration::GpgAgent),
         ]
     );
     let serialized = requested_capabilities_json(request.requested());
     assert_eq!(
         serialized,
-        json!({ "host_integrations": ["ssh-agent", "dbus"] })
+        json!({ "host_integrations": ["ssh-agent", "dbus", "gpg-agent"] })
     );
 }
 

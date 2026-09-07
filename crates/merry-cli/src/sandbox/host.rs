@@ -19,26 +19,9 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::MetadataExt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostPathKind {
-    RegularFile,
-    UnixSocket,
-    Other,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HostPathMetadata {
-    pub(super) kind: HostPathKind,
-    pub(super) owner_uid: u32,
-}
-
-impl HostPathMetadata {
-    pub(crate) const fn new(kind: HostPathKind, owner_uid: u32) -> Self {
-        Self { kind, owner_uid }
-    }
-}
+pub(crate) use merry_process::{HostPathKind, HostPathMetadata};
 
 pub(crate) trait HostPathProbe {
     fn file_exists(&self, path: &Path) -> bool;
@@ -121,7 +104,7 @@ impl Host {
             .as_ref()
             .map(MerryConfig::host_integrations)
             .unwrap_or_default();
-        let development_environment = ["CARGO_HOME", "RUSTUP_HOME", "XDG_CACHE_HOME"]
+        let development_environment = ["CARGO_HOME", "RUSTUP_HOME", "XDG_CACHE_HOME", "GNUPGHOME"]
             .into_iter()
             .filter_map(|name| env::var_os(name).map(|value| (os(name), value)))
             .collect();
@@ -212,16 +195,7 @@ pub(super) struct MountInfoMount<'a> {
 
 #[cfg(target_os = "linux")]
 pub(super) fn filesystem_path_metadata(path: &Path) -> Option<HostPathMetadata> {
-    let metadata = fs::metadata(path).ok()?;
-    let file_type = metadata.file_type();
-    let kind = if file_type.is_socket() {
-        HostPathKind::UnixSocket
-    } else if file_type.is_file() {
-        HostPathKind::RegularFile
-    } else {
-        HostPathKind::Other
-    };
-    Some(HostPathMetadata::new(kind, metadata.uid()))
+    HostPathMetadata::inspect(path).ok()
 }
 
 #[cfg(not(target_os = "linux"))]

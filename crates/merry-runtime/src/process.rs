@@ -6,6 +6,7 @@
 
 mod classification;
 mod contracts;
+mod session_permissions;
 mod validation;
 
 pub use classification::{
@@ -20,6 +21,11 @@ pub use contracts::{
     ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
     ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
     StaticPermissionedProcessRunnerFactory,
+};
+pub use session_permissions::{
+    PreparedProcessPermission, ProcessPathGrant, ProcessPathGrantConstraint,
+    ProcessSessionPermissionSnapshot, ProcessSessionPermissionView, ProcessSessionPermissions,
+    SessionPermissionedProcessRunnerFactory,
 };
 pub use validation::ProcessActionError;
 

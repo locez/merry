@@ -63,6 +63,8 @@ pub enum PathAccessRuleSource {
     /// Rule exposed by trusted global configuration as an outer writable
     /// ceiling while the inner action baseline remains read-only.
     TrustedGlobalConfigWritableCeiling,
+    /// Product-owned configuration, credentials, and state unavailable to actions.
+    ProductPrivate,
     /// Automatically applied read-only protection for Git metadata paths.
     ///
     /// A reviewed action may temporarily overlay this rule for one process
@@ -78,6 +80,7 @@ pub struct PathAccessRule {
     path: PathBuf,
     access: PathAccess,
     source: PathAccessRuleSource,
+    review_required: bool,
 }
 
 impl PathAccessRule {
@@ -88,7 +91,23 @@ impl PathAccessRule {
             path: path.into(),
             access,
             source,
+            review_required: false,
         }
+    }
+
+    /// Requires a fresh approval before each action may use this path subtree.
+    ///
+    /// This restricts the declared access; it does not increase its ceiling.
+    #[must_use]
+    pub const fn with_review_required(mut self) -> Self {
+        self.review_required = true;
+        self
+    }
+
+    /// Returns whether this subtree is unavailable without action-scoped review.
+    #[must_use]
+    pub const fn review_required(&self) -> bool {
+        self.review_required
     }
 
     /// Returns the configured path.

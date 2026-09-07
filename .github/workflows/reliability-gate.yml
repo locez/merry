@@ -40,7 +40,7 @@ jobs:
       - name: Install shell and sandbox test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes bubblewrap ripgrep
+          sudo apt-get install --no-install-recommends --yes bubblewrap ripgrep gnupg openssh-client
 
       - name: Enable unprivileged sandbox namespaces
         run: |

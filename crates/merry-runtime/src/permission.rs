@@ -93,16 +93,18 @@ pub enum RequestedCapability {
     HostIntegration(HostIntegration),
 }
 
-/// Host-provided IPC integration that may be exposed to inner process actions.
+/// Host integration and supporting client files exposed to inner process actions.
 /// The outer sandbox remains the capability ceiling; an enabled integration can
 /// be forwarded to the inner action sandbox, while an explicit request can add
 /// one for a permissioned action when the backend supports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HostIntegration {
-    /// The user's SSH authentication agent socket.
+    /// The user's SSH authentication agent socket and read-only known-hosts files.
     SshAgent,
     /// The user's D-Bus session bus socket, commonly used by keyring clients.
     SessionBus,
+    /// The native GnuPG agent and read-only public-key client integration, separate from SSH.
+    GpgAgent,
 }
 
 impl HostIntegration {
@@ -112,6 +114,7 @@ impl HostIntegration {
         match self {
             Self::SshAgent => "ssh-agent",
             Self::SessionBus => "dbus",
+            Self::GpgAgent => "gpg-agent",
         }
     }
 }

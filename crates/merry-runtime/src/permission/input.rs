@@ -39,12 +39,12 @@ pub(crate) struct RequestedCapabilitiesInput {
     pub(crate) network: bool,
     #[serde(default)]
     #[schemars(
-        description = "Filesystem paths for a session-aware process backend to keep available in later process actions. Each item must specify one path and ro, rw, or deny access."
+        description = "Exact filesystem paths to authorize. Configured review_paths stay hidden until explicitly requested and are approved only for this action, as are Git metadata writes. Ordinary path grants may be retained by a session-aware backend. Each item specifies a path and ro, rw, or deny access; approval never overrides a configured read-only ceiling or denial."
     )]
     pub(crate) paths: Vec<RequestedPathInput>,
     #[serde(default)]
     #[schemars(
-        description = "Explicitly configured host IPC integrations. Supported values are ssh-agent and dbus; dbus means the D-Bus session bus commonly used by Secret Service/keyring clients."
+        description = "Explicitly configured host integrations: ssh-agent, dbus, or gpg-agent. SSH includes its agent and read-only known_hosts; GPG includes read-only public keys and its native agent, not the SSH socket. File sources still obey path restrictions; neither integration authorizes networking. dbus is the session bus used by keyring clients."
     )]
     pub(crate) host_integrations: Vec<String>,
 }
@@ -219,7 +219,7 @@ fn requested_capabilities_schema_json() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "description": "Capabilities to add for this exact action after approval. Use network for this action's network access, paths for filesystem paths, or host_integrations for explicitly configured SSH agent/D-Bus session access. A session-aware backend retains approved paths and host integrations for later actions, but network must be requested again for every action. Include every capability the same command needs in one request.",
+        "description": "Capabilities to add for this exact action after approval. Use network for network access, paths for filesystem paths, or host_integrations for SSH agent, native GPG agent, or D-Bus access. A session-aware backend may retain ordinary path and host-integration grants, but network, configured review_paths, and Git metadata writes require approval for every action. Include every capability the same command needs in one request.",
         "properties": {
             "network": {
                 "type": "boolean",
@@ -227,7 +227,7 @@ fn requested_capabilities_schema_json() -> Value {
             },
             "paths": {
                 "type": "array",
-                "description": "Filesystem paths for a session-aware process backend to keep available in later process actions. Each item must specify one path and ro, rw, or deny access.",
+                "description": "Exact filesystem paths to authorize. Configured review_paths stay hidden until explicitly requested and are approved only for this action, as are Git metadata writes. Ordinary path grants may be retained by a session-aware backend. Each item specifies a path and ro, rw, or deny access; approval never overrides a configured read-only ceiling or denial.",
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
@@ -248,10 +248,10 @@ fn requested_capabilities_schema_json() -> Value {
             },
             "host_integrations": {
                 "type": "array",
-                "description": "Explicitly configured host IPC integrations. Supported values are ssh-agent and dbus; dbus means the D-Bus session bus commonly used by Secret Service/keyring clients.",
+                "description": "Explicitly configured host integrations: ssh-agent, dbus, or gpg-agent. SSH includes its agent and read-only known_hosts; GPG includes read-only public keys and its native agent, not the SSH socket. File sources still obey path restrictions; neither integration authorizes networking. dbus is the session bus used by keyring clients.",
                 "items": {
                     "type": "string",
-                    "enum": ["ssh-agent", "dbus"]
+                    "enum": ["ssh-agent", "dbus", "gpg-agent"]
                 },
                 "minItems": 1
             }
@@ -401,8 +401,9 @@ fn parse_host_integration(value: &str) -> Result<HostIntegration, PermissionAdmi
     match value {
         "ssh-agent" => Ok(HostIntegration::SshAgent),
         "dbus" => Ok(HostIntegration::SessionBus),
+        "gpg-agent" => Ok(HostIntegration::GpgAgent),
         actual => Err(PermissionAdmissionError::InvalidArguments {
-            message: format!("host integration must be ssh-agent|dbus, got {actual:?}"),
+            message: format!("host integration must be ssh-agent|dbus|gpg-agent, got {actual:?}"),
         }),
     }
 }

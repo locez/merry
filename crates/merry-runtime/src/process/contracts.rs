@@ -241,11 +241,10 @@ pub trait ProcessRunner: Send + Sync {
 /// Factory for runners created from approved permission requests.
 ///
 /// Implementations translate a runtime-approved request into the concrete
-/// process backend/profile for that exact action. Backends may retain approved
-/// paths and host integrations in a session-scoped store so later actions in
-/// the same session can reuse them. Network access is action-scoped and must
-/// not be retained; backends must not grant authority beyond the capabilities
-/// approved by the runtime.
+/// process backend/profile for that exact action. Adapters consume read-only
+/// session snapshots; runtime owns retention and capability lifetimes through
+/// `SessionPermissionedProcessRunnerFactory`. An adapter never records grants
+/// or grants authority beyond the runtime-approved request.
 pub trait PermissionedProcessRunnerFactory: Send + Sync {
     /// Validates the request against the backend's hard capability policy.
     ///
@@ -272,8 +271,22 @@ pub trait PermissionedProcessRunnerFactory: Send + Sync {
         Ok(false)
     }
 
-    /// Creates the process runner for one approved permission request and
-    /// records only the session-scoped capabilities supported by the backend.
+    /// Prepares one validated action and its normalized path evidence without
+    /// changing permission state. Adapters can share a single filesystem view
+    /// across validation and materialization. The default retains no paths.
+    fn prepare_approved_request(
+        &self,
+        request: &PermissionRequest,
+    ) -> Result<super::PreparedProcessPermission, ProcessRunnerError> {
+        self.validate_request(request)?;
+        Ok(super::PreparedProcessPermission::new(
+            self.runner_for(request),
+            Vec::new(),
+        ))
+    }
+
+    /// Creates the process runner for one approved permission request, without
+    /// mutating session state. Runtime handles retention after successful preparation.
     fn runner_for(&self, request: &PermissionRequest) -> Arc<dyn ProcessRunner>;
 }
 

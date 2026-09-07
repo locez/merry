@@ -18,7 +18,7 @@ use crate::{
         HeadlessRunPersistence, headless_session_metadata, run_agent_loop_with_persistence,
     },
     runtime_config::{
-        action_process_backend_options, automatic_compaction_config, generation_config,
+        automatic_compaction_config, generation_config, prepared_action_process_backend_options,
         subagents_config,
     },
     sandbox::ChildHandoff as SandboxChildHandoff,
@@ -210,7 +210,7 @@ pub(crate) async fn run(
     let root = env::current_dir().map_err(unexpected)?;
     let backend = action_process_runner_for_mode(
         &root,
-        action_process_backend_options(merry_config).map_err(unexpected)?,
+        prepared_action_process_backend_options(merry_config, process_execution_mode).await?,
         process_execution_mode,
     )?;
     let headless_metadata = headless_session_metadata(&session_store, &session, &root).await?;

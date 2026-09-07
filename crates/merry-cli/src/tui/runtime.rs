@@ -12,7 +12,7 @@ use crate::provider_config::{
     runtime_provider_bundle_from_config_with_primary_override,
 };
 use crate::runtime_config::{
-    action_process_backend_options, automatic_compaction_config, main_reasoning_effort,
+    automatic_compaction_config, main_reasoning_effort, prepared_action_process_backend_options,
     subagents_config,
 };
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
@@ -101,7 +101,7 @@ pub(crate) async fn start_tui_runtime_session(
     metadata.reasoning_effort = reasoning_effort_label.clone();
     let backend = action_process_runner_for_mode(
         &workspace_root,
-        action_process_backend_options(merry_config).map_err(unexpected)?,
+        prepared_action_process_backend_options(merry_config, process_execution_mode).await?,
         process_execution_mode,
     )?;
     let (permission_source, permission_requests) = ChannelPermissionAdmissionSource::channel(8);

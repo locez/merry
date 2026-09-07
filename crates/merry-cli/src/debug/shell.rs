@@ -2,7 +2,7 @@ use crate::cli_error::{CliError, shell_usage_error, stdout_error, unexpected};
 use crate::coding::action_process_runner;
 use crate::config::MerryConfig;
 use crate::debug::{DEFAULT_SESSION_ID, ShellArgs};
-use crate::runtime_config::action_process_backend_options;
+use crate::runtime_config::prepared_action_process_backend_options;
 use crate::runtime_events::{
     collect_runtime_step_events, first_pending_tool_call, write_runtime_events,
     write_runtime_step_events_to,
@@ -69,7 +69,11 @@ pub(crate) async fn run(
         if admission.is_some() {
             action_process_runner(
                 &current_dir,
-                action_process_backend_options(merry_config).map_err(unexpected)?,
+                prepared_action_process_backend_options(
+                    merry_config,
+                    crate::coding::ProcessExecutionMode::OuterAndInner,
+                )
+                .await?,
             )?
             .new_session()
             .runner()

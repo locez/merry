@@ -129,6 +129,8 @@ pub(crate) struct Plan {
     pub(crate) program: OsString,
     pub(crate) args: Vec<OsString>,
     pub(crate) env: Vec<(OsString, OsString)>,
+    #[cfg(target_os = "linux")]
+    pub(crate) ssh_config: merry_process::BwrapSshConfigFiles,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +145,35 @@ pub(crate) fn maybe_reexec(
     clipboard_access: ClipboardAccess,
     args: Vec<OsString>,
 ) -> Result<(), Error> {
-    let host = Host::from_env(args)?;
+    let mut host = Host::from_env(args)?;
+    if with_sandbox
+        && !host.inside_sandbox
+        && host
+            .host_integrations
+            .contains(&merry_runtime::HostIntegration::GpgAgent)
+    {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(Error::AgentDiscoveryRuntime)?;
+        host.host_integration_environment.gpg_agent_sockets = runtime
+            .block_on(merry_process::GpgAgentSockets::discover(
+                host.xdg_paths.home(),
+                &[],
+            ))
+            .map_err(Error::AgentDiscovery)?;
+        if let Some(sockets) = &host.host_integration_environment.gpg_agent_sockets {
+            sockets
+                .validate_public_key_access()
+                .map_err(Error::AgentDiscovery)?;
+        } else {
+            return Err(Error::AgentDiscovery(
+                merry_runtime::ProcessRunnerError::infrastructure(
+                    "gpg_agent requires gpgconf in PATH for socket discovery",
+                ),
+            ));
+        }
+    }
     match plan_bootstrap(with_sandbox, clipboard_access, &host)? {
         Bootstrap::Disabled | Bootstrap::AlreadyInside => Ok(()),
         Bootstrap::Reexec(plan) => exec(plan),
@@ -271,6 +301,8 @@ pub(crate) enum Error {
     CurrentExe(io::Error),
     CurrentUser(io::Error),
     Config(config::ConfigError),
+    AgentDiscovery(merry_runtime::ProcessRunnerError),
+    AgentDiscoveryRuntime(io::Error),
     LogDirectory {
         path: PathBuf,
         source: io::Error,
@@ -305,6 +337,12 @@ pub(crate) enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Error::AgentDiscovery(error) => {
+                write!(formatter, "GPG agent discovery failed: {error}")
+            }
+            Error::AgentDiscoveryRuntime(error) => {
+                write!(formatter, "could not initialize GPG discovery: {error}")
+            }
             Error::CurrentDir(error) => write!(
                 formatter,
                 "failed to read current directory before sandbox bootstrap: {error}"

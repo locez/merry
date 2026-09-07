@@ -28,6 +28,7 @@ pub struct BwrapProcessEnvironment {
     pub(super) host_integrations: Vec<HostIntegration>,
     pub(super) ssh_agent_socket: Option<PathBuf>,
     pub(super) session_bus_address: Option<OsString>,
+    pub(super) gpg_agent_sockets: Option<crate::GpgAgentSockets>,
 }
 
 impl BwrapProcessEnvironment {
@@ -51,6 +52,7 @@ impl BwrapProcessEnvironment {
             host_integrations: Vec::new(),
             ssh_agent_socket: env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
             session_bus_address: env::var_os("DBUS_SESSION_BUS_ADDRESS"),
+            gpg_agent_sockets: None,
         }
     }
 
@@ -79,6 +81,7 @@ impl BwrapProcessEnvironment {
             host_integrations: Vec::new(),
             ssh_agent_socket: env::var_os("SSH_AUTH_SOCK").map(PathBuf::from),
             session_bus_address: env::var_os("DBUS_SESSION_BUS_ADDRESS"),
+            gpg_agent_sockets: None,
         })
     }
 
@@ -100,6 +103,30 @@ impl BwrapProcessEnvironment {
             validated.push((name, value));
         }
         self.overrides = validated;
+        Ok(self)
+    }
+
+    /// Installs discovered GnuPG sockets without granting access to them.
+    #[must_use]
+    pub fn with_gpg_agent_sockets(mut self, sockets: crate::GpgAgentSockets) -> Self {
+        self.gpg_agent_sockets = Some(sockets);
+        self
+    }
+
+    pub(super) fn gpg_client(&self) -> Option<&crate::GpgAgentSockets> {
+        self.gpg_agent_sockets
+            .as_ref()
+            .filter(|_| self.host_integrations.contains(&HostIntegration::GpgAgent))
+    }
+
+    /// Selects a validated SSH socket path without granting access to it.
+    pub fn with_ssh_agent_socket(
+        mut self,
+        path: impl Into<PathBuf>,
+    ) -> Result<Self, ProcessRunnerError> {
+        let path = path.into();
+        validate_clean_absolute_path(&path, "SSH agent socket")?;
+        self.ssh_agent_socket = Some(path);
         Ok(self)
     }
 
@@ -174,6 +201,7 @@ impl BwrapProcessEnvironment {
                     .as_ref()
                     .and_then(|address| session_bus_socket_path(address))
                     .is_some_and(|path| is_clean_absolute_path(&path)),
+                HostIntegration::GpgAgent => self.gpg_agent_sockets.is_some(),
             };
             if !available {
                 return Err(ProcessRunnerError::infrastructure(format!(
@@ -181,6 +209,13 @@ impl BwrapProcessEnvironment {
                     integration.as_str()
                 )));
             }
+        }
+        for (_, socket, _) in self
+            .host_integration_candidates()
+            .into_iter()
+            .filter(|(integration, _, _)| integrations.contains(integration))
+        {
+            validate_host_socket(&socket)?;
         }
         Ok(())
     }
@@ -204,24 +239,33 @@ impl BwrapProcessEnvironment {
         {
             candidates.push((HostIntegration::SessionBus, socket, Some(address.clone())));
         }
+        if let Some(sockets) = &self.gpg_agent_sockets {
+            candidates.push((
+                HostIntegration::GpgAgent,
+                sockets.agent().to_path_buf(),
+                Some(sockets.home().as_os_str().to_owned()),
+            ));
+        }
         candidates
     }
 
     pub(super) fn host_integration_hidden_paths(&self) -> Vec<PathBuf> {
-        let mut hidden = Vec::new();
-        for (_, socket, _) in self.host_integration_candidates() {
-            let Some(parent) = socket.parent() else {
-                continue;
-            };
-            if parent.starts_with(&self.tmp_source) || self.tmp_source.starts_with(parent) {
-                continue;
-            }
-            if hidden.iter().any(|path: &PathBuf| parent.starts_with(path)) {
-                continue;
-            }
-            hidden.retain(|path| !path.starts_with(parent));
-            hidden.push(parent.to_path_buf());
+        let allowed = self
+            .host_integration_bindings()
+            .into_iter()
+            .map(|(_, path, _)| crate::resolve_bwrap_path(&path))
+            .collect::<Vec<_>>();
+        let mut hidden = self
+            .host_integration_candidates()
+            .into_iter()
+            .map(|(_, path, _)| path)
+            .collect::<Vec<_>>();
+        if let Some(sockets) = &self.gpg_agent_sockets {
+            hidden.extend(sockets.paths().map(Path::to_path_buf));
         }
+        hidden.retain(|path| !allowed.contains(&crate::resolve_bwrap_path(path)));
+        hidden.sort();
+        hidden.dedup();
         hidden
     }
 
@@ -230,9 +274,36 @@ impl BwrapProcessEnvironment {
     ) -> Vec<(HostIntegration, PathBuf, Option<OsString>)> {
         self.host_integration_candidates()
             .into_iter()
-            .filter(|(integration, _, _)| self.host_integrations.contains(integration))
+            .filter(|(integration, socket, _)| {
+                self.host_integrations.contains(integration) && validate_host_socket(socket).is_ok()
+            })
             .collect()
     }
+}
+
+fn validate_host_socket(path: &Path) -> Result<(), ProcessRunnerError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = crate::HostPathMetadata::inspect(path).map_err(|error| {
+            ProcessRunnerError::infrastructure(format!(
+                "host integration socket `{}` is unavailable: {error}",
+                path.display()
+            ))
+        })?;
+        let owner = fs::metadata("/proc/self").map_err(|error| {
+            ProcessRunnerError::infrastructure(format!(
+                "cannot validate host integration owner: {error}"
+            ))
+        })?;
+        if !metadata.is_owned_socket(owner.uid()) {
+            return Err(ProcessRunnerError::infrastructure(format!(
+                "host integration `{}` must be a socket owned by the current user",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn validate_os_string(value: &OsStr, label: &str) -> Result<(), ProcessRunnerError> {
