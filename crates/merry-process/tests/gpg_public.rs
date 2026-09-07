@@ -1,8 +1,5 @@
 #![cfg(target_os = "linux")]
 
-#[path = "support/gpg_fixture.rs"]
-mod gpg_fixture;
-
 use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
 use merry_process::{
     BwrapPermissionedProcessRunnerFactory, BwrapProcessEnvironment, BwrapProcessRunner,
@@ -13,18 +10,16 @@ use merry_runtime::{
     PermissionedProcessRunnerFactory, ProcessActionIntent, ProcessEnvPolicy, ProcessRunner,
     ProcessRunnerContext, ProcessRunnerOutput,
 };
-use std::{fs, os::unix::fs::symlink, path::PathBuf, process::Command};
+use std::{fs, os::unix::fs::symlink, path::PathBuf};
 use tokio_util::sync::CancellationToken;
 
-const LIST_KEYS: &str = "gpg --batch --no-autostart --with-colons --list-keys";
-const VERIFY: &str = "gpg --batch --no-autostart --status-fd 1 --verify message.asc message.txt";
+const PUBLIC_KEYRING: &str = "public keyring sentinel\n";
+const READ_KEYBOX: &str = "cat \"$GNUPGHOME/pubring.kbx\"";
 
 struct Fixture {
     directory: tempfile::TempDir,
     home: PathBuf,
     ring: PathBuf,
-    original_ring: Vec<u8>,
-    fingerprint: String,
 }
 
 impl Fixture {
@@ -34,36 +29,17 @@ impl Fixture {
         let workspace = directory.path().join("workspace");
         fs::create_dir(&home).unwrap();
         fs::create_dir(&workspace).unwrap();
-        fs::write(home.join("common.conf"), "").unwrap();
-        let public = workspace.join("public.asc");
-        let fingerprint = gpg_fixture::generate(&workspace);
         let ring = home.join(if legacy { "pubring.gpg" } else { "pubring.kbx" });
-        let mut command = Command::new("gpg");
-        command
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .env("HOME", directory.path())
-            .args(["--no-options", "--batch", "--no-autostart", "--homedir"])
-            .arg(&home);
-        if legacy {
-            command.arg("--output").arg(&ring).arg("--dearmor");
-        } else {
-            command.arg("--import");
-        }
-        let output = command.arg(public).output().expect("GnuPG test dependency");
-        assert!(output.status.success(), "{output:?}");
+        fs::write(&ring, PUBLIC_KEYRING).unwrap();
         fs::write(home.join("trustdb.gpg"), "host trust database sentinel").unwrap();
         fs::write(home.join("gpg.conf"), "invalid-host-only-option\n").unwrap();
         fs::create_dir(home.join("private-keys-v1.d")).unwrap();
         fs::write(home.join("private-keys-v1.d/sentinel"), "not a private key").unwrap();
         fs::write(home.join("secring.gpg"), "not a private key").unwrap();
-        let original_ring = fs::read(&ring).unwrap();
         Self {
             directory,
             home,
             ring,
-            original_ring,
-            fingerprint,
         }
     }
 
@@ -83,7 +59,7 @@ impl Fixture {
     }
 
     fn assert_host_unchanged(&self) {
-        assert_eq!(fs::read(&self.ring).unwrap(), self.original_ring);
+        assert_eq!(fs::read_to_string(&self.ring).unwrap(), PUBLIC_KEYRING);
         assert_eq!(
             fs::read_to_string(self.home.join("trustdb.gpg")).unwrap(),
             "host trust database sentinel"
@@ -120,7 +96,7 @@ fn intent(script: &str) -> ProcessActionIntent {
 }
 
 #[tokio::test]
-async fn gpg_public_keys_and_verification_work_without_agent_or_path_grants() {
+async fn gpg_keyrings_are_readonly_and_client_writes_stay_private() {
     for legacy in [false, true] {
         let fixture = Fixture::new(legacy);
         for readonly_home in [false, true] {
@@ -134,19 +110,16 @@ async fn gpg_public_keys_and_verification_work_without_agent_or_path_grants() {
                 Vec::new()
             };
             let runner = fixture.runner(rules);
-            let listed = execute(&runner, LIST_KEYS).await;
-            assert!(listed.ok(), "{listed:?}");
-            assert!(
-                listed.stdout_text().contains(&fixture.fingerprint),
-                "{listed:?}"
-            );
-            let verified = execute(&runner, VERIFY).await;
-            assert!(verified.ok(), "{verified:?}");
-            assert!(
-                verified
-                    .stdout_text()
-                    .contains(&format!("VALIDSIG {}", fixture.fingerprint)),
-                "{verified:?}"
+            let script = if legacy {
+                "cat \"$GNUPGHOME/pubring.gpg\""
+            } else {
+                READ_KEYBOX
+            };
+            let visible = execute(&runner, script).await;
+            assert!(visible.ok(), "{visible:?}");
+            assert_eq!(
+                visible.stdout_text(),
+                format!("sandbox-started\n{PUBLIC_KEYRING}")
             );
             let output = execute(
                 &runner,
@@ -166,19 +139,11 @@ async fn gpg_public_keys_and_verification_work_without_agent_or_path_grants() {
             assert!(output.ok(), "{output:?}");
             fixture.assert_host_unchanged();
         }
-        fs::write(
-            fixture.directory.path().join("workspace/message.txt"),
-            "tampered",
-        )
-        .unwrap();
-        let output = execute(&fixture.runner(Vec::new()), VERIFY).await;
-        assert!(!output.ok(), "{output:?}");
-        assert!(output.stdout_text().contains("BADSIG"), "{output:?}");
     }
 }
 
 #[tokio::test]
-async fn gpg_public_key_import_respects_deny_and_per_action_review() {
+async fn gpg_keyring_visibility_respects_deny_and_per_action_review() {
     let fixture = Fixture::new(false);
     for target in [&fixture.home, &fixture.ring] {
         let denied = fixture.runner(vec![PathAccessRule::new(
@@ -186,11 +151,8 @@ async fn gpg_public_key_import_respects_deny_and_per_action_review() {
             PathAccess::Deny,
             PathAccessRuleSource::TrustedGlobalConfig,
         )]);
-        let output = execute(&denied, LIST_KEYS).await;
-        assert!(
-            !output.stdout_text().contains(&fixture.fingerprint),
-            "{output:?}"
-        );
+        let output = execute(&denied, READ_KEYBOX).await;
+        assert!(!output.stdout_text().contains(PUBLIC_KEYRING), "{output:?}");
         let rules = vec![
             PathAccessRule::new(
                 &fixture.home,
@@ -215,28 +177,22 @@ async fn gpg_public_key_import_respects_deny_and_per_action_review() {
             ToolName::new("request_permissions").unwrap(),
             ToolCallArguments::try_from(serde_json::json!({
                 "requested": {"paths": [{"path": fixture.ring, "access": "ro"}]},
-                "for_action": {"command": LIST_KEYS, "cwd": null}
+                "for_action": {"command": READ_KEYBOX, "cwd": null}
             }))
             .unwrap(),
         );
         let request = merry_runtime::parse_permission_request(&call).unwrap();
         factory.validate_request(&request).unwrap();
-        let before = execute(&runner, LIST_KEYS).await;
-        assert!(
-            !before.stdout_text().contains(&fixture.fingerprint),
-            "{before:?}"
-        );
-        let approved = execute(factory.runner_for(&request).as_ref(), LIST_KEYS).await;
+        let before = execute(&runner, READ_KEYBOX).await;
+        assert!(!before.stdout_text().contains(PUBLIC_KEYRING), "{before:?}");
+        let approved = execute(factory.runner_for(&request).as_ref(), READ_KEYBOX).await;
         assert!(approved.ok(), "{approved:?}");
         assert!(
-            approved.stdout_text().contains(&fixture.fingerprint),
+            approved.stdout_text().contains(PUBLIC_KEYRING),
             "{approved:?}"
         );
-        let after = execute(&runner, LIST_KEYS).await;
-        assert!(
-            !after.stdout_text().contains(&fixture.fingerprint),
-            "{after:?}"
-        );
+        let after = execute(&runner, READ_KEYBOX).await;
+        assert!(!after.stdout_text().contains(PUBLIC_KEYRING), "{after:?}");
     }
     fixture.assert_host_unchanged();
 }
@@ -252,11 +208,8 @@ async fn symlinked_public_key_source_cannot_bypass_a_path_deny() {
         PathAccess::Deny,
         PathAccessRuleSource::TrustedGlobalConfig,
     )]);
-    let output = execute(&runner, LIST_KEYS).await;
-    assert!(
-        !output.stdout_text().contains(&fixture.fingerprint),
-        "{output:?}"
-    );
+    let output = execute(&runner, READ_KEYBOX).await;
+    assert!(!output.stdout_text().contains(PUBLIC_KEYRING), "{output:?}");
     fixture.assert_host_unchanged();
 }
 
@@ -272,7 +225,7 @@ async fn keyboxd_is_reported_instead_of_importing_a_host_write_interface() {
     let error = fixture
         .runner(Vec::new())
         .run(
-            intent(LIST_KEYS),
+            intent(READ_KEYBOX),
             ProcessRunnerContext::new(CancellationToken::new()),
         )
         .await

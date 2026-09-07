@@ -5,21 +5,20 @@ use crate::{
     runtime_config::prepared_action_process_backend_options,
     sandbox::{Bootstrap, ClipboardAccess, host::current_process_uid, os, plan_bootstrap},
 };
+use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
 use merry_process::{GpgAgentSockets, LocalProcessBackend, ProcessBackend, ProcessBackendMode};
 use merry_runtime::{
-    HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource, ProcessActionIntent,
-    ProcessEnvPolicy, ProcessRunnerContext,
+    HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource, PermissionedAction,
+    ProcessRunnerContext, parse_permission_request,
 };
-use std::{env, ffi::OsStr, fs, process::Command};
+use std::{env, ffi::OsStr, fs, os::unix::net::UnixListener, process::Command};
 use tokio_util::sync::CancellationToken;
 
-#[path = "../../../../merry-process/tests/support/gpg_fixture.rs"]
-mod gpg_fixture;
-
 const CHILD_ENV: &str = "MERRY_GPG_PUBLIC_TEST_CHILD";
+const PUBLIC_IDENTITY: &str = "Merry Sandbox Fixture <fixture@example.invalid>";
 
 #[test]
-fn gpg_agent_config_provides_public_keys_through_outer_and_inner_sandboxes() {
+fn gpg_agent_config_requires_review_through_both_sandboxes() {
     if env::var_os(CHILD_ENV).as_deref() == Some(OsStr::new("1")) {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -38,19 +37,10 @@ fn gpg_agent_config_provides_public_keys_through_outer_and_inner_sandboxes() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&keyring).unwrap();
     fs::create_dir(&workspace).unwrap();
-    gpg_fixture::generate(&workspace);
-    fs::write(keyring.join("common.conf"), "").unwrap();
-    let prepared = Command::new("gpg")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", &home)
-        .args(["--no-options", "--batch", "--no-autostart", "--homedir"])
-        .arg(&keyring)
-        .arg("--import")
-        .arg(workspace.join("public.asc"))
-        .output()
-        .expect("GnuPG test dependency");
-    assert!(prepared.status.success(), "{prepared:?}");
+    let agent = keyring.join("S.gpg-agent");
+    let _agent = UnixListener::bind(&agent).unwrap();
+    let original = public_keybox();
+    fs::write(keyring.join("pubring.kbx"), &original).unwrap();
     fs::write(keyring.join("trustdb.gpg"), "host trust database sentinel").unwrap();
     fs::write(keyring.join("gpg.conf"), "invalid-host-only-option\n").unwrap();
     fs::create_dir(keyring.join("private-keys-v1.d")).unwrap();
@@ -59,8 +49,6 @@ fn gpg_agent_config_provides_public_keys_through_outer_and_inner_sandboxes() {
         "not a private key",
     )
     .unwrap();
-    let original = fs::read(keyring.join("pubring.kbx")).unwrap();
-
     let mut host = sandbox_host();
     host.cwd = workspace;
     host.current_exe = env::current_exe().unwrap();
@@ -80,7 +68,7 @@ fn gpg_agent_config_provides_public_keys_through_outer_and_inner_sandboxes() {
     host.host_integrations = config.host_integrations();
     assert_eq!(host.host_integrations, vec![HostIntegration::GpgAgent]);
     host.host_integration_environment.gpg_agent_sockets =
-        Some(GpgAgentSockets::new(&keyring, keyring.join("S.gpg-agent")).unwrap());
+        Some(GpgAgentSockets::new(&keyring, agent).unwrap());
     host.trusted_path_rules = vec![PathAccessRule::new(
         &host.current_exe,
         PathAccess::ReadOnly,
@@ -103,7 +91,7 @@ fn gpg_agent_config_provides_public_keys_through_outer_and_inner_sandboxes() {
         os("1"),
         host.current_exe.into_os_string(),
         os("--exact"),
-        os("sandbox::tests::gpg_public::gpg_agent_config_provides_public_keys_through_outer_and_inner_sandboxes"),
+        os("sandbox::tests::gpg_public::gpg_agent_config_requires_review_through_both_sandboxes"),
         os("--nocapture"),
     ]);
     let output = Command::new(plan.program)
@@ -126,8 +114,6 @@ fn gpg_agent_config_provides_public_keys_through_outer_and_inner_sandboxes() {
 }
 
 async fn assert_public_key_client() {
-    let fingerprint = fs::read_to_string("fingerprint.txt").unwrap();
-    let fingerprint = fingerprint.trim();
     let paths = XdgPaths::from_env().unwrap();
     let keyring = paths.home().join(".gnupg");
     assert!(keyring.join("pubring.kbx").is_file());
@@ -145,32 +131,119 @@ async fn assert_public_key_client() {
         options,
     )
     .unwrap();
-    let runner = backend.new_session().runner();
-    for (script, evidence) in [
-        (
-            "gpg --batch --no-autostart --with-colons --list-keys",
-            fingerprint.to_owned(),
-        ),
-        (
-            "gpg --batch --no-autostart --status-fd 1 --verify message.asc message.txt",
-            format!("VALIDSIG {fingerprint}"),
-        ),
-    ] {
-        let intent = ProcessActionIntent::new(
-            vec!["/bin/sh".into(), "-eu".into(), "-c".into(), script.into()],
-            None,
-            ProcessEnvPolicy::empty(),
-            None,
-            16384,
-            16384,
+    let session = backend.new_session();
+    let request = parse_permission_request(&PendingToolCall::new(
+        ToolCallId::new("gpg-public-review").unwrap(),
+        ToolName::new("request_permissions").unwrap(),
+        ToolCallArguments::try_from(serde_json::json!({
+            "requested": {"host_integrations": ["gpg-agent"]},
+            "for_action": {"command": "gpg --batch --no-autostart --with-colons --list-keys", "cwd": null}
+        }))
+        .unwrap(),
+    ))
+    .unwrap();
+    let PermissionedAction::Process(intent) = request.action();
+    let factory = session.permissioned_factory();
+    assert!(
+        !factory
+            .request_capabilities_are_satisfied(&request)
+            .unwrap()
+    );
+    let before = session
+        .runner()
+        .run(
+            intent.clone(),
+            ProcessRunnerContext::new(CancellationToken::new()),
         )
+        .await
         .unwrap();
-        let output = runner
-            .run(intent, ProcessRunnerContext::new(CancellationToken::new()))
-            .await
-            .unwrap();
-        assert!(output.ok(), "{output:?}");
-        assert!(output.stdout_text().contains(&evidence), "{output:?}");
-    }
+    assert!(
+        !before.stdout_text().contains(PUBLIC_IDENTITY),
+        "{before:?}"
+    );
+    factory.validate_request(&request).unwrap();
+    let output = factory
+        .runner_for(&request)
+        .run(
+            intent.clone(),
+            ProcessRunnerContext::new(CancellationToken::new()),
+        )
+        .await
+        .unwrap();
+    assert!(output.ok(), "{output:?}");
+    assert!(output.stdout_text().contains(PUBLIC_IDENTITY), "{output:?}");
     assert!(!keyring.join("trustdb.gpg").exists());
+    assert!(
+        !backend
+            .new_session()
+            .permissioned_factory()
+            .request_capabilities_are_satisfied(&request)
+            .unwrap()
+    );
+}
+
+/// Returns only an anonymous public keybox; private keys stay on disposable tmpfs.
+fn public_keybox() -> Vec<u8> {
+    let script = r#"
+        mkdir -m 700 "$GNUPGHOME"
+        gpg --no-options --batch --pinentry-mode loopback --passphrase '' \
+            --quick-generate-key "$MERRY_GPG_TEST_IDENTITY" ed25519 sign 0
+        cat "$GNUPGHOME/pubring.kbx"
+    "#;
+    let output = Command::new("timeout")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .args([
+            "--kill-after=2s",
+            "20s",
+            "bwrap",
+            "--unshare-all",
+            "--die-with-parent",
+            "--new-session",
+            "--ro-bind",
+            "/",
+            "/",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--tmpfs",
+            "/run",
+            "--tmpfs",
+            "/etc",
+            "--ro-bind-try",
+            "/etc/ld.so.cache",
+            "/etc/ld.so.cache",
+            "--tmpfs",
+            "/home",
+            "--tmpfs",
+            "/root",
+            "--clearenv",
+            "--setenv",
+            "PATH",
+            "/usr/bin:/bin",
+            "--setenv",
+            "HOME",
+            "/tmp",
+            "--setenv",
+            "GNUPGHOME",
+            "/tmp/fixture-keyring",
+            "--setenv",
+            "MERRY_GPG_TEST_IDENTITY",
+            PUBLIC_IDENTITY,
+            "--",
+            "/bin/sh",
+            "-eu",
+            "-c",
+            script,
+        ])
+        .output()
+        .expect("isolated GnuPG test dependency");
+    assert!(
+        output.status.success(),
+        "public keybox generation failed: {output:?}"
+    );
+    output.stdout
 }

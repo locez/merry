@@ -271,14 +271,19 @@ preflight, before any action starts. Create the configured target first or prote
 an existing ancestor. Merry never creates host paths to install these masks;
 optional, absent development mounts remain skippable.
 
-`ssh_agent`, `gpg_agent`, and `dbus` are independent preauthorizations for
-available, user-owned sockets. A missing agent does not prevent ordinary actions
+`ssh_agent`, `gpg_agent`, and `dbus` independently enable outer-sandbox forwarding;
+they do not preauthorize inner actions. An inner action must request the matching
+host-integration capability and receive runtime approval before using the forwarded
+socket or automatically imported client files. Explicit trusted path rules may
+separately expose regular files, but do not approve protected agent sockets.
+A missing agent does not prevent ordinary actions
 from starting; explicitly requesting an unavailable endpoint reports an error. Native GPG
 socket discovery uses `gpgconf --list-dirs` and honors `GNUPGHOME`; it does not
 assume sockets live in `.gnupg` or `/run`. Outer scaffolding preserves private
 socket-directory permissions without importing their other contents.
 
-`ssh_agent = true` also exposes `~/.ssh/known_hosts` and `known_hosts2` read-only,
+After approval, the SSH integration also exposes `~/.ssh/known_hosts` and
+`known_hosts2` read-only to inner actions,
 without granting access to private keys, `~/.ssh/config`, or the network. These
 files still obey `deny_paths` and `review_paths`; an explicit deny of the entire
 `.ssh` directory blocks them as well. Existing host identities can be checked,
@@ -313,11 +318,14 @@ Runtime owns the session capability store and retention decisions. Process adapt
 consume read-only snapshots and report normalized path constraints; they do not
 record grants. Each preparation captures a fresh mount-alias view, shared by path
 review, masking, and client-resource discovery, rather than caching the filesystem
-for an entire session.
+for an entire session. Approved host integrations may be retained within that
+session; configuration flags alone never create a runtime grant. Separately
+reviewed paths still require per-action approval.
 
-`gpg_agent = true` also imports the conventional public-key stores
-(`pubring.kbx` and legacy `pubring.gpg`) read-only, without additional
-`readonly_paths`. Each inner action gets a private, temporary `GNUPGHOME` view
+`gpg_agent = true` makes the conventional public-key stores available for reviewed
+use. After GPG integration approval, inner actions import `pubring.kbx` and legacy
+`pubring.gpg` read-only, without additional `readonly_paths`. Each approved inner
+action gets a private, temporary `GNUPGHOME` view
 at the original path for locks and a fresh trust database. These client writes
 never modify the host keyring, even when the host directory is declared read-only.
 Host private-key files, configuration, and trust state are not automatically

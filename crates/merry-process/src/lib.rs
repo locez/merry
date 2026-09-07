@@ -158,7 +158,7 @@ pub trait ProcessBackend: Send + Sync {
 pub struct ProcessBackendOptions {
     /// Trusted filesystem rules installed for isolated actions.
     path_rules: Vec<PathAccessRule>,
-    /// Named host integrations available to sandboxed actions.
+    /// Host integrations already approved by the embedding application.
     host_integrations: Vec<HostIntegration>,
     gpg_agent_sockets: Option<GpgAgentSockets>,
     /// Environment assignments validated and applied by the host backend.
@@ -179,7 +179,8 @@ impl ProcessBackendOptions {
         self
     }
 
-    /// Sets named host integrations available to sandboxed actions.
+    /// Sets host integrations already approved by the embedding application.
+    /// Availability or outer-sandbox forwarding alone is not an approval.
     #[must_use]
     pub fn with_host_integrations(
         mut self,
@@ -212,7 +213,7 @@ impl ProcessBackendOptions {
         &self.path_rules
     }
 
-    /// Returns the named host integrations available to sandboxed actions.
+    /// Returns host integrations already approved by the embedding application.
     #[must_use]
     pub fn host_integrations(&self) -> &[HostIntegration] {
         &self.host_integrations

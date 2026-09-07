@@ -113,9 +113,6 @@ pub(crate) fn action_process_backend_options(
     path_rules.extend(private_paths.into_iter().map(|path| {
         PathAccessRule::new(path, PathAccess::Deny, PathAccessRuleSource::ProductPrivate)
     }));
-    let host_integrations = config
-        .map(MerryConfig::host_integrations)
-        .unwrap_or_default();
     let environment_overrides: Vec<(OsString, OsString)> = config
         .map(MerryConfig::process_environment_overrides)
         .transpose()?
@@ -125,7 +122,6 @@ pub(crate) fn action_process_backend_options(
         .collect();
     Ok(ActionProcessBackendOptions::new()
         .with_path_rules(path_rules)
-        .with_host_integrations(host_integrations)
         .with_environment_overrides(environment_overrides))
 }
 
@@ -149,27 +145,24 @@ pub(crate) async fn prepared_action_process_backend_options(
     let home = config
         .map(MerryConfig::home)
         .unwrap_or_else(|| paths.home());
+    let gpg_enabled = config.is_some_and(|config| {
+        config
+            .host_integrations()
+            .contains(&merry_runtime::HostIntegration::GpgAgent)
+    });
     match merry_process::GpgAgentSockets::discover(home, options.environment_overrides())
         .await
         .map_err(unexpected)?
     {
         Some(sockets) => {
-            if options
-                .host_integrations()
-                .contains(&merry_runtime::HostIntegration::GpgAgent)
-            {
+            if gpg_enabled {
                 sockets.validate_public_key_access().map_err(unexpected)?;
             }
             Ok(options.with_gpg_agent_sockets(sockets))
         }
-        None if options
-            .host_integrations()
-            .contains(&merry_runtime::HostIntegration::GpgAgent) =>
-        {
-            Err(unexpected(
-                "gpg_agent requires gpgconf in PATH for socket discovery",
-            ))
-        }
+        None if gpg_enabled => Err(unexpected(
+            "gpg_agent requires gpgconf in PATH for socket discovery",
+        )),
         None => Ok(options),
     }
 }
@@ -189,6 +182,20 @@ mod tests {
     };
     use merry_runtime::{PathAccessRuleSource, RuntimeModelRole, StepContext, StepInput};
     use std::{fs, path::PathBuf, sync::Arc};
+
+    #[test]
+    fn configured_host_integrations_do_not_preauthorize_inner_actions() {
+        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some("[permissions]\nssh_agent = true\ngpg_agent = true\ndbus = true\n"),
+            &paths,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.host_integrations().len(), 3);
+        let options = action_process_backend_options(Some(&config)).unwrap();
+        assert!(options.host_integrations().is_empty());
+    }
 
     #[test]
     fn action_backend_preauthorizes_explicit_path_access() {

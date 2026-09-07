@@ -28,22 +28,27 @@ profile = "default"
 # wins. Project-local config must not silently authorize host-wide access.
 #
 # Optional host integrations. These are explicit outer-sandbox ceilings and
-# enabled integrations are forwarded to inner process sandboxes when available.
+# forwarding switches, not inner preauthorizations. Inner actions must request
+# the matching host integration and pass runtime review before using its socket
+# or automatically imported client files. Approved grants follow runtime session
+# retention; review_paths still requires approval for each action.
 # dbus is the D-Bus session bus, including Secret Service/keyring access.
 # ssh_agent = true
 # gpg_agent = true
 # dbus = true
-# ssh_agent also exposes ~/.ssh/known_hosts and known_hosts2 read-only. It does
-# not import private keys or ~/.ssh/config, enable networking, accept new host
-# keys, or bypass deny_paths / review_paths. A blanket ~/.ssh deny still blocks
-# these trust files; choose narrower deny paths if they should remain readable.
+# After SSH approval, inner actions also get ~/.ssh/known_hosts and known_hosts2
+# read-only, not private keys or ~/.ssh/config. This does not enable networking,
+# accept new host keys, or bypass deny_paths / review_paths. A blanket ~/.ssh
+# deny still blocks these trust files; choose narrower deny paths if they should
+# remain readable.
 # Already-visible system SSH configuration is kept, not disabled. Safe root-owned
 # ssh_config files and static Includes use private read-only snapshots to retain
 # OpenSSH ownership checks across user namespaces. Host files are never changed.
 # gpg_agent enables the native GPG socket discovered with gpgconf --list-dirs,
-# independently of ssh_agent (including GPG's SSH endpoint). It also imports
-# pubring.kbx / pubring.gpg read-only; no extra readonly_paths is needed. Inner
-# actions use a private temporary GNUPGHOME view for locks and a fresh trustdb.
+# independently of ssh_agent (including GPG's SSH endpoint). After GPG approval,
+# inner actions also import pubring.kbx / pubring.gpg read-only; no extra
+# readonly_paths is needed. Approved inner actions use a private temporary
+# GNUPGHOME view for locks and a fresh trustdb.
 # Host private keys, configuration, and trust state are not imported. Public-key
 # reads still obey deny_paths / review_paths. Keyboxd databases are not yet
 # supported and produce an explicit error, not an implicit host write grant.

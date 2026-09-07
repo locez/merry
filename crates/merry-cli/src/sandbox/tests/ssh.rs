@@ -5,19 +5,20 @@ use crate::{
     runtime_config::prepared_action_process_backend_options,
     sandbox::{Bootstrap, ClipboardAccess, host::current_process_uid, os, plan_bootstrap},
 };
+use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
 use merry_process::{LocalProcessBackend, ProcessBackend, ProcessBackendMode};
 use merry_runtime::{
-    PathAccess, PathAccessRule, PathAccessRuleSource, ProcessActionIntent, ProcessEnvPolicy,
-    ProcessRunnerContext,
+    PathAccess, PathAccessRule, PathAccessRuleSource, PermissionedAction, ProcessRunnerContext,
+    parse_permission_request,
 };
-use std::{env, ffi::OsStr, fs, process::Command};
+use std::{env, ffi::OsStr, fs, os::unix::net::UnixListener, process::Command};
 use tokio_util::sync::CancellationToken;
 
 const CHILD_ENV: &str = "MERRY_SSH_CONFIG_TEST_CHILD";
 const HOST_KEY: &str = "sandbox.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n";
 
 #[test]
-fn configured_etc_and_known_hosts_work_through_both_sandboxes() {
+fn ssh_agent_config_requires_review_through_both_sandboxes() {
     if env::var_os(CHILD_ENV).as_deref() == Some(OsStr::new("1")) {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -35,6 +36,8 @@ fn configured_etc_and_known_hosts_work_through_both_sandboxes() {
     let workspace = directory.path().join("workspace");
     fs::create_dir_all(&ssh).unwrap();
     fs::create_dir(&workspace).unwrap();
+    let agent = ssh.join("agent.sock");
+    let _agent = UnixListener::bind(&agent).unwrap();
     fs::write(ssh.join("known_hosts"), HOST_KEY).unwrap();
     fs::write(ssh.join("known_hosts2"), HOST_KEY).unwrap();
     fs::write(ssh.join("id_ed25519"), "not a private key").unwrap();
@@ -58,6 +61,7 @@ fn configured_etc_and_known_hosts_work_through_both_sandboxes() {
         .unwrap()
         .unwrap();
     host.host_integrations = config.host_integrations();
+    host.host_integration_environment.ssh_agent_socket = Some(agent);
     host.trusted_path_rules = config.trusted_global_path_rules().unwrap();
     host.trusted_path_rules.push(PathAccessRule::new(
         &host.current_exe,
@@ -81,7 +85,7 @@ fn configured_etc_and_known_hosts_work_through_both_sandboxes() {
         os("1"),
         host.current_exe.into_os_string(),
         os("--exact"),
-        os("sandbox::tests::ssh::configured_etc_and_known_hosts_work_through_both_sandboxes"),
+        os("sandbox::tests::ssh::ssh_agent_config_requires_review_through_both_sandboxes"),
         os("--nocapture"),
     ]);
     let mut command = Command::new(plan.program);
@@ -125,17 +129,50 @@ async fn assert_ssh_client() {
         options,
     )
     .unwrap();
-    let runner = backend.new_session().runner();
-    let intent = ProcessActionIntent::new(vec!["/bin/sh".into(), "-eu".into(), "-c".into(), r#"
+    let session = backend.new_session();
+    let script = r#"
+        set -eu
+        test -S "$SSH_AUTH_SOCK"
         test ! -w /etc/ssh/ssh_config
         test ! -w "$HOME/.ssh/known_hosts"
         test ! -w "$HOME/.ssh/known_hosts2"
         ssh-keygen -F sandbox.example -f "$HOME/.ssh/known_hosts"
         ssh-keygen -F sandbox.example -f "$HOME/.ssh/known_hosts2"
         ssh -G -F /etc/ssh/ssh_config -o StrictHostKeyChecking=yes -o Hostname=127.0.0.1 sandbox.example
-    "#.into()], None, ProcessEnvPolicy::empty(), None, 16384, 16384).unwrap();
-    let output = runner
-        .run(intent, ProcessRunnerContext::new(CancellationToken::new()))
+    "#;
+    let request = parse_permission_request(&PendingToolCall::new(
+        ToolCallId::new("ssh-client-review").unwrap(),
+        ToolName::new("request_permissions").unwrap(),
+        ToolCallArguments::try_from(serde_json::json!({
+            "requested": {"host_integrations": ["ssh-agent"]},
+            "for_action": {"command": script, "cwd": null}
+        }))
+        .unwrap(),
+    ))
+    .unwrap();
+    let PermissionedAction::Process(intent) = request.action();
+    let factory = session.permissioned_factory();
+    assert!(
+        !factory
+            .request_capabilities_are_satisfied(&request)
+            .unwrap()
+    );
+    let before = session
+        .runner()
+        .run(
+            intent.clone(),
+            ProcessRunnerContext::new(CancellationToken::new()),
+        )
+        .await
+        .unwrap();
+    assert!(!before.ok(), "{before:?}");
+    factory.validate_request(&request).unwrap();
+    let output = factory
+        .runner_for(&request)
+        .run(
+            intent.clone(),
+            ProcessRunnerContext::new(CancellationToken::new()),
+        )
         .await
         .unwrap();
     assert!(output.ok(), "{output:?}");
@@ -149,5 +186,12 @@ async fn assert_ssh_client() {
             "stricthostkeychecking true" | "stricthostkeychecking yes"
         )),
         "{output:?}"
+    );
+    assert!(
+        !backend
+            .new_session()
+            .permissioned_factory()
+            .request_capabilities_are_satisfied(&request)
+            .unwrap()
     );
 }
