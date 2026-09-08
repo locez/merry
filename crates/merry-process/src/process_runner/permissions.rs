@@ -133,6 +133,7 @@ pub struct BwrapPermissionedProcessRunnerFactory {
     pub(super) cwd_root: PathBuf,
     pub(super) environment: BwrapProcessEnvironment,
     pub(super) path_rules: Vec<PathAccessRule>,
+    network_requests_allowed: bool,
     pub(super) session_permissions: Option<ProcessSessionPermissionView>,
     pub(super) bwrap_program: PathBuf,
 }
@@ -145,6 +146,7 @@ impl BwrapPermissionedProcessRunnerFactory {
             cwd_root: root.into(),
             environment: BwrapProcessEnvironment::from_current_process(),
             path_rules: Vec::new(),
+            network_requests_allowed: true,
             session_permissions: None,
             bwrap_program: PathBuf::from(BWRAP_PROGRAM),
         }
@@ -161,6 +163,16 @@ impl BwrapPermissionedProcessRunnerFactory {
     #[must_use]
     pub fn with_path_rules(mut self, rules: impl IntoIterator<Item = PathAccessRule>) -> Self {
         self.path_rules = rules.into_iter().collect();
+        self
+    }
+
+    /// Sets whether network capability requests can proceed to review.
+    ///
+    /// Defaults to true without preauthorizing access. False rejects requests
+    /// during validation and materialization, including direct runner creation.
+    #[must_use]
+    pub fn with_network_requests_allowed(mut self, allowed: bool) -> Self {
+        self.network_requests_allowed = allowed;
         self
     }
 
@@ -246,6 +258,7 @@ impl BwrapPermissionedProcessRunnerFactory {
         &self,
         request: &PermissionRequest,
     ) -> Result<(BwrapProcessRunner, Vec<ProcessPathGrant>), ProcessRunnerError> {
+        self.validate_network_request(request)?;
         let mut environment = self.environment.validate_for_workspace(&self.cwd_root)?;
         let integrations = self.requested_host_integrations_for_request(request);
         environment.validate_requested_host_integrations(&integrations)?;
@@ -297,6 +310,19 @@ impl BwrapPermissionedProcessRunnerFactory {
         runner.bwrap_program = self.bwrap_program.clone();
         Ok((runner, grants))
     }
+
+    /// Enforces the capability ceiling before review, grants, or runner construction.
+    fn validate_network_request(
+        &self,
+        request: &PermissionRequest,
+    ) -> Result<(), ProcessRunnerError> {
+        if request.requests_network() && !self.network_requests_allowed {
+            return Err(ProcessRunnerError::infrastructure(
+                "network requests are disabled by the configured process capability ceiling",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl PermissionedProcessRunnerFactory for BwrapPermissionedProcessRunnerFactory {
@@ -308,6 +334,7 @@ impl PermissionedProcessRunnerFactory for BwrapPermissionedProcessRunnerFactory 
         &self,
         request: &PermissionRequest,
     ) -> Result<bool, ProcessRunnerError> {
+        self.validate_network_request(request)?;
         let environment = self.environment.validate_for_workspace(&self.cwd_root)?;
         let snapshot = self
             .session_permissions

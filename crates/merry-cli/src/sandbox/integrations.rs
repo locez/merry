@@ -109,6 +109,23 @@ pub(super) fn host_integration_access_plan(
     for integration in &host.host_integrations {
         match integration {
             HostIntegration::SshAgent => {
+                for (path, kind) in [
+                    ("/etc/passwd", HostPathKind::RegularFile),
+                    ("/etc/group", HostPathKind::RegularFile),
+                    ("/etc/ssh/ssh_config", HostPathKind::RegularFile),
+                    ("/etc/ssh/ssh_config.d", HostPathKind::Directory),
+                ] {
+                    let path = Path::new(path);
+                    if probe
+                        .metadata(path)
+                        .is_some_and(|metadata| metadata.kind() == kind)
+                    {
+                        plan.mounts.push(GraphicalMount {
+                            source: path.to_path_buf(),
+                            destination: path.to_path_buf(),
+                        });
+                    }
+                }
                 for path in merry_process::ssh_known_hosts(host.xdg_paths.home()) {
                     if probe
                         .metadata(&path)

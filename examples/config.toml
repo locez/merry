@@ -27,6 +27,13 @@ profile = "default"
 # to a declared subtree without raising its access ceiling. deny_paths always
 # wins. Project-local config must not silently authorize host-wide access.
 #
+# Inner action network capability ceiling; defaults to true when omitted.
+# true allows network requests, not network access: each action still requires
+# its own approval. false rejects network requests before review or execution.
+# This does not restrict model-provider or configured MCP network connections,
+# and does not add network isolation to explicit --no-sandbox host execution.
+network = true
+
 # Optional host integrations. These are explicit outer-sandbox ceilings and
 # forwarding switches, not inner preauthorizations. Inner actions must request
 # the matching host integration and pass runtime review before using its socket
@@ -41,9 +48,15 @@ profile = "default"
 # accept new host keys, or bypass deny_paths / review_paths. A blanket ~/.ssh
 # deny still blocks these trust files; choose narrower deny paths if they should
 # remain readable.
-# Already-visible system SSH configuration is kept, not disabled. Safe root-owned
-# ssh_config files and static Includes use private read-only snapshots to retain
-# OpenSSH ownership checks across user namespaces. Host files are never changed.
+# ssh_agent also imports /etc/passwd and /etc/group for client account lookup,
+# plus /etc/ssh/ssh_config and /etc/ssh/ssh_config.d, all read-only. No blanket
+# /etc grant is needed. These imports obey deny_paths and do not import SSH
+# server configuration, host private keys, or shadow password databases.
+# Include targets outside the existing sandbox view still need readonly_paths.
+# Explicitly authorized system SSH configuration remains visible when ssh_agent
+# is disabled. Safe root-owned config files and static Includes use private
+# read-only snapshots to retain OpenSSH ownership checks across user namespaces.
+# Host files are never changed.
 # gpg_agent enables the native GPG socket discovered with gpgconf --list-dirs,
 # independently of ssh_agent (including GPG's SSH endpoint). After GPG approval,
 # inner actions also import pubring.kbx / pubring.gpg read-only; no extra

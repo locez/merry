@@ -239,6 +239,15 @@ Optional development paths such as `.rustup/toolchains` remain built in, but
 missing sources are skipped without creating directories beneath a read-only
 HOME. This applies to both inner-only and outer+inner execution.
 
+`[permissions] network` is the inner sandbox's network capability ceiling and
+defaults to `true`. It does not preauthorize network access: ordinary actions
+remain network-isolated, and each action must request and obtain its own network
+approval. With `network = false`, network requests are rejected before review
+or execution, including in fully trusted review mode; approval cannot override
+the ceiling. The setting is inherited by new process sessions and does not
+restrict model-provider or configured MCP connections. Explicit `--no-sandbox`
+host execution remains outside this network-isolation boundary.
+
 Trusted `readonly_paths` and `readwrite_paths` are preauthorized in the inner
 sandbox at their declared access level. `review_paths` marks existing subtrees
 within these grants for **per-action** review, without adding a new grant or
@@ -291,15 +300,24 @@ but new or changed host keys are not automatically accepted and host trust files
 are not made writable. No `StrictHostKeyChecking` or SSH configuration override
 is injected.
 
-System SSH configuration already exposed by the filesystem policy remains
-available, independently of `ssh_agent`. Before entering a user namespace, Merry
+Enabling `ssh_agent` imports `/etc/passwd` and `/etc/group` for client account
+lookup, plus `/etc/ssh/ssh_config` and `/etc/ssh/ssh_config.d`, read-only. It does
+not require granting the whole `/etc` directory or import SSH server
+configuration, host private keys, or shadow password databases. These imports
+obey explicit path denials; Include targets outside the existing sandbox view
+still need an explicit `readonly_paths` grant. System SSH configuration already
+exposed by filesystem rules remains available when `ssh_agent` is disabled.
+
+Before entering a user namespace, Merry
 validates regular configuration files against OpenSSH's owner/write-mode rules.
 Safe root-owned files that would otherwise become UID 65534 are supplied as
 unchanged, read-only private snapshots at their original paths. Snapshots travel
 through sealed anonymous-memory FDs and are consumed by bubblewrap; the host
-files are never modified. Both the outer and inner mount plans preserve path
-denials and per-action review. This does not import `/etc/ssh` if it was not
-already exposed or make unsafe/unknown ownership acceptable.
+files are never modified. Snapshot mounts replace the corresponding original
+file binds instead of stacking a second mount that inner actions cannot rebind.
+Both the outer and inner mount plans preserve path denials and per-action review.
+This does not import the whole `/etc/ssh` directory or make unsafe/unknown
+ownership acceptable.
 
 Snapshot discovery starts at `/etc/ssh/ssh_config` and follows static recursive
 `Include` paths, quoted filenames, globs, and symlinks within the allowed view.

@@ -5,6 +5,26 @@ use merry_runtime::{PathAccess, PathAccessRuleSource};
 use std::path::{Path, PathBuf};
 
 #[test]
+fn network_capability_ceiling_defaults_to_enabled_and_preserves_false() {
+    let paths = XdgPaths::from_parts(home(), None, None);
+    for (text, allowed) in [
+        ("", true),
+        ("[permissions]\n", true),
+        ("[permissions]\nnetwork = true\n", true),
+        ("[permissions]\nnetwork = false\n", false),
+    ] {
+        let config = MerryConfig::load_optional_from_text(Some(text), &paths)
+            .unwrap()
+            .unwrap();
+        assert_eq!(config.network_requests_allowed(), allowed, "{text}");
+    }
+    for value in ["0", "\"false\"", "[]"] {
+        let text = format!("[permissions]\nnetwork = {value}\n");
+        assert!(MerryConfig::load_optional_from_text(Some(&text), &paths).is_err());
+    }
+}
+
+#[test]
 fn review_paths_restrict_declared_subtrees_without_changing_preauthorization() {
     let paths = XdgPaths::from_parts(home(), None, None);
     let config = MerryConfig::load_optional_from_text(

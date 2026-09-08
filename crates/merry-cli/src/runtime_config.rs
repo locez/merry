@@ -122,6 +122,7 @@ pub(crate) fn action_process_backend_options(
         .collect();
     Ok(ActionProcessBackendOptions::new()
         .with_path_rules(path_rules)
+        .with_network_requests_allowed(config.is_none_or(MerryConfig::network_requests_allowed))
         .with_environment_overrides(environment_overrides))
 }
 
@@ -166,6 +167,9 @@ pub(crate) async fn prepared_action_process_backend_options(
         None => Ok(options),
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod network_tests;
 
 #[cfg(test)]
 mod tests {

@@ -228,6 +228,18 @@ impl MerryConfig {
         Ok(rules)
     }
 
+    /// Returns whether inner process actions may request network capability.
+    ///
+    /// Defaults to true. This is a capability ceiling, not preauthorization:
+    /// enabled requests still require approval for each action.
+    pub fn network_requests_allowed(&self) -> bool {
+        self.raw
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.network)
+            .unwrap_or(true)
+    }
+
     /// Returns host IPC integrations explicitly enabled by trusted global
     /// configuration. These form the outer sandbox capability ceiling and are
     /// forwarded to inner process sandboxes when their endpoints are present.
@@ -398,6 +410,7 @@ struct GlobalToml {
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct PermissionsToml {
+    network: Option<bool>,
     ssh_agent: Option<bool>,
     dbus: Option<bool>,
     gpg_agent: Option<bool>,

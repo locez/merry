@@ -154,10 +154,12 @@ pub trait ProcessBackend: Send + Sync {
 }
 
 /// Inputs shared by local process backend implementations.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ProcessBackendOptions {
     /// Trusted filesystem rules installed for isolated actions.
     path_rules: Vec<PathAccessRule>,
+    /// Isolated-session capability ceiling, not a grant to an ordinary runner.
+    network_requests_allowed: bool,
     /// Host integrations already approved by the embedding application.
     host_integrations: Vec<HostIntegration>,
     gpg_agent_sockets: Option<GpgAgentSockets>,
@@ -165,8 +167,20 @@ pub struct ProcessBackendOptions {
     environment_overrides: Vec<(OsString, OsString)>,
 }
 
+impl Default for ProcessBackendOptions {
+    fn default() -> Self {
+        Self {
+            path_rules: Vec::new(),
+            network_requests_allowed: true,
+            host_integrations: Vec::new(),
+            gpg_agent_sockets: None,
+            environment_overrides: Vec::new(),
+        }
+    }
+}
+
 impl ProcessBackendOptions {
-    /// Creates empty host-process backend options.
+    /// Creates default options without preauthorized process capabilities.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -176,6 +190,17 @@ impl ProcessBackendOptions {
     #[must_use]
     pub fn with_path_rules(mut self, path_rules: impl IntoIterator<Item = PathAccessRule>) -> Self {
         self.path_rules = path_rules.into_iter().collect();
+        self
+    }
+
+    /// Sets whether isolated process sessions may request network capability.
+    ///
+    /// Defaults to true, which still requires approval for each action. False
+    /// rejects network requests before review. Explicit host execution is not
+    /// isolated and is not restricted by this ceiling.
+    #[must_use]
+    pub fn with_network_requests_allowed(mut self, allowed: bool) -> Self {
+        self.network_requests_allowed = allowed;
         self
     }
 
@@ -211,6 +236,12 @@ impl ProcessBackendOptions {
     #[must_use]
     pub fn path_rules(&self) -> &[PathAccessRule] {
         &self.path_rules
+    }
+
+    /// Returns whether isolated sessions may request, not preauthorize, network access.
+    #[must_use]
+    pub fn network_requests_allowed(&self) -> bool {
+        self.network_requests_allowed
     }
 
     /// Returns host integrations already approved by the embedding application.
@@ -331,6 +362,7 @@ impl LocalProcessBackend {
             workspace_root,
             environment,
             options.path_rules,
+            options.network_requests_allowed,
         ))
     }
 
@@ -350,6 +382,7 @@ impl LocalProcessBackend {
         workspace_root: PathBuf,
         environment: BwrapProcessEnvironment,
         path_rules: Vec<PathAccessRule>,
+        network_requests_allowed: bool,
     ) -> Self {
         let child_workspace_root = workspace_root.clone();
         let child_environment = environment;
@@ -360,6 +393,7 @@ impl LocalProcessBackend {
                     &child_workspace_root,
                     &child_environment,
                     &child_path_rules,
+                    network_requests_allowed,
                 )
             }),
         }
@@ -370,6 +404,7 @@ impl LocalProcessBackend {
         workspace_root: &Path,
         environment: &BwrapProcessEnvironment,
         path_rules: &[PathAccessRule],
+        network_requests_allowed: bool,
     ) -> ProcessSession {
         let session_permissions = BwrapSessionPermissions::new();
         let runner = BwrapProcessRunner::new_at_workspace_root(workspace_root)
@@ -380,6 +415,7 @@ impl LocalProcessBackend {
             BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(workspace_root)
                 .with_environment(environment.clone())
                 .with_path_rules(path_rules.iter().cloned())
+                .with_network_requests_allowed(network_requests_allowed)
                 .with_session_permissions(session_permissions);
         ProcessSession::from_parts(
             AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),

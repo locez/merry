@@ -171,6 +171,18 @@ impl BwrapSshConfigFiles {
         })
     }
 
+    /// Returns whether a snapshot replaces the original file mount at `path`.
+    ///
+    /// Callers should omit that original file bind while retaining its parent
+    /// directories. Stacking both mounts exposes an obsolete mount alias whose
+    /// replacement is an unlinked bubblewrap data file and cannot be rebound.
+    #[must_use]
+    pub fn replaces_file(&self, path: &Path) -> bool {
+        self.snapshots
+            .iter()
+            .any(|snapshot| snapshot.destination == path)
+    }
+
     /// Appends read-only data mounts after ordinary mounts. The caller must also
     /// call `configure_command` on the same bubblewrap invocation before spawning it.
     pub fn append_args(&self, args: &mut Vec<OsString>) {

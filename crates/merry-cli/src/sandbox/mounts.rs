@@ -187,6 +187,13 @@ impl MountPlan {
         let mut masked_directories = Vec::new();
         for mount in mounts {
             append_mount_parent_args(args, &mount.destination);
+            #[cfg(target_os = "linux")]
+            if !mount.directory
+                && mount.access != PathAccess::Deny
+                && ssh_config.replaces_file(&mount.logical_destination)
+            {
+                continue;
+            }
             let flag = match (mount.access, mount.optional) {
                 (PathAccess::Deny, _) => {
                     let kind = merry_process::BwrapMaskKind::inspect(&mount.source)
