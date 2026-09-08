@@ -21,6 +21,33 @@ class LookupOutput(BaseModel):
     status: str = Field(description="Current order status.")
 
 
+def test_tool_handler_accepts_wider_inputs_and_narrower_outputs() -> None:
+    class RegionalLookupInput(LookupInput):
+        region: str = Field(description="Order fulfillment region.")
+
+    class DetailedLookupOutput(LookupOutput):
+        order_id: str = Field(description="Stable order identifier.")
+
+    async def lookup(arguments: LookupInput) -> DetailedLookupOutput:
+        return DetailedLookupOutput(status="shipped", order_id=arguments.order_id)
+
+    original: merry.ToolHandler[LookupInput, DetailedLookupOutput] = lookup
+    compatible: merry.ToolHandler[RegionalLookupInput, LookupOutput] = original
+    tool: merry.Tool[RegionalLookupInput, LookupOutput] = merry.Tool.from_function(
+        compatible,
+        name="lookup_order",
+        description="Look up an order using a compatible handler.",
+        input_model=RegionalLookupInput,
+        output_model=LookupOutput,
+    )
+
+    output = asyncio.run(tool(RegionalLookupInput(order_id="A123", region="west")))
+
+    assert isinstance(output, DetailedLookupOutput)
+    assert output.status == "shipped"
+    assert output.order_id == "A123"
+
+
 def test_tool_decorator_executes_through_rust_batch_handoff() -> None:
     calls: list[str] = []
 

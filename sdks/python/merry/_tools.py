@@ -44,12 +44,18 @@ if TYPE_CHECKING:
 InputT = TypeVar("InputT", bound=BaseModel)
 OutputT = TypeVar("OutputT", bound=BaseModel)
 RunOutputT = TypeVar("RunOutputT", bound=BaseModel)
+HandlerInputT_contra = TypeVar(
+    "HandlerInputT_contra", bound=BaseModel, contravariant=True
+)
+HandlerOutputT_co = TypeVar("HandlerOutputT_co", bound=BaseModel, covariant=True)
 
 
-class ToolHandler(Protocol[InputT, OutputT]):
+class ToolHandler(Protocol[HandlerInputT_contra, HandlerOutputT_co]):
     """Callable contract for an async Pydantic tool handler."""
 
-    def __call__(self, arguments: InputT, /) -> Awaitable[OutputT]: ...
+    def __call__(
+        self, arguments: HandlerInputT_contra, /
+    ) -> Awaitable[HandlerOutputT_co]: ...
 
 
 class ToolRegistration(Protocol):
