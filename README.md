@@ -230,9 +230,29 @@ process's validated `TMPDIR` directly. Debug commands remain unsandboxed unless
 `--with-sandbox` is supplied.
 
 Outer filesystem mounts are applied parent-first after resolving access-rule
-precedence. If an imported directory contains a symlink such as
-`/etc/resolv.conf`, Merry mounts the required target file without exposing its
-whole parent directory. Inner action sandboxes inherit these system mounts
+precedence. Explicit file and directory imports preserve symbolic links instead
+of replacing them with their target's contents. Trusted and integration directory
+imports inspect only their direct children for link dependencies. Ordinary child
+directories remain covered by the whole-directory bind and are not traversed.
+Already-visible targets reuse their effective mount without further scanning;
+missing targets are added only from an already-admitted
+host source, without importing a file's whole parent directory. Directory aliases
+retain descendant denials and read-only restrictions. External targets outside
+the admitted source scopes still require an explicit path grant.
+
+Newly added directory targets receive the same one-level inspection. Deeper links
+inside ordinary subdirectories are not proactively discovered; explicitly imported
+subdirectories can be inspected independently. SSH Include discovery still follows
+referenced configuration paths within the admitted view.
+
+Directory scanning is bounded (250,000 entries, 8,192 mounts or aliases, depth
+128, and 10 seconds). Exceeding a bound fails preparation; dangling links, cycles
+among directory entries, and inaccessible entries retain their unavailable
+behavior. Explicit cyclic mount destinations fail preparation. Runtime-provided
+`/proc` and `/dev` are not recursively scanned or resolved through host process
+IDs. `/usr` remains one read-only directory import, not a per-file mount tree;
+base system imports and workspace/development trees are not automatic scan roots.
+Inner action sandboxes inherit these system mounts
 instead of repeating them; workspace overlays, read-only `.git` metadata,
 reviewed grants, network isolation, and host-integration controls still apply.
 Optional development paths such as `.rustup/toolchains` remain built in, but
@@ -311,7 +331,9 @@ exposed by filesystem rules remains available when `ssh_agent` is disabled.
 Before entering a user namespace, Merry
 validates regular configuration files against OpenSSH's owner/write-mode rules.
 Safe root-owned files that would otherwise become UID 65534 are supplied as
-unchanged, read-only private snapshots at their original paths. Snapshots travel
+unchanged, read-only private snapshots at their resolved sandbox destinations;
+original symlinks remain in place and multiple aliases share one snapshot.
+Ordinary mount coverage does not suppress these deliberate replacements. Snapshots travel
 through sealed anonymous-memory FDs and are consumed by bubblewrap; the host
 files are never modified. Snapshot mounts replace the corresponding original
 file binds instead of stacking a second mount that inner actions cannot rebind.

@@ -1,5 +1,5 @@
 use super::mount_aliases::MountAliases;
-use crate::resolve_bwrap_path;
+use crate::{PreparedSandboxMountPlan, SandboxMountPlan, SandboxPathSource, resolve_bwrap_path};
 use merry_runtime::{PathAccess, PathAccessRule, PathAccessRuleSource, ProcessRunnerError};
 use std::path::{Path, PathBuf};
 
@@ -9,7 +9,7 @@ pub(super) struct ActionPathView {
     denied: Vec<PathBuf>,
     reviewed: Vec<PathBuf>,
     granted: Vec<PathBuf>,
-    bindings: Vec<(PathBuf, PathBuf)>,
+    namespace: PreparedSandboxMountPlan,
 }
 
 impl ActionPathView {
@@ -24,9 +24,13 @@ impl ActionPathView {
         let mut granted = Vec::new();
         let workspace = resolve_bwrap_path(workspace);
         let mut bindings = vec![
-            (PathBuf::from("/"), PathBuf::from("/")),
-            (PathBuf::from("/tmp"), resolve_bwrap_path(tmp_source)),
-            (workspace.clone(), workspace),
+            (PathBuf::from("/"), PathBuf::from("/"), PathAccess::ReadOnly),
+            (
+                PathBuf::from("/tmp"),
+                resolve_bwrap_path(tmp_source),
+                PathAccess::ReadWrite,
+            ),
+            (workspace.clone(), workspace, PathAccess::ReadWrite),
         ];
         for rule in rules {
             if rule.access() == PathAccess::Deny {
@@ -39,7 +43,7 @@ impl ActionPathView {
             if !rule.review_required() && rule.access() != PathAccess::Deny && rule.path().exists()
             {
                 let path = resolve_bwrap_path(rule.path());
-                bindings.push((path.clone(), path));
+                bindings.push((path.clone(), path, rule.access()));
             }
         }
         for rule in rules.iter().filter(|rule| {
@@ -52,21 +56,45 @@ impl ActionPathView {
                 )
         }) {
             if rule.path().exists() {
-                bindings.extend(aliases.action_paths(rule.path(), tmp_source));
+                bindings.extend(
+                    aliases
+                        .action_paths(rule.path(), tmp_source)
+                        .into_iter()
+                        .map(|(destination, source)| (destination, source, rule.access())),
+                );
             }
         }
         for rule in rules
             .iter()
             .filter(|rule| rule.source() == PathAccessRuleSource::PermissionReview)
         {
-            bindings.extend(aliases.grant_paths(rule.path(), tmp_source));
+            bindings.extend(
+                aliases
+                    .grant_paths(rule.path(), tmp_source)
+                    .into_iter()
+                    .map(|(destination, source)| (destination, source, rule.access())),
+            );
         }
+        let mut namespace = SandboxMountPlan::new();
+        for (destination, source, access) in bindings {
+            namespace
+                .bind(&source, &destination, access, false)
+                .map_err(|error| ProcessRunnerError::infrastructure(error.to_string()))?;
+        }
+        for path in ["/proc", "/dev"] {
+            namespace
+                .opaque(Path::new(path))
+                .map_err(|error| ProcessRunnerError::infrastructure(error.to_string()))?;
+        }
+        let namespace = namespace
+            .complete(&[])
+            .map_err(|error| ProcessRunnerError::infrastructure(error.to_string()))?;
         Ok(Self {
             aliases,
             denied,
             reviewed,
             granted,
-            bindings,
+            namespace,
         })
     }
 
@@ -81,35 +109,19 @@ impl ActionPathView {
             })
     }
 
-    pub(super) fn source(&self, path: &Path) -> Result<Option<PathBuf>, ProcessRunnerError> {
-        if !self.visible(path) {
-            return Ok(None);
-        }
-        let destination = crate::resolve_sandbox_path(path, |prefix| {
-            self.visible(prefix)
-                .then(|| self.imported_source(prefix))
-                .flatten()
-        })
-        .map_err(|error| ProcessRunnerError::infrastructure(error.to_string()))?;
-        let Some(source) = self.imported_source(&destination) else {
-            return Ok(None);
-        };
-        Ok((self.visible(&destination) && self.visible(&source)).then_some(source))
+    pub(super) fn resolve(
+        &self,
+        path: &Path,
+    ) -> Result<Option<SandboxPathSource>, ProcessRunnerError> {
+        self.namespace
+            .resolve_checked(path, |prefix| self.visible(prefix))
+            .map_err(|error| ProcessRunnerError::infrastructure(error.to_string()))
     }
 
-    fn imported_source(&self, path: &Path) -> Option<PathBuf> {
-        let (_, (destination, source)) = self
-            .bindings
-            .iter()
-            .enumerate()
-            .filter(|(_, (destination, _))| path.starts_with(destination))
-            .max_by_key(|(index, (destination, _))| (destination.components().count(), *index))?;
-        let relative = path.strip_prefix(destination).ok()?;
-        Some(if relative.as_os_str().is_empty() {
-            source.clone()
-        } else {
-            source.join(relative)
-        })
+    pub(super) fn destination(&self, path: &Path) -> Result<PathBuf, ProcessRunnerError> {
+        self.namespace
+            .destination(path)
+            .map_err(|error| ProcessRunnerError::infrastructure(error.to_string()))
     }
 }
 

@@ -44,7 +44,16 @@ pub fn resolve_sandbox_path(
         let mut components = destination.components();
         let mut next = None;
         while let Some(component) = components.next() {
-            prefix.push(component);
+            match component {
+                Component::CurDir => continue,
+                Component::ParentDir => {
+                    if prefix != Path::new("/") {
+                        prefix.pop();
+                    }
+                    continue;
+                }
+                component => prefix.push(component),
+            }
             let Some(host_path) = source_for(&prefix) else {
                 continue;
             };
@@ -71,32 +80,16 @@ pub fn resolve_sandbox_path(
                     source,
                 })?;
                 let parent = prefix.parent().unwrap_or(Path::new("/"));
-                next = Some(normalize(&parent.join(target).join(components.as_path())));
+                next = Some(parent.join(target).join(components.as_path()));
                 break;
             }
         }
         match next {
             Some(next) => destination = next,
-            None => return Ok(destination),
+            None => return Ok(prefix),
         }
     }
     Err(SandboxPathError::Loop {
         path: path.to_path_buf(),
     })
-}
-
-fn normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if normalized != Path::new("/") {
-                    normalized.pop();
-                }
-            }
-            component => normalized.push(component),
-        }
-    }
-    normalized
 }

@@ -4,14 +4,11 @@
 //! parent to child. Destination links are interpreted in the planned sandbox,
 //! never by blindly canonicalizing a path in the host namespace.
 
-mod destination;
-
 use crate::sandbox::os;
 use merry_process::resolve_bwrap_path;
 use merry_runtime::{PathAccess, PathAccessRule};
 use std::{
     ffi::OsString,
-    io,
     path::{Path, PathBuf},
 };
 use thiserror::Error;
@@ -36,22 +33,15 @@ impl MountOrigin {
 
 #[derive(Debug, Error)]
 pub(crate) enum MountPlanError {
-    #[error("cannot prepare sandbox protection: {0}")]
-    Protection(#[source] merry_runtime::ProcessRunnerError),
+    #[error("cannot prepare sandbox mounts: {0}")]
+    Shared(#[from] merry_process::SandboxMountError),
     #[cfg(target_os = "linux")]
     #[error("cannot prepare SSH configuration for sandbox: {0}")]
     SshConfig(#[source] merry_runtime::ProcessRunnerError),
-    #[error("failed to inspect sandbox mount destination through {path}: {source}")]
-    DestinationIo {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("sandbox mount destination has a cyclic or excessively deep symlink chain: {path}")]
-    DestinationLoop { path: PathBuf },
 }
 
 struct Mount {
+    original_source: PathBuf,
     source: PathBuf,
     logical_destination: PathBuf,
     destination: PathBuf,
@@ -70,10 +60,12 @@ impl Mount {
         optional: bool,
         origin: MountOrigin,
     ) -> Self {
+        let original_source = source.to_path_buf();
         let source = resolve_bwrap_path(source);
         let directory = source.is_dir();
         let exists = source.exists();
         Self {
+            original_source,
             source,
             logical_destination: destination.to_path_buf(),
             destination: destination.to_path_buf(),
@@ -153,7 +145,10 @@ impl MountPlan {
         prepare_ssh: bool,
     ) -> Result<SshConfigFiles, MountPlanError> {
         self.mounts.sort_by_key(|mount| mount.origin);
-        destination::resolve_all(&mut self.mounts)?;
+        let destinations = namespace_inputs(&self.mounts)?.resolved_destinations()?;
+        for (mount, destination) in self.mounts.iter_mut().zip(destinations) {
+            mount.destination = destination;
+        }
         let access = self
             .mounts
             .iter()
@@ -169,10 +164,32 @@ impl MountPlan {
             })
             .collect::<Vec<_>>();
         mounts.sort_by_key(|mount| mount.destination.components().count());
+        let namespace = namespace_inputs(&mounts)?;
+        let scan_roots = mounts
+            .iter()
+            .filter(|mount| {
+                mount.directory
+                    && mount.access != PathAccess::Deny
+                    && matches!(
+                        mount.origin,
+                        MountOrigin::Trusted
+                            | MountOrigin::ProductRestriction
+                            | MountOrigin::Integration
+                    )
+            })
+            .map(|mount| mount.logical_destination.clone())
+            .collect::<Vec<_>>();
+        let namespace = namespace.complete(&scan_roots)?;
+        for issue in namespace.issues() {
+            tracing::debug!(
+                ?issue,
+                "sandbox symlink dependency retains its restricted or unavailable representation"
+            );
+        }
         #[cfg(target_os = "linux")]
         let ssh_config = if prepare_ssh {
             merry_process::BwrapSshConfigFiles::prepare(Path::new("/etc/ssh/ssh_config"), |path| {
-                visible_source(path, &mounts).map_err(|error| {
+                namespace.resolve(path).map_err(|error| {
                     merry_runtime::ProcessRunnerError::infrastructure(error.to_string())
                 })
             })
@@ -184,40 +201,10 @@ impl MountPlan {
         let ssh_config = {
             let _ = prepare_ssh;
         };
-        let mut masked_directories = Vec::new();
-        for mount in mounts {
-            append_mount_parent_args(args, &mount.destination);
-            #[cfg(target_os = "linux")]
-            if !mount.directory
-                && mount.access != PathAccess::Deny
-                && ssh_config.replaces_file(&mount.logical_destination)
-            {
-                continue;
-            }
-            let flag = match (mount.access, mount.optional) {
-                (PathAccess::Deny, _) => {
-                    let kind = merry_process::BwrapMaskKind::inspect(&mount.source)
-                        .map_err(MountPlanError::Protection)?;
-                    kind.append(args, &mount.destination);
-                    if kind == merry_process::BwrapMaskKind::Directory {
-                        masked_directories.push(mount.destination);
-                    }
-                    continue;
-                }
-                (PathAccess::ReadOnly, false) => "--ro-bind",
-                (PathAccess::ReadOnly, true) => "--ro-bind-try",
-                (PathAccess::ReadWrite, false) => "--bind",
-                (PathAccess::ReadWrite, true) => "--bind-try",
-            };
-            args.extend([
-                os(flag),
-                mount.source.into_os_string(),
-                mount.destination.into_os_string(),
-            ]);
-        }
-        for destination in masked_directories {
-            args.extend([os("--remount-ro"), destination.into_os_string()]);
-        }
+        #[cfg(target_os = "linux")]
+        namespace.append_args(args, |path| ssh_config.replaces_file(path))?;
+        #[cfg(not(target_os = "linux"))]
+        namespace.append_args(args, |_| false)?;
         Ok(ssh_config)
     }
 
@@ -261,40 +248,19 @@ type SshConfigFiles = merry_process::BwrapSshConfigFiles;
 #[cfg(not(target_os = "linux"))]
 type SshConfigFiles = ();
 
-#[cfg(target_os = "linux")]
-fn visible_source(path: &Path, mounts: &[Mount]) -> Result<Option<PathBuf>, MountPlanError> {
-    let resolved = destination::resolve(path, None, mounts)?;
-    let Some(mount) = mounts
-        .iter()
-        .filter(|mount| resolved.starts_with(&mount.destination))
-        .max_by_key(|mount| mount.destination.components().count())
-    else {
-        return Ok(None);
-    };
-    if mount.access == PathAccess::Deny || !mount.exists {
-        return Ok(None);
+fn namespace_inputs(mounts: &[Mount]) -> Result<merry_process::SandboxMountPlan, MountPlanError> {
+    let mut inputs = merry_process::SandboxMountPlan::new();
+    inputs.opaque(Path::new("/proc"))?;
+    inputs.opaque(Path::new("/dev"))?;
+    for mount in mounts {
+        inputs.bind(
+            &mount.original_source,
+            &mount.logical_destination,
+            mount.access,
+            mount.optional,
+        )?;
     }
-    let relative = resolved
-        .strip_prefix(&mount.destination)
-        .map_err(|source| MountPlanError::DestinationIo {
-            path: path.to_path_buf(),
-            source: io::Error::other(source),
-        })?;
-    if !mount.directory && !relative.as_os_str().is_empty() {
-        return Ok(None);
-    }
-    let source = if relative.as_os_str().is_empty() {
-        mount.source.clone()
-    } else {
-        mount.source.join(relative)
-    };
-    if mounts
-        .iter()
-        .any(|other| other.access == PathAccess::Deny && source.starts_with(&other.source))
-    {
-        return Ok(None);
-    }
-    Ok(Some(source))
+    Ok(inputs)
 }
 
 pub(super) fn append_mount_parent_args(args: &mut Vec<OsString>, destination: &Path) {

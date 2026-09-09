@@ -69,17 +69,17 @@ fn plan_mounts_runtime_paths_and_workspace() {
     assert_ro_mount(&args, "--ro-bind", "/usr", "/usr");
     for path in ["/bin", "/lib", "/lib64", "/opt"] {
         if Path::new(path).exists() {
-            assert_ro_mount(&args, "--ro-bind-try", path, path);
+            assert_runtime_readonly_path(&args, "--ro-bind-try", path);
         }
     }
     for path in SANDBOX_ETC_READ_ONLY_FILE_PATHS {
         if Path::new(path).exists() {
-            assert_ro_mount(&args, "--ro-bind", path, path);
+            assert_runtime_readonly_path(&args, "--ro-bind", path);
         }
     }
     for path in SANDBOX_ETC_READ_ONLY_DIR_PATHS {
         if Path::new(path).exists() {
-            assert_ro_mount(&args, "--ro-bind", path, path);
+            assert_runtime_readonly_path(&args, "--ro-bind", path);
         }
     }
     assert!(!contains_sequence(
@@ -91,6 +91,22 @@ fn plan_mounts_runtime_paths_and_workspace() {
         &["--bind", "/workspace/merry", "/workspace/merry"]
     ));
     assert!(contains_sequence(&args, &["--chdir", "/workspace/merry"]));
+}
+
+fn assert_runtime_readonly_path(args: &[String], flag: &str, path: &str) {
+    if let Ok(target) = std::fs::read_link(path) {
+        assert!(contains_sequence(
+            args,
+            &["--symlink", target.to_str().unwrap(), path]
+        ));
+        let resolved = merry_process::resolve_bwrap_path(Path::new(path));
+        if !resolved.starts_with("/usr") {
+            let resolved = resolved.to_str().unwrap();
+            assert_ro_mount(args, flag, resolved, resolved);
+        }
+    } else {
+        assert_ro_mount(args, flag, path, path);
+    }
 }
 
 #[test]

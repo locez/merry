@@ -2,6 +2,7 @@
 
 mod includes;
 
+use crate::SandboxPathSource;
 use command_fds::{CommandFdExt, FdMapping};
 use merry_runtime::ProcessRunnerError;
 use rustix::fs::{MemfdFlags, Mode, OFlags, SealFlags};
@@ -23,6 +24,7 @@ const MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, PartialEq, Eq)]
 struct Snapshot {
+    logical_destinations: Vec<PathBuf>,
     destination: PathBuf,
     contents: Arc<[u8]>,
 }
@@ -59,7 +61,7 @@ enum PreparationError {
 impl BwrapSshConfigFiles {
     /// Reads an already-exposed system configuration and its static `Include` paths.
     ///
-    /// `source_for` translates a destination in the planned sandbox into its allowed
+    /// `source_for` returns both the resolved sandbox destination and its allowed
     /// host source, or returns `None` when absent, denied, or awaiting review. It is
     /// consulted for directories as well as files; this method never grants access.
     /// Includes are not executed and do not alter OpenSSH's configuration text.
@@ -70,7 +72,7 @@ impl BwrapSshConfigFiles {
     /// failures remain fatal. OpenSSH still performs its own security checks.
     pub fn prepare(
         root: &Path,
-        source_for: impl Fn(&Path) -> Result<Option<PathBuf>, ProcessRunnerError>,
+        source_for: impl Fn(&Path) -> Result<Option<SandboxPathSource>, ProcessRunnerError>,
     ) -> Result<Self, ProcessRunnerError> {
         match Self::discover(root, source_for) {
             Ok(files) => Ok(files),
@@ -93,28 +95,29 @@ impl BwrapSshConfigFiles {
 
     fn discover(
         root: &Path,
-        source_for: impl Fn(&Path) -> Result<Option<PathBuf>, ProcessRunnerError>,
+        source_for: impl Fn(&Path) -> Result<Option<SandboxPathSource>, ProcessRunnerError>,
     ) -> Result<Self, PreparationError> {
         let base = root
             .parent()
             .ok_or_else(|| failure("invalid system SSH config path"))?;
         let mut pending = vec![root.to_path_buf()];
         let mut visited = BTreeSet::new();
-        let mut snapshots = Vec::new();
+        let mut snapshots: Vec<Snapshot> = Vec::new();
         let mut total_bytes = 0;
         let current_uid = rustix::process::getuid().as_raw();
         while let Some(destination) = pending.pop() {
-            let Some(source) = source_for(&destination).map_err(PreparationError::Policy)? else {
+            let Some(mapping) = source_for(&destination).map_err(PreparationError::Policy)? else {
                 continue;
             };
-            if !visited.insert((destination.clone(), source.clone())) {
+            let source = mapping.source();
+            if !visited.insert((destination.clone(), source.to_path_buf())) {
                 continue;
             }
             if visited.len() > MAX_FILES {
                 return Err(failure("system SSH configuration exceeds 256 files").into());
             }
             let descriptor = match rustix::fs::open(
-                &source,
+                source,
                 OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
                 Mode::empty(),
             ) {
@@ -149,7 +152,10 @@ impl BwrapSshConfigFiles {
             }
             if let Ok(text) = std::str::from_utf8(&contents) {
                 for pattern in includes::paths(text, base) {
-                    pending.extend(includes::expand(&pattern, &source_for)?);
+                    pending.extend(includes::expand(&pattern, &|path| {
+                        source_for(path)
+                            .map(|mapping| mapping.map(|mapping| mapping.source().to_path_buf()))
+                    })?);
                     if pending.len() > MAX_FILES {
                         return Err(
                             failure("system SSH Include expansion exceeds 256 files").into()
@@ -158,10 +164,23 @@ impl BwrapSshConfigFiles {
                 }
             }
             if metadata.uid() == 0 && current_uid != 0 {
-                snapshots.push(Snapshot {
-                    destination,
-                    contents: contents.into(),
-                });
+                if let Some(snapshot) = snapshots
+                    .iter_mut()
+                    .find(|snapshot| snapshot.destination == mapping.destination())
+                {
+                    if snapshot.contents.as_ref() != contents {
+                        return Err(
+                            failure("system SSH configuration changed during preparation").into(),
+                        );
+                    }
+                    snapshot.logical_destinations.push(destination);
+                } else {
+                    snapshots.push(Snapshot {
+                        logical_destinations: vec![destination],
+                        destination: mapping.destination().to_path_buf(),
+                        contents: contents.into(),
+                    });
+                }
             }
         }
         snapshots.sort_by(|left, right| left.destination.cmp(&right.destination));
@@ -178,9 +197,13 @@ impl BwrapSshConfigFiles {
     /// replacement is an unlinked bubblewrap data file and cannot be rebound.
     #[must_use]
     pub fn replaces_file(&self, path: &Path) -> bool {
-        self.snapshots
-            .iter()
-            .any(|snapshot| snapshot.destination == path)
+        self.snapshots.iter().any(|snapshot| {
+            snapshot.destination == path
+                || snapshot
+                    .logical_destinations
+                    .iter()
+                    .any(|logical| logical == path)
+        })
     }
 
     /// Appends read-only data mounts after ordinary mounts. The caller must also

@@ -2,6 +2,7 @@
 use super::environment::{ACTION_SANDBOX_HOME_FALLBACK, ACTION_SANDBOX_PATH_FALLBACK};
 use super::{
     environment::{ACTION_SANDBOX_TMPDIR, BwrapProcessEnvironment, process_current_dir},
+    path_view::ActionPathView,
     permissions::is_git_metadata_path,
 };
 use crate::resolve_bwrap_path;
@@ -104,13 +105,13 @@ pub(crate) fn bwrap_process_plan_with_environment(
     if !network_allowed {
         args.push(os("--unshare-net"));
     }
-    append_bwrap_required_path_rule(&mut args, cwd_root, PathAccess::ReadWrite);
+    append_bwrap_required_path_rule(&mut args, cwd_root, PathAccess::ReadWrite, &view)?;
     for rule in path_rules {
         if rule.review_required() || rule.access() == PathAccess::Deny {
             continue;
         }
         if rule.source() == PathAccessRuleSource::GitMetadataBaseline {
-            append_bwrap_git_metadata_baseline_rule(&mut args, rule.path());
+            append_bwrap_git_metadata_baseline_rule(&mut args, rule.path(), &view)?;
         } else if rule.source() == PathAccessRuleSource::PermissionReview
             && rule.access() == PathAccess::ReadWrite
             && is_git_metadata_path(rule.path())
@@ -121,16 +122,16 @@ pub(crate) fn bwrap_process_plan_with_environment(
             // fail before git init gets a chance to create the directory.
             continue;
         } else if rule.source() == PathAccessRuleSource::PermissionReview {
-            append_bwrap_required_path_rule(&mut args, rule.path(), rule.access());
+            append_bwrap_required_path_rule(&mut args, rule.path(), rule.access(), &view)?;
         } else {
-            append_bwrap_path_rule(&mut args, rule.path(), rule.access());
+            append_bwrap_path_rule(&mut args, rule.path(), rule.access(), &view)?;
         }
     }
     super::restricted_mounts::append(&mut args, path_rules, &environment.tmp_source, &view)?;
     #[cfg(target_os = "linux")]
     let ssh_config =
         crate::BwrapSshConfigFiles::prepare(Path::new("/etc/ssh/ssh_config"), |path| {
-            view.source(path)
+            view.resolve(path)
         })?;
     #[cfg(target_os = "linux")]
     ssh_config.append_args(&mut args);
@@ -139,12 +140,13 @@ pub(crate) fn bwrap_process_plan_with_environment(
         .contains(&HostIntegration::SshAgent)
     {
         for path in crate::ssh_known_hosts(&environment.home) {
-            let source = resolve_bwrap_path(&path);
-            if source.is_file() && view.visible(&path) && view.visible(&source) {
+            if let Some(mapping) = view.resolve(&path)?
+                && mapping.source().is_file()
+            {
                 args.extend([
                     os("--ro-bind"),
-                    source.into_os_string(),
-                    path.into_os_string(),
+                    mapping.source().as_os_str().to_owned(),
+                    mapping.destination().as_os_str().to_owned(),
                 ]);
             }
         }
@@ -153,15 +155,15 @@ pub(crate) fn bwrap_process_plan_with_environment(
         super::gpg_client::append(&mut args, sockets, cwd_root, &view)?;
     }
     for (_, socket, _) in environment.host_integration_bindings() {
-        if view.visible(&resolve_bwrap_path(&socket)) {
-            append_bwrap_host_integration_mount_args(&mut args, &socket);
+        if view.visible(&socket) && view.visible(&resolve_bwrap_path(&socket)) {
+            append_bwrap_host_integration_mount_args(&mut args, &socket, &view)?;
         }
     }
     let aliases = &view.aliases;
     for path in environment.host_integration_hidden_paths() {
         for (path, source) in aliases.action_paths(&path, &environment.tmp_source) {
             if source.exists() && view.visible(&path) {
-                append_bwrap_hidden_host_integration_args(&mut args, &path);
+                append_bwrap_hidden_host_integration_args(&mut args, &view.destination(&path)?);
             }
         }
     }
@@ -217,20 +219,21 @@ pub(crate) fn bwrap_process_plan_with_environment(
     })
 }
 
-fn append_bwrap_file_bind_args(args: &mut Vec<OsString>, source: &Path, destination: &Path) {
-    args.extend([
-        os("--ro-bind"),
-        resolve_bwrap_path(source).as_os_str().to_owned(),
-        resolve_bwrap_path(destination).as_os_str().to_owned(),
-    ]);
-}
-
 fn append_bwrap_hidden_host_integration_args(args: &mut Vec<OsString>, path: &Path) {
     crate::BwrapMaskKind::NonDirectory.append(args, path);
 }
 
-fn append_bwrap_host_integration_mount_args(args: &mut Vec<OsString>, socket: &Path) {
-    append_bwrap_file_bind_args(args, socket, socket);
+fn append_bwrap_host_integration_mount_args(
+    args: &mut Vec<OsString>,
+    socket: &Path,
+    view: &ActionPathView,
+) -> Result<(), ProcessRunnerError> {
+    args.extend([
+        os("--ro-bind"),
+        resolve_bwrap_path(socket).into_os_string(),
+        view.destination(socket)?.into_os_string(),
+    ]);
+    Ok(())
 }
 
 fn append_bwrap_host_integration_environment_args(
@@ -262,18 +265,24 @@ fn append_bwrap_host_integration_environment_args(
     }
 }
 
-fn append_bwrap_path_rule(args: &mut Vec<OsString>, path: &Path, access: PathAccess) {
+fn append_bwrap_path_rule(
+    args: &mut Vec<OsString>,
+    path: &Path,
+    access: PathAccess,
+    view: &ActionPathView,
+) -> Result<(), ProcessRunnerError> {
     let resolved = resolve_bwrap_path(path);
-    let path = resolved.as_path();
+    let destination = view.destination(&resolved)?;
+    let path = destination.as_path();
     match access {
         PathAccess::ReadOnly => args.extend([
             os("--ro-bind-try"),
-            resolve_bwrap_path(path).as_os_str().to_owned(),
+            resolved.as_os_str().to_owned(),
             path.as_os_str().to_owned(),
         ]),
         PathAccess::ReadWrite => args.extend([
             os("--bind-try"),
-            resolve_bwrap_path(path).as_os_str().to_owned(),
+            resolved.as_os_str().to_owned(),
             path.as_os_str().to_owned(),
         ]),
         PathAccess::Deny => {
@@ -281,40 +290,54 @@ fn append_bwrap_path_rule(args: &mut Vec<OsString>, path: &Path, access: PathAcc
             args.extend([os("--tmpfs"), path.as_os_str().to_owned()]);
         }
     }
+    Ok(())
 }
 
-fn append_bwrap_required_path_rule(args: &mut Vec<OsString>, path: &Path, access: PathAccess) {
+fn append_bwrap_required_path_rule(
+    args: &mut Vec<OsString>,
+    path: &Path,
+    access: PathAccess,
+    view: &ActionPathView,
+) -> Result<(), ProcessRunnerError> {
     let resolved = resolve_bwrap_path(path);
-    let path = resolved.as_path();
+    let destination = view.destination(&resolved)?;
+    let path = destination.as_path();
     append_bwrap_mount_parent_args(args, path);
     match access {
         PathAccess::ReadOnly => args.extend([
             os("--ro-bind"),
-            resolve_bwrap_path(path).as_os_str().to_owned(),
+            resolved.as_os_str().to_owned(),
             path.as_os_str().to_owned(),
         ]),
         PathAccess::ReadWrite => args.extend([
             os("--bind"),
-            resolve_bwrap_path(path).as_os_str().to_owned(),
+            resolved.as_os_str().to_owned(),
             path.as_os_str().to_owned(),
         ]),
         PathAccess::Deny => args.extend([os("--tmpfs"), path.as_os_str().to_owned()]),
     }
+    Ok(())
 }
 
-fn append_bwrap_git_metadata_baseline_rule(args: &mut Vec<OsString>, path: &Path) {
+fn append_bwrap_git_metadata_baseline_rule(
+    args: &mut Vec<OsString>,
+    path: &Path,
+    view: &ActionPathView,
+) -> Result<(), ProcessRunnerError> {
     if !path.exists() {
         // A missing `.git` is the initialization case. Leaving it under the
         // writable workspace lets `git init` persist metadata; a later plan
         // sees the path and mounts it read-only.
-        return;
+        return Ok(());
     }
-    append_bwrap_mount_parent_args(args, path);
+    let destination = view.destination(path)?;
+    append_bwrap_mount_parent_args(args, &destination);
     args.extend([
         os("--ro-bind"),
         resolve_bwrap_path(path).as_os_str().to_owned(),
-        path.as_os_str().to_owned(),
+        destination.into_os_string(),
     ]);
+    Ok(())
 }
 
 fn append_bwrap_mount_parent_args(args: &mut Vec<OsString>, destination: &Path) {

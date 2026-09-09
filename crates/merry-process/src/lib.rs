@@ -11,6 +11,7 @@ mod gpg;
 mod host_resources;
 mod process_runner;
 mod sandbox_fs;
+mod sandbox_mounts;
 mod sandbox_path;
 #[cfg(target_os = "linux")]
 mod ssh_config;
@@ -19,6 +20,10 @@ pub use bwrap_path::resolve_bwrap_path;
 pub use gpg::GpgAgentSockets;
 pub use host_resources::{HostPathKind, HostPathMetadata, ssh_known_hosts};
 pub use sandbox_fs::BwrapMaskKind;
+pub use sandbox_mounts::{
+    PreparedSandboxMountPlan, SandboxLinkIssue, SandboxMountError, SandboxMountPlan,
+    SandboxPathSource,
+};
 pub use sandbox_path::{SandboxPathError, resolve_sandbox_path};
 #[cfg(target_os = "linux")]
 pub use ssh_config::BwrapSshConfigFiles;

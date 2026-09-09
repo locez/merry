@@ -3,7 +3,7 @@
 use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
 use merry_process::{
     BwrapPermissionedProcessRunnerFactory, BwrapProcessEnvironment, BwrapProcessRunner,
-    BwrapSshConfigFiles,
+    BwrapSshConfigFiles, SandboxMountPlan,
 };
 use merry_runtime::{
     HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource,
@@ -80,7 +80,19 @@ fn oversized_system_ssh_config_does_not_block_inner_actions() {
 fn prepared_snapshots_supply_independent_readonly_files_to_each_command() {
     let source = Path::new("/etc/ssh/ssh_config");
     let original = fs::read(source).expect("openssh-client system configuration");
-    let files = BwrapSshConfigFiles::prepare(source, |path| Ok(Some(path.to_path_buf()))).unwrap();
+    let mut namespace = SandboxMountPlan::new();
+    namespace
+        .bind(Path::new("/"), Path::new("/"), PathAccess::ReadOnly, false)
+        .unwrap();
+    namespace.opaque(Path::new("/proc")).unwrap();
+    namespace.opaque(Path::new("/dev")).unwrap();
+    let namespace = namespace.complete(&[]).unwrap();
+    let files = BwrapSshConfigFiles::prepare(source, |path| {
+        namespace
+            .resolve(path)
+            .map_err(|error| merry_runtime::ProcessRunnerError::infrastructure(error.to_string()))
+    })
+    .unwrap();
     let mut args = [
         "--unshare-user",
         "--unshare-net",

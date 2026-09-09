@@ -1,4 +1,5 @@
 use super::{BwrapSshConfigFiles, includes};
+use crate::SandboxPathSource;
 use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 
 #[test]
@@ -43,7 +44,10 @@ fn insecure_config_is_not_parsed_or_repaired() {
     fs::set_permissions(&config, fs::Permissions::from_mode(0o666)).unwrap();
     let files = BwrapSshConfigFiles::prepare(&config, |path| {
         assert_eq!(path, config);
-        Ok(Some(path.to_path_buf()))
+        Ok(Some(SandboxPathSource::new(
+            path.to_path_buf(),
+            path.to_path_buf(),
+        )))
     })
     .unwrap();
     let mut command = std::process::Command::new("true");
@@ -60,7 +64,13 @@ fn oversized_config_leaves_original_mounts_without_blocking_unrelated_actions() 
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("ssh_config");
     fs::write(&config, vec![b'x'; 1024 * 1024 + 1]).unwrap();
-    let files = BwrapSshConfigFiles::prepare(&config, |path| Ok(Some(path.to_path_buf()))).unwrap();
+    let files = BwrapSshConfigFiles::prepare(&config, |path| {
+        Ok(Some(SandboxPathSource::new(
+            path.to_path_buf(),
+            path.to_path_buf(),
+        )))
+    })
+    .unwrap();
     let error = files
         .compatibility_failure()
         .expect("bounded compatibility failure");

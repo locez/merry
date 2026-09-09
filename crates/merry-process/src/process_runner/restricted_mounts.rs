@@ -45,6 +45,7 @@ pub(super) fn append(
             )
     }) {
         for (path, source) in aliases.action_paths(rule.path(), tmp_source) {
+            let path = view.destination(&path)?;
             args.extend([
                 OsString::from("--ro-bind-try"),
                 source.into_os_string(),
@@ -68,7 +69,8 @@ pub(super) fn append(
         let paths = aliases
             .action_paths(rule.path(), tmp_source)
             .into_keys()
-            .collect::<BTreeSet<_>>();
+            .map(|path| view.destination(&path))
+            .collect::<Result<BTreeSet<_>, _>>()?;
         for path in &paths {
             mounts.push(Mount::Mask {
                 path: path.clone(),
@@ -89,6 +91,7 @@ pub(super) fn append(
             continue;
         }
         for (path, source) in aliases.grant_paths(rule.path(), tmp_source) {
+            let path = view.destination(&path)?;
             if !reviewed.iter().any(|root| path.starts_with(root))
                 || denied.iter().any(|root| path.starts_with(root))
             {

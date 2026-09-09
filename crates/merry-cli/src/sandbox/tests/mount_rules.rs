@@ -175,8 +175,6 @@ fn sandbox_supports_symlinked_product_write_roots() {
         panic!("expected sandbox reexec plan");
     };
     let args = plan_args(&plan);
-    let config_dir = linked_config.join("merry");
-    let managed_config_dir = config_dir.join("managed");
     let resolved_config_dir = real_config.join("merry");
     let resolved_managed_config_dir = resolved_config_dir.join("managed");
 
@@ -185,7 +183,7 @@ fn sandbox_supports_symlinked_product_write_roots() {
         &[
             "--ro-bind-try",
             resolved_config_dir.to_str().expect("UTF-8 test path"),
-            config_dir.to_str().expect("UTF-8 test path"),
+            resolved_config_dir.to_str().expect("UTF-8 test path"),
         ],
     ));
     assert!(contains_sequence(
@@ -195,14 +193,24 @@ fn sandbox_supports_symlinked_product_write_roots() {
             resolved_managed_config_dir
                 .to_str()
                 .expect("UTF-8 test path"),
-            managed_config_dir.to_str().expect("UTF-8 test path"),
+            resolved_managed_config_dir
+                .to_str()
+                .expect("UTF-8 test path"),
         ],
+    ));
+    assert!(contains_sequence(
+        &args,
+        &[
+            "--symlink",
+            real_config.to_str().unwrap(),
+            linked_config.to_str().unwrap(),
+        ]
     ));
 }
 
 #[cfg(unix)]
 #[test]
-fn sandbox_mounts_symlinked_file_sources_at_their_logical_paths() {
+fn sandbox_preserves_symlinked_file_sources_and_binds_their_targets() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::tempdir().expect("temporary sandbox paths");
@@ -234,8 +242,12 @@ fn sandbox_mounts_symlinked_file_sources_at_their_logical_paths() {
         &[
             "--ro-bind",
             real_file.to_str().expect("UTF-8 test path"),
-            "/etc/resolv.conf",
+            real_file.to_str().expect("UTF-8 test path"),
         ],
+    ));
+    assert!(contains_sequence(
+        &args,
+        &["--symlink", real_file.to_str().unwrap(), "/etc/resolv.conf",]
     ));
 }
 
@@ -251,24 +263,31 @@ fn bubblewrap_reads_a_symlinked_file_through_its_logical_mount_path() {
     symlink(&real_file, &linked_file).expect("file symlink");
 
     let destination = Path::new("/etc/resolv.conf");
-    let mut args = vec![
-        os("--unshare-user"),
-        os("--die-with-parent"),
-        os("--ro-bind"),
-        os("/"),
-        os("/"),
-    ];
-    args.extend([
-        os("--ro-bind"),
-        merry_process::resolve_bwrap_path(&linked_file)
-            .as_os_str()
-            .to_owned(),
-        destination.as_os_str().to_owned(),
-    ]);
+    let mut args = vec![os("--unshare-user"), os("--die-with-parent")];
+    let mut mounts = MountPlan::default();
+    for path in ["/usr", "/bin", "/lib", "/lib64"] {
+        mounts.bind(
+            Path::new(path),
+            Path::new(path),
+            PathAccess::ReadOnly,
+            true,
+            MountOrigin::System,
+        );
+    }
+    mounts.bind(
+        &linked_file,
+        destination,
+        PathAccess::ReadOnly,
+        false,
+        MountOrigin::System,
+    );
+    mounts.append_args(&mut args).unwrap();
     args.extend([
         os("--"),
-        os("/usr/bin/cat"),
-        destination.as_os_str().to_owned(),
+        os("/bin/sh"),
+        os("-eu"),
+        os("-c"),
+        os("test -L /etc/resolv.conf; test ! -w /etc/resolv.conf; cat /etc/resolv.conf"),
     ]);
 
     let output = match Command::new("bwrap").args(args).output() {

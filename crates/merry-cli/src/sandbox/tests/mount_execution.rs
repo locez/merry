@@ -449,7 +449,9 @@ fn cyclic_links_in_an_imported_parent_fail_during_planning() {
     );
     assert!(matches!(
         mounts.append_args(&mut Vec::new()),
-        Err(MountPlanError::DestinationLoop { .. })
+        Err(MountPlanError::Shared(
+            merry_process::SandboxMountError::Path(merry_process::SandboxPathError::Loop { .. })
+        ))
     ));
 }
 
