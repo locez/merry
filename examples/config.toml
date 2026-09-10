@@ -151,7 +151,7 @@ max_model_turns = 2048
 [tui]
 # Show up to five output lines for successful commands. Failed commands always
 # show their output preview; an extra ... line indicates omitted output.
-# Alt+O inspects captured output independently of this default. In the viewer,
+# Ctrl+T inspects captured output independently of this default. In the viewer,
 # Left/Right selects a command, C copies its command, Y copies captured output,
 # and Esc closes. Copy uses OSC 52 and requires terminal clipboard support.
 show_successful_command_output = false
@@ -187,7 +187,7 @@ scroll_down = "pagedown"
 # Manual scrolling pauses following; return explicitly when ready for new output.
 follow_latest = "ctrl+end"
 # Toggle command output details; pressing the same shortcut again or Esc closes them.
-open_command_details = "alt+o"
+open_command_details = "ctrl+t"
 review_previous_user_input = "ctrl+u"
 open_session_in_browser = "ctrl+g"
 history_previous = "up"

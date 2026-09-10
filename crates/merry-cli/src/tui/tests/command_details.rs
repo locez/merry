@@ -79,7 +79,10 @@ fn key(state: &mut TuiState, code: KeyCode) -> ControllerEffect {
 }
 
 fn open(state: &mut TuiState) -> ArtifactId {
-    let effect = handle_key_event(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT), state);
+    let effect = handle_key_event(
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        state,
+    );
     let ControllerEffect::LoadCommandOutput(artifact_id) = effect else {
         panic!("opening a completed command should request its artifact");
     };
@@ -105,7 +108,7 @@ fn command_details_shortcut_toggles_without_changing_the_draft_or_reading_positi
         assert!(draw(&mut state, 80, 24).contains("Loading captured output"));
         assert_eq!(
             handle_key_event(
-                KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT),
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
                 &mut state,
             ),
             ControllerEffect::None
@@ -123,7 +126,7 @@ fn command_details_shortcut_toggles_without_changing_the_draft_or_reading_positi
 #[test]
 fn command_output_hint_appears_only_when_completed_output_is_available() {
     let mut state = state();
-    assert!(!draw(&mut state, 80, 24).contains("Alt+O output"));
+    assert!(!draw(&mut state, 80, 24).contains("Ctrl+T output"));
     TuiProjector::default().apply(
         RuntimeEvent::ToolCallStarted {
             call: pending_call_with_args("pending", "run_process", json!({"command": "pwd"})),
@@ -131,10 +134,10 @@ fn command_output_hint_appears_only_when_completed_output_is_available() {
         },
         &mut state,
     );
-    assert!(!draw(&mut state, 80, 24).contains("Alt+O output"));
+    assert!(!draw(&mut state, 80, 24).contains("Ctrl+T output"));
     completed_command(&mut state, "ready", "pwd", 0, "");
     for width in [24, 80] {
-        assert!(draw(&mut state, width, 24).contains("Alt+O output"));
+        assert!(draw(&mut state, width, 24).contains("Ctrl+T output"));
     }
 }
 
@@ -150,11 +153,11 @@ fn command_output_hint_does_not_overwrite_new_content_navigation() {
     let wide = draw(&mut state, 80, 24);
     assert!(wide.contains("New content"));
     assert!(wide.contains("Ctrl+End latest"));
-    assert!(wide.contains("Alt+O output"));
+    assert!(wide.contains("Ctrl+T output"));
     let narrow = draw(&mut state, 40, 24);
     assert!(narrow.contains("New content"));
     assert!(narrow.contains("Ctrl+End latest"));
-    assert!(!narrow.contains("Alt+O output"));
+    assert!(!narrow.contains("Ctrl+T output"));
 }
 
 #[test]
@@ -165,7 +168,7 @@ fn command_details_close_hint_and_feedback_fit_narrow_terminals() {
     key(&mut state, KeyCode::Char('y'));
     for width in [24, 40, 80, 120] {
         let rendered = draw(&mut state, width, 24);
-        assert!(rendered.contains("Alt+O / Esc close"), "{rendered}");
+        assert!(rendered.contains("Ctrl+T / Esc close"), "{rendered}");
         assert!(rendered.contains("↑/↓"), "{rendered}");
         assert!(
             rendered.contains("C/Y copy") || rendered.contains("C copy command"),
@@ -184,7 +187,7 @@ fn command_details_shortcut_does_not_dismiss_unrelated_dialogs() {
     let before = draw(&mut state, 80, 24);
     assert_eq!(
         handle_key_event(
-            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
             &mut state,
         ),
         ControllerEffect::None
@@ -370,7 +373,7 @@ fn opening_before_any_command_completes_preserves_the_draft() {
     let mut state = state();
     state.insert_input_str("keep my draft");
     let effect = handle_key_event(
-        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT),
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
         &mut state,
     );
     assert_eq!(effect, ControllerEffect::None);
@@ -388,7 +391,7 @@ fn inspection_toggle_and_follow_shortcuts_respect_configured_bindings() {
     let artifact = completed_command(&mut state, "configured", "pwd", 0, "");
     let collapsed = draw(&mut state, 80, 24);
     assert!(collapsed.contains("Ctrl+F output"));
-    assert!(!collapsed.contains("Alt+O output"));
+    assert!(!collapsed.contains("Ctrl+T output"));
     assert_eq!(
         handle_key_event(
             KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
@@ -399,7 +402,7 @@ fn inspection_toggle_and_follow_shortcuts_respect_configured_bindings() {
     let expanded = draw(&mut state, 80, 24);
     assert!(expanded.contains("Ctrl+F / Esc close"));
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT),
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
         &mut state,
     );
     assert_eq!(draw(&mut state, 80, 24), expanded);

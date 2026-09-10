@@ -83,7 +83,7 @@ impl Default for Keymap {
                     KeyAction::OpenCommandPanel,
                 ),
                 (
-                    KeyBinding::new(KeyCode::Char('o'), KeyModifiers::ALT),
+                    KeyBinding::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
                     KeyAction::OpenCommandDetails,
                 ),
                 (
@@ -268,6 +268,7 @@ fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> 
         "ctrl+p" => Ok(KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
         "ctrl+q" => Ok(KeyBinding::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
         "ctrl+r" => Ok(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+        "ctrl+t" => Ok(KeyBinding::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
         "ctrl+u" => Ok(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
         "ctrl+v" => Ok(KeyBinding::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
         other => Err(crate::config::ConfigError::Invalid(format!(
@@ -280,6 +281,54 @@ fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> 
 mod tests {
     use super::*;
     use crate::config::TuiKeymapToml;
+
+    #[test]
+    fn command_details_defaults_to_ctrl_t_without_retaining_alt_o() {
+        let keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.action_for(KeyBinding::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            Some(KeyAction::OpenCommandDetails)
+        );
+        assert_eq!(
+            keymap.action_for(KeyBinding::new(KeyCode::Char('o'), KeyModifiers::ALT)),
+            None
+        );
+        assert_eq!(
+            keymap.action_for(KeyBinding::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            Some(KeyAction::TogglePlan)
+        );
+        assert_eq!(
+            keymap
+                .binding_label_for(KeyAction::OpenCommandDetails)
+                .as_deref(),
+            Some("Ctrl+T")
+        );
+    }
+
+    #[test]
+    fn explicitly_configured_alt_o_replaces_the_new_default() {
+        let keymap = Keymap::from_config(&TuiKeymapToml {
+            open_command_details: Some("alt+o".to_owned()),
+            ..TuiKeymapToml::default()
+        })
+        .expect("existing explicit shortcut config should remain valid");
+
+        assert_eq!(
+            keymap.action_for(KeyBinding::new(KeyCode::Char('o'), KeyModifiers::ALT)),
+            Some(KeyAction::OpenCommandDetails)
+        );
+        assert_eq!(
+            keymap.action_for(KeyBinding::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(
+            keymap
+                .binding_label_for(KeyAction::OpenCommandDetails)
+                .as_deref(),
+            Some("Alt+O")
+        );
+    }
 
     #[test]
     fn configured_binding_takes_precedence_over_existing_default_binding() {
