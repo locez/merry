@@ -181,6 +181,39 @@ fn renderer_highlights_inline_code_spans() {
 }
 
 #[test]
+fn renderer_preserves_historical_emphasis_across_user_and_assistant_text() {
+    for (focus, expected_color) in [(None, Color::LightMagenta), (Some("red"), Color::Red)] {
+        let theme = TuiTheme::from_config(&crate::config::TuiThemeToml {
+            focus: focus.map(str::to_owned),
+            ..crate::config::TuiThemeToml::default()
+        })
+        .expect("theme config should validate");
+        let mut state = TuiState::new(
+            "/repo".into(),
+            "gpt-test".to_owned(),
+            Keymap::default(),
+            theme,
+        );
+        state.push_timeline_item(TimelineItem::User {
+            text: "inspect `user_keyword`".to_owned(),
+            lane: QueuedInputLane::Next,
+        });
+        state.push_timeline_item(TimelineItem::Assistant {
+            text: "**important** and `assistant_keyword`".to_owned(),
+        });
+
+        let buffer = render_to_buffer(&state, 120, 24);
+        for text in ["user_keyword", "important", "assistant_keyword"] {
+            let style = find_cell_style(&buffer, text).expect("emphasized text should render");
+            assert_eq!(style.fg, Some(expected_color), "{text}");
+            assert_eq!(style.bg, Some(Color::Reset), "{text}");
+            assert!(style.add_modifier.contains(Modifier::BOLD), "{text}");
+            assert!(!style.add_modifier.contains(Modifier::DIM), "{text}");
+        }
+    }
+}
+
+#[test]
 fn renderer_renders_assistant_markdown_strong_without_markers() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -465,7 +498,7 @@ fn renderer_wraps_assistant_text_on_word_boundaries() {
 }
 
 #[test]
-fn renderer_draws_assistant_separator_across_timeline_width() {
+fn renderer_draws_assistant_separator_across_timeline_content_width() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -477,5 +510,8 @@ fn renderer_draws_assistant_separator_across_timeline_width() {
     });
 
     let text = render_to_text(&state, 40, 12);
-    assert!(text.lines().any(|line| line == "-".repeat(40)));
+    assert!(
+        text.lines()
+            .any(|line| line == format!(" {}", "-".repeat(39)))
+    );
 }

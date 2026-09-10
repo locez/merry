@@ -1,10 +1,13 @@
 use super::{
+    copy_controls::{CopyContent, CopyTarget, copy_header},
     highlight::highlight_code_to_lines,
     state::TuiState,
     text_wrap::{
-        StyledTextPart, wrap_styled_parts, wrap_styled_parts_preserving_leading_whitespace,
+        StyledTextPart, inline_code_style, semantic_style, wrap_styled_parts,
+        wrap_styled_parts_preserving_leading_whitespace,
     },
     theme::SemanticColor,
+    transcript::{SelectionPolicy, TranscriptRow},
 };
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{
@@ -13,11 +16,23 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// Display lines and source-backed controls produced by the same Markdown parse.
+pub(crate) struct RenderedMarkdown {
+    pub(crate) rows: Vec<TranscriptRow>,
+    pub(crate) copy_targets: Vec<CopyTarget>,
+}
+
+impl RenderedMarkdown {
+    fn new(rows: Vec<TranscriptRow>, copy_targets: Vec<CopyTarget>) -> Self {
+        Self { rows, copy_targets }
+    }
+}
+
 pub(crate) fn markdown_lines(
     state: &TuiState,
     markdown: &str,
     region_width: u16,
-) -> Vec<Line<'static>> {
+) -> RenderedMarkdown {
     let parser = Parser::new_ext(
         markdown,
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS,
@@ -32,7 +47,8 @@ pub(crate) fn markdown_lines(
 struct MarkdownRenderer<'state> {
     state: &'state TuiState,
     region_width: u16,
-    lines: Vec<Line<'static>>,
+    rows: Vec<TranscriptRow>,
+    copy_targets: Vec<CopyTarget>,
     parts: Vec<StyledTextPart>,
     style_stack: Vec<Style>,
     link_stack: Vec<LinkState>,
@@ -79,7 +95,8 @@ impl<'state> MarkdownRenderer<'state> {
         Self {
             state,
             region_width,
-            lines: Vec::new(),
+            rows: Vec::new(),
+            copy_targets: Vec::new(),
             parts: Vec::new(),
             style_stack: vec![semantic_style(state, SemanticColor::Assistant)],
             link_stack: Vec::new(),
@@ -111,10 +128,13 @@ impl<'state> MarkdownRenderer<'state> {
             Event::SoftBreak | Event::HardBreak => self.flush_parts(),
             Event::Rule => {
                 self.flush_parts();
-                self.lines.push(Line::from(Span::styled(
-                    "-".repeat(usize::from(self.region_width).max(1)),
-                    semantic_style(self.state, SemanticColor::Muted),
-                )));
+                self.push_row(TranscriptRow::new(
+                    Line::from(Span::styled(
+                        "-".repeat(usize::from(self.region_width).max(1)),
+                        semantic_style(self.state, SemanticColor::Muted),
+                    )),
+                    SelectionPolicy::Keep,
+                ));
             }
             Event::Html(html) | Event::InlineHtml(html) => self.push_text(html.as_ref()),
             Event::FootnoteReference(reference) => self.push_text(reference.as_ref()),
@@ -394,8 +414,10 @@ impl<'state> MarkdownRenderer<'state> {
         }
         let parts = std::mem::take(&mut self.parts);
         if self.quote_depth == 0 {
-            self.lines
-                .extend(wrap_styled_parts(parts, self.region_width));
+            self.push_lines(
+                wrap_styled_parts(parts, self.region_width),
+                SelectionPolicy::Keep,
+            );
             return;
         }
 
@@ -407,41 +429,73 @@ impl<'state> MarkdownRenderer<'state> {
             .max(1);
         let prefix_style =
             semantic_style(self.state, SemanticColor::Focus).add_modifier(Modifier::BOLD);
-        self.lines.extend(
+        self.push_lines(
             wrap_styled_parts(parts, content_width)
                 .into_iter()
                 .map(|mut line| {
                     line.spans
                         .insert(0, Span::styled(prefix.clone(), prefix_style));
                     line
-                }),
+                })
+                .collect(),
+            SelectionPolicy::Keep,
         );
     }
 
     fn flush_code_block(&mut self, block: CodeBlockState) {
-        let text = block
-            .text
-            .strip_suffix('\n')
-            .unwrap_or(block.text.as_str())
-            .to_owned();
+        let copy_target = if !block.text.is_empty()
+            && let Some((header, width)) = copy_header(self.state, "[Copy code]", self.region_width)
+        {
+            let line_index = self.rows.len();
+            self.push_row(TranscriptRow::new(header, SelectionPolicy::Skip));
+            Some((line_index, width))
+        } else {
+            None
+        };
+        let text = block.text.strip_suffix('\n').unwrap_or(block.text.as_str());
         if let Some(lang) = block.lang {
-            let highlighted = highlight_code_to_lines(&text, &lang, self.state.code_theme());
-            self.lines.extend(
+            let highlighted = highlight_code_to_lines(text, &lang, self.state.code_theme());
+            self.push_lines(
                 highlighted
                     .into_iter()
-                    .flat_map(|line| code_block_visual_lines(self.state, line, self.region_width)),
+                    .flat_map(|line| code_block_visual_lines(self.state, line, self.region_width))
+                    .collect(),
+                SelectionPolicy::StripPrefix(2),
             );
-            return;
+        } else {
+            for line in text.split('\n') {
+                self.push_lines(
+                    code_block_lines(self.state, line, self.region_width),
+                    SelectionPolicy::StripPrefix(2),
+                );
+            }
         }
-        for line in text.split('\n') {
-            self.lines
-                .extend(code_block_lines(self.state, line, self.region_width));
+        if let Some((line_index, width)) = copy_target {
+            self.copy_targets.push(CopyTarget::new(
+                line_index,
+                width,
+                CopyContent::Text(block.text),
+            ));
         }
     }
 
     fn flush_table(&mut self, table: TableState) {
-        self.lines
-            .extend(table_lines(self.state, table.rows, self.region_width));
+        self.push_lines(
+            table_lines(self.state, table.rows, self.region_width),
+            SelectionPolicy::Keep,
+        );
+    }
+
+    fn push_row(&mut self, row: TranscriptRow) {
+        self.rows.push(row);
+    }
+
+    fn push_lines(&mut self, lines: Vec<Line<'static>>, selection: SelectionPolicy) {
+        self.rows.extend(
+            lines
+                .into_iter()
+                .map(|line| TranscriptRow::new(line, selection)),
+        );
     }
 
     fn push_style(&mut self, style: Style) {
@@ -497,12 +551,15 @@ impl<'state> MarkdownRenderer<'state> {
         }
     }
 
-    fn finish(mut self) -> Vec<Line<'static>> {
+    fn finish(mut self) -> RenderedMarkdown {
         self.flush_parts();
-        if self.lines.is_empty() {
-            self.lines.push(Line::from(String::new()));
+        if self.rows.is_empty() {
+            self.push_row(TranscriptRow::new(
+                Line::from(String::new()),
+                SelectionPolicy::Keep,
+            ));
         }
-        self.lines
+        RenderedMarkdown::new(self.rows, self.copy_targets)
     }
 }
 
@@ -785,20 +842,8 @@ fn link_style(state: &TuiState, _url: &str) -> Style {
     semantic_style(state, SemanticColor::Command).add_modifier(Modifier::UNDERLINED)
 }
 
-fn inline_code_style(state: &TuiState, base: Style) -> Style {
-    base.fg.unwrap_or_default();
-    semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD)
-}
-
 fn strikethrough_style(state: &TuiState) -> Style {
     semantic_style(state, SemanticColor::Muted).add_modifier(Modifier::CROSSED_OUT)
-}
-
-fn semantic_style(state: &TuiState, color: SemanticColor) -> Style {
-    state
-        .theme()
-        .color(color)
-        .map_or_else(Style::default, |color| Style::default().fg(color))
 }
 
 fn quote_prefix(depth: usize) -> String {

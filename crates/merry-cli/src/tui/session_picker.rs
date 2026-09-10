@@ -116,7 +116,7 @@ pub(crate) async fn pick_session(
                     .draw(|frame| render_session_picker(frame, &state, workspace_root))
                     .map_err(unexpected)?;
             }
-            TerminalEvent::Paste(_) => {}
+            TerminalEvent::Paste(_) | TerminalEvent::Mouse(_) => {}
         }
     }
 }

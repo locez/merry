@@ -317,19 +317,15 @@ fn projector_expands_tool_batches_in_model_order() {
         &mut state,
     );
 
-    assert_eq!(
-        state.timeline(),
-        [
-            TimelineItem::Muted {
-                title: "Read".to_owned(),
-                detail: "read_text path=first.rs".to_owned(),
-            },
-            TimelineItem::Muted {
-                title: "Ran".to_owned(),
-                detail: "rg --files (src)".to_owned(),
-            },
-        ]
-    );
+    assert_eq!(state.timeline().len(), 2);
+    let rendered = render_to_text(&state, 120, 24);
+    let read_position = rendered
+        .find("Read read_text path=first.rs")
+        .expect("read call is visible");
+    let process_position = rendered.find("Running ").expect("process call is running");
+    assert!(read_position < process_position);
+    assert!(rendered.contains("rg --files (src)"));
+    assert!(!rendered.contains("Ran "));
 }
 
 #[test]

@@ -1,7 +1,8 @@
 use crate::tui::{
     keymap::Keymap,
     projector::TuiProjector,
-    state::{TimelineItem, TuiState},
+    render::render_to_text,
+    state::{CommandView, TimelineItem, TuiState},
     tests::{pending_call_with_args, source, text_artifact},
     theme::TuiTheme,
 };
@@ -15,7 +16,8 @@ fn projector_renders_process_calls_as_ran_with_preview() {
         "gpt-test".to_owned(),
         Keymap::default(),
         TuiTheme::default(),
-    );
+    )
+    .with_successful_command_output(true);
     let mut projector = TuiProjector::default();
 
     projector.apply(
@@ -44,11 +46,10 @@ fn projector_renders_process_calls_as_ran_with_preview() {
     );
 
     assert_eq!(state.timeline().len(), 1);
-    let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
-        panic!("process call should expand with output preview");
-    };
-    assert_eq!(title, "Ran python3 hello_world.py (.)");
-    assert_eq!(body, "  hello world");
+    let rendered = render_to_text(&state, 120, 24);
+    assert!(rendered.contains("Ran python3 hello_world.py (.)"));
+    assert!(rendered.contains("  hello world"));
+    assert!(!rendered.contains("process_action"));
 }
 
 #[test]
@@ -89,12 +90,12 @@ fn projector_renders_nonzero_process_exit_as_command_result() {
     );
 
     assert_eq!(state.timeline().len(), 1);
-    let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
-        panic!("nonzero process exit should remain a command result");
-    };
-    assert_eq!(title, "Ran cargo test -p merry-cli (.) -> exit 101");
-    assert_eq!(body, "  error: test failed\n  rerun with --exact");
-    assert!(!body.contains("process_action_failed"));
+    let rendered = render_to_text(&state, 120, 24);
+    assert!(rendered.contains("Ran cargo test -p merry-cli (.) -> 101"));
+    assert!(rendered.contains("  error: test failed"));
+    assert!(rendered.contains("  rerun with --exact"));
+    assert!(!rendered.contains("process_action_failed"));
+    assert!(!rendered.contains("! Error"));
 }
 
 #[test]
@@ -133,12 +134,17 @@ fn projector_keeps_process_start_failure_as_diagnostic() {
         &mut state,
     );
 
-    let TimelineItem::Diagnostic { title, body } = &state.timeline()[0] else {
-        panic!("process start failure should remain a diagnostic");
-    };
-    assert_eq!(title, "Ran missing-command (.) -> failed");
-    assert!(body.contains("process_action_failed"));
-    assert!(body.contains("failed to start process"));
+    let rendered = render_to_text(&state, 120, 24);
+    assert!(rendered.contains("Ran missing-command (.) -> failed"));
+    assert!(rendered.contains("process_action_failed"));
+    assert!(rendered.contains("failed to start process"));
+    assert!(matches!(
+        crate::tui::controller::handle_key_action(
+            crate::tui::keymap::KeyAction::OpenCommandDetails,
+            &mut state
+        ),
+        crate::tui::controller::ControllerEffect::LoadCommandOutput(_)
+    ));
 }
 
 #[test]
@@ -224,11 +230,14 @@ fn projector_keeps_process_preview_lines_intact() {
         &mut state,
     );
 
-    let TimelineItem::Expanded { body, .. } = &state.timeline()[0] else {
+    let TimelineItem::Command {
+        view: CommandView::Finished { preview, .. },
+    } = &state.timeline()[0]
+    else {
         panic!("process call should expand with output preview");
     };
-    assert!(!body.contains("stdout:"));
-    assert!(body.contains(&format!("  {}", "x".repeat(150))));
+    assert_eq!(preview.lines, ["x".repeat(150)]);
+    assert!(!preview.truncated);
 }
 
 #[test]
@@ -266,8 +275,12 @@ fn projector_limits_process_preview_to_five_output_lines() {
         &mut state,
     );
 
-    let TimelineItem::Expanded { body, .. } = &state.timeline()[0] else {
+    let TimelineItem::Command {
+        view: CommandView::Finished { preview, .. },
+    } = &state.timeline()[0]
+    else {
         panic!("process call should expand with output preview");
     };
-    assert_eq!(body, "  one\n  two\n  three\n  four\n  five");
+    assert_eq!(preview.lines, ["one", "two", "three", "four", "five"]);
+    assert!(preview.truncated);
 }

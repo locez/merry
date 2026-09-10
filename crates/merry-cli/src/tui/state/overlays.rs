@@ -58,6 +58,20 @@ impl TuiState {
         self.overlays.overlay = Some(Overlay::settings());
     }
 
+    pub(crate) fn open_command_details(
+        &mut self,
+        details: crate::tui::command_details::CommandDetails,
+    ) {
+        self.command_details_generation = self.command_details_generation.saturating_add(1);
+        self.completion_menu = None;
+        self.overlays = OverlayState::default();
+        self.overlays.overlay = Some(Overlay::CommandDetails(details));
+    }
+
+    pub(crate) fn command_details_generation(&self) -> u64 {
+        self.command_details_generation
+    }
+
     pub(crate) fn open_provider_manager(&mut self, items: Vec<ProviderListItem>) {
         self.overlays.provider_form_back = None;
         self.overlays.reasoning_picker_back = None;
@@ -78,6 +92,7 @@ impl TuiState {
                 Overlay::PlanApproval(_)
                 | Overlay::PermissionReview(_)
                 | Overlay::Dialog(_)
+                | Overlay::CommandDetails(_)
                 | Overlay::Shortcuts(_),
             )
             | None => {

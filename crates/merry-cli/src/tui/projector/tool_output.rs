@@ -3,8 +3,13 @@
 use crate::{
     tool_display::format_tool_call_detail,
     tui::{
+        process_output::process_output_preview,
         projector::StartedToolView,
-        state::{PatchChangeView, PatchLineKind, PatchLineView, TimelineItem},
+        state::{
+            CommandFailure, CommandView, PatchChangeView, PatchLineKind, PatchLineView,
+            ProcessOutputPreview, TimelineItem,
+        },
+        text_wrap::truncate_chars,
         tool_error::compact_failed_tool_body,
     },
 };
@@ -13,8 +18,6 @@ use merry_tools::APPLY_PATCH_TOOL;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-
-pub(super) const PROCESS_PREVIEW_MAX_LINES: usize = 5;
 
 // This bounds the timeline preview only; the workspace tool and Focus retain the full file.
 pub(super) const READ_FILE_PREVIEW_MAX_LINES: usize = 120;
@@ -106,7 +109,6 @@ pub(super) fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
 
 pub(super) fn success_tool_bodies(name: &str, output: &str) -> Option<String> {
     match name {
-        "run_process" => process_output_bodies(output),
         "request_permissions" => permission_output_bodies(output),
         "read_text" => read_text_output_bodies(output),
         _ => None,
@@ -163,65 +165,45 @@ pub(super) struct WorkspaceReadTextOutput {
     pub(super) truncated: bool,
 }
 
-pub(super) fn process_output_bodies(output: &str) -> Option<String> {
-    let value = serde_json::from_str::<Value>(output).ok()?;
-    let stdout = value
-        .pointer("/stdout/text")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let stderr = value
-        .pointer("/stderr/text")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let status = process_exit_code_from_value(&value);
-
-    let mut lines = Vec::new();
-    append_stream_preview(&mut lines, stdout);
-    append_stream_preview(&mut lines, stderr);
-    if lines.is_empty()
-        && let Some(status) = status
-        && status != 0
+pub(super) fn completed_process_view(
+    tool: &StartedToolView,
+    output: &str,
+    exit_code: Option<i64>,
+    result: &merry_core::ToolCallResult,
+) -> TimelineItem {
+    let failure = if result
+        .diagnostic()
+        .is_some_and(|diagnostic| diagnostic.code() == merry_core::TOOL_CANCELLED_BY_USER_CODE)
     {
-        lines.push(format!("  exit {status}"));
+        Some(CommandFailure::Cancelled)
+    } else if result.status() == merry_core::ToolCallResultStatus::Failed
+        && !exit_code.is_some_and(|code| code != 0)
+    {
+        Some(CommandFailure::Failed)
+    } else {
+        None
+    };
+    let mut preview = process_output_preview(output)
+        .unwrap_or_else(|| ProcessOutputPreview::new(&compact_tool_output(output), "", false));
+    if failure == Some(CommandFailure::Failed) {
+        preview = ProcessOutputPreview::new(
+            &failed_tool_body(result.diagnostic(), output),
+            "",
+            preview.truncated,
+        );
     }
-
-    (!lines.is_empty()).then(|| lines.join("\n"))
-}
-
-pub(super) fn process_exit_code(output: &str) -> Option<i64> {
-    let value = serde_json::from_str::<Value>(output).ok()?;
-    process_exit_code_from_value(&value)
-}
-
-pub(super) fn process_exit_code_from_value(value: &Value) -> Option<i64> {
-    if value.get("kind").and_then(Value::as_str) != Some("process_action") {
-        return None;
+    TimelineItem::Command {
+        view: CommandView::Finished {
+            detail: tool.detail.clone(),
+            exit_code,
+            failure,
+            preview,
+            command: tool.command.clone(),
+            cwd: tool.cwd.clone(),
+            artifact: result.artifact().clone(),
+            elapsed: tool.started_at.map(|started_at| started_at.elapsed()),
+        },
     }
-    value.get("status").and_then(Value::as_i64).or_else(|| {
-        value
-            .pointer("/status/kind")
-            .and_then(Value::as_str)
-            .filter(|kind| *kind == "exited")
-            .and_then(|_| value.pointer("/status/code").and_then(Value::as_i64))
-    })
-}
-
-pub(super) fn append_stream_preview(lines: &mut Vec<String>, text: &str) {
-    let stream_lines = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .take(PROCESS_PREVIEW_MAX_LINES.saturating_sub(lines.len()));
-    lines.extend(stream_lines.map(|line| format!("  {line}")));
-}
-
-pub(super) fn truncate_chars(text: &str, max_chars: usize) -> String {
-    if max_chars <= 3 {
-        return ".".repeat(max_chars);
-    }
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    text.chars().take(max_chars - 3).collect::<String>() + "..."
 }
 
 pub(super) fn compact_tool_output(output: &str) -> String {

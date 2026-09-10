@@ -1,6 +1,8 @@
 use super::{TUI_REFRESH_INTERVAL, drain_background_tasks, new_refresh_interval};
 use tokio::{sync::oneshot, task::JoinSet, time};
 
+mod selection_scroll;
+
 #[tokio::test(start_paused = true)]
 async fn refresh_interval_is_not_reset_by_unrelated_work() {
     let mut refresh_interval = new_refresh_interval();

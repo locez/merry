@@ -5,8 +5,10 @@ use crate::tui::{
     plan::PlanUiState,
     preferences::{TuiPreferences, TuiSettingsDefaults},
     status::{format_header_status_parts, format_session_usage_full},
+    text_interaction::TextSelection,
     theme::TuiTheme,
 };
+use clipboard::ClipboardFeedback;
 use merry_core::{InteractiveRunState, QueuedInputLane, SessionUsage};
 use merry_runtime::SkillMetadata;
 use overlays::OverlayState;
@@ -14,9 +16,10 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
+pub(crate) use timeline::TimelineAnchor;
 pub(crate) use views::{
-    PatchChangeView, PatchLineKind, PatchLineView, QueuePreview, QueuePreviewItem,
-    QueuePreviewState, TimelineItem,
+    CommandFailure, CommandView, PatchChangeView, PatchLineKind, PatchLineView,
+    ProcessOutputPreview, QueuePreview, QueuePreviewItem, QueuePreviewState, TimelineItem,
 };
 
 mod overlays;
@@ -24,6 +27,10 @@ mod overlays;
 mod views;
 
 mod settings;
+
+mod clipboard;
+mod text_interaction;
+mod timeline;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TuiState {
@@ -38,8 +45,14 @@ pub(crate) struct TuiState {
     input_history: InputHistory,
     queue_preview: QueuePreviewState,
     timeline: Vec<TimelineItem>,
+    show_successful_command_output: bool,
+    command_details_generation: u64,
     timeline_scroll_offset: usize,
     timeline_review_user_index: Option<usize>,
+    timeline_anchor: Option<TimelineAnchor>,
+    timeline_has_updates: bool,
+    text_selection: Option<TextSelection>,
+    clipboard_feedback: Option<ClipboardFeedback>,
     pending_local_echoes: Vec<PendingLocalEcho>,
     pending_local_run_start: bool,
     stop_feedback: StopFeedbackState,
@@ -90,8 +103,14 @@ impl TuiState {
             input_history: InputHistory::default(),
             queue_preview: QueuePreviewState::from_preview(QueuePreview::empty()),
             timeline: Vec::new(),
+            show_successful_command_output: false,
+            command_details_generation: 0,
             timeline_scroll_offset: 0,
             timeline_review_user_index: None,
+            timeline_anchor: None,
+            timeline_has_updates: false,
+            text_selection: None,
+            clipboard_feedback: None,
             pending_local_echoes: Vec::new(),
             pending_local_run_start: false,
             stop_feedback: StopFeedbackState::Idle,
@@ -105,6 +124,17 @@ impl TuiState {
             settings_defaults: TuiSettingsDefaults::default(),
             plan: PlanUiState::default(),
         }
+    }
+
+    /// Sets the display-only success-output policy without changing runtime artifacts.
+    pub(crate) fn with_successful_command_output(mut self, show_output: bool) -> Self {
+        self.show_successful_command_output = show_output;
+        self
+    }
+
+    /// Whether completed successful commands show their bounded output preview.
+    pub(crate) fn show_successful_command_output(&self) -> bool {
+        self.show_successful_command_output
     }
 
     pub(crate) fn plan(&self) -> &PlanUiState {
@@ -320,13 +350,13 @@ impl TuiState {
     }
 
     pub(crate) fn push_timeline_item(&mut self, item: TimelineItem) {
+        self.note_timeline_update();
         self.timeline.push(item);
-        self.timeline_scroll_offset = 0;
-        self.timeline_review_user_index = None;
     }
 
     pub(crate) fn append_assistant_delta(&mut self, index: Option<usize>, delta: &str) -> usize {
-        let index = if let Some(index) = index
+        self.note_timeline_update();
+        if let Some(index) = index
             && let Some(TimelineItem::Assistant { text }) = self.timeline.get_mut(index)
         {
             text.push_str(delta);
@@ -336,10 +366,7 @@ impl TuiState {
                 text: delta.to_owned(),
             });
             self.timeline.len().saturating_sub(1)
-        };
-        self.timeline_scroll_offset = 0;
-        self.timeline_review_user_index = None;
-        index
+        }
     }
 
     pub(crate) fn push_user_timeline_item(&mut self, text: String, lane: QueuedInputLane) {
@@ -383,10 +410,9 @@ impl TuiState {
     }
 
     pub(crate) fn replace_timeline_item(&mut self, index: usize, item: TimelineItem) {
+        self.note_timeline_update();
         if let Some(slot) = self.timeline.get_mut(index) {
             *slot = item;
-            self.timeline_scroll_offset = 0;
-            self.timeline_review_user_index = None;
         }
     }
 
@@ -472,13 +498,14 @@ impl TuiState {
     }
 
     pub(crate) fn exit_timeline_review(&mut self) {
-        self.timeline_review_user_index = None;
-        self.timeline_scroll_offset = 0;
+        self.follow_latest();
     }
 
     pub(crate) fn follow_latest(&mut self) {
         self.timeline_scroll_offset = 0;
         self.timeline_review_user_index = None;
+        self.timeline_anchor = None;
+        self.timeline_has_updates = false;
         self.pending_empty_input_quit = false;
     }
 
@@ -490,13 +517,18 @@ impl TuiState {
     pub(crate) fn scroll_timeline_up_by(&mut self, lines: usize) {
         self.pending_empty_input_quit = false;
         self.timeline_review_user_index = None;
+        self.timeline_anchor = None;
         self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_add(lines);
     }
 
     pub(crate) fn scroll_timeline_down_by(&mut self, lines: usize) {
         self.pending_empty_input_quit = false;
         self.timeline_review_user_index = None;
+        self.timeline_anchor = None;
         self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_sub(lines);
+        if self.timeline_scroll_offset == 0 {
+            self.follow_latest();
+        }
     }
 
     pub(crate) fn jump_to_previous_user_input(&mut self) {
@@ -509,6 +541,7 @@ impl TuiState {
         {
             self.pending_empty_input_quit = false;
             self.timeline_review_user_index = Some(index);
+            self.timeline_anchor = None;
         }
     }
 

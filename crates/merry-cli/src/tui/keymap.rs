@@ -11,11 +11,13 @@ pub(crate) enum KeyAction {
     OpenSessionInBrowser,
     Interrupt,
     OpenCommandPanel,
+    OpenCommandDetails,
     TogglePlan,
     CloseOverlay,
     Quit,
     ScrollUp,
     ScrollDown,
+    FollowLatest,
     ReviewPreviousUserInput,
     HistoryPrevious,
     HistoryNext,
@@ -81,6 +83,10 @@ impl Default for Keymap {
                     KeyAction::OpenCommandPanel,
                 ),
                 (
+                    KeyBinding::new(KeyCode::Char('o'), KeyModifiers::ALT),
+                    KeyAction::OpenCommandDetails,
+                ),
+                (
                     KeyBinding::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
                     KeyAction::TogglePlan,
                 ),
@@ -99,6 +105,10 @@ impl Default for Keymap {
                 (
                     KeyBinding::new(KeyCode::PageDown, KeyModifiers::NONE),
                     KeyAction::ScrollDown,
+                ),
+                (
+                    KeyBinding::new(KeyCode::End, KeyModifiers::CONTROL),
+                    KeyAction::FollowLatest,
                 ),
                 (
                     KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
@@ -159,6 +169,12 @@ impl Keymap {
         }
         if let Some(binding) = config.scroll_down.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::ScrollDown);
+        }
+        if let Some(binding) = config.follow_latest.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::FollowLatest);
+        }
+        if let Some(binding) = config.open_command_details.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::OpenCommandDetails);
         }
         if let Some(binding) = config.review_previous_user_input.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::ReviewPreviousUserInput);
@@ -233,6 +249,8 @@ fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> 
     match normalized.as_str() {
         "enter" => Ok(KeyBinding::new(KeyCode::Enter, KeyModifiers::NONE)),
         "esc" => Ok(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
+        "ctrl+end" => Ok(KeyBinding::new(KeyCode::End, KeyModifiers::CONTROL)),
+        "alt+o" => Ok(KeyBinding::new(KeyCode::Char('o'), KeyModifiers::ALT)),
         "up" => Ok(KeyBinding::new(KeyCode::Up, KeyModifiers::NONE)),
         "down" => Ok(KeyBinding::new(KeyCode::Down, KeyModifiers::NONE)),
         "pageup" | "page_up" | "pgup" => Ok(KeyBinding::new(KeyCode::PageUp, KeyModifiers::NONE)),

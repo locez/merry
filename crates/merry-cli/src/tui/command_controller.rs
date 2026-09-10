@@ -90,6 +90,13 @@ pub(crate) fn run_palette_command(
             state.close_overlay();
             handle_key_action(KeyAction::ReviewPreviousUserInput, state)
         }
+        PaletteCommand::OpenCommandDetails => {
+            handle_key_action(KeyAction::OpenCommandDetails, state)
+        }
+        PaletteCommand::FollowLatest => {
+            state.close_overlay();
+            handle_key_action(KeyAction::FollowLatest, state)
+        }
         PaletteCommand::Interrupt => {
             prepare_timeline_feedback(state);
             if state.can_interrupt_run() {

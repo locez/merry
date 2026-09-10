@@ -23,7 +23,7 @@ use crate::{
 pub(super) use effects::persist_submitted_input_history;
 pub(super) use input::project_local_effect;
 pub(crate) use input::{
-    apply_clipboard_image_completion, handle_key_action, handle_key_event,
+    apply_clipboard_image_completion, handle_key_action, handle_key_event, handle_mouse_input,
     handle_mouse_scroll_down, handle_mouse_scroll_up, handle_paste_event,
 };
 use merry_runtime::InteractiveRunMessage;
@@ -48,6 +48,32 @@ struct ClipboardImageCompletion {
     result: Result<DraftImage, String>,
 }
 
+pub(super) struct CommandOutputCompletion {
+    artifact_id: merry_core::ArtifactId,
+    generation: u64,
+    result: Result<super::command_details::CapturedOutput, String>,
+}
+
+impl CommandOutputCompletion {
+    pub(super) fn new(
+        artifact_id: merry_core::ArtifactId,
+        generation: u64,
+        result: Result<super::command_details::CapturedOutput, String>,
+    ) -> Self {
+        Self {
+            artifact_id,
+            generation,
+            result,
+        }
+    }
+
+    pub(super) fn apply(self, state: &mut TuiState) {
+        if self.generation == state.command_details_generation() {
+            super::command_details::apply_output(state, &self.artifact_id, self.result);
+        }
+    }
+}
+
 pub(super) struct ProviderController<'a> {
     pub(super) management: &'a mut ProviderManagementService,
     pub(super) discovery_tx: &'a mpsc::Sender<ModelDiscoveryCompletion>,
@@ -61,6 +87,9 @@ pub(crate) enum ControllerEffect {
     SubmitNext(TuiSubmission),
     SubmitBacklog(TuiSubmission),
     PasteImage,
+    LoadCommandOutput(merry_core::ArtifactId),
+    CopyText(String),
+    CopyTextTooLarge,
     Interrupt,
     ResumeSuspended,
     DiscardSuspended,
@@ -145,6 +174,7 @@ pub(crate) async fn run_controller(
     let mut background_tasks = JoinSet::new();
     let (model_discovery_tx, mut model_discovery_rx) = mpsc::channel(4);
     let (clipboard_image_tx, mut clipboard_image_rx) = mpsc::channel(4);
+    let (command_output_tx, mut command_output_rx) = mpsc::channel(4);
     let mut model_discovery_generation = 0_u64;
     let mut model_discovery_token: Option<CancellationToken> = None;
     let mut subagent_activity_open = true;
@@ -163,80 +193,83 @@ pub(crate) async fn run_controller(
             .update_subagent_activity(session.subagent_activity.borrow().clone());
         let mut refresh_interval = new_refresh_interval();
         refresh_interval.tick().await;
-        render_once(&mut terminal, &state)?;
+        render_once(&mut terminal, &mut state)?;
 
         loop {
             tokio::select! {
                 Some(result) = background_tasks.join_next(), if !background_tasks.is_empty() => {
                     result.map_err(unexpected)?;
                 }
-                _ = refresh_interval.tick(), if state.is_active_run() => {
+                _ = refresh_interval.tick(), if needs_refresh(&state) => {
                     if let Some(next) = session.prune_cancelled_permission_reviews() {
                         match next {
                             Some((approval_id, body)) => state.open_permission_review(approval_id, body),
                             None => state.close_overlay(),
                         }
                     }
-                    render_once(&mut terminal, &state)?;
+                    refresh_interactions(&mut state, terminal.size().map_err(unexpected)?);
+                    render_once(&mut terminal, &mut state)?;
                 }
                 event = terminal.next_event() => {
                     let Some(event) = event.map_err(unexpected)? else {
                         break;
                     };
 
-                    match event {
+                    let effect = match event {
                         TerminalEvent::Key(key) => {
-                            let effect = handle_key_event(key, &mut state);
-                            project_local_effect(&effect, &mut state);
-                            render_once(&mut terminal, &state)?;
-                            let providers = ProviderController {
-                                management: &mut provider_management,
-                                discovery_tx: &model_discovery_tx,
-                                discovery_generation: &mut model_discovery_generation,
-                                discovery_token: &mut model_discovery_token,
-                            };
-                            let input_history = InputHistoryController {
-                                store: &input_history_store,
-                                warning_shown: &mut input_history_warning_shown,
-                            };
-                            let services = ControllerServices {
-                                preferences_store: &preferences_store,
-                                input_history,
-                                providers,
-                                clipboard_image_tx: &clipboard_image_tx,
-                                web_service: &mut web_service,
-                                background_tasks: &mut background_tasks,
-                            };
-                            let should_quit = dispatch_effect(
-                                effect,
-                                &mut session,
-                                &mut state,
-                                services,
-                            )
-                            .await?;
-                            if should_quit {
-                                break;
-                            }
-                            render_once(&mut terminal, &state)?;
+                            Some(handle_key_event(key, &mut state))
+                        }
+                        TerminalEvent::Mouse(mouse) => {
+                            let size = terminal.size().map_err(unexpected)?;
+                            Some(handle_mouse_input(mouse, size, &mut state))
                         }
                         TerminalEvent::MouseScrollUp(position) => {
                             let size = terminal.size().map_err(unexpected)?;
                             handle_mouse_scroll_up(position, size, &mut state);
-                            render_once(&mut terminal, &state)?;
+                            None
                         }
                         TerminalEvent::MouseScrollDown(position) => {
                             let size = terminal.size().map_err(unexpected)?;
                             handle_mouse_scroll_down(position, size, &mut state);
-                            render_once(&mut terminal, &state)?;
+                            None
                         }
                         TerminalEvent::Paste(text) => {
                             handle_paste_event(&text, &mut state);
-                            render_once(&mut terminal, &state)?;
+                            None
                         }
                         TerminalEvent::Resize => {
-                            render_once(&mut terminal, &state)?;
+                            state.clear_text_selection();
+                            None
+                        }
+                    };
+                    if let Some(effect) = effect {
+                        project_local_effect(&effect, &mut state);
+                        render_once(&mut terminal, &mut state)?;
+                        let providers = ProviderController {
+                            management: &mut provider_management,
+                            discovery_tx: &model_discovery_tx,
+                            discovery_generation: &mut model_discovery_generation,
+                            discovery_token: &mut model_discovery_token,
+                        };
+                        let input_history = InputHistoryController {
+                            store: &input_history_store,
+                            warning_shown: &mut input_history_warning_shown,
+                        };
+                        let services = ControllerServices {
+                            preferences_store: &preferences_store,
+                            input_history,
+                            providers,
+                            clipboard_image_tx: &clipboard_image_tx,
+                            command_output_tx: &command_output_tx,
+                            terminal: &mut terminal,
+                            web_service: &mut web_service,
+                            background_tasks: &mut background_tasks,
+                        };
+                        if dispatch_effect(effect, &mut session, &mut state, services).await? {
+                            break;
                         }
                     }
+                    render_once(&mut terminal, &mut state)?;
                 }
                 message = session.stream.next_message() => {
                     let Some(message) = message.map_err(unexpected)? else {
@@ -245,7 +278,7 @@ pub(crate) async fn run_controller(
                     match message {
                         InteractiveRunMessage::Event(event) => {
                             projector.apply(event, &mut state);
-                            render_once(&mut terminal, &state)?;
+                            render_once(&mut terminal, &mut state)?;
                         }
                         InteractiveRunMessage::ToolInvocations { batch } => {
                             return Err(unexpected(format!(
@@ -266,7 +299,7 @@ pub(crate) async fn run_controller(
                             state.plan_mut().update_subagent_activity(
                                 session.subagent_activity.borrow().clone(),
                             );
-                            render_once(&mut terminal, &state)?;
+                            render_once(&mut terminal, &mut state)?;
                         }
                         Err(_) => {
                             subagent_activity_open = false;
@@ -281,7 +314,7 @@ pub(crate) async fn run_controller(
                     if let Some((approval_id, body)) = session.enqueue_permission_review(request) {
                         state.open_permission_review(approval_id, body);
                     }
-                    render_once(&mut terminal, &state)?;
+                    render_once(&mut terminal, &mut state)?;
                 }
                 completion = model_discovery_rx.recv() => {
                     let Some(completion) = completion else {
@@ -289,7 +322,7 @@ pub(crate) async fn run_controller(
                     };
                     if completion.generation == model_discovery_generation {
                         state.update_model_picker(&completion.alias, completion.result);
-                        render_once(&mut terminal, &state)?;
+                        render_once(&mut terminal, &mut state)?;
                     }
                 }
                 completion = clipboard_image_rx.recv() => {
@@ -297,7 +330,11 @@ pub(crate) async fn run_controller(
                         continue;
                     };
                     apply_clipboard_image_completion(completion.result, &mut state);
-                    render_once(&mut terminal, &state)?;
+                    render_once(&mut terminal, &mut state)?;
+                }
+                Some(completion) = command_output_rx.recv() => {
+                    completion.apply(&mut state);
+                    render_once(&mut terminal, &mut state)?;
                 }
             }
         }
@@ -311,6 +348,7 @@ pub(crate) async fn run_controller(
     }
     model_discovery_rx.close();
     clipboard_image_rx.close();
+    command_output_rx.close();
     let session_result = session.stream.wait_until_closed().await.map_err(unexpected);
     let tasks_result = drain_background_tasks(&mut background_tasks).await;
     let web_result = web_service.shutdown().await.map_err(unexpected);
@@ -340,11 +378,25 @@ async fn drain_background_tasks(tasks: &mut JoinSet<()>) -> Result<(), CliError>
     }
 }
 
-fn render_once(terminal: &mut TerminalSession, state: &TuiState) -> Result<(), CliError> {
+fn render_once(terminal: &mut TerminalSession, state: &mut TuiState) -> Result<(), CliError> {
+    render::prepare_viewport(state, terminal.size().map_err(unexpected)?);
     terminal
         .draw(|frame| render::render(frame, state))
         .map_err(unexpected)?;
     Ok(())
+}
+
+fn needs_refresh(state: &TuiState) -> bool {
+    state.is_active_run()
+        || state.clipboard_feedback().is_some()
+        || state.text_selection_is_autoscrolling()
+}
+
+fn refresh_interactions(state: &mut TuiState, size: Size) {
+    state.expire_clipboard_feedback();
+    let rects = cockpit_rects(size, state);
+    state.validate_text_selection_area(render::timeline_content_region(rects.timeline));
+    state.autoscroll_text_selection();
 }
 
 fn new_refresh_interval() -> time::Interval {

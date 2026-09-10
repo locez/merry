@@ -1,13 +1,16 @@
 //! Synchronous input-to-effect translation and local UI state updates; no external I/O.
 
 use crate::tui::{
+    command_details::CommandNavigation,
     controller::{ControllerEffect, cockpit_rects, exit_review_if_active},
+    copy_controls::CopyTextError,
     input::{DraftImage, TuiSubmission},
     keymap::KeyAction,
-    overlay::OverlayKeyResult,
+    overlay::{Overlay, OverlayKeyResult},
     preferences::TuiPreferences,
     provider_overlay::ModelPickerTarget,
     state::TuiState,
+    text_interaction::MouseInput,
 };
 use crossterm::event::{KeyCode, KeyEvent};
 use merry_core::QueuedInputLane;
@@ -38,6 +41,14 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             state.open_command_palette();
             ControllerEffect::None
         }
+        KeyAction::OpenCommandDetails => {
+            if matches!(state.overlay(), Some(Overlay::CommandDetails(_))) {
+                state.close_overlay();
+                ControllerEffect::None
+            } else {
+                crate::tui::command_details::inspect_command(state, CommandNavigation::Latest)
+            }
+        }
         KeyAction::TogglePlan => {
             state.plan_mut().toggle();
             ControllerEffect::None
@@ -64,6 +75,10 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
         }
         KeyAction::ScrollDown => {
             state.scroll_timeline_down_by(TIMELINE_SCROLL_STEP);
+            ControllerEffect::None
+        }
+        KeyAction::FollowLatest => {
+            state.follow_latest();
             ControllerEffect::None
         }
         KeyAction::ReviewPreviousUserInput => {
@@ -101,10 +116,25 @@ pub(super) fn submit_input(
 }
 
 pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
+    if state.overlay().is_none() && state.clear_text_selection() && key.code == KeyCode::Esc {
+        return ControllerEffect::None;
+    }
+    if matches!(state.overlay(), Some(Overlay::CommandDetails(_)))
+        && state.keymap().action_for(key.into()) == Some(KeyAction::OpenCommandDetails)
+    {
+        return handle_key_action(KeyAction::OpenCommandDetails, state);
+    }
     if let Some(overlay) = state.overlay_mut() {
         let result = overlay.handle_key(key);
         return match result {
             OverlayKeyResult::Consumed => ControllerEffect::None,
+            OverlayKeyResult::PreviousCommand => {
+                crate::tui::command_details::inspect_command(state, CommandNavigation::Previous)
+            }
+            OverlayKeyResult::NextCommand => {
+                crate::tui::command_details::inspect_command(state, CommandNavigation::Next)
+            }
+            OverlayKeyResult::CopyText(text) => ControllerEffect::CopyText(text),
             OverlayKeyResult::Close => {
                 state.close_overlay();
                 ControllerEffect::None
@@ -236,6 +266,8 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
             && matches!(
                 action,
                 KeyAction::OpenCommandPanel
+                    | KeyAction::OpenCommandDetails
+                    | KeyAction::FollowLatest
                     | KeyAction::TogglePlan
                     | KeyAction::Interrupt
                     | KeyAction::Quit
@@ -276,8 +308,49 @@ pub(super) fn input_is_known_slash(state: &TuiState) -> bool {
 }
 
 pub(crate) fn handle_paste_event(text: &str, state: &mut TuiState) {
+    state.clear_text_selection();
     if !state.insert_overlay_paste(text) {
         state.insert_input_paste(text);
+    }
+}
+
+pub(crate) fn handle_mouse_input(
+    mouse: MouseInput,
+    terminal_size: Size,
+    state: &mut TuiState,
+) -> ControllerEffect {
+    if state.overlay().is_some() {
+        state.clear_text_selection();
+        return ControllerEffect::None;
+    }
+    let rects = cockpit_rects(terminal_size, state);
+    state.validate_text_selection_area(crate::tui::render::timeline_content_region(rects.timeline));
+    match mouse {
+        MouseInput::Down(position) => {
+            state.clear_text_selection();
+            match crate::tui::render::timeline_mouse_down(state, rects.timeline, position) {
+                crate::tui::render::TimelineMouseDown::Copy(text) => {
+                    return ControllerEffect::CopyText(text);
+                }
+                crate::tui::render::TimelineMouseDown::CopyTooLarge => {
+                    return ControllerEffect::CopyTextTooLarge;
+                }
+                crate::tui::render::TimelineMouseDown::Select(selection) => {
+                    state.begin_text_selection(selection);
+                }
+                crate::tui::render::TimelineMouseDown::None => {}
+            }
+            ControllerEffect::None
+        }
+        MouseInput::Drag(position) => {
+            state.drag_text_selection(position);
+            ControllerEffect::None
+        }
+        MouseInput::Up(position) => match state.finish_text_selection(position) {
+            Ok(Some(text)) => ControllerEffect::CopyText(text),
+            Ok(None) => ControllerEffect::None,
+            Err(CopyTextError::TooLarge) => ControllerEffect::CopyTextTooLarge,
+        },
     }
 }
 
@@ -286,6 +359,14 @@ pub(crate) fn handle_mouse_scroll_up(
     terminal_size: Size,
     state: &mut TuiState,
 ) {
+    state.clear_text_selection();
+    if let Some(crate::tui::overlay::Overlay::CommandDetails(details)) = state.overlay_mut() {
+        details.handle_key(KeyEvent::new(
+            KeyCode::PageUp,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        return;
+    }
     if state.overlay().is_some() {
         return;
     }
@@ -305,6 +386,14 @@ pub(crate) fn handle_mouse_scroll_down(
     terminal_size: Size,
     state: &mut TuiState,
 ) {
+    state.clear_text_selection();
+    if let Some(crate::tui::overlay::Overlay::CommandDetails(details)) = state.overlay_mut() {
+        details.handle_key(KeyEvent::new(
+            KeyCode::PageDown,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        return;
+    }
     if state.overlay().is_some() {
         return;
     }

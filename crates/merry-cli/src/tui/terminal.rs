@@ -1,8 +1,9 @@
+use crate::tui::{copy_controls::MAX_CLIPBOARD_BYTES, text_interaction::MouseInput};
 use crossterm::{
     cursor::{Hide, Show},
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, EventStream, KeyEvent, MouseEvent, MouseEventKind,
+        Event, EventStream, KeyEvent, MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -15,6 +16,7 @@ use std::io::{self, Stdout, stdout};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TerminalEvent {
     Key(KeyEvent),
+    Mouse(MouseInput),
     MouseScrollUp(Position),
     MouseScrollDown(Position),
     Paste(String),
@@ -66,7 +68,7 @@ impl TerminalSession {
             match event {
                 Event::Key(key) => return Ok(Some(TerminalEvent::Key(key))),
                 Event::Mouse(mouse) => {
-                    if let Some(event) = mouse_scroll_event(mouse) {
+                    if let Some(event) = mouse_event(mouse) {
                         return Ok(Some(event));
                     }
                 }
@@ -84,6 +86,24 @@ impl TerminalSession {
     pub(crate) fn size(&self) -> io::Result<Size> {
         self.terminal.size()
     }
+
+    /// Requests a clipboard write through the terminal; OSC 52 support is terminal-owned.
+    pub(crate) fn copy_text(&mut self, text: &str) -> io::Result<()> {
+        write_clipboard_request(self.terminal.backend_mut(), text)
+    }
+}
+
+pub(crate) fn write_clipboard_request(writer: &mut impl io::Write, text: &str) -> io::Result<()> {
+    if text.len() > MAX_CLIPBOARD_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Clipboard payload exceeds 1 MiB; inspect the artifact in the trajectory instead",
+        ));
+    }
+    execute!(
+        writer,
+        crossterm::clipboard::CopyToClipboard::to_clipboard_from(text)
+    )
 }
 
 impl Drop for TerminalSession {
@@ -114,18 +134,28 @@ fn mouse_capture_enabled() -> bool {
     true
 }
 
-fn mouse_scroll_event(mouse: MouseEvent) -> Option<TerminalEvent> {
+fn mouse_event(mouse: MouseEvent) -> Option<TerminalEvent> {
     let position = Position::new(mouse.column, mouse.row);
     match mouse.kind {
         MouseEventKind::ScrollUp => Some(TerminalEvent::MouseScrollUp(position)),
         MouseEventKind::ScrollDown => Some(TerminalEvent::MouseScrollDown(position)),
+        MouseEventKind::Down(MouseButton::Left) if mouse.modifiers.is_empty() => {
+            Some(TerminalEvent::Mouse(MouseInput::Down(position)))
+        }
+        MouseEventKind::Drag(MouseButton::Left) if mouse.modifiers.is_empty() => {
+            Some(TerminalEvent::Mouse(MouseInput::Drag(position)))
+        }
+        MouseEventKind::Up(MouseButton::Left) if mouse.modifiers.is_empty() => {
+            Some(TerminalEvent::Mouse(MouseInput::Up(position)))
+        }
         _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TerminalEvent, mouse_capture_enabled, mouse_scroll_event};
+    use super::{TerminalEvent, mouse_capture_enabled, mouse_event};
+    use crate::tui::text_interaction::MouseInput;
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Position;
 
@@ -141,32 +171,70 @@ mod tests {
     #[test]
     fn maps_mouse_wheel_to_timeline_scroll_events() {
         assert_eq!(
-            mouse_scroll_event(mouse(MouseEventKind::ScrollUp)),
+            mouse_event(mouse(MouseEventKind::ScrollUp)),
             Some(TerminalEvent::MouseScrollUp(Position::new(7, 9)))
         );
         assert_eq!(
-            mouse_scroll_event(mouse(MouseEventKind::ScrollDown)),
+            mouse_event(mouse(MouseEventKind::ScrollDown)),
             Some(TerminalEvent::MouseScrollDown(Position::new(7, 9)))
         );
+        assert_eq!(mouse_event(mouse(MouseEventKind::ScrollLeft)), None);
+        assert_eq!(mouse_event(mouse(MouseEventKind::ScrollRight)), None);
+    }
+
+    #[test]
+    fn maps_left_button_presses_to_click_actions() {
         assert_eq!(
-            mouse_scroll_event(mouse(MouseEventKind::Down(MouseButton::Left))),
-            None
+            mouse_event(mouse(MouseEventKind::Down(MouseButton::Left))),
+            Some(TerminalEvent::Mouse(MouseInput::Down(Position::new(7, 9))))
         );
         assert_eq!(
-            mouse_scroll_event(mouse(MouseEventKind::Drag(MouseButton::Left))),
-            None
+            mouse_event(mouse(MouseEventKind::Drag(MouseButton::Left))),
+            Some(TerminalEvent::Mouse(MouseInput::Drag(Position::new(7, 9))))
         );
-        assert_eq!(mouse_scroll_event(mouse(MouseEventKind::Moved)), None);
         assert_eq!(
-            mouse_scroll_event(mouse(MouseEventKind::Up(MouseButton::Left))),
-            None
+            mouse_event(mouse(MouseEventKind::Up(MouseButton::Left))),
+            Some(TerminalEvent::Mouse(MouseInput::Up(Position::new(7, 9))))
         );
-        assert_eq!(mouse_scroll_event(mouse(MouseEventKind::ScrollLeft)), None);
-        assert_eq!(mouse_scroll_event(mouse(MouseEventKind::ScrollRight)), None);
+    }
+
+    #[test]
+    fn ignores_drag_release_and_motion_events() {
+        for kind in [
+            MouseEventKind::Drag(MouseButton::Right),
+            MouseEventKind::Moved,
+        ] {
+            assert_eq!(mouse_event(mouse(kind)), None);
+        }
     }
 
     #[test]
     fn enables_mouse_capture_for_app_owned_timeline_scroll() {
         assert!(mouse_capture_enabled());
+    }
+
+    #[test]
+    fn modified_and_non_left_mouse_events_do_not_start_application_actions() {
+        for modifiers in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+            KeyModifiers::CONTROL,
+        ] {
+            for kind in [
+                MouseEventKind::Down(MouseButton::Left),
+                MouseEventKind::Drag(MouseButton::Left),
+                MouseEventKind::Up(MouseButton::Left),
+            ] {
+                let mut event = mouse(kind);
+                event.modifiers = modifiers;
+                assert_eq!(mouse_event(event), None);
+            }
+        }
+        for kind in [
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Down(MouseButton::Middle),
+        ] {
+            assert_eq!(mouse_event(mouse(kind)), None);
+        }
     }
 }

@@ -67,6 +67,7 @@ pub(crate) enum Overlay {
     PermissionReview(PermissionReviewOverlay),
     Dialog(MessageDialogOverlay),
     Shortcuts(ShortcutsBack),
+    CommandDetails(super::command_details::CommandDetails),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +205,9 @@ pub(crate) struct CommandPalette {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OverlayKeyResult {
     Consumed,
+    PreviousCommand,
+    NextCommand,
+    CopyText(String),
     Close,
     Back,
     Run(PaletteCommand),
@@ -475,6 +479,7 @@ impl Overlay {
 
         match self {
             Self::CommandPalette(palette) => palette.handle_key(key),
+            Self::CommandDetails(details) => details.handle_key(key),
             Self::Settings(settings) => settings.handle_key(key),
             Self::ProviderManager(manager) => match manager.handle_key(key) {
                 ProviderOverlayAction::Back => OverlayKeyResult::Back,
@@ -544,6 +549,7 @@ impl Overlay {
             Self::Settings(settings) => settings.insert_paste(text),
             Self::ProviderForm(form) => form.insert_paste(text),
             Self::ProviderManager(_)
+            | Self::CommandDetails(_)
             | Self::ModelPicker(_)
             | Self::PlanApproval(_)
             | Self::PermissionReview(_)

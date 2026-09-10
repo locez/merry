@@ -3,7 +3,9 @@
 use crate::{
     cli_error::{CliError, unexpected},
     tui::{
-        controller::{ClipboardImageCompletion, ControllerEffect, ProviderController},
+        controller::{
+            ClipboardImageCompletion, CommandOutputCompletion, ControllerEffect, ProviderController,
+        },
         input_history_store::InputHistoryStore,
         preferences::TuiPreferencesStore,
         runtime::TuiRuntimeSession,
@@ -24,6 +26,8 @@ pub(super) struct ControllerServices<'a> {
     pub(super) input_history: InputHistoryController<'a>,
     pub(super) providers: ProviderController<'a>,
     pub(super) clipboard_image_tx: &'a mpsc::Sender<ClipboardImageCompletion>,
+    pub(super) command_output_tx: &'a mpsc::Sender<CommandOutputCompletion>,
+    pub(super) terminal: &'a mut crate::tui::terminal::TerminalSession,
     pub(super) web_service: &'a mut RuntimeWebService,
     pub(super) background_tasks: &'a mut JoinSet<()>,
 }
@@ -39,6 +43,8 @@ pub(super) async fn dispatch_effect(
         input_history,
         providers,
         clipboard_image_tx,
+        command_output_tx,
+        terminal,
         web_service,
         background_tasks,
     } = services;
@@ -60,6 +66,41 @@ pub(super) async fn dispatch_effect(
     }
     match effect {
         ControllerEffect::None => Ok(false),
+        ControllerEffect::LoadCommandOutput(artifact_id) => {
+            let runtime = session.runtime().clone();
+            let sender = command_output_tx.clone();
+            let generation = state.command_details_generation();
+            background_tasks.spawn(async move {
+                let result = crate::tui::command_details::load_output(&runtime, &artifact_id).await;
+                let _ = sender
+                    .send(CommandOutputCompletion::new(
+                        artifact_id,
+                        generation,
+                        result,
+                    ))
+                    .await;
+            });
+            Ok(false)
+        }
+        ControllerEffect::CopyText(text) => {
+            let (feedback, failed) = match terminal.copy_text(&text) {
+                Ok(()) => (
+                    "Copy requested via OSC 52; terminal support required".to_owned(),
+                    false,
+                ),
+                Err(error) => (format!("Copy failed: {error}"), true),
+            };
+            show_copy_feedback(state, feedback, failed);
+            Ok(false)
+        }
+        ControllerEffect::CopyTextTooLarge => {
+            show_copy_feedback(
+                state,
+                "Copy failed: selected text exceeds the 1 MiB clipboard limit".to_owned(),
+                true,
+            );
+            Ok(false)
+        }
         ControllerEffect::SubmitNext(submission) => {
             let (message, history_text) = submission
                 .into_user_message_and_history()
@@ -212,6 +253,14 @@ pub(super) async fn dispatch_effect(
             Ok(true)
         }
         _ => unreachable!("provider effect handled by the provider dispatcher"),
+    }
+}
+
+fn show_copy_feedback(state: &mut TuiState, feedback: String, failed: bool) {
+    if let Some(crate::tui::overlay::Overlay::CommandDetails(details)) = state.overlay_mut() {
+        details.set_feedback(feedback);
+    } else {
+        state.show_clipboard_feedback(feedback, failed);
     }
 }
 

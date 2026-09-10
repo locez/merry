@@ -28,9 +28,11 @@ use tokio_util::sync::CancellationToken;
 mod clipboard_image;
 mod command;
 mod command_controller;
+mod command_details;
 mod completion;
 mod controller;
 mod controller_provider;
+mod copy_controls;
 mod highlight;
 mod input;
 mod input_history_store;
@@ -44,6 +46,7 @@ mod plan_controller;
 mod plan_projector;
 mod plan_render;
 mod preferences;
+mod process_output;
 mod projector;
 mod provider_overlay;
 mod provider_render;
@@ -56,9 +59,11 @@ mod session_picker;
 mod state;
 mod status;
 mod terminal;
+mod text_interaction;
 mod text_wrap;
 pub(crate) mod theme;
 mod tool_error;
+mod transcript;
 
 #[cfg(test)]
 mod history_tests;
@@ -161,7 +166,8 @@ pub(crate) async fn run(
         session.model_label.clone(),
         keymap,
         theme,
-    );
+    )
+    .with_successful_command_output(tui_config.show_successful_command_output);
     let input_history_store =
         InputHistoryStore::for_workspace(paths.state_dir(), &session.workspace_root);
     state.set_input_history(input_history_store.load().await);
@@ -587,6 +593,7 @@ async fn run_provider_setup(
                         state.insert_overlay_paste(&text);
                     }
                     terminal::TerminalEvent::Resize
+                    | terminal::TerminalEvent::Mouse(_)
                     | terminal::TerminalEvent::MouseScrollUp(_)
                     | terminal::TerminalEvent::MouseScrollDown(_) => {}
                 }

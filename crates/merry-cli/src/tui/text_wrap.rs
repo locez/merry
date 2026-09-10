@@ -275,7 +275,7 @@ fn push_long_token_by_char(
     }
 }
 
-fn inline_code_style(state: &TuiState, base_style: Style) -> Style {
+pub(super) fn inline_code_style(state: &TuiState, base_style: Style) -> Style {
     let foreground = state.theme().color(SemanticColor::Focus);
     let mut style = base_style.add_modifier(Modifier::BOLD);
     if let Some(foreground) = foreground {

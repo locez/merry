@@ -413,5 +413,6 @@ fn single_wrapped_line_beyond_u16_scroll_limit_keeps_its_tail_visible() {
     });
 
     let rendered = render::render_to_text(&state, 20, 12);
-    assert!(rendered.contains("TAIL_SENTINEL"), "{rendered}");
+    let visible_characters = rendered.lines().map(str::trim).collect::<String>();
+    assert!(visible_characters.contains("TAIL_SENTINEL"), "{rendered}");
 }

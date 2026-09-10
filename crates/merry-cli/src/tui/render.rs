@@ -21,16 +21,40 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Paragraph},
 };
+pub(crate) use timeline::{TimelineMouseDown, timeline_content_region, timeline_mouse_down};
 
 mod command_style;
 
 mod composer;
 
 mod timeline;
+mod timeline_layout;
 
 pub(crate) const STATUS_HEIGHT: u16 = 1;
 
 const HEADER_HEIGHT: u16 = 1;
+
+/// Captures the visible timeline anchor before drawing or processing subsequent updates.
+pub(crate) fn prepare_viewport(state: &mut TuiState, size: ratatui::layout::Size) {
+    let area = Rect::new(0, 0, size.width, size.height);
+    super::command_details::prepare_viewport(state, area);
+    let heights = pane_heights_for_area(state, area);
+    let rects = cockpit_layout(
+        area,
+        BottomPaneHeights {
+            queue: heights.queue,
+            completion: heights.completion,
+            input: heights.input,
+            status: STATUS_HEIGHT,
+        },
+        state.plan().is_open(),
+        state.plan().is_focused(),
+    );
+    state.validate_text_selection_area(timeline::timeline_content_region(rects.timeline));
+    if state.text_selection().is_none() {
+        timeline::prepare_timeline_viewport(state, rects.timeline);
+    }
+}
 
 pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
     let pane_heights = pane_heights(state, frame.area().height);
@@ -166,6 +190,18 @@ fn header_background_style(state: &TuiState) -> Style {
 }
 
 fn render_status(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
+    if let Some(feedback) = state.clipboard_feedback() {
+        let color = if feedback.failed {
+            SemanticColor::Error
+        } else {
+            SemanticColor::Focus
+        };
+        frame.render_widget(
+            Paragraph::new(feedback.message.as_str()).style(semantic_style(state, color)),
+            region,
+        );
+        return;
+    }
     let interaction_style = if state.is_active_run() {
         semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD)
     } else {

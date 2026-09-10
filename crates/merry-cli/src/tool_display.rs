@@ -26,8 +26,10 @@ fn format_process_call_detail(arguments: &Map<String, Value>) -> Option<String> 
     let cwd = arguments.get("cwd").and_then(Value::as_str).unwrap_or(".");
     Some(format!(
         "{} ({})",
-        compact_shell_command(command),
-        compact_inline(cwd, 80)
+        display_shell_command(command),
+        cwd.chars()
+            .filter(|character| !character.is_control())
+            .collect::<String>()
     ))
 }
 
@@ -106,10 +108,9 @@ fn compact_shell_word(value: &str) -> String {
     }
 }
 
-fn compact_shell_command(value: &str) -> String {
-    let mut output = value
+fn display_shell_command(value: &str) -> String {
+    let output = value
         .chars()
-        .take(120)
         .map(|character| {
             if character.is_control() {
                 ' '
@@ -118,9 +119,6 @@ fn compact_shell_command(value: &str) -> String {
             }
         })
         .collect::<String>();
-    if value.chars().count() > 120 {
-        output.push_str("...");
-    }
     let output = output.trim();
     if output.is_empty() {
         "\"\"".to_owned()
@@ -242,5 +240,32 @@ mod tests {
         assert_eq!(detail, "rg -n 'select!' crates/merry-runtime (.)");
         assert!(!detail.contains("command="));
         assert!(!detail.contains("cwd="));
+    }
+
+    #[test]
+    fn process_detail_keeps_long_commands_and_working_directories_complete() {
+        let command = format!("printf '%s' '{}'", "完整-command-".repeat(30));
+        let cwd = format!("src/{}/workspace", "nested/".repeat(20));
+        let arguments = json!({"command": command, "cwd": cwd});
+
+        let detail =
+            format_tool_call_detail("run_process", arguments.as_object().unwrap()).unwrap();
+
+        assert_eq!(detail, format!("{command} ({cwd})"));
+    }
+
+    #[test]
+    fn process_detail_sanitizes_terminal_controls_without_losing_the_command_tail() {
+        let command = format!("printf '{}'\n\t&& echo done\r", "x".repeat(150));
+        let arguments = json!({"command": command, "cwd": "src\u{1b}"});
+
+        let detail =
+            format_tool_call_detail("run_process", arguments.as_object().unwrap()).unwrap();
+
+        assert_eq!(
+            detail,
+            format!("printf '{}'  && echo done (src)", "x".repeat(150))
+        );
+        assert!(!detail.chars().any(char::is_control));
     }
 }

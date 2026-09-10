@@ -1,214 +1,122 @@
 //! Timeline content, wrapping, and bounded viewport projection.
 
 use crate::tui::{
-    markdown::markdown_lines,
+    copy_controls::{CopyContent, CopyTarget, CopyTextError, copy_header, validate_copy_text},
+    keymap::KeyAction,
+    markdown::{RenderedMarkdown, markdown_lines},
     render::command_style::command_spans,
-    state::{PatchChangeView, TimelineItem, TuiState},
+    state::{CommandFailure, CommandView, PatchChangeView, TimelineItem, TuiState},
+    text_interaction::TextSelection,
     text_wrap::{
         StyledTextPart, inline_code_spans, semantic_style, truncate_chars, wrap_styled_parts,
+        wrap_styled_parts_preserving_leading_whitespace,
     },
     theme::SemanticColor,
+    transcript::{SelectionPolicy, TranscriptRow},
 };
 use merry_core::QueuedInputLane;
 use ratatui::{
     Frame,
-    layout::Rect,
-    style::{Modifier, Style},
+    layout::{Position, Rect},
+    style::Modifier,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap},
+};
+
+pub(super) use super::timeline_layout::prepare_timeline_viewport;
+pub(crate) use super::timeline_layout::timeline_content_region;
+use super::timeline_layout::{
+    TimelineLayout, timeline_layout, timeline_scroll_start, timeline_viewport,
 };
 
 // Keep prefix eviction below the viewport start when Paragraph scroll exceeds u16.
-pub(super) const MAX_TIMELINE_LOGICAL_LINE_GRAPHEMES: usize = 32_768;
-
 pub(super) const TOOL_RESULT_PREVIEW_MAX_LINES: usize = 5;
 
 pub(super) fn render_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
-    let timeline = timeline_lines_compact(state, region);
-    let viewport = timeline_viewport(state, timeline, region);
+    let mut block = Block::default()
+        .borders(Borders::BOTTOM)
+        .border_type(BorderType::Plain)
+        .border_style(semantic_style(state, SemanticColor::Muted))
+        .title_style(semantic_style(state, SemanticColor::Muted))
+        .padding(Padding::left(1));
+    let mut review_hint_width = 0;
+    if state.is_timeline_detached() {
+        let key = state.keymap().binding_label_for(KeyAction::FollowLatest);
+        let label = if state.timeline_has_updates() {
+            "New content"
+        } else {
+            "Reviewing"
+        };
+        let hint = key
+            .map(|key| format!(" · {key} latest"))
+            .unwrap_or_default();
+        let title = Line::from(format!(" {label}{hint} "));
+        review_hint_width = title.width();
+        block = block.title_bottom(title);
+    }
+    if state.overlay().is_none()
+        && let Some(key) = state
+            .keymap()
+            .binding_label_for(KeyAction::OpenCommandDetails)
+        && state.timeline().iter().rev().any(|item| {
+            matches!(
+                item,
+                TimelineItem::Command {
+                    view: CommandView::Finished { .. }
+                }
+            )
+        })
+    {
+        let hint = Line::from(format!(" {key} output ")).right_aligned();
+        if review_hint_width.saturating_add(hint.width()) <= usize::from(region.width) {
+            block = block.title_bottom(hint);
+        }
+    }
+    let content_region = block.inner(region);
+    frame.render_widget(block, region);
+    if content_region.is_empty() {
+        return;
+    }
+    if let Some(selection) = state.text_selection()
+        && selection.area() == content_region
+    {
+        selection.render(frame.buffer_mut());
+        return;
+    }
+    let timeline = timeline_layout(state, content_region);
+    let viewport = timeline_viewport(state, timeline, content_region);
     frame.render_widget(
         Paragraph::new(viewport.lines)
             .wrap(Wrap { trim: false })
-            .scroll((viewport.scroll, 0))
-            .block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_type(BorderType::Plain)
-                    .border_style(semantic_style(state, SemanticColor::Muted))
-                    .title_style(semantic_style(state, SemanticColor::Muted)),
-            ),
-        region,
+            .scroll((viewport.scroll, 0)),
+        content_region,
     );
-}
-
-pub(super) struct TimelineLines {
-    pub(super) lines: Vec<Line<'static>>,
-    pub(super) review_logical_start: Option<usize>,
-}
-
-pub(super) struct TimelineViewport {
-    pub(super) lines: Vec<Line<'static>>,
-    pub(super) scroll: u16,
-}
-
-pub(super) fn timeline_lines_compact(state: &TuiState, region: Rect) -> TimelineLines {
-    let mut lines = Vec::new();
-    let mut review_logical_start = None;
-    for (index, item) in state.timeline().iter().enumerate() {
-        if state.timeline_review_user_index() == Some(index) {
-            review_logical_start = Some(lines.len());
-        }
-        let item_lines = match item {
-            TimelineItem::User { text, lane } => user_lines(state, text, *lane),
-            TimelineItem::Assistant { text } => assistant_lines(state, text, region.width),
-            TimelineItem::Muted { title, detail } => muted_lines(state, title, detail),
-            TimelineItem::LocalCommand { title, body } => {
-                local_command_lines(state, title, body, region.width)
-            }
-            TimelineItem::Expanded { title, body } => {
-                expanded_timeline_lines(state, title, body, region.width)
-            }
-            TimelineItem::Diagnostic { title, body } => {
-                diagnostic_lines(state, title, body, region.width)
-            }
-            TimelineItem::Patch { changes } => compact_patch_lines(state, changes),
-        };
-        let item_lines = item_lines
-            .into_iter()
-            .flat_map(split_oversized_timeline_line)
-            .collect();
-        lines.extend(spaced_timeline_item(
-            item_lines,
-            index + 1 < state.timeline().len(),
-        ));
-    }
-    TimelineLines {
-        lines,
-        review_logical_start,
-    }
-}
-
-pub(super) fn timeline_viewport(
-    state: &TuiState,
-    timeline: TimelineLines,
-    region: Rect,
-) -> TimelineViewport {
-    let mut scroll = timeline_scroll_start(state, &timeline, region);
-    let mut lines = timeline.lines;
-    let max_scroll = usize::from(u16::MAX);
-    if scroll > max_scroll {
-        // Paragraph scroll is u16; remove complete prefix lines in one linear pass.
-        let rows_to_drop = scroll - max_scroll;
-        let mut dropped_lines = 0;
-        let mut dropped_rows = 0;
-        for line in &lines {
-            if dropped_rows >= rows_to_drop {
-                break;
-            }
-            dropped_rows += wrapped_line_count(std::slice::from_ref(line), region.width).max(1);
-            dropped_lines += 1;
-        }
-        if dropped_lines > 0 {
-            lines.drain(..dropped_lines);
-            scroll = scroll.saturating_sub(dropped_rows);
-        }
-    }
-
-    TimelineViewport {
-        lines,
-        scroll: u16::try_from(scroll).unwrap_or(u16::MAX),
-    }
-}
-
-pub(super) fn timeline_scroll_start(
-    state: &TuiState,
-    timeline: &TimelineLines,
-    region: Rect,
-) -> usize {
-    if let Some(logical_start) = timeline.review_logical_start {
-        wrapped_line_count(&timeline.lines[..logical_start], region.width)
-    } else {
-        let total = wrapped_line_count(&timeline.lines, region.width);
-        let visible = usize::from(region.height.saturating_sub(1));
-        total
-            .saturating_sub(visible)
-            .saturating_sub(state.timeline_scroll_offset())
-    }
-}
-
-pub(super) fn wrapped_line_count(lines: &[Line<'static>], width: u16) -> usize {
-    Paragraph::new(lines.to_vec())
-        .wrap(Wrap { trim: false })
-        .line_count(width)
-}
-
-pub(super) fn split_oversized_timeline_line(line: Line<'static>) -> Vec<Line<'static>> {
-    let byte_len = line.spans.iter().fold(0_usize, |total, span| {
-        total.saturating_add(span.content.len())
-    });
-    if byte_len <= MAX_TIMELINE_LOGICAL_LINE_GRAPHEMES {
-        return vec![line];
-    }
-
-    let Line {
-        style,
-        alignment,
-        spans,
-    } = line;
-    let mut lines = Vec::new();
-    let mut current_spans = Vec::new();
-    let mut current_graphemes = 0;
-
-    for span in spans {
-        let mut chunk = String::new();
-        for grapheme in span.styled_graphemes(Style::default()) {
-            if current_graphemes == MAX_TIMELINE_LOGICAL_LINE_GRAPHEMES {
-                if !chunk.is_empty() {
-                    current_spans.push(Span::styled(std::mem::take(&mut chunk), span.style));
-                }
-                lines.push(Line {
-                    style,
-                    alignment,
-                    spans: std::mem::take(&mut current_spans),
-                });
-                current_graphemes = 0;
-            }
-            chunk.push_str(grapheme.symbol);
-            current_graphemes += 1;
-        }
-        if !chunk.is_empty() {
-            current_spans.push(Span::styled(chunk, span.style));
-        }
-    }
-
-    if !current_spans.is_empty() || lines.is_empty() {
-        lines.push(Line {
-            style,
-            alignment,
-            spans: current_spans,
-        });
-    }
-    lines
-}
-
-pub(super) fn spaced_timeline_item(
-    mut lines: Vec<Line<'static>>,
-    has_next_item: bool,
-) -> Vec<Line<'static>> {
-    if has_next_item && !lines.is_empty() {
-        lines.push(Line::from(""));
-    }
-    lines
 }
 
 pub(super) fn assistant_lines(
     state: &TuiState,
     text: &str,
+    item_index: usize,
     region_width: u16,
-) -> Vec<Line<'static>> {
-    let mut lines = markdown_lines(state, text, region_width);
-    lines.push(assistant_separator_line(state, region_width));
-    lines
+) -> RenderedMarkdown {
+    let mut rendered = markdown_lines(state, text, region_width);
+    if let Some((header, width)) = copy_header(state, "[Copy reply]", region_width) {
+        rendered
+            .rows
+            .insert(0, TranscriptRow::new(header, SelectionPolicy::Skip));
+        for target in &mut rendered.copy_targets {
+            target.line_index += 1;
+        }
+        rendered.copy_targets.insert(
+            0,
+            CopyTarget::new(0, width, CopyContent::AssistantMessage(item_index)),
+        );
+    }
+    rendered.rows.push(TranscriptRow::new(
+        assistant_separator_line(state, region_width),
+        SelectionPolicy::Skip,
+    ));
+    rendered
 }
 
 pub(super) fn assistant_separator_line(state: &TuiState, region_width: u16) -> Line<'static> {
@@ -289,22 +197,112 @@ pub(super) fn local_command_lines(
     title: &str,
     body: &str,
     region_width: u16,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(Span::styled(
-        title.to_owned(),
-        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-    ))];
-    let body_width = region_width.saturating_sub(2).max(1);
-    lines.extend(
-        markdown_lines(state, body, body_width)
-            .into_iter()
-            .map(|line| {
-                let mut spans = vec![Span::raw("  ")];
-                spans.extend(line.spans);
-                Line::from(spans)
-            }),
+) -> RenderedMarkdown {
+    let mut rows = vec![TranscriptRow::new(
+        Line::from(Span::styled(
+            title.to_owned(),
+            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+        )),
+        SelectionPolicy::Skip,
+    )];
+    let body_width = region_width.saturating_sub(1).max(1);
+    let mut rendered = markdown_lines(state, body, body_width);
+    rows.extend(rendered.rows.into_iter().map(|row| {
+        let mut spans = vec![Span::raw(" ")];
+        spans.extend(row.display.spans);
+        TranscriptRow::new(Line::from(spans), row.selection.with_prefix(1))
+    }));
+    rendered.rows = rows;
+    for target in &mut rendered.copy_targets {
+        target.line_index += 1;
+        target.column += 1;
+    }
+    rendered
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TimelineMouseDown {
+    None,
+    Copy(String),
+    CopyTooLarge,
+    Select(TextSelection),
+}
+
+/// Resolves a timeline press from one layout snapshot.
+pub(crate) fn timeline_mouse_down(
+    state: &TuiState,
+    region: Rect,
+    position: Position,
+) -> TimelineMouseDown {
+    let content = timeline_content_region(region);
+    if !region.contains(position) || content.is_empty() {
+        return TimelineMouseDown::None;
+    }
+    let timeline = timeline_layout(state, content);
+    if content.contains(position) {
+        match copy_target_text(state, &timeline, content, position) {
+            Ok(Some(text)) => return TimelineMouseDown::Copy(text),
+            Ok(None) => {}
+            Err(CopyTextError::TooLarge) => return TimelineMouseDown::CopyTooLarge,
+        }
+    }
+    let position = Position::new(
+        position
+            .x
+            .clamp(content.x, content.right().saturating_sub(1)),
+        position
+            .y
+            .clamp(content.y, content.bottom().saturating_sub(1)),
     );
-    lines
+    let scroll = timeline_scroll_start(state, &timeline, content);
+    match TextSelection::new(
+        timeline.rows,
+        timeline.item_starts,
+        timeline.row_starts,
+        content,
+        scroll,
+        position,
+    ) {
+        Some(selection) => TimelineMouseDown::Select(selection),
+        None => TimelineMouseDown::None,
+    }
+}
+
+fn copy_target_text(
+    state: &TuiState,
+    timeline: &TimelineLayout,
+    content: Rect,
+    position: Position,
+) -> Result<Option<String>, CopyTextError> {
+    let clicked_row = timeline_scroll_start(state, timeline, content)
+        .saturating_add(usize::from(position.y - content.y));
+    let column = position.x - content.x;
+    for target in &timeline.copy_targets {
+        let Some(&target_row) = timeline.row_starts.get(target.line_index) else {
+            continue;
+        };
+        if target_row > clicked_row {
+            break;
+        }
+        if target_row == clicked_row
+            && (target.column..target.column.saturating_add(target.width)).contains(&column)
+        {
+            return match &target.content {
+                CopyContent::Text(text) => validate_copy_text(text.clone()).map(Some),
+                CopyContent::AssistantMessage(index) => match state.timeline().get(*index) {
+                    Some(TimelineItem::Assistant { text }) => {
+                        if text.len() > crate::tui::copy_controls::MAX_CLIPBOARD_BYTES {
+                            Err(CopyTextError::TooLarge)
+                        } else {
+                            Ok(Some(text.clone()))
+                        }
+                    }
+                    _ => Ok(None),
+                },
+            };
+        }
+    }
+    Ok(None)
 }
 
 pub(super) fn expanded_timeline_lines(
@@ -338,6 +336,132 @@ pub(super) fn expanded_timeline_lines(
         )));
     }
     lines
+}
+
+pub(super) fn command_lines(
+    state: &TuiState,
+    view: &CommandView,
+    region_width: u16,
+) -> Vec<Line<'static>> {
+    match view {
+        CommandView::Running { detail, started_at } => {
+            let elapsed = started_at.elapsed();
+            let spinner = match (elapsed.as_millis() / 100) % 8 {
+                0 => "⠋",
+                1 => "⠙",
+                2 => "⠹",
+                3 => "⠸",
+                4 => "⠼",
+                5 => "⠴",
+                6 => "⠦",
+                _ => "⠧",
+            };
+            let mut title = command_title_line(state, &format!("Running {spinner}"), detail);
+            append_command_elapsed(state, &mut title, Some(elapsed));
+            wrap_command_title(title, region_width)
+        }
+        CommandView::Finished {
+            detail,
+            exit_code,
+            failure,
+            preview,
+            elapsed,
+            ..
+        } => {
+            let mut title = command_title_line(state, "Ran", detail);
+            let failed =
+                exit_code.is_some_and(|code| code != 0) || *failure == Some(CommandFailure::Failed);
+            if let Some(failure) = failure {
+                let (label, color) = match failure {
+                    CommandFailure::Cancelled => ("cancelled", SemanticColor::Warning),
+                    CommandFailure::Failed => ("failed", SemanticColor::Error),
+                };
+                title.spans.push(Span::styled(
+                    format!(" -> {label}"),
+                    semantic_style(state, color).add_modifier(Modifier::BOLD),
+                ));
+            } else if let Some(code) = exit_code.filter(|_| failed) {
+                title.spans.push(Span::styled(
+                    format!(" -> {code}"),
+                    semantic_style(state, SemanticColor::Error).add_modifier(Modifier::BOLD),
+                ));
+            }
+            append_command_elapsed(state, &mut title, *elapsed);
+            let mut lines = wrap_command_title(title, region_width);
+            if failed || (failure.is_none() && state.show_successful_command_output()) {
+                let body_width = usize::from(region_width).saturating_sub(2).max(4);
+                for line in &preview.lines {
+                    let clean = line
+                        .chars()
+                        .filter(|character| !character.is_control())
+                        .collect::<String>();
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", truncate_chars(clean.trim(), body_width)),
+                        semantic_style(state, SemanticColor::Muted),
+                    )));
+                }
+                if preview.truncated {
+                    lines.push(Line::from(Span::styled(
+                        "  ...",
+                        semantic_style(state, SemanticColor::Muted),
+                    )));
+                }
+            }
+            lines
+        }
+    }
+}
+
+fn append_command_elapsed(
+    state: &TuiState,
+    line: &mut Line<'static>,
+    elapsed: Option<std::time::Duration>,
+) {
+    if let Some(elapsed) = elapsed.filter(|elapsed| elapsed.as_secs() >= 1) {
+        line.spans.push(Span::styled(
+            format!("  {:.1}s", elapsed.as_secs_f64()),
+            semantic_style(state, SemanticColor::Muted),
+        ));
+    }
+}
+
+fn wrap_command_title(title: Line<'static>, width: u16) -> Vec<Line<'static>> {
+    let prefix_width = title.spans.iter().take(2).map(Span::width).sum::<usize>();
+    let indent = if usize::from(width) > prefix_width {
+        prefix_width
+    } else {
+        0
+    };
+    let mut spans = title.spans;
+    let prefix = if indent > 0 {
+        spans.drain(..2).collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let parts = spans
+        .into_iter()
+        .map(|span| StyledTextPart {
+            text: span.content.into_owned(),
+            style: span.style,
+            atomic: false,
+        })
+        .collect();
+    let body_width = width
+        .saturating_sub(u16::try_from(indent).unwrap_or_default())
+        .max(1);
+    wrap_styled_parts_preserving_leading_whitespace(parts, body_width)
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut line)| {
+            let mut leading = if index == 0 {
+                prefix.clone()
+            } else {
+                vec![Span::raw(" ".repeat(indent))]
+            };
+            leading.append(&mut line.spans);
+            Line::from(leading)
+        })
+        .collect()
 }
 
 pub(super) fn diagnostic_lines(
@@ -382,7 +506,7 @@ pub(super) fn tool_title_line_from_parts(
     }
 
     if title == "Ran" {
-        return Some(ran_title_line(state, detail));
+        return Some(command_title_line(state, "Ran", detail));
     }
     tool_title_keyword(title).map(|keyword| tool_keyword_title_line(state, keyword, detail))
 }
@@ -392,7 +516,7 @@ pub(super) fn tool_title_line(state: &TuiState, title: &str) -> Option<Line<'sta
         .strip_prefix("Ran ")
         .or_else(|| title.strip_prefix("Ran: "))
     {
-        return Some(ran_title_line(state, command));
+        return Some(command_title_line(state, "Ran", command));
     }
 
     for keyword in TOOL_TITLE_KEYWORDS {
@@ -444,11 +568,11 @@ pub(super) fn tool_keyword_title_line(
     Line::from(spans)
 }
 
-pub(super) fn ran_title_line(state: &TuiState, detail: &str) -> Line<'static> {
+fn command_title_line(state: &TuiState, keyword: &str, detail: &str) -> Line<'static> {
     let (command, suffix) = split_command_suffix(detail);
     let mut spans = vec![
         Span::styled(
-            "Ran".to_owned(),
+            keyword.to_owned(),
             semantic_style(state, SemanticColor::ToolKeyword).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" ".to_owned(), semantic_style(state, SemanticColor::Muted)),

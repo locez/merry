@@ -1,12 +1,13 @@
 use crate::tui::{
     overlay::Overlay,
     plan_projector::plan_timeline_item,
+    process_output::process_exit_code,
     projector::tool_output::{
-        compact_tool_output, completed_tool_title, expanded_tool_title, failed_tool_body,
-        parse_apply_patch_view, process_exit_code, process_output_bodies,
-        started_tool_title_and_detail, success_tool_bodies, tool_output_text,
+        compact_tool_output, completed_process_view, completed_tool_title, expanded_tool_title,
+        failed_tool_body, parse_apply_patch_view, started_tool_title_and_detail,
+        success_tool_bodies, tool_output_text,
     },
-    state::{QueuePreview, TimelineItem, TuiState},
+    state::{CommandView, QueuePreview, TimelineItem, TuiState},
 };
 use merry_core::{
     PlanAttemptOutcome, PlanDirectiveStatus, PlanPhase, RuntimeEvent, TOOL_CANCELLED_BY_USER_CODE,
@@ -16,6 +17,7 @@ use merry_runtime::SessionTranscriptItem;
 use merry_tools::APPLY_PATCH_TOOL;
 use serde_json::Value;
 use std::collections::HashMap;
+use tokio::time::Instant;
 
 mod tool_output;
 
@@ -34,6 +36,9 @@ struct StartedToolView {
     title: String,
     detail: String,
     patch_argument: Option<String>,
+    command: String,
+    cwd: String,
+    started_at: Option<Instant>,
 }
 
 #[allow(dead_code)]
@@ -52,6 +57,7 @@ impl TuiProjector {
                 state.push_timeline_item(TimelineItem::Assistant { text });
             }
             SessionTranscriptItem::ToolCall { call } => {
+                let call_id = call.id().clone();
                 self.apply(
                     RuntimeEvent::ToolCallStarted {
                         call,
@@ -59,6 +65,9 @@ impl TuiProjector {
                     },
                     state,
                 );
+                if let Some(tool) = self.started_tools.get_mut(&call_id) {
+                    tool.started_at = None;
+                }
             }
             SessionTranscriptItem::ToolResult { result, output, .. } => {
                 self.apply(
@@ -146,9 +155,15 @@ impl TuiProjector {
                 let process_exit_code = tool
                     .as_ref()
                     .filter(|tool| tool.name.as_str() == "run_process")
-                    .and_then(|_| process_exit_code(&text))
-                    .filter(|exit_code| failed && *exit_code != 0);
-                if cancelled_by_user {
+                    .and_then(|_| process_exit_code(&text));
+                if let Some(tool) = tool.as_ref()
+                    && tool.name.as_str() == "run_process"
+                {
+                    state.replace_timeline_item(
+                        tool.timeline_index,
+                        completed_process_view(tool, &text, process_exit_code, &result),
+                    );
+                } else if cancelled_by_user {
                     let item = TimelineItem::Muted {
                         title: tool.as_ref().map_or_else(
                             || "Tool -> cancelled".to_owned(),
@@ -161,18 +176,6 @@ impl TuiProjector {
                     } else {
                         state.push_timeline_item(item);
                     }
-                } else if let Some(exit_code) = process_exit_code
-                    && let Some(tool) = tool.as_ref()
-                {
-                    let body =
-                        process_output_bodies(&text).unwrap_or_else(|| compact_tool_output(&text));
-                    state.replace_timeline_item(
-                        tool.timeline_index,
-                        TimelineItem::Expanded {
-                            title: completed_tool_title(tool, &format!("exit {exit_code}")),
-                            body,
-                        },
-                    );
                 } else if failed {
                     let body = failed_tool_body(result.diagnostic(), &text);
                     let item = TimelineItem::Diagnostic {
@@ -333,6 +336,7 @@ impl TuiProjector {
                 });
             }
             RuntimeEvent::RunFailed { diagnostic, .. } => {
+                self.finish_pending_commands(state, "failed");
                 self.streaming_assistant_index = None;
                 let item = TimelineItem::Diagnostic {
                     title: if self.compaction_timeline_index.is_some() {
@@ -349,6 +353,7 @@ impl TuiProjector {
                 }
             }
             RuntimeEvent::RunCancelled { diagnostic, .. } => {
+                self.finish_pending_commands(state, "cancelled");
                 self.streaming_assistant_index = None;
                 let had_compaction = if let Some(index) = self.compaction_timeline_index.take() {
                     state.replace_timeline_item(
@@ -371,6 +376,7 @@ impl TuiProjector {
                 }
             }
             RuntimeEvent::Closed => {
+                self.finish_pending_commands(state, "interrupted");
                 self.streaming_assistant_index = None;
                 state.push_timeline_item(TimelineItem::Muted {
                     title: "closed".to_owned(),
@@ -381,6 +387,23 @@ impl TuiProjector {
         }
     }
 
+    /// Stops command animations when the run ends before individual results arrive.
+    fn finish_pending_commands(&mut self, state: &mut TuiState, status: &str) {
+        self.started_tools.retain(|_, tool| {
+            if tool.name.as_str() != "run_process" {
+                return true;
+            }
+            state.replace_timeline_item(
+                tool.timeline_index,
+                TimelineItem::Muted {
+                    title: completed_tool_title(tool, status),
+                    detail: String::new(),
+                },
+            );
+            false
+        });
+    }
+
     fn start_tool(&mut self, call: merry_core::PendingToolCall, state: &mut TuiState) {
         self.streaming_assistant_index = None;
         let call_id = call.id().clone();
@@ -388,10 +411,21 @@ impl TuiProjector {
         let (title, detail) =
             started_tool_title_and_detail(tool_name.as_str(), call.arguments().as_object());
         let timeline_index = state.timeline().len();
-        state.push_timeline_item(TimelineItem::Muted {
-            title: title.clone(),
-            detail: detail.clone(),
-        });
+        let started_at = Instant::now();
+        let item = if tool_name.as_str() == "run_process" {
+            TimelineItem::Command {
+                view: CommandView::Running {
+                    detail: detail.clone(),
+                    started_at,
+                },
+            }
+        } else {
+            TimelineItem::Muted {
+                title: title.clone(),
+                detail: detail.clone(),
+            }
+        };
+        state.push_timeline_item(item);
         self.started_tools.insert(
             call_id,
             StartedToolView {
@@ -399,6 +433,21 @@ impl TuiProjector {
                 timeline_index,
                 title,
                 detail,
+                started_at: Some(started_at),
+                command: call
+                    .arguments()
+                    .as_object()
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                cwd: call
+                    .arguments()
+                    .as_object()
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .unwrap_or(".")
+                    .to_owned(),
                 patch_argument: call
                     .arguments()
                     .as_object()

@@ -505,6 +505,7 @@ struct RuntimeModelToml {
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct TuiToml {
+    show_successful_command_output: Option<bool>,
     theme: Option<TuiThemeToml>,
     keymap: Option<TuiKeymapToml>,
 }
@@ -541,6 +542,8 @@ pub(crate) struct TuiKeymapToml {
     pub(crate) quit: Option<String>,
     pub(crate) scroll_up: Option<String>,
     pub(crate) scroll_down: Option<String>,
+    pub(crate) follow_latest: Option<String>,
+    pub(crate) open_command_details: Option<String>,
     pub(crate) review_previous_user_input: Option<String>,
     pub(crate) history_previous: Option<String>,
     pub(crate) history_next: Option<String>,
@@ -550,6 +553,7 @@ pub(crate) struct TuiKeymapToml {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TuiConfig {
+    pub(crate) show_successful_command_output: bool,
     pub(crate) theme: TuiThemeToml,
     pub(crate) keymap: TuiKeymapToml,
 }
@@ -560,6 +564,7 @@ impl MerryConfig {
             return Ok(TuiConfig::default());
         };
         let config = TuiConfig {
+            show_successful_command_output: tui.show_successful_command_output.unwrap_or(false),
             theme: tui.theme.clone().unwrap_or_default(),
             keymap: tui.keymap.clone().unwrap_or_default(),
         };

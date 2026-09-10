@@ -98,6 +98,12 @@ fn find_cell_style(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<ratat
 
 mod command_palette;
 
+mod command_details;
+mod command_display;
+
+mod command_runtime;
+mod copy_interactions;
+
 mod composer;
 
 mod event_projection;
@@ -120,6 +126,7 @@ mod submission;
 
 mod text_rendering;
 
+mod reading_position;
 mod timeline_navigation;
 
 mod tool_projection;

@@ -1,4 +1,60 @@
-use merry_core::{QueuedInputLane, QueuedInputView};
+use merry_core::{ArtifactRef, QueuedInputLane, QueuedInputView};
+use std::time::Duration;
+use tokio::time::Instant;
+
+const PROCESS_PREVIEW_MAX_LINES: usize = 5;
+
+/// A bounded display preview; complete process output remains in runtime artifacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessOutputPreview {
+    pub(crate) lines: Vec<String>,
+    pub(crate) truncated: bool,
+}
+
+impl ProcessOutputPreview {
+    /// Keeps five nonempty stdout/stderr lines and records local or upstream truncation.
+    pub(crate) fn new(stdout: &str, stderr: &str, source_truncated: bool) -> Self {
+        let mut output_lines = stdout
+            .lines()
+            .chain(stderr.lines())
+            .filter(|line| !line.trim().is_empty());
+        let lines = output_lines
+            .by_ref()
+            .take(PROCESS_PREVIEW_MAX_LINES)
+            .map(str::to_owned)
+            .collect();
+        Self {
+            lines,
+            truncated: source_truncated || output_lines.next().is_some(),
+        }
+    }
+}
+
+/// Distinguishes cancellation from failures without a nonzero exit code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommandFailure {
+    Cancelled,
+    Failed,
+}
+
+/// Projects command lifecycle events without owning process execution or runtime state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CommandView {
+    Running {
+        detail: String,
+        started_at: Instant,
+    },
+    Finished {
+        detail: String,
+        exit_code: Option<i64>,
+        failure: Option<CommandFailure>,
+        preview: ProcessOutputPreview,
+        command: String,
+        cwd: String,
+        artifact: ArtifactRef,
+        elapsed: Option<Duration>,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -133,6 +189,7 @@ pub(crate) enum TimelineItem {
     User { text: String, lane: QueuedInputLane },
     Assistant { text: String },
     Muted { title: String, detail: String },
+    Command { view: CommandView },
     LocalCommand { title: String, body: String },
     Expanded { title: String, body: String },
     Diagnostic { title: String, body: String },
