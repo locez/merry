@@ -11,7 +11,7 @@ use crate::{
 use merry_core::ToolName;
 use merry_llm::{
     FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
-    ToolArguments, Usage,
+    ProviderErrorKind, ToolArguments, Usage,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -232,6 +232,7 @@ impl ResponsesStreamParser {
                 self.parse_terminal_response(response, "failed")
             }
             ResponsesStreamEvent::Error { code, message } => {
+                let kind = responses_stream_error_kind(code.as_deref());
                 let code = code
                     .as_deref()
                     .and_then(bounded_provider_metadata)
@@ -240,9 +241,11 @@ impl ResponsesStreamParser {
                     .as_deref()
                     .and_then(bounded_provider_error_message)
                     .unwrap_or_else(|| "provider returned stream error".to_owned());
-                Err(OpenAiProviderError::protocol(format!(
-                    "Responses stream error {code}: {message}"
-                )))
+                let reason = format!("Responses stream error {code}: {message}");
+                Err(match kind {
+                    ProviderErrorKind::Protocol => OpenAiProviderError::protocol(reason),
+                    kind => OpenAiProviderError::provider(kind, reason),
+                })
             }
         }
     }
@@ -298,6 +301,16 @@ impl ResponsesStreamParser {
             },
             usage,
         ))
+    }
+}
+
+fn responses_stream_error_kind(code: Option<&str>) -> ProviderErrorKind {
+    match code {
+        // Responses emits this event when the provider cannot currently serve
+        // the request. Normalize it so the runtime's bounded retry policy can
+        // recover from transient capacity failures.
+        Some("server_error") => ProviderErrorKind::Unavailable,
+        _ => ProviderErrorKind::Protocol,
     }
 }
 

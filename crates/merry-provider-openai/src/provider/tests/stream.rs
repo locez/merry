@@ -110,13 +110,32 @@ fn parser_reports_unexpected_non_sse_stream_lines() {
 fn responses_stream_error_preserves_safe_server_message() {
     let mut parser = ResponsesStreamParser::new();
     let error = parser
-            .parse_sse_line(
-                r#"data: {"type":"error","code":"invalid_request_error","message":"response schema is invalid"}"#,
-            )
-            .expect_err("provider stream error should be surfaced");
+        .parse_sse_line(
+            r#"data: {"type":"error","code":"invalid_request_error","message":"response schema is invalid"}"#,
+        )
+        .expect_err("provider stream error should be surfaced");
 
     assert!(error.to_string().contains("invalid_request_error"));
     assert!(error.to_string().contains("response schema is invalid"));
+    assert_eq!(
+        merry_llm::ModelError::from(error).kind(),
+        merry_llm::ProviderErrorKind::Protocol
+    );
+}
+
+#[test]
+fn responses_server_error_is_normalized_as_transient() {
+    let mut parser = ResponsesStreamParser::new();
+    let error = parser
+        .parse_sse_line(
+            r#"data: {"type":"error","code":"server_error","message":"Our server are currently overload. Please try again later."}"#,
+        )
+        .expect_err("provider stream error should be surfaced");
+    let error: merry_llm::ModelError = error.into();
+
+    assert_eq!(error.kind(), merry_llm::ProviderErrorKind::Unavailable);
+    assert!(error.message().contains("server_error"));
+    assert!(error.message().contains("try again later"));
 }
 
 #[test]
