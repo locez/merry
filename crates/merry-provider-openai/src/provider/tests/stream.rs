@@ -139,6 +139,35 @@ fn responses_server_error_is_normalized_as_transient() {
 }
 
 #[test]
+fn responses_failed_server_error_is_normalized_as_transient() {
+    let mut parser = ResponsesStreamParser::new();
+    let error = parser
+        .parse_sse_line(
+            r#"data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"Our server is overloaded. Please try again later."}}}"#,
+        )
+        .expect_err("failed server response should be surfaced");
+    let error: merry_llm::ModelError = error.into();
+
+    assert_eq!(error.kind(), merry_llm::ProviderErrorKind::Unavailable);
+    assert!(error.message().contains("server_error"));
+    assert!(error.message().contains("try again later"));
+}
+
+#[test]
+fn responses_failed_rate_limit_is_normalized_as_retryable() {
+    let mut parser = ResponsesStreamParser::new();
+    let error = parser
+        .parse_sse_line(
+            r#"data: {"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"Too many requests."}}}"#,
+        )
+        .expect_err("failed rate-limit response should be surfaced");
+    let error: merry_llm::ModelError = error.into();
+
+    assert_eq!(error.kind(), merry_llm::ProviderErrorKind::RateLimited);
+    assert!(error.message().contains("rate_limit_exceeded"));
+}
+
+#[test]
 fn stream_state_emits_completed_from_final_usage_line_without_trailing_newline() {
     let mut events = OpenAiEventStreamEvents::new(OpenAiProtocol::Responses);
 
