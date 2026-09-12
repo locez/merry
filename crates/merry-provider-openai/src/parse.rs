@@ -11,7 +11,7 @@ use crate::{
 use merry_core::ToolName;
 use merry_llm::{
     FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
-    ToolArguments, Usage,
+    ProviderErrorKind, ToolArguments, Usage,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -229,20 +229,22 @@ impl ResponsesStreamParser {
                 self.parse_terminal_response(response, "incomplete")
             }
             ResponsesStreamEvent::Failed { response } => {
+                if let Some(error) = response.error.as_ref() {
+                    let code = error.code.as_deref();
+                    let kind = responses_stream_error_kind(code);
+                    if kind != ProviderErrorKind::Protocol {
+                        return Err(responses_stream_error(code, error.message.as_deref(), kind));
+                    }
+                }
                 self.parse_terminal_response(response, "failed")
             }
             ResponsesStreamEvent::Error { code, message } => {
-                let code = code
-                    .as_deref()
-                    .and_then(bounded_provider_metadata)
-                    .unwrap_or_else(|| "unknown".to_owned());
-                let message = message
-                    .as_deref()
-                    .and_then(bounded_provider_error_message)
-                    .unwrap_or_else(|| "provider returned stream error".to_owned());
-                Err(OpenAiProviderError::protocol(format!(
-                    "Responses stream error {code}: {message}"
-                )))
+                let kind = responses_stream_error_kind(code.as_deref());
+                Err(responses_stream_error(
+                    code.as_deref(),
+                    message.as_deref(),
+                    kind,
+                ))
             }
         }
     }
@@ -298,6 +300,37 @@ impl ResponsesStreamParser {
             },
             usage,
         ))
+    }
+}
+
+/// Only explicit transient codes opt into the caller's bounded retry policy.
+fn responses_stream_error_kind(code: Option<&str>) -> ProviderErrorKind {
+    match code {
+        // Responses emits this event when the provider cannot currently serve
+        // the request. Normalize it so the runtime's bounded retry policy can
+        // recover from transient capacity failures.
+        Some("server_error") => ProviderErrorKind::Unavailable,
+        Some("rate_limit_exceeded") => ProviderErrorKind::RateLimited,
+        _ => ProviderErrorKind::Protocol,
+    }
+}
+
+/// Sanitize provider diagnostics identically for both Responses failure forms.
+fn responses_stream_error(
+    code: Option<&str>,
+    message: Option<&str>,
+    kind: ProviderErrorKind,
+) -> OpenAiProviderError {
+    let code = code
+        .and_then(bounded_provider_metadata)
+        .unwrap_or_else(|| "unknown".to_owned());
+    let message = message
+        .and_then(bounded_provider_error_message)
+        .unwrap_or_else(|| "provider returned stream error".to_owned());
+    let reason = format!("Responses stream error {code}: {message}");
+    match kind {
+        ProviderErrorKind::Protocol => OpenAiProviderError::protocol(reason),
+        kind => OpenAiProviderError::provider(kind, reason),
     }
 }
 
