@@ -8,6 +8,7 @@ use std::{
 };
 use thiserror::Error;
 
+mod cli;
 pub(crate) mod managed_provider;
 mod mcp;
 mod path_review;
@@ -17,6 +18,10 @@ use paths::{resolve_config_relative_path, resolve_path_access_rule_path, resolve
 mod provider;
 mod runtime;
 
+#[cfg(test)]
+pub(crate) use cli::CliDefaultOption;
+pub(crate) use cli::CliDefaultOptions;
+use cli::CliToml;
 pub(crate) use managed_provider::{
     ManagedProviderDefinition, ManagedProviderKind, ManagedProviderStore,
     ManagedProviderStoreError, ProviderAlias, derive_provider_alias,
@@ -391,6 +396,7 @@ pub enum LogFormat {
 struct MerryConfigToml {
     #[serde(default)]
     global: GlobalToml,
+    cli: Option<CliToml>,
     permissions: Option<PermissionsToml>,
     runtime: Option<RuntimeToml>,
     skills: Option<SkillsToml>,

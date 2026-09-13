@@ -229,6 +229,22 @@ by action sandboxes. With `--no-sandbox`, action `/tmp` maps to the current
 process's validated `TMPDIR` directly. Debug commands remain unsandboxed unless
 `--with-sandbox` is supplied.
 
+`[cli] default_options` in `config.toml` selects default modes for every `merry`
+invocation, so a preferred sandbox mode or fully trusted review does not need
+to be passed as a flag on each command:
+
+```toml
+[cli]
+default_options = ["inner-sandbox", "fully-trusted"]
+```
+
+The four values map to the root flags: `with-sandbox` (outer+inner, the
+built-in default for TUI and `run`), `no-sandbox`, `inner-sandbox`, and
+`fully-trusted`. A single value or an array is accepted; any other value, a
+repeated value, or more than one sandbox mode is a config error. A sandbox mode
+given on the command line replaces the configured one. `fully-trusted` has no
+negating flag, so a configured default enables it for every session.
+
 Outer filesystem mounts are applied parent-first after resolving access-rule
 precedence. Explicit file and directory imports preserve symbolic links instead
 of replacing them with their target's contents. Trusted and integration directory
@@ -267,6 +283,11 @@ or execution, including in fully trusted review mode; approval cannot override
 the ceiling. The setting is inherited by new process sessions and does not
 restrict model-provider or configured MCP connections. Explicit `--no-sandbox`
 host execution remains outside this network-isolation boundary.
+
+`--fully-trusted` skips model and host permission review for configured actions
+in the TUI and `merry run`; `[cli] default_options` can apply it to every
+session. Fully trusted review does not raise any access ceiling: `deny_paths`,
+`review_paths` masking, and `network = false` still apply.
 
 Trusted `readonly_paths` and `readwrite_paths` are preauthorized in the inner
 sandbox at their declared access level. `review_paths` marks existing subtrees

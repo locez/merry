@@ -33,7 +33,7 @@ use runtime_config::{effective_log_settings, validate_loaded_config};
 
 fn main() -> CliExit {
     let argv = env::args_os().collect::<Vec<_>>();
-    let cli = match Cli::try_parse_from(argv.clone()) {
+    let mut cli = match Cli::try_parse_from(argv.clone()) {
         Ok(cli) => cli,
         Err(error) => return CliExit::Clap(error),
     };
@@ -48,6 +48,12 @@ fn main() -> CliExit {
     };
     if let Err(error) = validate_loaded_config(_config.as_ref(), &config_paths) {
         return CliExit::Unexpected(error.to_string());
+    }
+    if let Some(config) = _config.as_ref() {
+        match config.cli_default_options() {
+            Ok(defaults) => cli.apply_default_options(defaults),
+            Err(error) => return CliExit::Unexpected(error.to_string()),
+        }
     }
     let log_settings = match effective_log_settings(_config.as_ref(), &config_paths) {
         Ok(settings) => settings,
