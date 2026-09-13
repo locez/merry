@@ -1,5 +1,5 @@
 use crate::coding::ProcessExecutionMode;
-use crate::config::CliDefaultOptions;
+use crate::config::CliDefaults;
 use crate::debug::{Args as DebugArgs, OpenAiArgs as DebugOpenAiArgs};
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -100,14 +100,14 @@ impl Cli {
         }
     }
 
-    /// Applies `[cli] default_options` as if the matching flags preceded the
+    /// Applies `[cli]` defaults as if the matching flags preceded the
     /// subcommand.
     ///
     /// Explicit command-line flags win. The three sandbox modes are mutually
-    /// exclusive, so a mode given on the command line keeps a configured mode
-    /// from applying. `--fully-trusted` has no negating flag, so a configured
-    /// default enables it for every invocation.
-    pub(crate) fn apply_default_options(&mut self, defaults: CliDefaultOptions) {
+    /// exclusive, so a mode given on the command line keeps a configured
+    /// `sandbox` from applying. `--fully-trusted` has no negating flag, so
+    /// `fully_trusted = true` enables it for every invocation.
+    pub(crate) fn apply_defaults(&mut self, defaults: CliDefaults) {
         if !(self.with_sandbox || self.no_sandbox || self.inner_sandbox) {
             match defaults.process_execution_mode() {
                 Some(ProcessExecutionMode::OuterAndInner) => self.with_sandbox = true,
@@ -209,7 +209,7 @@ mod tests {
     use super::{
         Cli, CliCommand, ProcessExecutionMode, cmd_usage, debug_openai_usage, shell_usage,
     };
-    use crate::config::{CliDefaultOption, CliDefaultOptions};
+    use crate::config::CliDefaults;
     use crate::debug::{Command as DebugCommand, DEFAULT_INPUT, DEFAULT_SESSION_ID};
     use crate::sandbox::{
         ChildHandoff as SandboxChildHandoff, ClipboardAccess, SANDBOX_CHILD_HANDOFF_ARG,
@@ -270,14 +270,14 @@ mod tests {
         assert!(cli.fully_trusted());
     }
 
-    fn defaults(options: &[CliDefaultOption]) -> CliDefaultOptions {
-        CliDefaultOptions::from_options(options).expect("default options should map to modes")
+    fn defaults(mode: Option<ProcessExecutionMode>, fully_trusted: bool) -> CliDefaults {
+        CliDefaults::new(mode, fully_trusted)
     }
 
     #[test]
-    fn default_options_select_sandbox_mode_when_command_line_omits_one() {
+    fn config_sandbox_selects_mode_when_command_line_omits_one() {
         let mut unrestricted = Cli::try_parse_from(["merry", "run", "task"]).expect("run parses");
-        unrestricted.apply_default_options(defaults(&[CliDefaultOption::NoSandbox]));
+        unrestricted.apply_defaults(defaults(Some(ProcessExecutionMode::Unrestricted), false));
         assert_eq!(
             unrestricted.process_execution_mode(),
             ProcessExecutionMode::Unrestricted
@@ -286,7 +286,7 @@ mod tests {
         assert!(!unrestricted.fully_trusted());
 
         let mut inner = Cli::try_parse_from(["merry"]).expect("root parses");
-        inner.apply_default_options(defaults(&[CliDefaultOption::InnerSandbox]));
+        inner.apply_defaults(defaults(Some(ProcessExecutionMode::InnerOnly), false));
         assert_eq!(
             inner.process_execution_mode(),
             ProcessExecutionMode::InnerOnly
@@ -294,7 +294,7 @@ mod tests {
         assert!(!inner.should_bootstrap_sandbox());
 
         let mut debug = Cli::try_parse_from(["merry", "debug"]).expect("debug parses");
-        debug.apply_default_options(defaults(&[CliDefaultOption::WithSandbox]));
+        debug.apply_defaults(defaults(Some(ProcessExecutionMode::OuterAndInner), false));
         assert!(debug.with_sandbox);
         assert!(debug.should_bootstrap_sandbox());
     }
@@ -303,7 +303,7 @@ mod tests {
     fn command_line_sandbox_mode_replaces_configured_default() {
         let mut with_sandbox =
             Cli::try_parse_from(["merry", "--with-sandbox", "run", "task"]).expect("run parses");
-        with_sandbox.apply_default_options(defaults(&[CliDefaultOption::NoSandbox]));
+        with_sandbox.apply_defaults(defaults(Some(ProcessExecutionMode::Unrestricted), false));
         assert_eq!(
             with_sandbox.process_execution_mode(),
             ProcessExecutionMode::OuterAndInner
@@ -312,7 +312,7 @@ mod tests {
         assert!(!with_sandbox.no_sandbox);
 
         let mut no_sandbox = Cli::try_parse_from(["merry", "--no-sandbox"]).expect("root parses");
-        no_sandbox.apply_default_options(defaults(&[CliDefaultOption::InnerSandbox]));
+        no_sandbox.apply_defaults(defaults(Some(ProcessExecutionMode::InnerOnly), false));
         assert_eq!(
             no_sandbox.process_execution_mode(),
             ProcessExecutionMode::Unrestricted
@@ -321,9 +321,9 @@ mod tests {
     }
 
     #[test]
-    fn default_fully_trusted_applies_alongside_explicit_flags() {
+    fn config_fully_trusted_applies_alongside_explicit_flags() {
         let mut configured = Cli::try_parse_from(["merry", "run", "task"]).expect("run parses");
-        configured.apply_default_options(defaults(&[CliDefaultOption::FullyTrusted]));
+        configured.apply_defaults(defaults(None, true));
         assert!(configured.fully_trusted());
         assert_eq!(
             configured.process_execution_mode(),
@@ -332,15 +332,12 @@ mod tests {
 
         let mut flagged =
             Cli::try_parse_from(["merry", "--fully-trusted", "run", "task"]).expect("run parses");
-        flagged.apply_default_options(CliDefaultOptions::default());
+        flagged.apply_defaults(CliDefaults::default());
         assert!(flagged.fully_trusted());
 
         let mut mixed =
             Cli::try_parse_from(["merry", "--no-sandbox", "run", "task"]).expect("run parses");
-        mixed.apply_default_options(defaults(&[
-            CliDefaultOption::InnerSandbox,
-            CliDefaultOption::FullyTrusted,
-        ]));
+        mixed.apply_defaults(defaults(Some(ProcessExecutionMode::InnerOnly), true));
         assert_eq!(
             mixed.process_execution_mode(),
             ProcessExecutionMode::Unrestricted

@@ -18,9 +18,7 @@ use paths::{resolve_config_relative_path, resolve_path_access_rule_path, resolve
 mod provider;
 mod runtime;
 
-#[cfg(test)]
-pub(crate) use cli::CliDefaultOption;
-pub(crate) use cli::CliDefaultOptions;
+pub(crate) use cli::CliDefaults;
 use cli::CliToml;
 pub(crate) use managed_provider::{
     ManagedProviderDefinition, ManagedProviderKind, ManagedProviderStore,

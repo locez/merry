@@ -1,7 +1,7 @@
 use super::home;
 use crate::config::provider::{EffectiveOpenAiApiKeySource, ProviderConfigSource};
 use crate::config::{
-    CliDefaultOptions, EffectiveProviderConfig, LogFormat, LogLevel, MerryConfig, XdgPaths,
+    CliDefaults, EffectiveProviderConfig, LogFormat, LogLevel, MerryConfig, XdgPaths,
 };
 use merry_runtime::PathAccess;
 use std::{
@@ -343,10 +343,8 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
 
     assert_eq!(config.profile(), Some("default"));
     assert_eq!(
-        config
-            .cli_default_options()
-            .expect("example cli defaults should validate"),
-        CliDefaultOptions::default(),
+        config.cli_defaults(),
+        CliDefaults::default(),
         "the user-facing example should not preselect a sandbox mode or trust level"
     );
     assert!(

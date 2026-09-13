@@ -229,21 +229,21 @@ by action sandboxes. With `--no-sandbox`, action `/tmp` maps to the current
 process's validated `TMPDIR` directly. Debug commands remain unsandboxed unless
 `--with-sandbox` is supplied.
 
-`[cli] default_options` in `config.toml` selects default modes for every `merry`
-invocation, so a preferred sandbox mode or fully trusted review does not need
-to be passed as a flag on each command:
+The `[cli]` table in `config.toml` sets defaults for every `merry` invocation,
+so a preferred sandbox mode or fully trusted review does not need to be passed
+as a flag on each command:
 
 ```toml
 [cli]
-default_options = ["inner-sandbox", "fully-trusted"]
+sandbox = "inner-sandbox"
+fully_trusted = true
 ```
 
-The four values map to the root flags: `with-sandbox` (outer+inner, the
-built-in default for TUI and `run`), `no-sandbox`, `inner-sandbox`, and
-`fully-trusted`. A single value or an array is accepted; any other value, a
-repeated value, or more than one sandbox mode is a config error. A sandbox mode
-given on the command line replaces the configured one. `fully-trusted` has no
-negating flag, so a configured default enables it for every session.
+`sandbox` takes `with-sandbox` (outer+inner, the built-in default for TUI and
+`run`), `no-sandbox`, or `inner-sandbox`, matching the root flags; a sandbox
+mode given on the command line replaces the configured one. `fully_trusted` is
+the config equivalent of `--fully-trusted`; there is no negating flag, so `true`
+enables it for every session.
 
 Outer filesystem mounts are applied parent-first after resolving access-rule
 precedence. Explicit file and directory imports preserve symbolic links instead
@@ -285,7 +285,7 @@ restrict model-provider or configured MCP connections. Explicit `--no-sandbox`
 host execution remains outside this network-isolation boundary.
 
 `--fully-trusted` skips model and host permission review for configured actions
-in the TUI and `merry run`; `[cli] default_options` can apply it to every
+in the TUI and `merry run`; `[cli] fully_trusted = true` applies it to every
 session. Fully trusted review does not raise any access ceiling: `deny_paths`,
 `review_paths` masking, and `network = false` still apply.
 

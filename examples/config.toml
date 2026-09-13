@@ -22,18 +22,18 @@
 profile = "default"
 
 [cli]
-# Default modes for every merry invocation. Values:
-#   with-sandbox   outer+inner bubblewrap (the built-in default for TUI and run)
-#   no-sandbox     unrestricted host execution
-#   inner-sandbox  inner action sandbox only, without the outer re-exec
-#   fully-trusted  skip model/host permission review
-# A single value or an array is accepted; at most one sandbox mode may be
-# listed. Explicit command-line flags take precedence: --with-sandbox,
-# --no-sandbox, or --inner-sandbox on the command line replaces the configured
-# sandbox mode. fully-trusted has no negating flag, so listing it here applies
-# to every TUI and `merry run` session. Path ceilings, deny_paths, and
-# network = false still apply.
-# default_options = ["inner-sandbox", "fully-trusted"]
+# Default sandbox mode for every merry invocation, named after the root flag it
+# stands in for:
+#   "with-sandbox"   outer+inner bubblewrap (the built-in default for TUI and run)
+#   "no-sandbox"     unrestricted host execution
+#   "inner-sandbox"  inner action sandbox only, without the outer re-exec
+# --with-sandbox, --no-sandbox, or --inner-sandbox on the command line replaces
+# this default.
+# sandbox = "inner-sandbox"
+# Skip model/host permission review for every TUI and `merry run` session, like
+# --fully-trusted. There is no negating flag, so true applies to every session.
+# Path ceilings, deny_paths, and network = false still apply.
+# fully_trusted = false
 
 [permissions]
 # Global config is user-trusted: readonly_paths/readwrite_paths define both the
