@@ -103,6 +103,13 @@ pub(super) async fn run_spawned_process(
         .map(ProcessExitStatus::Exited)
         .unwrap_or(ProcessExitStatus::DomainFailed);
 
+    if is_bwrap_initialization_failure(&program_for_error, &stderr.bytes) {
+        return Err(ProcessRunnerError::infrastructure(format!(
+            "bubblewrap could not initialize the action sandbox: {}",
+            String::from_utf8_lossy(&stderr.bytes).trim()
+        )));
+    }
+
     ProcessRunnerOutput::from_bytes(
         &intent,
         status,
@@ -112,6 +119,19 @@ pub(super) async fn run_spawned_process(
         stderr.truncated,
     )
     .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))
+}
+
+fn is_bwrap_initialization_failure(program: &str, stderr: &[u8]) -> bool {
+    if !program.ends_with("bwrap") {
+        return false;
+    }
+    let stderr = String::from_utf8_lossy(stderr);
+    stderr.lines().any(|line| {
+        line.starts_with("bwrap:")
+            && (line.contains("No permissions to create new namespace")
+                || line.contains("Creating new namespace failed")
+                || line.contains("setting up namespace"))
+    })
 }
 async fn join_bounded_output(
     task: tokio::task::JoinHandle<Result<BoundedOutput, ProcessRunnerError>>,
@@ -159,4 +179,47 @@ where
     }
 
     Ok(BoundedOutput { bytes, truncated })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_bwrap_initialization_failure;
+
+    const NAMESPACE_DENIED: &[u8] = b"bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces.\n";
+
+    #[test]
+    fn bwrap_namespace_failures_are_infrastructure_errors() {
+        assert!(is_bwrap_initialization_failure(
+            "/usr/bin/bwrap",
+            NAMESPACE_DENIED
+        ));
+        assert!(is_bwrap_initialization_failure(
+            "bwrap",
+            b"bwrap: Creating new namespace failed: Operation not permitted\n"
+        ));
+        assert!(is_bwrap_initialization_failure(
+            "bwrap",
+            b"other output\nbwrap: setting up namespace: Permission denied\n"
+        ));
+    }
+
+    #[test]
+    fn ordinary_command_failures_inside_bwrap_are_not_infrastructure_errors() {
+        assert!(!is_bwrap_initialization_failure(
+            "/usr/bin/bwrap",
+            b"cargo: could not find `Cargo.toml`\n"
+        ));
+        assert!(!is_bwrap_initialization_failure(
+            "/usr/bin/bwrap",
+            b"error: No permissions to create new namespace\n"
+        ));
+    }
+
+    #[test]
+    fn non_bwrap_programs_never_match_even_with_bwrap_style_output() {
+        assert!(!is_bwrap_initialization_failure(
+            "/usr/bin/cargo",
+            NAMESPACE_DENIED
+        ));
+    }
 }
