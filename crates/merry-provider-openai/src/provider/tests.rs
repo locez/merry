@@ -1,5 +1,6 @@
 mod errors;
 mod request;
+mod retry;
 mod stream;
 
 use merry_llm::{

@@ -178,6 +178,17 @@ pub(crate) struct ResponsesResponse {
     pub(crate) output: Vec<ResponsesOutputItem>,
     pub(crate) status: Option<String>,
     pub(crate) usage: Option<ResponsesUsage>,
+    #[serde(default)]
+    pub(crate) error: Option<ResponsesResponseError>,
+}
+
+/// Error details from a failed Responses generation; interpreted by the adapter.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ResponsesResponseError {
+    #[serde(default)]
+    pub(crate) code: Option<String>,
+    #[serde(default)]
+    pub(crate) message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

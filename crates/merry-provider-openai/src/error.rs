@@ -19,7 +19,8 @@ pub enum OpenAiProviderError {
     /// Provider response did not match the expected Responses protocol.
     #[error("OpenAI provider protocol error: {reason}")]
     Protocol { reason: String },
-    /// Provider returned a non-successful HTTP status or transport failure.
+    /// Provider returned a provider-level failure, including transient stream
+    /// errors or a non-successful HTTP status.
     #[error("OpenAI provider request failed ({kind:?}): {message}")]
     Provider {
         /// Provider-neutral error category.
