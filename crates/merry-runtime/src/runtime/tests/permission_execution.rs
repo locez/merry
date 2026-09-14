@@ -702,7 +702,7 @@ async fn request_permissions_model_failure_uses_opt_in_host_fallback() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn request_permissions_model_denial_does_not_escalate_to_host_fallback() {
+async fn request_permissions_model_denial_escalates_to_host_fallback() {
     let review_provider =
         RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
             permission_review_completed_event("deny", "The action is not grounded in the task."),
@@ -710,11 +710,50 @@ async fn request_permissions_model_denial_does_not_escalate_to_host_fallback() {
     let admission = StaticPermissionAdmissionSource::approving();
     let runner = FakeProcessRunner::succeeding();
     let (runtime, pending) = register_permission_pending_tool_with_builder(
-        "runtime-permission-denial-no-human",
-        "call-permission-denial-no-human",
+        "runtime-permission-denial-human-fallback",
+        "call-permission-denial-human-fallback",
         |builder| {
             builder
                 .permission_review_mode(PermissionReviewMode::ModelThenHostFallback)
+                .permission_admission_source(Arc::new(admission.clone()))
+                .model_provider_for_role(
+                    RuntimeModelRole::ApprovalReview,
+                    Arc::new(review_provider),
+                    named_model("fake/approval-review"),
+                )
+                .allow_permissioned_process_actions(Arc::new(runner.clone()))
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("model denial should hand the decision to the host");
+
+    assert_eq!(admission.call_count(), 1);
+    assert_eq!(runner.call_count(), 1);
+    assert_eq!(
+        resolved_tool_result(&events).status(),
+        ToolCallResultStatus::Succeeded
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_permissions_model_denial_is_final_without_host_fallback_mode() {
+    let review_provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            permission_review_completed_event("deny", "The action is not grounded in the task."),
+        )])]);
+    let admission = StaticPermissionAdmissionSource::approving();
+    let runner = FakeProcessRunner::succeeding();
+    let (runtime, pending) = register_permission_pending_tool_with_builder(
+        "runtime-permission-denial-model-only",
+        "call-permission-denial-model-only",
+        |builder| {
+            builder
+                .permission_review_mode(PermissionReviewMode::Required)
                 .permission_admission_source(Arc::new(admission.clone()))
                 .model_provider_for_role(
                     RuntimeModelRole::ApprovalReview,

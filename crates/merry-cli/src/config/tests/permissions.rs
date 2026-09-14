@@ -1,6 +1,5 @@
 use super::home;
 use crate::config::{MerryConfig, XdgPaths};
-use merry::profiles::NoSandboxReviewMode;
 use merry_runtime::{PathAccess, PathAccessRuleSource};
 use std::path::{Path, PathBuf};
 
@@ -113,23 +112,14 @@ access = "ro"
 }
 
 #[test]
-fn configures_model_review_for_no_sandbox_mode() {
+fn rejects_removed_no_sandbox_review_key() {
     let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-    let model = MerryConfig::load_optional_from_text(
+    let error = MerryConfig::load_optional_from_text(
         Some("[permissions]\nno_sandbox_review = \"model\"\n"),
         &paths,
     )
-    .expect("permission review config should parse")
-    .expect("permission review config should exist");
-    assert_eq!(model.no_sandbox_review_mode(), NoSandboxReviewMode::Model);
-
-    let default = MerryConfig::load_optional_from_text(
-        Some("[permissions]\nno_sandbox_review = \"host\"\n"),
-        &paths,
-    )
-    .expect("host review config should parse")
-    .expect("host review config should exist");
-    assert_eq!(default.no_sandbox_review_mode(), NoSandboxReviewMode::Host);
+    .expect_err("no_sandbox_review was replaced by [cli] approval_policy");
+    assert!(error.to_string().contains("no_sandbox_review"), "{error}");
 }
 
 #[test]

@@ -48,7 +48,7 @@ pub(crate) struct Cli {
         long,
         value_enum,
         value_name = "POLICY",
-        help = "Who reviews permission requests before a command runs [default: auto]"
+        help = "Who reviews permission requests before a command runs [default: model_then_human]"
     )]
     pub(crate) approval_policy: Option<ApprovalPolicy>,
 
@@ -89,7 +89,8 @@ impl Cli {
         }
     }
 
-    /// The effective approval policy; `auto` when no flag or default set one.
+    /// The effective approval policy; `model_then_human` when no flag or
+    /// configured default set one.
     pub(crate) fn approval_policy(&self) -> ApprovalPolicy {
         self.approval_policy.unwrap_or_default()
     }
@@ -108,11 +109,11 @@ impl Cli {
     ///
     /// Explicit command-line flags win. The three sandbox modes are mutually
     /// exclusive, so a mode given on the command line keeps a configured
-    /// `sandbox` from applying. A configured `approval_policy = "trusted"`
+    /// `sandbox` from applying. A configured `approval_policy = "none"`
     /// always comes with `sandbox = "no-sandbox"` and means running without
     /// any sandbox, so it applies only while the effective mode is
     /// unrestricted: `--with-sandbox` or `--inner-sandbox` on the command
-    /// line runs that invocation sandboxed with the `auto` reviewer. Every
+    /// line runs that invocation sandboxed with the default reviewer. Every
     /// other configured policy applies under any sandbox mode. An explicit
     /// `--approval-policy` is left as given.
     pub(crate) fn apply_defaults(&mut self, defaults: CliDefaults) {
@@ -126,7 +127,7 @@ impl Cli {
         }
         if self.approval_policy.is_none()
             && let Some(policy) = defaults.approval_policy()
-            && (policy != ApprovalPolicy::Trusted
+            && (policy != ApprovalPolicy::NoApproval
                 || self.process_execution_mode() == ProcessExecutionMode::Unrestricted)
         {
             self.approval_policy = Some(policy);
@@ -269,26 +270,34 @@ mod tests {
             run.process_execution_mode(),
             ProcessExecutionMode::Unrestricted
         );
-        assert_eq!(tui.approval_policy(), ApprovalPolicy::Auto);
-        assert_eq!(run.approval_policy(), ApprovalPolicy::Auto);
+        assert_eq!(tui.approval_policy(), ApprovalPolicy::ModelThenHuman);
+        assert_eq!(run.approval_policy(), ApprovalPolicy::ModelThenHuman);
     }
 
     #[test]
     fn approval_policy_flag_parses_every_reviewer_name() {
         for (value, policy) in [
-            ("auto", ApprovalPolicy::Auto),
-            ("model", ApprovalPolicy::Model),
-            ("human", ApprovalPolicy::Human),
-            ("model-then-human", ApprovalPolicy::ModelThenHuman),
-            ("trusted", ApprovalPolicy::Trusted),
-            ("none", ApprovalPolicy::DenyAll),
+            ("none", ApprovalPolicy::NoApproval),
+            ("deny", ApprovalPolicy::Deny),
+            ("model_only", ApprovalPolicy::ModelOnly),
+            ("model_then_human", ApprovalPolicy::ModelThenHuman),
+            ("human_only", ApprovalPolicy::HumanOnly),
         ] {
             let cli = Cli::try_parse_from(["merry", "--approval-policy", value, "run", "task"])
                 .unwrap_or_else(|error| panic!("--approval-policy {value} should parse: {error}"));
             assert_eq!(cli.approval_policy(), policy, "{value}");
         }
 
-        for value in ["fully-trusted", "deny-all", "--approval-policy", "yes"] {
+        for value in [
+            "auto",
+            "trusted",
+            "model",
+            "human",
+            "model-then-human",
+            "fully-trusted",
+            "--approval-policy",
+            "yes",
+        ] {
             assert!(
                 Cli::try_parse_from(["merry", "--approval-policy", value]).is_err(),
                 "{value} should be rejected"
@@ -301,22 +310,22 @@ mod tests {
     }
 
     #[test]
-    fn trusted_policy_is_explicit_and_independent_from_host_execution_mode() {
+    fn none_policy_is_explicit_and_independent_from_host_execution_mode() {
         let cli = Cli::try_parse_from([
             "merry",
             "--approval-policy",
-            "trusted",
+            "none",
             "--no-sandbox",
             "run",
             "task",
         ])
-        .expect("trusted run parses");
+        .expect("no-approval run parses");
 
         assert_eq!(
             cli.process_execution_mode(),
             ProcessExecutionMode::Unrestricted
         );
-        assert_eq!(cli.approval_policy(), ApprovalPolicy::Trusted);
+        assert_eq!(cli.approval_policy(), ApprovalPolicy::NoApproval);
     }
 
     fn defaults(
@@ -335,7 +344,10 @@ mod tests {
             ProcessExecutionMode::Unrestricted
         );
         assert!(!unrestricted.should_bootstrap_sandbox());
-        assert_eq!(unrestricted.approval_policy(), ApprovalPolicy::Auto);
+        assert_eq!(
+            unrestricted.approval_policy(),
+            ApprovalPolicy::ModelThenHuman
+        );
 
         let mut inner = Cli::try_parse_from(["merry"]).expect("root parses");
         inner.apply_defaults(defaults(Some(ProcessExecutionMode::InnerOnly), None));
@@ -373,51 +385,51 @@ mod tests {
     }
 
     #[test]
-    fn config_trusted_policy_applies_only_without_a_sandbox() {
-        let trusted_host = defaults(
+    fn config_none_policy_applies_only_without_a_sandbox() {
+        let unreviewed_host = defaults(
             Some(ProcessExecutionMode::Unrestricted),
-            Some(ApprovalPolicy::Trusted),
+            Some(ApprovalPolicy::NoApproval),
         );
 
         let mut configured = Cli::try_parse_from(["merry", "run", "task"]).expect("run parses");
-        configured.apply_defaults(trusted_host);
+        configured.apply_defaults(unreviewed_host);
         assert_eq!(
             configured.process_execution_mode(),
             ProcessExecutionMode::Unrestricted
         );
-        assert_eq!(configured.approval_policy(), ApprovalPolicy::Trusted);
+        assert_eq!(configured.approval_policy(), ApprovalPolicy::NoApproval);
 
         let mut explicit_host =
             Cli::try_parse_from(["merry", "--no-sandbox", "run", "task"]).expect("run parses");
-        explicit_host.apply_defaults(trusted_host);
-        assert_eq!(explicit_host.approval_policy(), ApprovalPolicy::Trusted);
+        explicit_host.apply_defaults(unreviewed_host);
+        assert_eq!(explicit_host.approval_policy(), ApprovalPolicy::NoApproval);
 
         let mut inner = Cli::try_parse_from(["merry", "--inner-sandbox"]).expect("root parses");
-        inner.apply_defaults(trusted_host);
+        inner.apply_defaults(unreviewed_host);
         assert_eq!(
             inner.process_execution_mode(),
             ProcessExecutionMode::InnerOnly
         );
-        assert_eq!(inner.approval_policy(), ApprovalPolicy::Auto);
+        assert_eq!(inner.approval_policy(), ApprovalPolicy::ModelThenHuman);
 
         let mut outer =
             Cli::try_parse_from(["merry", "--with-sandbox", "run", "task"]).expect("run parses");
-        outer.apply_defaults(trusted_host);
+        outer.apply_defaults(unreviewed_host);
         assert_eq!(
             outer.process_execution_mode(),
             ProcessExecutionMode::OuterAndInner
         );
         assert!(outer.should_bootstrap_sandbox());
-        assert_eq!(outer.approval_policy(), ApprovalPolicy::Auto);
+        assert_eq!(outer.approval_policy(), ApprovalPolicy::ModelThenHuman);
     }
 
     #[test]
     fn config_reviewer_policies_apply_under_every_sandbox_mode() {
         for policy in [
-            ApprovalPolicy::Model,
-            ApprovalPolicy::Human,
+            ApprovalPolicy::Deny,
+            ApprovalPolicy::ModelOnly,
             ApprovalPolicy::ModelThenHuman,
-            ApprovalPolicy::DenyAll,
+            ApprovalPolicy::HumanOnly,
         ] {
             for args in [
                 vec!["merry"],
@@ -435,15 +447,15 @@ mod tests {
     #[test]
     fn explicit_approval_policy_flag_is_left_as_given() {
         let mut flagged =
-            Cli::try_parse_from(["merry", "--approval-policy", "trusted", "run", "task"])
+            Cli::try_parse_from(["merry", "--approval-policy", "none", "run", "task"])
                 .expect("run parses");
         flagged.apply_defaults(CliDefaults::default());
-        assert_eq!(flagged.approval_policy(), ApprovalPolicy::Trusted);
+        assert_eq!(flagged.approval_policy(), ApprovalPolicy::NoApproval);
 
         let mut flagged_inner = Cli::try_parse_from([
             "merry",
             "--approval-policy",
-            "trusted",
+            "none",
             "--inner-sandbox",
             "run",
             "task",
@@ -451,19 +463,19 @@ mod tests {
         .expect("run parses");
         flagged_inner.apply_defaults(defaults(
             Some(ProcessExecutionMode::Unrestricted),
-            Some(ApprovalPolicy::Trusted),
+            Some(ApprovalPolicy::NoApproval),
         ));
         assert_eq!(
             flagged_inner.process_execution_mode(),
             ProcessExecutionMode::InnerOnly
         );
-        assert_eq!(flagged_inner.approval_policy(), ApprovalPolicy::Trusted);
+        assert_eq!(flagged_inner.approval_policy(), ApprovalPolicy::NoApproval);
 
-        let mut flagged_auto =
-            Cli::try_parse_from(["merry", "--approval-policy", "auto", "run", "task"])
+        let mut flagged_human =
+            Cli::try_parse_from(["merry", "--approval-policy", "human_only", "run", "task"])
                 .expect("run parses");
-        flagged_auto.apply_defaults(defaults(None, Some(ApprovalPolicy::DenyAll)));
-        assert_eq!(flagged_auto.approval_policy(), ApprovalPolicy::Auto);
+        flagged_human.apply_defaults(defaults(None, Some(ApprovalPolicy::Deny)));
+        assert_eq!(flagged_human.approval_policy(), ApprovalPolicy::HumanOnly);
     }
 
     #[test]

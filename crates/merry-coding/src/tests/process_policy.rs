@@ -1,7 +1,7 @@
 use crate::{
     CodingApprovalPolicy, CodingModelRoleConfig, CodingPermissionPolicy,
-    CodingPermissionPolicyError, CodingProcessBoundary, CodingRuntimeBuilder, CodingRuntimeInput,
-    CodingSubagentsConfig, NoSandboxReviewMode, tests::process_backend,
+    CodingPermissionPolicyError, CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig,
+    tests::process_backend,
 };
 use futures_util::stream;
 use merry_core::{ProviderName, SessionId, SubagentActivityPhase, ToolName};
@@ -299,33 +299,31 @@ async fn parent_builder_passes_policy_to_a_real_child_runtime() {
 }
 
 #[test]
-fn process_boundary_policy_rejects_missing_host_admission() {
-    let error = match CodingPermissionPolicy::for_process_boundary(
-        CodingProcessBoundary::Unrestricted,
-        CodingApprovalPolicy::Auto,
-        NoSandboxReviewMode::Model,
-        None,
-    ) {
-        Ok(_) => panic!("headless host fallback must be explicit"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        CodingPermissionPolicyError::HostAdmissionUnavailable {
-            boundary: CodingProcessBoundary::Unrestricted
-        }
-    ));
+fn host_reviewed_policies_reject_missing_host_admission() {
+    for policy in [
+        CodingApprovalPolicy::ModelThenHuman,
+        CodingApprovalPolicy::HumanOnly,
+    ] {
+        let error = match CodingPermissionPolicy::for_approval_policy(policy, None) {
+            Ok(_) => panic!("{policy:?} needs a host source"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error,
+                CodingPermissionPolicyError::HostAdmissionUnavailable { policy: found }
+                    if found == policy
+            ),
+            "{policy:?}"
+        );
+    }
 }
 
 #[test]
-fn process_boundary_policy_uses_model_then_host_only_for_interactive_no_sandbox() {
-    let host = CountingAdmission::approving();
-    let policy = CodingPermissionPolicy::for_process_boundary(
-        CodingProcessBoundary::Unrestricted,
-        CodingApprovalPolicy::Auto,
-        NoSandboxReviewMode::Model,
-        Some(Arc::new(host)),
+fn model_then_human_policy_uses_host_fallback() {
+    let policy = CodingPermissionPolicy::for_approval_policy(
+        CodingApprovalPolicy::ModelThenHuman,
+        Some(Arc::new(CountingAdmission::approving())),
     )
     .expect("host fallback policy should build");
 
@@ -336,13 +334,10 @@ fn process_boundary_policy_uses_model_then_host_only_for_interactive_no_sandbox(
 }
 
 #[test]
-fn process_boundary_policy_defaults_to_host_review_for_interactive_no_sandbox() {
-    let host = CountingAdmission::approving();
-    let policy = CodingPermissionPolicy::for_process_boundary(
-        CodingProcessBoundary::Unrestricted,
-        CodingApprovalPolicy::Auto,
-        NoSandboxReviewMode::Host,
-        Some(Arc::new(host)),
+fn human_only_policy_uses_host_decision() {
+    let policy = CodingPermissionPolicy::for_approval_policy(
+        CodingApprovalPolicy::HumanOnly,
+        Some(Arc::new(CountingAdmission::approving())),
     )
     .expect("host review policy should build");
 
@@ -353,127 +348,26 @@ fn process_boundary_policy_defaults_to_host_review_for_interactive_no_sandbox() 
 }
 
 #[test]
-fn process_boundary_policy_keeps_outer_and_inner_model_only() {
-    let host = CountingAdmission::approving();
-    let policy = CodingPermissionPolicy::for_process_boundary(
-        CodingProcessBoundary::OuterAndInner,
-        CodingApprovalPolicy::Auto,
-        NoSandboxReviewMode::Model,
-        Some(Arc::new(host)),
-    )
-    .expect("outer and inner model-only policy should build");
+fn reviewer_free_policies_do_not_need_a_host_admission_source() {
+    let model = CodingPermissionPolicy::for_approval_policy(CodingApprovalPolicy::ModelOnly, None)
+        .expect("model-only should not need a reviewer");
+    assert!(matches!(model, CodingPermissionPolicy::Required));
 
-    assert!(matches!(policy, CodingPermissionPolicy::Required));
+    let none = CodingPermissionPolicy::for_approval_policy(CodingApprovalPolicy::NoApproval, None)
+        .expect("no-approval should not need a reviewer");
+    assert!(matches!(none, CodingPermissionPolicy::FullyTrusted));
+
+    let deny = CodingPermissionPolicy::for_approval_policy(CodingApprovalPolicy::Deny, None)
+        .expect("deny should not need a reviewer");
+    assert!(matches!(deny, CodingPermissionPolicy::DenyAll));
 }
 
 #[test]
-fn outer_and_inner_model_only_does_not_need_a_host_admission_source() {
-    let policy = CodingPermissionPolicy::for_process_boundary(
-        CodingProcessBoundary::OuterAndInner,
-        CodingApprovalPolicy::Auto,
-        NoSandboxReviewMode::Model,
-        None,
-    )
-    .expect("outer and inner should remain model-only without host fallback");
-
-    assert!(matches!(policy, CodingPermissionPolicy::Required));
-}
-
-#[test]
-fn fully_trusted_process_policy_does_not_need_a_host_admission_source() {
-    let policy = CodingPermissionPolicy::for_process_boundary(
-        CodingProcessBoundary::Unrestricted,
-        CodingApprovalPolicy::Trusted,
-        NoSandboxReviewMode::Host,
-        None,
-    )
-    .expect("fully trusted mode should not need a reviewer");
-
-    assert!(matches!(policy, CodingPermissionPolicy::FullyTrusted));
-}
-
-#[test]
-fn deny_all_process_policy_does_not_need_a_host_admission_source() {
-    let policy = CodingPermissionPolicy::for_process_boundary(
-        CodingProcessBoundary::OuterAndInner,
-        CodingApprovalPolicy::DenyAll,
-        NoSandboxReviewMode::Host,
-        None,
-    )
-    .expect("deny-all policy should not need a reviewer");
-
-    assert!(matches!(policy, CodingPermissionPolicy::DenyAll));
-}
-
-#[test]
-fn explicit_reviewer_policies_ignore_the_process_boundary() {
-    for boundary in [
-        CodingProcessBoundary::OuterAndInner,
-        CodingProcessBoundary::InnerOnly,
-        CodingProcessBoundary::Unrestricted,
-    ] {
-        let model = CodingPermissionPolicy::for_process_boundary(
-            boundary,
-            CodingApprovalPolicy::Model,
-            NoSandboxReviewMode::Host,
-            None,
-        )
-        .expect("model-only policy should not need a reviewer");
-        assert!(
-            matches!(model, CodingPermissionPolicy::Required),
-            "{boundary:?}"
-        );
-
-        let human = CodingPermissionPolicy::for_process_boundary(
-            boundary,
-            CodingApprovalPolicy::Human,
-            NoSandboxReviewMode::Model,
-            Some(Arc::new(CountingAdmission::approving())),
-        )
-        .expect("human policy should build with a host source");
-        assert!(
-            matches!(human, CodingPermissionPolicy::HostDecisionOnly { .. }),
-            "{boundary:?}"
-        );
-
-        let fallback = CodingPermissionPolicy::for_process_boundary(
-            boundary,
-            CodingApprovalPolicy::ModelThenHuman,
-            NoSandboxReviewMode::Host,
-            Some(Arc::new(CountingAdmission::approving())),
-        )
-        .expect("model-then-human policy should build with a host source");
-        assert!(
-            matches!(
-                fallback,
-                CodingPermissionPolicy::ModelThenHostFallback { .. }
-            ),
-            "{boundary:?}"
-        );
-
-        for approval in [
-            CodingApprovalPolicy::Human,
-            CodingApprovalPolicy::ModelThenHuman,
-        ] {
-            let error = match CodingPermissionPolicy::for_process_boundary(
-                boundary,
-                approval,
-                NoSandboxReviewMode::Host,
-                None,
-            ) {
-                Ok(_) => panic!("{boundary:?} {approval:?} needs a host source"),
-                Err(error) => error,
-            };
-            assert!(
-                matches!(
-                    error,
-                    CodingPermissionPolicyError::HostAdmissionUnavailable { boundary: found }
-                        if found == boundary
-                ),
-                "{boundary:?} {approval:?}"
-            );
-        }
-    }
+fn default_approval_policy_is_model_then_human() {
+    assert_eq!(
+        CodingApprovalPolicy::default(),
+        CodingApprovalPolicy::ModelThenHuman
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -55,34 +55,29 @@ fn cli_sandbox_and_approval_policy_map_to_modes() {
             None,
         ),
         (
-            "[cli]\nsandbox = \"inner-sandbox\"\napproval_policy = \"auto\"\n",
-            Some(ProcessExecutionMode::InnerOnly),
-            Some(ApprovalPolicy::Auto),
-        ),
-        (
-            "[cli]\nsandbox = \"no-sandbox\"\napproval_policy = \"trusted\"\n",
+            "[cli]\nsandbox = \"no-sandbox\"\napproval_policy = \"none\"\n",
             Some(ProcessExecutionMode::Unrestricted),
-            Some(ApprovalPolicy::Trusted),
+            Some(ApprovalPolicy::NoApproval),
         ),
         (
-            "[cli]\napproval_policy = \"model\"\n",
+            "[cli]\napproval_policy = \"deny\"\n",
             None,
-            Some(ApprovalPolicy::Model),
+            Some(ApprovalPolicy::Deny),
         ),
         (
-            "[cli]\nsandbox = \"with-sandbox\"\napproval_policy = \"human\"\n",
+            "[cli]\nsandbox = \"with-sandbox\"\napproval_policy = \"model_only\"\n",
             Some(ProcessExecutionMode::OuterAndInner),
-            Some(ApprovalPolicy::Human),
+            Some(ApprovalPolicy::ModelOnly),
         ),
         (
-            "[cli]\nsandbox = \"inner-sandbox\"\napproval_policy = \"model-then-human\"\n",
+            "[cli]\nsandbox = \"inner-sandbox\"\napproval_policy = \"model_then_human\"\n",
             Some(ProcessExecutionMode::InnerOnly),
             Some(ApprovalPolicy::ModelThenHuman),
         ),
         (
-            "[cli]\napproval_policy = \"none\"\n",
+            "[cli]\napproval_policy = \"human_only\"\n",
             None,
-            Some(ApprovalPolicy::DenyAll),
+            Some(ApprovalPolicy::HumanOnly),
         ),
     ] {
         let defaults = cli_defaults(text);
@@ -92,18 +87,15 @@ fn cli_sandbox_and_approval_policy_map_to_modes() {
 }
 
 #[test]
-fn cli_trusted_approval_policy_requires_no_sandbox() {
+fn cli_none_approval_policy_requires_no_sandbox() {
     for (text, found) in [
+        ("[cli]\napproval_policy = \"none\"\n", "sandbox is not set"),
         (
-            "[cli]\napproval_policy = \"trusted\"\n",
-            "sandbox is not set",
-        ),
-        (
-            "[cli]\nsandbox = \"with-sandbox\"\napproval_policy = \"trusted\"\n",
+            "[cli]\nsandbox = \"with-sandbox\"\napproval_policy = \"none\"\n",
             "sandbox = \"with-sandbox\"",
         ),
         (
-            "[cli]\nsandbox = \"inner-sandbox\"\napproval_policy = \"trusted\"\n",
+            "[cli]\nsandbox = \"inner-sandbox\"\napproval_policy = \"none\"\n",
             "sandbox = \"inner-sandbox\"",
         ),
     ] {
@@ -113,7 +105,7 @@ fn cli_trusted_approval_policy_requires_no_sandbox() {
             "{message}"
         );
         assert!(
-            message.contains("[cli] approval_policy = \"trusted\" runs without any sandbox"),
+            message.contains("[cli] approval_policy = \"none\" runs without any sandbox"),
             "{message}"
         );
         assert!(
@@ -136,20 +128,29 @@ fn cli_sandbox_rejects_raw_flags_and_unknown_names() {
         "{message}"
     );
 
-    let message = parse_error("[cli]\nsandbox = \"trusted\"\n");
-    assert!(message.contains("unknown variant `trusted`"), "{message}");
+    let message = parse_error("[cli]\nsandbox = \"none\"\n");
+    assert!(message.contains("unknown variant `none`"), "{message}");
 }
 
 #[test]
 fn cli_approval_policy_rejects_old_and_unknown_names() {
-    for value in ["fully-trusted", "deny-all", "--approval-policy", "yes"] {
+    for value in [
+        "auto",
+        "trusted",
+        "model",
+        "human",
+        "model-then-human",
+        "fully-trusted",
+        "--approval-policy",
+        "yes",
+    ] {
         let message = parse_error(&format!("[cli]\napproval_policy = \"{value}\"\n"));
         assert!(
             message.contains(&format!("unknown variant `{value}`")),
             "{value}: {message}"
         );
         assert!(
-            message.contains("`auto`, `model`, `human`, `model-then-human`, `trusted`, `none`"),
+            message.contains("`none`, `deny`, `model_only`, `model_then_human`, `human_only`"),
             "{value}: {message}"
         );
     }

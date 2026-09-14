@@ -44,8 +44,8 @@ impl From<SandboxModeToml> for ProcessExecutionMode {
 /// Resolved `[cli]` defaults: the configured sandbox mode and approval
 /// policy, each absent when its key is unset.
 ///
-/// Trusted execution has no sandbox, so `approval_policy` is only ever
-/// [`ApprovalPolicy::Trusted`] together with
+/// Unreviewed execution has no sandbox, so `approval_policy` is only ever
+/// [`ApprovalPolicy::NoApproval`] together with
 /// [`ProcessExecutionMode::Unrestricted`]; see [`MerryConfig::cli_defaults`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct CliDefaults {
@@ -78,13 +78,13 @@ impl CliDefaults {
 impl MerryConfig {
     /// Returns the `[cli]` defaults, empty when the table is absent.
     ///
-    /// `approval_policy = "trusted"` means running without any sandbox, so
-    /// it is rejected unless `sandbox = "no-sandbox"` is set alongside it.
+    /// `approval_policy = "none"` means running without any sandbox, so it
+    /// is rejected unless `sandbox = "no-sandbox"` is set alongside it.
     pub(crate) fn cli_defaults(&self) -> Result<CliDefaults, ConfigError> {
         let Some(cli) = self.raw.cli.as_ref() else {
             return Ok(CliDefaults::default());
         };
-        if cli.approval_policy == Some(ApprovalPolicy::Trusted)
+        if cli.approval_policy == Some(ApprovalPolicy::NoApproval)
             && cli.sandbox != Some(SandboxModeToml::No)
         {
             let found = match cli.sandbox {
@@ -94,7 +94,7 @@ impl MerryConfig {
             return Err(ConfigError::Invalid(format!(
                 "[cli] approval_policy = \"{}\" runs without any sandbox and requires \
                  sandbox = \"no-sandbox\", but {found}",
-                ApprovalPolicy::Trusted.name()
+                ApprovalPolicy::NoApproval.name()
             )));
         }
         Ok(CliDefaults::new(

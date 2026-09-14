@@ -253,12 +253,8 @@ pub(crate) async fn run(
         workspace_tool_limits: None,
     };
     let headless_reviewer = HeadlessPermissionReviewer::new();
-    let permission_policy = CodingPermissionPolicy::for_process_boundary(
-        process_execution_mode.into(),
+    let permission_policy = CodingPermissionPolicy::for_approval_policy(
         approval_policy.into(),
-        merry_config
-            .map(MerryConfig::no_sandbox_review_mode)
-            .unwrap_or_default(),
         Some(headless_reviewer.source()),
     )
     .map_err(unexpected)?;

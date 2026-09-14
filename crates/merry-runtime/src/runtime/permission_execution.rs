@@ -402,6 +402,18 @@ pub(super) async fn review_permission_request(
             )
             .await;
         return match result {
+            Ok(decision)
+                if !decision.is_approved()
+                    && matches!(mode, crate::PermissionReviewMode::ModelThenHostFallback) =>
+            {
+                // The model is a first pass under this mode: a denial or an
+                // uncertain approval hands the final decision to the host.
+                let failure = format!(
+                    "AI review did not approve: {}",
+                    decision.review().rationale()
+                );
+                host_fallback_or_error(inner, mode, request, context, Some(failure)).await
+            }
             Ok(decision) => Ok(decision),
             Err(error) if matches!(error, crate::PermissionAdmissionError::Cancelled) => Err(error),
             Err(error) if matches!(mode, crate::PermissionReviewMode::ModelThenHostFallback) => {

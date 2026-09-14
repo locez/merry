@@ -5,37 +5,33 @@ use serde::Deserialize;
 /// Who reviews permission requests, as written for `--approval-policy` and
 /// `[cli] approval_policy`. Each value names the reviewer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-#[value(rename_all = "kebab-case")]
+#[serde(rename_all = "snake_case")]
+#[value(rename_all = "snake_case")]
 pub(crate) enum ApprovalPolicy {
-    /// Follow the sandbox mode: model under --with-sandbox, model then human
-    /// under --inner-sandbox, human under --no-sandbox
-    #[default]
-    Auto,
-    /// The approval-review model decides; no human fallback
-    Model,
-    /// You decide in the TUI dialog or on the run prompt
-    Human,
-    /// The model decides; you are asked only when the model cannot
-    ModelThenHuman,
-    /// Nobody reviews: skip model and human review for configured actions
-    Trusted,
-    /// Reject every permission request without asking
+    /// No approval needed: configured actions run without model or human review
     #[serde(rename = "none")]
     #[value(name = "none")]
-    DenyAll,
+    NoApproval,
+    /// Reject every permission request without asking
+    Deny,
+    /// The approval-review model decides; no human fallback
+    ModelOnly,
+    /// The model reviews first; you decide when it denies or cannot decide
+    #[default]
+    ModelThenHuman,
+    /// You decide in the TUI dialog or on the run prompt
+    HumanOnly,
 }
 
 impl ApprovalPolicy {
     /// The value as written on the command line and in `config.toml`.
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Auto => "auto",
-            Self::Model => "model",
-            Self::Human => "human",
-            Self::ModelThenHuman => "model-then-human",
-            Self::Trusted => "trusted",
-            Self::DenyAll => "none",
+            Self::NoApproval => "none",
+            Self::Deny => "deny",
+            Self::ModelOnly => "model_only",
+            Self::ModelThenHuman => "model_then_human",
+            Self::HumanOnly => "human_only",
         }
     }
 }
@@ -43,12 +39,11 @@ impl ApprovalPolicy {
 impl From<ApprovalPolicy> for CodingApprovalPolicy {
     fn from(policy: ApprovalPolicy) -> Self {
         match policy {
-            ApprovalPolicy::Auto => Self::Auto,
-            ApprovalPolicy::Model => Self::Model,
-            ApprovalPolicy::Human => Self::Human,
+            ApprovalPolicy::NoApproval => Self::NoApproval,
+            ApprovalPolicy::Deny => Self::Deny,
+            ApprovalPolicy::ModelOnly => Self::ModelOnly,
             ApprovalPolicy::ModelThenHuman => Self::ModelThenHuman,
-            ApprovalPolicy::Trusted => Self::Trusted,
-            ApprovalPolicy::DenyAll => Self::DenyAll,
+            ApprovalPolicy::HumanOnly => Self::HumanOnly,
         }
     }
 }
@@ -72,7 +67,7 @@ mod tests {
                     .unwrap_or_else(|error| panic!("{flag_name} should deserialize: {error}"));
             assert_eq!(parsed, *policy);
         }
-        assert_eq!(ApprovalPolicy::DenyAll.name(), "none");
-        assert_eq!(ApprovalPolicy::default(), ApprovalPolicy::Auto);
+        assert_eq!(ApprovalPolicy::NoApproval.name(), "none");
+        assert_eq!(ApprovalPolicy::default(), ApprovalPolicy::ModelThenHuman);
     }
 }

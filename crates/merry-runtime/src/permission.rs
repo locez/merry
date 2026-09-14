@@ -56,8 +56,8 @@ pub enum PermissionReviewMode {
     Required,
     /// Allow an injected non-model admission source to decide without model review.
     HostDecisionOnly,
-    /// Try AI review first, then wait on an injected host source only when the
-    /// AI review cannot produce a decision.
+    /// Try AI review first, then wait on an injected host source when the AI
+    /// review denies the request or cannot produce a decision.
     ModelThenHostFallback,
     /// Explicit SDK/host mode that admits configured registered tools without
     /// an AI or human approval round.

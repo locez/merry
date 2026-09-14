@@ -32,22 +32,20 @@ profile = "default"
 # sandbox = "inner-sandbox"
 # Who reviews permission requests in every TUI and `merry run` session, like
 # --approval-policy:
-#   "auto"              follow the sandbox mode: model under with-sandbox,
-#                       model-then-human under inner-sandbox, and
-#                       [permissions] no_sandbox_review under no-sandbox
-#   "model"             the [models.approval_review] model decides, no human
+#   "none"              no approval needed: configured actions run unreviewed
+#   "deny"              reject every permission request without asking
+#   "model_only"        the [models.approval_review] model decides, no human
 #                       fallback
-#   "human"             you decide in the TUI dialog or on the run prompt
-#   "model-then-human"  the model decides; you are asked only when it cannot
-#   "trusted"           nobody reviews: configured actions run unreviewed
-#   "none"              every permission request is rejected without asking
-# --approval-policy on the command line replaces this default. "trusted" runs
+#   "model_then_human"  the model decides; if it denies or cannot decide, you
+#                       are asked in the TUI dialog or on the run prompt
+#   "human_only"        you decide in the TUI dialog or on the run prompt
+# --approval-policy on the command line replaces this default. "none" runs
 # without any sandbox, so it requires sandbox = "no-sandbox" above; any other
 # sandbox value, or no sandbox key at all, is rejected when the config loads,
 # and a --with-sandbox or --inner-sandbox flag on the command line runs that
-# session sandboxed with the "auto" reviewer. Path ceilings, deny_paths, and
+# session sandboxed with the default reviewer. Path ceilings, deny_paths, and
 # network = false still apply under every policy.
-# approval_policy = "auto"
+approval_policy = "model_then_human"
 
 [permissions]
 # Global config is user-trusted: readonly_paths/readwrite_paths define both the
@@ -94,13 +92,6 @@ network = true
 # reads still obey deny_paths / review_paths. Keyboxd databases are not yet
 # supported and produce an explicit error, not an implicit host write grant.
 # Neither a readonly mount nor network isolation prevents Unix socket access.
-# Reviewer for --no-sandbox sessions under the "auto" approval policy. They
-# remain host-interactive by default. Set this to "model" to review with the
-# configured model first and fall back to the host only when that model review
-# is unavailable; an explicit [cli] approval_policy other than "auto" ignores
-# this key. TUI reviews use their dialog; headless `merry run` reviews read
-# yes/no from stdin and write prompts to stderr.
-# no_sandbox_review = "model"
 
 readonly_paths = [
   "/etc",

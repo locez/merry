@@ -1,4 +1,5 @@
 use super::home;
+use crate::coding::ApprovalPolicy;
 use crate::config::provider::{EffectiveOpenAiApiKeySource, ProviderConfigSource};
 use crate::config::{
     CliDefaults, EffectiveProviderConfig, LogFormat, LogLevel, MerryConfig, XdgPaths,
@@ -346,8 +347,9 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
         config
             .cli_defaults()
             .expect("example [cli] defaults should validate"),
-        CliDefaults::default(),
-        "the user-facing example should not preselect a sandbox mode or approval policy"
+        CliDefaults::new(None, Some(ApprovalPolicy::ModelThenHuman)),
+        "the user-facing example should not preselect a sandbox mode and should \
+         spell out the default approval policy"
     );
     assert!(
         config

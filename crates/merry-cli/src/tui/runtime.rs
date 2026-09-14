@@ -158,10 +158,8 @@ pub(crate) async fn start_tui_runtime_session(
         ),
         workspace_tool_limits: None,
     };
-    let permission_policy = CodingPermissionPolicy::for_process_boundary(
-        process_execution_mode.into(),
+    let permission_policy = CodingPermissionPolicy::for_approval_policy(
         approval_policy.into(),
-        owned_config.no_sandbox_review_mode(),
         Some(permission_source),
     )
     .map_err(unexpected)?;
