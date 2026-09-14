@@ -12,7 +12,7 @@ use crate::tui;
 pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
     let sandbox_child_handoff = cli.sandbox_child_handoff;
     let process_execution_mode = cli.process_execution_mode();
-    let fully_trusted = cli.fully_trusted();
+    let approval_policy = cli.approval_policy();
 
     match cli.command {
         None => map_result(
@@ -21,7 +21,7 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
                 merry_config.as_ref(),
                 tui::LaunchMode::New,
                 process_execution_mode,
-                fully_trusted,
+                approval_policy,
             )
             .await,
             cli::root_usage,
@@ -33,7 +33,7 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
                 merry_config.as_ref(),
                 tui::LaunchMode::ResumePicker,
                 process_execution_mode,
-                fully_trusted,
+                approval_policy,
             )
             .await,
             cli::root_usage,
@@ -45,7 +45,7 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
                 sandbox_child_handoff,
                 merry_config.as_ref(),
                 process_execution_mode,
-                fully_trusted,
+                approval_policy,
             )
             .await,
         ),

@@ -343,9 +343,11 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
 
     assert_eq!(config.profile(), Some("default"));
     assert_eq!(
-        config.cli_defaults(),
+        config
+            .cli_defaults()
+            .expect("example [cli] defaults should validate"),
         CliDefaults::default(),
-        "the user-facing example should not preselect a sandbox mode or trust level"
+        "the user-facing example should not preselect a sandbox mode or approval policy"
     );
     assert!(
         config

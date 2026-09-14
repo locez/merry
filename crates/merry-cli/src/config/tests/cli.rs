@@ -1,11 +1,17 @@
 use super::home;
-use crate::coding::ProcessExecutionMode;
+use crate::coding::{ApprovalPolicy, ProcessExecutionMode};
 use crate::config::{CliDefaults, ConfigError, MerryConfig, XdgPaths};
 
 fn load(text: &str) -> MerryConfig {
     MerryConfig::load_optional_from_text(Some(text), &XdgPaths::from_parts(home(), None, None))
         .expect("config should parse")
         .expect("config should be present")
+}
+
+fn cli_defaults(text: &str) -> CliDefaults {
+    load(text)
+        .cli_defaults()
+        .unwrap_or_else(|error| panic!("{text:?} [cli] defaults should validate: {error}"))
 }
 
 fn parse_error(text: &str) -> String {
@@ -17,39 +23,104 @@ fn parse_error(text: &str) -> String {
     }
 }
 
-#[test]
-fn cli_defaults_to_no_sandbox_mode_and_reviewed() {
-    for text in ["", "[cli]\n", "[cli]\nfully_trusted = false\n"] {
-        let defaults = load(text).cli_defaults();
-        assert_eq!(defaults, CliDefaults::default(), "{text:?}");
-        assert_eq!(defaults.process_execution_mode(), None, "{text:?}");
-        assert!(!defaults.fully_trusted(), "{text:?}");
+fn invalid_error(text: &str) -> String {
+    match load(text).cli_defaults() {
+        Ok(defaults) => panic!("{text:?} should be rejected, resolved {defaults:?}"),
+        Err(error @ ConfigError::Invalid(_)) => error.to_string(),
+        Err(error) => panic!("{text:?} should be an invalid-config error, got {error}"),
     }
 }
 
 #[test]
-fn cli_sandbox_and_fully_trusted_map_to_modes() {
-    for (text, mode, fully_trusted) in [
+fn cli_defaults_to_no_sandbox_mode_and_no_approval_policy() {
+    for text in ["", "[cli]\n"] {
+        let defaults = cli_defaults(text);
+        assert_eq!(defaults, CliDefaults::default(), "{text:?}");
+        assert_eq!(defaults.process_execution_mode(), None, "{text:?}");
+        assert_eq!(defaults.approval_policy(), None, "{text:?}");
+    }
+}
+
+#[test]
+fn cli_sandbox_and_approval_policy_map_to_modes() {
+    for (text, mode, policy) in [
         (
             "[cli]\nsandbox = \"no-sandbox\"\n",
             Some(ProcessExecutionMode::Unrestricted),
-            false,
+            None,
         ),
         (
             "[cli]\nsandbox = \"with-sandbox\"\n",
             Some(ProcessExecutionMode::OuterAndInner),
-            false,
+            None,
         ),
         (
-            "[cli]\nsandbox = \"inner-sandbox\"\nfully_trusted = true\n",
+            "[cli]\nsandbox = \"inner-sandbox\"\napproval_policy = \"auto\"\n",
             Some(ProcessExecutionMode::InnerOnly),
-            true,
+            Some(ApprovalPolicy::Auto),
         ),
-        ("[cli]\nfully_trusted = true\n", None, true),
+        (
+            "[cli]\nsandbox = \"no-sandbox\"\napproval_policy = \"trusted\"\n",
+            Some(ProcessExecutionMode::Unrestricted),
+            Some(ApprovalPolicy::Trusted),
+        ),
+        (
+            "[cli]\napproval_policy = \"model\"\n",
+            None,
+            Some(ApprovalPolicy::Model),
+        ),
+        (
+            "[cli]\nsandbox = \"with-sandbox\"\napproval_policy = \"human\"\n",
+            Some(ProcessExecutionMode::OuterAndInner),
+            Some(ApprovalPolicy::Human),
+        ),
+        (
+            "[cli]\nsandbox = \"inner-sandbox\"\napproval_policy = \"model-then-human\"\n",
+            Some(ProcessExecutionMode::InnerOnly),
+            Some(ApprovalPolicy::ModelThenHuman),
+        ),
+        (
+            "[cli]\napproval_policy = \"none\"\n",
+            None,
+            Some(ApprovalPolicy::DenyAll),
+        ),
     ] {
-        let defaults = load(text).cli_defaults();
+        let defaults = cli_defaults(text);
         assert_eq!(defaults.process_execution_mode(), mode, "{text:?}");
-        assert_eq!(defaults.fully_trusted(), fully_trusted, "{text:?}");
+        assert_eq!(defaults.approval_policy(), policy, "{text:?}");
+    }
+}
+
+#[test]
+fn cli_trusted_approval_policy_requires_no_sandbox() {
+    for (text, found) in [
+        (
+            "[cli]\napproval_policy = \"trusted\"\n",
+            "sandbox is not set",
+        ),
+        (
+            "[cli]\nsandbox = \"with-sandbox\"\napproval_policy = \"trusted\"\n",
+            "sandbox = \"with-sandbox\"",
+        ),
+        (
+            "[cli]\nsandbox = \"inner-sandbox\"\napproval_policy = \"trusted\"\n",
+            "sandbox = \"inner-sandbox\"",
+        ),
+    ] {
+        let message = invalid_error(text);
+        assert!(
+            message.starts_with("Merry config is invalid: "),
+            "{message}"
+        );
+        assert!(
+            message.contains("[cli] approval_policy = \"trusted\" runs without any sandbox"),
+            "{message}"
+        );
+        assert!(
+            message.contains("requires sandbox = \"no-sandbox\""),
+            "{message}"
+        );
+        assert!(message.ends_with(found), "{message}");
     }
 }
 
@@ -65,11 +136,23 @@ fn cli_sandbox_rejects_raw_flags_and_unknown_names() {
         "{message}"
     );
 
-    let message = parse_error("[cli]\nsandbox = \"fully-trusted\"\n");
-    assert!(
-        message.contains("unknown variant `fully-trusted`"),
-        "{message}"
-    );
+    let message = parse_error("[cli]\nsandbox = \"trusted\"\n");
+    assert!(message.contains("unknown variant `trusted`"), "{message}");
+}
+
+#[test]
+fn cli_approval_policy_rejects_old_and_unknown_names() {
+    for value in ["fully-trusted", "deny-all", "--approval-policy", "yes"] {
+        let message = parse_error(&format!("[cli]\napproval_policy = \"{value}\"\n"));
+        assert!(
+            message.contains(&format!("unknown variant `{value}`")),
+            "{value}: {message}"
+        );
+        assert!(
+            message.contains("`auto`, `model`, `human`, `model-then-human`, `trusted`, `none`"),
+            "{value}: {message}"
+        );
+    }
 }
 
 #[test]
@@ -77,9 +160,11 @@ fn cli_table_rejects_unknown_keys_and_wrong_types() {
     for text in [
         "[cli]\ndefault_options = [\"no-sandbox\"]\n",
         "[cli]\nsandbox_mode = \"no-sandbox\"\n",
+        "[cli]\nfully_trusted = true\n",
         "[cli]\nsandbox = [\"no-sandbox\"]\n",
         "[cli]\nsandbox = true\n",
-        "[cli]\nfully_trusted = \"true\"\n",
+        "[cli]\napproval_policy = true\n",
+        "[cli]\napproval_policy = [\"none\"]\n",
     ] {
         let message = parse_error(text);
         assert!(!message.is_empty(), "{text:?}");

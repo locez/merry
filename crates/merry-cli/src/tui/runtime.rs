@@ -1,6 +1,6 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, unexpected};
 use crate::coding::{
-    CodingPermissionPolicy, CodingTrustMode, HeadlessCodingRuntimeInput, ProcessExecutionMode,
+    ApprovalPolicy, CodingPermissionPolicy, HeadlessCodingRuntimeInput, ProcessExecutionMode,
     action_process_runner_for_mode, build_headless_coding_with_policy_composition,
     coding_agent_process_admission, resume_headless_coding_composition_with_loaded_session,
 };
@@ -58,7 +58,7 @@ pub(crate) async fn start_tui_runtime_session(
     session_store: TuiSessionStore,
     selection: SessionPickerSelection,
     process_execution_mode: ProcessExecutionMode,
-    fully_trusted: bool,
+    approval_policy: ApprovalPolicy,
     preferences: &TuiPreferences,
 ) -> Result<TuiRuntimeSession, CliError> {
     let Some(_admission) =
@@ -160,11 +160,7 @@ pub(crate) async fn start_tui_runtime_session(
     };
     let permission_policy = CodingPermissionPolicy::for_process_boundary(
         process_execution_mode.into(),
-        if fully_trusted {
-            CodingTrustMode::FullyTrusted
-        } else {
-            CodingTrustMode::Reviewed
-        },
+        approval_policy.into(),
         owned_config.no_sandbox_review_mode(),
         Some(permission_source),
     )

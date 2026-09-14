@@ -62,6 +62,9 @@ pub enum PermissionReviewMode {
     /// Explicit SDK/host mode that admits configured registered tools without
     /// an AI or human approval round.
     FullyTrusted,
+    /// Deny every permission request and action review without consulting a
+    /// reviewer. Actions that need no approval still run.
+    DenyAll,
 }
 
 impl PermissionReviewMode {
@@ -70,13 +73,18 @@ impl PermissionReviewMode {
         matches!(self, Self::FullyTrusted)
     }
 
+    /// Returns whether every permission request is rejected without review.
+    pub(crate) const fn is_deny_all(self) -> bool {
+        matches!(self, Self::DenyAll)
+    }
+
     pub(crate) fn requires_model_review(self, trust_level: RuntimeTrustLevel) -> bool {
         match self {
             Self::DefaultForTrust => trust_level == RuntimeTrustLevel::Agent,
             Self::Required => true,
             Self::HostDecisionOnly => false,
             Self::ModelThenHostFallback => true,
-            Self::FullyTrusted => false,
+            Self::FullyTrusted | Self::DenyAll => false,
         }
     }
 }

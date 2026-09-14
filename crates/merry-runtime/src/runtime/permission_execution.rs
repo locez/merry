@@ -172,6 +172,7 @@ async fn execute_permissioned_process_request(
             crate::PermissionReviewMode::Required
                 | crate::PermissionReviewMode::HostDecisionOnly
                 | crate::PermissionReviewMode::FullyTrusted
+                | crate::PermissionReviewMode::DenyAll
         );
     let admission = if may_reuse_existing_grant {
         Ok(crate::PermissionAdmissionDecision::approved_existing_grant())
@@ -378,6 +379,11 @@ pub(super) async fn review_permission_request(
     if mode.is_fully_trusted() {
         return Ok(crate::PermissionAdmissionDecision::approved(
             "explicit fully trusted mode admitted this configured action",
+        ));
+    }
+    if mode.is_deny_all() {
+        return Ok(crate::PermissionAdmissionDecision::denied(
+            "deny-all approval policy rejects every permission request",
         ));
     }
 

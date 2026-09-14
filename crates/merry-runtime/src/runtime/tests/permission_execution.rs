@@ -637,6 +637,41 @@ async fn request_permissions_fully_trusted_mode_skips_review_sources() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn request_permissions_deny_all_mode_rejects_without_review_sources() {
+    let admission = StaticPermissionAdmissionSource::approving();
+    let runner = FakeProcessRunner::succeeding();
+    let (runtime, pending) = register_permission_pending_tool_with_builder(
+        "runtime-permission-deny-all",
+        "call-permission-deny-all",
+        |builder| {
+            builder
+                .permission_review_mode(PermissionReviewMode::DenyAll)
+                .permission_admission_source(Arc::new(admission.clone()))
+                .allow_permissioned_process_actions(Arc::new(runner.clone()))
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("deny-all permission request should resolve the tool call");
+
+    assert_eq!(admission.call_count(), 0);
+    assert_eq!(runner.call_count(), 0);
+    let result = resolved_tool_result(&events);
+    assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        result
+            .diagnostic()
+            .expect("denied permission should include diagnostic")
+            .code(),
+        "permission_request_denied"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn request_permissions_model_failure_uses_opt_in_host_fallback() {
     let admission = StaticPermissionAdmissionSource::approving();
     let runner = FakeProcessRunner::succeeding();

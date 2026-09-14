@@ -3,7 +3,7 @@
 use crate::{
     cli_error::{CliError, debug_openai_usage_error, unexpected, usage_error},
     coding::{
-        CodingPermissionPolicy, CodingTrustMode, HeadlessCodingRuntimeInput, ProcessExecutionMode,
+        ApprovalPolicy, CodingPermissionPolicy, HeadlessCodingRuntimeInput, ProcessExecutionMode,
         action_process_runner_for_mode, build_headless_coding_with_policy_composition,
         coding_agent_process_admission, coding_agent_requires_sandbox_error,
         resume_headless_coding_composition_with_loaded_session,
@@ -188,7 +188,7 @@ pub(crate) async fn run(
     sandbox_child_handoff: Option<SandboxChildHandoff>,
     merry_config: Option<&MerryConfig>,
     process_execution_mode: ProcessExecutionMode,
-    fully_trusted: bool,
+    approval_policy: ApprovalPolicy,
 ) -> Result<RunExitStatus, CliError> {
     let session = RunSession::from_args(args)?;
     let session_store = FileSessionStore::default_store().map_err(unexpected)?;
@@ -255,11 +255,7 @@ pub(crate) async fn run(
     let headless_reviewer = HeadlessPermissionReviewer::new();
     let permission_policy = CodingPermissionPolicy::for_process_boundary(
         process_execution_mode.into(),
-        if fully_trusted {
-            CodingTrustMode::FullyTrusted
-        } else {
-            CodingTrustMode::Reviewed
-        },
+        approval_policy.into(),
         merry_config
             .map(MerryConfig::no_sandbox_review_mode)
             .unwrap_or_default(),

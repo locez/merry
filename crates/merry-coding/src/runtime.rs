@@ -100,14 +100,26 @@ pub enum NoSandboxReviewMode {
     Model,
 }
 
-/// Trust mode selected by the product surface for a coding runtime.
+/// Who reviews permission requests, as selected by the product surface.
+///
+/// This is the coding-layer form of the user-facing `approval_policy`
+/// setting; each variant names the reviewer rather than a runtime mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CodingTrustMode {
-    /// Permission requests must go through the configured review policy.
+pub enum CodingApprovalPolicy {
+    /// Derive the reviewer from the process boundary and the no-sandbox
+    /// review preference.
     #[default]
-    Reviewed,
-    /// Explicitly skip model and host permission review for configured actions.
-    FullyTrusted,
+    Auto,
+    /// The approval-review model decides; no human fallback.
+    Model,
+    /// The host admission source (the person at the terminal) decides.
+    Human,
+    /// The model reviews first; the host decides when the model cannot.
+    ModelThenHuman,
+    /// Skip model and host permission review for configured actions.
+    Trusted,
+    /// Reject every permission request without consulting a reviewer.
+    DenyAll,
 }
 
 /// Failure to construct a process-boundary permission policy.
@@ -145,6 +157,8 @@ pub enum CodingPermissionPolicy {
     },
     /// Admit configured registered tools without an approval round.
     FullyTrusted,
+    /// Reject every permission request without an approval round.
+    DenyAll,
 }
 
 impl CodingPermissionPolicy {
@@ -178,33 +192,41 @@ impl CodingPermissionPolicy {
         Self::FullyTrusted
     }
 
+    /// Reject every permission request without an approval round.
+    #[must_use]
+    pub const fn deny_all() -> Self {
+        Self::DenyAll
+    }
+
     /// Selects the product policy for one process boundary.
     ///
-    /// A host fallback is only constructed when the caller supplies a host
-    /// admission source. Callers that need host review must handle the typed
-    /// error instead of silently degrading to another policy.
+    /// A host-reviewed policy is only constructed when the caller supplies a
+    /// host admission source. Callers that need host review must handle the
+    /// typed error instead of silently degrading to another policy.
     pub fn for_process_boundary(
         boundary: CodingProcessBoundary,
-        trust: CodingTrustMode,
+        approval: CodingApprovalPolicy,
         no_sandbox_review: NoSandboxReviewMode,
         host_source: Option<Arc<dyn PermissionAdmissionSource>>,
     ) -> Result<Self, CodingPermissionPolicyError> {
-        if trust == CodingTrustMode::FullyTrusted {
-            return Ok(Self::fully_trusted());
-        }
-
-        match boundary {
-            CodingProcessBoundary::OuterAndInner => Ok(Self::model_only()),
-            CodingProcessBoundary::InnerOnly => host_source
-                .map(Self::model_then_host_fallback)
-                .ok_or(CodingPermissionPolicyError::HostAdmissionUnavailable { boundary }),
-            CodingProcessBoundary::Unrestricted => match no_sandbox_review {
-                NoSandboxReviewMode::Host => host_source
-                    .map(Self::host_decision_only)
-                    .ok_or(CodingPermissionPolicyError::HostAdmissionUnavailable { boundary }),
-                NoSandboxReviewMode::Model => host_source
-                    .map(Self::model_then_host_fallback)
-                    .ok_or(CodingPermissionPolicyError::HostAdmissionUnavailable { boundary }),
+        let host_reviewed = |policy: fn(Arc<dyn PermissionAdmissionSource>) -> Self| {
+            host_source
+                .map(policy)
+                .ok_or(CodingPermissionPolicyError::HostAdmissionUnavailable { boundary })
+        };
+        match approval {
+            CodingApprovalPolicy::Trusted => Ok(Self::fully_trusted()),
+            CodingApprovalPolicy::DenyAll => Ok(Self::deny_all()),
+            CodingApprovalPolicy::Model => Ok(Self::model_only()),
+            CodingApprovalPolicy::Human => host_reviewed(Self::host_decision_only),
+            CodingApprovalPolicy::ModelThenHuman => host_reviewed(Self::model_then_host_fallback),
+            CodingApprovalPolicy::Auto => match boundary {
+                CodingProcessBoundary::OuterAndInner => Ok(Self::model_only()),
+                CodingProcessBoundary::InnerOnly => host_reviewed(Self::model_then_host_fallback),
+                CodingProcessBoundary::Unrestricted => match no_sandbox_review {
+                    NoSandboxReviewMode::Host => host_reviewed(Self::host_decision_only),
+                    NoSandboxReviewMode::Model => host_reviewed(Self::model_then_host_fallback),
+                },
             },
         }
     }
@@ -227,6 +249,9 @@ impl CodingPermissionPolicy {
             }
             Self::FullyTrusted => {
                 builder = builder.permission_review_mode(PermissionReviewMode::FullyTrusted);
+            }
+            Self::DenyAll => {
+                builder = builder.permission_review_mode(PermissionReviewMode::DenyAll);
             }
         }
         builder

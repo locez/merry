@@ -50,7 +50,10 @@ fn main() -> CliExit {
         return CliExit::Unexpected(error.to_string());
     }
     if let Some(config) = _config.as_ref() {
-        cli.apply_defaults(config.cli_defaults());
+        match config.cli_defaults() {
+            Ok(defaults) => cli.apply_defaults(defaults),
+            Err(error) => return CliExit::Unexpected(error.to_string()),
+        }
     }
     let log_settings = match effective_log_settings(_config.as_ref(), &config_paths) {
         Ok(settings) => settings,

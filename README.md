@@ -230,20 +230,37 @@ process's validated `TMPDIR` directly. Debug commands remain unsandboxed unless
 `--with-sandbox` is supplied.
 
 The `[cli]` table in `config.toml` sets defaults for every `merry` invocation,
-so a preferred sandbox mode or fully trusted review does not need to be passed
-as a flag on each command:
+so a preferred sandbox mode or approval policy does not need to be passed as a
+flag on each command:
 
 ```toml
 [cli]
-sandbox = "inner-sandbox"
-fully_trusted = true
+sandbox = "no-sandbox"
+approval_policy = "trusted"
 ```
 
 `sandbox` takes `with-sandbox` (outer+inner, the built-in default for TUI and
 `run`), `no-sandbox`, or `inner-sandbox`, matching the root flags; a sandbox
-mode given on the command line replaces the configured one. `fully_trusted` is
-the config equivalent of `--fully-trusted`; there is no negating flag, so `true`
-enables it for every session.
+mode given on the command line replaces the configured one. `approval_policy`
+is the config equivalent of `--approval-policy` and names who reviews
+permission requests before a command runs:
+
+| Value | Reviewer |
+|---|---|
+| `auto` (default) | follows the sandbox mode: `model` under `with-sandbox`, `model-then-human` under `inner-sandbox`, and `[permissions] no_sandbox_review` under `no-sandbox` |
+| `model` | the `[models.approval_review]` model decides; no human fallback |
+| `human` | you decide, in the TUI dialog or on the `merry run` prompt |
+| `model-then-human` | the model decides; you are asked only when it cannot |
+| `trusted` | nobody reviews: configured actions run without an approval round |
+| `none` | every permission request is rejected without asking |
+
+Trusted execution runs without any sandbox, so `approval_policy = "trusted"`
+requires `sandbox = "no-sandbox"` next to it; any other `sandbox` value, or
+leaving `sandbox` unset, is rejected when the config loads. The configured
+`trusted` policy applies to every session that runs without a sandbox; passing
+`--with-sandbox` or `--inner-sandbox` on the command line runs that session
+sandboxed with the `auto` reviewer. Every other configured policy applies under
+any sandbox mode, and `--approval-policy` on the command line always wins.
 
 Outer filesystem mounts are applied parent-first after resolving access-rule
 precedence. Explicit file and directory imports preserve symbolic links instead
@@ -279,15 +296,18 @@ HOME. This applies to both inner-only and outer+inner execution.
 defaults to `true`. It does not preauthorize network access: ordinary actions
 remain network-isolated, and each action must request and obtain its own network
 approval. With `network = false`, network requests are rejected before review
-or execution, including in fully trusted review mode; approval cannot override
+or execution, including under the `trusted` approval policy; approval cannot override
 the ceiling. The setting is inherited by new process sessions and does not
 restrict model-provider or configured MCP connections. Explicit `--no-sandbox`
 host execution remains outside this network-isolation boundary.
 
-`--fully-trusted` skips model and host permission review for configured actions
-in the TUI and `merry run`; `[cli] fully_trusted = true` applies it to every
-session. Fully trusted review does not raise any access ceiling: `deny_paths`,
-`review_paths` masking, and `network = false` still apply.
+`--approval-policy trusted` skips model and host permission review for
+configured actions in the TUI and `merry run`; `[cli] approval_policy =
+"trusted"` applies it to every session that runs without a sandbox.
+`--approval-policy none` is the opposite end: actions that need no approval
+still run, but every permission request and high-risk action review is denied
+without consulting a reviewer. Neither policy changes any access ceiling:
+`deny_paths`, `review_paths` masking, and `network = false` still apply.
 
 Trusted `readonly_paths` and `readwrite_paths` are preauthorized in the inner
 sandbox at their declared access level. `review_paths` marks existing subtrees

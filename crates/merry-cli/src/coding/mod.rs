@@ -1,12 +1,14 @@
+mod approval;
 mod error;
 mod process;
 mod runtime;
 mod sandbox;
 
+pub(crate) use approval::ApprovalPolicy;
 pub(crate) use error::CodingRuntimeError;
 pub(crate) use merry::profiles::{
-    CodingModelRoleConfig as RuntimeRoleProviderConfig, CodingPermissionPolicy,
-    CodingSubagentsConfig, CodingTrustMode,
+    CodingApprovalPolicy, CodingModelRoleConfig as RuntimeRoleProviderConfig,
+    CodingPermissionPolicy, CodingSubagentsConfig,
 };
 #[cfg(test)]
 pub(crate) use process::ActionProcessBackend;

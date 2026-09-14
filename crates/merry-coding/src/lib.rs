@@ -20,9 +20,9 @@ pub use project_rules::{
     load_root_project_rules,
 };
 pub use runtime::{
-    CodingModelRoleConfig, CodingModelRoleConfigError, CodingPermissionPolicy,
-    CodingPermissionPolicyError, CodingProcessBoundary, CodingRuntime, CodingRuntimeBuildError,
-    CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig, CodingTrustMode,
+    CodingApprovalPolicy, CodingModelRoleConfig, CodingModelRoleConfigError,
+    CodingPermissionPolicy, CodingPermissionPolicyError, CodingProcessBoundary, CodingRuntime,
+    CodingRuntimeBuildError, CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig,
     NoSandboxReviewMode,
 };
 

@@ -30,10 +30,24 @@ profile = "default"
 # --with-sandbox, --no-sandbox, or --inner-sandbox on the command line replaces
 # this default.
 # sandbox = "inner-sandbox"
-# Skip model/host permission review for every TUI and `merry run` session, like
-# --fully-trusted. There is no negating flag, so true applies to every session.
-# Path ceilings, deny_paths, and network = false still apply.
-# fully_trusted = false
+# Who reviews permission requests in every TUI and `merry run` session, like
+# --approval-policy:
+#   "auto"              follow the sandbox mode: model under with-sandbox,
+#                       model-then-human under inner-sandbox, and
+#                       [permissions] no_sandbox_review under no-sandbox
+#   "model"             the [models.approval_review] model decides, no human
+#                       fallback
+#   "human"             you decide in the TUI dialog or on the run prompt
+#   "model-then-human"  the model decides; you are asked only when it cannot
+#   "trusted"           nobody reviews: configured actions run unreviewed
+#   "none"              every permission request is rejected without asking
+# --approval-policy on the command line replaces this default. "trusted" runs
+# without any sandbox, so it requires sandbox = "no-sandbox" above; any other
+# sandbox value, or no sandbox key at all, is rejected when the config loads,
+# and a --with-sandbox or --inner-sandbox flag on the command line runs that
+# session sandboxed with the "auto" reviewer. Path ceilings, deny_paths, and
+# network = false still apply under every policy.
+# approval_policy = "auto"
 
 [permissions]
 # Global config is user-trusted: readonly_paths/readwrite_paths define both the
@@ -80,11 +94,12 @@ network = true
 # reads still obey deny_paths / review_paths. Keyboxd databases are not yet
 # supported and produce an explicit error, not an implicit host write grant.
 # Neither a readonly mount nor network isolation prevents Unix socket access.
-# Permission reviews in --no-sandbox remain host-interactive by default. Set
-# this to "model" to review with the configured model first and fall back to
-# the host only when that model review is unavailable. TUI reviews use their
-# dialog; headless `merry run` reviews read yes/no from stdin and write prompts
-# to stderr.
+# Reviewer for --no-sandbox sessions under the "auto" approval policy. They
+# remain host-interactive by default. Set this to "model" to review with the
+# configured model first and fall back to the host only when that model review
+# is unavailable; an explicit [cli] approval_policy other than "auto" ignores
+# this key. TUI reviews use their dialog; headless `merry run` reviews read
+# yes/no from stdin and write prompts to stderr.
 # no_sandbox_review = "model"
 
 readonly_paths = [
