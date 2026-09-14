@@ -184,7 +184,18 @@ target/release/merry run --resume migration-1 "now update the tests"
 
 # Generate a command plan without executing it
 target/release/merry cmd "find the largest Rust files"
+
+# Shell completions (bash, zsh, fish, elvish, powershell), generated from the
+# same clap definition that parses the flags above
+target/release/merry completions zsh > "${fpath[1]}/_merry"
+target/release/merry completions bash > ~/.local/share/bash-completion/completions/merry
+target/release/merry completions fish > ~/.config/fish/completions/merry.fish
 ```
+
+`merry completions <SHELL>` prints the script to stdout and exits without
+reading `config.toml` or starting a sandbox, so it works before Merry is
+configured. Regenerate it after upgrading; the flags, subcommands, and value
+lists such as `--approval-policy` are read from the binary itself.
 
 Every `merry run` saves its session state under
 `$XDG_STATE_HOME/merry/sessions/<session-id>` when the run settles, so a later

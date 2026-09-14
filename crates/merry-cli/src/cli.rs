@@ -98,9 +98,12 @@ impl Cli {
     pub(crate) fn clipboard_access(&self) -> crate::sandbox::ClipboardAccess {
         match &self.command {
             None | Some(CliCommand::Resume) => crate::sandbox::ClipboardAccess::Tui,
-            Some(CliCommand::Run(_) | CliCommand::Cmd(_) | CliCommand::Debug(_)) => {
-                crate::sandbox::ClipboardAccess::Disabled
-            }
+            Some(
+                CliCommand::Run(_)
+                | CliCommand::Cmd(_)
+                | CliCommand::Debug(_)
+                | CliCommand::Completions(_),
+            ) => crate::sandbox::ClipboardAccess::Disabled,
         }
     }
 
@@ -145,6 +148,8 @@ pub(crate) enum CliCommand {
     Cmd(crate::cmd::Args),
     #[command(about = "Print deterministic runtime events or run opt-in provider debugging")]
     Debug(DebugArgs),
+    #[command(about = "Print a shell completion script for merry to stdout")]
+    Completions(crate::completions::Args),
 }
 
 pub(crate) fn parse_max_output_tokens(value: &str) -> Result<u64, String> {
@@ -476,6 +481,24 @@ mod tests {
                 .expect("run parses");
         flagged_human.apply_defaults(defaults(None, Some(ApprovalPolicy::Deny)));
         assert_eq!(flagged_human.approval_policy(), ApprovalPolicy::HumanOnly);
+    }
+
+    #[test]
+    fn completions_subcommand_parses_every_shell_without_touching_the_sandbox() {
+        for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+            let cli = Cli::try_parse_from(["merry", "completions", shell])
+                .unwrap_or_else(|error| panic!("completions {shell} should parse: {error}"));
+            assert!(
+                matches!(cli.command, Some(CliCommand::Completions(_))),
+                "{shell}"
+            );
+            assert!(!cli.is_product_surface(), "{shell}");
+            assert!(!cli.should_bootstrap_sandbox(), "{shell}");
+            assert_eq!(cli.clipboard_access(), ClipboardAccess::Disabled, "{shell}");
+        }
+
+        assert!(Cli::try_parse_from(["merry", "completions"]).is_err());
+        assert!(Cli::try_parse_from(["merry", "completions", "tcsh"]).is_err());
     }
 
     #[test]

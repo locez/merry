@@ -6,6 +6,7 @@ mod cli_exit;
 mod cli_route;
 mod cmd;
 mod coding;
+mod completions;
 mod config;
 mod debug;
 mod headless_review;
@@ -25,7 +26,7 @@ mod web;
 
 use clap::Parser;
 use config::{MerryConfig, XdgPaths};
-use std::env;
+use std::{env, io};
 
 use cli::Cli;
 use cli_exit::CliExit;
@@ -37,6 +38,13 @@ fn main() -> CliExit {
         Ok(cli) => cli,
         Err(error) => return CliExit::Clap(error),
     };
+
+    // Completion scripts come straight from the clap definition; they must
+    // print even when no config exists yet or the current one fails to load.
+    if let Some(cli::CliCommand::Completions(args)) = &cli.command {
+        completions::write_completions(args.shell, &mut io::stdout().lock());
+        return CliExit::Success;
+    }
 
     let config_paths = match XdgPaths::from_env() {
         Ok(paths) => paths,

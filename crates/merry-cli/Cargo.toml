@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 clap.workspace = true
+clap_complete.workspace = true
 crossterm = { workspace = true, features = ["osc52"] }
 futures-util.workspace = true
 merry-core = { path = "../merry-core", version = "0.1.0" }
