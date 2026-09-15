@@ -12,7 +12,9 @@ use crate::{
             },
             model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
             tool_executors::SuccessfulToolExecutor,
-            tool_helpers::{event_kind_names_for_tool_execution, resolved_tool_result},
+            tool_helpers::{
+                event_kind_names_for_tool_execution, resolved_artifact_json, resolved_tool_result,
+            },
         },
     },
     tool::{RegisteredTool, ToolExecutionContext},
@@ -285,16 +287,7 @@ async fn checkpoint_ref_tool_returns_default_original_page_json() {
     );
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("tool result artifact should be readable");
-    let payload: serde_json::Value = serde_json::from_str(
-        content
-            .as_text()
-            .expect("checkpoint ref result should be textual JSON"),
-    )
-    .expect("checkpoint ref result should parse as JSON");
+    let payload = resolved_artifact_json(&runtime, result, "checkpoint ref result").await;
     assert_eq!(
         payload,
         json!({
@@ -397,16 +390,7 @@ async fn checkpoint_ref_tool_reports_read_failed_when_ref_artifact_is_missing() 
             .code(),
         "checkpoint_ref_read_failed"
     );
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("failure artifact should be readable");
-    let payload: serde_json::Value = serde_json::from_str(
-        content
-            .as_text()
-            .expect("checkpoint ref failure should be textual JSON"),
-    )
-    .expect("checkpoint ref failure should parse as JSON");
+    let payload = resolved_artifact_json(&runtime, result, "checkpoint ref failure").await;
     assert_eq!(payload["error"], "checkpoint_ref_read_failed");
     assert_eq!(payload["ref"], "bootstrap-ref");
     assert!(
@@ -451,16 +435,7 @@ async fn assert_checkpoint_ref_not_found(call_id: &str, ref_id: &str, runtime: R
             .code(),
         "checkpoint_ref_not_found"
     );
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("failure artifact should be readable");
-    let payload: serde_json::Value = serde_json::from_str(
-        content
-            .as_text()
-            .expect("checkpoint ref failure should be textual JSON"),
-    )
-    .expect("checkpoint ref failure should parse as JSON");
+    let payload = resolved_artifact_json(&runtime, result, "checkpoint ref failure").await;
     assert_eq!(
         payload,
         json!({

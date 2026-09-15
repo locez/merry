@@ -10,7 +10,7 @@ use crate::{
         tool_helpers::{
             action_audit_records, event_kind_names_for_tool_execution, lifecycle_kinds,
             policy_tool_spec, register_policy_pending_registered_tool_with_builder,
-            resolved_tool_result,
+            resolved_artifact_json, resolved_tool_result,
         },
     },
 };
@@ -66,16 +66,7 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
     ));
     assert!(runtime.pending_tool_calls().await.is_empty());
 
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("process result artifact should be readable");
-    let payload: serde_json::Value = serde_json::from_str(
-        content
-            .as_text()
-            .expect("process result artifact should be textual JSON"),
-    )
-    .expect("process result artifact should parse as JSON");
+    let payload = resolved_artifact_json(&runtime, result, "process result").await;
     assert_eq!(
         payload,
         json!({
@@ -246,16 +237,7 @@ async fn process_action_artifact_preserves_non_utf8_output_as_base64() {
         .expect("non-UTF-8 process output should still produce a result");
 
     let result = resolved_tool_result(&events);
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("process result artifact should be readable");
-    let payload: serde_json::Value = serde_json::from_str(
-        content
-            .as_text()
-            .expect("process result artifact should be textual JSON"),
-    )
-    .expect("process result artifact should parse as JSON");
+    let payload = resolved_artifact_json(&runtime, result, "process result").await;
 
     assert_eq!(payload["stdout"]["utf8"], false);
     assert_eq!(payload["stdout"]["bytes"], 3);
@@ -294,16 +276,7 @@ async fn process_action_artifact_guides_model_when_output_is_truncated() {
         .expect("process action should execute");
 
     let result = resolved_tool_result(&events);
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("process result artifact should be readable");
-    let payload: serde_json::Value = serde_json::from_str(
-        content
-            .as_text()
-            .expect("process result artifact should be textual JSON"),
-    )
-    .expect("process result artifact should parse as JSON");
+    let payload = resolved_artifact_json(&runtime, result, "process result").await;
 
     assert_eq!(payload["stdout"]["truncated"], true);
     assert_eq!(payload["stderr"]["truncated"], false);
@@ -348,16 +321,7 @@ async fn failed_process_action_artifact_explains_capability_recovery() {
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Failed);
 
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("failed process result artifact should be readable");
-    let payload: serde_json::Value = serde_json::from_str(
-        content
-            .as_text()
-            .expect("process result artifact should be textual JSON"),
-    )
-    .expect("process result artifact should parse as JSON");
+    let payload = resolved_artifact_json(&runtime, result, "failed process result").await;
     assert_eq!(payload["guidance"]["kind"], "process_action_recovery");
     let message = payload["guidance"]["message"]
         .as_str()

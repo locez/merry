@@ -142,7 +142,9 @@ pub(in crate::runtime::tests) fn resolved_tool_result(
 /// Reads the artifact of a resolved tool result and parses it as JSON.
 ///
 /// `label` names the behaviour under test so a failure points at the test's
-/// subject instead of a generic artifact read.
+/// subject instead of a generic artifact read. Every runtime test that inspects
+/// a tool-result payload goes through this helper, so the "artifact exists,
+/// holds text, and is JSON" contract is asserted in one place.
 pub(in crate::runtime::tests) async fn resolved_artifact_json(
     runtime: &Runtime,
     result: &merry_core::ToolCallResult,
@@ -154,7 +156,7 @@ pub(in crate::runtime::tests) async fn resolved_artifact_json(
         .unwrap_or_else(|error| panic!("{label} artifact should be readable: {error}"));
     let text = content
         .as_text()
-        .unwrap_or_else(|| panic!("{label} result should be textual JSON"));
+        .unwrap_or_else(|| panic!("{label} artifact should be textual JSON"));
     serde_json::from_str(text)
         .unwrap_or_else(|error| panic!("{label} artifact should parse as JSON: {error}"))
 }
@@ -247,14 +249,7 @@ pub(in crate::runtime::tests) async fn denied_action_content(
     events: &[RuntimeJournalEvent],
 ) -> serde_json::Value {
     let result = resolved_tool_result(events);
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("denial artifact should be readable");
-    let text = content
-        .as_text()
-        .expect("denial artifact should be textual JSON");
-    serde_json::from_str(text).expect("denial artifact should parse as JSON")
+    resolved_artifact_json(runtime, result, "denial").await
 }
 
 pub(in crate::runtime::tests) async fn action_audit_records(

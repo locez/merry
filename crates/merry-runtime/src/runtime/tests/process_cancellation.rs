@@ -7,7 +7,8 @@ use crate::{
         process::{FakeProcessRunner, ProcessProposingToolExecutor},
         tool_helpers::{
             action_audit_records, event_kind_names_for_tool_execution, policy_tool_spec,
-            register_policy_pending_registered_tool_with_builder, resolved_tool_result,
+            register_policy_pending_registered_tool_with_builder, resolved_artifact_json,
+            resolved_tool_result,
         },
     },
     tool::{ActionExecutionEvidence, RegisteredTool, ToolActionKind, ToolExecutionContext},
@@ -55,16 +56,7 @@ async fn opt_in_process_action_commits_output_after_runner_cancels_token() {
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
     assert!(runtime.pending_tool_calls().await.is_empty());
 
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("process result artifact should be readable");
-    let payload: serde_json::Value = serde_json::from_str(
-        content
-            .as_text()
-            .expect("process result artifact should be textual JSON"),
-    )
-    .expect("process result artifact should parse as JSON");
+    let payload = resolved_artifact_json(&runtime, result, "process result").await;
     assert_eq!(
         payload
             .pointer("/stdout/text")

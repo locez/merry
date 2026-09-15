@@ -3,8 +3,11 @@ use crate::{
     plan::{SubagentPlanChangeInput, SubagentPlanUpdateInput},
     runtime::{
         Runtime,
-        tests::plan_surface::{
-            linked_plan_scope, pending_call, plan_node, record_pending, session_id,
+        tests::{
+            plan_surface::{
+                linked_plan_scope, pending_call, plan_node, record_pending, session_id,
+            },
+            support::tool_helpers::resolved_artifact_json,
         },
     },
 };
@@ -224,16 +227,7 @@ async fn invalid_plan_input_is_recorded_with_nested_decode_guidance() {
         "plan_input_invalid"
     );
 
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("invalid plan input artifact should be readable");
-    let payload: serde_json::Value = serde_json::from_str(
-        content
-            .as_text()
-            .expect("invalid plan input result should be textual JSON"),
-    )
-    .expect("invalid plan input result should parse as JSON");
+    let payload = resolved_artifact_json(&runtime, result, "invalid plan input").await;
     let message = payload["error"]["message"]
         .as_str()
         .expect("invalid plan input should include an error message");

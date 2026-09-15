@@ -11,7 +11,7 @@ use crate::{
                 action_audit_records, event_kind_names_for_tool_execution, policy_tool_spec,
                 register_policy_pending_registered_tool,
                 register_policy_pending_registered_tool_with_builder, register_policy_pending_tool,
-                required_query_tool_spec, resolved_tool_result,
+                required_query_tool_spec, resolved_artifact_json, resolved_tool_result,
             },
         },
     },
@@ -129,16 +129,7 @@ async fn registered_tool_arguments_are_validated_before_execution() {
             .code(),
         "tool_input_schema_invalid"
     );
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("schema failure artifact should be readable");
-    let payload: serde_json::Value = serde_json::from_str(
-        content
-            .as_text()
-            .expect("schema failure artifact should be textual JSON"),
-    )
-    .expect("schema failure artifact should parse as JSON");
+    let payload = resolved_artifact_json(&runtime, result, "schema failure").await;
     assert_eq!(payload["ok"], false);
     assert_eq!(payload["tool"], "validated_tool");
     assert_eq!(payload["error"]["code"], "tool_input_schema_invalid");

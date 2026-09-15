@@ -10,7 +10,7 @@ use crate::{
         tool_helpers::{
             action_audit_records, event_kind_names_for_tool_execution, lifecycle_kinds,
             policy_tool_spec, register_policy_pending_registered_tool_with_builder,
-            resolved_tool_result,
+            resolved_artifact_json, resolved_tool_result,
         },
     },
     tool::{
@@ -153,16 +153,7 @@ async fn read_only_shell_process_executes_under_shell_profile_when_opted_in() {
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
 
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("shell process result artifact should be readable");
-    let payload: serde_json::Value = serde_json::from_str(
-        content
-            .as_text()
-            .expect("shell process result artifact should be textual JSON"),
-    )
-    .expect("shell process result artifact should parse as JSON");
+    let payload = resolved_artifact_json(&runtime, result, "shell process result").await;
     assert_eq!(payload["permission_profile_id"], "process.shell.read_only");
     assert!(payload["intent"].get("argv").is_none());
     assert_eq!(

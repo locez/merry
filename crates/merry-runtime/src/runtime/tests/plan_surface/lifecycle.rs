@@ -3,7 +3,10 @@ use crate::{
     plan::{PlanChangeInput, PlanExecutionIntent, PlanNodeInput, UpdatePlanInput},
     runtime::{
         Runtime,
-        tests::plan_surface::{noop_tool, pending_call, record_pending, session_id},
+        tests::{
+            plan_surface::{noop_tool, pending_call, record_pending, session_id},
+            support::tool_helpers::resolved_artifact_json,
+        },
     },
 };
 use merry_core::{
@@ -205,16 +208,7 @@ async fn first_update_defines_a_plan_without_a_separate_activation_call() {
             _ => None,
         })
         .expect("read_plan result should be recorded");
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("read_plan artifact should be readable");
-    let payload: serde_json::Value = serde_json::from_str(
-        content
-            .as_text()
-            .expect("read_plan artifact should contain JSON text"),
-    )
-    .expect("read_plan artifact should parse");
+    let payload = resolved_artifact_json(&runtime, result, "read_plan").await;
     assert_eq!(
         payload["guidance"]["do_not_repeat_until_state_change"],
         true
@@ -344,16 +338,7 @@ async fn reading_without_an_active_plan_returns_a_non_retrying_recovery() {
             _ => None,
         })
         .expect("read_plan result should be recorded");
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("recovery artifact should be readable");
-    let payload: serde_json::Value = serde_json::from_str(
-        content
-            .as_text()
-            .expect("recovery artifact should contain JSON text"),
-    )
-    .expect("recovery artifact should parse");
+    let payload = resolved_artifact_json(&runtime, result, "recovery").await;
     assert_eq!(payload["error"]["code"], "no_active_plan");
     assert_eq!(payload["recovery"]["next_tool"], "update_plan");
     assert!(
