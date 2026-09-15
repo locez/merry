@@ -334,13 +334,31 @@ def test_session_store_save_and_resume_preserves_session_identity(
 
 def test_close_cancels_an_unfinished_run_and_keeps_terminal_result() -> None:
     async def scenario() -> merry.RunResult[BaseModel]:
-        run = fake_agent(session_id="close-run").stream("Close me.")
-        await run.close()
+        native = pending_native_agent("close-run")
+        run = merry.Agent._from_native(native).stream("Close me.")
+        await asyncio.wait_for(run.close(), timeout=5)
         return await run.result()
 
     result = asyncio.run(scenario())
 
     assert result.status is merry.RunStatus.CANCELLED
+
+
+def test_close_after_the_run_reached_eof_keeps_the_completed_result() -> None:
+    async def scenario() -> tuple[
+        merry.RunResult[BaseModel], merry.RunResult[BaseModel]
+    ]:
+        run = fake_agent(session_id="close-completed").stream("Close me.")
+        while await run.next() is not None:
+            pass
+        before = await run.result()
+        await asyncio.wait_for(run.close(), timeout=5)
+        return before, await run.result()
+
+    before, after = asyncio.run(scenario())
+
+    assert before.status is merry.RunStatus.COMPLETED
+    assert after.status is before.status
 
 
 def test_direct_next_cancellation_persists_a_terminal_result() -> None:

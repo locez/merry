@@ -152,8 +152,12 @@ assert result.status is merry.RunStatus.COMPLETED
 
 `ToolCallBatch` is an exclusive Rust-owned lease. The complete result set must
 be submitted before reading the next message. `result()` is valid after EOF;
-`run.cancel()` and `close()` wait for a durable cancelled terminal result. The
-Python async task may be cancelled; the SDK requests Rust cancellation and
+`run.cancel()` and `close()` wait for the durable terminal result. Cancellation
+is cooperative, so a run that reached its terminal state first keeps that
+result: `close()` requests cancellation only while the run is unfinished, and
+`cancel()` returns the completed result instead of rewriting its status. Both
+wait for Rust to stop provider and tool work, so the returned result is durable.
+The Python async task may be cancelled; the SDK requests Rust cancellation and
 re-raises `asyncio.CancelledError`.
 
 `AgentBuilder` is single-use for `build()` and `resume()`. A native operation

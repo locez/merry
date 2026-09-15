@@ -126,7 +126,12 @@ class AgentRun(Generic[OutputT]):
         return result
 
     async def cancel(self) -> RunResult[OutputT]:
-        """Cancel the run and return its durable terminal result."""
+        """Cancel the run and return its durable terminal result.
+
+        Cancellation is cooperative: a run that reached its terminal state
+        before the request arrived keeps that result, so the returned status is
+        `CANCELLED` only when cancellation reached the runtime first.
+        """
 
         if self._result is not None:
             return self._result
@@ -151,7 +156,11 @@ class AgentRun(Generic[OutputT]):
         return result
 
     async def close(self) -> None:
-        """Cancel an unfinished run and wait for its terminal result."""
+        """Cancel an unfinished run and wait for its terminal result.
+
+        A run that already reached EOF or a terminal result keeps that result;
+        its status is not rewritten to `CANCELLED`.
+        """
 
         if self._terminal_error is not None:
             self._raise_terminal_error()
