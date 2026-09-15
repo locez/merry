@@ -16,16 +16,18 @@
 //! `TIOCSTI` stay unavailable to it. Inner action sandboxes mount their own
 //! `/dev`, so the node never reaches the processes a run executes.
 
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::{
     fs,
     os::unix::fs::{FileTypeExt, MetadataExt},
-    path::{Path, PathBuf},
 };
 
 /// Path inside the outer sandbox where the parent's terminal device is bound.
 pub(crate) const SANDBOX_REVIEW_TERMINAL_PATH: &str = "/dev/merry-review-tty";
 
 /// Directories searched for the controlling terminal's device node.
+#[cfg(target_os = "linux")]
 const TERMINAL_DEVICE_DIRS: [&str; 2] = ["/dev/pts", "/dev"];
 
 /// The controlling terminal's device node, resolved before the re-exec.
@@ -37,6 +39,7 @@ pub(crate) struct ReviewTerminalHandoff {
 impl ReviewTerminalHandoff {
     /// Resolves the current process's controlling terminal; `None` when the
     /// process has none or its device node cannot be found.
+    #[cfg(target_os = "linux")]
     pub(crate) fn resolve_controlling_terminal() -> Option<Self> {
         let stat = fs::read_to_string("/proc/self/stat").ok()?;
         let device_number = controlling_terminal_number(&stat)?;
@@ -44,7 +47,14 @@ impl ReviewTerminalHandoff {
         Some(Self { device })
     }
 
-    #[cfg(test)]
+    /// The outer bubblewrap sandbox, and with it this handoff, exists only
+    /// on Linux; elsewhere there is never a terminal to bind.
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn resolve_controlling_terminal() -> Option<Self> {
+        None
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn for_device(device: PathBuf) -> Self {
         Self { device }
     }
@@ -60,6 +70,7 @@ impl ReviewTerminalHandoff {
 ///
 /// The command name in field two may contain spaces and parentheses, so
 /// fields are counted from the last closing parenthesis.
+#[cfg(target_os = "linux")]
 fn controlling_terminal_number(stat: &str) -> Option<u64> {
     let (_, after_command) = stat.rsplit_once(')')?;
     // After the command: state ppid pgrp session tty_nr ...
@@ -73,6 +84,7 @@ fn controlling_terminal_number(stat: &str) -> Option<u64> {
 
 /// Finds the character device in `dirs` whose device number is
 /// `device_number`, searching each directory's direct children only.
+#[cfg(target_os = "linux")]
 fn find_terminal_device(device_number: u64, dirs: &[&str]) -> Option<PathBuf> {
     dirs.iter().find_map(|dir| {
         fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
@@ -84,7 +96,7 @@ fn find_terminal_device(device_number: u64, dirs: &[&str]) -> Option<PathBuf> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(crate) mod tests {
     use super::{
         ReviewTerminalHandoff, SANDBOX_REVIEW_TERMINAL_PATH, controlling_terminal_number,
