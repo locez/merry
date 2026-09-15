@@ -9,11 +9,12 @@ use super::{
     error::JudgmentError,
     payload::{push_evidence, push_field, push_list},
 };
-use futures_util::StreamExt;
+use crate::model_completion::{
+    ModelCompletionError, complete_single_text, is_cancelled_model_error,
+};
 use merry_llm::{
-    FinishReason, GenerationConfig, ModelContent, ModelError, ModelEvent, ModelMessage,
-    ModelMessageRole, ModelName, ModelOutput, ModelProvider, ModelRequest, ModelResponse,
-    ModelStreamContext, ProviderErrorKind,
+    GenerationConfig, ModelContent, ModelError, ModelMessage, ModelMessageRole, ModelName,
+    ModelProvider, ModelRequest, ModelStreamContext,
 };
 use serde::Deserialize;
 use std::{collections::BTreeSet, sync::Arc};
@@ -154,55 +155,21 @@ impl JudgmentSource for ModelBackedJudgmentSource {
             }
 
             let token = context.cancellation_token().clone();
-            if token.is_cancelled() {
-                return Err(JudgmentError::Cancelled);
-            }
-
             let model_request = compile_model_backed_judgment_request(
                 &request,
                 &self.model,
                 self.generation_config.clone(),
             )?;
             let stream_context = ModelStreamContext::new(token.clone());
-            let stream_result = tokio::select! {
-                biased;
-                () = token.cancelled() => return Err(JudgmentError::Cancelled),
-                result = self.provider.stream_model(model_request, stream_context) => result,
-            };
-            let mut stream = stream_result.map_err(map_model_judgment_setup_error)?;
-
-            loop {
-                let item = tokio::select! {
-                    biased;
-                    () = token.cancelled() => return Err(JudgmentError::Cancelled),
-                    item = stream.next() => item,
-                };
-
-                match item {
-                    Some(Ok(ModelEvent::Started | ModelEvent::OutputTextDelta { .. })) => {}
-                    Some(Ok(ModelEvent::ToolCallRequested { .. })) => {
-                        return Err(JudgmentError::InvalidModelJudgmentResponseShape {
-                            reason: "model judgment stream must not request tools",
-                        });
-                    }
-                    Some(Ok(ModelEvent::Completed { response })) => {
-                        let text = model_judgment_text_from_completed_response(&response)?;
-                        return parse_tool_risk_review_model_judgment_output(
-                            text,
-                            &request,
-                            &self.source_label,
-                        );
-                    }
-                    Some(Err(error)) => {
-                        return Err(map_model_judgment_stream_error(error));
-                    }
-                    None => {
-                        return Err(JudgmentError::InvalidModelJudgmentResponseShape {
-                            reason: "model judgment stream ended before completed event",
-                        });
-                    }
-                }
-            }
+            let text = complete_single_text(
+                self.provider.as_ref(),
+                model_request,
+                stream_context,
+                &token,
+            )
+            .await
+            .map_err(map_model_judgment_completion_error)?;
+            parse_tool_risk_review_model_judgment_output(&text, &request, &self.source_label)
         })
     }
 }
@@ -333,73 +300,42 @@ fn model_backed_judgment_user_prompt(request: &JudgmentRequest) -> String {
     prompt
 }
 
-fn model_judgment_text_from_completed_response(
-    response: &ModelResponse,
-) -> Result<&str, JudgmentError> {
-    if response.finish_reason() == FinishReason::Cancelled {
-        return Err(JudgmentError::Cancelled);
-    }
-
-    if response.finish_reason() != FinishReason::Stop {
-        return Err(JudgmentError::InvalidModelJudgmentResponseShape {
-            reason: "model judgment completed without stop finish reason",
-        });
-    }
-
-    let [ModelOutput::Text { text }] = response.outputs() else {
-        return Err(JudgmentError::InvalidModelJudgmentResponseShape {
-            reason: "model judgment stop output must contain exactly one text item",
-        });
-    };
-
-    Ok(text)
-}
-
 fn map_model_judgment_request_error(error: ModelError) -> JudgmentError {
-    if is_cancelled_model_judgment_error(&error) {
+    if is_cancelled_model_error(&error) {
         return JudgmentError::Cancelled;
     }
-
-    let (kind, message) = model_error_parts(error);
-    JudgmentError::ModelJudgmentRequest { kind, message }
-}
-
-fn map_model_judgment_setup_error(error: ModelError) -> JudgmentError {
-    if is_cancelled_model_judgment_error(&error) {
-        return JudgmentError::Cancelled;
+    JudgmentError::ModelJudgmentRequest {
+        kind: error.kind(),
+        message: error.message().to_owned(),
     }
-
-    let (kind, message) = model_error_parts(error);
-    JudgmentError::ModelJudgmentProviderSetup { kind, message }
 }
 
-fn map_model_judgment_stream_error(error: ModelError) -> JudgmentError {
-    if is_cancelled_model_judgment_error(&error) {
-        return JudgmentError::Cancelled;
-    }
-
-    let (kind, message) = model_error_parts(error);
-    JudgmentError::ModelJudgmentProviderStream { kind, message }
-}
-
-fn is_cancelled_model_judgment_error(error: &ModelError) -> bool {
-    matches!(error, ModelError::Cancelled)
-        || matches!(
-            error,
-            ModelError::Provider {
-                kind: ProviderErrorKind::Cancelled,
-                ..
-            }
-        )
-}
-
-fn model_error_parts(error: ModelError) -> (ProviderErrorKind, String) {
+fn map_model_judgment_completion_error(error: ModelCompletionError) -> JudgmentError {
     match error {
-        ModelError::InvalidRequest { reason } => (ProviderErrorKind::InvalidRequest, reason),
-        ModelError::Cancelled => (
-            ProviderErrorKind::Cancelled,
-            "model stream cancelled".to_owned(),
-        ),
-        ModelError::Provider { kind, message, .. } => (kind, message),
+        ModelCompletionError::Cancelled => JudgmentError::Cancelled,
+        ModelCompletionError::Setup { kind, message } => {
+            JudgmentError::ModelJudgmentProviderSetup { kind, message }
+        }
+        ModelCompletionError::Stream { kind, message } => {
+            JudgmentError::ModelJudgmentProviderStream { kind, message }
+        }
+        ModelCompletionError::ToolCallRequested => {
+            JudgmentError::InvalidModelJudgmentResponseShape {
+                reason: "model judgment stream must not request tools",
+            }
+        }
+        ModelCompletionError::NonStopFinish { .. } => {
+            JudgmentError::InvalidModelJudgmentResponseShape {
+                reason: "model judgment completed without stop finish reason",
+            }
+        }
+        ModelCompletionError::NotSingleText => JudgmentError::InvalidModelJudgmentResponseShape {
+            reason: "model judgment stop output must contain exactly one text item",
+        },
+        ModelCompletionError::EndedBeforeCompletion => {
+            JudgmentError::InvalidModelJudgmentResponseShape {
+                reason: "model judgment stream ended before completed event",
+            }
+        }
     }
 }

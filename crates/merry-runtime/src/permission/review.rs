@@ -25,12 +25,13 @@ use super::{
     PermissionRequest, PermissionReviewRisk, PermissionUserAuthorization, PermissionedAction,
     RequestedCapability,
 };
+use crate::model_completion::{
+    ModelCompletionError, complete_single_text, is_cancelled_model_error,
+};
 use crate::model_config::ModelProviderConfig;
-use futures_util::StreamExt;
 use merry_llm::{
-    FinishReason, GenerationConfig, ModelContent, ModelError, ModelEvent, ModelMessage,
-    ModelMessageRole, ModelName, ModelOutput, ModelProvider, ModelRequest, ModelResponse,
-    ModelStreamContext, ProviderErrorKind,
+    GenerationConfig, ModelContent, ModelError, ModelMessage, ModelMessageRole, ModelName,
+    ModelProvider, ModelRequest, ModelStreamContext,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -71,49 +72,21 @@ impl PermissionAdmissionSource for ModelBackedPermissionAdmissionSource {
     ) -> PermissionAdmissionFuture<'a> {
         Box::pin(async move {
             let token = context.cancellation_token().clone();
-            if token.is_cancelled() {
-                return Err(PermissionAdmissionError::Cancelled);
-            }
-
             let model_request = compile_permission_review_model_request(
                 &request,
                 &self.model,
                 self.generation_config.clone(),
             )?;
             let stream_context = ModelStreamContext::new(token.clone());
-            let stream_result = tokio::select! {
-                biased;
-                () = token.cancelled() => return Err(PermissionAdmissionError::Cancelled),
-                result = self.provider.stream_model(model_request, stream_context) => result,
-            };
-            let mut stream = stream_result.map_err(map_permission_model_setup_error)?;
-
-            loop {
-                let item = tokio::select! {
-                    biased;
-                    () = token.cancelled() => return Err(PermissionAdmissionError::Cancelled),
-                    item = stream.next() => item,
-                };
-
-                match item {
-                    Some(Ok(ModelEvent::Started | ModelEvent::OutputTextDelta { .. })) => {}
-                    Some(Ok(ModelEvent::ToolCallRequested { .. })) => {
-                        return Err(PermissionAdmissionError::InvalidReviewOutput {
-                            message: "permission review model must not request tools".to_owned(),
-                        });
-                    }
-                    Some(Ok(ModelEvent::Completed { response })) => {
-                        let text = permission_review_text_from_completed_response(&response)?;
-                        return parse_permission_review_model_output(text);
-                    }
-                    Some(Err(error)) => return Err(map_permission_model_stream_error(error)),
-                    None => {
-                        return Err(PermissionAdmissionError::InvalidReviewOutput {
-                            message: "permission review stream ended before completion".to_owned(),
-                        });
-                    }
-                }
-            }
+            let text = complete_single_text(
+                self.provider.as_ref(),
+                model_request,
+                stream_context,
+                &token,
+            )
+            .await
+            .map_err(map_permission_review_completion_error)?;
+            parse_permission_review_model_output(&text)
         })
     }
 }
@@ -342,70 +315,39 @@ fn validate_rationale(value: &str) -> Result<(), PermissionAdmissionError> {
     Ok(())
 }
 
-fn permission_review_text_from_completed_response(
-    response: &ModelResponse,
-) -> Result<&str, PermissionAdmissionError> {
-    if response.finish_reason() == FinishReason::Cancelled {
-        return Err(PermissionAdmissionError::Cancelled);
-    }
-    if response.finish_reason() != FinishReason::Stop {
-        return Err(PermissionAdmissionError::InvalidReviewOutput {
-            message: "permission review completed without stop finish reason".to_owned(),
-        });
-    }
-    let [ModelOutput::Text { text }] = response.outputs() else {
-        return Err(PermissionAdmissionError::InvalidReviewOutput {
-            message: "permission review stop output must contain exactly one text item".to_owned(),
-        });
-    };
-    Ok(text)
-}
-
 fn map_permission_model_request_error(error: ModelError) -> PermissionAdmissionError {
-    if is_cancelled_permission_model_error(&error) {
+    if is_cancelled_model_error(&error) {
         return PermissionAdmissionError::Cancelled;
     }
-    let (kind, message) = model_error_parts(error);
     PermissionAdmissionError::ReviewFailed {
-        message: format!("request {kind:?}: {message}"),
+        message: format!("request {:?}: {}", error.kind(), error.message()),
     }
 }
 
-fn map_permission_model_setup_error(error: ModelError) -> PermissionAdmissionError {
-    if is_cancelled_permission_model_error(&error) {
-        return PermissionAdmissionError::Cancelled;
-    }
-    let (kind, message) = model_error_parts(error);
-    PermissionAdmissionError::ReviewFailed {
-        message: format!("provider setup {kind:?}: {message}"),
-    }
-}
-
-fn map_permission_model_stream_error(error: ModelError) -> PermissionAdmissionError {
-    if is_cancelled_permission_model_error(&error) {
-        return PermissionAdmissionError::Cancelled;
-    }
-    let (kind, message) = model_error_parts(error);
-    PermissionAdmissionError::ReviewFailed {
-        message: format!("provider stream {kind:?}: {message}"),
-    }
-}
-
-fn is_cancelled_permission_model_error(error: &ModelError) -> bool {
-    matches!(error, ModelError::Cancelled)
-        || matches!(
-            error,
-            ModelError::Provider {
-                kind: ProviderErrorKind::Cancelled,
-                ..
-            }
-        )
-}
-
-fn model_error_parts(error: ModelError) -> (ProviderErrorKind, String) {
+fn map_permission_review_completion_error(error: ModelCompletionError) -> PermissionAdmissionError {
     match error {
-        ModelError::Provider { kind, message, .. } => (kind, message),
-        ModelError::InvalidRequest { reason } => (ProviderErrorKind::InvalidRequest, reason),
-        ModelError::Cancelled => (ProviderErrorKind::Cancelled, "cancelled".to_owned()),
+        ModelCompletionError::Cancelled => PermissionAdmissionError::Cancelled,
+        ModelCompletionError::Setup { kind, message } => PermissionAdmissionError::ReviewFailed {
+            message: format!("provider setup {kind:?}: {message}"),
+        },
+        ModelCompletionError::Stream { kind, message } => PermissionAdmissionError::ReviewFailed {
+            message: format!("provider stream {kind:?}: {message}"),
+        },
+        ModelCompletionError::ToolCallRequested => PermissionAdmissionError::InvalidReviewOutput {
+            message: "permission review model must not request tools".to_owned(),
+        },
+        ModelCompletionError::NonStopFinish { .. } => {
+            PermissionAdmissionError::InvalidReviewOutput {
+                message: "permission review completed without stop finish reason".to_owned(),
+            }
+        }
+        ModelCompletionError::NotSingleText => PermissionAdmissionError::InvalidReviewOutput {
+            message: "permission review stop output must contain exactly one text item".to_owned(),
+        },
+        ModelCompletionError::EndedBeforeCompletion => {
+            PermissionAdmissionError::InvalidReviewOutput {
+                message: "permission review stream ended before completion".to_owned(),
+            }
+        }
     }
 }

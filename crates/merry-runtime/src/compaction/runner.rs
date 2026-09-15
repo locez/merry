@@ -1,10 +1,12 @@
 use super::{CitationCompactionInput, checkpoint_from_candidate_json};
-use crate::{RuntimeError, token_estimate::estimate_model_input_tokens};
-use futures_util::StreamExt;
+use crate::{
+    RuntimeError,
+    model_completion::{ModelCompletionError, complete_single_text},
+    token_estimate::estimate_model_input_tokens,
+};
 use merry_core::{ProviderName, SessionId};
 use merry_llm::{
-    FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelOutput, ModelProvider,
-    ModelRequest, ModelStreamContext, ProviderErrorKind,
+    ModelCapabilities, ModelProvider, ModelRequest, ModelStreamContext, ProviderErrorKind,
 };
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -113,100 +115,60 @@ async fn run_compaction_attempt(
     stream_context: ModelStreamContext,
     token: &CancellationToken,
 ) -> Result<String, AttemptFailure> {
-    let setup = provider.stream_model(request, stream_context);
-    tokio::pin!(setup);
-    let mut stream = tokio::select! {
-        biased;
-        () = token.cancelled() => {
-            return Err(AttemptFailure::cancelled(cancelled_setup_error(
-                "during compaction model setup",
-            )));
-        }
-        result = &mut setup => match result {
-            Ok(stream) => stream,
-            Err(error) => return Err(setup_failure(error)),
-        },
-    };
+    complete_single_text(provider, request, stream_context, token)
+        .await
+        .map_err(|error| completion_failure(&error))
+}
 
-    loop {
-        let item = tokio::select! {
-            biased;
-            () = token.cancelled() => {
-                return Err(AttemptFailure::cancelled(cancelled_stream_error(
-                    "while reading compaction model stream",
-                )));
-            }
-            item = stream.next() => item,
-        };
-        match item {
-            Some(Ok(ModelEvent::Started | ModelEvent::OutputTextDelta { .. })) => {}
-            Some(Ok(ModelEvent::ToolCallRequested { .. })) => {
-                return Err(AttemptFailure::retryable(
-                    RuntimeError::CompactionModelStream {
-                        message: "compaction model requested a tool call".to_owned(),
-                    },
-                ));
-            }
-            Some(Ok(ModelEvent::Completed { response })) => {
-                if response.finish_reason() == FinishReason::Cancelled {
-                    return Err(AttemptFailure::cancelled(cancelled_stream_error(
-                        "because the compaction model reported a cancelled finish",
-                    )));
-                }
-                if response.finish_reason() != FinishReason::Stop {
-                    return Err(AttemptFailure::retryable(
-                        RuntimeError::CompactionModelStream {
-                            message: format!(
-                                "compaction model finished with {:?}",
-                                response.finish_reason()
-                            ),
-                        },
-                    ));
-                }
-                let [ModelOutput::Text { text }] = response.outputs() else {
-                    return Err(AttemptFailure::retryable(
-                        RuntimeError::CompactionModelStream {
-                            message: "compaction model must return exactly one text output"
-                                .to_owned(),
-                        },
-                    ));
-                };
-                return Ok(text.clone());
-            }
-            Some(Err(error)) => return Err(stream_failure(error)),
-            None => {
-                return Err(AttemptFailure::retryable(
-                    RuntimeError::CompactionModelStream {
-                        message: "compaction model stream ended before completion".to_owned(),
-                    },
-                ));
-            }
+fn completion_failure(error: &ModelCompletionError) -> AttemptFailure {
+    match error {
+        ModelCompletionError::Cancelled => {
+            AttemptFailure::cancelled(cancelled_stream_error("while running the compaction model"))
+        }
+        ModelCompletionError::Setup { kind, message } => AttemptFailure {
+            error: RuntimeError::CompactionModelSetup {
+                message: message.clone(),
+            },
+            cancelled: false,
+            retryable: is_retryable_provider_error(*kind),
+        },
+        ModelCompletionError::Stream { kind, message } => AttemptFailure {
+            error: RuntimeError::CompactionModelStream {
+                message: message.clone(),
+            },
+            cancelled: false,
+            retryable: is_retryable_provider_error(*kind),
+        },
+        ModelCompletionError::ToolCallRequested => {
+            AttemptFailure::retryable(RuntimeError::CompactionModelStream {
+                message: "compaction model requested a tool call".to_owned(),
+            })
+        }
+        ModelCompletionError::NonStopFinish { finish_reason } => {
+            AttemptFailure::retryable(RuntimeError::CompactionModelStream {
+                message: format!("compaction model finished with {finish_reason:?}"),
+            })
+        }
+        ModelCompletionError::NotSingleText => {
+            AttemptFailure::retryable(RuntimeError::CompactionModelStream {
+                message: "compaction model must return exactly one text output".to_owned(),
+            })
+        }
+        ModelCompletionError::EndedBeforeCompletion => {
+            AttemptFailure::retryable(RuntimeError::CompactionModelStream {
+                message: "compaction model stream ended before completion".to_owned(),
+            })
         }
     }
 }
 
-fn setup_failure(error: ModelError) -> AttemptFailure {
-    let kind = error.kind();
-    AttemptFailure {
-        error: RuntimeError::CompactionModelSetup {
-            message: error.message().to_owned(),
-        },
-        cancelled: kind == ProviderErrorKind::Cancelled,
-        retryable: is_retryable_provider_error(kind),
-    }
-}
-
-fn stream_failure(error: ModelError) -> AttemptFailure {
-    let kind = error.kind();
-    AttemptFailure {
-        error: RuntimeError::CompactionModelStream {
-            message: error.message().to_owned(),
-        },
-        cancelled: kind == ProviderErrorKind::Cancelled,
-        retryable: is_retryable_provider_error(kind),
-    }
-}
-
+/// Returns whether one compaction attempt may be retried for this provider error.
+///
+/// This is the runtime's attempt-level policy, not the provider-level
+/// [`merry_llm::ModelRetryPolicy`]: provider retries already ran inside
+/// `stream_model`, so an error that reaches runtime is what the whole attempt
+/// observed. Request-shape, authentication, and cancellation failures cannot be
+/// fixed by another attempt, so only transport and availability classes retry.
 fn is_retryable_provider_error(kind: ProviderErrorKind) -> bool {
     !matches!(
         kind,

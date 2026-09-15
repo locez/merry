@@ -43,6 +43,7 @@ mod interactive;
 mod judgment;
 mod ledger;
 mod memory;
+mod model_completion;
 mod model_config;
 mod permission;
 mod plan;

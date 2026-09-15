@@ -111,9 +111,9 @@ fn tool_call_conversion_diagnostic(error: CoreError) -> ErrorInfo {
     )
 }
 
-pub(super) fn is_cancelled_model_error(error: &ModelError) -> bool {
-    error.kind() == ProviderErrorKind::Cancelled
-}
+// Re-exported so provider-step code keeps one cancellation predicate instead of
+// a second copy of the same normalization.
+pub(super) use crate::model_completion::is_cancelled_model_error;
 
 pub(super) fn diagnostic_from_model_error(error: ModelError) -> ErrorInfo {
     let code = match error.kind() {
