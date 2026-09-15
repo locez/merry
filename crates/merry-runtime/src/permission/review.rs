@@ -30,8 +30,8 @@ use crate::model_completion::{
 };
 use crate::model_config::ModelProviderConfig;
 use merry_llm::{
-    GenerationConfig, ModelContent, ModelError, ModelMessage, ModelMessageRole, ModelName,
-    ModelProvider, ModelRequest, ModelStreamContext,
+    FinishReason, GenerationConfig, ModelContent, ModelError, ModelMessage, ModelMessageRole,
+    ModelName, ModelProvider, ModelRequest, ModelStreamContext, ReasoningEffort,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -40,7 +40,21 @@ use std::sync::Arc;
 pub(crate) const PERMISSION_REVIEW_SCHEMA_VERSION: &str = "permission_review.v1";
 
 /// Maximum output tokens reserved for one permission review response.
-const PERMISSION_REVIEW_MAX_OUTPUT_TOKENS: u64 = 512;
+///
+/// The budget covers the reviewer's hidden reasoning tokens as well as the
+/// answer, so it stays an order of magnitude above the size of one review JSON
+/// object. A ceiling that only fits the answer turns an ordinary reasoning pass
+/// into a truncated response whose finish reason is not [`FinishReason::Stop`],
+/// which the review contract rejects.
+const PERMISSION_REVIEW_MAX_OUTPUT_TOKENS: u64 = 2048;
+
+/// Reasoning effort requested for one permission review response.
+///
+/// Review is a bounded classification over recorded evidence, not an
+/// open-ended task, so reviewer thinking is capped at the lowest standard
+/// provider effort: enough to weigh risk and authorization, while leaving the
+/// output budget for the answer the review contract requires.
+const PERMISSION_REVIEW_REASONING_EFFORT: &str = "low";
 
 pub(crate) struct ModelBackedPermissionAdmissionSource {
     provider: Arc<dyn ModelProvider>,
@@ -52,9 +66,12 @@ impl ModelBackedPermissionAdmissionSource {
     pub(crate) fn from_config(
         config: ModelProviderConfig,
     ) -> Result<Self, PermissionAdmissionError> {
+        let reasoning_effort = ReasoningEffort::new(PERMISSION_REVIEW_REASONING_EFFORT)
+            .map_err(map_permission_model_request_error)?;
         let generation_config =
             GenerationConfig::new(Some(PERMISSION_REVIEW_MAX_OUTPUT_TOKENS), false)
-                .map_err(map_permission_model_request_error)?;
+                .map_err(map_permission_model_request_error)?
+                .with_reasoning_effort(Some(reasoning_effort));
         Ok(Self {
             provider: config.provider(),
             model: config.model().clone(),
@@ -282,10 +299,8 @@ fn map_permission_review_completion_error(error: ModelCompletionError) -> Permis
         ModelCompletionError::ToolCallRequested => PermissionAdmissionError::InvalidReviewOutput {
             message: "permission review model must not request tools".to_owned(),
         },
-        ModelCompletionError::NonStopFinish { .. } => {
-            PermissionAdmissionError::InvalidReviewOutput {
-                message: "permission review completed without stop finish reason".to_owned(),
-            }
+        ModelCompletionError::NonStopFinish { finish_reason } => {
+            classify_non_stop_review_finish(finish_reason)
         }
         ModelCompletionError::NotSingleText => PermissionAdmissionError::InvalidReviewOutput {
             message: "permission review stop output must contain exactly one text item".to_owned(),
@@ -295,5 +310,28 @@ fn map_permission_review_completion_error(error: ModelCompletionError) -> Permis
                 message: "permission review stream ended before completion".to_owned(),
             }
         }
+    }
+}
+
+/// Classifies a reviewer response that ended for a reason other than a stop.
+///
+/// Only output the reviewer itself controls is a review-contract violation.
+/// Running out of output tokens, a provider-side failure, and a provider
+/// safety filter all mean the review never reached the contract, so they stay
+/// distinguishable from invalid reviewer output and remain recoverable by
+/// runtime policy instead of reading as a broken reviewer.
+fn classify_non_stop_review_finish(finish_reason: FinishReason) -> PermissionAdmissionError {
+    match finish_reason {
+        FinishReason::Length => PermissionAdmissionError::ReviewOutputTruncated { finish_reason },
+        FinishReason::Blocked => PermissionAdmissionError::ReviewFailed {
+            message: "permission review response was blocked by the provider's safety filter"
+                .to_owned(),
+        },
+        FinishReason::Error => PermissionAdmissionError::ReviewFailed {
+            message: "provider reported a failed permission review response".to_owned(),
+        },
+        other => PermissionAdmissionError::InvalidReviewOutput {
+            message: format!("permission review finished with {other:?} instead of stop"),
+        },
     }
 }

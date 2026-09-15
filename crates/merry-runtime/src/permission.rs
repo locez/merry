@@ -7,6 +7,7 @@
 
 use crate::{PathAccess, ProcessActionIntent};
 use merry_core::{CoreError, PendingToolCall, ToolName};
+use merry_llm::FinishReason;
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin};
 use thiserror::Error;
@@ -617,9 +618,22 @@ pub enum PermissionAdmissionError {
     /// Model-backed review failed before producing a decision.
     #[error("permission review failed: {message}")]
     ReviewFailed { message: String },
-    /// Model-backed review returned unsupported output.
+    /// Model-backed review returned output that violates the review contract.
     #[error("permission review output is invalid: {message}")]
     InvalidReviewOutput { message: String },
+    /// The reviewer ran out of output tokens before it could answer.
+    ///
+    /// This is an output-budget failure rather than a contract violation: the
+    /// reviewer never reached the review contract, so runtime policy may retry
+    /// it with a larger budget or hand the decision to the host instead of
+    /// recording the reviewer as non-compliant.
+    #[error(
+        "permission review ran out of output tokens before answering: reviewer finished with {finish_reason:?} instead of stop"
+    )]
+    ReviewOutputTruncated {
+        /// Finish reason reported by the provider.
+        finish_reason: FinishReason,
+    },
     /// The optional human fallback could not accept or await a response.
     #[error("human permission review is unavailable: {message}")]
     HumanReviewUnavailable { message: String },

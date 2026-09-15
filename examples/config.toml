@@ -270,6 +270,11 @@ model = "gpt-4.1-mini"
 [models.approval_review]
 # Optional model override for permission admission review. Omit this table to
 # review with [providers.default].model.
+#
+# Merry owns the reviewer request shape: every review asks for a low reasoning
+# effort and its own fixed output budget, independently of the primary
+# provider's reasoning_effort. Point this role at a provider that accepts a
+# reasoning effort, and prefer a small fast model over a deep-reasoning one.
 model = "gpt-4.1-mini"
 
 [providers.openai-compatible]

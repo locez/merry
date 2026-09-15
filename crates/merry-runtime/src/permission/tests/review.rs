@@ -7,16 +7,39 @@ use crate::permission::review::{
 };
 use crate::permission::{
     ModelBackedPermissionAdmissionSource, PermissionAdmissionContext, PermissionAdmissionError,
-    PermissionAdmissionSource, PermissionReviewRisk, PermissionUserAuthorization,
-    permission_request_from_call,
+    PermissionAdmissionSource, PermissionRequest, PermissionReviewRisk,
+    PermissionUserAuthorization, permission_request_from_call,
 };
 use merry_llm::{
     FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse, ModelRetryPolicy,
-    testing::FakeModelProvider,
+    ReasoningEffort, testing::FakeModelProvider,
 };
 use serde_json::json;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+/// Builds a reviewer source backed by one scripted provider response.
+fn review_source(provider: Arc<FakeModelProvider>) -> ModelBackedPermissionAdmissionSource {
+    ModelBackedPermissionAdmissionSource::from_config(ModelProviderConfig::new(
+        provider,
+        ModelName::new("fake/reviewer").expect("model name should be valid"),
+        ModelRetryPolicy::default(),
+    ))
+    .expect("review source should build")
+}
+
+/// Builds the permission request every reviewer test reviews.
+fn review_request() -> PermissionRequest {
+    permission_request_from_call(
+        &call(json!({
+            "reason": "Confirm the endpoint is reachable",
+            "requested": { "network": true },
+            "for_action": { "command": "curl -sI https://example.com", "cwd": null }
+        })),
+        Vec::new(),
+    )
+    .expect("request should parse")
+}
 
 #[test]
 fn model_review_parser_maps_approve_and_deny() {
@@ -106,25 +129,11 @@ async fn model_review_request_declares_the_accepted_schema_version() {
             None,
         ),
     })]));
-    let source = ModelBackedPermissionAdmissionSource::from_config(ModelProviderConfig::new(
-        provider.clone(),
-        ModelName::new("fake/reviewer").expect("model name should be valid"),
-        ModelRetryPolicy::default(),
-    ))
-    .expect("review source should build");
-    let request = permission_request_from_call(
-        &call(json!({
-            "reason": "Confirm the endpoint is reachable",
-            "requested": { "network": true },
-            "for_action": { "command": "curl -sI https://example.com", "cwd": null }
-        })),
-        Vec::new(),
-    )
-    .expect("request should parse");
+    let source = review_source(provider.clone());
 
     source
         .review(
-            request,
+            review_request(),
             PermissionAdmissionContext::new(CancellationToken::new()),
         )
         .await
@@ -146,4 +155,119 @@ async fn model_review_request_declares_the_accepted_schema_version() {
         )),
         "user prompt must declare the schema version the parser accepts"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_review_request_keeps_thinking_modest_and_output_budget_wide() {
+    // Reviewers on reasoning models bill hidden reasoning tokens against the
+    // same ceiling as the answer. The reviewer request must therefore keep
+    // thinking at a low effort and leave the ceiling far above one review
+    // JSON, otherwise an ordinary reasoning pass is truncated before the
+    // reviewer can answer in the accepted schema.
+    let provider = Arc::new(FakeModelProvider::new(vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::text(
+                r#"{"schema_version":"permission_review.v1","decision":"approve","risk":"low","user_authorization":"high","rationale":"The exact command is grounded in the task."}"#,
+            )],
+            FinishReason::Stop,
+            None,
+        ),
+    })]));
+    let source = review_source(provider.clone());
+
+    source
+        .review(
+            review_request(),
+            PermissionAdmissionContext::new(CancellationToken::new()),
+        )
+        .await
+        .expect("review should be accepted");
+
+    let recorded = provider.recorded_requests();
+    let [model_request] = recorded.as_slice() else {
+        panic!("expected exactly one recorded review request");
+    };
+    let generation = model_request.generation();
+    assert_eq!(generation.max_output_tokens(), Some(2048));
+    assert_eq!(
+        generation.reasoning_effort().map(ReasoningEffort::as_str),
+        Some("low")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_review_reports_a_truncated_answer_as_an_output_budget_failure() {
+    // A reviewer that runs out of output tokens never reaches the review
+    // schema. The failure must name the output budget rather than read as a
+    // reviewer that returned output outside the contract.
+    let provider = Arc::new(FakeModelProvider::new(vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::text(
+                r#"{"schema_version":"permission_review.v1","decision":"approve","#,
+            )],
+            FinishReason::Length,
+            None,
+        ),
+    })]));
+    let source = review_source(provider);
+
+    let error = source
+        .review(
+            review_request(),
+            PermissionAdmissionContext::new(CancellationToken::new()),
+        )
+        .await
+        .expect_err("a truncated review must not be accepted");
+
+    let message = error.to_string();
+    assert!(
+        matches!(
+            &error,
+            PermissionAdmissionError::ReviewOutputTruncated { finish_reason }
+                if *finish_reason == FinishReason::Length
+        ),
+        "message was {message}"
+    );
+    assert!(
+        message.contains("ran out of output tokens"),
+        "message should name the exhausted output budget: {message}"
+    );
+    assert!(message.contains("Length"), "message was {message}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_review_separates_provider_failures_from_invalid_reviewer_output() {
+    // A reviewer the provider never let answer is a failed review, not a
+    // contract violation. Keeping the two apart lets runtime policy retry or
+    // escalate instead of recording the reviewer as non-compliant.
+    for (finish_reason, expected) in [
+        (FinishReason::Blocked, "safety filter"),
+        (FinishReason::Error, "failed permission review response"),
+    ] {
+        let provider = Arc::new(FakeModelProvider::new(vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text("no review decision")],
+                finish_reason,
+                None,
+            ),
+        })]));
+        let source = review_source(provider);
+
+        let error = source
+            .review(
+                review_request(),
+                PermissionAdmissionContext::new(CancellationToken::new()),
+            )
+            .await
+            .expect_err("a non-stop review must not be accepted");
+
+        assert!(
+            matches!(&error, PermissionAdmissionError::ReviewFailed { .. }),
+            "{finish_reason:?} should stay a failed review, got {error}"
+        );
+        assert!(
+            error.to_string().contains(expected),
+            "message was {error}, expected {expected}"
+        );
+    }
 }
