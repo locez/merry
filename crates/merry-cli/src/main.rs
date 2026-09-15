@@ -27,7 +27,7 @@ mod web;
 use clap::Parser;
 use coding::ProcessExecutionMode;
 use config::{MerryConfig, XdgPaths};
-use std::{env, io};
+use std::env;
 
 use cli::Cli;
 use cli_exit::CliExit;
@@ -43,8 +43,7 @@ fn main() -> CliExit {
     // Completion scripts come straight from the clap definition; they must
     // print even when no config exists yet or the current one fails to load.
     if let Some(cli::CliCommand::Completions(args)) = &cli.command {
-        completions::write_completions(args.shell, &mut io::stdout().lock());
-        return CliExit::Success;
+        return completions::print_completions(args.shell);
     }
 
     let config_paths = match XdgPaths::from_env() {

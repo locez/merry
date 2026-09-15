@@ -90,10 +90,7 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
         ),
         // `main` answers this before loading config; kept here so the route
         // stays total if that short-circuit ever moves.
-        Some(CliCommand::Completions(args)) => {
-            crate::completions::write_completions(args.shell, &mut std::io::stdout().lock());
-            CliExit::Success
-        }
+        Some(CliCommand::Completions(args)) => crate::completions::print_completions(args.shell),
     }
 }
 
