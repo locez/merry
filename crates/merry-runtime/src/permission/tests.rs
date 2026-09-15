@@ -1,4 +1,5 @@
-use super::review::{parse_permission_review_model_output, requested_capabilities_json};
+use super::request_json::requested_capabilities_json;
+use super::review::parse_permission_review_model_output;
 use super::*;
 use crate::{MAX_PROCESS_CWD_BYTES, model_config::ModelProviderConfig};
 use merry_core::{ToolCallArguments, ToolCallId};
@@ -292,6 +293,42 @@ fn requested_paths_reject_traversal_and_conflicting_duplicates() {
     )
     .expect_err("conflicting normalized paths must be rejected");
     assert!(conflict.to_string().contains("conflicting access"));
+}
+
+#[test]
+fn permission_request_fingerprint_json_carries_only_correlation_fields() {
+    // `PermissionRequest::fingerprint` hashes this object and the derived
+    // approval id correlates host responses, so the field set is a
+    // compatibility contract rather than a display detail.
+    let request = permission_request_from_call(
+        &call(json!({
+            "reason": "Need dependency metadata",
+            "requested": { "network": true },
+            "for_action": { "command": "cargo metadata", "cwd": "." }
+        })),
+        Vec::new(),
+    )
+    .expect("request should parse");
+
+    let fingerprint = permission_request_fingerprint_json(&request);
+    let mut keys = fingerprint
+        .as_object()
+        .expect("fingerprint input should be an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "action",
+            "reason",
+            "requested",
+            "review_only",
+            "tool_call_id",
+            "tool_name"
+        ]
+    );
 }
 
 #[test]

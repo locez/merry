@@ -19,11 +19,11 @@
 //!   [`ModelProvider`] behind a [`ModelProviderConfig`].
 
 use super::PermissionAdmissionContext;
+use super::request_json::{permissioned_action_json, requested_capabilities_json};
 use super::{
     PermissionAdmissionDecision, PermissionAdmissionError, PermissionAdmissionFuture,
     PermissionAdmissionReview, PermissionAdmissionReviewSource, PermissionAdmissionSource,
-    PermissionRequest, PermissionReviewRisk, PermissionUserAuthorization, PermissionedAction,
-    RequestedCapability,
+    PermissionRequest, PermissionReviewRisk, PermissionUserAuthorization,
 };
 use crate::model_completion::{
     ModelCompletionError, complete_single_text, is_cancelled_model_error,
@@ -34,7 +34,6 @@ use merry_llm::{
     ModelProvider, ModelRequest, ModelStreamContext,
 };
 use serde::Deserialize;
-use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// Reviewer output schema version accepted by [`parse_permission_review_model_output`].
@@ -89,17 +88,6 @@ impl PermissionAdmissionSource for ModelBackedPermissionAdmissionSource {
             parse_permission_review_model_output(&text)
         })
     }
-}
-
-pub(crate) fn permission_request_fingerprint_json(request: &PermissionRequest) -> Value {
-    json!({
-        "tool_call_id": request.tool_call_id().as_str(),
-        "tool_name": request.tool_name().as_str(),
-        "reason": request.reason(),
-        "review_only": request.is_action_review(),
-        "requested": requested_capabilities_json(request.requested()),
-        "action": permissioned_action_json(request.action()),
-    })
 }
 
 fn compile_permission_review_model_request(
@@ -197,48 +185,6 @@ fn push_review_block(prompt: &mut String, label: &str, value: &str) {
     prompt.push_str("\n>>> ");
     prompt.push_str(label);
     prompt.push_str(" END\n");
-}
-
-pub(crate) fn requested_capabilities_json(requested: &[RequestedCapability]) -> Value {
-    let mut network = false;
-    let mut paths = Vec::new();
-    let mut integrations = Vec::new();
-    for capability in requested {
-        match capability {
-            RequestedCapability::Network => network = true,
-            RequestedCapability::Path(path) => {
-                paths.push(json!({
-                    "path": path.path(),
-                    "access": path.access().as_str(),
-                }));
-            }
-            RequestedCapability::HostIntegration(integration) => {
-                integrations.push(integration.as_str());
-            }
-        }
-    }
-    let mut payload = json!({});
-    if network {
-        payload["network"] = json!(true);
-    }
-    if !paths.is_empty() {
-        payload["paths"] = Value::Array(paths);
-    }
-    if !integrations.is_empty() {
-        payload["host_integrations"] = json!(integrations);
-    }
-    payload
-}
-
-pub(crate) fn permissioned_action_json(action: &PermissionedAction) -> Value {
-    match action {
-        PermissionedAction::Process(intent) => json!({
-            "kind": "process",
-            "command": crate::shell_command_for_argv(intent.argv()),
-            "cwd": intent.cwd(),
-            "summary": intent.summary(),
-        }),
-    }
 }
 
 /// Reviewer-supplied decision fields parsed from one model JSON object.

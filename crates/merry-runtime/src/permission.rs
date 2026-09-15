@@ -19,6 +19,7 @@ const DEFAULT_PERMISSION_STDOUT_LIMIT_BYTES: usize = 64 * 1024;
 const DEFAULT_PERMISSION_STDERR_LIMIT_BYTES: usize = 64 * 1024;
 mod input;
 mod payload;
+mod request_json;
 mod review;
 
 pub(crate) use input::{
@@ -32,9 +33,8 @@ pub(crate) use payload::{
     permission_blocked_outcome, permission_denied_outcome, permission_invalid_arguments_outcome,
     permission_review_error_outcome,
 };
-pub(crate) use review::{
-    ModelBackedPermissionAdmissionSource, permission_request_fingerprint_json,
-};
+pub(crate) use request_json::permission_request_fingerprint_json;
+pub(crate) use review::ModelBackedPermissionAdmissionSource;
 
 /// How much runtime should trust the host/runtime owner for permission gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

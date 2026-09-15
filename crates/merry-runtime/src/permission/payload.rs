@@ -1,9 +1,9 @@
+use super::request_json::permission_request_json;
 use super::{
     PermissionAdmissionError, PermissionAdmissionReview, PermissionAdmissionReviewSource,
     PermissionRequest,
 };
 use crate::ToolExecutionOutcome;
-use crate::permission::review::{permissioned_action_json, requested_capabilities_json};
 use merry_core::{ErrorInfo, PendingToolCall};
 use serde_json::{Value, json};
 
@@ -149,16 +149,10 @@ fn permission_denied_guidance() -> Value {
 }
 
 fn permission_request_summary(request: &PermissionRequest) -> Value {
-    json!({
-        "fingerprint": request.fingerprint(),
-        "approval_id": request.approval_id(),
-        "tool_call_id": request.tool_call_id().as_str(),
-        "tool_name": request.tool_name().as_str(),
-        "reason": request.reason(),
-        "review_only": request.is_action_review(),
-        "requested": requested_capabilities_json(request.requested()),
-        "action": permissioned_action_json(request.action()),
-    })
+    let mut summary = permission_request_json(request);
+    summary["fingerprint"] = json!(request.fingerprint());
+    summary["approval_id"] = json!(request.approval_id());
+    summary
 }
 
 pub(crate) fn permission_invalid_arguments_outcome(
