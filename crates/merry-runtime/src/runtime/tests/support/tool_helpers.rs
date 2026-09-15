@@ -139,6 +139,26 @@ pub(in crate::runtime::tests) fn resolved_tool_result(
         .expect("tool call should resolve")
 }
 
+/// Reads the artifact of a resolved tool result and parses it as JSON.
+///
+/// `label` names the behaviour under test so a failure points at the test's
+/// subject instead of a generic artifact read.
+pub(in crate::runtime::tests) async fn resolved_artifact_json(
+    runtime: &Runtime,
+    result: &merry_core::ToolCallResult,
+    label: &str,
+) -> serde_json::Value {
+    let content = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .unwrap_or_else(|error| panic!("{label} artifact should be readable: {error}"));
+    let text = content
+        .as_text()
+        .unwrap_or_else(|| panic!("{label} result should be textual JSON"));
+    serde_json::from_str(text)
+        .unwrap_or_else(|error| panic!("{label} artifact should parse as JSON: {error}"))
+}
+
 pub(in crate::runtime::tests) async fn register_policy_pending_tool(
     session: &str,
     tool_name: &str,
