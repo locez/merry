@@ -522,6 +522,16 @@ fn persisted_entries(entries: &[CheckpointEntry]) -> Vec<CheckpointEntryWire> {
     entries.iter().map(CheckpointEntryWire::from).collect()
 }
 
+/// Wire form of one compacted checkpoint candidate.
+///
+/// This value is both parsed from model output and persisted as checkpoint
+/// wire, so `deny_unknown_fields` is deliberate and must stay: a checkpoint is
+/// a durable record read back across sessions, and an unexpected field means
+/// the model answered a different schema than the one it was given. Ignoring
+/// such a field would silently accept a contract change and then persist it.
+///
+/// The permissive unknown-field policy used for model-produced decisions that
+/// are never persisted (see `crate::permission::review`) does not apply here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CompactedCheckpointCandidateWire {
