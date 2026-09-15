@@ -226,10 +226,17 @@ ask and each request is denied with that reason on stderr, so grant the
 capabilities up front, pass the task on argv, or pick `model_only` or `deny`
 when a piped run needs approvals without a terminal.
 
-TUI and `run` use outer+inner bubblewrap automatically. `--inner-sandbox`
-selects the Codex-compatible single inner sandbox, while `--no-sandbox`
-selects the explicit unrestricted host mode: process actions inherit the host
-filesystem, environment, and permissions without any bubblewrap namespace.
+TUI and `run` use outer+inner bubblewrap automatically. Before the outer
+sandbox starts, Merry probes whether bubblewrap can run inside bubblewrap on
+this host. When it cannot, startup stops with a warning that quotes the
+bubblewrap error, names the likely cause, and points to
+[SANDBOX.md](SANDBOX.md); Merry never silently downgrades to a weaker mode.
+The usual cause is the bubblewrap AppArmor profile shipped by Ubuntu 24.04
+and newer, and SANDBOX.md describes the host change that allows nesting.
+`--inner-sandbox` selects the Codex-compatible single inner sandbox
+explicitly, while `--no-sandbox` selects the explicit unrestricted host mode:
+process actions inherit the host filesystem, environment, and permissions
+without any bubblewrap namespace.
 Both inner modes start from a read-only view of their parent filesystem, so
 ordinary commands can see host configuration and toolchains. The inner action
 policy controls workspace writes, network access, path review, and modeled host

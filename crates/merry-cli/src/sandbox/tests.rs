@@ -159,3 +159,31 @@ mod gpg_public;
 
 #[cfg(target_os = "linux")]
 mod ssh;
+
+#[test]
+fn nested_sandbox_diagnostic_names_the_cause_and_the_setup_document() {
+    let error = Error::NestedSandboxUnavailable {
+        stderr: "bwrap: No permissions to create new namespace".to_owned(),
+        apparmor_profile: Some(PathBuf::from("/etc/apparmor.d/bwrap-userns-restrict")),
+    };
+    let message = error.to_string();
+
+    assert!(message.starts_with("warning: bubblewrap cannot start inside Merry's outer sandbox"));
+    assert!(message.contains("bwrap: No permissions to create new namespace"));
+    assert!(message.contains("/etc/apparmor.d/bwrap-userns-restrict"));
+    assert!(message.contains("SANDBOX.md"));
+    assert!(message.contains("--inner-sandbox"));
+}
+
+#[test]
+fn nested_sandbox_diagnostic_omits_apparmor_hint_without_the_profile() {
+    let error = Error::NestedSandboxUnavailable {
+        stderr: "bwrap: setting up uid map: Permission denied".to_owned(),
+        apparmor_profile: None,
+    };
+    let message = error.to_string();
+
+    assert!(!message.contains("AppArmor"));
+    assert!(message.contains("SANDBOX.md"));
+    assert!(message.contains("--inner-sandbox"));
+}

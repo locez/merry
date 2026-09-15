@@ -22,6 +22,7 @@ use std::{
     ffi::OsString,
     fmt, io,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 #[cfg(test)]
@@ -97,6 +98,12 @@ pub(crate) const SANDBOX_XDG_STATE_HOME: &str = "/host/state";
 
 #[cfg(test)]
 pub(crate) const SANDBOX_MERRY_CONFIG_DIR: &str = "/host/config/merry";
+/// Host setup guide referenced by sandbox initialization diagnostics.
+pub(crate) const SANDBOX_SETUP_DOC: &str = "SANDBOX.md";
+pub(crate) const SANDBOX_SETUP_URL: &str = "https://github.com/locez/merry/blob/main/SANDBOX.md";
+/// Ubuntu's packaged bubblewrap AppArmor profile. When present it is the
+/// usual reason a second bubblewrap cannot start inside the first one.
+pub(crate) const BUBBLEWRAP_APPARMOR_PROFILE: &str = "/etc/apparmor.d/bwrap-userns-restrict";
 
 #[cfg(test)]
 pub(crate) const SANDBOX_MERRY_MANAGED_CONFIG_DIR: &str = "/host/config/merry/managed";
@@ -198,6 +205,107 @@ pub(crate) fn ensure_bubblewrap_available() -> Result<(), Error> {
         find_bwrap_in_path(&path, Path::exists)
             .map(|_| ())
             .ok_or(Error::MissingBubblewrap)
+    }
+}
+
+/// Verifies that an inner action sandbox can be created from the current
+/// process. This is run after the outer CLI sandbox handoff, so systems that
+/// prohibit nested user namespaces fail before the agent starts or requests
+/// command permissions.
+pub(crate) fn ensure_inner_sandbox_available() -> Result<(), Error> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        return Err(Error::UnsupportedPlatform);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let path = env::var_os("PATH")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| os(DEFAULT_SANDBOX_PATH));
+        let bwrap = find_bwrap_in_path(&path, Path::exists).ok_or(Error::MissingBubblewrap)?;
+        let output = Command::new(&bwrap)
+            .args([
+                "--unshare-user",
+                "--die-with-parent",
+                "--ro-bind",
+                "/",
+                "/",
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--",
+                "/usr/bin/true",
+            ])
+            .output()
+            .map_err(Error::InnerSandboxProbe)?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(Error::InnerSandboxUnavailable { stderr })
+    }
+}
+
+/// Verifies that Merry's outer sandbox can itself create the inner action
+/// sandbox. This probe runs before the outer re-exec, while the process still
+/// has the host's namespace permissions. It fails closed: Merry never
+/// downgrades the sandbox mode on its own, the diagnostic tells the user how
+/// to fix the host or which flag selects a single sandbox layer explicitly.
+pub(crate) fn ensure_nested_sandbox_available() -> Result<(), Error> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        return Err(Error::UnsupportedPlatform);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let path = env::var_os("PATH")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| os(DEFAULT_SANDBOX_PATH));
+        let bwrap = find_bwrap_in_path(&path, Path::exists).ok_or(Error::MissingBubblewrap)?;
+        let output = Command::new(&bwrap)
+            .args([
+                "--unshare-user",
+                "--unshare-ipc",
+                "--unshare-pid",
+                "--unshare-uts",
+                "--die-with-parent",
+                "--ro-bind",
+                "/",
+                "/",
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--",
+            ])
+            .arg(&bwrap)
+            .args([
+                "--unshare-user",
+                "--die-with-parent",
+                "--ro-bind",
+                "/",
+                "/",
+                "--proc",
+                "/proc",
+                "--dev",
+                "/dev",
+                "--",
+                "/usr/bin/true",
+            ])
+            .output()
+            .map_err(Error::NestedSandboxProbe)?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let apparmor_profile = Path::new(BUBBLEWRAP_APPARMOR_PROFILE)
+            .exists()
+            .then(|| PathBuf::from(BUBBLEWRAP_APPARMOR_PROFILE));
+        Err(Error::NestedSandboxUnavailable {
+            stderr,
+            apparmor_profile,
+        })
     }
 }
 
@@ -337,6 +445,15 @@ pub(crate) enum Error {
     },
     MountPlan(mounts::MountPlanError),
     Exec(io::Error),
+    InnerSandboxProbe(io::Error),
+    InnerSandboxUnavailable {
+        stderr: String,
+    },
+    NestedSandboxProbe(io::Error),
+    NestedSandboxUnavailable {
+        stderr: String,
+        apparmor_profile: Option<PathBuf>,
+    },
 }
 
 impl fmt::Display for Error {
@@ -421,6 +538,38 @@ impl fmt::Display for Error {
                 write!(
                     formatter,
                     "failed to execute bubblewrap sandbox bootstrap: {error}"
+                )
+            }
+            Error::InnerSandboxProbe(error) => write!(
+                formatter,
+                "failed to probe the inner action sandbox: {error}"
+            ),
+            Error::InnerSandboxUnavailable { stderr } => write!(
+                formatter,
+                "inner action sandbox is unavailable from the outer sandbox; command permission approval cannot fix sandbox initialization: {stderr}\n  See {SANDBOX_SETUP_DOC} ({SANDBOX_SETUP_URL}) for host setup, or rerun with --inner-sandbox to use a single action sandbox."
+            ),
+            Error::NestedSandboxProbe(error) => write!(
+                formatter,
+                "failed to probe nested bubblewrap sandboxes: {error}"
+            ),
+            Error::NestedSandboxUnavailable {
+                stderr,
+                apparmor_profile,
+            } => {
+                write!(
+                    formatter,
+                    "warning: bubblewrap cannot start inside Merry's outer sandbox on this host, so every process action would fail; command permission approval cannot fix sandbox initialization.\n  {stderr}"
+                )?;
+                if let Some(profile) = apparmor_profile {
+                    write!(
+                        formatter,
+                        "\n  The bubblewrap AppArmor profile {} is installed. On Ubuntu 24.04 and newer it strips capabilities from nested bubblewrap even though the kernel allows unprivileged user namespaces.",
+                        profile.display()
+                    )?;
+                }
+                write!(
+                    formatter,
+                    "\n  See {SANDBOX_SETUP_DOC} ({SANDBOX_SETUP_URL}) to allow nested bubblewrap, or rerun with --inner-sandbox to use a single action sandbox."
                 )
             }
         }

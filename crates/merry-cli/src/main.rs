@@ -25,6 +25,7 @@ mod tui;
 mod web;
 
 use clap::Parser;
+use coding::ProcessExecutionMode;
 use config::{MerryConfig, XdgPaths};
 use std::{env, io};
 
@@ -65,13 +66,28 @@ fn main() -> CliExit {
         Err(error) => return CliExit::Unexpected(error.to_string()),
     };
 
-    if cli.process_execution_mode().uses_inner_sandbox()
+    let process_execution_mode = cli.process_execution_mode();
+    if process_execution_mode.uses_inner_sandbox()
         && cli.is_product_surface()
         && let Err(error) = sandbox::ensure_bubblewrap_available()
     {
         return CliExit::Unexpected(error.to_string());
     }
 
+    // Probe nested bubblewrap before the outer re-exec. Merry never downgrades
+    // the sandbox mode on its own: when the host cannot nest, startup stops
+    // with a diagnostic that explains the host setup and the explicit flags.
+    let inside_sandbox =
+        env::var_os(sandbox::MERRY_SANDBOX_ENV).as_deref() == Some(std::ffi::OsStr::new("1"));
+    if cli.should_bootstrap_sandbox()
+        && !inside_sandbox
+        && let Err(error) = sandbox::ensure_nested_sandbox_available()
+    {
+        return CliExit::Unexpected(error.to_string());
+    }
+
+    // Resolved on the host, after the probe has settled that this invocation
+    // really re-execs: the sandboxed child cannot open /dev/tty itself.
     let review_terminal = if cli.hands_off_review_terminal() {
         sandbox::ReviewTerminalHandoff::resolve_controlling_terminal()
     } else {
@@ -83,6 +99,14 @@ fn main() -> CliExit {
         review_terminal,
         argv.iter().skip(1).cloned().collect(),
     ) {
+        return CliExit::Unexpected(error.to_string());
+    }
+
+    if process_execution_mode.uses_inner_sandbox()
+        && cli.is_product_surface()
+        && (process_execution_mode == ProcessExecutionMode::InnerOnly || inside_sandbox)
+        && let Err(error) = sandbox::ensure_inner_sandbox_available()
+    {
         return CliExit::Unexpected(error.to_string());
     }
 
