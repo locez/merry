@@ -217,9 +217,14 @@ is rejected as a usage error (exit 2).
 Reading the task from stdin consumes that stream, so `merry run -` answers
 permission review on the controlling terminal rather than on stdin. Piping
 approval answers alongside the task does not work: they would be read as part
-of the task. When the process has no controlling terminal, review has no way to
+of the task. Under the default outer sandbox, whose `--new-session` leaves the
+sandboxed process unable to open `/dev/tty`, a `run -` with a `model_then_human`
+or `human_only` policy binds only the parent's terminal device into the sandbox
+at `/dev/merry-review-tty` and reads answers there; tool processes never see
+it. When the process has no controlling terminal at all, review has no way to
 ask and each request is denied with that reason on stderr, so grant the
-capabilities up front or pass the task on argv when a piped run needs approvals.
+capabilities up front, pass the task on argv, or pick `model_only` or `deny`
+when a piped run needs approvals without a terminal.
 
 TUI and `run` use outer+inner bubblewrap automatically. `--inner-sandbox`
 selects the Codex-compatible single inner sandbox, while `--no-sandbox`
@@ -264,14 +269,12 @@ permission requests before a command runs:
 | `model_then_human` (default) | the model decides first; when it denies or cannot decide, you are asked in the TUI dialog or on the `merry run` prompt |
 | `human_only` | you decide, in the TUI dialog or on the `merry run` prompt |
 
-Unreviewed execution runs without any sandbox, so `approval_policy = "none"`
-requires `sandbox = "no-sandbox"` next to it; any other `sandbox` value, or
-leaving `sandbox` unset, is rejected when the config loads. The configured
-`none` policy applies to every session that runs without a sandbox; passing
-`--with-sandbox` or `--inner-sandbox` on the command line runs that session
-sandboxed with the default `model_then_human` reviewer. Every other configured
-policy applies under any sandbox mode, and `--approval-policy` on the command
-line always wins.
+`sandbox` and `approval_policy` are independent dimensions: the sandbox sets
+the execution boundary and the approval policy sets who reviews permission
+requests inside it. Any policy combines with any sandbox mode, in config and on
+the command line alike, and a flag for one dimension replaces only that
+dimension's configured default: `--with-sandbox` keeps a configured
+`approval_policy`, and `--approval-policy` keeps a configured `sandbox`.
 
 Outer filesystem mounts are applied parent-first after resolving access-rule
 precedence. Explicit file and directory imports preserve symbolic links instead
@@ -314,7 +317,7 @@ host execution remains outside this network-isolation boundary.
 
 `--approval-policy none` skips model and host permission review for configured
 actions in the TUI and `merry run`; `[cli] approval_policy = "none"` applies it
-to every session that runs without a sandbox. `--approval-policy deny` is the
+to every session, under whichever sandbox mode is in effect. `--approval-policy deny` is the
 opposite end: actions that need no approval still run, but every permission
 request and high-risk action review is denied without consulting a reviewer.
 Neither policy changes any access ceiling: `deny_paths`, `review_paths`

@@ -39,12 +39,12 @@ profile = "default"
 #   "model_then_human"  the model decides; if it denies or cannot decide, you
 #                       are asked in the TUI dialog or on the run prompt
 #   "human_only"        you decide in the TUI dialog or on the run prompt
-# --approval-policy on the command line replaces this default. "none" runs
-# without any sandbox, so it requires sandbox = "no-sandbox" above; any other
-# sandbox value, or no sandbox key at all, is rejected when the config loads,
-# and a --with-sandbox or --inner-sandbox flag on the command line runs that
-# session sandboxed with the default reviewer. Path ceilings, deny_paths, and
-# network = false still apply under every policy.
+# --approval-policy on the command line replaces this default. sandbox and
+# approval_policy are independent: the sandbox sets the execution boundary and
+# the approval policy sets who reviews requests inside it, so any value here
+# combines with any sandbox value, and a flag for one never changes the other.
+# Path ceilings, deny_paths, and network = false still apply under every
+# policy.
 approval_policy = "model_then_human"
 
 [permissions]

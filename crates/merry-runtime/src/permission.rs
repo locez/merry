@@ -524,17 +524,60 @@ pub trait PermissionAdmissionSource: Send + Sync {
     ) -> PermissionAdmissionFuture<'a>;
 }
 
+/// Why a permission request reached the host after AI review was attempted.
+///
+/// Under [`PermissionReviewMode::ModelThenHostFallback`] the host is asked
+/// only after the AI review step; this records what that step produced so a
+/// host prompt can distinguish an AI denial from AI review being unavailable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostFallbackReason {
+    /// The AI reviewer denied the request, or approved it without enough
+    /// confidence to admit it. The original review metadata is retained.
+    ModelDenied(PermissionAdmissionReview),
+    /// AI review ran but could not produce a decision.
+    ReviewFailed { message: String },
+    /// No approval-review model is configured, so AI review was skipped.
+    ReviewModelUnavailable,
+}
+
+impl HostFallbackReason {
+    /// Returns the AI review behind a [`HostFallbackReason::ModelDenied`].
+    #[must_use]
+    pub const fn model_review(&self) -> Option<&PermissionAdmissionReview> {
+        match self {
+            Self::ModelDenied(review) => Some(review),
+            Self::ReviewFailed { .. } | Self::ReviewModelUnavailable => None,
+        }
+    }
+}
+
+impl std::fmt::Display for HostFallbackReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ModelDenied(review) => {
+                write!(formatter, "AI review denied: {}", review.rationale())
+            }
+            Self::ReviewFailed { message } => {
+                write!(formatter, "AI review unavailable: {message}")
+            }
+            Self::ReviewModelUnavailable => {
+                formatter.write_str("AI review unavailable: no approval-review model is configured")
+            }
+        }
+    }
+}
+
 /// Cancellation-aware permission admission context.
 #[derive(Debug, Clone)]
 pub struct PermissionAdmissionContext {
     cancellation_token: CancellationToken,
-    review_failure: Option<String>,
+    host_fallback_reason: Option<HostFallbackReason>,
 }
 
 /// A pending host-facing permission review request.
 pub struct PermissionReviewRequest {
     request: PermissionRequest,
-    review_failure: Option<String>,
+    host_fallback_reason: Option<HostFallbackReason>,
     cancellation_token: CancellationToken,
     response_sender: Option<oneshot::Sender<PermissionReviewResponse>>,
 }
@@ -569,10 +612,10 @@ impl PermissionReviewRequest {
         self.request.fingerprint()
     }
 
-    /// Returns the AI review failure that caused the host fallback.
+    /// Returns why AI review handed this request to the host, when it did.
     #[must_use]
-    pub fn review_failure(&self) -> Option<&str> {
-        self.review_failure.as_deref()
+    pub const fn host_fallback_reason(&self) -> Option<&HostFallbackReason> {
+        self.host_fallback_reason.as_ref()
     }
 
     /// Returns whether the runtime cancelled this pending review.
@@ -696,7 +739,7 @@ impl PermissionAdmissionSource for ChannelPermissionAdmissionSource {
             let (response_sender, response_receiver) = oneshot::channel();
             let pending = PermissionReviewRequest {
                 request: request.clone(),
-                review_failure: context.review_failure().map(str::to_owned),
+                host_fallback_reason: context.host_fallback_reason().cloned(),
                 cancellation_token: context.cancellation_token().clone(),
                 response_sender: Some(response_sender),
             };
@@ -764,7 +807,7 @@ impl PermissionAdmissionContext {
     pub fn new(cancellation_token: CancellationToken) -> Self {
         Self {
             cancellation_token,
-            review_failure: None,
+            host_fallback_reason: None,
         }
     }
 
@@ -773,17 +816,17 @@ impl PermissionAdmissionContext {
         &self.cancellation_token
     }
 
-    /// Adds the structured reason that caused an optional host fallback.
+    /// Records why AI review handed this request to the host.
     #[must_use]
-    pub fn with_review_failure(mut self, failure: impl Into<String>) -> Self {
-        self.review_failure = Some(failure.into());
+    pub fn with_host_fallback_reason(mut self, reason: HostFallbackReason) -> Self {
+        self.host_fallback_reason = Some(reason);
         self
     }
 
-    /// Returns the AI review failure that preceded this fallback, if any.
+    /// Returns why AI review handed this request to the host, if it did.
     #[must_use]
-    pub fn review_failure(&self) -> Option<&str> {
-        self.review_failure.as_deref()
+    pub const fn host_fallback_reason(&self) -> Option<&HostFallbackReason> {
+        self.host_fallback_reason.as_ref()
     }
 }
 

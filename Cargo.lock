@@ -1589,6 +1589,7 @@ dependencies = [
  "merry-web",
  "pulldown-cmark",
  "ratatui",
+ "rustix",
  "schemars",
  "serde",
  "serde_json",

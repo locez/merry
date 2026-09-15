@@ -6,7 +6,8 @@ use crate::{
         BWRAP_PROGRAM, ChildHandoff, ClipboardAccess, DEFAULT_SANDBOX_PATH, Error,
         MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION, MERRY_SANDBOX_VERSION_ENV, Plan,
         SANDBOX_CHILD_HANDOFF_ARG, SANDBOX_ETC_READ_ONLY_DIR_PATHS,
-        SANDBOX_ETC_READ_ONLY_FILE_PATHS, SANDBOX_HOME_ROOT, SANDBOX_TMPDIR,
+        SANDBOX_ETC_READ_ONLY_FILE_PATHS, SANDBOX_HOME_ROOT, SANDBOX_REVIEW_TERMINAL_PATH,
+        SANDBOX_TMPDIR,
         host::{Host, HostPathProbe},
         integrations::{GraphicalAccessPlan, graphical_access_plan, host_integration_access_plan},
         mounts::{MountOrigin, MountPlan, append_mount_parent_args},
@@ -63,6 +64,15 @@ pub(super) fn build_plan(
         os("--tmpfs"),
         os(SANDBOX_HOME_ROOT),
     ];
+    if let Some(device) = &host.review_terminal_device {
+        // Only this one device node: `/dev/tty` stays unopenable under
+        // `--new-session`, and inner action sandboxes mount their own `/dev`.
+        args.extend([
+            os("--dev-bind"),
+            device.as_os_str().to_owned(),
+            os(SANDBOX_REVIEW_TERMINAL_PATH),
+        ]);
+    }
     if !Path::new(&home).starts_with(Path::new(SANDBOX_HOME_ROOT)) {
         append_mount_parent_args(&mut args, Path::new(&home));
         args.extend([os("--tmpfs"), home.clone()]);

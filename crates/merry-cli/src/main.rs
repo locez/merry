@@ -58,10 +58,7 @@ fn main() -> CliExit {
         return CliExit::Unexpected(error.to_string());
     }
     if let Some(config) = _config.as_ref() {
-        match config.cli_defaults() {
-            Ok(defaults) => cli.apply_defaults(defaults),
-            Err(error) => return CliExit::Unexpected(error.to_string()),
-        }
+        cli.apply_defaults(config.cli_defaults());
     }
     let log_settings = match effective_log_settings(_config.as_ref(), &config_paths) {
         Ok(settings) => settings,
@@ -75,9 +72,15 @@ fn main() -> CliExit {
         return CliExit::Unexpected(error.to_string());
     }
 
+    let review_terminal = if cli.hands_off_review_terminal() {
+        sandbox::ReviewTerminalHandoff::resolve_controlling_terminal()
+    } else {
+        None
+    };
     if let Err(error) = sandbox::maybe_reexec(
         cli.should_bootstrap_sandbox(),
         cli.clipboard_access(),
+        review_terminal,
         argv.iter().skip(1).cloned().collect(),
     ) {
         return CliExit::Unexpected(error.to_string());

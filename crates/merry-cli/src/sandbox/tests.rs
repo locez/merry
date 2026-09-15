@@ -86,6 +86,7 @@ fn sandbox_host() -> Host {
         host_integration_environment: HostIntegrationEnvironment::default(),
         development_environment: Vec::new(),
         current_uid: 1_000,
+        review_terminal_device: None,
     }
 }
 

@@ -2,6 +2,20 @@ use super::home;
 use crate::coding::{ApprovalPolicy, ProcessExecutionMode};
 use crate::config::{CliDefaults, ConfigError, MerryConfig, XdgPaths};
 
+const SANDBOXES: [(&str, ProcessExecutionMode); 3] = [
+    ("with-sandbox", ProcessExecutionMode::OuterAndInner),
+    ("no-sandbox", ProcessExecutionMode::Unrestricted),
+    ("inner-sandbox", ProcessExecutionMode::InnerOnly),
+];
+
+const POLICIES: [(&str, ApprovalPolicy); 5] = [
+    ("none", ApprovalPolicy::NoApproval),
+    ("deny", ApprovalPolicy::Deny),
+    ("model_only", ApprovalPolicy::ModelOnly),
+    ("model_then_human", ApprovalPolicy::ModelThenHuman),
+    ("human_only", ApprovalPolicy::HumanOnly),
+];
+
 fn load(text: &str) -> MerryConfig {
     MerryConfig::load_optional_from_text(Some(text), &XdgPaths::from_parts(home(), None, None))
         .expect("config should parse")
@@ -9,9 +23,7 @@ fn load(text: &str) -> MerryConfig {
 }
 
 fn cli_defaults(text: &str) -> CliDefaults {
-    load(text)
-        .cli_defaults()
-        .unwrap_or_else(|error| panic!("{text:?} [cli] defaults should validate: {error}"))
+    load(text).cli_defaults()
 }
 
 fn parse_error(text: &str) -> String {
@@ -20,14 +32,6 @@ fn parse_error(text: &str) -> String {
         Ok(config) => panic!("{text:?} should fail to parse, loaded {config:?}"),
         Err(error @ ConfigError::Parse { .. }) => error.to_string(),
         Err(error) => panic!("{text:?} should be a parse error, got {error}"),
-    }
-}
-
-fn invalid_error(text: &str) -> String {
-    match load(text).cli_defaults() {
-        Ok(defaults) => panic!("{text:?} should be rejected, resolved {defaults:?}"),
-        Err(error @ ConfigError::Invalid(_)) => error.to_string(),
-        Err(error) => panic!("{text:?} should be an invalid-config error, got {error}"),
     }
 }
 
@@ -42,77 +46,32 @@ fn cli_defaults_to_no_sandbox_mode_and_no_approval_policy() {
 }
 
 #[test]
-fn cli_sandbox_and_approval_policy_map_to_modes() {
-    for (text, mode, policy) in [
-        (
-            "[cli]\nsandbox = \"no-sandbox\"\n",
-            Some(ProcessExecutionMode::Unrestricted),
-            None,
-        ),
-        (
-            "[cli]\nsandbox = \"with-sandbox\"\n",
-            Some(ProcessExecutionMode::OuterAndInner),
-            None,
-        ),
-        (
-            "[cli]\nsandbox = \"no-sandbox\"\napproval_policy = \"none\"\n",
-            Some(ProcessExecutionMode::Unrestricted),
-            Some(ApprovalPolicy::NoApproval),
-        ),
-        (
-            "[cli]\napproval_policy = \"deny\"\n",
-            None,
-            Some(ApprovalPolicy::Deny),
-        ),
-        (
-            "[cli]\nsandbox = \"with-sandbox\"\napproval_policy = \"model_only\"\n",
-            Some(ProcessExecutionMode::OuterAndInner),
-            Some(ApprovalPolicy::ModelOnly),
-        ),
-        (
-            "[cli]\nsandbox = \"inner-sandbox\"\napproval_policy = \"model_then_human\"\n",
-            Some(ProcessExecutionMode::InnerOnly),
-            Some(ApprovalPolicy::ModelThenHuman),
-        ),
-        (
-            "[cli]\napproval_policy = \"human_only\"\n",
-            None,
-            Some(ApprovalPolicy::HumanOnly),
-        ),
-    ] {
-        let defaults = cli_defaults(text);
-        assert_eq!(defaults.process_execution_mode(), mode, "{text:?}");
-        assert_eq!(defaults.approval_policy(), policy, "{text:?}");
+fn cli_sandbox_and_approval_policy_each_resolve_alone() {
+    for (name, mode) in SANDBOXES {
+        let defaults = cli_defaults(&format!("[cli]\nsandbox = \"{name}\"\n"));
+        assert_eq!(defaults.process_execution_mode(), Some(mode), "{name}");
+        assert_eq!(defaults.approval_policy(), None, "{name}");
+    }
+    for (name, policy) in POLICIES {
+        let defaults = cli_defaults(&format!("[cli]\napproval_policy = \"{name}\"\n"));
+        assert_eq!(defaults.process_execution_mode(), None, "{name}");
+        assert_eq!(defaults.approval_policy(), Some(policy), "{name}");
     }
 }
 
+/// The sandbox decides the execution boundary and the approval policy
+/// decides who reviews requests inside it, so every combination is valid,
+/// including `none` next to a sandbox and a human reviewer without one.
 #[test]
-fn cli_none_approval_policy_requires_no_sandbox() {
-    for (text, found) in [
-        ("[cli]\napproval_policy = \"none\"\n", "sandbox is not set"),
-        (
-            "[cli]\nsandbox = \"with-sandbox\"\napproval_policy = \"none\"\n",
-            "sandbox = \"with-sandbox\"",
-        ),
-        (
-            "[cli]\nsandbox = \"inner-sandbox\"\napproval_policy = \"none\"\n",
-            "sandbox = \"inner-sandbox\"",
-        ),
-    ] {
-        let message = invalid_error(text);
-        assert!(
-            message.starts_with("Merry config is invalid: "),
-            "{message}"
-        );
-        assert!(
-            message.contains("[cli] approval_policy = \"none\" runs without any sandbox"),
-            "{message}"
-        );
-        assert!(
-            message.contains("requires sandbox = \"no-sandbox\""),
-            "{message}"
-        );
-        assert!(message.ends_with(found), "{message}");
+fn cli_accepts_every_sandbox_and_approval_policy_combination() {
+    for (sandbox, mode) in SANDBOXES {
+        for (policy_name, policy) in POLICIES {
+            let text =
+                format!("[cli]\nsandbox = \"{sandbox}\"\napproval_policy = \"{policy_name}\"\n");
+            let defaults = cli_defaults(&text);
+            assert_eq!(defaults.process_execution_mode(), Some(mode), "{text:?}");
+            assert_eq!(defaults.approval_policy(), Some(policy), "{text:?}");
+        }
     }
 }
 

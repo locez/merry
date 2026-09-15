@@ -389,8 +389,8 @@ async fn write_session_metadata(
 fn permission_review_view(request: &PermissionReviewRequest) -> (String, String) {
     let permission_request = request.request();
     let mut lines = vec![format!("approval_id: {}", request.approval_id())];
-    if let Some(failure) = request.review_failure() {
-        lines.push(format!("AI review fallback: {failure}"));
+    if let Some(reason) = request.host_fallback_reason() {
+        lines.push(reason.to_string());
     }
     if let Some(reason) = permission_request.reason() {
         lines.push(format!("reason: {reason}"));

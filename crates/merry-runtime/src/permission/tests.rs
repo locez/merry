@@ -340,8 +340,11 @@ async fn channel_human_review_waits_for_a_correlated_typed_response() {
         source_for_task
             .review(
                 request,
-                PermissionAdmissionContext::new(token)
-                    .with_review_failure("approval provider was unavailable"),
+                PermissionAdmissionContext::new(token).with_host_fallback_reason(
+                    HostFallbackReason::ReviewFailed {
+                        message: "approval provider was unavailable".to_owned(),
+                    },
+                ),
             )
             .await
     });
@@ -353,8 +356,17 @@ async fn channel_human_review_waits_for_a_correlated_typed_response() {
     assert_eq!(pending.approval_id(), approval_id);
     assert_eq!(pending.fingerprint(), fingerprint);
     assert_eq!(
-        pending.review_failure(),
-        Some("approval provider was unavailable")
+        pending.host_fallback_reason(),
+        Some(&HostFallbackReason::ReviewFailed {
+            message: "approval provider was unavailable".to_owned(),
+        })
+    );
+    assert_eq!(
+        pending
+            .host_fallback_reason()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("AI review unavailable: approval provider was unavailable")
     );
     pending
         .respond(PermissionReviewResponse::allow(

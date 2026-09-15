@@ -1,4 +1,4 @@
-use super::{ConfigError, MerryConfig};
+use super::MerryConfig;
 use crate::coding::{ApprovalPolicy, ProcessExecutionMode};
 use serde::Deserialize;
 
@@ -20,17 +20,6 @@ enum SandboxModeToml {
     Inner,
 }
 
-impl SandboxModeToml {
-    /// The config value, as written in `config.toml`.
-    const fn name(self) -> &'static str {
-        match self {
-            Self::With => "with-sandbox",
-            Self::No => "no-sandbox",
-            Self::Inner => "inner-sandbox",
-        }
-    }
-}
-
 impl From<SandboxModeToml> for ProcessExecutionMode {
     fn from(value: SandboxModeToml) -> Self {
         match value {
@@ -44,9 +33,10 @@ impl From<SandboxModeToml> for ProcessExecutionMode {
 /// Resolved `[cli]` defaults: the configured sandbox mode and approval
 /// policy, each absent when its key is unset.
 ///
-/// Unreviewed execution has no sandbox, so `approval_policy` is only ever
-/// [`ApprovalPolicy::NoApproval`] together with
-/// [`ProcessExecutionMode::Unrestricted`]; see [`MerryConfig::cli_defaults`].
+/// The two keys are independent. `sandbox` sets the execution boundary and
+/// `approval_policy` sets who reviews permission requests inside it; any
+/// approval policy may be configured next to any sandbox mode, exactly as the
+/// matching flags may be combined on the command line.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct CliDefaults {
     process_execution_mode: Option<ProcessExecutionMode>,
@@ -77,29 +67,12 @@ impl CliDefaults {
 
 impl MerryConfig {
     /// Returns the `[cli]` defaults, empty when the table is absent.
-    ///
-    /// `approval_policy = "none"` means running without any sandbox, so it
-    /// is rejected unless `sandbox = "no-sandbox"` is set alongside it.
-    pub(crate) fn cli_defaults(&self) -> Result<CliDefaults, ConfigError> {
-        let Some(cli) = self.raw.cli.as_ref() else {
-            return Ok(CliDefaults::default());
-        };
-        if cli.approval_policy == Some(ApprovalPolicy::NoApproval)
-            && cli.sandbox != Some(SandboxModeToml::No)
-        {
-            let found = match cli.sandbox {
-                Some(sandbox) => format!("sandbox = \"{}\"", sandbox.name()),
-                None => "sandbox is not set".to_owned(),
-            };
-            return Err(ConfigError::Invalid(format!(
-                "[cli] approval_policy = \"{}\" runs without any sandbox and requires \
-                 sandbox = \"no-sandbox\", but {found}",
-                ApprovalPolicy::NoApproval.name()
-            )));
-        }
-        Ok(CliDefaults::new(
-            cli.sandbox.map(Into::into),
-            cli.approval_policy,
-        ))
+    pub(crate) fn cli_defaults(&self) -> CliDefaults {
+        self.raw
+            .cli
+            .as_ref()
+            .map_or_else(CliDefaults::default, |cli| {
+                CliDefaults::new(cli.sandbox.map(Into::into), cli.approval_policy)
+            })
     }
 }

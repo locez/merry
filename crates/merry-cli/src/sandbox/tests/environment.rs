@@ -5,8 +5,8 @@ use crate::{
         Bootstrap, Error, MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION, MERRY_SANDBOX_VERSION_ENV,
         SANDBOX_ETC_READ_ONLY_DIR_PATHS, SANDBOX_ETC_READ_ONLY_FILE_PATHS, SANDBOX_HOME,
         SANDBOX_MERRY_CONFIG_DIR, SANDBOX_MERRY_LOG_DIR, SANDBOX_MERRY_MANAGED_CONFIG_DIR,
-        SANDBOX_MERRY_STATE_DIR, SANDBOX_TMPDIR, SANDBOX_XDG_CONFIG_HOME, SANDBOX_XDG_STATE_HOME,
-        os,
+        SANDBOX_MERRY_STATE_DIR, SANDBOX_REVIEW_TERMINAL_PATH, SANDBOX_TMPDIR,
+        SANDBOX_XDG_CONFIG_HOME, SANDBOX_XDG_STATE_HOME, os,
         tests::{
             assert_ro_mount, contains_sequence, plan_args, plan_sandbox, sandbox_host,
             sequence_position,
@@ -42,6 +42,46 @@ fn plan_uses_bwrap_and_required_namespace_args() {
     }
     assert!(!args.iter().any(|arg| arg == "--disable-userns"));
     assert!(!args.iter().any(|arg| arg == "--unshare-net"));
+}
+
+#[test]
+fn plan_binds_the_review_terminal_only_when_the_parent_hands_one_off() {
+    let host = sandbox_host();
+    let Bootstrap::Reexec(plan) = plan_sandbox(true, &host).expect("sandbox planning succeeds")
+    else {
+        panic!("expected sandbox reexec plan");
+    };
+    let args = plan_args(&plan);
+    assert!(
+        !args.iter().any(|arg| arg == SANDBOX_REVIEW_TERMINAL_PATH),
+        "no terminal device should be bound unless a run - asked for one: {args:?}"
+    );
+
+    let mut host = sandbox_host();
+    host.review_terminal_device = Some(PathBuf::from("/dev/pts/12"));
+    let Bootstrap::Reexec(plan) = plan_sandbox(true, &host).expect("sandbox planning succeeds")
+    else {
+        panic!("expected sandbox reexec plan");
+    };
+    let args = plan_args(&plan);
+    let dev = sequence_position(&args, &["--dev", "/dev"]).expect("/dev is mounted");
+    let bind = sequence_position(
+        &args,
+        &["--dev-bind", "/dev/pts/12", SANDBOX_REVIEW_TERMINAL_PATH],
+    )
+    .expect("the terminal device should be bound at the review path");
+    assert!(
+        dev < bind,
+        "the device bind must land on the sandbox /dev, not be covered by it"
+    );
+    assert!(
+        args.iter().any(|arg| arg == "--new-session"),
+        "binding the device must not relax --new-session"
+    );
+    assert!(
+        !args.iter().any(|arg| arg == "/dev/tty"),
+        "only the resolved device node is shared, never /dev/tty itself"
+    );
 }
 
 #[test]

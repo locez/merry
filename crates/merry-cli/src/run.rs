@@ -54,7 +54,7 @@ impl RunExitStatus {
 }
 
 /// `TASK` value that reads the task text from stdin instead of argv.
-const STDIN_TASK: &str = "-";
+pub(crate) const STDIN_TASK: &str = "-";
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct Args {

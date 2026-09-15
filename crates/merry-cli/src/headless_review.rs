@@ -1,7 +1,8 @@
+use crate::sandbox::SANDBOX_REVIEW_TERMINAL_PATH;
 use merry_runtime::{
     ChannelPermissionAdmissionSource, PermissionReviewRequest, RequestedCapability,
 };
-use std::{io, sync::Arc};
+use std::{io, path::Path, sync::Arc};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
     sync::mpsc,
@@ -14,12 +15,20 @@ use tokio_util::sync::CancellationToken;
 /// `merry run -` reads the task from stdin to end-of-file, so stdin can no
 /// longer carry answers: reusing it would read that end-of-file and silently
 /// deny every request. Those runs answer on the controlling terminal instead,
-/// and deny with an explicit reason when the process has none.
+/// or on the terminal device the outer sandbox parent bound into the sandbox,
+/// and deny with an explicit reason when the process has neither.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReviewInputChannel {
     Stdin,
     ControllingTerminal,
 }
+
+/// Terminal paths tried, in order, for a run whose task came from stdin.
+///
+/// `/dev/tty` is the controlling terminal. Under the outer sandbox,
+/// `--new-session` makes it unopenable, and the parent binds its terminal
+/// device at the second path instead; see `sandbox::review_terminal`.
+const REVIEW_TERMINAL_PATHS: [&str; 2] = ["/dev/tty", SANDBOX_REVIEW_TERMINAL_PATH];
 
 /// Reason recorded when a run has no channel to answer permission review on.
 const NO_REVIEW_INPUT_REASON: &str =
@@ -28,7 +37,8 @@ const NO_REVIEW_INPUT_REASON: &str =
 /// Operator-facing note explaining why a request was denied unanswered.
 const NO_REVIEW_INPUT_NOTICE: &str = concat!(
     "\nNo input channel for permission review: the task was read from stdin and ",
-    "no controlling terminal is available. Denying.\n"
+    "no terminal is available to answer on. Denying. Pass the task on the command ",
+    "line, or use --approval-policy model_only or deny, for runs without a terminal.\n"
 );
 
 pub(crate) struct HeadlessPermissionReviewer {
@@ -90,20 +100,37 @@ impl HeadlessPermissionReviewTask {
 /// Opens the reader that answers permission reviews for this run.
 ///
 /// A run whose task came from stdin has already consumed that stream, so it
-/// falls back to the controlling terminal. `None` means review has no way to
-/// ask, which is reported per request rather than silently defaulting to deny.
+/// falls back to a terminal. `None` means review has no way to ask, which is
+/// reported per request rather than silently defaulting to deny.
 async fn open_review_input(
     channel: ReviewInputChannel,
 ) -> Option<Box<dyn AsyncBufRead + Unpin + Send>> {
     match channel {
         ReviewInputChannel::Stdin => Some(Box::new(BufReader::new(tokio::io::stdin()))),
-        ReviewInputChannel::ControllingTerminal => tokio::fs::File::open("/dev/tty")
+        ReviewInputChannel::ControllingTerminal => open_review_terminal(&REVIEW_TERMINAL_PATHS)
             .await
-            .ok()
             .map(|terminal| {
                 Box::new(BufReader::new(terminal)) as Box<dyn AsyncBufRead + Unpin + Send>
             }),
     }
+}
+
+/// Opens the first terminal in `paths` that exists, for reading answers.
+///
+/// `O_NOCTTY` keeps a bound terminal device from ever becoming this
+/// process's controlling terminal.
+async fn open_review_terminal(paths: &[&str]) -> Option<tokio::fs::File> {
+    for path in paths {
+        if let Ok(terminal) = tokio::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(Path::new(path))
+            .await
+        {
+            return Some(terminal);
+        }
+    }
+    None
 }
 
 async fn run_headless_permission_review<R, W>(
@@ -250,8 +277,8 @@ fn format_permission_prompt(request: &PermissionReviewRequest) -> String {
         "Permission review required ({})",
         request.approval_id()
     )];
-    if let Some(failure) = request.review_failure() {
-        lines.push(format!("AI review unavailable: {failure}"));
+    if let Some(reason) = request.host_fallback_reason() {
+        lines.push(reason.to_string());
     }
     if let Some(reason) = permission_request.reason() {
         lines.push(format!("reason: {reason}"));
@@ -283,17 +310,17 @@ fn format_permission_prompt(request: &PermissionReviewRequest) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        HeadlessDecision, NO_REVIEW_INPUT_REASON, parse_decision, read_headless_decision,
-        review_request,
+        HeadlessDecision, NO_REVIEW_INPUT_REASON, open_review_terminal, parse_decision,
+        read_headless_decision, review_request,
     };
     use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
     use merry_runtime::{
         ChannelPermissionAdmissionSource, PermissionAdmissionContext, PermissionAdmissionDecision,
         PermissionAdmissionSource, PermissionRequest, parse_permission_request,
     };
-    use std::io::Cursor;
+    use std::io::{Cursor, Write};
     use std::sync::Arc;
-    use tokio::io::BufReader;
+    use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio_util::sync::CancellationToken;
 
     /// Reader type the no-input-channel case never constructs.
@@ -442,6 +469,36 @@ mod tests {
         assert!(
             matches!(decision, PermissionAdmissionDecision::Approved(_)),
             "an answered request should be approved: {decision:?}"
+        );
+    }
+
+    /// A stdin task answers on the first terminal path that opens, which is
+    /// the bound device when `/dev/tty` is unavailable in the outer sandbox.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stdin_task_review_falls_back_to_the_bound_review_terminal() {
+        let mut terminal = crate::sandbox::review_terminal::tests::open_pseudo_terminal();
+        let slave_path = terminal.slave_path.to_str().expect("UTF-8 slave path");
+        terminal
+            .master
+            .write_all(b"yes\n")
+            .expect("answer should reach the terminal");
+
+        let opened = open_review_terminal(&["/nonexistent/merry-review-tty", slave_path])
+            .await
+            .expect("the bound terminal should open");
+        let mut line = String::new();
+        BufReader::new(opened)
+            .read_line(&mut line)
+            .await
+            .expect("the answer should be readable");
+        assert_eq!(line.trim_end(), "yes");
+
+        assert!(
+            open_review_terminal(&["/nonexistent/merry-review-tty"])
+                .await
+                .is_none(),
+            "a run with no terminal at all must report the missing channel"
         );
     }
 }

@@ -344,9 +344,7 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
 
     assert_eq!(config.profile(), Some("default"));
     assert_eq!(
-        config
-            .cli_defaults()
-            .expect("example [cli] defaults should validate"),
+        config.cli_defaults(),
         CliDefaults::new(None, Some(ApprovalPolicy::ModelThenHuman)),
         "the user-facing example should not preselect a sandbox mode and should \
          spell out the default approval policy"

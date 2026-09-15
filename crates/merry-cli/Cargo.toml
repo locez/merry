@@ -48,6 +48,9 @@ image.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["pty"] }
+
 [[bin]]
 name = "merry"
 path = "src/main.rs"

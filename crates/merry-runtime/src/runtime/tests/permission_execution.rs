@@ -1,5 +1,6 @@
 use crate::{
-    PermissionReviewMode, RuntimeModelRole, RuntimeTrustLevel,
+    HostFallbackReason, PermissionAdmissionReviewSource, PermissionReviewMode, RuntimeModelRole,
+    RuntimeTrustLevel,
     process::ProcessPermissionProfileId,
     request_permissions_tool,
     runtime::{
@@ -694,6 +695,11 @@ async fn request_permissions_model_failure_uses_opt_in_host_fallback() {
         .expect("configured fallback should resolve missing model review");
 
     assert_eq!(admission.call_count(), 1);
+    assert_eq!(
+        admission.fallback_reasons(),
+        vec![Some(HostFallbackReason::ReviewModelUnavailable)],
+        "the host should be told that no review model was configured"
+    );
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         resolved_tool_result(&events).status(),
@@ -733,6 +739,19 @@ async fn request_permissions_model_denial_escalates_to_host_fallback() {
         .expect("model denial should hand the decision to the host");
 
     assert_eq!(admission.call_count(), 1);
+    let reasons = admission.fallback_reasons();
+    let Some(Some(HostFallbackReason::ModelDenied(review))) = reasons.first() else {
+        panic!("the host should see the model denial, got {reasons:?}");
+    };
+    assert_eq!(review.source(), PermissionAdmissionReviewSource::Model);
+    assert_eq!(
+        review.rationale(),
+        "The action is not grounded in the task."
+    );
+    assert_eq!(
+        reasons[0].as_ref().map(ToString::to_string).as_deref(),
+        Some("AI review denied: The action is not grounded in the task.")
+    );
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         resolved_tool_result(&events).status(),

@@ -363,25 +363,40 @@ impl PermissionedProcessRunnerFactory for RecordingPermissionedProcessRunnerFact
 pub(in crate::runtime::tests) struct StaticPermissionAdmissionSource {
     pub(in crate::runtime::tests) decision: crate::PermissionAdmissionDecision,
     pub(in crate::runtime::tests) calls: Arc<AtomicUsize>,
+    fallback_reasons: Arc<StdMutex<Vec<Option<crate::HostFallbackReason>>>>,
 }
 
 impl StaticPermissionAdmissionSource {
     pub(in crate::runtime::tests) fn approving() -> Self {
-        Self {
-            decision: crate::PermissionAdmissionDecision::approved("host approved"),
-            calls: Arc::new(AtomicUsize::new(0)),
-        }
+        Self::with_decision(crate::PermissionAdmissionDecision::approved(
+            "host approved",
+        ))
     }
 
     pub(in crate::runtime::tests) fn denying() -> Self {
+        Self::with_decision(crate::PermissionAdmissionDecision::denied("host denied"))
+    }
+
+    fn with_decision(decision: crate::PermissionAdmissionDecision) -> Self {
         Self {
-            decision: crate::PermissionAdmissionDecision::denied("host denied"),
+            decision,
             calls: Arc::new(AtomicUsize::new(0)),
+            fallback_reasons: Arc::new(StdMutex::new(Vec::new())),
         }
     }
 
     pub(in crate::runtime::tests) fn call_count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    /// The host fallback reason attached to each review, in call order.
+    pub(in crate::runtime::tests) fn fallback_reasons(
+        &self,
+    ) -> Vec<Option<crate::HostFallbackReason>> {
+        self.fallback_reasons
+            .lock()
+            .expect("fallback reasons mutex should not be poisoned")
+            .clone()
     }
 }
 
@@ -389,10 +404,14 @@ impl crate::PermissionAdmissionSource for StaticPermissionAdmissionSource {
     fn review<'a>(
         &'a self,
         _request: crate::PermissionRequest,
-        _context: crate::PermissionAdmissionContext,
+        context: crate::PermissionAdmissionContext,
     ) -> crate::PermissionAdmissionFuture<'a> {
         Box::pin(async move {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.fallback_reasons
+                .lock()
+                .expect("fallback reasons mutex should not be poisoned")
+                .push(context.host_fallback_reason().cloned());
             Ok(self.decision.clone())
         })
     }

@@ -82,6 +82,9 @@ pub(crate) struct Host {
     pub(crate) host_integration_environment: HostIntegrationEnvironment,
     pub(crate) development_environment: Vec<(OsString, OsString)>,
     pub(crate) current_uid: u32,
+    /// Terminal device a sandboxed `run -` reads review answers from; see
+    /// [`super::review_terminal`].
+    pub(crate) review_terminal_device: Option<PathBuf>,
 }
 
 impl Host {
@@ -125,6 +128,7 @@ impl Host {
             host_integration_environment: HostIntegrationEnvironment::from_env(),
             development_environment,
             current_uid: current_process_uid()?,
+            review_terminal_device: None,
         })
     }
 }

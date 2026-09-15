@@ -24,7 +24,13 @@ pub(crate) enum ApprovalPolicy {
 }
 
 impl ApprovalPolicy {
+    /// Whether this policy can put a request to the person at the terminal.
+    pub(crate) const fn may_ask_a_human(self) -> bool {
+        matches!(self, Self::ModelThenHuman | Self::HumanOnly)
+    }
+
     /// The value as written on the command line and in `config.toml`.
+    #[cfg(test)]
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::NoApproval => "none",
