@@ -49,11 +49,7 @@ impl ActionPathView {
         for rule in rules.iter().filter(|rule| {
             rule.access() == PathAccess::ReadOnly
                 && !rule.review_required()
-                && matches!(
-                    rule.source(),
-                    PathAccessRuleSource::TrustedGlobalConfig
-                        | PathAccessRuleSource::TrustedGlobalConfigWritableCeiling
-                )
+                && rule.source() == PathAccessRuleSource::TrustedGlobalConfig
         }) {
             if rule.path().exists() {
                 bindings.extend(

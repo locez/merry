@@ -38,11 +38,7 @@ pub(super) fn append(
     for rule in rules.iter().filter(|rule| {
         rule.access() == PathAccess::ReadOnly
             && !rule.review_required()
-            && matches!(
-                rule.source(),
-                PathAccessRuleSource::TrustedGlobalConfig
-                    | PathAccessRuleSource::TrustedGlobalConfigWritableCeiling
-            )
+            && rule.source() == PathAccessRuleSource::TrustedGlobalConfig
     }) {
         for (path, source) in aliases.action_paths(rule.path(), tmp_source) {
             let path = view.destination(&path)?;

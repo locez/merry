@@ -234,8 +234,13 @@ impl MerryConfig {
     }
 
     /// Returns host IPC integrations explicitly enabled by trusted global
-    /// configuration. These form the outer sandbox capability ceiling and are
-    /// forwarded to inner process sandboxes when their endpoints are present.
+    /// configuration.
+    ///
+    /// The same flags are the outer sandbox capability ceiling and the inner
+    /// action preauthorization: when a validated endpoint exists, ordinary
+    /// inner actions use it without another permission request. `deny_paths`
+    /// and `review_paths` still mask a configured endpoint until the exact
+    /// path is approved for that action.
     pub fn host_integrations(&self) -> Vec<HostIntegration> {
         let Some(permissions) = self.raw.permissions.as_ref() else {
             return Vec::new();

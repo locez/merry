@@ -459,11 +459,7 @@ fn path_rule_covers(
         && rules.iter().any(|rule| {
             path_matches_rule(requested_path, rule.path())
                 && rule.access() == PathAccess::ReadOnly
-                && matches!(
-                    rule.source(),
-                    PathAccessRuleSource::TrustedGlobalConfig
-                        | PathAccessRuleSource::TrustedGlobalConfigWritableCeiling
-                )
+                && rule.source() == PathAccessRuleSource::TrustedGlobalConfig
         })
     {
         return false;
@@ -492,13 +488,7 @@ fn normalize_path_rules(rules: Vec<PathAccessRule>) -> Vec<PathAccessRule> {
             action_rules.push(rule);
             continue;
         }
-        let access = if rule.source() == PathAccessRuleSource::TrustedGlobalConfigWritableCeiling
-            && rule.access() == PathAccess::ReadWrite
-        {
-            PathAccess::ReadOnly
-        } else {
-            rule.access()
-        };
+        let access = rule.access();
         let entry = merged
             .entry(rule.path().to_path_buf())
             .or_insert((access, rule.source()));

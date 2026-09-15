@@ -154,13 +154,23 @@ pub(crate) fn bwrap_process_plan_with_environment(
     if let Some(sockets) = environment.gpg_client() {
         super::gpg_client::append(&mut args, sockets, cwd_root, &view)?;
     }
-    for (_, socket, _) in environment.host_integration_bindings() {
-        if view.visible(&socket) && view.visible(&resolve_bwrap_path(&socket)) {
-            append_bwrap_host_integration_mount_args(&mut args, &socket, &view)?;
+    // Path policy governs whether the endpoint is reachable, not whether an
+    // enabled integration is announced. A deny or review rule over the socket
+    // or one of its parent directories leaves the mount masked, while the
+    // client environment below still names the configured endpoint, so the
+    // failure appears at connect time instead of the capability silently
+    // disappearing.
+    //
+    // Resolving the enabled bindings once serves both the mounts below and the
+    // client environment, so each endpoint is validated exactly once per plan.
+    let host_integration_bindings = environment.host_integration_bindings();
+    for binding in &host_integration_bindings {
+        if view.visible(&binding.socket) && view.visible(&resolve_bwrap_path(&binding.socket)) {
+            append_bwrap_host_integration_mount_args(&mut args, &binding.socket, &view)?;
         }
     }
     let aliases = &view.aliases;
-    for path in environment.host_integration_hidden_paths() {
+    for path in environment.host_integration_hidden_paths(&host_integration_bindings) {
         for (path, source) in aliases.action_paths(&path, &environment.tmp_source) {
             if source.exists() && view.visible(&path) {
                 append_bwrap_hidden_host_integration_args(&mut args, &view.destination(&path)?);
@@ -199,12 +209,12 @@ pub(crate) fn bwrap_process_plan_with_environment(
         os("--unsetenv"),
         os("DBUS_SESSION_BUS_ADDRESS"),
     ]);
-    for (integration, socket, address) in environment.host_integration_bindings() {
+    for binding in &host_integration_bindings {
         append_bwrap_host_integration_environment_args(
             &mut args,
-            integration,
-            &socket,
-            address.as_deref(),
+            binding.integration,
+            &binding.socket,
+            binding.environment_value.as_deref(),
         );
     }
     args.push(os("--"));

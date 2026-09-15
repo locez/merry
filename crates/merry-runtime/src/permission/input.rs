@@ -19,15 +19,24 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
+// Model-visible schema text for requested capabilities. The derive attributes
+// below and the hand-written JSON schema in `requested_capabilities_schema_json`
+// describe the same fields, so both read these constants instead of repeating
+// the wording and drifting apart.
+const REQUESTED_PATHS_DESCRIPTION: &str = "Exact filesystem paths to authorize. Configured review_paths stay hidden until explicitly requested and are approved only for this action, as are Git metadata writes. Ordinary path grants may be retained by a session-aware backend. Each item specifies a path and ro, rw, or deny access; approval never overrides a configured read-only ceiling or denial.";
+const REQUESTED_PATH_DESCRIPTION: &str = "Path requested for additional filesystem access.";
+const REQUESTED_ACCESS_DESCRIPTION: &str = "Requested access for this path: ro, rw, or deny.";
+const REQUESTED_NETWORK_DESCRIPTION: &str =
+    "Set true to request network capability for the exact action.";
+const REQUESTED_HOST_INTEGRATIONS_DESCRIPTION: &str = "Host integrations: ssh-agent, dbus, or gpg-agent. Integrations enabled by trusted global configuration are already available and need no request; request one here only when it is not configured but its endpoint is present. SSH includes its agent and read-only known_hosts; GPG includes read-only public keys and its native agent, not the SSH socket. File sources still obey path restrictions, including deny_paths and review_paths; neither integration authorizes networking. dbus is the session bus used by keyring clients.";
+const PERMISSION_REASON_DESCRIPTION: &str = "Optional short explanation of why the current task needs the requested capability. Null is treated as omitted; a provided string must be non-blank and within the byte limit.";
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RequestedPathInput {
-    #[schemars(
-        description = "Path requested for additional filesystem access.",
-        length(min = 1)
-    )]
+    #[schemars(description = REQUESTED_PATH_DESCRIPTION, length(min = 1))]
     pub(crate) path: String,
-    #[schemars(description = "Requested access for this path: ro, rw, or deny.")]
+    #[schemars(description = REQUESTED_ACCESS_DESCRIPTION)]
     pub(crate) access: String,
 }
 
@@ -35,17 +44,13 @@ pub(crate) struct RequestedPathInput {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RequestedCapabilitiesInput {
     #[serde(default)]
-    #[schemars(description = "Set true to request network capability for the exact action.")]
+    #[schemars(description = REQUESTED_NETWORK_DESCRIPTION)]
     pub(crate) network: bool,
     #[serde(default)]
-    #[schemars(
-        description = "Exact filesystem paths to authorize. Configured review_paths stay hidden until explicitly requested and are approved only for this action, as are Git metadata writes. Ordinary path grants may be retained by a session-aware backend. Each item specifies a path and ro, rw, or deny access; approval never overrides a configured read-only ceiling or denial."
-    )]
+    #[schemars(description = REQUESTED_PATHS_DESCRIPTION)]
     pub(crate) paths: Vec<RequestedPathInput>,
     #[serde(default)]
-    #[schemars(
-        description = "Explicitly configured host integrations: ssh-agent, dbus, or gpg-agent. SSH includes its agent and read-only known_hosts; GPG includes read-only public keys and its native agent, not the SSH socket. File sources still obey path restrictions; neither integration authorizes networking. dbus is the session bus used by keyring clients."
-    )]
+    #[schemars(description = REQUESTED_HOST_INTEGRATIONS_DESCRIPTION)]
     pub(crate) host_integrations: Vec<String>,
 }
 
@@ -89,7 +94,7 @@ impl<'de> Deserialize<'de> for PermissionedProcessInput {
 #[tool(
     crate = "crate",
     name = "request_permissions",
-    description = "Request additional filesystem, network, or explicitly configured host-integration capability for one exact planned action."
+    description = "Request additional filesystem, network, or host-integration capability that trusted configuration did not already enable for one exact planned action."
 )]
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -97,7 +102,7 @@ struct RequestPermissionsInput {
     #[serde(default)]
     #[schemars(
         schema_with = "permission_reason_schema_for_schemars",
-        description = "Optional short explanation of why the current task needs the requested capability. Null is treated as omitted; a provided string must be non-blank and within the byte limit."
+        description = PERMISSION_REASON_DESCRIPTION
     )]
     reason: Option<String>,
     #[schemars(schema_with = "requested_capabilities_schema_for_schemars")]
@@ -111,7 +116,7 @@ struct RequestPermissionsInput {
 pub fn request_permissions_tool() -> Result<RegisteredTool, PermissionAdmissionError> {
     let spec = RequestPermissionsInput::tool_spec_with(
         REQUEST_PERMISSIONS_TOOL_NAME,
-        "Request additional filesystem, network, or explicitly configured host-integration capability for one exact planned action. A configured session-aware process backend retains approved paths and host integrations for later actions in the current runtime session, but network access must be requested again for every action. When one command needs multiple capabilities, request them together.",
+        "Request filesystem, network, or host-integration capability that trusted configuration has not already enabled for one exact planned action. Paths and host integrations enabled by trusted global configuration are already available, so request only what is still missing. A configured session-aware process backend retains approved paths and host integrations for later actions in the current runtime session, but network access must be requested again for every action. When one command needs multiple capabilities, request them together.",
     )
     .map_err(|error| PermissionAdmissionError::Core {
         source: error.into(),
@@ -203,7 +208,7 @@ impl ToolExecutor for RequestPermissionsToolExecutor {
 
 fn permission_reason_schema_json() -> Value {
     json!({
-        "description": "Optional short explanation of why the current task needs the requested capability. Null is treated as omitted; a provided string must be non-blank and within the byte limit.",
+        "description": PERMISSION_REASON_DESCRIPTION,
         "anyOf": [
             { "type": "null" },
             {
@@ -219,15 +224,15 @@ fn requested_capabilities_schema_json() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "description": "Capabilities to add for this exact action after approval. Use network for network access, paths for filesystem paths, or host_integrations for SSH agent, native GPG agent, or D-Bus access. A session-aware backend may retain ordinary path and host-integration grants, but network, configured review_paths, and Git metadata writes require approval for every action. Include every capability the same command needs in one request.",
+        "description": "Capabilities to add for this exact action after approval. Use network for network access, paths for filesystem paths, or host_integrations for SSH agent, native GPG agent, or D-Bus access. Paths and host integrations enabled by trusted global configuration are already available to every action, so request only what is still missing. A session-aware backend may retain ordinary path and host-integration grants, but network, configured review_paths, and Git metadata writes require approval for every action. Include every capability the same command needs in one request.",
         "properties": {
             "network": {
                 "type": "boolean",
-                "description": "Set true to request network capability for the exact action."
+                "description": REQUESTED_NETWORK_DESCRIPTION
             },
             "paths": {
                 "type": "array",
-                "description": "Exact filesystem paths to authorize. Configured review_paths stay hidden until explicitly requested and are approved only for this action, as are Git metadata writes. Ordinary path grants may be retained by a session-aware backend. Each item specifies a path and ro, rw, or deny access; approval never overrides a configured read-only ceiling or denial.",
+                "description": REQUESTED_PATHS_DESCRIPTION,
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
@@ -235,12 +240,12 @@ fn requested_capabilities_schema_json() -> Value {
                         "path": {
                             "type": "string",
                             "minLength": 1,
-                            "description": "Path requested for additional filesystem access."
+                            "description": REQUESTED_PATH_DESCRIPTION
                         },
                         "access": {
                             "type": "string",
                             "enum": ["ro", "rw", "deny"],
-                            "description": "Requested access for this path: ro, rw, or deny."
+                            "description": REQUESTED_ACCESS_DESCRIPTION
                         }
                     },
                     "required": ["path", "access"]
@@ -248,7 +253,7 @@ fn requested_capabilities_schema_json() -> Value {
             },
             "host_integrations": {
                 "type": "array",
-                "description": "Explicitly configured host integrations: ssh-agent, dbus, or gpg-agent. SSH includes its agent and read-only known_hosts; GPG includes read-only public keys and its native agent, not the SSH socket. File sources still obey path restrictions; neither integration authorizes networking. dbus is the session bus used by keyring clients.",
+                "description": REQUESTED_HOST_INTEGRATIONS_DESCRIPTION,
                 "items": {
                     "type": "string",
                     "enum": ["ssh-agent", "dbus", "gpg-agent"]

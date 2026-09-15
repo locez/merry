@@ -1,3 +1,4 @@
+use super::reentry;
 use crate::sandbox::{
     mounts::{MountOrigin, MountPlan, MountPlanError},
     os,
@@ -458,7 +459,9 @@ fn cyclic_links_in_an_imported_parent_fail_during_planning() {
 #[test]
 fn outer_and_inner_preserve_system_reads_and_git_admission() {
     const CHILD_ENV: &str = "MERRY_BWRAP_MOUNT_TEST_CHILD";
-    if std::env::var_os(CHILD_ENV).as_deref() == Some(std::ffi::OsStr::new("1")) {
+    const CHILD_TEST: &str =
+        "sandbox::tests::mount_execution::outer_and_inner_preserve_system_reads_and_git_admission";
+    if reentry::is_child(CHILD_ENV) {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -493,20 +496,11 @@ fn outer_and_inner_preserve_system_reads_and_git_admission() {
         false,
         MountOrigin::Workspace,
     );
-    let command = vec![
-        executable.into_os_string(),
-        os("--exact"),
-        os(
-            "sandbox::tests::mount_execution::outer_and_inner_preserve_system_reads_and_git_admission",
-        ),
-        os("--nocapture"),
-    ];
-    assert_success(
-        outer_command(mounts, &command)
-            .env(CHILD_ENV, "1")
-            .output()
-            .expect("outer sandbox"),
-    );
+    let output = outer_command(mounts, &reentry::reentry_arguments(&executable, CHILD_TEST))
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("outer sandbox");
+    reentry::assert_child_passed(&output, CHILD_TEST);
     assert_eq!(
         fs::read_to_string(workspace.join(".git/config")).unwrap(),
         "approved"

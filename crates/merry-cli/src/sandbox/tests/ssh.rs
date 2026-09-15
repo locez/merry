@@ -1,9 +1,9 @@
-use super::sandbox_host;
+use super::{assert_sandbox_child_ran, integration_host, reentry};
 use crate::{
     coding::ProcessExecutionMode,
     config::{MerryConfig, XdgPaths},
     runtime_config::prepared_action_process_backend_options,
-    sandbox::{Bootstrap, ClipboardAccess, host::current_process_uid, os, plan_bootstrap},
+    sandbox::{Bootstrap, ClipboardAccess, plan_bootstrap},
 };
 use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
 use merry_process::{LocalProcessBackend, ProcessBackend, ProcessBackendMode};
@@ -11,15 +11,17 @@ use merry_runtime::{
     PathAccess, PathAccessRule, PathAccessRuleSource, PermissionedAction, ProcessRunnerContext,
     parse_permission_request,
 };
-use std::{env, ffi::OsStr, fs, os::unix::net::UnixListener, process::Command};
+use std::{env, fs, os::unix::net::UnixListener, process::Command};
 use tokio_util::sync::CancellationToken;
 
-const CHILD_ENV: &str = "MERRY_SSH_CONFIG_TEST_CHILD";
+const CHILD_MARKER: &str = "MERRY_SSH_CONFIG_TEST_CHILD";
+const CHILD_TEST: &str =
+    "sandbox::tests::ssh::ssh_agent_config_preauthorizes_inner_actions_through_both_sandboxes";
 const HOST_KEY: &str = "sandbox.example ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n";
 
 #[test]
-fn ssh_agent_config_requires_review_through_both_sandboxes() {
-    if env::var_os(CHILD_ENV).as_deref() == Some(OsStr::new("1")) {
+fn ssh_agent_config_preauthorizes_inner_actions_through_both_sandboxes() {
+    if reentry::is_child(CHILD_MARKER) {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -50,68 +52,27 @@ fn assert_ssh_sandboxes(expose_etc: bool) {
     fs::write(ssh.join("config"), "invalid-host-only-config").unwrap();
     let original = fs::read("/etc/ssh/ssh_config").expect("openssh-client configuration");
     let original_metadata = fs::metadata("/etc/ssh/ssh_config").unwrap();
-    let mut host = sandbox_host();
-    host.cwd = workspace;
-    host.current_exe = env::current_exe().unwrap();
-    host.path = Some(os("/usr/bin:/bin"));
-    host.args.clear();
-    host.current_uid = current_process_uid().unwrap();
-    host.xdg_paths = XdgPaths::from_parts(home, None, None);
-    fs::create_dir_all(host.xdg_paths.config_dir()).unwrap();
-    fs::write(
-        host.xdg_paths.config_file(),
+    let mut host = integration_host(
+        &home,
+        &workspace,
         if expose_etc {
             "[permissions]\nssh_agent = true\nreadonly_paths = [\"/etc\"]\n"
         } else {
             "[permissions]\nssh_agent = true\n"
         },
-    )
-    .unwrap();
-    let config = MerryConfig::load_optional(&host.xdg_paths)
-        .unwrap()
-        .unwrap();
-    host.host_integrations = config.host_integrations();
+    );
     host.host_integration_environment.ssh_agent_socket = Some(agent);
-    host.trusted_path_rules = config.trusted_global_path_rules().unwrap();
-    host.trusted_path_rules.push(PathAccessRule::new(
-        &host.current_exe,
-        PathAccess::ReadOnly,
-        PathAccessRuleSource::TrustedGlobalConfig,
-    ));
     let Bootstrap::Reexec(mut plan) =
         plan_bootstrap(true, ClipboardAccess::Disabled, &host).unwrap()
     else {
         panic!("outer sandbox plan");
     };
-    let command_index = plan
-        .args
-        .iter()
-        .rposition(|argument| argument == host.current_exe.as_os_str())
-        .unwrap();
-    plan.args.truncate(command_index);
+    reentry::truncate_before_command(&mut plan, &host.current_exe);
     assert_ssh_bootstrap(&plan, expose_etc);
     if !expose_etc {
         assert_ssh_bootstrap_restrictions(&host);
     }
-    plan.args.extend([
-        os("--setenv"),
-        os(CHILD_ENV),
-        os("1"),
-        host.current_exe.into_os_string(),
-        os("--exact"),
-        os("sandbox::tests::ssh::ssh_agent_config_requires_review_through_both_sandboxes"),
-        os("--nocapture"),
-    ]);
-    let mut command = Command::new(plan.program);
-    command.args(plan.args).env_clear().envs(plan.env);
-    plan.ssh_config.configure_command(&mut command).unwrap();
-    let output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_sandbox_child_ran(&mut plan, &host, CHILD_MARKER, CHILD_TEST);
     assert_eq!(fs::read("/etc/ssh/ssh_config").unwrap(), original);
     assert_eq!(
         fs::metadata("/etc/ssh/ssh_config").unwrap().permissions(),
@@ -177,12 +138,7 @@ fn assert_ssh_bootstrap_restrictions(host: &crate::sandbox::host::Host) {
         else {
             panic!("expected sandbox reexec plan");
         };
-        let command_index = plan
-            .args
-            .iter()
-            .rposition(|argument| argument == host.current_exe.as_os_str())
-            .unwrap();
-        plan.args.truncate(command_index);
+        reentry::truncate_before_command(&mut plan, &host.current_exe);
         let output = bootstrap_output(
             &plan,
             r#"
@@ -267,22 +223,15 @@ async fn assert_ssh_client() {
     let PermissionedAction::Process(intent) = request.action();
     let factory = session.permissioned_factory();
     assert!(
-        !factory
+        factory
             .request_capabilities_are_satisfied(&request)
-            .unwrap()
+            .unwrap(),
+        "trusted config must preauthorize the configured ssh agent"
     );
-    let before = session
+    // No permission request is needed: the configured agent is already part of
+    // the inner action baseline.
+    let output = session
         .runner()
-        .run(
-            intent.clone(),
-            ProcessRunnerContext::new(CancellationToken::new()),
-        )
-        .await
-        .unwrap();
-    assert!(!before.ok(), "{before:?}");
-    factory.validate_request(&request).unwrap();
-    let output = factory
-        .runner_for(&request)
         .run(
             intent.clone(),
             ProcessRunnerContext::new(CancellationToken::new()),
@@ -300,12 +249,5 @@ async fn assert_ssh_client() {
             "stricthostkeychecking true" | "stricthostkeychecking yes"
         )),
         "{output:?}"
-    );
-    assert!(
-        !backend
-            .new_session()
-            .permissioned_factory()
-            .request_capabilities_are_satisfied(&request)
-            .unwrap()
     );
 }

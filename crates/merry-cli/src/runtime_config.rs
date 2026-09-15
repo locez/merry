@@ -91,7 +91,14 @@ pub(crate) fn main_reasoning_effort(
         .and_then(|provider| provider.reasoning_effort))
 }
 
-pub(crate) fn action_process_backend_options(
+/// Builds the action backend inputs that need no asynchronous discovery.
+///
+/// GnuPG socket discovery has to run on the async runtime, so this is the
+/// synchronous base for [`prepared_action_process_backend_options`], which every
+/// product surface uses. Trusted global configuration preauthorizes the inner
+/// action sandbox here; the per-action endpoint checks still happen in the
+/// process backend.
+fn action_process_backend_options(
     config: Option<&MerryConfig>,
 ) -> Result<ActionProcessBackendOptions, config::ConfigError> {
     let home = config
@@ -124,7 +131,14 @@ pub(crate) fn action_process_backend_options(
     Ok(ActionProcessBackendOptions::new()
         .with_path_rules(path_rules)
         .with_network_requests_allowed(config.is_none_or(MerryConfig::network_requests_allowed))
-        .with_environment_overrides(environment_overrides))
+        .with_environment_overrides(environment_overrides)
+        // Trusted global config is the user's own preauthorization for the
+        // inner action sandbox; the endpoints are still validated per action.
+        .with_host_integrations(
+            config
+                .map(MerryConfig::host_integrations)
+                .unwrap_or_default(),
+        ))
 }
 
 pub(crate) fn configured_runtime_builder(
@@ -189,7 +203,9 @@ mod tests {
     use std::{fs, path::PathBuf, sync::Arc};
 
     #[test]
-    fn configured_host_integrations_do_not_preauthorize_inner_actions() {
+    fn configured_host_integrations_preauthorize_inner_actions() {
+        use merry_runtime::HostIntegration;
+
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
         let config = MerryConfig::load_optional_from_text(
             Some("[permissions]\nssh_agent = true\ngpg_agent = true\ndbus = true\n"),
@@ -197,9 +213,27 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(config.host_integrations().len(), 3);
+        // `MerryConfig::host_integrations()` parsing is covered by the config
+        // module; this test owns the mapping into the action backend options.
         let options = action_process_backend_options(Some(&config)).unwrap();
-        assert!(options.host_integrations().is_empty());
+        assert_eq!(
+            options.host_integrations(),
+            [
+                HostIntegration::SshAgent,
+                HostIntegration::SessionBus,
+                HostIntegration::GpgAgent,
+            ]
+        );
+
+        let unconfigured =
+            MerryConfig::load_optional_from_text(Some("[permissions]\nnetwork = true\n"), &paths)
+                .unwrap()
+                .unwrap();
+        let options = action_process_backend_options(Some(&unconfigured)).unwrap();
+        assert!(
+            options.host_integrations().is_empty(),
+            "only integrations enabled by trusted config may be preauthorized"
+        );
     }
 
     #[test]

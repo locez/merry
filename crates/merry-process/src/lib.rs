@@ -165,7 +165,7 @@ pub struct ProcessBackendOptions {
     path_rules: Vec<PathAccessRule>,
     /// Isolated-session capability ceiling, not a grant to an ordinary runner.
     network_requests_allowed: bool,
-    /// Host integrations already approved by the embedding application.
+    /// Host integrations the embedding application authorizes for isolated actions.
     host_integrations: Vec<HostIntegration>,
     gpg_agent_sockets: Option<GpgAgentSockets>,
     /// Environment assignments validated and applied by the host backend.
@@ -209,8 +209,15 @@ impl ProcessBackendOptions {
         self
     }
 
-    /// Sets host integrations already approved by the embedding application.
-    /// Availability or outer-sandbox forwarding alone is not an approval.
+    /// Sets host integrations the embedding application authorizes.
+    ///
+    /// The embedding application owns this decision; the backend treats the
+    /// listed integrations as part of the ordinary action baseline instead of
+    /// requiring a per-action request for them. Merry's CLI derives the list
+    /// from user-trusted global configuration, which preauthorizes the inner
+    /// action sandbox; project-local configuration never does. Endpoint
+    /// validation and path policy still apply per action, so a `deny_paths` or
+    /// `review_paths` entry can keep a listed integration masked.
     #[must_use]
     pub fn with_host_integrations(
         mut self,

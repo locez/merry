@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+use crate::{config::MerryConfig, sandbox::host::current_process_uid};
 use crate::{
     config::XdgPaths,
     sandbox::{
@@ -7,10 +9,13 @@ use crate::{
         os, plan_bootstrap_with_file_exists, plan_bootstrap_with_probe,
     },
 };
+use merry_runtime::{PathAccess, PathAccessRule, PathAccessRuleSource};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
+#[cfg(target_os = "linux")]
+use std::{env, fs};
 
 #[derive(Default)]
 struct FakeHostProbe {
@@ -94,6 +99,45 @@ fn path_is_fake_bwrap(path: &Path) -> bool {
     path == Path::new("/custom/bin/bwrap")
 }
 
+/// Builds the host fixture an integration test re-enters with: a private home
+/// holding `permissions`, the current test binary as the sandbox command, and
+/// the same config the child half reloads through its own XDG paths.
+#[cfg(target_os = "linux")]
+fn integration_host(home: &Path, workspace: &Path, permissions: &str) -> Host {
+    let mut host = sandbox_host();
+    host.cwd = workspace.to_path_buf();
+    host.current_exe = env::current_exe().unwrap();
+    host.path = Some(os("/usr/bin:/bin"));
+    host.args.clear();
+    host.current_uid = current_process_uid().unwrap();
+    host.xdg_paths = XdgPaths::from_parts(home.to_path_buf(), None, None);
+    fs::create_dir_all(host.xdg_paths.config_dir()).unwrap();
+    fs::write(host.xdg_paths.config_file(), permissions).unwrap();
+    let config = MerryConfig::load_optional(&host.xdg_paths)
+        .unwrap()
+        .unwrap();
+    host.host_integrations = config.host_integrations();
+    host.trusted_path_rules = config.trusted_global_path_rules().unwrap();
+    host.trusted_path_rules.push(PathAccessRule::new(
+        &host.current_exe,
+        PathAccess::ReadOnly,
+        PathAccessRuleSource::TrustedGlobalConfig,
+    ));
+    host
+}
+
+/// Re-enters the test binary inside `plan`'s sandbox and asserts the named child
+/// test reported exactly one passing test.
+#[cfg(target_os = "linux")]
+fn assert_sandbox_child_ran(plan: &mut Plan, host: &Host, marker: &str, test_path: &str) {
+    plan.args.extend(reentry::sandboxed_reentry_arguments(
+        marker,
+        &host.current_exe,
+        test_path,
+    ));
+    reentry::assert_child_passed(&reentry::run_plan(plan), test_path);
+}
+
 fn plan_sandbox(with_sandbox: bool, host: &Host) -> Result<Bootstrap, Error> {
     plan_bootstrap_with_file_exists(with_sandbox, host, path_is_fake_bwrap)
 }
@@ -153,6 +197,9 @@ mod runtime_evidence;
 
 #[cfg(target_os = "linux")]
 mod mount_execution;
+
+#[cfg(target_os = "linux")]
+mod reentry;
 
 #[cfg(target_os = "linux")]
 mod gpg_public;

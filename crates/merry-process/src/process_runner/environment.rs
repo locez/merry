@@ -31,6 +31,19 @@ pub struct BwrapProcessEnvironment {
     pub(super) gpg_agent_sockets: Option<crate::GpgAgentSockets>,
 }
 
+/// One configured host integration whose endpoint validated for this action.
+///
+/// The socket is the object a sandbox mounts read-only, and the environment
+/// value is what the client needs next to it: the session bus address for
+/// `dbus`, the private GnuPG home for `gpg-agent`, and nothing for the SSH
+/// agent, whose client reads the socket path directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct HostIntegrationBinding {
+    pub(super) integration: HostIntegration,
+    pub(super) socket: PathBuf,
+    pub(super) environment_value: Option<OsString>,
+}
+
 impl BwrapProcessEnvironment {
     /// Builds an environment layout from the current process environment.
     ///
@@ -210,26 +223,30 @@ impl BwrapProcessEnvironment {
                 )));
             }
         }
-        for (_, socket, _) in self
+        for binding in self
             .host_integration_candidates()
             .into_iter()
-            .filter(|(integration, _, _)| integrations.contains(integration))
+            .filter(|binding| integrations.contains(&binding.integration))
         {
-            validate_host_socket(&socket)?;
+            validate_host_socket(&binding.socket)?;
         }
         Ok(())
     }
 
-    pub(super) fn host_integration_candidates(
-        &self,
-    ) -> Vec<(HostIntegration, PathBuf, Option<OsString>)> {
+    /// Returns every configured integration endpoint this environment can name,
+    /// whether or not it is enabled or its socket currently validates.
+    pub(super) fn host_integration_candidates(&self) -> Vec<HostIntegrationBinding> {
         let mut candidates = Vec::new();
         if let Some(path) = self
             .ssh_agent_socket
             .as_ref()
             .filter(|path| is_clean_absolute_path(path))
         {
-            candidates.push((HostIntegration::SshAgent, path.clone(), None));
+            candidates.push(HostIntegrationBinding {
+                integration: HostIntegration::SshAgent,
+                socket: path.clone(),
+                environment_value: None,
+            });
         }
         if let Some((socket, address)) = self
             .session_bus_address
@@ -237,28 +254,38 @@ impl BwrapProcessEnvironment {
             .and_then(|address| session_bus_socket_path(address).map(|socket| (socket, address)))
             .filter(|(socket, _)| is_clean_absolute_path(socket))
         {
-            candidates.push((HostIntegration::SessionBus, socket, Some(address.clone())));
+            candidates.push(HostIntegrationBinding {
+                integration: HostIntegration::SessionBus,
+                socket,
+                environment_value: Some(address.clone()),
+            });
         }
         if let Some(sockets) = &self.gpg_agent_sockets {
-            candidates.push((
-                HostIntegration::GpgAgent,
-                sockets.agent().to_path_buf(),
-                Some(sockets.home().as_os_str().to_owned()),
-            ));
+            candidates.push(HostIntegrationBinding {
+                integration: HostIntegration::GpgAgent,
+                socket: sockets.agent().to_path_buf(),
+                environment_value: Some(sockets.home().as_os_str().to_owned()),
+            });
         }
         candidates
     }
 
-    pub(super) fn host_integration_hidden_paths(&self) -> Vec<PathBuf> {
-        let allowed = self
-            .host_integration_bindings()
-            .into_iter()
-            .map(|(_, path, _)| crate::resolve_bwrap_path(&path))
+    /// Returns the masked paths for candidates this action did not enable.
+    ///
+    /// `bindings` is the result of [`Self::host_integration_bindings`] for the
+    /// same action, so one plan validates each endpoint exactly once.
+    pub(super) fn host_integration_hidden_paths(
+        &self,
+        bindings: &[HostIntegrationBinding],
+    ) -> Vec<PathBuf> {
+        let allowed = bindings
+            .iter()
+            .map(|binding| crate::resolve_bwrap_path(&binding.socket))
             .collect::<Vec<_>>();
         let mut hidden = self
             .host_integration_candidates()
             .into_iter()
-            .map(|(_, path, _)| path)
+            .map(|binding| binding.socket)
             .collect::<Vec<_>>();
         if let Some(sockets) = &self.gpg_agent_sockets {
             hidden.extend(sockets.paths().map(Path::to_path_buf));
@@ -269,13 +296,15 @@ impl BwrapProcessEnvironment {
         hidden
     }
 
-    pub(super) fn host_integration_bindings(
-        &self,
-    ) -> Vec<(HostIntegration, PathBuf, Option<OsString>)> {
+    /// Returns the enabled integrations whose endpoints validated, in a stable
+    /// order. One plan resolves this once and shares it between mounts and the
+    /// client environment.
+    pub(super) fn host_integration_bindings(&self) -> Vec<HostIntegrationBinding> {
         self.host_integration_candidates()
             .into_iter()
-            .filter(|(integration, socket, _)| {
-                self.host_integrations.contains(integration) && validate_host_socket(socket).is_ok()
+            .filter(|binding| {
+                self.host_integrations.contains(&binding.integration)
+                    && validate_host_socket(&binding.socket).is_ok()
             })
             .collect()
     }

@@ -49,7 +49,7 @@ fn non_tui_sandbox_ignores_valid_graphical_endpoints() {
 }
 
 #[test]
-fn sandbox_exposes_configured_host_integrations_as_outer_ceiling() {
+fn outer_sandbox_forwards_configured_host_integrations() {
     let mut host = sandbox_host();
     host.host_integrations = vec![HostIntegration::SshAgent, HostIntegration::SessionBus];
     host.host_integration_environment = HostIntegrationEnvironment {

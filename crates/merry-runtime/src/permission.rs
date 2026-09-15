@@ -104,9 +104,10 @@ pub enum RequestedCapability {
 }
 
 /// Host integration and supporting client files exposed to inner process actions.
-/// The outer sandbox remains the capability ceiling; an enabled integration can
-/// be forwarded to the inner action sandbox, while an explicit request can add
-/// one for a permissioned action when the backend supports it.
+/// Trusted global configuration is the capability ceiling and preauthorizes the
+/// inner action sandbox; an integration the configuration did not enable can
+/// still be requested for one permissioned action when the backend supports it
+/// and its endpoint is visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HostIntegration {
     /// The user's SSH authentication agent socket and read-only known-hosts files.

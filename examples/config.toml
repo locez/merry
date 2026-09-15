@@ -61,19 +61,30 @@ approval_policy = "model_then_human"
 network = true
 
 # Optional host integrations. These are explicit outer-sandbox ceilings and
-# forwarding switches, not inner preauthorizations. Inner actions must request
-# the matching host integration and pass runtime review before using its socket
-# or automatically imported client files. Approved grants follow runtime session
-# retention; review_paths still requires approval for each action.
+# inner preauthorizations: when the endpoint exists, ordinary inner actions use
+# the socket and automatically imported client files without another request,
+# like readonly_paths / readwrite_paths. review_paths still mask a configured
+# endpoint until the exact path is approved for that action, and deny_paths
+# always mask it. An integration that is not enabled here can still be requested
+# per action when its endpoint is visible.
+#
+# Path policy decides reachability, not announcement: SSH_AUTH_SOCK,
+# DBUS_SESSION_BUS_ADDRESS, and GNUPGHOME still name the configured endpoints,
+# while a deny_paths or review_paths entry covering the socket, the keyring, or
+# one of their parent directories masks the mount itself. A broad deny (for
+# example a whole ~/.ssh or ~/.gnupg deny) therefore also hides the agent even
+# though ssh_agent / gpg_agent / dbus is enabled: the client sees the endpoint
+# and fails when it connects. Keep such denies narrow if the integration should
+# stay usable; deny_paths is never reopened by an approval.
 # dbus is the D-Bus session bus, including Secret Service/keyring access.
 # ssh_agent = true
 # gpg_agent = true
 # dbus = true
-# After SSH approval, inner actions also get ~/.ssh/known_hosts and known_hosts2
-# read-only, not private keys or ~/.ssh/config. This does not enable networking,
-# accept new host keys, or bypass deny_paths / review_paths. A blanket ~/.ssh
-# deny still blocks these trust files; choose narrower deny paths if they should
-# remain readable.
+# Once the SSH integration is available, inner actions get ~/.ssh/known_hosts
+# and known_hosts2 read-only, not private keys or ~/.ssh/config. This does not
+# enable networking, accept new host keys, or bypass deny_paths / review_paths.
+# A blanket ~/.ssh deny still blocks these trust files; choose narrower deny
+# paths if they should remain readable.
 # ssh_agent also imports /etc/passwd and /etc/group for client account lookup,
 # plus /etc/ssh/ssh_config and /etc/ssh/ssh_config.d, all read-only. No blanket
 # /etc grant is needed. These imports obey deny_paths and do not import SSH
@@ -84,10 +95,10 @@ network = true
 # read-only snapshots to retain OpenSSH ownership checks across user namespaces.
 # Host files are never changed.
 # gpg_agent enables the native GPG socket discovered with gpgconf --list-dirs,
-# independently of ssh_agent (including GPG's SSH endpoint). After GPG approval,
-# inner actions also import pubring.kbx / pubring.gpg read-only; no extra
-# readonly_paths is needed. Approved inner actions use a private temporary
-# GNUPGHOME view for locks and a fresh trustdb.
+# independently of ssh_agent (including GPG's SSH endpoint). When the
+# integration is available, inner actions import pubring.kbx / pubring.gpg
+# read-only; no extra readonly_paths is needed. Such inner actions use a private
+# temporary GNUPGHOME view for locks and a fresh trustdb.
 # Host private keys, configuration, and trust state are not imported. Public-key
 # reads still obey deny_paths / review_paths. Keyboxd databases are not yet
 # supported and produce an explicit error, not an implicit host write grant.

@@ -88,9 +88,18 @@ fn coding_agent_profile_owns_process_permission_and_patch_order() {
             .description()
             .contains("runtime will review before running this exact command")
     );
+    assert!(process.spec().description().contains(
+        "Paths and host integrations enabled by trusted global configuration are already available"
+    ));
     let schema = process.spec().input_schema().as_schema().as_value();
     assert_eq!(schema["required"], json!(["command"]));
     assert!(schema["properties"]["permissions"].is_object());
+    assert!(
+        schema["properties"]["permissions"]["properties"]["host_integrations"]["description"]
+            .as_str()
+            .expect("host integration description should be text")
+            .contains("Integrations enabled by trusted global configuration are already available")
+    );
 }
 
 #[test]
@@ -223,6 +232,11 @@ fn coding_agent_profile_owns_the_coding_prompt_and_hashes_its_exact_text() {
         prompt.stable_blocks()[0]
             .text()
             .contains("discovered after a failed sandboxed attempt")
+    );
+    assert!(
+        prompt.stable_blocks()[0]
+            .text()
+            .contains("already available to sandboxed commands")
     );
 }
 

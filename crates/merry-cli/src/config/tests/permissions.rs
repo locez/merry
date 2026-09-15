@@ -123,7 +123,7 @@ fn rejects_removed_no_sandbox_review_key() {
 }
 
 #[test]
-fn parses_host_integrations_for_outer_sandbox_ceiling() {
+fn parses_host_integrations_for_outer_ceiling_and_inner_preauthorization() {
     let paths = XdgPaths::from_parts(home(), None, None);
     let config = MerryConfig::load_optional_from_text(
         Some(

@@ -362,19 +362,33 @@ preflight, before any action starts. Create the configured target first or prote
 an existing ancestor. Merry never creates host paths to install these masks;
 optional, absent development mounts remain skippable.
 
-`ssh_agent`, `gpg_agent`, and `dbus` independently enable outer-sandbox forwarding;
-they do not preauthorize inner actions. An inner action must request the matching
-host-integration capability and receive runtime approval before using the forwarded
-socket or automatically imported client files. Explicit trusted path rules may
-separately expose regular files, but do not approve protected agent sockets.
-A missing agent does not prevent ordinary actions
-from starting; explicitly requesting an unavailable endpoint reports an error. Native GPG
-socket discovery uses `gpgconf --list-dirs` and honors `GNUPGHOME`; it does not
-assume sockets live in `.gnupg` or `/run`. Outer scaffolding preserves private
-socket-directory permissions without importing their other contents.
+`ssh_agent`, `gpg_agent`, and `dbus` independently enable outer-sandbox forwarding
+and preauthorize the matching inner capability: when the validated endpoint exists,
+ordinary actions use the forwarded socket and automatically imported client files
+without a separate request, like trusted `readonly_paths` and `readwrite_paths`.
+`review_paths` still mask a configured endpoint until its exact path is approved
+for that action, and `deny_paths` always mask it; explicit trusted path rules that
+expose regular files do not thereby approve protected agent sockets. An
+integration that trusted configuration did not enable can still be requested for
+one permissioned action when its endpoint is visible. A missing agent does not
+prevent ordinary actions from starting; explicitly requesting an unavailable
+endpoint reports an error. Native GPG socket discovery uses `gpgconf --list-dirs`
+and honors `GNUPGHOME`; it does not assume sockets live in `.gnupg` or `/run`. Outer
+scaffolding preserves private socket-directory permissions without importing their
+other contents.
 
-After approval, the SSH integration also exposes `~/.ssh/known_hosts` and
-`known_hosts2` read-only to inner actions,
+Path policy decides whether an enabled endpoint is reachable, not whether it is
+announced. `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, and `GNUPGHOME` name the
+configured endpoints for every action, while a `deny_paths` or `review_paths`
+entry covering the socket, the keyring, or one of their parent directories masks
+the mount itself. A broad deny therefore also hides the agent even though
+`ssh_agent`/`gpg_agent`/`dbus` is enabled: the client sees the endpoint and fails
+when it connects. Keep those denies narrow (or outside the endpoint tree) when the
+integration should stay usable, and remember that `deny_paths` is never reopened
+by an approval.
+
+Once the SSH integration is available, `~/.ssh/known_hosts` and
+`known_hosts2` are exposed read-only to inner actions,
 without granting access to private keys, `~/.ssh/config`, or the network. These
 files still obey `deny_paths` and `review_paths`; an explicit deny of the entire
 `.ssh` directory blocks them as well. Existing host identities can be checked,
@@ -420,13 +434,14 @@ Runtime owns the session capability store and retention decisions. Process adapt
 consume read-only snapshots and report normalized path constraints; they do not
 record grants. Each preparation captures a fresh mount-alias view, shared by path
 review, masking, and client-resource discovery, rather than caching the filesystem
-for an entire session. Approved host integrations may be retained within that
-session; configuration flags alone never create a runtime grant. Separately
-reviewed paths still require per-action approval.
+for an entire session. Trusted configuration flags are the preauthorized baseline
+for paths and host integrations; capabilities approved through a request may be
+retained within that session. Separately reviewed paths still require per-action
+approval.
 
-`gpg_agent = true` makes the conventional public-key stores available for reviewed
-use. After GPG integration approval, inner actions import `pubring.kbx` and legacy
-`pubring.gpg` read-only, without additional `readonly_paths`. Each approved inner
+`gpg_agent = true` makes the conventional public-key stores available to inner
+actions. When the integration is available, inner actions import `pubring.kbx` and
+legacy `pubring.gpg` read-only, without additional `readonly_paths`. Each such
 action gets a private, temporary `GNUPGHOME` view
 at the original path for locks and a fresh trust database. These client writes
 never modify the host keyring, even when the host directory is declared read-only.

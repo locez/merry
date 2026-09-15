@@ -195,6 +195,47 @@ fn bwrap_process_plan_hides_unapproved_host_integrations() {
 }
 
 #[test]
+#[cfg(unix)]
+fn bwrap_process_plan_keeps_denied_host_integration_endpoint_in_the_environment() {
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("agent.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let socket_path = socket.to_str().unwrap();
+    let mut environment =
+        BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/tmp")
+            .expect("environment layout should validate");
+    environment.ssh_agent_socket = Some(socket.clone());
+    let environment = environment.with_host_integrations([HostIntegration::SshAgent]);
+    let denied = PathAccessRule::new(
+        directory.path().to_path_buf(),
+        PathAccess::Deny,
+        PathAccessRuleSource::TrustedGlobalConfig,
+    );
+    let plan = bwrap_process_plan_with_environment(
+        &intent(None),
+        Path::new("/workspace/merry"),
+        &environment,
+        true,
+        &[denied],
+        Path::new("/custom/bin/bwrap"),
+    )
+    .expect("sandbox plan");
+    let args = os_args(&plan.args);
+
+    assert!(!contains_sequence(
+        &args,
+        &["--ro-bind", socket_path, socket_path]
+    ));
+    // A deny rule commonly covers a parent directory the user wanted hidden,
+    // not the agent itself, so the configured integration stays announced and
+    // the client reports the unreachable endpoint at connect time.
+    assert!(contains_sequence(
+        &args,
+        &["--setenv", "SSH_AUTH_SOCK", socket_path]
+    ));
+}
+
+#[test]
 fn bwrap_process_plan_preserves_action_tmp_when_host_socket_is_under_it() {
     let mut environment =
         BwrapProcessEnvironment::new("/custom/bin:/usr/bin", "/home/alice", "/tmp")
