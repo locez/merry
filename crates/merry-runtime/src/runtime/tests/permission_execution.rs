@@ -7,8 +7,8 @@ use crate::{
         Runtime, RuntimeBuilder,
         tests::support::{
             common::{
-                RuntimeSessionStateTestExt, named_model, permission_review_completed_event,
-                session_id,
+                RuntimeSessionStateTestExt, completed_event_with, named_model,
+                permission_review_completed_event, session_id,
             },
             memory::record_prior_failed_tool_result,
             model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
@@ -26,6 +26,7 @@ use crate::{
     tool::ToolExecutionContext,
 };
 use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolCallResultStatus, ToolName};
+use merry_llm::{FinishReason, ModelOutput};
 use std::sync::Arc;
 
 #[tokio::test(flavor = "current_thread")]
@@ -161,6 +162,66 @@ async fn request_permissions_approved_by_review_executes_exact_process_action() 
         payload["permission_profile_id"],
         ProcessPermissionProfileId::APPROVED_PERMISSION_REQUEST.as_str()
     );
+    assert_eq!(
+        payload["permission_review"]["rationale"],
+        "The user asked to run this command."
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_permissions_review_accepts_reviewer_extra_fields() {
+    // Reviewer models on smaller providers may echo prompt metadata such as
+    // `reviewed_tool_call_id` or append their own commentary fields. The
+    // review must still approve the exact action instead of degrading to the
+    // host fallback.
+    let reviewer_output = concat!(
+        r#"{"schema_version":"permission_review.v1","decision":"approve","risk":"low","#,
+        r#""user_authorization":"high","rationale":"The user asked to run this command.","#,
+        r#""reviewed_tool_call_id":"call-permission-extra-fields","#,
+        r#""reviewed_tool_name":"request_permissions","review_only":false}"#
+    );
+    let review_provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event_with(vec![ModelOutput::text(reviewer_output)], FinishReason::Stop),
+        )])]);
+    let runner = FakeProcessRunner::succeeding();
+    let runner_factory = RecordingPermissionedProcessRunnerFactory::new(Arc::new(runner.clone()));
+    let (runtime, pending) = register_permission_pending_tool_with_builder(
+        "runtime-permission-review-extra-fields",
+        "call-permission-extra-fields",
+        |builder| {
+            builder
+                .model_provider_for_role(
+                    RuntimeModelRole::ApprovalReview,
+                    Arc::new(review_provider.clone()),
+                    named_model("fake/approval-review"),
+                )
+                .permissioned_process_runner_factory(Arc::new(runner_factory.clone()))
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("reviewer extra fields should not block the approved action");
+
+    assert_eq!(runner_factory.call_count(), 1);
+    assert_eq!(runner.call_count(), 1);
+    let result = resolved_tool_result(&events);
+    assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
+    let content = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .expect("process artifact should be readable");
+    let payload: serde_json::Value = serde_json::from_str(
+        content
+            .as_text()
+            .expect("permissioned process result should be JSON"),
+    )
+    .expect("process artifact should parse as JSON");
+    assert_eq!(payload["permission_review"]["source"], "model");
     assert_eq!(
         payload["permission_review"]["rationale"],
         "The user asked to run this command."
