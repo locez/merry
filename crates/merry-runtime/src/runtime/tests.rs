@@ -19,4 +19,3 @@ mod support;
 mod tool_catalog;
 mod tool_execution;
 mod tool_submit_cancellation;
-mod uncertainty_review;

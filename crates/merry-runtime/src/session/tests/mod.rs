@@ -14,20 +14,13 @@ use crate::{
         CheckpointSequenceRange, CheckpointSourceKind, CheckpointValidationPolicy,
         CitationBackedCheckpoint, CompactedCheckpointCandidate,
     },
-    context::{ContextCompiler, ContextEntry, ContextError, ContextEvidence, ContextSummary},
-    judgment::{
-        JudgmentConfidence, JudgmentError, JudgmentEvidence, JudgmentOutcome, JudgmentProvenance,
-        JudgmentPurpose, JudgmentRecommendation, JudgmentRecordId, JudgmentRiskLevel,
-        JudgmentSourceKind, SummaryDraftAcceptance, SummaryDraftAcceptanceAuthority,
-        SummaryDraftPromotionError, SummaryDraftPromotionInput,
-    },
+    context::ContextCompiler,
     ledger::{LedgerFactKind, LedgerProjection, LedgerScope},
     memory::{
         ActivatedMemory, MemoryActivationProvenance, MemoryActivationReason, MemoryActivationScore,
         MemoryActivationSourceKind, MemoryEvidence, MemoryId, MemoryItem, MemoryItemSelection,
         MemoryScope,
     },
-    summary_draft_promotion::SummaryDraftPromotionState,
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
@@ -40,7 +33,6 @@ mod checkpoint_ref_persistence;
 mod checkpoint_refs;
 mod compaction;
 mod context_memory;
-mod judgments;
 mod lifecycle;
 mod persistence;
 mod rolling_compaction;
@@ -193,151 +185,8 @@ fn citation_plain_runtime_checkpoint_for_tests(
         .expect("compacted checkpoint builds")
 }
 
-fn judgment_evidence(label: &str, id: &str, locator: EvidenceLocator) -> JudgmentEvidence {
-    JudgmentEvidence::new(label, EvidenceRef::new(artifact_id(id), locator))
-        .expect("valid judgment evidence")
-}
-
-fn judgment_constraints() -> Vec<String> {
-    vec!["advisory semantic signal only".to_owned()]
-}
-
-fn judgment_provenance() -> JudgmentProvenance {
-    JudgmentProvenance::new(JudgmentSourceKind::Test, "session test source")
-        .expect("valid judgment provenance")
-}
-
-fn judgment_confidence(value: f32) -> JudgmentConfidence {
-    JudgmentConfidence::new(value).expect("valid judgment confidence")
-}
-
-fn memory_relevance_request(evidence: Vec<JudgmentEvidence>) -> crate::judgment::JudgmentRequest {
-    crate::judgment::JudgmentRequest::new(
-        JudgmentPurpose::MemoryRelevance,
-        "candidate memory",
-        "Is this memory relevant?",
-        evidence,
-        judgment_constraints(),
-        "session test request",
-    )
-    .expect("valid memory relevance request")
-}
-
-fn summary_draft_request(evidence: Vec<JudgmentEvidence>) -> crate::judgment::JudgmentRequest {
-    crate::judgment::JudgmentRequest::new(
-        JudgmentPurpose::SummaryDraft,
-        "session summary",
-        "Draft from exact evidence.",
-        evidence,
-        judgment_constraints(),
-        "session test request",
-    )
-    .expect("valid summary draft request")
-}
-
-fn summary_draft_outcome_with_draft(
-    evidence: Vec<JudgmentEvidence>,
-    draft: impl Into<String>,
-) -> JudgmentOutcome {
-    JudgmentOutcome::new(
-        JudgmentPurpose::SummaryDraft,
-        JudgmentRecommendation::SummaryDraft {
-            draft: draft.into(),
-        },
-        judgment_confidence(0.8),
-        evidence,
-        "The draft is grounded in readable evidence.",
-        "The source is partial.",
-        judgment_provenance(),
-    )
-    .expect("valid summary draft outcome")
-}
-
-fn summary_draft_outcome(evidence: Vec<JudgmentEvidence>) -> JudgmentOutcome {
-    summary_draft_outcome_with_draft(evidence, "Draft from readable evidence.")
-}
-
-fn high_tool_risk_request() -> crate::judgment::JudgmentRequest {
-    crate::judgment::JudgmentRequest::new(
-        JudgmentPurpose::ToolRiskReview,
-        "pending lookup tool",
-        "Review whether the lookup input has semantic risk.",
-        Vec::new(),
-        judgment_constraints(),
-        "session test request",
-    )
-    .expect("valid tool risk request")
-}
-
-fn high_tool_risk_outcome() -> JudgmentOutcome {
-    JudgmentOutcome::new(
-        JudgmentPurpose::ToolRiskReview,
-        JudgmentRecommendation::ToolRiskReview {
-            risk: JudgmentRiskLevel::High,
-            concerns: vec!["Input references credential-like material.".to_owned()],
-        },
-        judgment_confidence(0.95),
-        Vec::new(),
-        "Credential-like input is semantically risky.",
-        "This is advisory and not a hard policy decision.",
-        judgment_provenance(),
-    )
-    .expect("valid high risk outcome")
-}
-
 fn memory_id(value: &str) -> MemoryId {
     MemoryId::new(value).expect("valid memory id")
-}
-
-fn promotion_input(
-    summary_id: &str,
-    draft_text: &str,
-    evidence: Vec<JudgmentEvidence>,
-) -> SummaryDraftPromotionInput {
-    promotion_input_with_source_record_id(summary_id, draft_text, evidence, None)
-}
-
-fn promotion_input_with_source_record_id(
-    summary_id: &str,
-    draft_text: &str,
-    evidence: Vec<JudgmentEvidence>,
-    source_record_id: Option<JudgmentRecordId>,
-) -> SummaryDraftPromotionInput {
-    SummaryDraftPromotionInput::new(
-        summary_id,
-        draft_text,
-        evidence,
-        SummaryDraftAcceptance::new(
-            SummaryDraftAcceptanceAuthority::HardPolicy,
-            "session hard policy",
-            "Hard policy accepted the draft for context promotion.",
-        )
-        .expect("valid promotion acceptance"),
-        source_record_id,
-    )
-    .expect("valid promotion input")
-}
-
-fn assert_single_promotion_record(
-    session: &SessionState,
-    summary_id: &str,
-    state: SummaryDraftPromotionState,
-    source_record_id: Option<&str>,
-) {
-    let snapshot = session.summary_draft_promotion_snapshot();
-    assert_eq!(snapshot.records().len(), 1);
-    let record = &snapshot.records()[0];
-    assert_eq!(
-        record.id().as_str(),
-        "summary-draft-promotion-00000000000000000000"
-    );
-    assert_eq!(record.summary_id(), summary_id);
-    assert_eq!(record.state(), state);
-    assert_eq!(record.commit_order(), 0);
-    assert_eq!(
-        record.source_record_id().map(JudgmentRecordId::as_str),
-        source_record_id
-    );
 }
 
 fn activated_memory(id: &str) -> ActivatedMemory {

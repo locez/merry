@@ -358,9 +358,8 @@ impl Runtime {
     /// validation, duplicate-id rejection, and without runtime events or ledger
     /// facts.
     ///
-    /// This API is independent of the internal summary-draft promotion
-    /// lifecycle. Calling it does not create promotion records, perform
-    /// acceptance/replay checks, or authorize context mutation from judgment
+    /// This API is the raw manual write path: it does not perform
+    /// acceptance/replay checks and never derives context mutation from model
     /// output.
     pub async fn record_context_summary(
         &self,

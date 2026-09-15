@@ -19,8 +19,6 @@ use tokio_util::sync::CancellationToken;
 fn role_model_config_stores_all_roles_independently_and_overrides_same_role() {
     let first_primary_model = named_model("fake/primary-v1");
     let primary_model = named_model("fake/primary-v2");
-    let first_tool_risk_model = named_model("fake/tool-risk-review-v1");
-    let tool_risk_model = named_model("fake/tool-risk-review");
     let approval_model = named_model("fake/approval-review");
     let summary_model = named_model("fake/summary-memory");
     let compaction_model = named_model("fake/context-compaction");
@@ -30,11 +28,6 @@ fn role_model_config_stores_all_roles_independently_and_overrides_same_role() {
         .model_provider(
             Arc::new(RecordingModelProvider::new()),
             primary_model.clone(),
-        )
-        .model_provider_for_role(
-            RuntimeModelRole::ToolRiskReview,
-            Arc::new(RecordingModelProvider::new()),
-            first_tool_risk_model,
         )
         .model_provider_for_role(
             RuntimeModelRole::ApprovalReview,
@@ -51,17 +44,11 @@ fn role_model_config_stores_all_roles_independently_and_overrides_same_role() {
             Arc::new(RecordingModelProvider::new()),
             compaction_model.clone(),
         )
-        .model_provider_for_role(
-            RuntimeModelRole::ToolRiskReview,
-            Arc::new(RecordingModelProvider::new()),
-            tool_risk_model.clone(),
-        )
         .build()
         .expect("runtime should build");
 
     for (role, expected_model) in [
         (RuntimeModelRole::Primary, &primary_model),
-        (RuntimeModelRole::ToolRiskReview, &tool_risk_model),
         (RuntimeModelRole::ApprovalReview, &approval_model),
         (RuntimeModelRole::SummaryMemory, &summary_model),
         (RuntimeModelRole::ContextCompaction, &compaction_model),
@@ -101,9 +88,9 @@ fn role_scoped_retry_policy_does_not_rewrite_existing_model_configs() {
             named_model("fake/primary"),
         )
         .model_provider_for_role_with_retry(
-            RuntimeModelRole::ToolRiskReview,
+            RuntimeModelRole::SummaryMemory,
             Arc::new(RecordingModelProvider::new()),
-            named_model("fake/tool-risk"),
+            named_model("fake/summary-memory"),
             later_policy,
         )
         .build()
@@ -122,8 +109,8 @@ fn role_scoped_retry_policy_does_not_rewrite_existing_model_configs() {
         runtime
             .inner
             .model_configs
-            .get(RuntimeModelRole::ToolRiskReview)
-            .expect("tool-risk config should exist")
+            .get(RuntimeModelRole::SummaryMemory)
+            .expect("summary-memory config should exist")
             .retry_policy(),
         later_policy
     );
@@ -132,17 +119,11 @@ fn role_scoped_retry_policy_does_not_rewrite_existing_model_configs() {
 #[tokio::test(flavor = "current_thread")]
 async fn step_uses_primary_model_and_does_not_call_any_non_primary_role_provider() {
     let primary = RecordingModelProvider::new();
-    let tool_risk_review = RecordingModelProvider::new();
     let approval_review = RecordingModelProvider::new();
     let summary_memory = RecordingModelProvider::new();
     let context_compaction = RecordingModelProvider::new();
     let runtime = Runtime::builder(session_id("runtime-step-primary-role-model"))
         .model_provider(Arc::new(primary.clone()), named_model("fake/primary-step"))
-        .model_provider_for_role(
-            RuntimeModelRole::ToolRiskReview,
-            Arc::new(tool_risk_review.clone()),
-            named_model("fake/tool-risk-review-step"),
-        )
         .model_provider_for_role(
             RuntimeModelRole::ApprovalReview,
             Arc::new(approval_review.clone()),
@@ -184,12 +165,7 @@ async fn step_uses_primary_model_and_does_not_call_any_non_primary_role_provider
         primary_requests[0].model(),
         &named_model("fake/primary-step")
     );
-    for provider in [
-        &tool_risk_review,
-        &approval_review,
-        &summary_memory,
-        &context_compaction,
-    ] {
+    for provider in [&approval_review, &summary_memory, &context_compaction] {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
         assert!(provider.recorded_requests().is_empty());
     }

@@ -34,7 +34,7 @@ fn persisted_image_message() -> UserMessageInput {
 
 fn current_document() -> serde_json::Value {
     serde_json::json!({
-        "format_version": 4,
+        "format_version": 5,
         "external_tool_catalog": { "format_version": 1, "entries": [] },
         "session_id": session_id(),
         "next_sequence": 0,
@@ -55,8 +55,6 @@ fn current_document() -> serde_json::Value {
         "usage": null,
         "task_anchor": null,
         "registries": {
-            "judgments": { "records": [] },
-            "summary_draft_promotions": { "records": [] },
             "action_audits": { "records": [] }
         },
         "active_plan": null,

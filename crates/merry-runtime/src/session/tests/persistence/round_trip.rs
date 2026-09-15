@@ -5,12 +5,10 @@ use crate::{
     session::tests::{
         ActionAuditPolicy, ActionAuditStatus, ActionExecutionEvidence, ActionPolicyDisposition,
         ActionProposal, ActionProposalEvidence, ActionRiskTier, ArtifactId, DefaultActionPolicy,
-        ErrorInfo, ModelTurnStatus, SessionState, SessionStateTestExt, SummaryDraftPromotionState,
+        ErrorInfo, ModelTurnStatus, SessionState, SessionStateTestExt,
         WorkspacePatchExecutionEvidence, WorkspacePatchProposal, artifact_id,
-        assert_single_promotion_record, citation_plain_runtime_checkpoint_for_tests,
-        judgment_evidence, pending_tool_call, persistence::persisted_image_message,
-        promotion_input_with_source_record_id, session_id, summary_draft_outcome_with_draft,
-        summary_draft_request, tool_call_id,
+        citation_plain_runtime_checkpoint_for_tests, pending_tool_call,
+        persistence::persisted_image_message, session_id, tool_call_id,
     },
 };
 use merry_core::{
@@ -267,39 +265,10 @@ async fn session_state_save_loads_inline_artifacts_without_payload_files() {
 }
 
 #[tokio::test]
-async fn session_state_save_load_round_trips_recoverable_registries() {
+async fn session_state_save_load_round_trips_action_audit_registry() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     let mut session = SessionState::new(session_id());
-    session
-        .record_artifact_state(
-            ArtifactRef::new(artifact_id("registry-source"), ArtifactKind::Text),
-            ArtifactContent::text("registry source text\n"),
-        )
-        .expect("artifact records");
-
-    let evidence = judgment_evidence(
-        "registry source",
-        "registry-source",
-        EvidenceLocator::whole_artifact(),
-    );
-    let request = summary_draft_request(vec![evidence.clone()]);
-    let outcome = summary_draft_outcome_with_draft(vec![evidence.clone()], "Registry draft.");
-    let record = session
-        .record_summary_draft_judgment(request.clone(), outcome.clone())
-        .expect("judgment records");
-    session
-        .promote_summary_draft_to_context(
-            &request,
-            &outcome,
-            promotion_input_with_source_record_id(
-                "registry-summary",
-                "Registry draft.",
-                vec![evidence.clone()],
-                Some(record.id().clone()),
-            ),
-        )
-        .expect("promotion records");
 
     let executed_call = pending_tool_call("registry-executed-call");
     session
@@ -372,21 +341,10 @@ async fn session_state_save_load_round_trips_recoverable_registries() {
         .expect("denial records");
 
     session.save_to(&store).await.expect("session saves");
-    let mut loaded = SessionState::load_from(&store, &session_id())
+    let loaded = SessionState::load_from(&store, &session_id())
         .await
         .expect("session loads");
 
-    assert_eq!(loaded.judgment_records().len(), 1);
-    assert_eq!(
-        loaded.judgment_records()[0].id().as_str(),
-        "judgment-record-00000000000000000000"
-    );
-    assert_single_promotion_record(
-        &loaded,
-        "registry-summary",
-        SummaryDraftPromotionState::Promoted,
-        Some("judgment-record-00000000000000000000"),
-    );
     let audit_snapshot = loaded.action_audit_snapshot();
     assert_eq!(audit_snapshot.records().len(), 3);
     assert_eq!(
@@ -409,25 +367,6 @@ async fn session_state_save_load_round_trips_recoverable_registries() {
     assert_eq!(
         audit_snapshot.records()[2].status(),
         ActionAuditStatus::Denied
-    );
-
-    loaded
-        .promote_summary_draft_to_context(
-            &request,
-            &outcome,
-            promotion_input_with_source_record_id(
-                "registry-summary",
-                "Registry draft.",
-                vec![evidence],
-                Some(record.id().clone()),
-            ),
-        )
-        .expect("restored promotion record keeps replay idempotent");
-    assert_single_promotion_record(
-        &loaded,
-        "registry-summary",
-        SummaryDraftPromotionState::Promoted,
-        Some("judgment-record-00000000000000000000"),
     );
 }
 

@@ -45,7 +45,7 @@ async fn session_state_current_format_without_plan_round_trips_current_format() 
             .expect("rewritten state reads"),
     )
     .expect("rewritten state is JSON");
-    assert_eq!(rewritten["format_version"], 4);
+    assert_eq!(rewritten["format_version"], 5);
     assert_eq!(rewritten["active_plan"], serde_json::Value::Null);
     assert_eq!(rewritten["terminal_plans"], serde_json::json!([]));
 }

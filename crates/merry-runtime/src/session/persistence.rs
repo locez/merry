@@ -18,13 +18,9 @@ use crate::{
         CompactedCheckpoint, ContextCompiler, ContextEntry, ContextEvidence, ContextSummary,
         PersistedCompactedCheckpoint, SessionContextSnapshot,
     },
-    judgment::{JudgmentRegistry, PersistedJudgmentRegistry},
     ledger::{PersistedLedgerEntry, TaskLedger},
     memory::MemoryStore,
     plan::{PersistedPlanState, PlanState},
-    summary_draft_promotion::{
-        PersistedSummaryDraftPromotionRegistry, SummaryDraftPromotionRegistry,
-    },
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, EvidenceRef, PendingToolCall, PlanSnapshot, SessionId,
@@ -36,7 +32,13 @@ use std::{
     sync::Arc,
 };
 
-const CURRENT_SESSION_STATE_FORMAT_VERSION: u32 = 4;
+/// Wire version of the persisted session document.
+///
+/// Format 5 removed the judgment and summary-draft-promotion registries: they
+/// were only ever written by the deleted advisory review path and carried no
+/// state in any live session. Older documents are rejected with
+/// [`SessionStoreError::UnsupportedFormatVersion`] instead of migrated.
+const CURRENT_SESSION_STATE_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredSessionDocumentHeader {
@@ -88,8 +90,6 @@ struct StoredArchivedRef {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredRegistries {
-    judgments: PersistedJudgmentRegistry,
-    summary_draft_promotions: PersistedSummaryDraftPromotionRegistry,
     action_audits: PersistedActionAuditRegistry,
 }
 
@@ -324,8 +324,6 @@ impl SessionState {
                 objective: anchor.objective().to_owned(),
             }),
             registries: StoredRegistries {
-                judgments: self.judgments.persisted(),
-                summary_draft_promotions: self.summary_draft_promotions.persisted(),
                 action_audits: self.action_audits.persisted(),
             },
             active_plan: view.active_plan.map(PlanState::persisted),
@@ -407,12 +405,6 @@ impl SessionState {
                 .map(ContextEntry::try_from)
                 .collect::<Result<Vec<_>, _>>()?,
             activated_memories: Vec::new(),
-            judgments: JudgmentRegistry::from_persisted(document.registries.judgments)
-                .map_err(|_| invalid_document("stored judgment registry is invalid"))?,
-            summary_draft_promotions: SummaryDraftPromotionRegistry::from_persisted(
-                document.registries.summary_draft_promotions,
-            )
-            .map_err(|_| invalid_document("stored summary draft promotion registry is invalid"))?,
             action_audits: ActionAuditRegistry::from_persisted(document.registries.action_audits),
             active_plan,
             terminal_plans: document.terminal_plans,

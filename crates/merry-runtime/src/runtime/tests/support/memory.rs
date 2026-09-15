@@ -1,6 +1,5 @@
 use crate::{
     artifact::ArtifactContent,
-    judgment::JudgmentRecord,
     memory::{
         ActivatedMemory, MemoryActivationContext, MemoryActivationFuture, MemoryActivationReason,
         MemoryActivationScore, MemoryActivationSource, MemoryActivationSourceKind, MemoryError,
@@ -177,29 +176,6 @@ pub(in crate::runtime::tests) async fn compiled_context_snapshot(runtime: &Runti
         .compile(&runtime.context_snapshot().await)
         .expect("context compiles")
         .to_snapshot()
-}
-
-#[derive(Debug, PartialEq)]
-pub(in crate::runtime::tests) struct JudgmentHarnessState {
-    pub(in crate::runtime::tests) context: String,
-    pub(in crate::runtime::tests) ledger: crate::LedgerProjectionSnapshot,
-    pub(in crate::runtime::tests) pending_tool_calls: Vec<PendingToolCall>,
-    pub(in crate::runtime::tests) judgment_records: Vec<JudgmentRecord>,
-}
-
-pub(in crate::runtime::tests) async fn judgment_harness_state(
-    runtime: &Runtime,
-) -> JudgmentHarnessState {
-    let session = runtime.inner.session.lock().await;
-    JudgmentHarnessState {
-        context: crate::ContextCompiler::new()
-            .compile(&session.context_snapshot())
-            .expect("context compiles")
-            .to_snapshot(),
-        ledger: session.ledger_projection(),
-        pending_tool_calls: session.pending_tool_calls(),
-        judgment_records: session.judgment_records(),
-    }
 }
 
 pub(in crate::runtime::tests) async fn assert_activated_memory_projection_cleared(

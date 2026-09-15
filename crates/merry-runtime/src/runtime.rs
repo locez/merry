@@ -12,7 +12,6 @@ use crate::{
     events::{
         ActiveStepPermit, RuntimeEventProjector, RuntimeEventStream, RuntimeJournalEventStream,
     },
-    judgment::{JudgmentContext, JudgmentError, JudgmentRecord, JudgmentRequest, JudgmentSource},
     model_config::ModelProviderConfig,
     plan::{
         BeginPlanInput, BeginPlanOutput, PlanControllerError, PlanControllerEventReceiver,
@@ -613,49 +612,6 @@ impl Runtime {
         }
 
         compact_context_once_inner(&self.inner, policy, token, active_permit).await
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn run_uncertainty_review(
-        &self,
-        source: &dyn JudgmentSource,
-        request: JudgmentRequest,
-        token: CancellationToken,
-    ) -> Result<JudgmentRecord, JudgmentError> {
-        if token.is_cancelled() {
-            return Err(JudgmentError::Cancelled);
-        }
-
-        {
-            let session = self.inner.session.lock().await;
-            if token.is_cancelled() {
-                return Err(JudgmentError::Cancelled);
-            }
-            session.preflight_judgment_request(&request)?;
-        }
-
-        if token.is_cancelled() {
-            return Err(JudgmentError::Cancelled);
-        }
-
-        let context = JudgmentContext::new(token.clone());
-        let outcome = tokio::select! {
-            biased;
-            () = token.cancelled() => {
-                return Err(JudgmentError::Cancelled);
-            }
-            outcome = source.judge(request.clone(), context) => outcome?,
-        };
-
-        if token.is_cancelled() {
-            return Err(JudgmentError::Cancelled);
-        }
-
-        let mut session = self.inner.session.lock().await;
-        if token.is_cancelled() {
-            return Err(JudgmentError::Cancelled);
-        }
-        session.record_judgment(request, outcome)
     }
 }
 

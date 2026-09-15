@@ -154,7 +154,7 @@ without any known definitions does not silently gain tools after reconnecting.
 This prevents connectivity-induced prompt-prefix changes, not provider cache
 expiration or changes to other parts of the prompt.
 
-Session state uses format 4 and requires an external tool catalog, even when it
+Session state uses format 5 and requires an external tool catalog, even when it
 is empty. Other formats are rejected without migration; Merry is not yet released
 and does not support historical session formats. Start a new session if a saved
 session uses an unsupported format. Catalogs do not store authentication headers

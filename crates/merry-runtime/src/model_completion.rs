@@ -1,6 +1,6 @@
 //! Shared single-text model completion boundary.
 //!
-//! Permission review, tool-risk judgment, and context compaction all ask a
+//! Permission review and context compaction both ask a
 //! model for exactly one text answer and must treat stream surprises as typed
 //! failures instead of guessing. This module owns that one contract so each
 //! role does not re-derive it:

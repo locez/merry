@@ -4,12 +4,10 @@ use crate::{
     action_audit::ActionAuditRegistry,
     artifact::ArtifactRegistry,
     context::{CompactedCheckpoint, ContextEntry, ProjectRules, TaskAnchor},
-    judgment::JudgmentRegistry,
     ledger::TaskLedger,
     memory::{ActivatedMemory, MemoryStore},
     plan::PlanState,
     skill::SkillCatalog,
-    summary_draft_promotion::SummaryDraftPromotionRegistry,
 };
 use merry_core::{PendingToolCall, PlanSnapshot, SessionId, ToolCallId, TrajectorySnapshot};
 use std::collections::BTreeSet;
@@ -19,7 +17,6 @@ mod checkpoint_window;
 mod context_state;
 mod events;
 mod history;
-mod judgments;
 mod messages;
 mod model_turns;
 mod persistence;
@@ -62,9 +59,6 @@ pub(crate) struct SessionState {
     prompt_history_projection: PromptHistoryProjection,
     context_entries: Vec<ContextEntry>,
     activated_memories: Vec<ActivatedMemory>,
-    #[allow(dead_code)]
-    judgments: JudgmentRegistry,
-    summary_draft_promotions: SummaryDraftPromotionRegistry,
     action_audits: ActionAuditRegistry,
     active_plan: Option<PlanState>,
     terminal_plans: Vec<PlanSnapshot>,
@@ -100,8 +94,6 @@ impl SessionState {
             prompt_history_projection: PromptHistoryProjection::new(),
             context_entries: Vec::new(),
             activated_memories: Vec::new(),
-            judgments: JudgmentRegistry::default(),
-            summary_draft_promotions: SummaryDraftPromotionRegistry::default(),
             action_audits: ActionAuditRegistry::default(),
             active_plan: None,
             terminal_plans: Vec::new(),

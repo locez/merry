@@ -12,8 +12,6 @@ use std::{collections::BTreeMap, sync::Arc};
 pub enum RuntimeModelRole {
     /// Model used by normal [`crate::Runtime::step`] provider requests.
     Primary,
-    /// Model reserved for future tool risk review.
-    ToolRiskReview,
     /// Model reserved for future approval review.
     ApprovalReview,
     /// Model reserved for future summary or memory work.
@@ -26,7 +24,6 @@ impl RuntimeModelRole {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Primary => "primary",
-            Self::ToolRiskReview => "tool_risk_review",
             Self::ApprovalReview => "approval_review",
             Self::SummaryMemory => "summary_memory",
             Self::ContextCompaction => "context_compaction",

@@ -196,7 +196,7 @@ async fn resume_rejects_unsupported_formats_without_migrating_the_document() {
         .as_object_mut()
         .unwrap()
         .remove("external_tool_catalog");
-    for version in [3, 5] {
+    for version in [3, 4] {
         document["format_version"] = json!(version);
         let bytes = serde_json::to_vec(&document).unwrap();
         tokio::fs::write(&path, &bytes).await.unwrap();
