@@ -26,8 +26,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 const REQUESTED_PATHS_DESCRIPTION: &str = "Exact filesystem paths to authorize. Configured review_paths stay hidden until explicitly requested and are approved only for this action, as are Git metadata writes. Ordinary path grants may be retained by a session-aware backend. Each item specifies a path and ro, rw, or deny access; approval never overrides a configured read-only ceiling or denial.";
 const REQUESTED_PATH_DESCRIPTION: &str = "Path requested for additional filesystem access.";
 const REQUESTED_ACCESS_DESCRIPTION: &str = "Requested access for this path: ro, rw, or deny.";
-const REQUESTED_NETWORK_DESCRIPTION: &str =
-    "Set true to request network capability for the exact action.";
+const REQUESTED_NETWORK_DESCRIPTION: &str = "Set true to request network capability for the exact action. Network is never granted implicitly: a command that authenticates, installs, downloads, publishes, or otherwise reaches a remote service needs this set in the same action, while a command that only touches the workspace and the configured local baseline does not.";
 const REQUESTED_HOST_INTEGRATIONS_DESCRIPTION: &str = "Host integrations: ssh-agent, dbus, or gpg-agent. Integrations enabled by trusted global configuration are already available and need no request; request one here only when it is not configured but its endpoint is present. SSH includes its agent and read-only known_hosts; GPG includes read-only public keys and its native agent, not the SSH socket. File sources still obey path restrictions, including deny_paths and review_paths; neither integration authorizes networking. dbus is the session bus used by keyring clients.";
 const PERMISSION_REASON_DESCRIPTION: &str = "Optional short explanation of why the current task needs the requested capability. Null is treated as omitted; a provided string must be non-blank and within the byte limit.";
 
@@ -224,7 +223,7 @@ fn requested_capabilities_schema_json() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "description": "Capabilities to add for this exact action after approval. Use network for network access, paths for filesystem paths, or host_integrations for SSH agent, native GPG agent, or D-Bus access. Paths and host integrations enabled by trusted global configuration are already available to every action, so request only what is still missing. A session-aware backend may retain ordinary path and host-integration grants, but network, configured review_paths, and Git metadata writes require approval for every action. Include every capability the same command needs in one request.",
+        "description": "Capabilities to add for this exact action after approval. Use network for network access, paths for filesystem paths, or host_integrations for SSH agent, native GPG agent, or D-Bus access. Paths and host integrations enabled by trusted global configuration are already available to every action, so request only what is still missing; network is never granted implicitly, so a command that reaches a remote service must request it in the same action. A session-aware backend may retain ordinary path and host-integration grants, but network, configured review_paths, and Git metadata writes require approval for every action. Include every capability the same command needs in one request.",
         "properties": {
             "network": {
                 "type": "boolean",

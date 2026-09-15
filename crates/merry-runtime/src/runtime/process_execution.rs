@@ -387,7 +387,7 @@ fn process_output_artifact_content(
     if !output.ok() {
         payload["guidance"] = serde_json::json!({
             "kind": "process_action_recovery",
-            "message": "The process action ran inside the sandbox and failed. If the needed network, filesystem path, or host integration was known before execution, include every minimum required capability under permissions in the next run_process call so runtime can review before execution. If the need was discovered only from this failure, call request_permissions for the exact same action before retrying it. An unmodeled Linux Unix socket may be requested as its exact filesystem path.",
+            "message": "The process action ran inside the sandbox and failed. Treat the sandbox as the first suspect: a withheld network, filesystem, or host integration capability often surfaces as a credentials, authentication, or connectivity error, so check whether the command needed access it did not request. Include every minimum required capability under permissions in the next run_process call so runtime can review before execution. If the need was discovered only from this failure, call request_permissions for the exact same action before retrying it. An unmodeled Linux Unix socket may be requested as its exact filesystem path.",
         });
     }
 

@@ -103,6 +103,10 @@ async fn headless_runtime_uses_coding_agent_profile() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(request_text.contains("Coding file capabilities"));
+    assert!(
+        request_text.contains("Network is withheld from every action that does not request it")
+    );
+    assert!(request_text.contains("Action PATH search tools:"));
     assert!(request_text.contains("user's current input language"));
     assert!(
         request

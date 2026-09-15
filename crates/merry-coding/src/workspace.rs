@@ -1,4 +1,7 @@
-use crate::{CODING_LOOP_PROCESS_TOOL, project_capabilities::project_capability_summary_for_root};
+use crate::{
+    CODING_LOOP_PROCESS_TOOL, project_capabilities::project_capability_summary_for_root,
+    search_tools::SearchToolAvailability,
+};
 use merry_core::ToolName;
 use merry_llm::ModelRetryPolicy;
 use merry_process::ProcessSession;
@@ -15,8 +18,16 @@ use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 
 const PROJECT_CAPABILITY_CONTEXT_ID: &str = "project-capabilities";
-const CODING_WORKSPACE_CAPABILITY_SUMMARY: &str = "\
-Coding file capabilities:\n- `read_text` reads a bounded one-based line range from a known UTF-8 text path. Omit the range only to use the small configured default; use multiple focused reads instead of requesting a whole file. Paths are relative to configured roots, and skill/resource roots are read-only and separate from write scope.\n- `apply_patch` is the only file-edit tool. Use one patch envelope with localized Add File or Update File hunks; do not submit whole-file content for a small edit. Runtime admission, write scope, forbidden paths, and current-file preimages are enforced before writes.\n- `run_process` is the discovery and verification lane when configured. Prefer `rg --files`, focused literal `rg` searches, and bounded `sed -n '<start>,<end>p'` reads. Avoid broad recursive output and unbounded file reads.\n- Process execution runs through Merry runtime policy and the configured sandbox/profile, so filesystem and network access may be intentionally restricted; environment and host IPC access may also be intentionally restricted. Paths and host integrations enabled by trusted global configuration are already available to actions. If a command needs access that is still missing, such as network, a reviewed path, or an unconfigured endpoint, put all minimum required capabilities in that same `run_process` call under `permissions`; runtime reviews before executing the exact command through the permissioned backend.\n- If a capability is discovered only after a sandboxed failure, call `request_permissions` for that exact action before retrying it. Approved paths and host integrations remain available for later actions in this runtime session; network access must be requested again for every action that needs it.\n- Linux Unix sockets are filesystem paths. If a host resource is not represented by a named integration, request its exact socket/file path through `permissions.paths` or `requested.paths`; the outer sandbox must already expose the path.\n- `request_permissions` must name the exact planned action and request only the minimum needed capability; the runtime may approve, deny, or fail the request.";
+const CODING_WORKSPACE_CAPABILITY_SUMMARY: &str = concat!(
+    "Coding file capabilities:\n",
+    "- `read_text` reads a bounded one-based line range from a known UTF-8 text path. Omit the range only to use the small configured default; use multiple focused reads instead of requesting a whole file. Paths are relative to configured roots, and skill/resource roots are read-only and separate from write scope.\n",
+    "- `apply_patch` is the only file-edit tool. Use one patch envelope with localized Add File or Update File hunks; do not submit whole-file content for a small edit. Runtime admission, write scope, forbidden paths, and current-file preimages are enforced before writes.\n",
+    "- `run_process` is the discovery and verification lane when configured. Prefer the modern search tools the environment facts below report: `rg --files` to list files, a focused literal `rg` search for content, and `fd`/`fdfind` for paths by name; fall back to `grep -r` and `find` only for a tool the facts say is missing. Scope each search to the directories that own the behavior instead of the repository root, and exclude build output such as `target/`, `node_modules/`, and `.venv/`. Read files with bounded `sed -n '<start>,<end>p'`. Avoid broad recursive output, `cat` on large files, and repeated exploratory calls.\n",
+    "- Process execution runs through Merry runtime policy and the configured sandbox/profile, so filesystem and network access may be intentionally restricted; environment and host IPC access may also be intentionally restricted. Network is withheld from every action that does not request it, so a command that reaches a remote service needs `network: true` in the same call's `permissions`. Paths and host integrations enabled by trusted global configuration are already available to actions. If a command needs access that is still missing, such as network, a reviewed path, or an unconfigured endpoint, put all minimum required capabilities in that same `run_process` call under `permissions`; runtime reviews before executing the exact command through the permissioned backend.\n",
+    "- If a capability is discovered only after a sandboxed failure, call `request_permissions` for that exact action before retrying it. Approved paths and host integrations remain available for later actions in this runtime session; network access must be requested again for every action that needs it.\n",
+    "- Linux Unix sockets are filesystem paths. If a host resource is not represented by a named integration, request its exact socket/file path through `permissions.paths` or `requested.paths`; the outer sandbox must already expose the path.\n",
+    "- `request_permissions` must name the exact planned action and request only the minimum needed capability; the runtime may approve, deny, or fail the request.",
+);
 
 #[derive(Clone)]
 pub(crate) enum WorkspaceProcessRunnerConfig {
@@ -140,10 +151,22 @@ impl WorkspaceCodingProfileBuilder {
             .find_map(|root| project_capability_summary_for_root(root));
         let workspace_tools = WorkspaceTools::new(config)?;
 
-        let capability_summary = project_summary.map_or_else(
-            || CODING_WORKSPACE_CAPABILITY_SUMMARY.to_owned(),
-            |facts| format!("{CODING_WORKSPACE_CAPABILITY_SUMMARY}\n{facts}"),
+        // The environment facts name what this host actually provides so the
+        // static summary can keep asking for modern search tools without
+        // promising a tool the sandbox does not have.
+        let search_tools = SearchToolAvailability::probe_action_path();
+        tracing::debug!(
+            event = "coding.search_tools.probe",
+            availability = ?search_tools,
+            "coding profile probed action-PATH search tools"
         );
+        let environment_facts = search_tools.summary_line();
+        let mut summary_sections = vec![CODING_WORKSPACE_CAPABILITY_SUMMARY.to_owned()];
+        if let Some(project_summary) = project_summary {
+            summary_sections.push(project_summary);
+        }
+        summary_sections.push(environment_facts);
+        let capability_summary = summary_sections.join("\n");
         builder = builder
             .model_retry_policy(ModelRetryPolicy::coding_agent_default())
             .progress_commentary(true)
@@ -183,7 +206,7 @@ impl WorkspaceCodingProfileBuilder {
 
             let process_tool = process_command_tool(
                 ToolName::new(CODING_LOOP_PROCESS_TOOL)?,
-                "Run one shell command through Merry's configured process runner. Provide command as one JSON string; omit cwd for the current workspace directory, or use null or a workspace-relative directory such as \".\". Do not add a bash field or pass argv. The runtime validates command and cwd byte/control-character limits. Workspace files and directories are writable in the sandbox. Paths and host integrations enabled by trusted global configuration are already available; .git, network, and anything not configured remain restricted and may require a reviewed capability. If the command needs access that is still missing, include the minimum capabilities in permissions and runtime will review before running this exact command. If the need is discovered only after failure, use request_permissions for the exact same action before retrying it. Network access must be requested again for each action that needs it. Linux Unix sockets can be requested as exact filesystem paths when no named integration applies.",
+                "Run one shell command through Merry's configured process runner. Provide command as one JSON string; omit cwd for the current workspace directory, or use null or a workspace-relative directory such as \".\". Do not add a bash field or pass argv. The runtime validates command and cwd byte/control-character limits. Workspace files and directories are writable in the sandbox. Paths and host integrations enabled by trusted global configuration are already available; .git, network, and anything not configured remain restricted and may require a reviewed capability. Network is never granted implicitly: a command that reaches a remote service, such as one that authenticates, installs, downloads, or publishes, must include network in this call's permissions. If the command needs access that is still missing, include the minimum capabilities in permissions and runtime will review before running this exact command. If the need is discovered only after failure, use request_permissions for the exact same action before retrying it. Network access must be requested again for each action that needs it. Linux Unix sockets can be requested as exact filesystem paths when no named integration applies.",
             )?;
             builder = builder
                 .register_tool(process_tool)

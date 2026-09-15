@@ -14,7 +14,7 @@ mod review;
 mod sandbox;
 mod tokio_runner;
 
-pub use environment::BwrapProcessEnvironment;
+pub use environment::{BwrapProcessEnvironment, action_process_path};
 pub use permissions::{
     BwrapPermissionedProcessRunnerFactory, BwrapProcessRunner, BwrapSessionPermissions,
 };

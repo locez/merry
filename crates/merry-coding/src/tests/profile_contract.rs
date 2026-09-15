@@ -91,6 +91,12 @@ fn coding_agent_profile_owns_process_permission_and_patch_order() {
     assert!(process.spec().description().contains(
         "Paths and host integrations enabled by trusted global configuration are already available"
     ));
+    assert!(
+        process
+            .spec()
+            .description()
+            .contains("Network is never granted implicitly")
+    );
     let schema = process.spec().input_schema().as_schema().as_value();
     assert_eq!(schema["required"], json!(["command"]));
     assert!(schema["properties"]["permissions"].is_object());
@@ -99,6 +105,12 @@ fn coding_agent_profile_owns_process_permission_and_patch_order() {
             .as_str()
             .expect("host integration description should be text")
             .contains("Integrations enabled by trusted global configuration are already available")
+    );
+    assert!(
+        schema["properties"]["permissions"]["properties"]["network"]["description"]
+            .as_str()
+            .expect("network description should be text")
+            .contains("Network is never granted implicitly")
     );
 }
 
@@ -237,6 +249,16 @@ fn coding_agent_profile_owns_the_coding_prompt_and_hashes_its_exact_text() {
         prompt.stable_blocks()[0]
             .text()
             .contains("already available to sandboxed commands")
+    );
+    assert!(
+        prompt.stable_blocks()[0]
+            .text()
+            .contains("starts with no network access")
+    );
+    assert!(
+        prompt.stable_blocks()[0]
+            .text()
+            .contains("preferring the installed modern search tools")
     );
 }
 

@@ -10,6 +10,22 @@ pub(super) const BWRAP_PROGRAM: &str = "bwrap";
 pub(super) const ACTION_SANDBOX_HOME_FALLBACK: &str = "/home/merry";
 pub(super) const ACTION_SANDBOX_TMPDIR: &str = "/tmp";
 pub(super) const ACTION_SANDBOX_PATH_FALLBACK: &str = "/usr/local/bin:/usr/bin:/bin";
+
+/// PATH value that Merry passes to sandboxed action commands.
+///
+/// The value is the current process `PATH` when it is set and non-empty,
+/// otherwise the action sandbox fallback used when a bubblewrap action
+/// environment is built. Callers that describe the action environment, such as
+/// a prompt naming the command-line tools a sandboxed command may use, resolve
+/// the value through here so the description follows the PATH the sandbox
+/// actually passes instead of guessing.
+#[must_use]
+pub fn action_process_path() -> OsString {
+    env::var_os("PATH")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| OsString::from(ACTION_SANDBOX_PATH_FALLBACK))
+}
+
 /// Host-derived paths used to construct one action sandbox.
 ///
 /// The HOME, PATH, and non-policy environment variables preserve the caller's
@@ -52,9 +68,7 @@ impl BwrapProcessEnvironment {
     /// validated process defaults and configured assignments.
     #[must_use]
     pub fn from_current_process() -> Self {
-        let path = env::var_os("PATH")
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| OsString::from(ACTION_SANDBOX_PATH_FALLBACK));
+        let path = action_process_path();
         let home = absolute_env_path("HOME", ACTION_SANDBOX_HOME_FALLBACK);
         let tmp_source = absolute_env_path("TMPDIR", ACTION_SANDBOX_TMPDIR);
         Self {

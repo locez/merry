@@ -28,7 +28,7 @@ pub use sandbox_path::{SandboxPathError, resolve_sandbox_path};
 #[cfg(target_os = "linux")]
 pub use ssh_config::BwrapSshConfigFiles;
 
-pub use process_runner::TokioProcessRunner;
+pub use process_runner::{TokioProcessRunner, action_process_path};
 
 #[cfg(target_os = "linux")]
 pub use process_runner::{
