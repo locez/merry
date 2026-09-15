@@ -454,10 +454,7 @@ pub(crate) fn validate_optional_reason(reason: &str) -> Result<(), PermissionAdm
     Ok(())
 }
 
-pub(crate) fn validate_non_blank(
-    field: &'static str,
-    value: &str,
-) -> Result<(), PermissionAdmissionError> {
+fn validate_non_blank(field: &'static str, value: &str) -> Result<(), PermissionAdmissionError> {
     if value.trim().is_empty() {
         return Err(PermissionAdmissionError::InvalidArguments {
             message: format!("{field} must not be blank"),

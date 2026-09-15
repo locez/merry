@@ -1,9 +1,14 @@
 use super::review::{parse_permission_review_model_output, requested_capabilities_json};
 use super::*;
-use crate::MAX_PROCESS_CWD_BYTES;
+use crate::{MAX_PROCESS_CWD_BYTES, model_config::ModelProviderConfig};
 use merry_core::{ToolCallArguments, ToolCallId};
+use merry_llm::{
+    FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse, ModelRetryPolicy,
+    testing::FakeModelProvider,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 fn call(arguments: Value) -> PendingToolCall {
     PendingToolCall::new(
@@ -360,9 +365,63 @@ fn model_review_parser_rejects_contract_violations() {
         assert!(matches!(
             error,
             PermissionAdmissionError::InvalidReviewOutput { .. }
-                | PermissionAdmissionError::InvalidArguments { .. }
         ));
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_review_request_declares_the_accepted_schema_version() {
+    // The reviewer can only answer in the schema it was told about, so the
+    // prompt and the parser must agree on one schema version constant.
+    let provider = Arc::new(FakeModelProvider::new(vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(
+            vec![ModelOutput::text(
+                r#"{"schema_version":"permission_review.v1","decision":"approve","risk":"low","user_authorization":"high","rationale":"The exact command is grounded in the task."}"#,
+            )],
+            FinishReason::Stop,
+            None,
+        ),
+    })]));
+    let source = ModelBackedPermissionAdmissionSource::from_config(ModelProviderConfig::new(
+        provider.clone(),
+        ModelName::new("fake/reviewer").expect("model name should be valid"),
+        ModelRetryPolicy::default(),
+    ))
+    .expect("review source should build");
+    let request = permission_request_from_call(
+        &call(json!({
+            "reason": "Confirm the endpoint is reachable",
+            "requested": { "network": true },
+            "for_action": { "command": "curl -sI https://example.com", "cwd": null }
+        })),
+        Vec::new(),
+    )
+    .expect("request should parse");
+
+    source
+        .review(
+            request,
+            PermissionAdmissionContext::new(CancellationToken::new()),
+        )
+        .await
+        .expect("review should be accepted");
+
+    let recorded = provider.recorded_requests();
+    let [model_request] = recorded.as_slice() else {
+        panic!("expected exactly one recorded review request");
+    };
+    assert_eq!(model_request.messages().len(), 2);
+    let system = model_request.messages()[0].content().as_text();
+    let user = model_request.messages()[1].content().as_text();
+    assert!(system.contains(super::review::PERMISSION_REVIEW_SCHEMA_VERSION));
+    assert!(system.contains("Return only those five fields"));
+    assert!(
+        user.contains(&format!(
+            "schema_version={}\n",
+            super::review::PERMISSION_REVIEW_SCHEMA_VERSION
+        )),
+        "user prompt must declare the schema version the parser accepts"
+    );
 }
 
 #[tokio::test]

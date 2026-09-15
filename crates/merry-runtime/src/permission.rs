@@ -17,8 +17,6 @@ const REQUEST_PERMISSIONS_TOOL_NAME: &str = "request_permissions";
 const MAX_PERMISSION_REASON_BYTES: usize = 2048;
 const DEFAULT_PERMISSION_STDOUT_LIMIT_BYTES: usize = 64 * 1024;
 const DEFAULT_PERMISSION_STDERR_LIMIT_BYTES: usize = 64 * 1024;
-const PERMISSION_REVIEW_MAX_OUTPUT_TOKENS: u64 = 512;
-
 mod input;
 mod payload;
 mod review;
