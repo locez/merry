@@ -1,5 +1,6 @@
 use crate::{
-    PermissionReviewMode, RuntimeModelRole, RuntimeTrustLevel,
+    HostFallbackReason, PermissionAdmissionReviewSource, PermissionReviewMode, RuntimeModelRole,
+    RuntimeTrustLevel,
     process::ProcessPermissionProfileId,
     request_permissions_tool,
     runtime::{
@@ -637,6 +638,41 @@ async fn request_permissions_fully_trusted_mode_skips_review_sources() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn request_permissions_deny_all_mode_rejects_without_review_sources() {
+    let admission = StaticPermissionAdmissionSource::approving();
+    let runner = FakeProcessRunner::succeeding();
+    let (runtime, pending) = register_permission_pending_tool_with_builder(
+        "runtime-permission-deny-all",
+        "call-permission-deny-all",
+        |builder| {
+            builder
+                .permission_review_mode(PermissionReviewMode::DenyAll)
+                .permission_admission_source(Arc::new(admission.clone()))
+                .allow_permissioned_process_actions(Arc::new(runner.clone()))
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("deny-all permission request should resolve the tool call");
+
+    assert_eq!(admission.call_count(), 0);
+    assert_eq!(runner.call_count(), 0);
+    let result = resolved_tool_result(&events);
+    assert_eq!(result.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        result
+            .diagnostic()
+            .expect("denied permission should include diagnostic")
+            .code(),
+        "permission_request_denied"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn request_permissions_model_failure_uses_opt_in_host_fallback() {
     let admission = StaticPermissionAdmissionSource::approving();
     let runner = FakeProcessRunner::succeeding();
@@ -659,6 +695,11 @@ async fn request_permissions_model_failure_uses_opt_in_host_fallback() {
         .expect("configured fallback should resolve missing model review");
 
     assert_eq!(admission.call_count(), 1);
+    assert_eq!(
+        admission.fallback_reasons(),
+        vec![Some(HostFallbackReason::ReviewModelUnavailable)],
+        "the host should be told that no review model was configured"
+    );
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         resolved_tool_result(&events).status(),
@@ -667,7 +708,7 @@ async fn request_permissions_model_failure_uses_opt_in_host_fallback() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn request_permissions_model_denial_does_not_escalate_to_host_fallback() {
+async fn request_permissions_model_denial_escalates_to_host_fallback() {
     let review_provider =
         RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
             permission_review_completed_event("deny", "The action is not grounded in the task."),
@@ -675,11 +716,63 @@ async fn request_permissions_model_denial_does_not_escalate_to_host_fallback() {
     let admission = StaticPermissionAdmissionSource::approving();
     let runner = FakeProcessRunner::succeeding();
     let (runtime, pending) = register_permission_pending_tool_with_builder(
-        "runtime-permission-denial-no-human",
-        "call-permission-denial-no-human",
+        "runtime-permission-denial-human-fallback",
+        "call-permission-denial-human-fallback",
         |builder| {
             builder
                 .permission_review_mode(PermissionReviewMode::ModelThenHostFallback)
+                .permission_admission_source(Arc::new(admission.clone()))
+                .model_provider_for_role(
+                    RuntimeModelRole::ApprovalReview,
+                    Arc::new(review_provider),
+                    named_model("fake/approval-review"),
+                )
+                .allow_permissioned_process_actions(Arc::new(runner.clone()))
+                .build()
+        },
+    )
+    .await;
+
+    let events = runtime
+        .execute_tool_call(pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("model denial should hand the decision to the host");
+
+    assert_eq!(admission.call_count(), 1);
+    let reasons = admission.fallback_reasons();
+    let Some(Some(HostFallbackReason::ModelDenied(review))) = reasons.first() else {
+        panic!("the host should see the model denial, got {reasons:?}");
+    };
+    assert_eq!(review.source(), PermissionAdmissionReviewSource::Model);
+    assert_eq!(
+        review.rationale(),
+        "The action is not grounded in the task."
+    );
+    assert_eq!(
+        reasons[0].as_ref().map(ToString::to_string).as_deref(),
+        Some("AI review denied: The action is not grounded in the task.")
+    );
+    assert_eq!(runner.call_count(), 1);
+    assert_eq!(
+        resolved_tool_result(&events).status(),
+        ToolCallResultStatus::Succeeded
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn request_permissions_model_denial_is_final_without_host_fallback_mode() {
+    let review_provider =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            permission_review_completed_event("deny", "The action is not grounded in the task."),
+        )])]);
+    let admission = StaticPermissionAdmissionSource::approving();
+    let runner = FakeProcessRunner::succeeding();
+    let (runtime, pending) = register_permission_pending_tool_with_builder(
+        "runtime-permission-denial-model-only",
+        "call-permission-denial-model-only",
+        |builder| {
+            builder
+                .permission_review_mode(PermissionReviewMode::Required)
                 .permission_admission_source(Arc::new(admission.clone()))
                 .model_provider_for_role(
                     RuntimeModelRole::ApprovalReview,

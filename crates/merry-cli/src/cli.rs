@@ -1,4 +1,5 @@
-use crate::coding::ProcessExecutionMode;
+use crate::coding::{ApprovalPolicy, ProcessExecutionMode};
+use crate::config::CliDefaults;
 use crate::debug::{Args as DebugArgs, OpenAiArgs as DebugOpenAiArgs};
 use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -45,9 +46,11 @@ pub(crate) struct Cli {
 
     #[arg(
         long,
-        help = "Explicitly trust all configured actions and skip model/host permission review"
+        value_enum,
+        value_name = "POLICY",
+        help = "Who reviews permission requests before a command runs [default: model_then_human]"
     )]
-    pub(crate) fully_trusted: bool,
+    pub(crate) approval_policy: Option<ApprovalPolicy>,
 
     #[arg(
         long = "merry-sandbox-child-handoff",
@@ -86,16 +89,61 @@ impl Cli {
         }
     }
 
-    pub(crate) const fn fully_trusted(&self) -> bool {
-        self.fully_trusted
+    /// The effective approval policy; `model_then_human` when no flag or
+    /// configured default set one.
+    pub(crate) fn approval_policy(&self) -> ApprovalPolicy {
+        self.approval_policy.unwrap_or_default()
+    }
+
+    /// Whether the outer-sandbox parent should bind its controlling terminal
+    /// into the child for permission review answers.
+    ///
+    /// Only a sandboxed `run -` needs it: the task consumes stdin, and
+    /// `--new-session` leaves the child unable to open `/dev/tty`. Policies
+    /// that never ask a person get nothing extra.
+    pub(crate) fn hands_off_review_terminal(&self) -> bool {
+        let reads_task_from_stdin = match &self.command {
+            Some(CliCommand::Run(args)) => args.task == crate::run::STDIN_TASK,
+            _ => false,
+        };
+        self.should_bootstrap_sandbox()
+            && reads_task_from_stdin
+            && self.approval_policy().may_ask_a_human()
     }
 
     pub(crate) fn clipboard_access(&self) -> crate::sandbox::ClipboardAccess {
         match &self.command {
             None | Some(CliCommand::Resume) => crate::sandbox::ClipboardAccess::Tui,
-            Some(CliCommand::Run(_) | CliCommand::Cmd(_) | CliCommand::Debug(_)) => {
-                crate::sandbox::ClipboardAccess::Disabled
+            Some(
+                CliCommand::Run(_)
+                | CliCommand::Cmd(_)
+                | CliCommand::Debug(_)
+                | CliCommand::Completions(_),
+            ) => crate::sandbox::ClipboardAccess::Disabled,
+        }
+    }
+
+    /// Applies `[cli]` defaults as if the matching flags preceded the
+    /// subcommand.
+    ///
+    /// Explicit command-line flags win, and each key stands in for its own
+    /// flag only. The three sandbox modes are mutually exclusive, so a mode
+    /// given on the command line keeps a configured `sandbox` from applying,
+    /// and an explicit `--approval-policy` keeps a configured
+    /// `approval_policy` from applying. The two never affect each other: the
+    /// sandbox sets the execution boundary and the approval policy sets who
+    /// reviews permission requests inside it.
+    pub(crate) fn apply_defaults(&mut self, defaults: CliDefaults) {
+        if !(self.with_sandbox || self.no_sandbox || self.inner_sandbox) {
+            match defaults.process_execution_mode() {
+                Some(ProcessExecutionMode::OuterAndInner) => self.with_sandbox = true,
+                Some(ProcessExecutionMode::Unrestricted) => self.no_sandbox = true,
+                Some(ProcessExecutionMode::InnerOnly) => self.inner_sandbox = true,
+                None => {}
             }
+        }
+        if self.approval_policy.is_none() {
+            self.approval_policy = defaults.approval_policy();
         }
     }
 }
@@ -110,6 +158,8 @@ pub(crate) enum CliCommand {
     Cmd(crate::cmd::Args),
     #[command(about = "Print deterministic runtime events or run opt-in provider debugging")]
     Debug(DebugArgs),
+    #[command(about = "Print a shell completion script for merry to stdout")]
+    Completions(crate::completions::Args),
 }
 
 pub(crate) fn parse_max_output_tokens(value: &str) -> Result<u64, String> {
@@ -185,314 +235,4 @@ fn command_usage(command: &mut clap::Command) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        Cli, CliCommand, ProcessExecutionMode, cmd_usage, debug_openai_usage, shell_usage,
-    };
-    use crate::debug::{Command as DebugCommand, DEFAULT_INPUT, DEFAULT_SESSION_ID};
-    use crate::sandbox::{
-        ChildHandoff as SandboxChildHandoff, ClipboardAccess, SANDBOX_CHILD_HANDOFF_ARG,
-        SANDBOX_CHILD_HANDOFF_CLI_BWRAP,
-    };
-    use clap::Parser;
-
-    #[test]
-    fn parses_no_subcommand_as_tui_entrypoint() {
-        let cli = Cli::try_parse_from(["merry"]).expect("root args should parse");
-
-        assert!(cli.command.is_none());
-        assert!(cli.should_bootstrap_sandbox());
-    }
-
-    #[test]
-    fn only_tui_routes_request_clipboard_access() {
-        let root = Cli::try_parse_from(["merry"]).expect("root args should parse");
-        let resume = Cli::try_parse_from(["merry", "resume"]).expect("resume should parse");
-        let run = Cli::try_parse_from(["merry", "run", "task"]).expect("run should parse");
-        let debug = Cli::try_parse_from(["merry", "debug"]).expect("debug should parse");
-
-        assert_eq!(root.clipboard_access(), ClipboardAccess::Tui);
-        assert_eq!(resume.clipboard_access(), ClipboardAccess::Tui);
-        assert_eq!(run.clipboard_access(), ClipboardAccess::Disabled);
-        assert_eq!(debug.clipboard_access(), ClipboardAccess::Disabled);
-    }
-
-    #[test]
-    fn no_sandbox_selects_unrestricted_host_mode() {
-        let tui = Cli::try_parse_from(["merry", "--no-sandbox"]).expect("root args parse");
-        let run =
-            Cli::try_parse_from(["merry", "--no-sandbox", "run", "task"]).expect("run parses");
-
-        assert!(!tui.should_bootstrap_sandbox());
-        assert!(!run.should_bootstrap_sandbox());
-        assert_eq!(
-            tui.process_execution_mode(),
-            ProcessExecutionMode::Unrestricted
-        );
-        assert_eq!(
-            run.process_execution_mode(),
-            ProcessExecutionMode::Unrestricted
-        );
-        assert!(!tui.fully_trusted());
-        assert!(!run.fully_trusted());
-    }
-
-    #[test]
-    fn fully_trusted_is_explicit_and_independent_from_host_execution_mode() {
-        let cli = Cli::try_parse_from(["merry", "--fully-trusted", "--no-sandbox", "run", "task"])
-            .expect("fully trusted run parses");
-
-        assert_eq!(
-            cli.process_execution_mode(),
-            ProcessExecutionMode::Unrestricted
-        );
-        assert!(cli.fully_trusted());
-    }
-
-    #[test]
-    fn inner_sandbox_selects_codex_compatible_single_sandbox_mode() {
-        let cli =
-            Cli::try_parse_from(["merry", "--inner-sandbox"]).expect("inner sandbox args parse");
-
-        assert!(!cli.should_bootstrap_sandbox());
-        assert_eq!(
-            cli.process_execution_mode(),
-            ProcessExecutionMode::InnerOnly
-        );
-    }
-
-    #[test]
-    fn debug_sandbox_remains_explicit() {
-        let plain = Cli::try_parse_from(["merry", "debug"]).expect("debug args parse");
-        let sandboxed =
-            Cli::try_parse_from(["merry", "--with-sandbox", "debug"]).expect("debug parses");
-
-        assert!(!plain.should_bootstrap_sandbox());
-        assert!(sandboxed.should_bootstrap_sandbox());
-    }
-
-    #[test]
-    fn existing_subcommands_still_parse_after_tui_entrypoint() {
-        let resume = Cli::try_parse_from(["merry", "resume"]).expect("resume parses");
-        assert!(matches!(resume.command, Some(CliCommand::Resume)));
-
-        let run = Cli::try_parse_from(["merry", "run", "fix the test"]).expect("run parses");
-        assert!(matches!(run.command, Some(CliCommand::Run(_))));
-
-        let cmd = Cli::try_parse_from(["merry", "cmd", "list files"]).expect("cmd parses");
-        assert!(matches!(cmd.command, Some(CliCommand::Cmd(_))));
-
-        let debug = Cli::try_parse_from(["merry", "debug"]).expect("debug parses");
-        assert!(matches!(debug.command, Some(CliCommand::Debug(_))));
-    }
-
-    #[test]
-    fn parses_run_task() {
-        let cli = Cli::try_parse_from(["merry", "run", "fix the failing test"])
-            .expect("run args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Run(args) => {
-                assert_eq!(args.task, "fix the failing test");
-                assert!(!args.events_jsonl);
-            }
-            _ => panic!("expected run command"),
-        }
-    }
-
-    #[test]
-    fn parses_run_events_jsonl() {
-        let cli = Cli::try_parse_from(["merry", "run", "--events-jsonl", "fix the failing test"])
-            .expect("run args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Run(args) => {
-                assert_eq!(args.task, "fix the failing test");
-                assert!(args.events_jsonl);
-            }
-            _ => panic!("expected run command"),
-        }
-    }
-
-    #[test]
-    fn parses_cmd_request_defaults() {
-        let cli = Cli::try_parse_from(["merry", "cmd", "find all TypeScript tests"])
-            .expect("cmd args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Cmd(args) => {
-                assert_eq!(args.request, "find all TypeScript tests");
-                assert!(!args.json);
-                assert!(!args.no_prompt);
-            }
-            _ => panic!("expected cmd command"),
-        }
-    }
-
-    #[test]
-    fn parses_cmd_json_and_no_prompt() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "cmd",
-            "--json",
-            "--no-prompt",
-            "find all TypeScript tests",
-        ])
-        .expect("cmd args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Cmd(args) => {
-                assert_eq!(args.request, "find all TypeScript tests");
-                assert!(args.json);
-                assert!(args.no_prompt);
-            }
-            _ => panic!("expected cmd command"),
-        }
-    }
-
-    #[test]
-    fn cmd_usage_renders_cmd_help() {
-        let usage = cmd_usage();
-
-        assert!(usage.contains("Usage: merry cmd"));
-        assert!(usage.contains("--no-prompt"));
-        assert!(!usage.contains("merry debug openai"));
-    }
-
-    #[test]
-    fn parses_debug_defaults() {
-        let cli = Cli::try_parse_from(["merry", "debug"]).expect("debug args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Debug(debug) => {
-                assert!(!cli.with_sandbox);
-                assert_eq!(debug.session_id, DEFAULT_SESSION_ID);
-                assert_eq!(debug.input, DEFAULT_INPUT);
-                assert!(debug.command.is_none());
-            }
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn parses_debug_openai_options() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "debug",
-            "openai",
-            "--input",
-            "hello",
-            "--model",
-            "gpt-test",
-            "--max-output-tokens",
-            "16",
-            "--debug-tool-result",
-            "tool result",
-        ])
-        .expect("debug openai args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::OpenAi(openai)) => {
-                    assert_eq!(openai.input, "hello");
-                    assert_eq!(openai.model.as_deref(), Some("gpt-test"));
-                    assert_eq!(openai.max_output_tokens, Some(16));
-                    assert_eq!(openai.debug_tool_result.as_deref(), Some("tool result"));
-                }
-                Some(DebugCommand::Shell(_)) => panic!("expected debug openai subcommand"),
-                None => panic!("expected debug openai subcommand"),
-            },
-            _ => panic!("expected debug subcommand"),
-        }
-    }
-
-    #[test]
-    fn parses_shell_argv() {
-        let cli = Cli::try_parse_from(["merry", "debug", "shell", "--", "rustc", "--version"])
-            .expect("shell args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::Shell(shell)) => {
-                    assert!(!shell.accept_local_workspace_process_risk);
-                    assert_eq!(shell.argv, ["rustc", "--version"]);
-                }
-                _ => panic!("expected shell subcommand"),
-            },
-            _ => panic!("expected shell subcommand"),
-        }
-    }
-
-    #[test]
-    fn parses_shell_local_workspace_process_risk_acceptance() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            "debug",
-            "shell",
-            "--accept-local-workspace-process-risk",
-            "--",
-            "cargo",
-            "test",
-            "-p",
-            "merry-runtime",
-        ])
-        .expect("shell args should parse");
-
-        match cli.command.expect("command should be present") {
-            CliCommand::Debug(debug) => match debug.command {
-                Some(DebugCommand::Shell(shell)) => {
-                    assert!(shell.accept_local_workspace_process_risk);
-                    assert_eq!(shell.argv, ["cargo", "test", "-p", "merry-runtime"]);
-                }
-                _ => panic!("expected shell subcommand"),
-            },
-            _ => panic!("expected shell subcommand"),
-        }
-    }
-
-    #[test]
-    fn parses_hidden_sandbox_child_handoff() {
-        let cli = Cli::try_parse_from([
-            "merry",
-            SANDBOX_CHILD_HANDOFF_ARG,
-            SANDBOX_CHILD_HANDOFF_CLI_BWRAP,
-            "debug",
-            "shell",
-            "--",
-            "rustc",
-            "--version",
-        ])
-        .expect("hidden sandbox handoff args should parse");
-
-        assert_eq!(
-            cli.sandbox_child_handoff,
-            Some(SandboxChildHandoff::CliBwrap)
-        );
-    }
-
-    #[test]
-    fn rejects_shell_argv_without_separator() {
-        let error = Cli::try_parse_from(["merry", "debug", "shell", "rustc", "--version"])
-            .expect_err("shell argv should require `--` separator");
-
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn shell_usage_contains_shell_usage() {
-        assert!(shell_usage().contains("Usage: merry debug shell [OPTIONS] -- <ARGV>..."));
-    }
-
-    #[test]
-    fn parses_root_with_sandbox_flag() {
-        let cli =
-            Cli::try_parse_from(["merry", "--with-sandbox", "debug"]).expect("args should parse");
-
-        assert!(cli.with_sandbox);
-    }
-
-    #[test]
-    fn debug_openai_usage_contains_openai_env_help() {
-        assert!(debug_openai_usage().contains("MERRY_OPENAI_DEBUG=1"));
-    }
-}
+mod tests;

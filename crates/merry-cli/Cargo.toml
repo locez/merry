@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 clap.workspace = true
+clap_complete.workspace = true
 crossterm = { workspace = true, features = ["osc52"] }
 futures-util.workspace = true
 merry-core = { path = "../merry-core", version = "0.1.0" }
@@ -27,7 +28,7 @@ serde_json.workspace = true
 sha2.workspace = true
 syntect.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["io-std", "io-util", "process"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "net", "process"] }
 tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true
@@ -46,6 +47,9 @@ image.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["pty"] }
 
 [[bin]]
 name = "merry"

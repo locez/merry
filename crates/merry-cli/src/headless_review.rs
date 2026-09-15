@@ -1,7 +1,8 @@
 use merry_runtime::{
     ChannelPermissionAdmissionSource, PermissionReviewRequest, RequestedCapability,
 };
-use std::{io, sync::Arc};
+use std::{io, path::PathBuf, sync::Arc};
+use terminal::open_review_terminal;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
     sync::mpsc,
@@ -9,16 +10,31 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+mod terminal;
+
 /// Where a headless run reads permission-review answers from.
 ///
 /// `merry run -` reads the task from stdin to end-of-file, so stdin can no
 /// longer carry answers: reusing it would read that end-of-file and silently
 /// deny every request. Those runs answer on the controlling terminal instead,
-/// and deny with an explicit reason when the process has none.
+/// or on the terminal device the outer sandbox parent bound into the sandbox,
+/// and deny with an explicit reason when the process has neither.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReviewInputChannel {
     Stdin,
     ControllingTerminal,
+}
+
+/// Terminal paths tried, in order, for a run whose task came from stdin.
+///
+/// `/dev/tty` is the controlling terminal. Under the outer sandbox on Linux,
+/// `--new-session` makes it unopenable, and the parent binds its terminal
+/// device at a second path instead; see `sandbox::review_terminal`.
+fn review_terminal_paths() -> Vec<PathBuf> {
+    let mut paths = vec![PathBuf::from("/dev/tty")];
+    #[cfg(target_os = "linux")]
+    paths.push(PathBuf::from(crate::sandbox::SANDBOX_REVIEW_TERMINAL_PATH));
+    paths
 }
 
 /// Reason recorded when a run has no channel to answer permission review on.
@@ -28,7 +44,8 @@ const NO_REVIEW_INPUT_REASON: &str =
 /// Operator-facing note explaining why a request was denied unanswered.
 const NO_REVIEW_INPUT_NOTICE: &str = concat!(
     "\nNo input channel for permission review: the task was read from stdin and ",
-    "no controlling terminal is available. Denying.\n"
+    "no terminal is available to answer on. Denying. Pass the task on the command ",
+    "line, or use --approval-policy model_only or deny, for runs without a terminal.\n"
 );
 
 pub(crate) struct HeadlessPermissionReviewer {
@@ -57,6 +74,15 @@ impl HeadlessPermissionReviewer {
     }
 
     pub(crate) fn start(self, channel: ReviewInputChannel) -> HeadlessPermissionReviewTask {
+        self.start_with_terminal_paths(channel, review_terminal_paths())
+    }
+
+    /// [`Self::start`] with the terminal paths a stdin task may answer on.
+    pub(crate) fn start_with_terminal_paths(
+        self,
+        channel: ReviewInputChannel,
+        terminal_paths: Vec<PathBuf>,
+    ) -> HeadlessPermissionReviewTask {
         let Self {
             requests,
             cancellation,
@@ -64,7 +90,7 @@ impl HeadlessPermissionReviewer {
         } = self;
         let task_cancellation = cancellation.clone();
         let handle = tokio::spawn(async move {
-            let input = open_review_input(channel).await;
+            let input = open_review_input(channel, &terminal_paths);
             run_headless_permission_review(requests, input, tokio::io::stderr(), task_cancellation)
                 .await
         });
@@ -90,19 +116,16 @@ impl HeadlessPermissionReviewTask {
 /// Opens the reader that answers permission reviews for this run.
 ///
 /// A run whose task came from stdin has already consumed that stream, so it
-/// falls back to the controlling terminal. `None` means review has no way to
-/// ask, which is reported per request rather than silently defaulting to deny.
-async fn open_review_input(
+/// falls back to the first terminal in `terminal_paths` that opens. `None`
+/// means review has no way to ask, which is reported per request rather than
+/// silently defaulting to deny.
+fn open_review_input(
     channel: ReviewInputChannel,
+    terminal_paths: &[PathBuf],
 ) -> Option<Box<dyn AsyncBufRead + Unpin + Send>> {
     match channel {
         ReviewInputChannel::Stdin => Some(Box::new(BufReader::new(tokio::io::stdin()))),
-        ReviewInputChannel::ControllingTerminal => tokio::fs::File::open("/dev/tty")
-            .await
-            .ok()
-            .map(|terminal| {
-                Box::new(BufReader::new(terminal)) as Box<dyn AsyncBufRead + Unpin + Send>
-            }),
+        ReviewInputChannel::ControllingTerminal => open_review_terminal(terminal_paths),
     }
 }
 
@@ -250,8 +273,8 @@ fn format_permission_prompt(request: &PermissionReviewRequest) -> String {
         "Permission review required ({})",
         request.approval_id()
     )];
-    if let Some(failure) = request.review_failure() {
-        lines.push(format!("AI review unavailable: {failure}"));
+    if let Some(reason) = request.host_fallback_reason() {
+        lines.push(reason.to_string());
     }
     if let Some(reason) = permission_request.reason() {
         lines.push(format!("reason: {reason}"));
@@ -443,5 +466,74 @@ mod tests {
             matches!(decision, PermissionAdmissionDecision::Approved(_)),
             "an answered request should be approved: {decision:?}"
         );
+    }
+
+    /// A stdin task answers on the first terminal path that opens (the bound
+    /// device when `/dev/tty` is unavailable in the outer sandbox), and an
+    /// unanswered request must not outlive the run: cancelling the reviewer
+    /// denies it, and the runtime then shuts down without waiting for a
+    /// keystroke that never comes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cancelling_an_unanswered_terminal_review_denies_it_and_lets_the_runtime_stop() {
+        use super::{HeadlessPermissionReviewer, ReviewInputChannel};
+        use crate::sandbox::review_terminal::tests::open_pseudo_terminal;
+        use std::time::Duration;
+
+        let terminal = open_pseudo_terminal();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let reviewer = HeadlessPermissionReviewer::new();
+            let source = reviewer.source();
+            let review_task = reviewer.start_with_terminal_paths(
+                ReviewInputChannel::ControllingTerminal,
+                vec![
+                    std::path::PathBuf::from("/nonexistent/merry-review-tty"),
+                    terminal.slave_path.clone(),
+                ],
+            );
+            let cancellation = CancellationToken::new();
+            let review = tokio::spawn(async move {
+                source
+                    .review(
+                        network_permission_request(),
+                        PermissionAdmissionContext::new(cancellation),
+                    )
+                    .await
+            });
+            // Let the reviewer print the prompt and start waiting on the
+            // terminal; nobody answers.
+            tokio::time::sleep(Duration::from_millis(250)).await;
+
+            review_task
+                .finish()
+                .await
+                .expect("cancelling the reviewer should settle cleanly");
+            match review.await.expect("review task should join") {
+                Ok(PermissionAdmissionDecision::Denied(review)) => {
+                    assert_eq!(
+                        review.rationale(),
+                        "headless permission review was cancelled"
+                    );
+                }
+                other => panic!("an unanswered request must be denied on cancel: {other:?}"),
+            }
+        });
+
+        // With a blocking terminal read this would wait for a newline that
+        // never arrives; the terminal stays open and silent throughout.
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(runtime);
+            let _ = done.send(());
+        });
+        assert!(
+            finished.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "runtime shutdown must not wait on the unanswered terminal read"
+        );
+        drop(terminal);
     }
 }

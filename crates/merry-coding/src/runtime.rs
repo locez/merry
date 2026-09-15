@@ -15,13 +15,18 @@ use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_process::ProcessBackend;
 use merry_runtime::{
     AgentLoopConfig, AgentLoopConfigError, AutomaticCompactionConfig, ChildRuntimeFactory,
-    FileSessionStore, LoadedSession, PermissionAdmissionSource, PermissionReviewMode,
-    RegisteredTool, Runtime, RuntimeBuilder, RuntimeError, RuntimeModelRole, SkillCatalog,
-    SkillError, SubagentConfig, SubagentError, SubagentManager, subagent_registered_tools,
+    FileSessionStore, LoadedSession, RegisteredTool, Runtime, RuntimeBuilder, RuntimeError,
+    RuntimeModelRole, SkillCatalog, SkillError, SubagentConfig, SubagentError, SubagentManager,
+    subagent_registered_tools,
 };
 use merry_tools::WorkspaceToolLimits;
+pub use permission_policy::{
+    CodingApprovalPolicy, CodingPermissionPolicy, CodingPermissionPolicyError,
+};
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 use thiserror::Error;
+
+mod permission_policy;
 
 /// A provider-neutral model/provider pair for one non-primary runtime role.
 ///
@@ -77,160 +82,6 @@ pub enum CodingModelRoleConfigError {
     /// The primary provider/model belongs to [`CodingRuntimeInput::new`].
     #[error("primary model must be configured as the coding runtime's primary provider")]
     PrimaryRole,
-}
-
-/// Product process boundary used to select coding permission policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodingProcessBoundary {
-    /// Process actions run directly in the host environment.
-    Unrestricted,
-    /// Process actions use only the per-action inner sandbox.
-    InnerOnly,
-    /// Process actions use the outer Merry sandbox and the inner sandbox.
-    OuterAndInner,
-}
-
-/// Host/model preference for permission review when the outer sandbox is off.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum NoSandboxReviewMode {
-    /// Use the host admission source directly when one is available.
-    #[default]
-    Host,
-    /// Try model review first and fall back to the host when one is available.
-    Model,
-}
-
-/// Trust mode selected by the product surface for a coding runtime.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CodingTrustMode {
-    /// Permission requests must go through the configured review policy.
-    #[default]
-    Reviewed,
-    /// Explicitly skip model and host permission review for configured actions.
-    FullyTrusted,
-}
-
-/// Failure to construct a process-boundary permission policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub enum CodingPermissionPolicyError {
-    /// A selected policy needs a host admission source, but the surface did not provide one.
-    #[error("{boundary:?} permission review requires a host admission source")]
-    HostAdmissionUnavailable { boundary: CodingProcessBoundary },
-}
-
-/// Permission configuration shared by parent and child coding runtimes.
-///
-/// This is the only coding-layer representation of permission mode and host
-/// admission. Host-dependent variants carry their source directly, so an
-/// incomplete host policy cannot be constructed by callers.
-#[derive(Clone, Default)]
-pub enum CodingPermissionPolicy {
-    /// Use the runtime's trust-level default.
-    #[default]
-    Default,
-    /// Route permission requests through model-backed review without a host fallback.
-    ///
-    /// The variant name is retained for public API compatibility; use
-    /// [`CodingPermissionPolicy::model_only`] in new code.
-    Required,
-    /// Route permission requests through the supplied host admission source.
-    HostDecisionOnly {
-        /// Host-owned admission source used by the runtime.
-        source: Arc<dyn PermissionAdmissionSource>,
-    },
-    /// Try model-backed review first and use the supplied host source as a fallback.
-    ModelThenHostFallback {
-        /// Host-owned admission source used by the runtime.
-        source: Arc<dyn PermissionAdmissionSource>,
-    },
-    /// Admit configured registered tools without an approval round.
-    FullyTrusted,
-}
-
-impl CodingPermissionPolicy {
-    /// Route permission requests through model-backed review without a host fallback.
-    #[must_use]
-    pub const fn model_only() -> Self {
-        Self::Required
-    }
-
-    /// Route permission requests through model-backed review without a host fallback.
-    #[must_use]
-    pub const fn required() -> Self {
-        Self::model_only()
-    }
-
-    /// Route permission requests through the supplied host admission source.
-    #[must_use]
-    pub fn host_decision_only(source: Arc<dyn PermissionAdmissionSource>) -> Self {
-        Self::HostDecisionOnly { source }
-    }
-
-    /// Try model-backed review first and use the supplied host source as a fallback.
-    #[must_use]
-    pub fn model_then_host_fallback(source: Arc<dyn PermissionAdmissionSource>) -> Self {
-        Self::ModelThenHostFallback { source }
-    }
-
-    /// Admit configured registered tools without an approval round.
-    #[must_use]
-    pub const fn fully_trusted() -> Self {
-        Self::FullyTrusted
-    }
-
-    /// Selects the product policy for one process boundary.
-    ///
-    /// A host fallback is only constructed when the caller supplies a host
-    /// admission source. Callers that need host review must handle the typed
-    /// error instead of silently degrading to another policy.
-    pub fn for_process_boundary(
-        boundary: CodingProcessBoundary,
-        trust: CodingTrustMode,
-        no_sandbox_review: NoSandboxReviewMode,
-        host_source: Option<Arc<dyn PermissionAdmissionSource>>,
-    ) -> Result<Self, CodingPermissionPolicyError> {
-        if trust == CodingTrustMode::FullyTrusted {
-            return Ok(Self::fully_trusted());
-        }
-
-        match boundary {
-            CodingProcessBoundary::OuterAndInner => Ok(Self::model_only()),
-            CodingProcessBoundary::InnerOnly => host_source
-                .map(Self::model_then_host_fallback)
-                .ok_or(CodingPermissionPolicyError::HostAdmissionUnavailable { boundary }),
-            CodingProcessBoundary::Unrestricted => match no_sandbox_review {
-                NoSandboxReviewMode::Host => host_source
-                    .map(Self::host_decision_only)
-                    .ok_or(CodingPermissionPolicyError::HostAdmissionUnavailable { boundary }),
-                NoSandboxReviewMode::Model => host_source
-                    .map(Self::model_then_host_fallback)
-                    .ok_or(CodingPermissionPolicyError::HostAdmissionUnavailable { boundary }),
-            },
-        }
-    }
-
-    fn apply_to(&self, mut builder: RuntimeBuilder) -> RuntimeBuilder {
-        match self {
-            Self::Default => {}
-            Self::Required => {
-                builder = builder.permission_review_mode(PermissionReviewMode::Required);
-            }
-            Self::HostDecisionOnly { source } => {
-                builder = builder
-                    .permission_review_mode(PermissionReviewMode::HostDecisionOnly)
-                    .permission_admission_source(Arc::clone(source));
-            }
-            Self::ModelThenHostFallback { source } => {
-                builder = builder
-                    .permission_review_mode(PermissionReviewMode::ModelThenHostFallback)
-                    .permission_admission_source(Arc::clone(source));
-            }
-            Self::FullyTrusted => {
-                builder = builder.permission_review_mode(PermissionReviewMode::FullyTrusted);
-            }
-        }
-        builder
-    }
 }
 
 /// Parent/child policy that must be applied to every coding runtime builder.

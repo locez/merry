@@ -1,4 +1,3 @@
-use merry::profiles::NoSandboxReviewMode;
 use merry_runtime::{HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource};
 use serde::Deserialize;
 use std::{
@@ -8,6 +7,7 @@ use std::{
 };
 use thiserror::Error;
 
+mod cli;
 pub(crate) mod managed_provider;
 mod mcp;
 mod path_review;
@@ -17,6 +17,8 @@ use paths::{resolve_config_relative_path, resolve_path_access_rule_path, resolve
 mod provider;
 mod runtime;
 
+pub(crate) use cli::CliDefaults;
+use cli::CliToml;
 pub(crate) use managed_provider::{
     ManagedProviderDefinition, ManagedProviderKind, ManagedProviderStore,
     ManagedProviderStoreError, ProviderAlias, derive_provider_alias,
@@ -148,15 +150,6 @@ impl MerryConfig {
 
     pub fn profile(&self) -> Option<&str> {
         self.raw.global.profile.as_deref()
-    }
-
-    pub(crate) fn no_sandbox_review_mode(&self) -> NoSandboxReviewMode {
-        self.raw
-            .permissions
-            .as_ref()
-            .and_then(|permissions| permissions.no_sandbox_review)
-            .map(Into::into)
-            .unwrap_or_default()
     }
 
     /// Resolves product-owned directories and credential files without reading secrets.
@@ -391,6 +384,7 @@ pub enum LogFormat {
 struct MerryConfigToml {
     #[serde(default)]
     global: GlobalToml,
+    cli: Option<CliToml>,
     permissions: Option<PermissionsToml>,
     runtime: Option<RuntimeToml>,
     skills: Option<SkillsToml>,
@@ -414,7 +408,6 @@ struct PermissionsToml {
     ssh_agent: Option<bool>,
     dbus: Option<bool>,
     gpg_agent: Option<bool>,
-    no_sandbox_review: Option<NoSandboxReviewToml>,
     #[serde(default)]
     readonly_paths: Vec<String>,
     #[serde(default)]
@@ -427,22 +420,6 @@ struct PermissionsToml {
     paths: Vec<PathRuleToml>,
     #[serde(default)]
     environment: Vec<EnvironmentVariableToml>,
-}
-
-#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-enum NoSandboxReviewToml {
-    Host,
-    Model,
-}
-
-impl From<NoSandboxReviewToml> for NoSandboxReviewMode {
-    fn from(value: NoSandboxReviewToml) -> Self {
-        match value {
-            NoSandboxReviewToml::Host => Self::Host,
-            NoSandboxReviewToml::Model => Self::Model,
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]

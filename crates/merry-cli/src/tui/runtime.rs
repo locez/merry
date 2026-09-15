@@ -1,6 +1,6 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, unexpected};
 use crate::coding::{
-    CodingPermissionPolicy, CodingTrustMode, HeadlessCodingRuntimeInput, ProcessExecutionMode,
+    ApprovalPolicy, CodingPermissionPolicy, HeadlessCodingRuntimeInput, ProcessExecutionMode,
     action_process_runner_for_mode, build_headless_coding_with_policy_composition,
     coding_agent_process_admission, resume_headless_coding_composition_with_loaded_session,
 };
@@ -58,7 +58,7 @@ pub(crate) async fn start_tui_runtime_session(
     session_store: TuiSessionStore,
     selection: SessionPickerSelection,
     process_execution_mode: ProcessExecutionMode,
-    fully_trusted: bool,
+    approval_policy: ApprovalPolicy,
     preferences: &TuiPreferences,
 ) -> Result<TuiRuntimeSession, CliError> {
     let Some(_admission) =
@@ -158,14 +158,8 @@ pub(crate) async fn start_tui_runtime_session(
         ),
         workspace_tool_limits: None,
     };
-    let permission_policy = CodingPermissionPolicy::for_process_boundary(
-        process_execution_mode.into(),
-        if fully_trusted {
-            CodingTrustMode::FullyTrusted
-        } else {
-            CodingTrustMode::Reviewed
-        },
-        owned_config.no_sandbox_review_mode(),
+    let permission_policy = CodingPermissionPolicy::for_approval_policy(
+        approval_policy.into(),
         Some(permission_source),
     )
     .map_err(unexpected)?;
@@ -395,8 +389,8 @@ async fn write_session_metadata(
 fn permission_review_view(request: &PermissionReviewRequest) -> (String, String) {
     let permission_request = request.request();
     let mut lines = vec![format!("approval_id: {}", request.approval_id())];
-    if let Some(failure) = request.review_failure() {
-        lines.push(format!("AI review fallback: {failure}"));
+    if let Some(reason) = request.host_fallback_reason() {
+        lines.push(reason.to_string());
     }
     if let Some(reason) = permission_request.reason() {
         lines.push(format!("reason: {reason}"));

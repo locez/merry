@@ -184,7 +184,18 @@ target/release/merry run --resume migration-1 "now update the tests"
 
 # Generate a command plan without executing it
 target/release/merry cmd "find the largest Rust files"
+
+# Shell completions (bash, zsh, fish, elvish, powershell), generated from the
+# same clap definition that parses the flags above
+target/release/merry completions zsh > "${fpath[1]}/_merry"
+target/release/merry completions bash > ~/.local/share/bash-completion/completions/merry
+target/release/merry completions fish > ~/.config/fish/completions/merry.fish
 ```
+
+`merry completions <SHELL>` prints the script to stdout and exits without
+reading `config.toml` or starting a sandbox, so it works before Merry is
+configured. Regenerate it after upgrading; the flags, subcommands, and value
+lists such as `--approval-policy` are read from the binary itself.
 
 Every `merry run` saves its session state under
 `$XDG_STATE_HOME/merry/sessions/<session-id>` when the run settles, so a later
@@ -206,9 +217,14 @@ is rejected as a usage error (exit 2).
 Reading the task from stdin consumes that stream, so `merry run -` answers
 permission review on the controlling terminal rather than on stdin. Piping
 approval answers alongside the task does not work: they would be read as part
-of the task. When the process has no controlling terminal, review has no way to
+of the task. Under the default outer sandbox, whose `--new-session` leaves the
+sandboxed process unable to open `/dev/tty`, a `run -` with a `model_then_human`
+or `human_only` policy binds only the parent's terminal device into the sandbox
+at `/dev/merry-review-tty` and reads answers there; tool processes never see
+it. When the process has no controlling terminal at all, review has no way to
 ask and each request is denied with that reason on stderr, so grant the
-capabilities up front or pass the task on argv when a piped run needs approvals.
+capabilities up front, pass the task on argv, or pick `model_only` or `deny`
+when a piped run needs approvals without a terminal.
 
 TUI and `run` use outer+inner bubblewrap automatically. Before the outer
 sandbox starts, Merry probes whether bubblewrap can run inside bubblewrap on
@@ -235,6 +251,37 @@ In the normal mode, the outer `/tmp` is a session-scoped in-memory tmpfs reused
 by action sandboxes. With `--no-sandbox`, action `/tmp` maps to the current
 process's validated `TMPDIR` directly. Debug commands remain unsandboxed unless
 `--with-sandbox` is supplied.
+
+The `[cli]` table in `config.toml` sets defaults for every `merry` invocation,
+so a preferred sandbox mode or approval policy does not need to be passed as a
+flag on each command:
+
+```toml
+[cli]
+sandbox = "no-sandbox"
+approval_policy = "none"
+```
+
+`sandbox` takes `with-sandbox` (outer+inner, the built-in default for TUI and
+`run`), `no-sandbox`, or `inner-sandbox`, matching the root flags; a sandbox
+mode given on the command line replaces the configured one. `approval_policy`
+is the config equivalent of `--approval-policy` and names who reviews
+permission requests before a command runs:
+
+| Value | Reviewer |
+|---|---|
+| `none` | nobody: configured actions run without an approval round |
+| `deny` | nobody: every permission request is rejected without asking |
+| `model_only` | the `[models.approval_review]` model decides; no human fallback |
+| `model_then_human` (default) | the model decides first; when it denies or cannot decide, you are asked in the TUI dialog or on the `merry run` prompt |
+| `human_only` | you decide, in the TUI dialog or on the `merry run` prompt |
+
+`sandbox` and `approval_policy` are independent dimensions: the sandbox sets
+the execution boundary and the approval policy sets who reviews permission
+requests inside it. Any policy combines with any sandbox mode, in config and on
+the command line alike, and a flag for one dimension replaces only that
+dimension's configured default: `--with-sandbox` keeps a configured
+`approval_policy`, and `--approval-policy` keeps a configured `sandbox`.
 
 Outer filesystem mounts are applied parent-first after resolving access-rule
 precedence. Explicit file and directory imports preserve symbolic links instead
@@ -270,10 +317,18 @@ HOME. This applies to both inner-only and outer+inner execution.
 defaults to `true`. It does not preauthorize network access: ordinary actions
 remain network-isolated, and each action must request and obtain its own network
 approval. With `network = false`, network requests are rejected before review
-or execution, including in fully trusted review mode; approval cannot override
+or execution, including under the `none` approval policy; approval cannot override
 the ceiling. The setting is inherited by new process sessions and does not
 restrict model-provider or configured MCP connections. Explicit `--no-sandbox`
 host execution remains outside this network-isolation boundary.
+
+`--approval-policy none` skips model and host permission review for configured
+actions in the TUI and `merry run`; `[cli] approval_policy = "none"` applies it
+to every session, under whichever sandbox mode is in effect. `--approval-policy deny` is the
+opposite end: actions that need no approval still run, but every permission
+request and high-risk action review is denied without consulting a reviewer.
+Neither policy changes any access ceiling: `deny_paths`, `review_paths`
+masking, and `network = false` still apply.
 
 Trusted `readonly_paths` and `readwrite_paths` are preauthorized in the inner
 sandbox at their declared access level. `review_paths` marks existing subtrees

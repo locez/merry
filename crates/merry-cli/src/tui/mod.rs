@@ -1,5 +1,5 @@
 use crate::cli_error::CliError;
-use crate::coding::ProcessExecutionMode;
+use crate::coding::{ApprovalPolicy, ProcessExecutionMode};
 use crate::config::{MerryConfig, XdgPaths};
 use crate::config::{ProviderAlias, derive_provider_alias};
 use crate::provider_management::{
@@ -89,7 +89,7 @@ pub(crate) async fn run(
     merry_config: Option<&MerryConfig>,
     launch_mode: LaunchMode,
     process_execution_mode: ProcessExecutionMode,
-    fully_trusted: bool,
+    approval_policy: ApprovalPolicy,
 ) -> Result<(), CliError> {
     let tui_config = merry_config
         .map(MerryConfig::tui_config)
@@ -157,7 +157,7 @@ pub(crate) async fn run(
         session_store,
         selection,
         process_execution_mode,
-        fully_trusted,
+        approval_policy,
         &preferences,
     )
     .await?;

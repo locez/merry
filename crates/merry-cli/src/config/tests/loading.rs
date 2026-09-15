@@ -1,6 +1,9 @@
 use super::home;
+use crate::coding::ApprovalPolicy;
 use crate::config::provider::{EffectiveOpenAiApiKeySource, ProviderConfigSource};
-use crate::config::{EffectiveProviderConfig, LogFormat, LogLevel, MerryConfig, XdgPaths};
+use crate::config::{
+    CliDefaults, EffectiveProviderConfig, LogFormat, LogLevel, MerryConfig, XdgPaths,
+};
 use merry_runtime::PathAccess;
 use std::{
     fs,
@@ -340,6 +343,12 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
         .expect("example config should be present");
 
     assert_eq!(config.profile(), Some("default"));
+    assert_eq!(
+        config.cli_defaults(),
+        CliDefaults::new(None, Some(ApprovalPolicy::ModelThenHuman)),
+        "the user-facing example should not preselect a sandbox mode and should \
+         spell out the default approval policy"
+    );
     assert!(
         config
             .effective_log_settings(&paths)

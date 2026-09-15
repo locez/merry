@@ -16,6 +16,7 @@ pub(crate) use host::{
 };
 use merry_runtime::PathAccess;
 pub(crate) use paths::default_inner_development_path_rules;
+pub(crate) use review_terminal::{ReviewTerminalHandoff, SANDBOX_REVIEW_TERMINAL_PATH};
 use std::{
     env,
     ffi::OsString,
@@ -39,6 +40,8 @@ mod integrations;
 mod paths;
 
 mod mounts;
+
+pub(crate) mod review_terminal;
 
 #[cfg(test)]
 mod tests;
@@ -150,9 +153,11 @@ pub(crate) enum Bootstrap {
 pub(crate) fn maybe_reexec(
     with_sandbox: bool,
     clipboard_access: ClipboardAccess,
+    review_terminal: Option<ReviewTerminalHandoff>,
     args: Vec<OsString>,
 ) -> Result<(), Error> {
     let mut host = Host::from_env(args)?;
+    host.review_terminal_device = review_terminal.map(|handoff| handoff.device().to_path_buf());
     if with_sandbox
         && !host.inside_sandbox
         && host

@@ -6,6 +6,7 @@ mod cli_exit;
 mod cli_route;
 mod cmd;
 mod coding;
+mod completions;
 mod config;
 mod debug;
 mod headless_review;
@@ -26,7 +27,7 @@ mod web;
 use clap::Parser;
 use coding::ProcessExecutionMode;
 use config::{MerryConfig, XdgPaths};
-use std::env;
+use std::{env, io};
 
 use cli::Cli;
 use cli_exit::CliExit;
@@ -34,10 +35,17 @@ use runtime_config::{effective_log_settings, validate_loaded_config};
 
 fn main() -> CliExit {
     let argv = env::args_os().collect::<Vec<_>>();
-    let cli = match Cli::try_parse_from(argv.clone()) {
+    let mut cli = match Cli::try_parse_from(argv.clone()) {
         Ok(cli) => cli,
         Err(error) => return CliExit::Clap(error),
     };
+
+    // Completion scripts come straight from the clap definition; they must
+    // print even when no config exists yet or the current one fails to load.
+    if let Some(cli::CliCommand::Completions(args)) = &cli.command {
+        completions::write_completions(args.shell, &mut io::stdout().lock());
+        return CliExit::Success;
+    }
 
     let config_paths = match XdgPaths::from_env() {
         Ok(paths) => paths,
@@ -49,6 +57,9 @@ fn main() -> CliExit {
     };
     if let Err(error) = validate_loaded_config(_config.as_ref(), &config_paths) {
         return CliExit::Unexpected(error.to_string());
+    }
+    if let Some(config) = _config.as_ref() {
+        cli.apply_defaults(config.cli_defaults());
     }
     let log_settings = match effective_log_settings(_config.as_ref(), &config_paths) {
         Ok(settings) => settings,
@@ -75,9 +86,17 @@ fn main() -> CliExit {
         return CliExit::Unexpected(error.to_string());
     }
 
+    // Resolved on the host, after the probe has settled that this invocation
+    // really re-execs: the sandboxed child cannot open /dev/tty itself.
+    let review_terminal = if cli.hands_off_review_terminal() {
+        sandbox::ReviewTerminalHandoff::resolve_controlling_terminal()
+    } else {
+        None
+    };
     if let Err(error) = sandbox::maybe_reexec(
         cli.should_bootstrap_sandbox(),
         cli.clipboard_access(),
+        review_terminal,
         argv.iter().skip(1).cloned().collect(),
     ) {
         return CliExit::Unexpected(error.to_string());
