@@ -351,10 +351,7 @@ pub(super) fn expanded_timeline_lines(
         .filter(|line| !line.trim().is_empty())
         .take(TOOL_RESULT_PREVIEW_MAX_LINES)
     {
-        let clean = line
-            .chars()
-            .filter(|character| !character.is_control())
-            .collect::<String>();
+        let clean = crate::text::without_control_chars(line);
         let clean = clean.trim();
         if clean.is_empty() {
             continue;
@@ -420,10 +417,7 @@ pub(super) fn command_lines(
             if failed || (failure.is_none() && state.show_successful_command_output()) {
                 let body_width = usize::from(region_width).saturating_sub(2).max(4);
                 for line in &preview.lines {
-                    let clean = line
-                        .chars()
-                        .filter(|character| !character.is_control())
-                        .collect::<String>();
+                    let clean = crate::text::without_control_chars(line);
                     lines.push(Line::from(Span::styled(
                         format!("  {}", truncate_chars(clean.trim(), body_width)),
                         semantic_style(state, SemanticColor::Muted),

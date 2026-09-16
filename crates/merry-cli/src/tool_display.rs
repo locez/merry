@@ -27,9 +27,7 @@ fn format_process_call_detail(arguments: &Map<String, Value>) -> Option<String> 
     Some(format!(
         "{} ({})",
         display_shell_command(command),
-        cwd.chars()
-            .filter(|character| !character.is_control())
-            .collect::<String>()
+        crate::text::without_control_chars(cwd)
     ))
 }
 
@@ -105,16 +103,7 @@ fn compact_shell_word(value: &str) -> String {
 }
 
 fn display_shell_command(value: &str) -> String {
-    let output = value
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
+    let output = crate::text::with_control_chars_as_spaces(value);
     let output = output.trim();
     if output.is_empty() {
         "\"\"".to_owned()
@@ -124,11 +113,8 @@ fn display_shell_command(value: &str) -> String {
 }
 
 fn compact_inline(value: &str, max_chars: usize) -> String {
-    let mut output = value
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(max_chars)
-        .collect::<String>();
+    let value = crate::text::without_control_chars(value);
+    let mut output = value.chars().take(max_chars).collect::<String>();
     if value.chars().count() > max_chars {
         output.push_str("...");
     }

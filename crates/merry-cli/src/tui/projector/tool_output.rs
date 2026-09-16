@@ -215,9 +215,8 @@ pub(super) fn compact_tool_output(output: &str) -> String {
     if output.is_empty() {
         return String::new();
     }
-    let mut compact = output
+    let mut compact = crate::text::without_control_chars_keeping_newlines(output)
         .chars()
-        .filter(|character| !character.is_control() || *character == '\n')
         .take(600)
         .collect::<String>();
     if output.chars().count() > 600 {

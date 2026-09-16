@@ -21,6 +21,7 @@ mod runtime_events;
 mod sandbox;
 mod session_id;
 mod testing;
+mod text;
 mod tool_display;
 mod tui;
 mod web;
