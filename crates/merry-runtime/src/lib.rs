@@ -59,6 +59,7 @@ mod session_store;
 mod skill;
 mod step;
 mod subagent;
+mod text;
 mod token_estimate;
 mod tool;
 mod tool_admission;
@@ -155,7 +156,10 @@ pub use session_projection::SessionTranscriptItem;
 pub use session_store::{
     FileSessionStore, PlanPersistenceLocation, SessionReservation, SessionStoreError,
 };
-pub use skill::{SkillCatalog, SkillError, SkillLoadWarning, SkillMetadata};
+pub use skill::{
+    FrontmatterError, SkillCatalog, SkillError, SkillLoadWarning, SkillLoadWarningReason,
+    SkillMetadata,
+};
 pub use step::StepContext;
 pub use subagent::{
     CancelSubagentsInput, ChildRuntimeFactory, ChildRuntimeInput, ChildWorkspaceScope,

@@ -21,7 +21,7 @@ async fn projects_skill_metadata_without_body() {
     std::fs::create_dir_all(skill_root.join("demo")).expect("mkdir skill");
     std::fs::write(
         skill_root.join("demo/SKILL.md"),
-        "---\nname: demo-skill\ndescription: Use for demo tasks.\n---\n# Demo\nbody sentinel\n",
+        "---\nname: demo-skill\ndescription: Use for demo tasks.\nmetadata:\n  cli_version: \">=1.2.3\"\n  requires:\n    bins:\n      - demo-cli\n---\n# Demo\nbody sentinel\n",
     )
     .expect("write skill");
 

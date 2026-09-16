@@ -2,15 +2,23 @@
 //!
 //! Skills are discovered from `SKILL.md` files, but only frontmatter metadata
 //! enters the cacheable stable prefix. Full skill bodies remain available
-//! through normal workspace file reads.
+//! through normal workspace file reads. Frontmatter is parsed as YAML by the
+//! `frontmatter` submodule, which reads only `name` and `description`.
 
 use std::{
     collections::{BTreeMap, btree_map::Entry},
-    fs, io,
+    fmt, fs,
     path::{Path, PathBuf},
 };
 
 use thiserror::Error;
+
+use crate::text;
+
+#[path = "skill/frontmatter.rs"]
+mod frontmatter;
+
+pub use frontmatter::FrontmatterError;
 
 const SKILLS_INTRO: &str = "A skill is a set of local instructions stored in a `SKILL.md` file. The list below is metadata for discovery only; skill bodies stay on disk until needed.";
 const SKILLS_HOW_TO_USE: &str = r#"- If the user explicitly names a skill, including with a `$skill-name` token, use it for that turn.
@@ -29,8 +37,8 @@ pub enum SkillError {
         /// Field name.
         field: &'static str,
     },
-    /// A required field had unsupported control characters.
-    #[error("{field} must not contain control characters")]
+    /// A required single-line field contained control characters or line breaks.
+    #[error("{field} must be single-line text without control characters")]
     ControlCharacters {
         /// Field name.
         field: &'static str,
@@ -48,12 +56,6 @@ pub enum SkillError {
         name: String,
         /// Duplicate skill path.
         path: String,
-    },
-    /// Configured skill root does not exist.
-    #[error("skill root does not exist: {root}")]
-    RootNotFound {
-        /// Configured root.
-        root: String,
     },
     /// Configured skill root is not a directory.
     #[error("skill root is not a directory: {root}")]
@@ -82,6 +84,11 @@ pub struct SkillMetadata {
 
 impl SkillMetadata {
     /// Creates validated skill metadata.
+    ///
+    /// Normalization happens here so every consumer sees the same single-line
+    /// values: `name` is trimmed and `description` has its whitespace
+    /// collapsed. Fields that stay blank or contain control characters are
+    /// rejected.
     pub fn new(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -89,12 +96,13 @@ impl SkillMetadata {
         root: PathBuf,
     ) -> Result<Self, SkillError> {
         let name = name.into();
-        validate_text("skill name", &name)?;
-        let description = description.into();
-        validate_text("skill description", &description)?;
+        let name = name.trim();
+        validate_single_line("skill name", name)?;
+        let description = text::collapse_whitespace(&description.into());
+        validate_single_line("skill description", &description)?;
         validate_skill_path(&skill_md_path)?;
         Ok(Self {
-            name,
+            name: name.to_owned(),
             description,
             skill_md_path,
             root,
@@ -183,7 +191,9 @@ impl SkillCatalog {
                 }
                 Entry::Occupied(_) => warnings.push(SkillLoadWarning::new(
                     skill.skill_md_path.clone(),
-                    format!("duplicate skill name `{}` was skipped", skill.name()),
+                    SkillLoadWarningReason::DuplicateName {
+                        name: skill.name().to_owned(),
+                    },
                 )),
             }
         }
@@ -251,17 +261,14 @@ impl SkillCatalog {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillLoadWarning {
     path: PathBuf,
-    message: String,
+    reason: SkillLoadWarningReason,
 }
 
 impl SkillLoadWarning {
     /// Creates a skill load warning.
     #[must_use]
-    pub fn new(path: PathBuf, message: impl Into<String>) -> Self {
-        Self {
-            path,
-            message: message.into(),
-        }
+    pub fn new(path: PathBuf, reason: SkillLoadWarningReason) -> Self {
+        Self { path, reason }
     }
 
     /// Path that produced the warning.
@@ -270,21 +277,47 @@ impl SkillLoadWarning {
         &self.path
     }
 
-    /// Human-readable warning detail.
+    /// Typed reason the skill was left out of the catalog.
     #[must_use]
-    pub fn message(&self) -> &str {
-        &self.message
+    pub fn reason(&self) -> &SkillLoadWarningReason {
+        &self.reason
     }
 }
 
-fn validate_text(field: &'static str, value: &str) -> Result<(), SkillError> {
+impl fmt::Display for SkillLoadWarning {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.path.display(), self.reason)
+    }
+}
+
+/// Reason a discovered `SKILL.md` file was left out of the catalog.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SkillLoadWarningReason {
+    /// The file could not be read from disk.
+    #[error("failed to read file: {message}")]
+    Read {
+        /// IO error detail.
+        message: String,
+    },
+    /// The frontmatter was missing or invalid.
+    #[error(transparent)]
+    Frontmatter(#[from] FrontmatterError),
+    /// The frontmatter parsed, but the resulting metadata was rejected.
+    #[error(transparent)]
+    InvalidMetadata(#[from] SkillError),
+    /// Another skill in the same catalog already used this name.
+    #[error("duplicate skill name `{name}` was skipped")]
+    DuplicateName {
+        /// Duplicate skill name.
+        name: String,
+    },
+}
+
+fn validate_single_line(field: &'static str, value: &str) -> Result<(), SkillError> {
     if value.trim().is_empty() {
         return Err(SkillError::Blank { field });
     }
-    if value
-        .chars()
-        .any(|character| character.is_control() && character != '\n' && character != '\t')
-    {
+    if value.chars().any(char::is_control) {
         return Err(SkillError::ControlCharacters { field });
     }
     Ok(())
@@ -322,12 +355,21 @@ fn scan_root(
     }
 
     let mut scanned_dirs = 0usize;
-    scan_dir(root, root, 0, &mut scanned_dirs, skills, warnings)
+    scan_dir(
+        root,
+        root,
+        Path::new(""),
+        0,
+        &mut scanned_dirs,
+        skills,
+        warnings,
+    )
 }
 
 fn scan_dir(
     root: &Path,
     dir: &Path,
+    relative_dir: &Path,
     depth: usize,
     scanned_dirs: &mut usize,
     skills: &mut Vec<SkillMetadata>,
@@ -340,9 +382,10 @@ fn scan_dir(
 
     let skill_md = dir.join(SKILLS_FILENAME);
     if skill_md.is_file() {
-        match parse_skill_file(root, &skill_md) {
+        let relative_skill_md = relative_dir.join(SKILLS_FILENAME);
+        match parse_skill_file(&skill_md, &relative_skill_md, root) {
             Ok(metadata) => skills.push(metadata),
-            Err(message) => warnings.push(SkillLoadWarning::new(skill_md, message)),
+            Err(reason) => warnings.push(SkillLoadWarning::new(skill_md, reason)),
         }
     }
 
@@ -361,14 +404,15 @@ fn scan_dir(
             message: source.to_string(),
         })?;
         if file_type.is_dir() {
-            child_dirs.push(entry.path());
+            child_dirs.push((entry.path(), relative_dir.join(entry.file_name())));
         }
     }
     child_dirs.sort();
-    for child_dir in child_dirs {
+    for (child_dir, child_relative_dir) in child_dirs {
         scan_dir(
             root,
             &child_dir,
+            &child_relative_dir,
             depth.saturating_add(1),
             scanned_dirs,
             skills,
@@ -379,77 +423,26 @@ fn scan_dir(
     Ok(())
 }
 
-fn parse_skill_file(root: &Path, skill_md: &Path) -> Result<SkillMetadata, String> {
-    let text = fs::read_to_string(skill_md).map_err(read_error)?;
-    let frontmatter = frontmatter_block(&text)?;
-    let fields = parse_frontmatter_fields(frontmatter)?;
-    let name = fields
-        .name
-        .ok_or_else(|| "missing field `name`".to_owned())?;
-    let description = fields
-        .description
-        .ok_or_else(|| "missing field `description`".to_owned())?;
-    let relative_path = skill_md
-        .strip_prefix(root)
-        .map_err(|_| "skill path is outside configured root".to_owned())?
-        .to_path_buf();
-    SkillMetadata::new(name, description, relative_path, root.to_path_buf())
-        .map_err(|error| error.to_string())
-}
-
-fn read_error(error: io::Error) -> String {
-    format!("failed to read file: {error}")
-}
-
-fn frontmatter_block(text: &str) -> Result<&str, String> {
-    let Some(rest) = text.strip_prefix("---\n") else {
-        return Err("missing frontmatter delimited by ---".to_owned());
-    };
-    let Some((frontmatter, _body)) = rest.split_once("\n---") else {
-        return Err("missing closing frontmatter delimiter".to_owned());
-    };
-    Ok(frontmatter)
-}
-
-#[derive(Default)]
-struct FrontmatterFields {
-    name: Option<String>,
-    description: Option<String>,
-}
-
-fn parse_frontmatter_fields(frontmatter: &str) -> Result<FrontmatterFields, String> {
-    let mut fields = FrontmatterFields::default();
-    for line in frontmatter.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if line != trimmed {
-            return Err(format!("invalid frontmatter line: {line}"));
-        }
-        let Some((key, value)) = trimmed.split_once(':') else {
-            return Err(format!("invalid frontmatter line: {trimmed}"));
-        };
-        let value = value.trim();
-        match key.trim() {
-            "name" => fields.name = Some(unquote_frontmatter_value(value).to_owned()),
-            "description" => fields.description = Some(unquote_frontmatter_value(value).to_owned()),
-            _ => {}
-        }
-    }
-    Ok(fields)
-}
-
-fn unquote_frontmatter_value(value: &str) -> &str {
-    value
-        .strip_prefix('"')
-        .and_then(|rest| rest.strip_suffix('"'))
-        .or_else(|| {
-            value
-                .strip_prefix('\'')
-                .and_then(|rest| rest.strip_suffix('\''))
-        })
-        .unwrap_or(value)
+/// Reads one skill file and turns its frontmatter into validated metadata.
+///
+/// `relative_skill_md` is built by the directory walk, so metadata never has to
+/// re-derive a root-relative path from the absolute scan path.
+fn parse_skill_file(
+    skill_md: &Path,
+    relative_skill_md: &Path,
+    root: &Path,
+) -> Result<SkillMetadata, SkillLoadWarningReason> {
+    let text = fs::read_to_string(skill_md).map_err(|source| SkillLoadWarningReason::Read {
+        message: source.to_string(),
+    })?;
+    let fields = frontmatter::parse(&text)?;
+    SkillMetadata::new(
+        fields.name(),
+        fields.description(),
+        relative_skill_md.to_path_buf(),
+        root.to_path_buf(),
+    )
+    .map_err(SkillLoadWarningReason::InvalidMetadata)
 }
 
 #[cfg(test)]
@@ -535,6 +528,45 @@ mod tests {
         .expect_err("control characters should be rejected");
         assert!(control.to_string().contains("skill name"));
     }
+
+    #[test]
+    fn normalizes_description_to_one_line() {
+        let skill = metadata(
+            "sample-tool",
+            "Use when the description\n  spans several lines.",
+            "skills/sample-tool/SKILL.md",
+        );
+        assert_eq!(
+            skill.description(),
+            "Use when the description spans several lines."
+        );
+
+        let catalog = SkillCatalog::from_metadata(vec![skill]).expect("valid catalog");
+        let rendered = catalog
+            .to_stable_prefix_message_text()
+            .expect("catalog should render");
+        let entry = rendered
+            .lines()
+            .find(|line| line.contains("sample-tool"))
+            .expect("catalog should list the skill");
+        assert_eq!(
+            entry,
+            "- sample-tool: Use when the description spans several lines. (file: skills/sample-tool/SKILL.md)"
+        );
+    }
+
+    #[test]
+    fn rejects_multi_line_names() {
+        let error = SkillMetadata::new(
+            "sample\ntool",
+            "Valid description.",
+            PathBuf::from("skills/sample/SKILL.md"),
+            PathBuf::from("/workspace"),
+        )
+        .expect_err("line breaks in a name should be rejected");
+
+        assert!(error.to_string().contains("skill name"), "{error}");
+    }
 }
 
 #[cfg(test)]
@@ -547,48 +579,81 @@ mod loader_tests {
     }
 
     #[test]
-    fn loads_skill_metadata_from_roots() {
+    fn loads_skill_frontmatter_from_roots() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("skills");
         write(
             &root.join("frontend/SKILL.md"),
-            r#"---
-name: frontend-design
-description: Use when building polished frontend UI.
----
-
-# Frontend Design
-
-full skill body sentinel
-"#,
+            "---\nname: frontend-design\ndescription: Use when building polished frontend UI.\n---\n\n# Frontend Design\n\nfull skill body sentinel\n",
+        );
+        write(
+            &root.join("sample-tool/SKILL.md"),
+            "---\nname: sample-tool\ndescription: Use when the task needs\n  the sample tool.\nmetadata:\n  cli_version: \">=1.2.3\"\n  requires:\n    bins:\n      - sample-cli\n---\n\n# Sample Tool Skill\n",
+        );
+        write(
+            &root.join("windows/SKILL.md"),
+            "\u{feff}---\r\nname: windows\r\ndescription: Windows-authored skill.\r\n---\r\n# Windows\r\n",
         );
 
-        let catalog = SkillCatalog::load_from_roots([root.clone()]).expect("loads catalog");
-        assert_eq!(catalog.skills().len(), 1);
-        assert_eq!(catalog.skills()[0].name(), "frontend-design");
+        let catalog = SkillCatalog::load_from_roots([root]).expect("loads catalog");
+        assert!(catalog.warnings().is_empty(), "{:?}", catalog.warnings());
+        let skills = catalog
+            .skills()
+            .iter()
+            .map(|skill| {
+                (
+                    skill.name(),
+                    skill.description(),
+                    skill.skill_md_path().to_path_buf(),
+                )
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            catalog.skills()[0].description(),
-            "Use when building polished frontend UI."
+            skills,
+            vec![
+                (
+                    "frontend-design",
+                    "Use when building polished frontend UI.",
+                    PathBuf::from("frontend/SKILL.md"),
+                ),
+                (
+                    "sample-tool",
+                    "Use when the task needs the sample tool.",
+                    PathBuf::from("sample-tool/SKILL.md"),
+                ),
+                (
+                    "windows",
+                    "Windows-authored skill.",
+                    PathBuf::from("windows/SKILL.md"),
+                ),
+            ]
         );
-        assert_eq!(
-            catalog.skills()[0].skill_md_path(),
-            Path::new("frontend/SKILL.md")
-        );
-        assert!(catalog.warnings().is_empty());
+
+        let rendered = catalog
+            .to_stable_prefix_message_text()
+            .expect("catalog should render");
+        assert!(rendered.contains("frontend/SKILL.md"));
+        assert!(!rendered.contains("# Frontend Design"));
+        assert!(!rendered.contains("full skill body sentinel"));
     }
 
     #[test]
-    fn skips_invalid_skill_frontmatter_with_warning() {
+    fn skips_invalid_skill_files_with_typed_warnings() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("skills");
         write(
-            &root.join("valid/SKILL.md"),
-            "---\nname: valid\n description: bad indentation\n---\n",
+            &root.join("bad-name/SKILL.md"),
+            "---\nname: |\n  bad\n  name\ndescription: Use when invalid.\n---\n",
         );
         write(
             &root.join("missing-description/SKILL.md"),
             "---\nname: missing-description\n---\n",
         );
+        write(
+            &root.join("nested-description/SKILL.md"),
+            "---\nname: nested-description\ndescription:\n  nested: value\n---\n",
+        );
+        write(&root.join("no-frontmatter/SKILL.md"), "# Body only\n");
         write(
             &root.join("ok/SKILL.md"),
             "---\nname: ok\ndescription: Valid skill.\n---\n# OK\n",
@@ -597,7 +662,56 @@ full skill body sentinel
         let catalog = SkillCatalog::load_from_roots([root]).expect("load should not fail");
         assert_eq!(catalog.skills().len(), 1);
         assert_eq!(catalog.skills()[0].name(), "ok");
-        assert_eq!(catalog.warnings().len(), 2);
+
+        let warnings = catalog.warnings();
+        assert_eq!(warnings.len(), 4);
+        assert!(warnings[0].path().ends_with("bad-name/SKILL.md"));
+        assert!(matches!(
+            warnings[0].reason(),
+            SkillLoadWarningReason::InvalidMetadata(SkillError::ControlCharacters {
+                field: "skill name"
+            })
+        ));
+        assert!(matches!(
+            warnings[1].reason(),
+            SkillLoadWarningReason::Frontmatter(FrontmatterError::MissingField {
+                field: "description"
+            })
+        ));
+        assert!(matches!(
+            warnings[2].reason(),
+            SkillLoadWarningReason::Frontmatter(FrontmatterError::Invalid { .. })
+        ));
+        assert!(matches!(
+            warnings[3].reason(),
+            SkillLoadWarningReason::Frontmatter(FrontmatterError::MissingDelimiter)
+        ));
+    }
+
+    #[test]
+    fn warns_about_duplicate_skill_names() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first_root = temp.path().join("first");
+        let second_root = temp.path().join("second");
+        write(
+            &first_root.join("sample/SKILL.md"),
+            "---\nname: sample-tool\ndescription: First copy.\n---\n",
+        );
+        write(
+            &second_root.join("sample/SKILL.md"),
+            "---\nname: Sample-Tool\ndescription: Second copy.\n---\n",
+        );
+
+        let catalog =
+            SkillCatalog::load_from_roots([first_root, second_root]).expect("loads catalog");
+
+        assert_eq!(catalog.skills().len(), 1);
+        assert_eq!(catalog.skills()[0].description(), "First copy.");
+        assert_eq!(catalog.warnings().len(), 1);
+        assert!(matches!(
+            catalog.warnings()[0].reason(),
+            SkillLoadWarningReason::DuplicateName { name } if name == "Sample-Tool"
+        ));
     }
 
     #[test]

@@ -7,6 +7,7 @@
 // Staged internal activation types are compiled before every call path is wired.
 #![cfg_attr(not(test), allow(dead_code))]
 
+use crate::text;
 use merry_core::EvidenceRef;
 use std::{cmp::Ordering, fmt};
 use thiserror::Error;
@@ -608,15 +609,11 @@ fn validate_non_blank(field: &'static str, value: &str) -> Result<(), MemoryErro
 }
 
 fn canonicalize_match_text(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+    text::collapse_whitespace(value).to_lowercase()
 }
 
 fn canonicalize_label_text(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
+    text::collapse_whitespace(value)
 }
 
 fn validate_reason(reason: &MemoryActivationReason) -> Result<(), MemoryError> {

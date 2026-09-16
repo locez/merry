@@ -8,6 +8,7 @@ use crate::{
         ActivatedMemory, MemoryActivationProvenance, MemoryActivationReason, MemoryActivationScore,
         MemoryEvidence, MemoryId, MemoryScope,
     },
+    text,
     token_estimate::estimate_text_tokens,
 };
 use merry_core::EvidenceRef;
@@ -33,11 +34,7 @@ fn format_memory_scopes(scopes: &[MemoryScope]) -> String {
 }
 
 fn canonicalize_memory_reason_text(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+    text::collapse_whitespace(value).to_lowercase()
 }
 
 /// Compiles allowlisted structured runtime state into a deterministic context snapshot.
