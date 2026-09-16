@@ -22,14 +22,12 @@ use crate::{
 };
 
 use super::{
+    envelope::{WorkspacePatchSuccess, WorkspacePatchSuccessChange},
     plan::{
         WorkspacePatchFileMode, WorkspacePatchFilePlan, WorkspacePatchPlan,
         read_patch_preimage_for_path,
     },
-    types::{
-        WorkspacePatchSuccess, WorkspacePatchSuccessChange, count_file_lines,
-        stable_content_fingerprint,
-    },
+    types::{count_file_lines, stable_content_fingerprint},
 };
 
 pub(super) fn execute_apply_patch_plan(
@@ -50,7 +48,7 @@ pub(super) fn execute_apply_patch_plan(
         let relative_display = change.relative.display.clone();
         let operation = change.mode.operation_kind();
         let ignored_context_hunks = change.ignored_context_hunks;
-        let lines_before = count_file_lines(&change.content_before);
+        let lines_before = change.lines_before;
         let content_after = match execute_apply_patch_file_plan(&change, is_cancelled) {
             Ok(content_after) => content_after,
             Err(PatchFileWriteError::Outcome(outcome)) => return Ok(*outcome),
@@ -75,10 +73,10 @@ pub(super) fn execute_apply_patch_plan(
         );
         written_changes.push(WorkspacePatchSuccessChange {
             path: relative_display,
-            op: operation,
+            op: Some(operation),
             hunks: change.hunks,
-            lines_before,
-            lines_after,
+            lines_before: Some(lines_before),
+            lines_after: Some(lines_after),
             bytes_before: change.bytes_before,
             bytes_after: content_after.len(),
             ignored_context_hunks,
@@ -94,7 +92,7 @@ pub(super) fn execute_apply_patch_plan(
         })?;
     let payload = WorkspacePatchSuccess {
         ok: true,
-        tool: APPLY_PATCH_TOOL,
+        tool: APPLY_PATCH_TOOL.to_owned(),
         changes: written_changes,
     };
     Ok(ToolExecutionOutcome::succeeded_json(

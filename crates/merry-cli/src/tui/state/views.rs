@@ -194,8 +194,10 @@ pub(crate) struct PatchChangeView {
     pub(crate) hunks: usize,
     pub(crate) lines_before: Option<usize>,
     pub(crate) lines_after: Option<usize>,
-    pub(crate) bytes_before: Option<usize>,
-    pub(crate) bytes_after: Option<usize>,
+    /// Byte counts are part of every recorded envelope, unlike the line counts
+    /// that older sessions predate.
+    pub(crate) bytes_before: usize,
+    pub(crate) bytes_after: usize,
     pub(crate) lines: Vec<PatchLineView>,
 }
 

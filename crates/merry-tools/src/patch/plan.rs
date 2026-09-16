@@ -29,11 +29,12 @@ use crate::{
 use super::{
     ApplyPatchInput,
     apply::execute_apply_patch_plan,
+    envelope::{WorkspacePatchOperationKind, WorkspacePatchSuccessLine},
     parse::parse_apply_patch,
     types::{
         WorkspacePatchFile, WorkspacePatchHunk, WorkspacePatchOperation,
-        WorkspacePatchOperationKind, WorkspacePatchSuccessLine, build_new_file_replacement,
-        build_patch_replacement, count_file_lines, stable_content_fingerprint,
+        build_new_file_replacement, build_patch_replacement, count_file_lines,
+        stable_content_fingerprint,
     },
 };
 
@@ -212,11 +213,11 @@ impl WorkspacePatchPlan {
                     .iter()
                     .fold(0usize, |sum, change| sum.saturating_add(change.bytes_after));
                 let lines_before = changes.iter().fold(0usize, |sum, change| {
-                    sum.saturating_add(change.lines_before())
+                    sum.saturating_add(change.lines_before)
                 });
-                let lines_after = changes.iter().fold(0usize, |sum, change| {
-                    sum.saturating_add(change.lines_after())
-                });
+                let lines_after = changes
+                    .iter()
+                    .fold(0usize, |sum, change| sum.saturating_add(change.lines_after));
                 format!(
                     "Apply workspace patch to {} files ({} -> {} lines, {} -> {} bytes).",
                     changes.len(),
@@ -258,6 +259,13 @@ pub(super) struct WorkspacePatchFilePlan {
     pub(super) replacement_bytes: usize,
     pub(super) bytes_before: usize,
     pub(super) bytes_after: usize,
+    /// Line counts of the planned preimage and replacement.
+    ///
+    /// They are stored beside the byte counts so every consumer of a plan
+    /// reports the same numbers without rescanning the file content, and so a
+    /// proposal summary cannot drift from the change it describes.
+    pub(super) lines_before: usize,
+    pub(super) lines_after: usize,
     pub(super) hunks: usize,
     pub(super) ignored_context_hunks: usize,
     pub(super) lines: Vec<WorkspacePatchSuccessLine>,
@@ -266,16 +274,6 @@ pub(super) struct WorkspacePatchFilePlan {
 }
 
 impl WorkspacePatchFilePlan {
-    /// Counts the lines the file had before this change.
-    pub(super) fn lines_before(&self) -> usize {
-        count_file_lines(&self.content_before)
-    }
-
-    /// Counts the lines the file has after this change.
-    pub(super) fn lines_after(&self) -> usize {
-        count_file_lines(&self.replacement)
-    }
-
     /// Describes the planned change for proposal and audit text.
     ///
     /// Reviewers reason about a change in lines, so the summary leads with the
@@ -284,17 +282,15 @@ impl WorkspacePatchFilePlan {
         if self.mode == WorkspacePatchFileMode::DeleteExisting {
             return format!(
                 "Delete {} ({} lines, {} bytes).",
-                self.relative.display,
-                self.lines_before(),
-                self.bytes_before
+                self.relative.display, self.lines_before, self.bytes_before
             );
         }
         format!(
             "Apply {} hunk(s) in {} ({} -> {} lines, {} -> {} bytes).",
             self.hunks,
             self.relative.display,
-            self.lines_before(),
-            self.lines_after(),
+            self.lines_before,
+            self.lines_after,
             self.bytes_before,
             self.bytes_after
         )
@@ -579,6 +575,8 @@ fn plan_resolved_apply_patch_file(
     Ok(WorkspacePatchFilePlan {
         relative,
         path,
+        lines_before: count_file_lines(&content),
+        lines_after: count_file_lines(&replacement.text),
         bytes_before: content.len(),
         bytes_after: replacement.text.len(),
         preimage_bytes: replacement.preimage_bytes,
@@ -611,6 +609,8 @@ fn plan_resolved_apply_patch_delete(
     }
 
     Ok(WorkspacePatchFilePlan {
+        lines_before: count_file_lines(&content),
+        lines_after: 0,
         bytes_before: content.len(),
         bytes_after: 0,
         preimage_bytes: content.len(),
@@ -650,6 +650,8 @@ fn plan_new_apply_patch_file(
     Ok(WorkspacePatchFilePlan {
         relative,
         path,
+        lines_before: 0,
+        lines_after: count_file_lines(&replacement.text),
         bytes_before: 0,
         bytes_after: replacement.text.len(),
         preimage_bytes: replacement.preimage_bytes,

@@ -200,8 +200,7 @@ fn patch_change_detail(change: &PatchChangeView) -> String {
     ));
     segments.push(format!(
         "{} -> {} bytes",
-        optional_size(change.bytes_before),
-        optional_size(change.bytes_after)
+        change.bytes_before, change.bytes_after
     ));
     format!("  {}", segments.join(", "))
 }

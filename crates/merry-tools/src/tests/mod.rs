@@ -376,7 +376,8 @@ fn assert_failed_json_for_tool(
     assert_eq!(payload["ok"], false);
     assert_eq!(payload["tool"], tool);
     assert_eq!(payload["error"]["code"], code);
-    if failure_keeps_path_contract(code) {
+    let expected_recovery = expected_recovery_for_code(code);
+    if expected_recovery.path_contract {
         assert_eq!(
             payload["recovery"]["path_contract"],
             WORKSPACE_PATH_CONTRACT
@@ -387,7 +388,7 @@ fn assert_failed_json_for_tool(
             "patch-text failures must not repeat the workspace path contract"
         );
     }
-    if let Some(expected_guidance_kind) = expected_guidance_kind_for_code(code) {
+    if let Some(expected_guidance_kind) = expected_recovery.guidance_kind {
         assert_eq!(payload["guidance"]["kind"], expected_guidance_kind);
         assert!(
             payload["guidance"]["message"]
@@ -422,32 +423,58 @@ fn assert_failed_json_for_tool(
     );
 }
 
-fn expected_guidance_kind_for_code(code: &str) -> Option<&'static str> {
+/// Model-facing recovery block a failure code must produce.
+///
+/// The expectation lives here as data per code. Restating it instead of
+/// re-running the production classifier keeps the assertion able to fail: a
+/// classifier that moved a code into the wrong class would still agree with
+/// itself.
+struct ExpectedRecovery {
+    path_contract: bool,
+    guidance_kind: Option<&'static str>,
+}
+
+fn expected_recovery_for_code(code: &str) -> ExpectedRecovery {
     match code {
-        ERROR_INVALID_ARGUMENTS => Some("workspace_invalid_arguments"),
-        ERROR_PATCH_SYNTAX => Some("apply_patch_syntax"),
-        ERROR_PATCH_NOOP => Some("apply_patch_noop"),
+        ERROR_INVALID_ARGUMENTS => ExpectedRecovery {
+            path_contract: true,
+            guidance_kind: Some("workspace_invalid_arguments"),
+        },
+        ERROR_PATCH_SYNTAX => ExpectedRecovery {
+            path_contract: false,
+            guidance_kind: Some("apply_patch_syntax"),
+        },
+        ERROR_PATCH_NOOP => ExpectedRecovery {
+            path_contract: false,
+            guidance_kind: Some("apply_patch_noop"),
+        },
+        ERROR_PREIMAGE_ABSENT | ERROR_PREIMAGE_AMBIGUOUS => ExpectedRecovery {
+            path_contract: false,
+            guidance_kind: Some("apply_patch_preimage_mismatch"),
+        },
+        ERROR_PROPOSAL_MISMATCH => ExpectedRecovery {
+            path_contract: true,
+            guidance_kind: Some("apply_patch_plan_changed"),
+        },
         ERROR_PATH_DENIED
         | ERROR_FILE_NOT_FOUND
         | ERROR_FILE_ALREADY_EXISTS
         | ERROR_NOT_FILE
-        | ERROR_NOT_DIRECTORY => Some("workspace_path_recovery"),
-        ERROR_FILE_TOO_LARGE => Some("workspace_file_too_large"),
-        ERROR_PREIMAGE_ABSENT | ERROR_PREIMAGE_AMBIGUOUS => Some("apply_patch_preimage_mismatch"),
-        ERROR_PROPOSAL_MISMATCH => Some("apply_patch_plan_changed"),
-        _ => None,
+        | ERROR_NOT_DIRECTORY => ExpectedRecovery {
+            path_contract: true,
+            guidance_kind: Some("workspace_path_recovery"),
+        },
+        ERROR_FILE_TOO_LARGE => ExpectedRecovery {
+            path_contract: true,
+            guidance_kind: Some("workspace_file_too_large"),
+        },
+        // Codes with no recovery text of their own still explain the path
+        // contract, because their failures can be about where a path points.
+        _ => ExpectedRecovery {
+            path_contract: true,
+            guidance_kind: None,
+        },
     }
-}
-
-/// Reports whether a failure code still carries the workspace path contract.
-///
-/// Failures about the patch body itself omit that block so callers are not sent
-/// looking at path rules that the failure never mentioned.
-fn failure_keeps_path_contract(code: &str) -> bool {
-    !matches!(
-        code,
-        ERROR_PATCH_SYNTAX | ERROR_PATCH_NOOP | ERROR_PREIMAGE_ABSENT | ERROR_PREIMAGE_AMBIGUOUS
-    )
 }
 
 fn assert_no_provider_visible_patch_metadata(outcome: &ToolExecutionOutcome) {

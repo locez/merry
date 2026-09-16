@@ -109,6 +109,12 @@ pub(super) fn pending_add_patch_call(path: &str, lines: &[&str]) -> ModelEvent {
     pending_workspace_call("workspace-patch-call", APPLY_PATCH_TOOL, arguments)
 }
 
+pub(super) fn pending_delete_patch_call(path: &str) -> ModelEvent {
+    let mut arguments = Map::new();
+    arguments.insert("patch".to_owned(), Value::String(delete_patch(path)));
+    pending_workspace_call("workspace-patch-call", APPLY_PATCH_TOOL, arguments)
+}
+
 pub(super) fn update_patch(path: &str, old_text: &str, new_text: &str) -> String {
     format!(
         "*** Begin Workspace Patch\n*** Update File: {path}\n-{old_text}\n+{new_text}\n*** End Workspace Patch"
@@ -122,6 +128,10 @@ pub(super) fn add_patch(path: &str, lines: &[&str]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!("*** Begin Workspace Patch\n*** Add File: {path}\n{additions}\n*** End Workspace Patch")
+}
+
+pub(super) fn delete_patch(path: &str) -> String {
+    format!("*** Begin Workspace Patch\n*** Delete File: {path}\n*** End Workspace Patch")
 }
 
 type ScriptedModelStep = Vec<Result<ModelEvent, ModelError>>;

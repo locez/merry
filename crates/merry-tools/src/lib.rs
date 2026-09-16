@@ -31,6 +31,10 @@ mod state;
 mod trace;
 
 pub use config::{WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceToolsConfig};
+pub use patch::envelope::{
+    WorkspacePatchOperationKind, WorkspacePatchSuccess, WorkspacePatchSuccessChange,
+    WorkspacePatchSuccessLine, WorkspacePatchSuccessLineKind,
+};
 pub use registry::WorkspaceTools;
 
 /// Registered tool name for bounded read-only text ranges.

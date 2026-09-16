@@ -93,8 +93,8 @@ fn renderer_applies_configured_semantic_theme_colors() {
             hunks: 1,
             lines_before: Some(3),
             lines_after: Some(3),
-            bytes_before: Some(8),
-            bytes_after: Some(6),
+            bytes_before: 8,
+            bytes_after: 6,
             lines: vec![
                 PatchLineView::remove("removed", Some(1)),
                 PatchLineView::add("added", Some(1)),

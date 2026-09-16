@@ -14,7 +14,10 @@ use crate::{
     },
 };
 use merry_core::ToolOutput;
-use merry_tools::APPLY_PATCH_TOOL;
+use merry_tools::{
+    APPLY_PATCH_TOOL, WorkspacePatchOperationKind, WorkspacePatchSuccess,
+    WorkspacePatchSuccessLineKind,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -226,8 +229,10 @@ pub(super) fn parse_apply_patch_view(
     output: &str,
     patch_argument: Option<&str>,
 ) -> Option<TimelineItem> {
-    let output = serde_json::from_str::<WorkspacePatchOutput>(output).ok()?;
-    if !output.ok || output.tool.as_deref() != Some(APPLY_PATCH_TOOL) {
+    // The envelope type is owned by the tool crate, so a field cannot drift
+    // between the writer and this reader.
+    let output = serde_json::from_str::<WorkspacePatchSuccess>(output).ok()?;
+    if !output.ok || output.tool != APPLY_PATCH_TOOL {
         return None;
     }
     let parsed_patch = patch_argument.map(parse_apply_patch_argument);
@@ -235,24 +240,31 @@ pub(super) fn parse_apply_patch_view(
         .changes
         .into_iter()
         .map(|change| {
-            let operation = change.operation();
+            let operation = match change.operation() {
+                WorkspacePatchOperationKind::Add => PatchOperationView::Add,
+                WorkspacePatchOperationKind::Update => PatchOperationView::Update,
+                WorkspacePatchOperationKind::Delete => PatchOperationView::Delete,
+                // An operation recorded by a newer build still describes a
+                // change to a file, so it renders as the historical default
+                // instead of falling back to the raw result.
+                WorkspacePatchOperationKind::Unknown => PatchOperationView::Update,
+            };
             let patch_lines = change
                 .lines
-                .as_ref()
-                .map(|lines| {
-                    lines
-                        .iter()
-                        .filter_map(WorkspacePatchOutputLine::to_patch_line_view)
-                        .collect::<Vec<_>>()
-                })
-                .filter(|lines| !lines.is_empty())
-                .or_else(|| {
-                    parsed_patch
-                        .as_ref()
-                        .and_then(|parsed| parsed.change_lines(&change.path))
-                        .cloned()
-                })
-                .unwrap_or_default();
+                .iter()
+                .filter_map(envelope_line_view)
+                .collect::<Vec<_>>();
+            // Envelopes recorded before the tool echoed hunk lines fall back to
+            // the lines of the pending call's own patch argument.
+            let patch_lines = if patch_lines.is_empty() {
+                parsed_patch
+                    .as_ref()
+                    .and_then(|parsed| parsed.change_lines(&change.path))
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                patch_lines
+            };
             let hunk_added = patch_lines
                 .iter()
                 .filter(|line| line.kind == PatchLineKind::Add)
@@ -276,8 +288,8 @@ pub(super) fn parse_apply_patch_view(
                 hunks: change.hunks,
                 lines_before: change.lines_before,
                 lines_after: change.lines_after,
-                bytes_before: Some(change.bytes_before),
-                bytes_after: Some(change.bytes_after),
+                bytes_before: change.bytes_before,
+                bytes_after: change.bytes_after,
                 lines: patch_lines,
             }
         })
@@ -285,65 +297,22 @@ pub(super) fn parse_apply_patch_view(
     Some(TimelineItem::Patch { changes })
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct WorkspacePatchOutput {
-    pub(super) ok: bool,
-    pub(super) tool: Option<String>,
-    pub(super) changes: Vec<WorkspacePatchOutputChange>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct WorkspacePatchOutputChange {
-    pub(super) path: String,
-    pub(super) hunks: usize,
-    pub(super) bytes_before: usize,
-    pub(super) bytes_after: usize,
-    // Resumed sessions replay envelopes recorded before these fields existed,
-    // so every added field stays optional and defaults to the update shape.
-    #[serde(default)]
-    pub(super) op: Option<String>,
-    #[serde(default)]
-    pub(super) lines_before: Option<usize>,
-    #[serde(default)]
-    pub(super) lines_after: Option<usize>,
-    #[serde(default)]
-    pub(super) lines: Option<Vec<WorkspacePatchOutputLine>>,
-}
-
-impl WorkspacePatchOutputChange {
-    /// Resolves the file operation, defaulting to an update for old envelopes.
-    pub(super) fn operation(&self) -> PatchOperationView {
-        match self.op.as_deref() {
-            Some("add") => PatchOperationView::Add,
-            Some("delete") => PatchOperationView::Delete,
-            Some("update") | Some(_) | None => PatchOperationView::Update,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct WorkspacePatchOutputLine {
-    pub(super) kind: String,
-    pub(super) old_line: Option<usize>,
-    pub(super) new_line: Option<usize>,
-    pub(super) text: String,
-}
-
-impl WorkspacePatchOutputLine {
-    pub(super) fn to_patch_line_view(&self) -> Option<PatchLineView> {
-        let kind = match self.kind.as_str() {
-            "context" => PatchLineKind::Context,
-            "remove" => PatchLineKind::Remove,
-            "add" => PatchLineKind::Add,
-            _ => return None,
-        };
-        Some(PatchLineView {
-            kind,
-            old_line: self.old_line,
-            new_line: self.new_line,
-            text: self.text.clone(),
-        })
-    }
+/// Maps one envelope line onto the timeline's line view.
+fn envelope_line_view(line: &merry_tools::WorkspacePatchSuccessLine) -> Option<PatchLineView> {
+    let kind = match line.kind {
+        WorkspacePatchSuccessLineKind::Context => PatchLineKind::Context,
+        WorkspacePatchSuccessLineKind::Remove => PatchLineKind::Remove,
+        WorkspacePatchSuccessLineKind::Add => PatchLineKind::Add,
+        // A line kind this build does not know is left out of the preview
+        // instead of hiding the rest of the change.
+        WorkspacePatchSuccessLineKind::Unknown => return None,
+    };
+    Some(PatchLineView {
+        kind,
+        old_line: line.old_line,
+        new_line: line.new_line,
+        text: line.text.clone(),
+    })
 }
 
 #[derive(Debug, Default, Clone)]

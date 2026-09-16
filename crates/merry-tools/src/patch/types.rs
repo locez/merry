@@ -1,48 +1,12 @@
-use serde::Serialize;
-
 use crate::errors::{
     BlockingToolError, DomainError, ERROR_PATCH_SYNTAX, ERROR_PREIMAGE_ABSENT,
     ERROR_PREIMAGE_AMBIGUOUS,
 };
 
-use super::diagnostic::{describe_preimage_ambiguity, describe_preimage_miss, line_number_at_byte};
-
-#[derive(Debug, Serialize)]
-pub(super) struct WorkspacePatchSuccess {
-    pub(super) ok: bool,
-    pub(super) tool: &'static str,
-    pub(super) changes: Vec<WorkspacePatchSuccessChange>,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct WorkspacePatchSuccessChange {
-    pub(super) path: String,
-    pub(super) op: WorkspacePatchOperationKind,
-    pub(super) hunks: usize,
-    pub(super) lines_before: usize,
-    pub(super) lines_after: usize,
-    pub(super) bytes_before: usize,
-    pub(super) bytes_after: usize,
-    #[serde(skip_serializing_if = "is_zero")]
-    pub(super) ignored_context_hunks: usize,
-    pub(super) lines: Vec<WorkspacePatchSuccessLine>,
-}
-
-/// Reports the file operation that produced a successful change entry.
-///
-/// A delete and an update that empties a file both end at zero bytes, so the
-/// envelope names the operation instead of leaving callers to infer it.
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum WorkspacePatchOperationKind {
-    Add,
-    Update,
-    Delete,
-}
-
-fn is_zero(value: &usize) -> bool {
-    *value == 0
-}
+use super::{
+    diagnostic::{describe_preimage_ambiguity, describe_preimage_miss, line_number_at_byte},
+    envelope::{WorkspacePatchSuccessLine, WorkspacePatchSuccessLineKind},
+};
 
 /// Counts the lines of UTF-8 file content.
 ///
@@ -51,24 +15,6 @@ fn is_zero(value: &usize) -> bool {
 /// reports the same count as LF content, and empty content reports zero lines.
 pub(super) fn count_file_lines(content: &str) -> usize {
     content.lines().count()
-}
-
-#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
-pub(super) struct WorkspacePatchSuccessLine {
-    pub(super) kind: WorkspacePatchSuccessLineKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) old_line: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) new_line: Option<usize>,
-    pub(super) text: String,
-}
-
-#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum WorkspacePatchSuccessLineKind {
-    Context,
-    Remove,
-    Add,
 }
 
 #[derive(Debug)]

@@ -32,6 +32,13 @@ const GUIDANCE_PATCH_SYNTAX: &str = "Fix the patch text itself: send exactly one
 const GUIDANCE_PATCH_NOOP: &str = "The patch had no `+` or `-` lines, so nothing was written. Add the added or removed lines to the hunk when you mean to edit the file, or use `read_text` when you only need to inspect it.";
 const GUIDANCE_PATCH_PLAN_CHANGED: &str = "The approved patch no longer matches current workspace state. Re-read the target file and submit a fresh localized patch.";
 
+/// A failure raised by a workspace tool operation, with a stable code.
+///
+/// The message is owned because self-locating diagnostics embed bounded
+/// previews of the patch text and the current file content. Text that never
+/// depends on input stays a `&'static str` in [`PathValidationError`], and every
+/// message that reaches a caller passes through [`failure_diagnostic`], which
+/// sanitizes text that cannot be represented as a diagnostic.
 #[derive(Debug)]
 pub(crate) struct DomainError {
     pub(crate) code: &'static str,
@@ -113,6 +120,7 @@ pub(crate) fn failed_outcome(
     path: Option<String>,
 ) -> ToolExecutionOutcome {
     let message = message.into();
+    let class = FailureClass::of(code);
     let envelope = FailureEnvelope {
         ok: false,
         tool,
@@ -120,10 +128,10 @@ pub(crate) fn failed_outcome(
             code,
             message: &message,
         },
-        recovery: failure_includes_path_contract(code).then_some(FailureRecovery {
+        recovery: class.includes_path_contract().then_some(FailureRecovery {
             path_contract: WORKSPACE_PATH_CONTRACT,
         }),
-        guidance: workspace_failure_guidance(code),
+        guidance: class.guidance(),
         path: path.as_deref(),
     };
     ToolExecutionOutcome::failed_json(
@@ -132,16 +140,97 @@ pub(crate) fn failed_outcome(
     )
 }
 
-/// Reports whether the workspace path contract helps explain this failure.
+/// Model-facing recovery class of a workspace failure code.
 ///
-/// Patch-text failures are about the patch body rather than about where a path
-/// points, so repeating the path contract there misleads the caller. A patch
-/// that names an unwritable or missing path still reports its own path code.
-fn failure_includes_path_contract(code: &str) -> bool {
-    !matches!(
-        code,
-        ERROR_PATCH_SYNTAX | ERROR_PATCH_NOOP | ERROR_PREIMAGE_ABSENT | ERROR_PREIMAGE_AMBIGUOUS
-    )
+/// One classification decides both whether the workspace path contract is
+/// repeated and which guidance the caller receives, so a new failure code
+/// cannot end up with guidance that contradicts the recovery block next to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureClass {
+    /// The arguments are unusable before any path or file is considered.
+    InvalidArguments,
+    /// The patch text does not follow the patch grammar.
+    PatchSyntax,
+    /// The patch is well formed but would change nothing.
+    PatchNoOp,
+    /// The patch is valid but its preimage no longer matches the file.
+    PatchPreimage,
+    /// The approved patch no longer matches current workspace state.
+    PatchPlanChanged,
+    /// The named path is denied, missing, or the wrong kind of entry.
+    PathRecovery,
+    /// Requested content or the resulting file exceeds a configured limit.
+    FileTooLarge,
+    /// A failure with no recovery text of its own.
+    Other,
+}
+
+impl FailureClass {
+    /// Classifies a failure code for model-facing recovery text.
+    fn of(code: &str) -> Self {
+        match code {
+            ERROR_INVALID_ARGUMENTS => Self::InvalidArguments,
+            ERROR_PATCH_SYNTAX => Self::PatchSyntax,
+            ERROR_PATCH_NOOP => Self::PatchNoOp,
+            ERROR_PREIMAGE_ABSENT | ERROR_PREIMAGE_AMBIGUOUS => Self::PatchPreimage,
+            ERROR_PROPOSAL_MISMATCH => Self::PatchPlanChanged,
+            ERROR_PATH_DENIED
+            | ERROR_FILE_NOT_FOUND
+            | ERROR_FILE_ALREADY_EXISTS
+            | ERROR_NOT_FILE
+            | ERROR_NOT_DIRECTORY => Self::PathRecovery,
+            ERROR_FILE_TOO_LARGE => Self::FileTooLarge,
+            _ => Self::Other,
+        }
+    }
+
+    /// Reports whether the workspace path contract helps explain this failure.
+    ///
+    /// Patch-text and preimage failures are about the patch body rather than
+    /// about where a path points, so repeating the path contract there misleads
+    /// the caller. A patch that names an unwritable or missing path keeps its
+    /// own path code and the contract.
+    fn includes_path_contract(self) -> bool {
+        !matches!(
+            self,
+            Self::PatchSyntax | Self::PatchNoOp | Self::PatchPreimage
+        )
+    }
+
+    /// Returns the guidance a caller can act on, when the class has one.
+    fn guidance(self) -> Option<WorkspaceGuidance> {
+        match self {
+            Self::InvalidArguments => Some(WorkspaceGuidance {
+                kind: "workspace_invalid_arguments",
+                message: GUIDANCE_INVALID_ARGUMENTS,
+            }),
+            Self::PatchSyntax => Some(WorkspaceGuidance {
+                kind: "apply_patch_syntax",
+                message: GUIDANCE_PATCH_SYNTAX,
+            }),
+            Self::PatchNoOp => Some(WorkspaceGuidance {
+                kind: "apply_patch_noop",
+                message: GUIDANCE_PATCH_NOOP,
+            }),
+            Self::PatchPreimage => Some(WorkspaceGuidance {
+                kind: "apply_patch_preimage_mismatch",
+                message: GUIDANCE_PATCH_PREIMAGE,
+            }),
+            Self::PatchPlanChanged => Some(WorkspaceGuidance {
+                kind: "apply_patch_plan_changed",
+                message: GUIDANCE_PATCH_PLAN_CHANGED,
+            }),
+            Self::PathRecovery => Some(WorkspaceGuidance {
+                kind: "workspace_path_recovery",
+                message: GUIDANCE_PATH_RECOVERY,
+            }),
+            Self::FileTooLarge => Some(WorkspaceGuidance {
+                kind: "workspace_file_too_large",
+                message: GUIDANCE_FILE_TOO_LARGE,
+            }),
+            Self::Other => None,
+        }
+    }
 }
 
 /// Builds a validated diagnostic without aborting the tool call on bad text.
@@ -163,42 +252,4 @@ fn failure_diagnostic(code: &str, message: &str) -> ErrorInfo {
         ErrorInfo::new(code, "workspace tool failure")
             .expect("fallback workspace diagnostic is always valid")
     })
-}
-
-fn workspace_failure_guidance(code: &str) -> Option<WorkspaceGuidance> {
-    match code {
-        ERROR_INVALID_ARGUMENTS => Some(WorkspaceGuidance {
-            kind: "workspace_invalid_arguments",
-            message: GUIDANCE_INVALID_ARGUMENTS,
-        }),
-        ERROR_PATCH_SYNTAX => Some(WorkspaceGuidance {
-            kind: "apply_patch_syntax",
-            message: GUIDANCE_PATCH_SYNTAX,
-        }),
-        ERROR_PATCH_NOOP => Some(WorkspaceGuidance {
-            kind: "apply_patch_noop",
-            message: GUIDANCE_PATCH_NOOP,
-        }),
-        ERROR_PATH_DENIED
-        | ERROR_FILE_NOT_FOUND
-        | ERROR_FILE_ALREADY_EXISTS
-        | ERROR_NOT_FILE
-        | ERROR_NOT_DIRECTORY => Some(WorkspaceGuidance {
-            kind: "workspace_path_recovery",
-            message: GUIDANCE_PATH_RECOVERY,
-        }),
-        ERROR_FILE_TOO_LARGE => Some(WorkspaceGuidance {
-            kind: "workspace_file_too_large",
-            message: GUIDANCE_FILE_TOO_LARGE,
-        }),
-        ERROR_PREIMAGE_ABSENT | ERROR_PREIMAGE_AMBIGUOUS => Some(WorkspaceGuidance {
-            kind: "apply_patch_preimage_mismatch",
-            message: GUIDANCE_PATCH_PREIMAGE,
-        }),
-        ERROR_PROPOSAL_MISMATCH => Some(WorkspaceGuidance {
-            kind: "apply_patch_plan_changed",
-            message: GUIDANCE_PATCH_PLAN_CHANGED,
-        }),
-        _ => None,
-    }
 }
