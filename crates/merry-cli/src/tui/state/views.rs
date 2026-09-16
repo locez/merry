@@ -137,7 +137,6 @@ pub(crate) enum PatchLineKind {
 /// Envelopes written before the field existed only described updates, so
 /// [`PatchOperationView::Update`] is the default for replayed sessions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub(crate) enum PatchOperationView {
     Add,
     #[default]
