@@ -25,6 +25,7 @@ use merry_runtime::{Tool, ToolBuildError};
 
 mod config;
 mod errors;
+mod file;
 mod patch;
 mod path;
 mod read;

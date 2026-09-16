@@ -1,6 +1,5 @@
 use std::{
     fs,
-    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -19,6 +18,7 @@ use crate::{
         ERROR_PATH_DENIED, ERROR_PROPOSAL_MISMATCH, ERROR_READ_FAILED, PathValidationError,
         WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE, failed_outcome,
     },
+    file::{decode_utf8, read_bounded},
     path::{
         NewWorkspacePath, ValidatedToolPath, open_file_for_read, resolve_existing_path,
         resolve_new_file_path, validate_workspace_path_argument,
@@ -645,58 +645,12 @@ pub(super) fn read_patch_preimage_for_path(
     }
 
     let mut file = open_file_for_read(path)?;
-    let metadata = file.metadata().map_err(|_| {
-        DomainError::new(
-            ERROR_READ_FAILED,
-            "could not inspect workspace file metadata",
-        )
-    })?;
-
-    if !metadata.is_file() {
-        return Err(
-            DomainError::new(ERROR_NOT_FILE, "workspace path is not a regular file").into(),
-        );
-    }
-
-    if metadata.len() > max_read_bytes as u64 {
-        return Err(DomainError::new(
-            ERROR_FILE_TOO_LARGE,
-            "workspace file exceeds the configured read limit",
-        )
-        .into());
-    }
-
-    let file_size = usize::try_from(metadata.len()).map_err(|_| {
-        DomainError::new(
-            ERROR_FILE_TOO_LARGE,
-            "workspace file exceeds the configured read limit",
-        )
-    })?;
-
-    if is_cancelled() {
-        return Err(BlockingToolError::Cancelled);
-    }
-
-    let mut bytes = Vec::with_capacity(file_size);
-    Read::by_ref(&mut file)
-        .take(metadata.len())
-        .read_to_end(&mut bytes)
-        .map_err(|_| DomainError::new(ERROR_READ_FAILED, "could not read workspace file"))?;
-
-    if bytes.len() > max_read_bytes {
-        return Err(DomainError::new(
-            ERROR_FILE_TOO_LARGE,
-            "workspace file exceeds the configured read limit",
-        )
-        .into());
-    }
-
+    let bytes = read_bounded(&mut file, max_read_bytes, is_cancelled)?;
+    // A patch edits text, so a NUL byte means the caller is about to make
+    // nonsense of a binary file. That is a patch decision rather than a read
+    // policy, which is why `read_text` still returns such bytes.
     if bytes.contains(&0) {
         return Err(DomainError::new(ERROR_NOT_UTF8, "workspace file appears to be binary").into());
     }
-
-    let content = String::from_utf8(bytes)
-        .map_err(|_| DomainError::new(ERROR_NOT_UTF8, "workspace file is not valid UTF-8"))?;
-
-    Ok(content)
+    Ok(decode_utf8(bytes)?)
 }

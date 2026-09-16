@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, Seek, SeekFrom, Write},
 };
 
 use merry_runtime::{
@@ -14,10 +14,8 @@ use crate::trace::{
 };
 use crate::{
     APPLY_PATCH_TOOL,
-    errors::{
-        BlockingToolError, DomainError, ERROR_FILE_TOO_LARGE, ERROR_NOT_FILE, ERROR_READ_FAILED,
-        ERROR_WRITE_FAILED, failed_outcome,
-    },
+    errors::{BlockingToolError, DomainError, ERROR_WRITE_FAILED, failed_outcome},
+    file::read_bounded,
     path::{open_file_for_patch, open_file_for_patch_create_new, open_file_for_read},
 };
 
@@ -148,7 +146,7 @@ fn execute_apply_patch_file_plan(
     // unlinking bytes the caller never saw. Updates and deletes share it so a
     // stale delete cannot report evidence for content it did not remove.
     if plan.mode != WorkspacePatchFileMode::CreateNew {
-        match read_open_patch_file_before_write(&mut file, plan.max_read_bytes, is_cancelled) {
+        match read_bounded(&mut file, plan.max_read_bytes, is_cancelled) {
             Ok(bytes) if bytes == plan.content_before.as_bytes() => {}
             Ok(_) => {
                 return Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(
@@ -270,60 +268,4 @@ fn delete_apply_patch_file(
             Some(relative_display),
         )))),
     }
-}
-
-fn read_open_patch_file_before_write(
-    file: &mut fs::File,
-    max_read_bytes: usize,
-    is_cancelled: &dyn Fn() -> bool,
-) -> Result<Vec<u8>, BlockingToolError> {
-    if is_cancelled() {
-        return Err(BlockingToolError::Cancelled);
-    }
-
-    let metadata = file.metadata().map_err(|_| {
-        DomainError::new(
-            ERROR_READ_FAILED,
-            "could not inspect workspace file metadata",
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err(
-            DomainError::new(ERROR_NOT_FILE, "workspace path is not a regular file").into(),
-        );
-    }
-    if metadata.len() > max_read_bytes as u64 {
-        return Err(DomainError::new(
-            ERROR_FILE_TOO_LARGE,
-            "workspace file exceeds the configured read limit",
-        )
-        .into());
-    }
-
-    if file.seek(SeekFrom::Start(0)).is_err() {
-        return Err(DomainError::new(ERROR_READ_FAILED, "could not seek workspace file").into());
-    }
-
-    if is_cancelled() {
-        return Err(BlockingToolError::Cancelled);
-    }
-
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).map_err(|_| {
-        DomainError::new(
-            ERROR_FILE_TOO_LARGE,
-            "workspace file exceeds the configured read limit",
-        )
-    })?);
-    Read::by_ref(file)
-        .take(metadata.len())
-        .read_to_end(&mut bytes)
-        .map_err(|_| DomainError::new(ERROR_READ_FAILED, "could not read workspace file"))?;
-    if bytes.len() > max_read_bytes {
-        return Err(DomainError::new(
-            ERROR_FILE_TOO_LARGE,
-            "workspace file exceeds the configured read limit",
-        )
-        .into());
-    }
-    Ok(bytes)
 }
