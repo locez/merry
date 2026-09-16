@@ -1,32 +1,80 @@
-use std::collections::BTreeSet;
+//! Parser for the `apply_patch` envelope.
+//!
+//! The grammar is small and deliberately strict, so most failures here are
+//! patch-text mistakes. Each error therefore names the offending text and what
+//! was expected instead of only reporting that the patch is invalid.
 
-use super::types::{
-    WorkspacePatch, WorkspacePatchFile, WorkspacePatchHunk, WorkspacePatchLine,
-    WorkspacePatchOperation,
+use std::collections::BTreeMap;
+
+use crate::errors::{ERROR_PATCH_NOOP, ERROR_PATCH_SYNTAX};
+
+use super::{
+    diagnostic::single_line_preview,
+    types::{
+        WorkspacePatch, WorkspacePatchFile, WorkspacePatchHunk, WorkspacePatchLine,
+        WorkspacePatchOperation,
+    },
 };
+
+const BEGIN_WORKSPACE: &str = "*** Begin Workspace Patch";
+const END_WORKSPACE: &str = "*** End Workspace Patch";
+const BEGIN_STANDARD: &str = "*** Begin Patch";
+const END_STANDARD: &str = "*** End Patch";
+const ADD_PREFIX: &str = "*** Add File: ";
+const UPDATE_PREFIX: &str = "*** Update File: ";
+const DELETE_PREFIX: &str = "*** Delete File: ";
+
+/// Longest patch line preview embedded in a parse error.
+const PREVIEW_CHARS: usize = 96;
+
+/// File section kinds accepted by the patch grammar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SectionKind {
+    Add,
+    Update,
+    Delete,
+}
+
+impl SectionKind {
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Add => ADD_PREFIX,
+            Self::Update => UPDATE_PREFIX,
+            Self::Delete => DELETE_PREFIX,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct WorkspacePatchParseError {
-    pub(super) message: &'static str,
+    pub(super) code: &'static str,
+    pub(super) message: String,
     pub(super) path: Option<String>,
 }
 
 impl WorkspacePatchParseError {
-    fn new(message: &'static str, path: Option<String>) -> Self {
-        Self { message, path }
+    /// Creates a failure for a patch body that does not follow the grammar.
+    fn syntax(message: impl Into<String>, path: Option<String>) -> Self {
+        Self {
+            code: ERROR_PATCH_SYNTAX,
+            message: message.into(),
+            path,
+        }
+    }
+
+    /// Creates a failure for a patch that would change nothing.
+    fn noop(message: impl Into<String>, path: Option<String>) -> Self {
+        Self {
+            code: ERROR_PATCH_NOOP,
+            message: message.into(),
+            path,
+        }
     }
 }
 
 pub(super) fn parse_apply_patch(
     raw_patch: &str,
 ) -> Result<WorkspacePatch, WorkspacePatchParseError> {
-    const BEGIN_WORKSPACE: &str = "*** Begin Workspace Patch";
-    const END_WORKSPACE: &str = "*** End Workspace Patch";
-    const BEGIN_STANDARD: &str = "*** Begin Patch";
-    const END_STANDARD: &str = "*** End Patch";
-    const ADD_PREFIX: &str = "*** Add File: ";
-    const UPDATE_PREFIX: &str = "*** Update File: ";
-
     let raw_patch = raw_patch.strip_prefix('\u{feff}').unwrap_or(raw_patch);
     let lines = raw_patch.lines().collect::<Vec<_>>();
     let mut index = 0;
@@ -35,22 +83,31 @@ pub(super) fn parse_apply_patch(
     let end = match patch_line(lines.get(index).copied()) {
         Some(BEGIN_WORKSPACE) => END_WORKSPACE,
         Some(BEGIN_STANDARD) => END_STANDARD,
-        _ => {
-            return Err(WorkspacePatchParseError::new(
-                "workspace patch must start with *** Begin Workspace Patch",
+        Some(first) => {
+            return Err(WorkspacePatchParseError::syntax(
+                format!(
+                    "workspace patch must start with `*** Begin Patch` (or `*** Begin Workspace Patch`); the first non-blank line is `{}`",
+                    single_line_preview(first, PREVIEW_CHARS),
+                ),
+                None,
+            ));
+        }
+        None => {
+            return Err(WorkspacePatchParseError::syntax(
+                "workspace patch must not be empty; send one `*** Begin Patch` ... `*** End Patch` envelope with the file sections inside it",
                 None,
             ));
         }
     };
     index += 1;
 
-    let mut files = Vec::new();
-    let mut seen_paths = BTreeSet::new();
+    let mut files: Vec<WorkspacePatchFile> = Vec::new();
+    let mut file_index_by_path: BTreeMap<String, usize> = BTreeMap::new();
     loop {
         skip_blank_patch_lines(&lines, &mut index);
         let Some(line) = patch_line(lines.get(index).copied()) else {
-            return Err(WorkspacePatchParseError::new(
-                "workspace patch must end with *** End Workspace Patch",
+            return Err(WorkspacePatchParseError::syntax(
+                format!("workspace patch must end with `{end}`"),
                 None,
             ));
         };
@@ -58,63 +115,130 @@ pub(super) fn parse_apply_patch(
             index += 1;
             skip_blank_patch_lines(&lines, &mut index);
             if index != lines.len() {
-                return Err(WorkspacePatchParseError::new(
-                    "workspace patch must not contain text after *** End Workspace Patch",
+                let trailing = lines.get(index).copied().unwrap_or_default();
+                return Err(WorkspacePatchParseError::syntax(
+                    format!(
+                        "workspace patch must not contain text after `{end}`; found `{}`",
+                        single_line_preview(trailing, PREVIEW_CHARS),
+                    ),
                     None,
                 ));
             }
             break;
         }
         if line == BEGIN_WORKSPACE || line == BEGIN_STANDARD {
-            return Err(WorkspacePatchParseError::new(
+            return Err(WorkspacePatchParseError::syntax(
                 "workspace patch contains a duplicate begin marker; provide exactly one patch envelope",
                 None,
             ));
         }
 
-        let (is_add, path) = if let Some(path) = line.strip_prefix(ADD_PREFIX) {
-            (true, path.trim())
+        let (kind, path) = if let Some(path) = line.strip_prefix(ADD_PREFIX) {
+            (SectionKind::Add, path.trim())
         } else if let Some(path) = line.strip_prefix(UPDATE_PREFIX) {
-            (false, path.trim())
+            (SectionKind::Update, path.trim())
+        } else if let Some(path) = line.strip_prefix(DELETE_PREFIX) {
+            (SectionKind::Delete, path.trim())
         } else {
-            return Err(WorkspacePatchParseError::new(
-                "workspace patch expected *** Add File: <path> or *** Update File: <path>",
+            return Err(WorkspacePatchParseError::syntax(
+                format!(
+                    "workspace patch expected `*** Add File: <path>`, `*** Update File: <path>`, or `*** Delete File: <path>`; found `{}`",
+                    single_line_preview(line, PREVIEW_CHARS),
+                ),
                 None,
             ));
         };
         if path.is_empty() {
-            return Err(WorkspacePatchParseError::new(
-                "workspace patch file path must not be empty",
+            return Err(WorkspacePatchParseError::syntax(
+                format!(
+                    "workspace patch {} section must name a workspace-relative path",
+                    kind.marker().trim(),
+                ),
                 None,
             ));
         }
         let path = path.to_owned();
-        if !seen_paths.insert(path.clone()) {
-            return Err(WorkspacePatchParseError::new(
-                "workspace patch must not operate on the same file more than once",
-                Some(path),
-            ));
-        }
         index += 1;
 
-        let operation = if is_add {
-            WorkspacePatchOperation::Add {
+        let operation = match kind {
+            SectionKind::Add => WorkspacePatchOperation::Add {
                 lines: parse_apply_patch_add_lines(&lines, &mut index, &path, end)?,
-            }
-        } else {
-            WorkspacePatchOperation::Update {
+            },
+            SectionKind::Update => WorkspacePatchOperation::Update {
                 hunks: parse_apply_patch_update_hunks(&lines, &mut index, &path, end)?,
+            },
+            SectionKind::Delete => {
+                parse_apply_patch_delete_section(&lines, &mut index, &path, end)?;
+                WorkspacePatchOperation::Delete
             }
         };
-        files.push(WorkspacePatchFile { path, operation });
+
+        match file_index_by_path.get(&path).copied() {
+            None => {
+                file_index_by_path.insert(path.clone(), files.len());
+                files.push(WorkspacePatchFile {
+                    path,
+                    operation,
+                    ignored_context_hunks: 0,
+                });
+            }
+            // Repeated update sections for one file are a common shape when a
+            // caller edits distant regions, so they merge into a single file
+            // plan that still fails as a whole when any hunk misses.
+            Some(existing) => match (&mut files[existing].operation, operation) {
+                (
+                    WorkspacePatchOperation::Update { hunks },
+                    WorkspacePatchOperation::Update { hunks: additional },
+                ) => hunks.extend(additional),
+                (WorkspacePatchOperation::Add { .. }, WorkspacePatchOperation::Add { .. }) => {
+                    return Err(WorkspacePatchParseError::syntax(
+                        format!(
+                            "workspace patch adds `{path}` more than once; use one {ADD_PREFIX}section per new file"
+                        ),
+                        Some(path),
+                    ));
+                }
+                _ => {
+                    return Err(WorkspacePatchParseError::syntax(
+                        format!(
+                            "workspace patch mixes Add File, Update File, or Delete File sections for `{path}`; use one section per file and merge its hunks into that section"
+                        ),
+                        Some(path),
+                    ));
+                }
+            },
+        }
     }
 
     if files.is_empty() {
-        return Err(WorkspacePatchParseError::new(
-            "workspace patch must contain at least one file operation",
+        return Err(WorkspacePatchParseError::syntax(
+            "workspace patch must contain at least one file section (`*** Add File:`, `*** Update File:`, or `*** Delete File:`)",
             None,
         ));
     }
+
+    if !files.iter().any(WorkspacePatchFile::has_edit) {
+        return Err(WorkspacePatchParseError::noop(
+            "workspace patch contains no `+` or `-` lines, so nothing would change. Send the added or removed lines as `+`/`-` hunk lines to edit the file, or use `read_text` when you only need to inspect the current content",
+            match files.as_slice() {
+                [file] => Some(file.path.clone()),
+                _ => None,
+            },
+        ));
+    }
+
+    // Context-only hunks describe the caller's belief about unchanged lines,
+    // not edits. Once the envelope is known to contain a real edit they are
+    // anchored by the edited hunks anyway, so they are dropped and counted
+    // instead of silently disappearing.
+    for file in &mut files {
+        if let WorkspacePatchOperation::Update { hunks } = &mut file.operation {
+            let before = hunks.len();
+            hunks.retain(WorkspacePatchHunk::has_edit);
+            file.ignored_context_hunks = before - hunks.len();
+        }
+    }
+    files.retain(WorkspacePatchFile::has_edit);
 
     Ok(WorkspacePatch { files })
 }
@@ -125,13 +249,14 @@ pub(super) fn parse_apply_patch_update_hunks(
     path: &str,
     end: &str,
 ) -> Result<Vec<WorkspacePatchHunk>, WorkspacePatchParseError> {
-    const ADD_PREFIX: &str = "*** Add File: ";
-    const UPDATE_PREFIX: &str = "*** Update File: ";
-
     let mut hunks = Vec::new();
     let mut current = Vec::new();
     while let Some(line) = patch_line(lines.get(*index).copied()) {
-        if line == end || line.starts_with(ADD_PREFIX) || line.starts_with(UPDATE_PREFIX) {
+        if line == end
+            || line.starts_with(ADD_PREFIX)
+            || line.starts_with(UPDATE_PREFIX)
+            || line.starts_with(DELETE_PREFIX)
+        {
             break;
         }
         if line.trim().is_empty() && current.is_empty() {
@@ -139,13 +264,13 @@ pub(super) fn parse_apply_patch_update_hunks(
             continue;
         }
         if line.starts_with("@@") {
-            push_apply_patch_hunk(&mut hunks, &mut current, path)?;
+            push_apply_patch_hunk(&mut hunks, &mut current);
             *index += 1;
             continue;
         }
         let Some((prefix, text)) = line.split_at_checked(1) else {
-            return Err(WorkspacePatchParseError::new(
-                "workspace patch hunk line must start with space, +, or -",
+            return Err(WorkspacePatchParseError::syntax(
+                "workspace patch hunk line must start with a space, `+`, or `-`; found a blank line where a hunk line was expected (prefix context lines with one space)",
                 Some(path.to_owned()),
             ));
         };
@@ -154,19 +279,24 @@ pub(super) fn parse_apply_patch_update_hunks(
             "-" => current.push(WorkspacePatchLine::Remove(text.to_owned())),
             "+" => current.push(WorkspacePatchLine::Add(text.to_owned())),
             _ => {
-                return Err(WorkspacePatchParseError::new(
-                    "workspace patch hunk line must start with space, +, or -",
+                return Err(WorkspacePatchParseError::syntax(
+                    format!(
+                        "workspace patch hunk line must start with a space, `+`, or `-`; found `{}`",
+                        single_line_preview(line, PREVIEW_CHARS),
+                    ),
                     Some(path.to_owned()),
                 ));
             }
         }
         *index += 1;
     }
-    push_apply_patch_hunk(&mut hunks, &mut current, path)?;
+    push_apply_patch_hunk(&mut hunks, &mut current);
 
     if hunks.is_empty() {
-        return Err(WorkspacePatchParseError::new(
-            "workspace patch update must contain at least one edited hunk; context-only hunks are ignored",
+        return Err(WorkspacePatchParseError::syntax(
+            format!(
+                "workspace patch update section for `{path}` contains no hunk lines; send `@@` followed by context, `+`, or `-` lines"
+            ),
             Some(path.to_owned()),
         ));
     }
@@ -179,12 +309,13 @@ fn parse_apply_patch_add_lines(
     path: &str,
     end: &str,
 ) -> Result<Vec<String>, WorkspacePatchParseError> {
-    const ADD_PREFIX: &str = "*** Add File: ";
-    const UPDATE_PREFIX: &str = "*** Update File: ";
-
     let mut contents = Vec::new();
     while let Some(line) = patch_line(lines.get(*index).copied()) {
-        if line == end || line.starts_with(ADD_PREFIX) || line.starts_with(UPDATE_PREFIX) {
+        if line == end
+            || line.starts_with(ADD_PREFIX)
+            || line.starts_with(UPDATE_PREFIX)
+            || line.starts_with(DELETE_PREFIX)
+        {
             break;
         }
 
@@ -196,14 +327,17 @@ fn parse_apply_patch_add_lines(
         }
 
         let Some((prefix, text)) = line.split_at_checked(1) else {
-            return Err(WorkspacePatchParseError::new(
-                "workspace patch add lines must start with +",
+            return Err(WorkspacePatchParseError::syntax(
+                "workspace patch add lines must start with `+`; found a blank line",
                 Some(path.to_owned()),
             ));
         };
         if prefix != "+" {
-            return Err(WorkspacePatchParseError::new(
-                "workspace patch add lines must start with +",
+            return Err(WorkspacePatchParseError::syntax(
+                format!(
+                    "workspace patch add lines must start with `+`; found `{}`",
+                    single_line_preview(line, PREVIEW_CHARS),
+                ),
                 Some(path.to_owned()),
             ));
         }
@@ -212,8 +346,10 @@ fn parse_apply_patch_add_lines(
     }
 
     if contents.is_empty() {
-        return Err(WorkspacePatchParseError::new(
-            "workspace patch add must contain at least one + line",
+        return Err(WorkspacePatchParseError::syntax(
+            format!(
+                "workspace patch add section for `{path}` contains no `+` lines; every line of the new file needs a `+` prefix"
+            ),
             Some(path.to_owned()),
         ));
     }
@@ -221,22 +357,51 @@ fn parse_apply_patch_add_lines(
     Ok(contents)
 }
 
+/// Consumes a `*** Delete File:` section, which has no hunk body.
+fn parse_apply_patch_delete_section(
+    lines: &[&str],
+    index: &mut usize,
+    path: &str,
+    end: &str,
+) -> Result<(), WorkspacePatchParseError> {
+    while let Some(line) = patch_line(lines.get(*index).copied()) {
+        if line == end
+            || line.starts_with(ADD_PREFIX)
+            || line.starts_with(UPDATE_PREFIX)
+            || line.starts_with(DELETE_PREFIX)
+        {
+            return Ok(());
+        }
+        if line.trim().is_empty() {
+            *index += 1;
+            continue;
+        }
+
+        return Err(WorkspacePatchParseError::syntax(
+            format!(
+                "workspace patch delete section for `{path}` must not contain content lines; found `{}`",
+                single_line_preview(line, PREVIEW_CHARS),
+            ),
+            Some(path.to_owned()),
+        ));
+    }
+    Ok(())
+}
+
+/// Moves the accumulated hunk lines into the section's hunk list.
+///
+/// Context-only hunks are kept here on purpose: the caller decides whether to
+/// drop them next to real edits or to report a patch that changes nothing.
 fn push_apply_patch_hunk(
     hunks: &mut Vec<WorkspacePatchHunk>,
     current: &mut Vec<WorkspacePatchLine>,
-    _path: &str,
-) -> Result<(), WorkspacePatchParseError> {
+) {
     if current.is_empty() {
-        return Ok(());
+        return;
     }
-    let hunk = WorkspacePatchHunk {
+    hunks.push(WorkspacePatchHunk {
         lines: std::mem::take(current),
-    };
-    if !hunk.has_edit() {
-        return Ok(());
-    }
-    hunks.push(hunk);
-    Ok(())
+    });
 }
 
 fn patch_line(line: Option<&str>) -> Option<&str> {

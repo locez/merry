@@ -14,10 +14,10 @@ fn apply_patch_proposal_reads_preimage_metadata_without_mutation() {
     assert_eq!(proposal.action_kind(), ToolActionKind::WorkspaceWrite);
     assert_eq!(proposal.label(), "workspace patch");
     assert_eq!(proposal.subject(), "dir/note.txt");
-    assert!(
-        proposal
-            .summary()
-            .contains("Apply 1 hunk(s) in dir/note.txt")
+    assert_eq!(
+        proposal.summary(),
+        "Apply 1 hunk(s) in dir/note.txt (3 -> 3 lines, 22 -> 24 bytes).",
+        "reviewers see line counts first, then byte counts"
     );
     let patch = match proposal.evidence() {
         ActionProposalEvidence::WorkspacePatch(patch) => patch,
@@ -501,6 +501,44 @@ fn mark_patch_cancelled_after_write(path: &Path) {
         "cancelled",
     )
     .expect("post-write cancellation marker should be written");
+}
+
+#[test]
+fn apply_patch_delete_respects_write_scope_and_forbidden_paths() {
+    let temp = TempWorkspace::new("patch-delete-scope");
+    temp.write_text("allowed/note.txt", "alpha\n");
+    temp.write_text("denied/note.txt", "alpha\n");
+    temp.write_text("allowed/secret.txt", "alpha\n");
+    let tools = WorkspaceTools::new(
+        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
+            .with_patch_write_scope(Some(vec![PathBuf::from("allowed")]))
+            .with_forbidden_paths(vec![PathBuf::from("allowed/secret.txt")]),
+    )
+    .expect("workspace tools should construct");
+
+    let allowed = patch_text_outcome(&tools, &delete_patch("allowed/note.txt"));
+    assert_eq!(allowed.status(), ToolCallResultStatus::Succeeded);
+    assert!(!temp.path().join("allowed/note.txt").exists());
+
+    let outside_scope = patch_text_outcome(&tools, &delete_patch("denied/note.txt"));
+    assert_failed_json_for_tool(
+        &outside_scope,
+        APPLY_PATCH_TOOL,
+        ERROR_PATH_DENIED,
+        Some("denied/note.txt"),
+        temp.path(),
+    );
+    assert!(temp.path().join("denied/note.txt").exists());
+
+    let forbidden = patch_text_outcome(&tools, &delete_patch("allowed/secret.txt"));
+    assert_failed_json_for_tool(
+        &forbidden,
+        APPLY_PATCH_TOOL,
+        ERROR_PATH_DENIED,
+        Some("allowed/secret.txt"),
+        temp.path(),
+    );
+    assert!(temp.path().join("allowed/secret.txt").exists());
 }
 
 #[test]

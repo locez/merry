@@ -3,8 +3,9 @@ use crate::{
     errors::{
         ERROR_FILE_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_FILE_TOO_LARGE,
         ERROR_INVALID_ARGUMENTS, ERROR_NOT_DIRECTORY, ERROR_NOT_FILE, ERROR_NOT_UTF8,
-        ERROR_PATH_DENIED, ERROR_PREIMAGE_ABSENT, ERROR_PREIMAGE_AMBIGUOUS,
-        ERROR_PROPOSAL_MISMATCH, WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE, WORKSPACE_PATH_CONTRACT,
+        ERROR_PATCH_NOOP, ERROR_PATCH_SYNTAX, ERROR_PATH_DENIED, ERROR_PREIMAGE_ABSENT,
+        ERROR_PREIMAGE_AMBIGUOUS, ERROR_PROPOSAL_MISMATCH, WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE,
+        WORKSPACE_PATH_CONTRACT,
     },
     patch::{
         ApplyPatchExecutor, ApplyPatchInput, apply_patch_blocking, apply_patch_blocking_checked,
@@ -313,6 +314,22 @@ fn add_patch(path: &str, lines: &[&str]) -> String {
     format!("*** Begin Workspace Patch\n*** Add File: {path}\n{additions}\n*** End Workspace Patch")
 }
 
+fn delete_patch(path: &str) -> String {
+    format!("*** Begin Workspace Patch\n*** Delete File: {path}\n*** End Workspace Patch")
+}
+
+fn delete_preflight(tools: &WorkspaceTools, path: &str) -> ToolActionPreflight {
+    let patch = delete_patch(path);
+    let call = pending_call_for(
+        APPLY_PATCH_TOOL,
+        json!({
+            "patch": patch
+        }),
+    );
+    propose_apply_patch_blocking_checked(&tools.state, ApplyPatchInput { patch }, &call, &|| false)
+        .expect("uncancelled workspace patch proposal should not return cancellation")
+}
+
 fn add_patch_preflight(tools: &WorkspaceTools, path: &str, lines: &[&str]) -> ToolActionPreflight {
     let patch = add_patch(path, lines);
     let call = pending_call_for(
@@ -359,10 +376,17 @@ fn assert_failed_json_for_tool(
     assert_eq!(payload["ok"], false);
     assert_eq!(payload["tool"], tool);
     assert_eq!(payload["error"]["code"], code);
-    assert_eq!(
-        payload["recovery"]["path_contract"],
-        WORKSPACE_PATH_CONTRACT
-    );
+    if failure_keeps_path_contract(code) {
+        assert_eq!(
+            payload["recovery"]["path_contract"],
+            WORKSPACE_PATH_CONTRACT
+        );
+    } else {
+        assert!(
+            payload.get("recovery").is_none(),
+            "patch-text failures must not repeat the workspace path contract"
+        );
+    }
     if let Some(expected_guidance_kind) = expected_guidance_kind_for_code(code) {
         assert_eq!(payload["guidance"]["kind"], expected_guidance_kind);
         assert!(
@@ -401,6 +425,8 @@ fn assert_failed_json_for_tool(
 fn expected_guidance_kind_for_code(code: &str) -> Option<&'static str> {
     match code {
         ERROR_INVALID_ARGUMENTS => Some("workspace_invalid_arguments"),
+        ERROR_PATCH_SYNTAX => Some("apply_patch_syntax"),
+        ERROR_PATCH_NOOP => Some("apply_patch_noop"),
         ERROR_PATH_DENIED
         | ERROR_FILE_NOT_FOUND
         | ERROR_FILE_ALREADY_EXISTS
@@ -411,6 +437,17 @@ fn expected_guidance_kind_for_code(code: &str) -> Option<&'static str> {
         ERROR_PROPOSAL_MISMATCH => Some("apply_patch_plan_changed"),
         _ => None,
     }
+}
+
+/// Reports whether a failure code still carries the workspace path contract.
+///
+/// Failures about the patch body itself omit that block so callers are not sent
+/// looking at path rules that the failure never mentioned.
+fn failure_keeps_path_contract(code: &str) -> bool {
+    !matches!(
+        code,
+        ERROR_PATCH_SYNTAX | ERROR_PATCH_NOOP | ERROR_PREIMAGE_ABSENT | ERROR_PREIMAGE_AMBIGUOUS
+    )
 }
 
 fn assert_no_provider_visible_patch_metadata(outcome: &ToolExecutionOutcome) {

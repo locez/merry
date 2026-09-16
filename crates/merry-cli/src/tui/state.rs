@@ -18,7 +18,7 @@ use std::{
 };
 pub(crate) use timeline::TimelineAnchor;
 pub(crate) use views::{
-    CommandFailure, CommandView, PatchChangeView, PatchLineKind, PatchLineView,
+    CommandFailure, CommandView, PatchChangeView, PatchLineKind, PatchLineView, PatchOperationView,
     ProcessOutputPreview, QueuePreview, QueuePreviewItem, QueuePreviewState, TimelineItem,
 };
 

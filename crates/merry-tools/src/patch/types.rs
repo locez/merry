@@ -1,9 +1,11 @@
 use serde::Serialize;
 
 use crate::errors::{
-    BlockingToolError, DomainError, ERROR_INVALID_ARGUMENTS, ERROR_PREIMAGE_ABSENT,
+    BlockingToolError, DomainError, ERROR_PATCH_SYNTAX, ERROR_PREIMAGE_ABSENT,
     ERROR_PREIMAGE_AMBIGUOUS,
 };
+
+use super::diagnostic::{describe_preimage_ambiguity, describe_preimage_miss, line_number_at_byte};
 
 #[derive(Debug, Serialize)]
 pub(super) struct WorkspacePatchSuccess {
@@ -15,10 +17,40 @@ pub(super) struct WorkspacePatchSuccess {
 #[derive(Debug, Serialize)]
 pub(super) struct WorkspacePatchSuccessChange {
     pub(super) path: String,
+    pub(super) op: WorkspacePatchOperationKind,
     pub(super) hunks: usize,
+    pub(super) lines_before: usize,
+    pub(super) lines_after: usize,
     pub(super) bytes_before: usize,
     pub(super) bytes_after: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub(super) ignored_context_hunks: usize,
     pub(super) lines: Vec<WorkspacePatchSuccessLine>,
+}
+
+/// Reports the file operation that produced a successful change entry.
+///
+/// A delete and an update that empties a file both end at zero bytes, so the
+/// envelope names the operation instead of leaving callers to infer it.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum WorkspacePatchOperationKind {
+    Add,
+    Update,
+    Delete,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+/// Counts the lines of UTF-8 file content.
+///
+/// The count matches how a reader sees the file rather than how many newline
+/// bytes it holds: `str::lines()` ignores a trailing `\r`, so CRLF content
+/// reports the same count as LF content, and empty content reports zero lines.
+pub(super) fn count_file_lines(content: &str) -> usize {
+    content.lines().count()
 }
 
 #[derive(Debug, Serialize, Clone, PartialEq, Eq)]
@@ -48,12 +80,27 @@ pub(super) struct WorkspacePatch {
 pub(super) struct WorkspacePatchFile {
     pub(super) path: String,
     pub(super) operation: WorkspacePatchOperation,
+    /// Number of context-only hunks dropped from this file's update sections.
+    pub(super) ignored_context_hunks: usize,
+}
+
+impl WorkspacePatchFile {
+    /// Reports whether this file section changes any content.
+    pub(super) fn has_edit(&self) -> bool {
+        match &self.operation {
+            WorkspacePatchOperation::Add { .. } | WorkspacePatchOperation::Delete => true,
+            WorkspacePatchOperation::Update { hunks } => {
+                hunks.iter().any(WorkspacePatchHunk::has_edit)
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
 pub(super) enum WorkspacePatchOperation {
     Add { lines: Vec<String> },
     Update { hunks: Vec<WorkspacePatchHunk> },
+    Delete,
 }
 
 #[derive(Debug)]
@@ -123,8 +170,8 @@ pub(super) fn build_patch_replacement(
         let new_text = hunk.new_text(trailing_newline);
         if old_text.is_empty() {
             return Err(DomainError::new(
-                ERROR_INVALID_ARGUMENTS,
-                "workspace patch update hunks must include context or removed text",
+                ERROR_PATCH_SYNTAX,
+                "workspace patch hunk has only + lines and no anchor; include at least one context line or removed line so the insert position is unambiguous",
             )
             .into());
         }
@@ -199,7 +246,10 @@ fn build_replacement(
     let Some(start) = content.find(old_text) else {
         return Err(DomainError::new(
             ERROR_PREIMAGE_ABSENT,
-            "workspace patch preimage was not found",
+            format!(
+                "workspace patch preimage was not found{}",
+                describe_preimage_miss(content, old_text)
+            ),
         )
         .into());
     };
@@ -208,7 +258,10 @@ fn build_replacement(
     if content[after_start..].contains(old_text) {
         return Err(DomainError::new(
             ERROR_PREIMAGE_AMBIGUOUS,
-            "workspace patch preimage matched more than once",
+            format!(
+                "workspace patch preimage matched more than once{}",
+                describe_preimage_ambiguity(content, old_text, start)
+            ),
         )
         .into());
     }
@@ -286,14 +339,6 @@ fn line_delta_for_hunk(hunk: &WorkspacePatchHunk) -> i64 {
         WorkspacePatchLine::Remove(_) => delta - 1,
         WorkspacePatchLine::Add(_) => delta + 1,
     })
-}
-
-fn line_number_at_byte(content: &str, byte_index: usize) -> usize {
-    content[..byte_index]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count()
-        + 1
 }
 
 pub(crate) fn stable_content_fingerprint(bytes: &[u8]) -> String {

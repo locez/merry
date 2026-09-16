@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
 };
 
 use merry_runtime::{
@@ -24,7 +24,10 @@ use super::{
         WorkspacePatchFileMode, WorkspacePatchFilePlan, WorkspacePatchPlan,
         read_patch_preimage_for_path,
     },
-    types::{WorkspacePatchSuccess, WorkspacePatchSuccessChange, stable_content_fingerprint},
+    types::{
+        WorkspacePatchSuccess, WorkspacePatchSuccessChange, count_file_lines,
+        stable_content_fingerprint,
+    },
 };
 
 pub(super) fn execute_apply_patch_plan(
@@ -43,11 +46,15 @@ pub(super) fn execute_apply_patch_plan(
             return Err(ToolExecutionError::Cancelled);
         }
         let relative_display = change.relative.display.clone();
+        let operation = change.mode.operation_kind();
+        let ignored_context_hunks = change.ignored_context_hunks;
+        let lines_before = count_file_lines(&change.content_before);
         let content_after = match execute_apply_patch_file_plan(&change, is_cancelled) {
             Ok(content_after) => content_after,
             Err(PatchFileWriteError::Outcome(outcome)) => return Ok(*outcome),
             Err(PatchFileWriteError::Cancelled) => return Err(ToolExecutionError::Cancelled),
         };
+        let lines_after = count_file_lines(&content_after);
         evidence_changes.push(
             WorkspacePatchChangeEvidence::new(
                 relative_display.clone(),
@@ -66,9 +73,13 @@ pub(super) fn execute_apply_patch_plan(
         );
         written_changes.push(WorkspacePatchSuccessChange {
             path: relative_display,
+            op: operation,
             hunks: change.hunks,
+            lines_before,
+            lines_after,
             bytes_before: change.bytes_before,
             bytes_after: content_after.len(),
+            ignored_context_hunks,
             lines: change.lines,
         });
     }
@@ -140,6 +151,9 @@ fn execute_apply_patch_file_plan(
             Err(BlockingToolError::Cancelled) => return Err(PatchFileWriteError::Cancelled),
         }
     }
+    if plan.mode == WorkspacePatchFileMode::DeleteExisting {
+        return delete_apply_patch_file(plan, file, relative_display);
+    }
     if file.seek(SeekFrom::Start(0)).is_err() {
         return Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(
             APPLY_PATCH_TOOL,
@@ -203,6 +217,41 @@ fn execute_apply_patch_file_plan(
     }
 
     Ok(content_after)
+}
+
+/// Unlinks a planned file whose preimage was already verified.
+///
+/// Deletion is verified the same way a write is: the plan recorded the exact
+/// preimage and byte count, and the caller re-read the file before this point.
+/// Success requires the path to be absent afterwards, so a partial or blocked
+/// removal reports a failure instead of claiming the file is gone.
+fn delete_apply_patch_file(
+    plan: &WorkspacePatchFilePlan,
+    file: fs::File,
+    relative_display: String,
+) -> Result<String, PatchFileWriteError> {
+    drop(file);
+    if fs::remove_file(&plan.path).is_err() {
+        return Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(
+            APPLY_PATCH_TOOL,
+            ERROR_WRITE_FAILED,
+            "could not delete workspace file",
+            Some(relative_display),
+        ))));
+    }
+
+    #[cfg(test)]
+    maybe_run_patch_test_after_write_hook(&plan.path);
+
+    match fs::symlink_metadata(&plan.path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        _ => Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(
+            APPLY_PATCH_TOOL,
+            ERROR_WRITE_FAILED,
+            "workspace file still exists after delete",
+            Some(relative_display),
+        )))),
+    }
 }
 
 fn read_open_patch_file_before_write(

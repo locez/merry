@@ -17,6 +17,7 @@ use crate::{
 };
 
 mod apply;
+mod diagnostic;
 mod input;
 pub(crate) use input::{ApplyPatchInput, spec};
 mod parse;

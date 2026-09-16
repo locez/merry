@@ -31,8 +31,9 @@ use super::{
     apply::execute_apply_patch_plan,
     parse::parse_apply_patch,
     types::{
-        WorkspacePatchFile, WorkspacePatchHunk, WorkspacePatchOperation, WorkspacePatchSuccessLine,
-        build_new_file_replacement, build_patch_replacement, stable_content_fingerprint,
+        WorkspacePatchFile, WorkspacePatchHunk, WorkspacePatchOperation,
+        WorkspacePatchOperationKind, WorkspacePatchSuccessLine, build_new_file_replacement,
+        build_patch_replacement, count_file_lines, stable_content_fingerprint,
     },
 };
 
@@ -140,7 +141,7 @@ fn plan_apply_patch_blocking_checked(
         Err(error) => {
             return Ok(WorkspacePatchPlanOutcome::Failure(failed_outcome(
                 APPLY_PATCH_TOOL,
-                ERROR_INVALID_ARGUMENTS,
+                error.code,
                 error.message,
                 error.path,
             )));
@@ -202,10 +203,7 @@ impl WorkspacePatchPlan {
 
     fn summary(&self) -> String {
         match self.changes.as_slice() {
-            [change] => format!(
-                "Apply {} hunk(s) in {} ({} bytes -> {} bytes).",
-                change.hunks, change.relative.display, change.bytes_before, change.bytes_after
-            ),
+            [change] => change.summary(),
             changes => {
                 let bytes_before = changes.iter().fold(0usize, |sum, change| {
                     sum.saturating_add(change.bytes_before)
@@ -213,9 +211,17 @@ impl WorkspacePatchPlan {
                 let bytes_after = changes
                     .iter()
                     .fold(0usize, |sum, change| sum.saturating_add(change.bytes_after));
+                let lines_before = changes.iter().fold(0usize, |sum, change| {
+                    sum.saturating_add(change.lines_before())
+                });
+                let lines_after = changes.iter().fold(0usize, |sum, change| {
+                    sum.saturating_add(change.lines_after())
+                });
                 format!(
-                    "Apply workspace patch to {} files ({} bytes -> {} bytes).",
+                    "Apply workspace patch to {} files ({} -> {} lines, {} -> {} bytes).",
                     changes.len(),
+                    lines_before,
+                    lines_after,
                     bytes_before,
                     bytes_after
                 )
@@ -228,6 +234,18 @@ impl WorkspacePatchPlan {
 pub(super) enum WorkspacePatchFileMode {
     CreateNew,
     UpdateExisting,
+    DeleteExisting,
+}
+
+impl WorkspacePatchFileMode {
+    /// Names the operation recorded in the success envelope.
+    pub(super) fn operation_kind(self) -> WorkspacePatchOperationKind {
+        match self {
+            Self::CreateNew => WorkspacePatchOperationKind::Add,
+            Self::UpdateExisting => WorkspacePatchOperationKind::Update,
+            Self::DeleteExisting => WorkspacePatchOperationKind::Delete,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -241,12 +259,47 @@ pub(super) struct WorkspacePatchFilePlan {
     pub(super) bytes_before: usize,
     pub(super) bytes_after: usize,
     pub(super) hunks: usize,
+    pub(super) ignored_context_hunks: usize,
     pub(super) lines: Vec<WorkspacePatchSuccessLine>,
     pub(super) max_read_bytes: usize,
     pub(super) mode: WorkspacePatchFileMode,
 }
 
 impl WorkspacePatchFilePlan {
+    /// Counts the lines the file had before this change.
+    pub(super) fn lines_before(&self) -> usize {
+        count_file_lines(&self.content_before)
+    }
+
+    /// Counts the lines the file has after this change.
+    pub(super) fn lines_after(&self) -> usize {
+        count_file_lines(&self.replacement)
+    }
+
+    /// Describes the planned change for proposal and audit text.
+    ///
+    /// Reviewers reason about a change in lines, so the summary leads with the
+    /// line counts and keeps byte counts as the secondary file-size measure.
+    fn summary(&self) -> String {
+        if self.mode == WorkspacePatchFileMode::DeleteExisting {
+            return format!(
+                "Delete {} ({} lines, {} bytes).",
+                self.relative.display,
+                self.lines_before(),
+                self.bytes_before
+            );
+        }
+        format!(
+            "Apply {} hunk(s) in {} ({} -> {} lines, {} -> {} bytes).",
+            self.hunks,
+            self.relative.display,
+            self.lines_before(),
+            self.lines_after(),
+            self.bytes_before,
+            self.bytes_after
+        )
+    }
+
     pub(super) fn file_fingerprint_before(&self) -> String {
         stable_content_fingerprint(self.content_before.as_bytes())
     }
@@ -386,54 +439,75 @@ fn plan_apply_patch_file(
             })
         }
         WorkspacePatchOperation::Update { hunks } => {
-            let relative = validate_relative_path(&file_patch.path, state.allow_hidden)
-                .map_err(WorkspacePatchFilePlanError::Path)?;
-            validate_patch_write_boundary(state, &relative).map_err(|error| {
-                WorkspacePatchFilePlanError::Domain {
-                    error,
-                    path: file_patch.path.clone(),
-                }
-            })?;
-
-            for root in &state.roots {
-                if is_cancelled() {
-                    return Err(WorkspacePatchFilePlanError::Cancelled);
-                }
-
-                match resolve_existing_path(root, &relative) {
-                    Ok(Some(resolved)) => {
-                        return plan_resolved_apply_patch_file(
-                            relative,
-                            resolved.path,
-                            hunks,
-                            state,
-                            is_cancelled,
-                        )
-                        .map_err(|error| match error {
-                            BlockingToolError::Domain(error) => {
-                                WorkspacePatchFilePlanError::Domain {
-                                    error,
-                                    path: file_patch.path,
-                                }
-                            }
-                            BlockingToolError::Cancelled => WorkspacePatchFilePlanError::Cancelled,
-                        });
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        return Err(WorkspacePatchFilePlanError::Domain {
-                            error,
-                            path: relative.display,
-                        });
-                    }
-                }
-            }
-
-            Err(WorkspacePatchFilePlanError::Domain {
-                error: DomainError::new(ERROR_FILE_NOT_FOUND, "workspace file was not found"),
-                path: relative.display,
-            })
+            let (relative, path) =
+                resolve_existing_patch_path(state, &file_patch.path, is_cancelled)?;
+            plan_resolved_apply_patch_file(
+                relative,
+                path,
+                hunks,
+                file_patch.ignored_context_hunks,
+                state,
+                is_cancelled,
+            )
+            .map_err(|error| file_plan_error(error, file_patch.path))
         }
+        WorkspacePatchOperation::Delete => {
+            let (relative, path) =
+                resolve_existing_patch_path(state, &file_patch.path, is_cancelled)?;
+            plan_resolved_apply_patch_delete(relative, path, state, is_cancelled)
+                .map_err(|error| file_plan_error(error, file_patch.path))
+        }
+    }
+}
+
+/// Resolves the workspace path of a file that a patch section edits or deletes.
+///
+/// Update and delete sections share the same path rules: the requested path is
+/// validated against hidden-path and write-scope policy, then resolved through
+/// the configured roots with first-root-wins semantics, and a missing file is
+/// reported as `ERROR_FILE_NOT_FOUND`.
+fn resolve_existing_patch_path(
+    state: &WorkspaceToolState,
+    requested: &str,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<(ValidatedRelativePath, PathBuf), WorkspacePatchFilePlanError> {
+    let relative = validate_relative_path(requested, state.allow_hidden)
+        .map_err(WorkspacePatchFilePlanError::Path)?;
+    validate_patch_write_boundary(state, &relative).map_err(|error| {
+        WorkspacePatchFilePlanError::Domain {
+            error,
+            path: requested.to_owned(),
+        }
+    })?;
+
+    for root in &state.roots {
+        if is_cancelled() {
+            return Err(WorkspacePatchFilePlanError::Cancelled);
+        }
+
+        match resolve_existing_path(root, &relative) {
+            Ok(Some(resolved)) => return Ok((relative, resolved.path)),
+            Ok(None) => {}
+            Err(error) => {
+                return Err(WorkspacePatchFilePlanError::Domain {
+                    error,
+                    path: relative.display,
+                });
+            }
+        }
+    }
+
+    Err(WorkspacePatchFilePlanError::Domain {
+        error: DomainError::new(ERROR_FILE_NOT_FOUND, "workspace file was not found"),
+        path: relative.display,
+    })
+}
+
+/// Maps a blocking tool error onto a file-plan failure for the requested path.
+fn file_plan_error(error: BlockingToolError, path: String) -> WorkspacePatchFilePlanError {
+    match error {
+        BlockingToolError::Domain(error) => WorkspacePatchFilePlanError::Domain { error, path },
+        BlockingToolError::Cancelled => WorkspacePatchFilePlanError::Cancelled,
     }
 }
 
@@ -472,6 +546,7 @@ fn plan_resolved_apply_patch_file(
     relative: ValidatedRelativePath,
     path: PathBuf,
     hunks: Vec<WorkspacePatchHunk>,
+    ignored_context_hunks: usize,
     state: &WorkspaceToolState,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<WorkspacePatchFilePlan, BlockingToolError> {
@@ -498,11 +573,46 @@ fn plan_resolved_apply_patch_file(
         preimage_bytes: replacement.preimage_bytes,
         replacement_bytes: replacement.replacement_bytes,
         hunks: hunks.len(),
+        ignored_context_hunks,
         lines: replacement.lines,
         content_before: content,
         replacement: replacement.text,
         max_read_bytes: state.limits.max_read_bytes,
         mode: WorkspacePatchFileMode::UpdateExisting,
+    })
+}
+
+/// Plans the removal of an existing file.
+///
+/// The plan keeps the preimage bytes and the file size so evidence, approval,
+/// and write-time verification use the same contract as an update: the file is
+/// read and compared before it is unlinked.
+fn plan_resolved_apply_patch_delete(
+    relative: ValidatedRelativePath,
+    path: PathBuf,
+    state: &WorkspaceToolState,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<WorkspacePatchFilePlan, BlockingToolError> {
+    let content = read_patch_preimage(&path, state, is_cancelled)?;
+
+    if is_cancelled() {
+        return Err(BlockingToolError::Cancelled);
+    }
+
+    Ok(WorkspacePatchFilePlan {
+        bytes_before: content.len(),
+        bytes_after: 0,
+        preimage_bytes: content.len(),
+        replacement_bytes: 0,
+        hunks: 0,
+        ignored_context_hunks: 0,
+        lines: Vec::new(),
+        content_before: content,
+        replacement: String::new(),
+        relative,
+        path,
+        max_read_bytes: state.limits.max_read_bytes,
+        mode: WorkspacePatchFileMode::DeleteExisting,
     })
 }
 
@@ -534,6 +644,7 @@ fn plan_new_apply_patch_file(
         preimage_bytes: replacement.preimage_bytes,
         replacement_bytes: replacement.replacement_bytes,
         hunks: 1,
+        ignored_context_hunks: 0,
         lines: replacement.lines,
         content_before: String::new(),
         replacement: replacement.text,

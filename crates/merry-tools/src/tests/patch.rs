@@ -27,7 +27,10 @@ fn apply_patch_executor_replaces_one_hunk_in_existing_utf8_file() {
             "tool": APPLY_PATCH_TOOL,
             "changes": [{
                 "path": "dir/note.txt",
+                "op": "update",
                 "hunks": 1,
+                "lines_before": 3,
+                "lines_after": 3,
                 "bytes_before": 22,
                 "bytes_after": 22,
                 "lines": [
@@ -89,7 +92,10 @@ fn apply_patch_executor_adds_new_utf8_file() {
         json_content(&outcome)["changes"][0],
         json!({
             "path": "dir/nested/new.txt",
+            "op": "add",
             "hunks": 1,
+            "lines_before": 0,
+            "lines_after": 2,
             "bytes_before": 0,
             "bytes_after": "alpha\nbeta\n".len(),
             "lines": [
@@ -210,7 +216,7 @@ fn apply_patch_add_file_requires_plus_lines() {
     assert_failed_json_for_tool(
         &outcome,
         APPLY_PATCH_TOOL,
-        ERROR_INVALID_ARGUMENTS,
+        ERROR_PATCH_SYNTAX,
         Some("new.txt"),
         temp.path(),
     );
@@ -390,10 +396,15 @@ fn apply_patch_executor_ignores_context_only_hunks_when_editing() {
         "alpha\nnew value\nomega\n"
     );
     assert_eq!(json_content(&outcome)["changes"][0]["hunks"], 1);
+    assert_eq!(
+        json_content(&outcome)["changes"][0]["ignored_context_hunks"],
+        1,
+        "dropped context-only hunks should stay visible in the success envelope"
+    );
 }
 
 #[test]
-fn apply_patch_executor_rejects_an_update_with_only_context_hunks() {
+fn apply_patch_executor_rejects_a_context_only_envelope_with_recovery_hint() {
     let temp = TempWorkspace::new("patch-only-context-hunk");
     temp.write_text("note.txt", "alpha\nold value\nomega\n");
     let tools = tools_for(temp.path());
@@ -408,16 +419,19 @@ fn apply_patch_executor_rejects_an_update_with_only_context_hunks() {
     assert_failed_json_for_tool(
         &outcome,
         APPLY_PATCH_TOOL,
-        ERROR_INVALID_ARGUMENTS,
+        ERROR_PATCH_NOOP,
         Some("note.txt"),
         temp.path(),
     );
+    assert_eq!(
+        outcome.diagnostic().expect("diagnostic").message(),
+        "workspace patch contains no `+` or `-` lines, so nothing would change. Send the added or removed lines as `+`/`-` hunk lines to edit the file, or use `read_text` when you only need to inspect the current content"
+    );
     assert!(
-        outcome
-            .diagnostic()
-            .expect("diagnostic")
-            .message()
-            .contains("at least one edited hunk")
+        json_content(&outcome)["guidance"]["message"]
+            .as_str()
+            .expect("guidance text")
+            .contains("nothing was written")
     );
     assert_eq!(
         read_text(&temp.path().join("note.txt")),
@@ -442,7 +456,7 @@ fn apply_patch_executor_rejects_duplicate_begin_marker_without_mutation() {
     assert_failed_json_for_tool(
         &outcome,
         APPLY_PATCH_TOOL,
-        ERROR_INVALID_ARGUMENTS,
+        ERROR_PATCH_SYNTAX,
         None,
         temp.path(),
     );
@@ -547,4 +561,493 @@ fn apply_patch_executor_applies_multi_file_patch_and_records_each_change() {
     assert_eq!(evidence.changes().len(), 2);
     assert_eq!(evidence.changes()[0].relative_path(), "src/lib.rs");
     assert_eq!(evidence.changes()[1].relative_path(), "tests/smoke.rs");
+}
+
+#[test]
+fn apply_patch_preimage_miss_reports_the_first_differing_line() {
+    let temp = TempWorkspace::new("patch-preimage-divergence");
+    temp.write_text("note.txt", "alpha\nold value\nomega\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Patch
+*** Update File: note.txt
+@@
+ alpha
+-stale value
++new value
+*** End Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        APPLY_PATCH_TOOL,
+        ERROR_PREIMAGE_ABSENT,
+        Some("note.txt"),
+        temp.path(),
+    );
+    let message = outcome
+        .diagnostic()
+        .expect("diagnostic")
+        .message()
+        .to_owned();
+    assert_eq!(
+        message,
+        "workspace patch preimage was not found; the hunk's first line matches at line 1, but line 2 differs: the patch has \"stale value\" but the file has \"old value\""
+    );
+    assert_eq!(
+        read_text(&temp.path().join("note.txt")),
+        "alpha\nold value\nomega\n"
+    );
+}
+
+#[test]
+fn apply_patch_preimage_miss_reports_an_unfindable_hunk_line() {
+    let temp = TempWorkspace::new("patch-preimage-unfindable");
+    temp.write_text("note.txt", "alpha\nbeta\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Patch
+*** Update File: note.txt
+@@
+-missing anchor line
++replacement
+*** End Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        APPLY_PATCH_TOOL,
+        ERROR_PREIMAGE_ABSENT,
+        Some("note.txt"),
+        temp.path(),
+    );
+    let message = outcome
+        .diagnostic()
+        .expect("diagnostic")
+        .message()
+        .to_owned();
+    assert!(
+        message.contains("missing anchor line") && message.contains("not found in the file"),
+        "diagnostic should quote the missing hunk line: {message}"
+    );
+}
+
+#[test]
+fn apply_patch_preimage_miss_reports_crlf_as_the_match_cause() {
+    let temp = TempWorkspace::new("patch-preimage-crlf");
+    temp.write_text("note.txt", "alpha\r\nold\r\nomega\r\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Patch
+*** Update File: note.txt
+@@
+-old
++new
+*** End Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        APPLY_PATCH_TOOL,
+        ERROR_PREIMAGE_ABSENT,
+        Some("note.txt"),
+        temp.path(),
+    );
+    let message = outcome
+        .diagnostic()
+        .expect("diagnostic")
+        .message()
+        .to_owned();
+    assert_eq!(
+        message,
+        "workspace patch preimage was not found; all 1 hunk line(s) match at line 2, but the file uses CRLF line endings and this tool matches bytes exactly; convert the file to LF first (for example with a process command) or edit it without apply_patch"
+    );
+    assert_eq!(
+        read_text(&temp.path().join("note.txt")),
+        "alpha\r\nold\r\nomega\r\n"
+    );
+}
+
+#[test]
+fn apply_patch_ambiguous_preimage_reports_every_match_line() {
+    let temp = TempWorkspace::new("patch-preimage-ambiguity-lines");
+    temp.write_text("note.txt", "dup\nmid\ndup\nmid\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Patch
+*** Update File: note.txt
+@@
+-dup
+-mid
++dup
++MID
+*** End Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        APPLY_PATCH_TOOL,
+        ERROR_PREIMAGE_AMBIGUOUS,
+        Some("note.txt"),
+        temp.path(),
+    );
+    let message = outcome
+        .diagnostic()
+        .expect("diagnostic")
+        .message()
+        .to_owned();
+    assert!(
+        message.contains("lines 1, 3"),
+        "diagnostic should list candidate lines: {message}"
+    );
+}
+
+#[test]
+fn apply_patch_rejects_a_missing_begin_marker_with_the_offending_line() {
+    let temp = TempWorkspace::new("patch-missing-begin-marker");
+    temp.write_text("note.txt", "alpha\nold\nomega\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Update File: note.txt
+-old
++new
+*** End Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        APPLY_PATCH_TOOL,
+        ERROR_PATCH_SYNTAX,
+        None,
+        temp.path(),
+    );
+    let message = outcome
+        .diagnostic()
+        .expect("diagnostic")
+        .message()
+        .to_owned();
+    assert!(
+        message.contains("*** Update File: note.txt"),
+        "diagnostic should quote the first non-blank line: {message}"
+    );
+    assert_eq!(
+        json_content(&outcome)["guidance"]["kind"],
+        "apply_patch_syntax"
+    );
+    assert_eq!(
+        read_text(&temp.path().join("note.txt")),
+        "alpha\nold\nomega\n"
+    );
+}
+
+#[test]
+fn apply_patch_merges_repeated_update_sections_for_one_file() {
+    let temp = TempWorkspace::new("patch-merged-sections");
+    temp.write_text("note.txt", "one\ntwo\nthree\nfour\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Patch
+*** Update File: note.txt
+@@
+-one
++ONE
+*** Update File: note.txt
+@@
+-four
++FOUR
+*** End Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(
+        read_text(&temp.path().join("note.txt")),
+        "ONE\ntwo\nthree\nFOUR\n"
+    );
+    let payload = json_content(&outcome);
+    assert_eq!(payload["changes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["changes"][0]["op"], "update");
+    assert_eq!(payload["changes"][0]["hunks"], 2);
+}
+
+#[test]
+fn apply_patch_rejects_repeated_add_sections_for_one_file() {
+    let temp = TempWorkspace::new("patch-repeated-add");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Patch
+*** Add File: new.txt
++first
+*** Add File: new.txt
++second
+*** End Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        APPLY_PATCH_TOOL,
+        ERROR_PATCH_SYNTAX,
+        Some("new.txt"),
+        temp.path(),
+    );
+    assert!(
+        outcome
+            .diagnostic()
+            .expect("diagnostic")
+            .message()
+            .contains("more than once")
+    );
+    assert!(!temp.path().join("new.txt").exists());
+}
+
+#[test]
+fn apply_patch_rejects_mixed_sections_for_one_file() {
+    let temp = TempWorkspace::new("patch-mixed-sections");
+    temp.write_text("note.txt", "alpha\nold\nomega\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Patch
+*** Update File: note.txt
+@@
+-old
++new
+*** Delete File: note.txt
+*** End Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        APPLY_PATCH_TOOL,
+        ERROR_PATCH_SYNTAX,
+        Some("note.txt"),
+        temp.path(),
+    );
+    assert!(
+        outcome
+            .diagnostic()
+            .expect("diagnostic")
+            .message()
+            .contains("mixes")
+    );
+    assert_eq!(
+        read_text(&temp.path().join("note.txt")),
+        "alpha\nold\nomega\n"
+    );
+}
+
+#[test]
+fn apply_patch_drops_a_context_only_file_next_to_edits() {
+    let temp = TempWorkspace::new("patch-context-only-file");
+    temp.write_text("edited.txt", "alpha\nold\n");
+    temp.write_text("anchors.txt", "alpha\nold\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Patch
+*** Update File: edited.txt
+@@
+-old
++new
+*** Update File: anchors.txt
+@@
+ alpha
+*** End Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(read_text(&temp.path().join("edited.txt")), "alpha\nnew\n");
+    assert_eq!(read_text(&temp.path().join("anchors.txt")), "alpha\nold\n");
+    let payload = json_content(&outcome);
+    assert_eq!(payload["changes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["changes"][0]["path"], "edited.txt");
+}
+
+#[test]
+fn apply_patch_executor_deletes_existing_file() {
+    let temp = TempWorkspace::new("patch-delete-success");
+    temp.write_text("dir/gone.txt", "alpha\nbeta\n");
+    let tools = tools_for(temp.path());
+
+    let outcome = patch_text_outcome(&tools, &delete_patch("dir/gone.txt"));
+
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert!(!temp.path().join("dir/gone.txt").exists());
+    assert!(
+        temp.path().join("dir").is_dir(),
+        "deleting a file must leave its parent directory in place"
+    );
+    assert_eq!(
+        json_content(&outcome),
+        json!({
+            "ok": true,
+            "tool": APPLY_PATCH_TOOL,
+            "changes": [{
+                "path": "dir/gone.txt",
+                "op": "delete",
+                "hunks": 0,
+                "lines_before": 2,
+                "lines_after": 0,
+                "bytes_before": "alpha\nbeta\n".len(),
+                "bytes_after": 0,
+                "lines": []
+            }]
+        })
+    );
+    let evidence = match outcome
+        .execution_evidence()
+        .expect("successful delete should include execution evidence")
+    {
+        ActionExecutionEvidence::WorkspacePatch(evidence) => evidence,
+        ActionExecutionEvidence::ProcessAction(_) => {
+            panic!("workspace patch execution must not produce process action evidence")
+        }
+    };
+    assert_eq!(evidence.preimage_bytes(), "alpha\nbeta\n".len());
+    assert_eq!(evidence.replacement_bytes(), 0);
+    assert_eq!(evidence.file_bytes_before(), "alpha\nbeta\n".len());
+    assert_eq!(evidence.file_bytes_after(), 0);
+    assert_eq!(
+        evidence.file_fingerprint_after(),
+        &stable_content_fingerprint(b"")
+    );
+}
+
+#[test]
+fn apply_patch_merged_sections_fail_atomically_when_one_hunk_misses() {
+    let temp = TempWorkspace::new("patch-merged-atomic");
+    temp.write_text("note.txt", "one\ntwo\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Patch
+*** Update File: note.txt
+@@
+-one
++ONE
+*** Update File: note.txt
+@@
+-missing
++MISSING
+*** End Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        APPLY_PATCH_TOOL,
+        ERROR_PREIMAGE_ABSENT,
+        Some("note.txt"),
+        temp.path(),
+    );
+    assert_eq!(
+        read_text(&temp.path().join("note.txt")),
+        "one\ntwo\n",
+        "a merged section must not write when any hunk misses"
+    );
+}
+
+#[test]
+fn apply_patch_rejects_a_hunk_without_an_anchor_line() {
+    let temp = TempWorkspace::new("patch-no-anchor");
+    temp.write_text("note.txt", "alpha\nbeta\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Patch
+*** Update File: note.txt
+@@
++inserted
+*** End Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        APPLY_PATCH_TOOL,
+        ERROR_PATCH_SYNTAX,
+        Some("note.txt"),
+        temp.path(),
+    );
+    assert!(
+        outcome
+            .diagnostic()
+            .expect("diagnostic")
+            .message()
+            .contains("only + lines and no anchor")
+    );
+    assert_eq!(read_text(&temp.path().join("note.txt")), "alpha\nbeta\n");
+}
+
+#[test]
+fn apply_patch_delete_proposal_and_execution_match() {
+    let temp = TempWorkspace::new("patch-delete-proposal");
+    temp.write_text("note.txt", "alpha\n");
+    let tools = tools_for(temp.path());
+    let patch = delete_patch("note.txt");
+    let proposal = match delete_preflight(&tools, "note.txt") {
+        ToolActionPreflight::Proposal(proposal) => proposal,
+        ToolActionPreflight::NoProposal | ToolActionPreflight::Outcome(_) => {
+            panic!("delete patch should produce a proposal")
+        }
+    };
+    let proposed = match proposal.evidence() {
+        ActionProposalEvidence::WorkspacePatch(patch) => patch,
+        ActionProposalEvidence::ProcessAction(_) => {
+            panic!("workspace patch proposal must not produce process action evidence")
+        }
+    };
+    assert_eq!(proposed.preimage_bytes(), "alpha\n".len());
+    assert_eq!(proposed.replacement_bytes(), 0);
+    assert_eq!(proposed.file_bytes_before(), "alpha\n".len());
+    assert_eq!(proposed.file_bytes_after(), 0);
+
+    let outcome = apply_patch_blocking_checked(
+        &tools.state,
+        ApplyPatchInput { patch },
+        Some(proposed),
+        &|| false,
+    )
+    .expect("uncancelled workspace patch should not return cancellation");
+
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert!(!temp.path().join("note.txt").exists());
+}
+
+#[test]
+fn apply_patch_delete_requires_an_existing_file() {
+    let temp = TempWorkspace::new("patch-delete-missing");
+    let tools = tools_for(temp.path());
+
+    let outcome = patch_text_outcome(&tools, &delete_patch("note.txt"));
+
+    assert_failed_json_for_tool(
+        &outcome,
+        APPLY_PATCH_TOOL,
+        ERROR_FILE_NOT_FOUND,
+        Some("note.txt"),
+        temp.path(),
+    );
+}
+
+#[test]
+fn apply_patch_delete_rejects_content_lines() {
+    let temp = TempWorkspace::new("patch-delete-content");
+    temp.write_text("note.txt", "alpha\n");
+    let tools = tools_for(temp.path());
+    let patch = "*** Begin Patch
+*** Delete File: note.txt
++unexpected
+*** End Patch";
+
+    let outcome = patch_text_outcome(&tools, patch);
+
+    assert_failed_json_for_tool(
+        &outcome,
+        APPLY_PATCH_TOOL,
+        ERROR_PATCH_SYNTAX,
+        Some("note.txt"),
+        temp.path(),
+    );
+    assert!(
+        outcome
+            .diagnostic()
+            .expect("diagnostic")
+            .message()
+            .contains("must not contain content lines")
+    );
+    assert_eq!(read_text(&temp.path().join("note.txt")), "alpha\n");
 }

@@ -7,7 +7,7 @@ use crate::{
         projector::StartedToolView,
         state::{
             CommandFailure, CommandView, PatchChangeView, PatchLineKind, PatchLineView,
-            ProcessOutputPreview, TimelineItem,
+            PatchOperationView, ProcessOutputPreview, TimelineItem,
         },
         text_wrap::truncate_chars,
         tool_error::compact_failed_tool_body,
@@ -235,6 +235,7 @@ pub(super) fn parse_apply_patch_view(
         .changes
         .into_iter()
         .map(|change| {
+            let operation = change.operation();
             let patch_lines = change
                 .lines
                 .as_ref()
@@ -252,19 +253,29 @@ pub(super) fn parse_apply_patch_view(
                         .cloned()
                 })
                 .unwrap_or_default();
-            let added = patch_lines
+            let hunk_added = patch_lines
                 .iter()
                 .filter(|line| line.kind == PatchLineKind::Add)
                 .count();
-            let removed = patch_lines
+            let hunk_removed = patch_lines
                 .iter()
                 .filter(|line| line.kind == PatchLineKind::Remove)
                 .count();
+            // A delete reports no hunk lines because the whole file leaves at
+            // once, so the file's own line count is the honest removal count.
+            let (added, removed) = if operation == PatchOperationView::Delete {
+                (0, change.lines_before.unwrap_or(0))
+            } else {
+                (hunk_added, hunk_removed)
+            };
             PatchChangeView {
                 path: change.path,
+                operation,
                 added,
                 removed,
                 hunks: change.hunks,
+                lines_before: change.lines_before,
+                lines_after: change.lines_after,
                 bytes_before: Some(change.bytes_before),
                 bytes_after: Some(change.bytes_after),
                 lines: patch_lines,
@@ -287,8 +298,27 @@ pub(super) struct WorkspacePatchOutputChange {
     pub(super) hunks: usize,
     pub(super) bytes_before: usize,
     pub(super) bytes_after: usize,
+    // Resumed sessions replay envelopes recorded before these fields existed,
+    // so every added field stays optional and defaults to the update shape.
+    #[serde(default)]
+    pub(super) op: Option<String>,
+    #[serde(default)]
+    pub(super) lines_before: Option<usize>,
+    #[serde(default)]
+    pub(super) lines_after: Option<usize>,
     #[serde(default)]
     pub(super) lines: Option<Vec<WorkspacePatchOutputLine>>,
+}
+
+impl WorkspacePatchOutputChange {
+    /// Resolves the file operation, defaulting to an update for old envelopes.
+    pub(super) fn operation(&self) -> PatchOperationView {
+        match self.op.as_deref() {
+            Some("add") => PatchOperationView::Add,
+            Some("delete") => PatchOperationView::Delete,
+            Some("update") | Some(_) | None => PatchOperationView::Update,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

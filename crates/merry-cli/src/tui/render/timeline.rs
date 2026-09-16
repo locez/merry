@@ -5,7 +5,9 @@ use crate::tui::{
     keymap::KeyAction,
     markdown::{RenderedMarkdown, markdown_lines},
     render::command_style::command_spans,
-    state::{CommandFailure, CommandView, PatchChangeView, TimelineItem, TuiState},
+    state::{
+        CommandFailure, CommandView, PatchChangeView, PatchOperationView, TimelineItem, TuiState,
+    },
     text_interaction::TextSelection,
     text_wrap::{
         StyledTextPart, inline_code_spans, semantic_style, truncate_chars, wrap_styled_parts,
@@ -158,27 +160,55 @@ pub(super) fn compact_patch_lines(
     let mut lines = Vec::new();
     for change in changes {
         lines.push(Line::from(Span::styled(
-            format!(
-                "Edited {} (+{} -{})",
-                change.path, change.added, change.removed
-            ),
+            patch_change_title(change),
             semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(Span::styled(
-            format!(
-                "  {} hunk(s), {} -> {} bytes",
-                change.hunks,
-                change
-                    .bytes_before
-                    .map_or_else(|| "-".to_owned(), |bytes| bytes.to_string()),
-                change
-                    .bytes_after
-                    .map_or_else(|| "-".to_owned(), |bytes| bytes.to_string())
-            ),
+            patch_change_detail(change),
             semantic_style(state, SemanticColor::Muted),
         )));
     }
     lines
+}
+
+/// Titles a patch change with the verb that matches its file operation.
+fn patch_change_title(change: &PatchChangeView) -> String {
+    match change.operation {
+        PatchOperationView::Add => format!("Created {} (+{})", change.path, change.added),
+        PatchOperationView::Update => format!(
+            "Edited {} (+{} -{})",
+            change.path, change.added, change.removed
+        ),
+        PatchOperationView::Delete => format!("Deleted {} (-{})", change.path, change.removed),
+    }
+}
+
+/// Summarizes a patch change by line counts first, then byte counts.
+///
+/// Reviewers reason about a change in lines, while byte counts describe the
+/// file-size effect that a line count cannot express, so lines lead and both
+/// stay visible. The hunk count only describes an update's hunks.
+fn patch_change_detail(change: &PatchChangeView) -> String {
+    let mut segments = Vec::new();
+    if change.operation == PatchOperationView::Update {
+        segments.push(format!("{} hunk(s)", change.hunks));
+    }
+    segments.push(format!(
+        "{} -> {} lines",
+        optional_size(change.lines_before),
+        optional_size(change.lines_after)
+    ));
+    segments.push(format!(
+        "{} -> {} bytes",
+        optional_size(change.bytes_before),
+        optional_size(change.bytes_after)
+    ));
+    format!("  {}", segments.join(", "))
+}
+
+/// Renders a stored size that a replayed envelope may not carry.
+fn optional_size(value: Option<usize>) -> String {
+    value.map_or_else(|| "-".to_owned(), |value| value.to_string())
 }
 
 pub(super) fn expanded_title_line(state: &TuiState, title: &str) -> Line<'static> {

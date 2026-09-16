@@ -1,7 +1,9 @@
 use crate::tui::{
     keymap::Keymap,
     render::{render_to_buffer, render_to_text},
-    state::{PatchChangeView, PatchLineView, QueuePreview, TimelineItem, TuiState},
+    state::{
+        PatchChangeView, PatchLineView, PatchOperationView, QueuePreview, TimelineItem, TuiState,
+    },
     tests::{find_cell_color, find_cell_style, find_text_position, rendered_buffer_text},
     theme::{SemanticColor, TuiTheme},
 };
@@ -85,9 +87,12 @@ fn renderer_applies_configured_semantic_theme_colors() {
     state.push_timeline_item(TimelineItem::Patch {
         changes: vec![PatchChangeView {
             path: "patch".to_owned(),
+            operation: PatchOperationView::Update,
             added: 1,
             removed: 1,
             hunks: 1,
+            lines_before: Some(3),
+            lines_after: Some(3),
             bytes_before: Some(8),
             bytes_after: Some(6),
             lines: vec![

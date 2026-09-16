@@ -132,6 +132,19 @@ pub(crate) enum PatchLineKind {
     Remove,
 }
 
+/// File operation a completed `apply_patch` change reported.
+///
+/// Envelopes written before the field existed only described updates, so
+/// [`PatchOperationView::Update`] is the default for replayed sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)]
+pub(crate) enum PatchOperationView {
+    Add,
+    #[default]
+    Update,
+    Delete,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) struct PatchLineView {
@@ -175,9 +188,12 @@ impl PatchLineView {
 #[allow(dead_code)]
 pub(crate) struct PatchChangeView {
     pub(crate) path: String,
+    pub(crate) operation: PatchOperationView,
     pub(crate) added: usize,
     pub(crate) removed: usize,
     pub(crate) hunks: usize,
+    pub(crate) lines_before: Option<usize>,
+    pub(crate) lines_after: Option<usize>,
     pub(crate) bytes_before: Option<usize>,
     pub(crate) bytes_after: Option<usize>,
     pub(crate) lines: Vec<PatchLineView>,
