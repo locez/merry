@@ -1,11 +1,12 @@
 use super::*;
 use crate::{
     errors::{
-        ERROR_FILE_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_FILE_TOO_LARGE,
-        ERROR_INVALID_ARGUMENTS, ERROR_NOT_DIRECTORY, ERROR_NOT_FILE, ERROR_NOT_UTF8,
-        ERROR_PATCH_NOOP, ERROR_PATCH_SYNTAX, ERROR_PATH_DENIED, ERROR_PREIMAGE_ABSENT,
-        ERROR_PREIMAGE_AMBIGUOUS, ERROR_PROPOSAL_MISMATCH, ERROR_WRITE_FAILED,
-        WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE, WORKSPACE_PATH_CONTRACT,
+        ALL_WORKSPACE_ERROR_CODES, ERROR_FILE_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND,
+        ERROR_FILE_TOO_LARGE, ERROR_INVALID_ARGUMENTS, ERROR_NOT_DIRECTORY, ERROR_NOT_FILE,
+        ERROR_NOT_UTF8, ERROR_PATCH_NOOP, ERROR_PATCH_SYNTAX, ERROR_PATH_DENIED,
+        ERROR_PREIMAGE_ABSENT, ERROR_PREIMAGE_AMBIGUOUS, ERROR_PROPOSAL_MISMATCH,
+        ERROR_READ_FAILED, ERROR_WRITE_FAILED, WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE,
+        WORKSPACE_PATH_CONTRACT,
     },
     patch::{
         ApplyPatchExecutor, ApplyPatchInput, apply_patch_blocking, apply_patch_blocking_checked,
@@ -376,7 +377,8 @@ fn assert_failed_json_for_tool(
     assert_eq!(payload["ok"], false);
     assert_eq!(payload["tool"], tool);
     assert_eq!(payload["error"]["code"], code);
-    let expected_recovery = expected_recovery_for_code(code);
+    let expected_recovery = expected_recovery_for_code(code)
+        .unwrap_or_else(|| panic!("{code} must declare its expected recovery"));
     if expected_recovery.path_contract {
         assert_eq!(
             payload["recovery"]["path_contract"],
@@ -434,46 +436,66 @@ struct ExpectedRecovery {
     guidance_kind: Option<&'static str>,
 }
 
-fn expected_recovery_for_code(code: &str) -> ExpectedRecovery {
+/// Returns the declared expectation for one code, or `None` when none exists.
+///
+/// The match names constants instead of literals, so an expectation for a code
+/// that no longer exists cannot compile. The `None` arm is what makes
+/// `every_workspace_error_code_declares_its_recovery` fail when a new code is
+/// declared without its own expectation.
+fn expected_recovery_for_code(code: &str) -> Option<ExpectedRecovery> {
     match code {
-        ERROR_INVALID_ARGUMENTS => ExpectedRecovery {
+        ERROR_INVALID_ARGUMENTS => Some(ExpectedRecovery {
             path_contract: true,
             guidance_kind: Some("workspace_invalid_arguments"),
-        },
-        ERROR_PATCH_SYNTAX => ExpectedRecovery {
+        }),
+        ERROR_PATCH_SYNTAX => Some(ExpectedRecovery {
             path_contract: false,
             guidance_kind: Some("apply_patch_syntax"),
-        },
-        ERROR_PATCH_NOOP => ExpectedRecovery {
+        }),
+        ERROR_PATCH_NOOP => Some(ExpectedRecovery {
             path_contract: false,
             guidance_kind: Some("apply_patch_noop"),
-        },
-        ERROR_PREIMAGE_ABSENT | ERROR_PREIMAGE_AMBIGUOUS => ExpectedRecovery {
+        }),
+        ERROR_PREIMAGE_ABSENT | ERROR_PREIMAGE_AMBIGUOUS => Some(ExpectedRecovery {
             path_contract: false,
             guidance_kind: Some("apply_patch_preimage_mismatch"),
-        },
-        ERROR_PROPOSAL_MISMATCH => ExpectedRecovery {
+        }),
+        ERROR_PROPOSAL_MISMATCH => Some(ExpectedRecovery {
             path_contract: true,
             guidance_kind: Some("apply_patch_plan_changed"),
-        },
+        }),
         ERROR_PATH_DENIED
         | ERROR_FILE_NOT_FOUND
         | ERROR_FILE_ALREADY_EXISTS
         | ERROR_NOT_FILE
-        | ERROR_NOT_DIRECTORY => ExpectedRecovery {
+        | ERROR_NOT_DIRECTORY => Some(ExpectedRecovery {
             path_contract: true,
             guidance_kind: Some("workspace_path_recovery"),
-        },
-        ERROR_FILE_TOO_LARGE => ExpectedRecovery {
+        }),
+        ERROR_FILE_TOO_LARGE => Some(ExpectedRecovery {
             path_contract: true,
             guidance_kind: Some("workspace_file_too_large"),
-        },
-        // Codes with no recovery text of their own still explain the path
-        // contract, because their failures can be about where a path points.
-        _ => ExpectedRecovery {
+        }),
+        // These codes explain the path contract without guidance text of their
+        // own, because a failure can be about where a path points and a failed
+        // read or write has no model-facing recovery step beyond retrying.
+        ERROR_NOT_UTF8 | ERROR_READ_FAILED | ERROR_WRITE_FAILED => Some(ExpectedRecovery {
             path_contract: true,
             guidance_kind: None,
-        },
+        }),
+        _ => None,
+    }
+}
+
+#[test]
+fn every_workspace_error_code_declares_its_recovery() {
+    for declared in ALL_WORKSPACE_ERROR_CODES {
+        assert!(
+            expected_recovery_for_code(declared.code).is_some(),
+            "{} ({}) needs an explicit expected recovery entry",
+            declared.name,
+            declared.code
+        );
     }
 }
 

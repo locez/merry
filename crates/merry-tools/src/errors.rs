@@ -2,23 +2,63 @@ use merry_core::ErrorInfo;
 use merry_runtime::ToolExecutionOutcome;
 use serde::Serialize;
 
-pub(crate) const ERROR_INVALID_ARGUMENTS: &str = "workspace_invalid_arguments";
-pub(crate) const ERROR_PATH_DENIED: &str = "workspace_path_denied";
-pub(crate) const ERROR_FILE_NOT_FOUND: &str = "workspace_file_not_found";
-pub(crate) const ERROR_FILE_ALREADY_EXISTS: &str = "workspace_file_already_exists";
-pub(crate) const ERROR_NOT_FILE: &str = "workspace_path_not_file";
-pub(crate) const ERROR_NOT_DIRECTORY: &str = "workspace_path_not_directory";
-pub(crate) const ERROR_FILE_TOO_LARGE: &str = "workspace_file_too_large";
-pub(crate) const ERROR_NOT_UTF8: &str = "workspace_file_not_utf8";
-pub(crate) const ERROR_READ_FAILED: &str = "workspace_read_failed";
-pub(crate) const ERROR_WRITE_FAILED: &str = "workspace_write_failed";
-pub(crate) const ERROR_PROPOSAL_MISMATCH: &str = "apply_patch_approved_mismatch";
+/// Declares every workspace tool error code and registers it for coverage.
+///
+/// A code is declared once here, which also puts it in
+/// [`ALL_WORKSPACE_ERROR_CODES`]. That registration is what lets
+/// `every_workspace_error_code_declares_its_recovery` require an explicit
+/// model-facing recovery expectation for each code: a code added below without
+/// one fails that test instead of silently falling back to a generic message.
+macro_rules! workspace_error_codes {
+    ($( $(#[$attribute:meta])* $name:ident = $code:literal ),* $(,)?) => {
+        $(
+            $(#[$attribute])*
+            pub(crate) const $name: &str = $code;
+        )*
+
+        /// Every declared workspace tool error code with its constant name.
+        ///
+        /// Only the coverage test reads this, so it exists in test builds.
+        #[cfg(test)]
+        pub(crate) const ALL_WORKSPACE_ERROR_CODES: &[DeclaredErrorCode] = &[
+            $(DeclaredErrorCode {
+                name: stringify!($name),
+                code: $code,
+            }),*
+        ];
+    };
+}
+
+/// One declared workspace tool error code.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DeclaredErrorCode {
+    /// Rust constant name, so a coverage failure names the code it means.
+    pub(crate) name: &'static str,
+    /// Stable code a caller receives.
+    pub(crate) code: &'static str,
+}
+
+workspace_error_codes! {
+    ERROR_INVALID_ARGUMENTS = "workspace_invalid_arguments",
+    ERROR_PATH_DENIED = "workspace_path_denied",
+    ERROR_FILE_NOT_FOUND = "workspace_file_not_found",
+    ERROR_FILE_ALREADY_EXISTS = "workspace_file_already_exists",
+    ERROR_NOT_FILE = "workspace_path_not_file",
+    ERROR_NOT_DIRECTORY = "workspace_path_not_directory",
+    ERROR_FILE_TOO_LARGE = "workspace_file_too_large",
+    ERROR_NOT_UTF8 = "workspace_file_not_utf8",
+    ERROR_READ_FAILED = "workspace_read_failed",
+    ERROR_WRITE_FAILED = "workspace_write_failed",
+    ERROR_PROPOSAL_MISMATCH = "apply_patch_approved_mismatch",
+    ERROR_PATCH_SYNTAX = "apply_patch_syntax",
+    ERROR_PATCH_NOOP = "apply_patch_noop",
+    ERROR_PREIMAGE_ABSENT = "apply_patch_preimage_absent",
+    ERROR_PREIMAGE_AMBIGUOUS = "apply_patch_preimage_ambiguous",
+}
+
 pub(crate) const WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE: &str =
     "workspace patch plan changed before execution";
-pub(crate) const ERROR_PATCH_SYNTAX: &str = "apply_patch_syntax";
-pub(crate) const ERROR_PATCH_NOOP: &str = "apply_patch_noop";
-pub(crate) const ERROR_PREIMAGE_ABSENT: &str = "apply_patch_preimage_absent";
-pub(crate) const ERROR_PREIMAGE_AMBIGUOUS: &str = "apply_patch_preimage_ambiguous";
 
 pub(crate) const WORKSPACE_PATH_CONTRACT: &str = "workspace tool path values are resolved under the one workspace root when they are relative and used as named when they are absolute: an absolute path inside the workspace root and the matching relative path address the same file, an absolute path may also address a file outside the workspace or inside a read-only resource root, every spelling including dot-prefixed components is accepted, and only the reachability the sandbox grants decides whether the path can be used";
 
