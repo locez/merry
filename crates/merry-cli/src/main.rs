@@ -1,5 +1,6 @@
 //! Merry terminal client and headless agent entrypoint.
 
+mod apply_patch_argument;
 mod cli;
 mod cli_error;
 mod cli_exit;

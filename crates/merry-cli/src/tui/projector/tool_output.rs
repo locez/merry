@@ -1,6 +1,7 @@
 //! Decodes tool output into bounded presentation values; never owns runtime state.
 
 use crate::{
+    apply_patch_argument::{PatchArgumentSectionKind, section_header},
     tool_display::format_tool_call_detail,
     tui::{
         process_output::process_output_preview,
@@ -333,19 +334,20 @@ pub(super) fn parse_apply_patch_argument(patch: &str) -> ParsedPatchArgument {
     let mut line_numbers = PatchLineNumbers::default();
 
     for line in patch.lines() {
-        if let Some(path) = line.strip_prefix("*** Add File: ").map(str::trim) {
+        if let Some((kind, path)) = section_header(line) {
             flush_patch_change(&mut parsed, &mut current_path, &mut current_lines);
             current_path = Some(path.to_owned());
-            line_numbers = PatchLineNumbers {
-                old_next: None,
-                new_next: Some(1),
+            line_numbers = match kind {
+                // A created file is numbered from its first line, while an
+                // updated or deleted file starts from the hunk headers.
+                PatchArgumentSectionKind::Add => PatchLineNumbers {
+                    old_next: None,
+                    new_next: Some(1),
+                },
+                PatchArgumentSectionKind::Update | PatchArgumentSectionKind::Delete => {
+                    PatchLineNumbers::default()
+                }
             };
-            continue;
-        }
-        if let Some(path) = line.strip_prefix("*** Update File: ").map(str::trim) {
-            flush_patch_change(&mut parsed, &mut current_path, &mut current_lines);
-            current_path = Some(path.to_owned());
-            line_numbers = PatchLineNumbers::default();
             continue;
         }
         if line.starts_with("*** ") {

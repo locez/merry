@@ -59,12 +59,7 @@ fn format_apply_patch_call_detail(arguments: &Map<String, Value>) -> Option<Stri
 fn apply_patch_paths(patch: &str) -> Vec<&str> {
     patch
         .lines()
-        .filter_map(|line| {
-            line.strip_prefix("*** Add File: ")
-                .or_else(|| line.strip_prefix("*** Update File: "))
-                .or_else(|| line.strip_prefix("*** Delete File: "))
-                .map(str::trim)
-        })
+        .filter_map(|line| crate::apply_patch_argument::section_header(line).map(|(_, path)| path))
         .filter(|path| !path.is_empty())
         .collect()
 }
