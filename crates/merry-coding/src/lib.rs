@@ -7,6 +7,7 @@
 //! second coding policy.
 
 mod child_runtime;
+mod profile_hash;
 mod project_capabilities;
 mod project_rules;
 mod runtime;
@@ -16,6 +17,7 @@ mod workspace;
 #[cfg(test)]
 mod tests;
 
+pub use profile_hash::CodingAgentProfileHash;
 pub use project_rules::{
     MAX_ROOT_PROJECT_RULES_BYTES, ProjectRulesLoadError, ROOT_PROJECT_RULES_FILE,
     load_root_project_rules,
@@ -33,13 +35,14 @@ use merry_runtime::{
     AgentLoopConfig, PermissionAdmissionError, ProcessCommandToolError, ProcessRunner,
     ProjectRules, PromptBlock, PromptError, PromptProfile, RegisteredTool, RuntimeBuilder,
     RuntimeError, RuntimeProfile, RuntimeProfileError, SkillCatalog, TaskAnchor, Tool,
-    ToolActionKind, ToolConcurrency, ToolRunner,
 };
 pub use merry_tools::{WorkspaceToolConfigError, WorkspaceToolLimits};
 use serde_json::Error as JsonError;
-use std::{fmt, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
 use workspace::{WorkspaceCodingProfileBuildError, WorkspaceCodingProfileBuilder};
+
+use profile_hash::coding_agent_profile_hash;
 
 /// Stable identity of the provider-neutral coding profile contract.
 pub const CODING_AGENT_PROFILE_ID: &str = "coding-agent-profile";
@@ -159,24 +162,6 @@ pub fn coding_agent_loop_config() -> Result<AgentLoopConfig, merry_runtime::Agen
 #[must_use]
 pub fn coding_agent(root: impl Into<PathBuf>) -> CodingAgentProfileBuilder {
     CodingAgentProfileBuilder::new(root)
-}
-
-/// Stable identity of a shared coding-agent composition profile.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct CodingAgentProfileHash(String);
-
-impl CodingAgentProfileHash {
-    /// Borrows the stable profile hash label.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for CodingAgentProfileHash {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
 }
 
 /// One provider-neutral coding-agent composition applied to a runtime builder.
@@ -509,250 +494,6 @@ pub enum CodingAgentProfileBuildError {
     /// Stable prompt composition was invalid.
     #[error(transparent)]
     Prompt(#[from] PromptError),
-}
-
-fn coding_agent_profile_hash(
-    profile: &RuntimeProfile,
-    run_policy: CodingAgentRunPolicy,
-    workspace_hash_material: &[u8],
-) -> Result<CodingAgentProfileHash, JsonError> {
-    let mut material = Vec::new();
-    append_hash_field(&mut material, "profile-id", CODING_AGENT_PROFILE_ID);
-    material.extend_from_slice(workspace_hash_material);
-    append_hash_field(
-        &mut material,
-        "stable-layout",
-        CODING_AGENT_STABLE_PREFIX_LAYOUT,
-    );
-    append_hash_field(
-        &mut material,
-        "dynamic-layout",
-        CODING_AGENT_DYNAMIC_CONTEXT_LAYOUT,
-    );
-    append_hash_field(
-        &mut material,
-        "prompt-base",
-        profile.prompt_profile().base_instructions(),
-    );
-    append_hash_field(
-        &mut material,
-        "prompt-progress",
-        profile.prompt_profile().progress_commentary_instructions(),
-    );
-    for block in profile.prompt_profile().stable_blocks() {
-        append_hash_field(&mut material, "prompt-block-tag", block.tag());
-        append_hash_field(&mut material, "prompt-block-text", block.text());
-    }
-    append_hash_field(
-        &mut material,
-        "run-max-model-turns",
-        &run_policy.max_model_turns().to_string(),
-    );
-    append_hash_field(
-        &mut material,
-        "run-final-report",
-        run_policy.final_report().as_str(),
-    );
-    if let Some(retry_policy) = profile.model_retry_policy() {
-        append_hash_field(
-            &mut material,
-            "retry-enabled",
-            if retry_policy.enabled() { "on" } else { "off" },
-        );
-        append_hash_field(
-            &mut material,
-            "retry-max-attempts",
-            &retry_policy.max_attempts().to_string(),
-        );
-        append_hash_field(
-            &mut material,
-            "retry-initial-delay-nanos",
-            &retry_policy.initial_delay().as_nanos().to_string(),
-        );
-        append_hash_field(
-            &mut material,
-            "retry-max-delay-nanos",
-            &retry_policy.max_delay().as_nanos().to_string(),
-        );
-        append_hash_field(
-            &mut material,
-            "retry-max-elapsed-nanos",
-            &retry_policy.max_elapsed().as_nanos().to_string(),
-        );
-        append_hash_field(
-            &mut material,
-            "retry-jitter",
-            if retry_policy.jitter() { "on" } else { "off" },
-        );
-    } else {
-        append_hash_field(&mut material, "retry-policy", "runtime-default");
-    }
-    append_hash_field(
-        &mut material,
-        "progress-commentary",
-        if profile.progress_commentary() {
-            "on"
-        } else {
-            "off"
-        },
-    );
-    append_hash_field(
-        &mut material,
-        "bridge-tools",
-        if profile.allow_bridge_tools() {
-            "on"
-        } else {
-            "off"
-        },
-    );
-    append_hash_field(
-        &mut material,
-        "workspace-patches",
-        if profile.allow_low_risk_apply_patches() {
-            "on"
-        } else {
-            "off"
-        },
-    );
-    append_hash_field(
-        &mut material,
-        "low-risk-process",
-        if profile.low_risk_process_runner().is_some() {
-            "on"
-        } else {
-            "off"
-        },
-    );
-    append_hash_field(
-        &mut material,
-        "read-only-process",
-        if profile.read_only_shell_process_runner().is_some() {
-            "on"
-        } else {
-            "off"
-        },
-    );
-    append_hash_field(
-        &mut material,
-        "accepted-process",
-        if profile.accepted_local_workspace_process_runner().is_some() {
-            "on"
-        } else {
-            "off"
-        },
-    );
-    append_hash_field(
-        &mut material,
-        "permissioned-process",
-        if profile.permissioned_process_runner_factory().is_some() {
-            "on"
-        } else {
-            "off"
-        },
-    );
-
-    for (id, text) in profile.initial_context_summaries() {
-        append_hash_field(&mut material, "initial-context-id", id);
-        append_hash_field(&mut material, "initial-context-text", text);
-    }
-    if let Some(project_rules) = profile.project_rules() {
-        append_hash_field(
-            &mut material,
-            "project-rules-source",
-            project_rules.source_path(),
-        );
-        append_hash_field(
-            &mut material,
-            "project-rules-hash",
-            project_rules.content_hash(),
-        );
-        append_hash_field(
-            &mut material,
-            "project-rules-stable-text",
-            &project_rules.to_stable_prefix_message_text(),
-        );
-    }
-    if let Some(skill_catalog) = profile.skill_catalog()
-        && let Some(text) = skill_catalog.to_stable_prefix_message_text()
-    {
-        append_hash_field(&mut material, "skill-catalog", &text);
-    }
-
-    // Task anchors and checkpoints are intentionally excluded: they are dynamic
-    // runtime context and must not invalidate the stable profile identity.
-    for tool in profile.registered_tools() {
-        let spec = serde_json::to_string(tool.spec())?;
-        append_hash_field(&mut material, "tool-spec", &spec);
-        append_hash_field(
-            &mut material,
-            "tool-action-kind",
-            tool_action_kind_label(tool.action_kind()),
-        );
-        append_hash_field(
-            &mut material,
-            "tool-runner",
-            tool_runner_label(tool.runner()),
-        );
-        append_hash_field(
-            &mut material,
-            "tool-concurrency",
-            tool_concurrency_label(tool.concurrency()),
-        );
-        append_hash_field(
-            &mut material,
-            "tool-proposals",
-            if tool.proposals_enabled() {
-                "on"
-            } else {
-                "off"
-            },
-        );
-    }
-
-    Ok(CodingAgentProfileHash(format!(
-        "fnv1a64:{:016x}",
-        fnv1a64(&material)
-    )))
-}
-
-fn append_hash_field(material: &mut Vec<u8>, name: &str, value: &str) {
-    material.extend_from_slice(name.as_bytes());
-    material.push(0);
-    material.extend_from_slice(&(value.len() as u64).to_be_bytes());
-    material.extend_from_slice(value.as_bytes());
-}
-
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in bytes {
-        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
-fn tool_action_kind_label(kind: ToolActionKind) -> &'static str {
-    match kind {
-        ToolActionKind::ReadOnly => "read_only",
-        ToolActionKind::RuntimeControl => "runtime_control",
-        ToolActionKind::WorkspaceWrite => "workspace_write",
-        ToolActionKind::CommandExec => "command_exec",
-        ToolActionKind::Network => "network",
-        ToolActionKind::TrustedExternal => "trusted_external",
-    }
-}
-
-fn tool_runner_label(runner: ToolRunner) -> &'static str {
-    match runner {
-        ToolRunner::Runtime => "runtime",
-        ToolRunner::Bridge => "bridge",
-    }
-}
-
-fn tool_concurrency_label(concurrency: ToolConcurrency) -> &'static str {
-    match concurrency {
-        ToolConcurrency::ParallelSafe => "parallel_safe",
-        ToolConcurrency::Exclusive => "exclusive",
-    }
 }
 
 /// Coding-profile name for runtime-owned process execution.
