@@ -17,12 +17,21 @@ pub(crate) struct ResolvedWorkspacePath {
     pub(crate) path: PathBuf,
 }
 
+/// Resolves a validated tool path to the file it names, when that file exists.
+///
+/// A target inside a configured root is walked without following symlinks, so a
+/// workspace path cannot be silently redirected through a link to somewhere
+/// else. A target outside every root is the sandbox's business: its components
+/// are resolved by the operating system, and the leaf stays protected because
+/// every open in this crate uses `O_NOFOLLOW`.
 pub(crate) fn resolve_existing_path(
     root: &Path,
-    relative: &ValidatedRelativePath,
+    path: &ValidatedToolPath,
 ) -> Result<Option<ResolvedWorkspacePath>, DomainError> {
-    let mut current = root.to_path_buf();
-    for component in &relative.components {
+    let (anchor, components) = path.anchor(root);
+    let deny_symlinks = path.resolves_below_root(root);
+    let mut current = anchor.to_path_buf();
+    for component in components {
         current.push(component);
         let metadata = match fs::symlink_metadata(&current) {
             Ok(metadata) => metadata,
@@ -35,22 +44,12 @@ pub(crate) fn resolve_existing_path(
             }
         };
 
-        if metadata.file_type().is_symlink() {
+        if deny_symlinks && metadata.file_type().is_symlink() {
             return Err(DomainError::new(
                 ERROR_PATH_DENIED,
                 "workspace path uses a symlink",
             ));
         }
-    }
-
-    let canonical = fs::canonicalize(&current).map_err(|_| {
-        DomainError::new(ERROR_READ_FAILED, "could not canonicalize workspace path")
-    })?;
-    if !canonical.starts_with(root) {
-        return Err(DomainError::new(
-            ERROR_PATH_DENIED,
-            "workspace path resolves outside a configured root",
-        ));
     }
 
     Ok(Some(ResolvedWorkspacePath { path: current }))
@@ -65,35 +64,19 @@ pub(crate) enum NewWorkspacePath {
 
 pub(crate) fn resolve_new_file_path(
     root: &Path,
-    relative: &ValidatedRelativePath,
+    path: &ValidatedToolPath,
 ) -> Result<NewWorkspacePath, DomainError> {
-    let last_index = relative.components.len().saturating_sub(1);
-    let mut current = root.to_path_buf();
+    let (anchor, components) = path.anchor(root);
+    let deny_symlinks = path.resolves_below_root(root);
+    let last_index = components.len().saturating_sub(1);
+    let mut current = anchor.to_path_buf();
 
-    for (index, component) in relative.components.iter().enumerate() {
+    for (index, component) in components.iter().enumerate() {
         current.push(component);
         let metadata = match fs::symlink_metadata(&current) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 if index == last_index {
-                    let parent = current.parent().ok_or_else(|| {
-                        DomainError::new(
-                            ERROR_READ_FAILED,
-                            "could not inspect workspace file parent",
-                        )
-                    })?;
-                    let canonical_parent = fs::canonicalize(parent).map_err(|_| {
-                        DomainError::new(
-                            ERROR_READ_FAILED,
-                            "could not canonicalize workspace file parent",
-                        )
-                    })?;
-                    if !canonical_parent.starts_with(root) {
-                        return Err(DomainError::new(
-                            ERROR_PATH_DENIED,
-                            "workspace path resolves outside a configured root",
-                        ));
-                    }
                     return Ok(NewWorkspacePath::Missing(current));
                 }
                 return Ok(NewWorkspacePath::ParentMissing);
@@ -106,7 +89,7 @@ pub(crate) fn resolve_new_file_path(
             }
         };
 
-        if metadata.file_type().is_symlink() {
+        if deny_symlinks && metadata.file_type().is_symlink() {
             return Err(DomainError::new(
                 ERROR_PATH_DENIED,
                 "workspace path uses a symlink",
@@ -293,32 +276,93 @@ fn is_symlink_open_error(_: &io::Error) -> bool {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ValidatedRelativePath {
+pub(crate) struct ValidatedToolPath {
+    /// Absolute directory a non-rooted argument is anchored at, or `None` when
+    /// the argument is relative and each configured root supplies the anchor.
+    anchored: Option<PathBuf>,
     pub(crate) components: Vec<String>,
+    /// Normalized form reported in results and diagnostics.
     pub(crate) display: String,
 }
 
-/// Validates a workspace tool path and normalizes it to workspace-relative
-/// components.
+impl ValidatedToolPath {
+    /// Returns the anchor directory and the components below it for `root`.
+    ///
+    /// A relative argument is anchored at `root`, so a caller that tries every
+    /// configured root keeps first-match-wins behavior. An absolute argument
+    /// ignores `root`, which makes every iteration resolve the same path.
+    #[must_use]
+    pub(crate) fn anchor<'a>(&'a self, root: &'a Path) -> (&'a Path, &'a [String]) {
+        match self.anchored.as_deref() {
+            Some(anchor) => (anchor, &self.components),
+            None => (root, &self.components),
+        }
+    }
+
+    /// Returns the concrete path this argument names when anchored at `root`.
+    #[must_use]
+    pub(crate) fn resolved(&self, root: &Path) -> PathBuf {
+        let (anchor, _) = self.anchor(root);
+        self.joined_under(anchor)
+    }
+
+    /// Returns the absolute path this argument names, when it is absolute.
+    #[must_use]
+    pub(crate) fn absolute_path(&self) -> Option<PathBuf> {
+        self.anchored
+            .as_ref()
+            .map(|anchor| self.joined_under(anchor))
+    }
+
+    /// Returns whether this argument resolves inside the configured `root`.
+    ///
+    /// A rooted path is the tools' own resolution responsibility, so the symlink
+    /// rule applies to it. A path outside every root is resolved for the caller
+    /// as the sandbox allows, including through a symlinked component such as a
+    /// `/tmp` link that a platform layout introduces.
+    #[must_use]
+    pub(crate) fn resolves_below_root(&self, root: &Path) -> bool {
+        self.absolute_path().is_none_or(|absolute| {
+            absolute
+                .strip_prefix(root)
+                .is_ok_and(|rest| !rest.as_os_str().is_empty())
+        })
+    }
+
+    /// Joins the components below `anchor` into one path.
+    fn joined_under(&self, anchor: &Path) -> PathBuf {
+        self.components
+            .iter()
+            .fold(anchor.to_path_buf(), |mut path, component| {
+                path.push(component);
+                path
+            })
+    }
+}
+
+/// Validates a tool path and normalizes its components.
 ///
-/// A caller may name the target either relative to a workspace root or with an
-/// absolute path inside one of `roots`. Both address the same file, and a
-/// caller that copied an absolute path out of process output or a tool result
-/// should not have to translate it first. `.` segments are redundant spelling
-/// and are dropped, `..` is resolved against the segments before it, and a path
-/// that escapes every root is denied, so accepting another spelling never
-/// widens what may be read or written. The resulting components go through the
-/// same hidden-path, write-scope, forbidden-path, symlink, and
-/// canonical-containment checks as any other path.
+/// Every spelling a caller may reasonably produce is accepted: a path relative
+/// to a workspace root, an absolute path inside one, an absolute path outside
+/// every root, a path that climbs above its root with `..`, and a path whose
+/// components start with a dot such as `.github/workflows`. Shape is not policy
+/// here. The tools are not the sandbox: the sandbox, accepted process profile,
+/// and trusted path rules decide which paths exist and which of them are
+/// writable, and re-deciding that inside the tool would only hide their answer.
 ///
-/// Failures report the workspace-relative form of the argument. A host absolute
-/// path is never echoed, because failure text is provider-visible and a root
-/// path is host detail the model does not need back.
+/// Normalization stays lexical so a result is reproducible without touching the
+/// filesystem: `.` is dropped, `..` pops the component before it, and an
+/// absolute argument clamps at its filesystem anchor. A relative argument that
+/// climbs past its root keeps the leading `..`, which is what makes the escape
+/// visible in the reported path instead of being silently rewritten.
+///
+/// Child workspace scope is unaffected, because that is a deliberate narrowing
+/// of one child agent rather than sandbox policy: its patterns are root-relative,
+/// so a target outside every root has no scope spelling to authorize it.
 pub(crate) fn validate_workspace_path_argument<I, P>(
     raw_path: &str,
-    allow_hidden: bool,
     roots: I,
-) -> Result<ValidatedRelativePath, PathValidationError>
+) -> Result<ValidatedToolPath, PathValidationError>
 where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
@@ -339,11 +383,31 @@ where
         ));
     }
 
-    let relative_text = match absolute_path_within_root(raw_path, roots)? {
-        Some(relative_text) => Cow::Owned(relative_text),
-        None => Cow::Borrowed(raw_path),
+    let requested = Path::new(raw_path);
+    let (anchored, relative_text, clamp) = if requested.is_absolute() {
+        match relative_to_configured_root(requested, roots)? {
+            Some(stripped) => (None, Cow::Borrowed(stripped), false),
+            None => {
+                let (anchor, remainder) = split_filesystem_root(requested)?;
+                (Some(anchor), Cow::Owned(remainder), true)
+            }
+        }
+    } else {
+        (None, Cow::Borrowed(raw_path), false)
     };
-    let mut components = Vec::new();
+    // Failure text reports the argument in the same form the success path
+    // reports: workspace-relative for a rooted argument, and the normalized
+    // absolute path for an absolute argument, which the caller already named.
+    let reported = |text: &str| -> String {
+        match anchored.as_ref() {
+            Some(anchor) => anchor
+                .join(text)
+                .to_str()
+                .map_or_else(|| text.to_owned(), str::to_owned),
+            None => text.to_owned(),
+        }
+    };
+    let mut components: Vec<String> = Vec::new();
     for component in Path::new(relative_text.as_ref()).components() {
         match component {
             Component::Normal(value) => {
@@ -354,49 +418,43 @@ where
                         None,
                     ));
                 };
-                if !allow_hidden && value.starts_with('.') {
-                    return Err(PathValidationError::new(
-                        ERROR_PATH_DENIED,
-                        "workspace hidden paths are not allowed",
-                        Some(relative_text.as_ref().to_owned()),
-                    ));
-                }
                 components.push(value.to_owned());
             }
             // A `.` segment is redundant spelling for the same path, so it is
-            // dropped. `..` is resolved here, before any filesystem access, and
-            // cannot reach above the workspace root because popping an empty
-            // component list is denied.
+            // dropped. `..` is resolved here, before any filesystem access. An
+            // absolute argument clamps at its anchor, so `/..` names `/`. A
+            // relative argument keeps a `..` that has nothing left to pop, so
+            // the reported path still shows that it left the root.
             Component::CurDir => {}
-            Component::ParentDir => {
-                if components.pop().is_none() {
-                    return Err(PathValidationError::new(
-                        ERROR_PATH_DENIED,
-                        "workspace path escapes the workspace root through '..' components",
-                        Some(relative_text.as_ref().to_owned()),
-                    ));
+            Component::ParentDir => match components.last() {
+                Some(last) if last == ".." => components.push("..".to_owned()),
+                Some(_) => {
+                    components.pop();
                 }
-            }
+                // `clamp` marks an absolute argument anchored at the filesystem
+                // root, where `..` above the anchor still names the anchor.
+                None if clamp => {}
+                None => components.push("..".to_owned()),
+            },
             Component::RootDir | Component::Prefix(_) => {
                 return Err(PathValidationError::new(
                     ERROR_PATH_DENIED,
-                    "workspace path must be relative to a workspace root",
+                    "workspace path must be relative to a workspace root or absolute",
                     None,
                 ));
             }
         }
     }
 
-    if components.is_empty() {
-        return Err(PathValidationError::new(
-            ERROR_PATH_DENIED,
-            "workspace path must name a file inside the workspace root",
-            Some(relative_text.as_ref().to_owned()),
-        ));
-    }
-
-    let display = components.join("/");
-    Ok(ValidatedRelativePath {
+    // The reported form keeps the anchor of an absolute argument, so a caller
+    // that named `/a/b` sees `/a/b` again instead of a bare `a/b`.
+    let display = if components.is_empty() && anchored.is_none() {
+        ".".to_owned()
+    } else {
+        reported(&components.join("/"))
+    };
+    Ok(ValidatedToolPath {
+        anchored,
         components,
         display,
     })
@@ -404,23 +462,17 @@ where
 
 /// Converts an absolute argument inside a workspace root into a relative path.
 ///
-/// Returns `None` when the argument is already relative, and denies an absolute
-/// path that no root contains. Roots are canonical and the comparison is
-/// lexical over path components, so a path that only shares a prefix string
-/// with a root does not match it.
-fn absolute_path_within_root<I, P>(
-    raw_path: &str,
+/// Returns `None` when no root contains the argument. Roots are canonical and
+/// the comparison is lexical over path components, so a path that only shares a
+/// prefix string with a root does not match it.
+fn relative_to_configured_root<I, P>(
+    requested: &Path,
     roots: I,
-) -> Result<Option<String>, PathValidationError>
+) -> Result<Option<&str>, PathValidationError>
 where
     I: IntoIterator<Item = P>,
     P: AsRef<Path>,
 {
-    let requested = Path::new(raw_path);
-    if !requested.is_absolute() {
-        return Ok(None);
-    }
-
     for root in roots {
         let Ok(stripped) = requested.strip_prefix(root.as_ref()) else {
             continue;
@@ -439,12 +491,49 @@ where
                 None,
             ));
         }
-        return Ok(Some(stripped.to_owned()));
+        return Ok(Some(stripped));
     }
 
-    Err(PathValidationError::new(
-        ERROR_PATH_DENIED,
-        "workspace path is an absolute path outside every configured workspace root; use a workspace-relative path or an absolute path inside the workspace",
-        None,
-    ))
+    Ok(None)
+}
+
+/// Splits an absolute path into its filesystem anchor and the text below it.
+///
+/// The anchor is the root or volume prefix, which is what an absolute argument
+/// outside every configured root is relative to. `..` is resolved here: a `..`
+/// at the anchor names the anchor itself, so popping an empty remainder keeps
+/// the anchor instead of failing.
+fn split_filesystem_root(requested: &Path) -> Result<(PathBuf, String), PathValidationError> {
+    let mut anchor = PathBuf::new();
+    let mut remainder = Vec::new();
+
+    for component in requested.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => anchor.push(component.as_os_str()),
+            Component::Normal(value) => {
+                let Some(value) = value.to_str() else {
+                    return Err(PathValidationError::new(
+                        ERROR_PATH_DENIED,
+                        "workspace path component must be UTF-8",
+                        None,
+                    ));
+                };
+                remainder.push(value.to_owned());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                remainder.pop();
+            }
+        }
+    }
+
+    if remainder.is_empty() {
+        return Err(PathValidationError::new(
+            ERROR_PATH_DENIED,
+            "workspace path must name a file, not a filesystem root",
+            None,
+        ));
+    }
+
+    Ok((anchor, remainder.join("/")))
 }

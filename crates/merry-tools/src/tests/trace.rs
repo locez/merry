@@ -42,7 +42,7 @@ async fn read_text_failure_trace_includes_diagnostic_code() {
     let call = pending_call_with_id(
         READ_TEXT_TOOL,
         "call-trace-read-failure",
-        json!({ "path": "../secret.txt" }),
+        json!({ "path": "missing.txt" }),
     );
 
     let (outcome, logs) = capture_traces_for(
@@ -50,16 +50,16 @@ async fn read_text_failure_trace_includes_diagnostic_code() {
         executor.execute(call, ToolExecutionContext::default()),
     )
     .await;
-    let outcome = outcome.expect("path denial should resolve as a domain result");
+    let outcome = outcome.expect("read failure should resolve as a domain result");
 
     assert_eq!(outcome.status(), ToolCallResultStatus::Failed);
     assert_eq!(
         outcome.diagnostic().expect("diagnostic").code(),
-        ERROR_PATH_DENIED
+        ERROR_FILE_NOT_FOUND
     );
     assert!(logs.contains("\"event\":\"runtime.workspace_tool.finish\""));
     assert!(logs.contains("\"status\":\"failed\""));
-    assert!(logs.contains("\"diagnostic_code\":\"workspace_path_denied\""));
+    assert!(logs.contains("\"diagnostic_code\":\"workspace_file_not_found\""));
 }
 
 #[tokio::test(flavor = "current_thread")]

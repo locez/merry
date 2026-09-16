@@ -135,23 +135,25 @@ fn patch_tool_registration_is_opt_in_and_workspace_write() {
 }
 
 #[test]
-fn hidden_paths_can_be_enabled_explicitly() {
+fn hidden_path_components_are_ordinary_spelling() {
     let temp = TempWorkspace::new("allow-hidden");
     temp.write_text(".secret", "ok\n");
-    let tools = WorkspaceTools::new(
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_allow_hidden(true),
-    )
-    .expect("workspace tools should construct");
+    let tools = tools_for(temp.path());
 
     let outcome = read_outcome(&tools, ".secret");
-    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(
+        outcome.status(),
+        ToolCallResultStatus::Succeeded,
+        "a leading dot is ordinary spelling, not a path policy the tool enforces"
+    );
+    assert_eq!(json_content(&outcome)["content"], "ok\n");
 }
 
 #[test]
 fn non_utf8_component_is_rejected_when_constructible() {
     let path = PathBuf::from(OsStr::new("plain"));
     let text = path.to_str().expect("plain path is utf8");
-    let validated = validate_workspace_path_argument(text, false, std::iter::empty::<PathBuf>())
+    let validated = validate_workspace_path_argument(text, std::iter::empty::<PathBuf>())
         .expect("plain path validates");
     assert_eq!(validated.display, "plain");
 }

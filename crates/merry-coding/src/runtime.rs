@@ -182,7 +182,6 @@ pub struct CodingRuntimeInput {
     model: ModelName,
     process_backend: Option<Arc<dyn ProcessBackend>>,
     extra_tools: Vec<RegisteredTool>,
-    allow_hidden_workspace_paths: bool,
     automatic_compaction: AutomaticCompactionConfig,
     retry_policy: Option<ModelRetryPolicy>,
     model_roles: Vec<CodingModelRoleConfig>,
@@ -208,7 +207,6 @@ impl CodingRuntimeInput {
             model,
             process_backend: Some(process_backend),
             extra_tools: Vec::new(),
-            allow_hidden_workspace_paths: false,
             automatic_compaction: AutomaticCompactionConfig::default(),
             retry_policy: None,
             model_roles: Vec::new(),
@@ -233,7 +231,6 @@ impl CodingRuntimeInput {
             model,
             process_backend: None,
             extra_tools: Vec::new(),
-            allow_hidden_workspace_paths: false,
             automatic_compaction: AutomaticCompactionConfig::default(),
             retry_policy: None,
             model_roles: Vec::new(),
@@ -250,13 +247,6 @@ impl CodingRuntimeInput {
         I: IntoIterator<Item = RegisteredTool>,
     {
         self.extra_tools.extend(tools);
-        self
-    }
-
-    /// Controls whether hidden workspace path components are readable.
-    #[must_use]
-    pub fn with_allow_hidden_workspace_paths(mut self, allow: bool) -> Self {
-        self.allow_hidden_workspace_paths = allow;
         self
     }
 
@@ -424,7 +414,6 @@ impl CodingRuntimeBuilder {
             model,
             process_backend,
             extra_tools,
-            allow_hidden_workspace_paths,
             automatic_compaction,
             retry_policy,
             model_roles,
@@ -469,7 +458,6 @@ impl CodingRuntimeBuilder {
 
         let mut profile_builder: CodingAgentProfileBuilder = coding_agent(&root)
             .readonly_resource_roots(skill_roots.clone())
-            .allow_hidden(allow_hidden_workspace_paths)
             .limits(workspace_tool_limits)
             .register_tools(extra_tools);
         if let Some(project_rules) = project_rules {

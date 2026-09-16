@@ -31,7 +31,6 @@ impl Default for WorkspaceToolLimits {
 pub struct WorkspaceToolsConfig {
     pub(crate) roots: Vec<PathBuf>,
     pub(crate) readonly_resource_roots: Vec<PathBuf>,
-    pub(crate) allow_hidden: bool,
     pub(crate) limits: WorkspaceToolLimits,
     pub(crate) patch_write_scope: Option<Vec<PathBuf>>,
     pub(crate) forbidden_paths: Vec<PathBuf>,
@@ -44,7 +43,6 @@ impl WorkspaceToolsConfig {
         Self {
             roots,
             readonly_resource_roots: Vec::new(),
-            allow_hidden: false,
             limits: WorkspaceToolLimits::default(),
             patch_write_scope: None,
             forbidden_paths: Vec::new(),
@@ -68,19 +66,6 @@ impl WorkspaceToolsConfig {
     #[must_use]
     pub fn with_readonly_resource_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.readonly_resource_roots = roots;
-        self
-    }
-
-    /// Returns whether hidden path components are allowed.
-    #[must_use]
-    pub fn allow_hidden(&self) -> bool {
-        self.allow_hidden
-    }
-
-    /// Sets whether hidden path components are allowed.
-    #[must_use]
-    pub fn with_allow_hidden(mut self, allow_hidden: bool) -> Self {
-        self.allow_hidden = allow_hidden;
         self
     }
 

@@ -104,7 +104,6 @@ pub(crate) async fn run(args: &Args, merry_config: Option<&MerryConfig>) -> Resu
         environment: environment.clone(),
         provider,
         model,
-        allow_hidden_workspace_paths: false,
         automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
         retry_policy,
         context_compaction,
@@ -190,7 +189,6 @@ pub(crate) struct RuntimeInput<'a> {
     pub(crate) environment: CommandGenerationEnvironment,
     pub(crate) provider: Arc<dyn ModelProvider>,
     pub(crate) model: ModelName,
-    pub(crate) allow_hidden_workspace_paths: bool,
     pub(crate) automatic_compaction: AutomaticCompactionConfig,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
@@ -269,7 +267,6 @@ pub(crate) fn build_runtime(input: RuntimeInput<'_>) -> Result<Runtime, CliError
     let mut coding_input =
         CodingRuntimeInput::read_only(session_id, input.root, input.provider, input.model)
             .with_automatic_compaction(input.automatic_compaction)
-            .with_allow_hidden_workspace_paths(input.allow_hidden_workspace_paths)
             .with_skill_roots(input.skill_roots)
             .with_extra_tools([cmd_check_command_tool(input.environment)?]);
     if let Some(role_provider) = input.context_compaction {

@@ -34,7 +34,6 @@ async fn projects_skill_metadata_without_body() {
         Arc::new(provider.clone()),
         model_name(),
         CodingRuntimeOptions {
-            allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
@@ -110,7 +109,6 @@ async fn includes_skill_roots_in_workspace_read_tools() {
         Arc::new(provider.clone()),
         model_name(),
         CodingRuntimeOptions {
-            allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
@@ -156,7 +154,6 @@ async fn allows_missing_default_skill_root() {
         Arc::new(provider.clone()),
         model_name(),
         CodingRuntimeOptions {
-            allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,

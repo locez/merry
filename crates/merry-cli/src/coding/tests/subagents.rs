@@ -30,7 +30,6 @@ async fn hides_subagent_tools_by_default() {
         Arc::new(provider.clone()),
         model_name(),
         CodingRuntimeOptions {
-            allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
@@ -78,7 +77,6 @@ async fn exposes_subagent_tools_when_enabled() {
         Arc::new(provider.clone()),
         model_name(),
         CodingRuntimeOptions {
-            allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
@@ -177,7 +175,6 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
         Arc::new(provider.clone()),
         model_name(),
         CodingRuntimeOptions {
-            allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,

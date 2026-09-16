@@ -98,7 +98,6 @@ async fn runtime_process_stays_running_and_animates_until_the_backend_completes(
                 permissioned_factory,
             )),
             extra_tools: Vec::new(),
-            allow_hidden_workspace_paths: false,
             automatic_compaction: AutomaticCompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,

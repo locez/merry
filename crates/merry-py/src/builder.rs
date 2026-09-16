@@ -86,7 +86,6 @@ impl PyAgentBuilder {
         &mut self,
         roots: Vec<String>,
         readonly_resource_roots: Vec<String>,
-        allow_hidden: bool,
         enable_patch: bool,
         patch_write_scope: Option<Vec<String>>,
         forbidden_paths: Vec<String>,
@@ -104,7 +103,6 @@ impl PyAgentBuilder {
             roots.into_iter().map(PathBuf::from),
         )
         .readonly_resource_roots(readonly_resource_roots.into_iter().map(PathBuf::from))
-        .allow_hidden(allow_hidden)
         .limits(WorkspaceToolLimits {
             max_read_bytes,
             max_read_lines,

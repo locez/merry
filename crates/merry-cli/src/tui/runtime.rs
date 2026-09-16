@@ -139,7 +139,6 @@ pub(crate) async fn start_tui_runtime_session(
         model,
         process_backend: backend,
         extra_tools: mcp.tools,
-        allow_hidden_workspace_paths: false,
         automatic_compaction: automatic_compaction_config_with_preferences(
             merry_config,
             preferences,

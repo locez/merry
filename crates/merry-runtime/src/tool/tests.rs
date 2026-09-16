@@ -158,6 +158,8 @@ fn apply_patch_proposal_validates_relative_path_and_sizes() {
     assert_eq!(new_file.file_bytes_before(), 0);
     assert_eq!(new_file.file_bytes_after(), 5);
 
+    // A change outside every configured root is named by its absolute path, so
+    // the evidence keeps that spelling instead of requiring a root-relative one.
     let absolute = WorkspacePatchProposal::new(
         "/tmp/note.txt",
         3,
@@ -167,9 +169,21 @@ fn apply_patch_proposal_validates_relative_path_and_sizes() {
         "fnv1a64:0123456789abcdef",
         "fnv1a64:fedcba9876543210",
     )
-    .expect_err("absolute paths are rejected");
+    .expect("absolute paths name a change outside the workspace roots");
+    assert_eq!(absolute.relative_path(), "/tmp/note.txt");
+
+    let empty_segment = WorkspacePatchProposal::new(
+        "/tmp//note.txt",
+        3,
+        5,
+        11,
+        13,
+        "fnv1a64:0123456789abcdef",
+        "fnv1a64:fedcba9876543210",
+    )
+    .expect_err("empty segments are rejected");
     assert!(matches!(
-        absolute,
+        empty_segment,
         ActionProposalError::InvalidWorkspacePatch {
             field: "relative_path",
             ..

@@ -104,7 +104,6 @@ def test_workspace_and_patch_configuration_are_explicit(tmp_path: Path) -> None:
     workspace = merry.WorkspaceConfig(
         root=tmp_path,
         readonly_resource_roots=["reference"],
-        allow_hidden=True,
         patch=patch,
         limits=merry.WorkspaceLimits(max_read_bytes=2048),
     )

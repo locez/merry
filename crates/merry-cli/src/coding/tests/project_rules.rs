@@ -35,7 +35,6 @@ async fn coding_projects_root_agents_in_the_stable_prefix() {
         Arc::new(provider.clone()),
         model_name(),
         CodingRuntimeOptions {
-            allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,
@@ -89,7 +88,6 @@ async fn coding_omits_project_rules_when_root_agents_is_missing() {
         Arc::new(provider.clone()),
         model_name(),
         CodingRuntimeOptions {
-            allow_hidden_workspace_paths: false,
             approval_review: None,
             automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
             retry_policy: None,

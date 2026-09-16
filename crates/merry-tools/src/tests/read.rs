@@ -122,7 +122,7 @@ fn read_text_rejects_ranges_outside_configured_limits() {
 }
 
 #[test]
-fn read_text_reports_missing_non_utf8_and_hidden_path_failures() {
+fn read_text_reports_missing_and_non_utf8_failures() {
     let temp = TempWorkspace::new("read-failures");
     temp.write_bytes("binary.bin", &[0xff, 0xfe, 0xfd]);
     temp.write_text("visible.txt", "ok\n");
@@ -140,9 +140,11 @@ fn read_text_reports_missing_non_utf8_and_hidden_path_failures() {
         Some("binary.bin"),
         temp.path(),
     );
+    // A dot-prefixed name is ordinary spelling: `.secret` is a file a caller may
+    // read, so its absence is the only failure here.
     assert_failed_json(
         &read_outcome(&tools, ".secret"),
-        ERROR_PATH_DENIED,
+        ERROR_FILE_NOT_FOUND,
         Some(".secret"),
         temp.path(),
     );

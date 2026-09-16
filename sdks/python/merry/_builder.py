@@ -85,7 +85,6 @@ class AgentBuilder:
             self._native.with_workspace(
                 [str(path) for path in config.roots],
                 [str(path) for path in config.readonly_resource_roots],
-                config.allow_hidden,
                 config.patch is not None,
                 patch_scope,
                 forbidden,

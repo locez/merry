@@ -31,7 +31,6 @@ fn headless_input<'a>(
             permissioned_process_runner_factory,
         )),
         extra_tools: Vec::new(),
-        allow_hidden_workspace_paths: false,
         automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
         retry_policy: None,
         context_compaction: None,

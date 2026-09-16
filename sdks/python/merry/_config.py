@@ -129,7 +129,6 @@ class WorkspaceConfig:
 
     roots: tuple[Path, ...]
     readonly_resource_roots: tuple[Path, ...]
-    allow_hidden: bool
     patch: PatchConfig | None
     forbidden_paths: tuple[Path, ...]
     limits: WorkspaceLimits
@@ -140,7 +139,6 @@ class WorkspaceConfig:
         *,
         roots: Sequence[PathInput] | None = None,
         readonly_resource_roots: Sequence[PathInput] = (),
-        allow_hidden: bool = False,
         patch: PatchConfig | None = None,
         forbidden_paths: Sequence[PathInput] = (),
         limits: WorkspaceLimits | None = None,
@@ -155,8 +153,6 @@ class WorkspaceConfig:
             normalized_roots = _paths(roots, "roots")
         if not normalized_roots:
             raise ValueError("WorkspaceConfig.roots must contain at least one path")
-        if type(allow_hidden) is not bool:
-            raise TypeError("allow_hidden must be a boolean")
         if patch is not None and not isinstance(patch, PatchConfig):
             raise TypeError("patch must be a PatchConfig or None")
         if limits is not None and not isinstance(limits, WorkspaceLimits):
@@ -167,7 +163,6 @@ class WorkspaceConfig:
             "readonly_resource_roots",
             _paths(readonly_resource_roots, "readonly_resource_roots"),
         )
-        object.__setattr__(self, "allow_hidden", allow_hidden)
         object.__setattr__(self, "patch", patch)
         object.__setattr__(
             self,

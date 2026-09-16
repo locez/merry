@@ -7,13 +7,13 @@ use serde::Deserialize;
 #[merry_tools_macros::tool(
     crate = "crate",
     name = "read_text",
-    description = "Read a bounded one-based line range from a UTF-8 text file under a configured stable root. Omit start_line to begin at line 1 and omit max_lines to use the configured limit. Use multiple focused reads for larger files; do not request or assume complete-file content."
+    description = "Read a bounded one-based line range from a UTF-8 text file. Omit start_line to begin at line 1 and omit max_lines to use the configured limit. Use multiple focused reads for larger files; do not request or assume complete-file content."
 )]
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadTextInput {
     #[schemars(
-        description = "UTF-8 text file path to read, relative to a workspace root or absolute inside the workspace. A path outside the workspace is denied.",
+        description = "UTF-8 text file path to read, relative to a workspace root or absolute. An absolute path may name a file outside the workspace, where the sandbox decides what is reachable. Any spelling is accepted, including dot-prefixed components such as `.github/workflows`.",
         length(min = 1)
     )]
     pub(crate) path: String,

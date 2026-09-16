@@ -19,7 +19,6 @@ class AgentBuilder:
         self,
         roots: list[str],
         readonly_resource_roots: list[str],
-        allow_hidden: bool,
         enable_patch: bool,
         patch_write_scope: list[str] | None,
         forbidden_paths: list[str],

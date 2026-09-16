@@ -4,8 +4,8 @@ use std::path::{Component, Path};
 
 /// Per-file metadata for a constrained workspace patch change.
 ///
-/// This stores only relative workspace identity, byte counts, and stable
-/// non-cryptographic content fingerprints. It does not store old or new text.
+/// This stores only file identity, byte counts, and stable non-cryptographic
+/// content fingerprints. It does not store old or new text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspacePatchChangeEvidence {
@@ -29,7 +29,7 @@ impl WorkspacePatchChangeEvidence {
         file_fingerprint_before: impl Into<String>,
         file_fingerprint_after: impl Into<String>,
     ) -> Result<Self, ActionProposalError> {
-        let relative_path = validate_apply_patch_relative_path(relative_path.into())?;
+        let relative_path = validate_apply_patch_path(relative_path.into())?;
         validate_apply_patch_counts(
             preimage_bytes,
             replacement_bytes,
@@ -56,7 +56,10 @@ impl WorkspacePatchChangeEvidence {
         })
     }
 
-    /// Returns the workspace-relative path using `/` separators.
+    /// Returns the changed path using `/` separators.
+    ///
+    /// The value stays workspace-relative while the change is below a configured
+    /// root, and is the absolute path the caller named when it is not.
     #[must_use]
     pub fn relative_path(&self) -> &str {
         &self.relative_path
@@ -151,7 +154,7 @@ impl WorkspacePatchExecutionEvidence {
             .expect("workspace patch execution evidence always has at least one change")
     }
 
-    /// Returns the first workspace-relative path using `/` separators.
+    /// Returns the first changed path using `/` separators.
     #[must_use]
     pub fn relative_path(&self) -> &str {
         self.first_change().relative_path()
@@ -247,7 +250,7 @@ impl WorkspacePatchProposal {
             .expect("workspace patch proposal always has at least one change")
     }
 
-    /// Returns the first workspace-relative path using `/` separators.
+    /// Returns the first changed path using `/` separators.
     #[must_use]
     pub fn relative_path(&self) -> &str {
         self.first_change().relative_path()
@@ -372,9 +375,15 @@ pub(super) fn validate_apply_patch_fingerprint(
 
 pub(super) const MAX_WORKSPACE_PATCH_RELATIVE_PATH_BYTES: usize = 4096;
 
-pub(super) fn validate_apply_patch_relative_path(
-    value: String,
-) -> Result<String, ActionProposalError> {
+/// Validates the path a patch change reports.
+///
+/// The value is the workspace-relative path of the change, or its absolute path
+/// when the change is outside every configured workspace root. Both forms are
+/// accepted because a patch tool may name a file the sandbox exposes rather than
+/// one below a root. What is rejected is ambiguity: blank text, control
+/// characters, empty segments, and dot segments that would make two different
+/// spellings of one target compare unequal.
+pub(super) fn validate_apply_patch_path(value: String) -> Result<String, ActionProposalError> {
     if value.trim().is_empty() {
         return Err(ActionProposalError::InvalidWorkspacePatch {
             field: "relative_path",
@@ -393,18 +402,20 @@ pub(super) fn validate_apply_patch_relative_path(
             reason: "must not contain control characters",
         });
     }
-    if value.split('/').any(str::is_empty) {
+
+    let path = Path::new(&value);
+    // A leading `/` is the root of an absolute path, not an empty segment.
+    let segments = value.strip_prefix('/').unwrap_or(&value);
+    if segments.split('/').any(str::is_empty) {
         return Err(ActionProposalError::InvalidWorkspacePatch {
             field: "relative_path",
             reason: "must not contain empty path segments",
         });
     }
-
-    let path = Path::new(&value);
-    if path.is_absolute() {
+    if !path.is_absolute() && value.starts_with('\\') {
         return Err(ActionProposalError::InvalidWorkspacePatch {
             field: "relative_path",
-            reason: "must be relative",
+            reason: "must use `/` separators",
         });
     }
 
@@ -426,12 +437,9 @@ pub(super) fn validate_apply_patch_relative_path(
                     reason: "must not contain dot segments",
                 });
             }
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(ActionProposalError::InvalidWorkspacePatch {
-                    field: "relative_path",
-                    reason: "must be relative",
-                });
-            }
+            // An absolute anchor is how a change outside every configured root
+            // is named, so it is part of a valid path rather than a violation.
+            Component::RootDir | Component::Prefix(_) => {}
         }
     }
 

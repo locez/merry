@@ -18,7 +18,6 @@ use std::{
 
 #[cfg(test)]
 pub(crate) struct CodingRuntimeOptions {
-    pub(crate) allow_hidden_workspace_paths: bool,
     pub(crate) approval_review: Option<RuntimeRoleProviderConfig>,
     pub(crate) automatic_compaction: AutomaticCompactionConfig,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
@@ -37,7 +36,6 @@ pub(crate) struct HeadlessCodingRuntimeInput<'a> {
     pub(crate) model: ModelName,
     pub(crate) process_backend: ActionProcessBackend,
     pub(crate) extra_tools: Vec<RegisteredTool>,
-    pub(crate) allow_hidden_workspace_paths: bool,
     pub(crate) automatic_compaction: AutomaticCompactionConfig,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
@@ -128,7 +126,6 @@ pub(crate) fn build_coding_runtime(
         model,
         process_backend: options.process_backend,
         extra_tools: options.extra_tools,
-        allow_hidden_workspace_paths: options.allow_hidden_workspace_paths,
         automatic_compaction: options.automatic_compaction,
         retry_policy: options.retry_policy,
         context_compaction: options.context_compaction,
@@ -152,7 +149,6 @@ fn build_coding_runtime_from_headless_input(
         input.process_backend,
     )
     .with_extra_tools(input.extra_tools)
-    .with_allow_hidden_workspace_paths(input.allow_hidden_workspace_paths)
     .with_automatic_compaction(input.automatic_compaction)
     .with_skill_roots(input.skill_roots)
     .with_subagents(input.subagents);

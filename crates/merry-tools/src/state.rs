@@ -1,16 +1,16 @@
 use std::{
     collections::BTreeSet,
     fs,
-    path::{Component, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use crate::config::{WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceToolsConfig};
+use crate::path::ValidatedToolPath;
 
 #[derive(Debug)]
 pub(crate) struct WorkspaceToolState {
     pub(crate) roots: Vec<PathBuf>,
     pub(crate) readonly_resource_roots: Vec<PathBuf>,
-    pub(crate) allow_hidden: bool,
     pub(crate) limits: WorkspaceToolLimits,
     pub(crate) patch_write_scope: Option<Vec<String>>,
     pub(crate) forbidden_paths: Vec<String>,
@@ -72,7 +72,6 @@ impl WorkspaceToolState {
         Ok(Self {
             roots,
             readonly_resource_roots,
-            allow_hidden: config.allow_hidden,
             limits: config.limits,
             patch_write_scope,
             forbidden_paths,
@@ -82,6 +81,39 @@ impl WorkspaceToolState {
     pub(crate) fn read_roots(&self) -> impl Iterator<Item = &PathBuf> {
         self.roots.iter().chain(self.readonly_resource_roots.iter())
     }
+
+    /// Returns the root-relative scope spelling of a validated tool path.
+    ///
+    /// Child workspace scope patterns are root-relative, so only a target below
+    /// a configured root has a scope spelling. An absolute path outside every
+    /// root returns `None`, which no relative pattern can authorize, so a child
+    /// agent cannot leave its own scope by naming an absolute path.
+    #[must_use]
+    pub(crate) fn scope_path(&self, path: &ValidatedToolPath) -> Option<String> {
+        let Some(absolute) = path.absolute_path() else {
+            return Some(path.display.clone());
+        };
+        self.roots.iter().find_map(|root| {
+            absolute
+                .strip_prefix(root)
+                .ok()
+                .filter(|rest| !rest.as_os_str().is_empty())
+                .and_then(scope_display)
+        })
+    }
+}
+
+/// Returns the slash-joined scope spelling of a path below a workspace root.
+fn scope_display(relative: &Path) -> Option<String> {
+    let mut components = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(value) => components.push(value.to_str()?.to_owned()),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
 }
 
 fn normalize_scope_paths(paths: Vec<PathBuf>) -> Result<Vec<String>, WorkspaceToolConfigError> {

@@ -20,7 +20,7 @@ use crate::{
         WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE, failed_outcome,
     },
     path::{
-        NewWorkspacePath, ValidatedRelativePath, open_file_for_read, resolve_existing_path,
+        NewWorkspacePath, ValidatedToolPath, open_file_for_read, resolve_existing_path,
         resolve_new_file_path, validate_workspace_path_argument,
     },
     state::{WorkspaceToolState, matches_any_scope_path},
@@ -251,7 +251,7 @@ impl WorkspacePatchFileMode {
 
 #[derive(Debug)]
 pub(super) struct WorkspacePatchFilePlan {
-    pub(super) relative: ValidatedRelativePath,
+    pub(super) relative: ValidatedToolPath,
     pub(super) path: PathBuf,
     pub(super) content_before: String,
     pub(super) replacement: String,
@@ -348,12 +348,8 @@ fn plan_apply_patch_file(
 ) -> Result<WorkspacePatchFilePlan, WorkspacePatchFilePlanError> {
     match file_patch.operation {
         WorkspacePatchOperation::Add { lines } => {
-            let relative = validate_workspace_path_argument(
-                &file_patch.path,
-                state.allow_hidden,
-                &state.roots,
-            )
-            .map_err(WorkspacePatchFilePlanError::Path)?;
+            let relative = validate_workspace_path_argument(&file_patch.path, &state.roots)
+                .map_err(WorkspacePatchFilePlanError::Path)?;
             // Failures report the normalized workspace-relative path so a
             // section that named the file with an absolute path never sends a
             // host path back through a tool result.
@@ -404,15 +400,7 @@ fn plan_apply_patch_file(
                         });
                     }
                     Ok(NewWorkspacePath::ParentMissing) => {
-                        first_parent_missing.get_or_insert_with(|| {
-                            relative.components.iter().fold(
-                                root.to_path_buf(),
-                                |mut path, component| {
-                                    path.push(component);
-                                    path
-                                },
-                            )
-                        });
+                        first_parent_missing.get_or_insert_with(|| relative.resolved(root));
                     }
                     Err(error) => {
                         return Err(WorkspacePatchFilePlanError::Domain {
@@ -477,8 +465,8 @@ fn resolve_existing_patch_path(
     state: &WorkspaceToolState,
     requested: &str,
     is_cancelled: &dyn Fn() -> bool,
-) -> Result<(ValidatedRelativePath, PathBuf), WorkspacePatchFilePlanError> {
-    let relative = validate_workspace_path_argument(requested, state.allow_hidden, &state.roots)
+) -> Result<(ValidatedToolPath, PathBuf), WorkspacePatchFilePlanError> {
+    let relative = validate_workspace_path_argument(requested, &state.roots)
         .map_err(WorkspacePatchFilePlanError::Path)?;
     validate_patch_write_boundary(state, &relative).map_err(|error| {
         WorkspacePatchFilePlanError::Domain {
@@ -520,9 +508,17 @@ fn file_plan_error(error: BlockingToolError, path: String) -> WorkspacePatchFile
 
 fn validate_patch_write_boundary(
     state: &WorkspaceToolState,
-    relative: &ValidatedRelativePath,
+    path: &ValidatedToolPath,
 ) -> Result<(), DomainError> {
-    if matches_any_scope_path(&relative.display, &state.forbidden_paths) {
+    // Scope patterns are root-relative, so a target outside every configured
+    // root has no scope spelling and cannot be authorized by a relative
+    // pattern. That keeps a child agent inside the scope its parent gave it,
+    // which is a deliberate narrowing rather than sandbox policy.
+    let scope_path = state.scope_path(path);
+
+    if let Some(scope_path) = scope_path.as_deref()
+        && matches_any_scope_path(scope_path, &state.forbidden_paths)
+    {
         return Err(DomainError::new(
             ERROR_PATH_DENIED,
             "workspace patch path is forbidden by the child workspace scope",
@@ -532,13 +528,12 @@ fn validate_patch_write_boundary(
     let Some(write_scope) = &state.patch_write_scope else {
         return Ok(());
     };
-    if matches_any_scope_path(&relative.display, write_scope) {
-        Ok(())
-    } else {
-        Err(DomainError::new(
+    match scope_path.as_deref() {
+        Some(scope_path) if matches_any_scope_path(scope_path, write_scope) => Ok(()),
+        _ => Err(DomainError::new(
             ERROR_PATH_DENIED,
             "workspace patch path is outside the child write scope",
-        ))
+        )),
     }
 }
 
@@ -550,7 +545,7 @@ enum WorkspacePatchFilePlanError {
 }
 
 fn plan_resolved_apply_patch_file(
-    relative: ValidatedRelativePath,
+    relative: ValidatedToolPath,
     path: PathBuf,
     hunks: Vec<WorkspacePatchHunk>,
     ignored_context_hunks: usize,
@@ -597,7 +592,7 @@ fn plan_resolved_apply_patch_file(
 /// and write-time verification use the same contract as an update: the file is
 /// read and compared before it is unlinked.
 fn plan_resolved_apply_patch_delete(
-    relative: ValidatedRelativePath,
+    relative: ValidatedToolPath,
     path: PathBuf,
     state: &WorkspaceToolState,
     is_cancelled: &dyn Fn() -> bool,
@@ -628,7 +623,7 @@ fn plan_resolved_apply_patch_delete(
 }
 
 fn plan_new_apply_patch_file(
-    relative: ValidatedRelativePath,
+    relative: ValidatedToolPath,
     path: PathBuf,
     lines: Vec<String>,
     state: &WorkspaceToolState,

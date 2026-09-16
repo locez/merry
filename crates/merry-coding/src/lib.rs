@@ -311,13 +311,6 @@ impl CodingAgentProfileBuilder {
         self
     }
 
-    /// Controls whether hidden path components are allowed.
-    #[must_use]
-    pub fn allow_hidden(mut self, allow_hidden: bool) -> Self {
-        self.workspace = self.workspace.allow_hidden(allow_hidden);
-        self
-    }
-
     /// Sets workspace tool limits.
     #[must_use]
     pub fn limits(mut self, limits: WorkspaceToolLimits) -> Self {

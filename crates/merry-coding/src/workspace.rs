@@ -20,8 +20,8 @@ use thiserror::Error;
 const PROJECT_CAPABILITY_CONTEXT_ID: &str = "project-capabilities";
 const CODING_WORKSPACE_CAPABILITY_SUMMARY: &str = concat!(
     "Coding file capabilities:\n",
-    "- `read_text` reads a bounded one-based line range from a known UTF-8 text path. Omit the range only to use the small configured default; use multiple focused reads instead of requesting a whole file. Paths are relative to configured roots or absolute inside them, and skill/resource roots are read-only and separate from write scope.\n",
-    "- `apply_patch` is the only file-edit tool: one `*** Begin Patch` envelope with `*** Add File:`, `*** Update File:`, or `*** Delete File:` sections, at most one Add or Delete section per file (repeated `*** Update File:` sections for one file merge into a single change), and localized hunks instead of whole-file content. Every hunk must match the current file bytes exactly and uniquely; when one does not, the failure names the closest line and the first difference, so re-read that line before retrying. Runtime admission, write scope, forbidden paths, and current-file preimages are enforced before writes.\n",
+    "- `read_text` reads a bounded one-based line range from a known UTF-8 text path. Omit the range only to use the small configured default; use multiple focused reads instead of requesting a whole file. A path is relative to a configured root or absolute, including a file outside the workspace that the sandbox exposes, every spelling including dot-prefixed components is accepted, and skill/resource roots are read-only and separate from write scope.\n",
+    "- `apply_patch` is the only file-edit tool: one `*** Begin Patch` envelope with `*** Add File:`, `*** Update File:`, or `*** Delete File:` sections, at most one Add or Delete section per file (repeated `*** Update File:` sections for one file merge into a single change), and localized hunks instead of whole-file content. Every hunk must match the current file bytes exactly and uniquely; when one does not, the failure names the closest line and the first difference, so re-read that line before retrying. Runtime admission, write scope, forbidden paths, and current-file preimages are enforced before writes. A section path is relative to a workspace root or absolute, and an absolute path may name a file outside the workspace, where the sandbox decides what is reachable and writable.\n",
     "- `run_process` is the discovery and verification lane when configured. Prefer the modern search tools the environment facts below report: `rg --files` to list files, a focused literal `rg` search for content, and `fd`/`fdfind` for paths by name; fall back to `grep -r` and `find` only for a tool the facts say is missing. Scope each search to the directories that own the behavior instead of the repository root, and exclude build output such as `target/`, `node_modules/`, and `.venv/`. Read files with bounded `sed -n '<start>,<end>p'`. Avoid broad recursive output, `cat` on large files, and repeated exploratory calls.\n",
     "- Process execution runs through Merry runtime policy and the configured sandbox/profile, so filesystem and network access may be intentionally restricted; environment and host IPC access may also be intentionally restricted. Network is withheld from every action that does not request it, so a command that reaches a remote service needs `network: true` in the same call's `permissions`. Paths and host integrations enabled by trusted global configuration are already available to actions. If a command needs access that is still missing, such as network, a reviewed path, or an unconfigured endpoint, put all minimum required capabilities in that same `run_process` call under `permissions`; runtime reviews before executing the exact command through the permissioned backend.\n",
     "- If a capability is discovered only after a sandboxed failure, call `request_permissions` for that exact action before retrying it. Approved paths and host integrations remain available for later actions in this runtime session; network access must be requested again for every action that needs it.\n",
@@ -40,7 +40,6 @@ pub(crate) enum WorkspaceProcessRunnerConfig {
 pub(crate) struct WorkspaceCodingProfileBuilder {
     pub(crate) roots: Vec<PathBuf>,
     pub(crate) readonly_resource_roots: Vec<PathBuf>,
-    pub(crate) allow_hidden: bool,
     pub(crate) limits: WorkspaceToolLimits,
     pub(crate) patch_write_scope: Option<Vec<PathBuf>>,
     pub(crate) forbidden_paths: Vec<PathBuf>,
@@ -64,7 +63,6 @@ impl WorkspaceCodingProfileBuilder {
         Self {
             roots: roots.into_iter().map(Into::into).collect(),
             readonly_resource_roots: Vec::new(),
-            allow_hidden: false,
             limits: WorkspaceToolLimits::default(),
             patch_write_scope: None,
             forbidden_paths: Vec::new(),
@@ -84,11 +82,6 @@ impl WorkspaceCodingProfileBuilder {
         P: Into<PathBuf>,
     {
         self.readonly_resource_roots = roots.into_iter().map(Into::into).collect();
-        self
-    }
-
-    pub(crate) fn allow_hidden(mut self, allow_hidden: bool) -> Self {
-        self.allow_hidden = allow_hidden;
         self
     }
 
@@ -141,7 +134,6 @@ impl WorkspaceCodingProfileBuilder {
     ) -> Result<RuntimeProfileBuilder, WorkspaceCodingProfileBuildError> {
         let config = WorkspaceToolsConfig::new(self.roots)
             .with_readonly_resource_roots(self.readonly_resource_roots)
-            .with_allow_hidden(self.allow_hidden)
             .with_limits(self.limits)
             .with_patch_write_scope(self.patch_write_scope)
             .with_forbidden_paths(self.forbidden_paths);
@@ -237,11 +229,6 @@ impl WorkspaceCodingProfileBuilder {
                 &root.to_string_lossy(),
             );
         }
-        append_hash_field(
-            &mut material,
-            "allow-hidden",
-            if self.allow_hidden { "on" } else { "off" },
-        );
         append_hash_field(
             &mut material,
             "patch-tool",

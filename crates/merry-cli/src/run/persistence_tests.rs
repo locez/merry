@@ -113,7 +113,6 @@ fn headless_input<'a>(
         model: model_name(),
         process_backend: fake_process_backend(),
         extra_tools: Vec::new(),
-        allow_hidden_workspace_paths: false,
         automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
         retry_policy: None,
         context_compaction: None,

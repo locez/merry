@@ -163,7 +163,7 @@ fn apply_patch_preflight_returns_failed_outcome_for_invalid_or_stale_patch_witho
     assert_failed_json_for_tool(
         &invalid,
         APPLY_PATCH_TOOL,
-        ERROR_PATH_DENIED,
+        ERROR_FILE_NOT_FOUND,
         Some("../note.txt"),
         temp.path(),
     );
@@ -278,33 +278,28 @@ fn apply_patch_missing_or_ambiguous_after_proposal_still_does_not_write() {
 }
 
 #[test]
-fn apply_patch_rejects_bad_hidden_missing_and_directory_paths_without_mutation() {
+fn apply_patch_reports_missing_and_directory_targets_without_mutation() {
     let temp = TempWorkspace::new("patch-path-denied");
     temp.write_text("visible.txt", "old\n");
     temp.write_text(".secret", "old\n");
     fs::create_dir_all(temp.path().join("dir")).expect("directory should be created");
     let tools = tools_for(temp.path());
 
-    for denied in [
-        "/etc/passwd".to_owned(),
-        "../outside.txt".to_owned(),
-        ".secret".to_owned(),
-    ] {
-        let outcome = patch_outcome(&tools, &denied, "old", "new");
-        let expected_path = if denied.starts_with('/') {
-            None
-        } else {
-            Some(denied.as_str())
-        };
-        assert_failed_json_for_tool(
-            &outcome,
-            APPLY_PATCH_TOOL,
-            ERROR_PATH_DENIED,
-            expected_path,
-            temp.path(),
-        );
-    }
-    assert_eq!(read_text(&temp.path().join(".secret")), "old\n");
+    // A dot-prefixed name is ordinary spelling, so a patch may edit it, and a
+    // path outside the workspace is resolved as the caller named it rather than
+    // being rejected by a second path policy inside the tool.
+    let hidden = patch_outcome(&tools, ".secret", "old", "new");
+    assert_eq!(hidden.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(read_text(&temp.path().join(".secret")), "new\n");
+
+    let outside = patch_outcome(&tools, "../outside.txt", "old", "new");
+    assert_failed_json_for_tool(
+        &outside,
+        APPLY_PATCH_TOOL,
+        ERROR_FILE_NOT_FOUND,
+        Some("../outside.txt"),
+        temp.path(),
+    );
 
     // A redundant `.` segment is spelling, not a path error: the section is
     // normalized and the reported path is the workspace-relative form.

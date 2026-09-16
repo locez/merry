@@ -19,7 +19,7 @@ use crate::{
         ERROR_INVALID_ARGUMENTS, ERROR_NOT_FILE, ERROR_READ_FAILED, failed_outcome,
     },
     path::{
-        ValidatedRelativePath, open_file_for_read, resolve_existing_path,
+        ValidatedToolPath, open_file_for_read, resolve_existing_path,
         validate_workspace_path_argument,
     },
     state::WorkspaceToolState,
@@ -122,11 +122,7 @@ fn read_text_blocking_checked(
     if is_cancelled() {
         return Err(ToolExecutionError::Cancelled);
     }
-    let relative = match validate_workspace_path_argument(
-        &args.path,
-        state.allow_hidden,
-        state.read_roots(),
-    ) {
+    let relative = match validate_workspace_path_argument(&args.path, state.read_roots()) {
         Ok(relative) => relative,
         Err(error) => {
             return Ok(failed_outcome(
@@ -191,7 +187,7 @@ fn read_text_blocking_checked(
 }
 
 fn read_resolved_text(
-    relative: &ValidatedRelativePath,
+    relative: &ValidatedToolPath,
     path: &Path,
     start_line: usize,
     max_lines: usize,

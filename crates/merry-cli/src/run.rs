@@ -239,7 +239,6 @@ pub(crate) async fn run(
         model,
         process_backend: backend,
         extra_tools: mcp.tools,
-        allow_hidden_workspace_paths: false,
         automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
         retry_policy,
         context_compaction,
