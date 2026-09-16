@@ -418,12 +418,10 @@ fn apply_patch_rejects_binary_and_limit_failures_without_mutation() {
     );
 
     let read_limited = WorkspaceTools::new(
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
-            WorkspaceToolLimits {
-                max_read_bytes: 3,
-                ..WorkspaceToolLimits::default()
-            },
-        ),
+        WorkspaceToolsConfig::new(temp.path().to_path_buf()).with_limits(WorkspaceToolLimits {
+            max_read_bytes: 3,
+            ..WorkspaceToolLimits::default()
+        }),
     )
     .expect("workspace tools should construct");
     let too_large_read = patch_outcome(&read_limited, "large-read.txt", "abc", "x");
@@ -437,12 +435,10 @@ fn apply_patch_rejects_binary_and_limit_failures_without_mutation() {
     assert_eq!(read_text(&temp.path().join("large-read.txt")), "abcdef\n");
 
     let payload_limited = WorkspaceTools::new(
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
-            WorkspaceToolLimits {
-                max_patch_bytes: 3,
-                ..WorkspaceToolLimits::default()
-            },
-        ),
+        WorkspaceToolsConfig::new(temp.path().to_path_buf()).with_limits(WorkspaceToolLimits {
+            max_patch_bytes: 3,
+            ..WorkspaceToolLimits::default()
+        }),
     )
     .expect("workspace tools should construct");
     let too_large_payload = patch_outcome(&payload_limited, "large-payload.txt", "ab", "cd");
@@ -456,12 +452,10 @@ fn apply_patch_rejects_binary_and_limit_failures_without_mutation() {
     assert_eq!(read_text(&temp.path().join("large-payload.txt")), "abc\n");
 
     let write_limited = WorkspaceTools::new(
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
-            WorkspaceToolLimits {
-                max_write_bytes: 4,
-                ..WorkspaceToolLimits::default()
-            },
-        ),
+        WorkspaceToolsConfig::new(temp.path().to_path_buf()).with_limits(WorkspaceToolLimits {
+            max_write_bytes: 4,
+            ..WorkspaceToolLimits::default()
+        }),
     )
     .expect("workspace tools should construct");
     let too_large_write = patch_outcome(&write_limited, "large-write.txt", "b", "bcdef");
@@ -515,7 +509,7 @@ fn apply_patch_delete_respects_write_scope_and_forbidden_paths() {
     temp.write_text("denied/note.txt", "alpha\n");
     temp.write_text("allowed/secret.txt", "alpha\n");
     let tools = WorkspaceTools::new(
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
+        WorkspaceToolsConfig::new(temp.path().to_path_buf())
             .with_patch_write_scope(Some(vec![PathBuf::from("allowed")]))
             .with_forbidden_paths(vec![PathBuf::from("allowed/secret.txt")]),
     )

@@ -67,13 +67,11 @@ fn read_text_reads_a_range_from_a_file_larger_than_the_read_limit() {
     let temp = TempWorkspace::new("read-large-file-range");
     temp.write_text("large.txt", &"0123456789\n".repeat(20));
     let tools = WorkspaceTools::new(
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
-            WorkspaceToolLimits {
-                max_read_bytes: 32,
-                max_read_lines: 2,
-                ..WorkspaceToolLimits::default()
-            },
-        ),
+        WorkspaceToolsConfig::new(temp.path().to_path_buf()).with_limits(WorkspaceToolLimits {
+            max_read_bytes: 32,
+            max_read_lines: 2,
+            ..WorkspaceToolLimits::default()
+        }),
     )
     .expect("workspace tools should construct");
 
@@ -90,12 +88,10 @@ fn read_text_rejects_ranges_outside_configured_limits() {
     let temp = TempWorkspace::new("read-range-validation");
     temp.write_text("note.txt", "one\ntwo\n");
     let tools = WorkspaceTools::new(
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
-            WorkspaceToolLimits {
-                max_read_lines: 2,
-                ..WorkspaceToolLimits::default()
-            },
-        ),
+        WorkspaceToolsConfig::new(temp.path().to_path_buf()).with_limits(WorkspaceToolLimits {
+            max_read_lines: 2,
+            ..WorkspaceToolLimits::default()
+        }),
     )
     .expect("workspace tools should construct");
     let executor = ReadTextExecutor {

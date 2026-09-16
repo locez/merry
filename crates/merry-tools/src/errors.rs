@@ -20,7 +20,7 @@ pub(crate) const ERROR_PATCH_NOOP: &str = "apply_patch_noop";
 pub(crate) const ERROR_PREIMAGE_ABSENT: &str = "apply_patch_preimage_absent";
 pub(crate) const ERROR_PREIMAGE_AMBIGUOUS: &str = "apply_patch_preimage_ambiguous";
 
-pub(crate) const WORKSPACE_PATH_CONTRACT: &str = "workspace tool path values are resolved against a configured workspace root when they are relative and used as named when they are absolute: an absolute path inside a root and the matching relative path address the same file, an absolute path may also address a file outside the workspace, every spelling including dot-prefixed components is accepted, and only the reachability the sandbox grants decides whether the path can be used";
+pub(crate) const WORKSPACE_PATH_CONTRACT: &str = "workspace tool path values are resolved under the one workspace root when they are relative and used as named when they are absolute: an absolute path inside the workspace root and the matching relative path address the same file, an absolute path may also address a file outside the workspace or inside a read-only resource root, every spelling including dot-prefixed components is accepted, and only the reachability the sandbox grants decides whether the path can be used";
 
 const MAX_FAILURE_DIAGNOSTIC_CHARS: usize = 512;
 

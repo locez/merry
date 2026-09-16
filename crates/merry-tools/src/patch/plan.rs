@@ -348,11 +348,8 @@ fn plan_apply_patch_file(
 ) -> Result<WorkspacePatchFilePlan, WorkspacePatchFilePlanError> {
     match file_patch.operation {
         WorkspacePatchOperation::Add { lines } => {
-            let relative = validate_workspace_path_argument(&file_patch.path, &state.roots)
+            let relative = validate_workspace_path_argument(&file_patch.path, &state.root)
                 .map_err(WorkspacePatchFilePlanError::Path)?;
-            // Failures report the normalized workspace-relative path so a
-            // section that named the file with an absolute path never sends a
-            // host path back through a tool result.
             let display = relative.display.clone();
             validate_patch_write_boundary(state, &relative).map_err(|error| {
                 WorkspacePatchFilePlanError::Domain {
@@ -361,74 +358,35 @@ fn plan_apply_patch_file(
                 }
             })?;
 
-            // Match Update's first-root-wins rule: Add creates at the first
-            // root reporting Missing and refuses an existing target immediately.
-            // If every root is missing the parent, fall back to the first root;
-            // execution will create those parents after the same path checks.
-            let mut first_parent_missing = None;
-            for root in &state.roots {
-                if is_cancelled() {
-                    return Err(WorkspacePatchFilePlanError::Cancelled);
-                }
-
-                match resolve_new_file_path(root, &relative) {
-                    Ok(NewWorkspacePath::Missing(path)) => {
-                        return plan_new_apply_patch_file(
-                            relative,
-                            path,
-                            lines,
-                            state,
-                            is_cancelled,
-                        )
-                        .map_err(|error| match error {
-                            BlockingToolError::Domain(error) => {
-                                WorkspacePatchFilePlanError::Domain {
-                                    error,
-                                    path: display.clone(),
-                                }
-                            }
-                            BlockingToolError::Cancelled => WorkspacePatchFilePlanError::Cancelled,
-                        });
-                    }
-                    Ok(NewWorkspacePath::Existing) => {
-                        return Err(WorkspacePatchFilePlanError::Domain {
-                            error: DomainError::new(
-                                ERROR_FILE_ALREADY_EXISTS,
-                                "workspace file already exists",
-                            ),
-                            path: relative.display,
-                        });
-                    }
-                    Ok(NewWorkspacePath::ParentMissing) => {
-                        first_parent_missing.get_or_insert_with(|| relative.resolved(root));
-                    }
-                    Err(error) => {
-                        return Err(WorkspacePatchFilePlanError::Domain {
-                            error,
-                            path: relative.display,
-                        });
-                    }
-                }
+            if is_cancelled() {
+                return Err(WorkspacePatchFilePlanError::Cancelled);
             }
-
-            if let Some(path) = first_parent_missing {
-                let display = relative.display.clone();
-                return plan_new_apply_patch_file(relative, path, lines, state, is_cancelled)
-                    .map_err(|error| match error {
-                        BlockingToolError::Domain(error) => WorkspacePatchFilePlanError::Domain {
-                            error,
-                            path: display,
-                        },
-                        BlockingToolError::Cancelled => WorkspacePatchFilePlanError::Cancelled,
+            let path = match resolve_new_file_path(&relative, std::iter::once(&state.root)) {
+                Ok(NewWorkspacePath::Missing(path)) => path,
+                Ok(NewWorkspacePath::Existing) => {
+                    return Err(WorkspacePatchFilePlanError::Domain {
+                        error: DomainError::new(
+                            ERROR_FILE_ALREADY_EXISTS,
+                            "workspace file already exists",
+                        ),
+                        path: display,
                     });
-            }
-
-            Err(WorkspacePatchFilePlanError::Domain {
-                error: DomainError::new(
-                    ERROR_FILE_NOT_FOUND,
-                    "workspace file parent was not found",
-                ),
-                path: relative.display,
+                }
+                Err(error) => {
+                    return Err(WorkspacePatchFilePlanError::Domain {
+                        error,
+                        path: display,
+                    });
+                }
+            };
+            plan_new_apply_patch_file(relative, path, lines, state, is_cancelled).map_err(|error| {
+                match error {
+                    BlockingToolError::Domain(error) => WorkspacePatchFilePlanError::Domain {
+                        error,
+                        path: display,
+                    },
+                    BlockingToolError::Cancelled => WorkspacePatchFilePlanError::Cancelled,
+                }
             })
         }
         WorkspacePatchOperation::Update { hunks } => {
@@ -458,15 +416,15 @@ fn plan_apply_patch_file(
 /// Resolves the workspace path of a file that a patch section edits or deletes.
 ///
 /// Update and delete sections share the same path rules: the requested path is
-/// validated against hidden-path and write-scope policy, then resolved through
-/// the configured roots with first-root-wins semantics, and a missing file is
-/// reported as `ERROR_FILE_NOT_FOUND`.
+/// validated against write-scope and forbidden-path policy, then resolved below
+/// the workspace root, and a missing file is reported as
+/// `ERROR_FILE_NOT_FOUND`.
 fn resolve_existing_patch_path(
     state: &WorkspaceToolState,
     requested: &str,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(ValidatedToolPath, PathBuf), WorkspacePatchFilePlanError> {
-    let relative = validate_workspace_path_argument(requested, &state.roots)
+    let relative = validate_workspace_path_argument(requested, &state.root)
         .map_err(WorkspacePatchFilePlanError::Path)?;
     validate_patch_write_boundary(state, &relative).map_err(|error| {
         WorkspacePatchFilePlanError::Domain {
@@ -475,27 +433,20 @@ fn resolve_existing_patch_path(
         }
     })?;
 
-    for root in &state.roots {
-        if is_cancelled() {
-            return Err(WorkspacePatchFilePlanError::Cancelled);
-        }
-
-        match resolve_existing_path(root, &relative) {
-            Ok(Some(resolved)) => return Ok((relative, resolved.path)),
-            Ok(None) => {}
-            Err(error) => {
-                return Err(WorkspacePatchFilePlanError::Domain {
-                    error,
-                    path: relative.display,
-                });
-            }
-        }
+    if is_cancelled() {
+        return Err(WorkspacePatchFilePlanError::Cancelled);
     }
-
-    Err(WorkspacePatchFilePlanError::Domain {
-        error: DomainError::new(ERROR_FILE_NOT_FOUND, "workspace file was not found"),
-        path: relative.display,
-    })
+    match resolve_existing_path(&relative, std::iter::once(&state.root)) {
+        Ok(Some(path)) => Ok((relative, path)),
+        Ok(None) => Err(WorkspacePatchFilePlanError::Domain {
+            error: DomainError::new(ERROR_FILE_NOT_FOUND, "workspace file was not found"),
+            path: relative.display,
+        }),
+        Err(error) => Err(WorkspacePatchFilePlanError::Domain {
+            error,
+            path: relative.display,
+        }),
+    }
 }
 
 /// Maps a blocking tool error onto a file-plan failure for the requested path.
@@ -510,13 +461,13 @@ fn validate_patch_write_boundary(
     state: &WorkspaceToolState,
     path: &ValidatedToolPath,
 ) -> Result<(), DomainError> {
-    // Scope patterns are root-relative, so a target outside every configured
-    // root has no scope spelling and cannot be authorized by a relative
-    // pattern. That keeps a child agent inside the scope its parent gave it,
-    // which is a deliberate narrowing rather than sandbox policy.
-    let scope_path = state.scope_path(path);
+    // Scope patterns are root-relative, so a target outside the workspace root
+    // has no scope spelling and cannot be authorized by a relative pattern.
+    // That keeps a child agent inside the scope its parent gave it, which is a
+    // deliberate narrowing rather than sandbox policy.
+    let scope_path = path.relative_spelling();
 
-    if let Some(scope_path) = scope_path.as_deref()
+    if let Some(scope_path) = scope_path
         && matches_any_scope_path(scope_path, &state.forbidden_paths)
     {
         return Err(DomainError::new(
@@ -528,7 +479,7 @@ fn validate_patch_write_boundary(
     let Some(write_scope) = &state.patch_write_scope else {
         return Ok(());
     };
-    match scope_path.as_deref() {
+    match scope_path {
         Some(scope_path) if matches_any_scope_path(scope_path, write_scope) => Ok(()),
         _ => Err(DomainError::new(
             ERROR_PATH_DENIED,

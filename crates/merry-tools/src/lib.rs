@@ -6,19 +6,19 @@
 //! access policy. The public `merry::tool` declaration macro is re-exported by
 //! the facade crate; this crate only contains the implementation dependency.
 //!
-//! Path safety separates rooted paths from absolute ones. A relative path is
-//! normalized to workspace-relative components, dot segments are resolved
-//! lexically, and a path that climbs above its root is denied. An absolute path
-//! is used as the caller named it and is not limited to a configured root,
-//! because the process sandbox, accepted process profile, and trusted path
-//! rules already decide which paths exist and which of them are writable.
-//! Hidden paths are rejected unless
-//! explicitly enabled, and ordinary symlink components are rejected before
-//! reading or patching. On Unix, file opens also use `O_NOFOLLOW` to avoid
-//! following a symlink swapped into the leaf path between validation and open.
-//! This is not an OS sandbox and does not claim complete hardening against
-//! malicious concurrent filesystem mutation, including replacement of
-//! intermediate directories during an operation.
+//! A workspace has one root. A relative path is normalized to root-relative
+//! components and dot segments are resolved lexically; an absolute path is used
+//! as the caller named it, and an absolute path below the workspace root is
+//! rewritten to its relative spelling so one file never has two identities. A
+//! path outside the workspace root is not limited to a configured root, because
+//! the process sandbox, accepted process profile, and trusted path rules already
+//! decide which paths exist and which of them are writable. Every spelling is
+//! accepted, including dot-prefixed components. A relative path is walked
+//! without following symlink components, and on Unix file opens also use
+//! `O_NOFOLLOW` to avoid following a symlink swapped into the leaf path between
+//! validation and open. This is not an OS sandbox and does not claim complete
+//! hardening against malicious concurrent filesystem mutation, including
+//! replacement of intermediate directories during an operation.
 
 use merry_core::ToolSpec;
 use merry_runtime::{Tool, ToolBuildError};

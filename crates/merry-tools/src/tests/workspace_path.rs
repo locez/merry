@@ -1,13 +1,15 @@
 //! Tests for tool path form, normalization, and scope boundaries.
 //!
-//! A relative tool path is resolved against the configured roots, so
-//! `dir/note.txt` and the absolute path to that file address the same target
-//! and report the same workspace-relative path. An absolute path outside every
-//! root is the caller's own way to name a file the sandbox exposes, so it is
-//! resolved as named instead of being denied by a second path policy inside the
-//! tool. What remains the tools' own business is that a relative path cannot
-//! climb above its root, that hidden components are denied, and that a child
-//! agent cannot leave the scope its parent gave it.
+//! A relative tool path is resolved under the workspace root first and then
+//! under each read-only resource root, so `dir/note.txt` and the absolute path
+//! to that file address the same target and report the same workspace-relative
+//! path. An absolute path that is not below the workspace root is the caller's
+//! own way to name a file, so it is used exactly as written instead of being
+//! matched against another anchor, and it is never denied by a second path
+//! policy inside the tool. What remains the tools' own business is that a
+//! relative path resolves below the root it was joined against, that a symlink
+//! component below the workspace root is denied, and that a child agent cannot
+//! leave the scope its parent gave it.
 
 use super::*;
 
@@ -28,6 +30,66 @@ fn sibling_of(root: &Path, suffix: &str) -> PathBuf {
     root.parent()
         .expect("workspace root should have a parent")
         .join(format!("{name}{suffix}"))
+}
+
+/// Returns tools whose workspace root and read-only resource root both exist.
+fn tools_with_resource_root(root: &Path, resource: &Path) -> WorkspaceTools {
+    WorkspaceTools::new(
+        WorkspaceToolsConfig::new(root.to_path_buf())
+            .with_readonly_resource_roots(vec![resource.to_path_buf()]),
+    )
+    .expect("workspace tools should construct")
+}
+
+#[test]
+fn read_text_absolute_resource_path_is_not_shadowed_by_a_workspace_file() {
+    let temp = TempWorkspace::new("path-resource-anchor");
+    temp.write_text("demo/SKILL.md", "workspace copy\n");
+    let resource = temp.path().join("resource");
+    fs::create_dir_all(resource.join("demo")).expect("resource directory should be creatable");
+    fs::write(resource.join("demo/SKILL.md"), "resource copy\n")
+        .expect("resource file should be writable");
+    let tools = tools_with_resource_root(temp.path(), &resource);
+    let absolute = fs::canonicalize(&resource)
+        .expect("resource root should canonicalize")
+        .join("demo/SKILL.md");
+
+    let outcome = read_outcome(&tools, absolute.to_str().expect("utf8"));
+
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(
+        json_content(&outcome)["content"],
+        "resource copy\n",
+        "an absolute path must name the file it was written for, not a same-named file below another root"
+    );
+}
+
+#[test]
+fn apply_patch_absolute_workspace_path_edits_the_named_file_only() {
+    let temp = TempWorkspace::new("path-absolute-anchor");
+    temp.write_text("demo/note.txt", "alpha\nold\nomega\n");
+    let resource = temp.path().join("resource");
+    fs::create_dir_all(resource.join("demo")).expect("resource directory should be creatable");
+    fs::write(resource.join("demo/note.txt"), "alpha\nold\nomega\n")
+        .expect("resource file should be writable");
+    let tools = tools_with_resource_root(temp.path(), &resource);
+    let absolute = canonical_root(&temp).join("demo/note.txt");
+
+    let outcome = patch_text_outcome(
+        &tools,
+        &update_patch(absolute.to_str().expect("utf8"), "old", "new"),
+    );
+
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(
+        read_text(&temp.path().join("demo/note.txt")),
+        "alpha\nnew\nomega\n"
+    );
+    assert_eq!(
+        read_text(&resource.join("demo/note.txt")),
+        "alpha\nold\nomega\n",
+        "a read-only resource root must not receive a write intended for the workspace root"
+    );
 }
 
 #[test]
@@ -104,7 +166,7 @@ fn read_text_reads_absolute_path_outside_the_workspace() {
     assert_eq!(
         json_content(&outcome)["path"],
         outside_text,
-        "a target outside every root has no workspace-relative spelling to report"
+        "a target outside the workspace root has no workspace-relative spelling to report"
     );
     fs::remove_file(&outside).expect("outside file should be removable");
 }
@@ -143,7 +205,7 @@ fn apply_patch_edits_files_outside_the_workspace() {
 fn child_write_scope_denies_absolute_paths_outside_the_workspace() {
     let temp = TempWorkspace::new("path-child-write-scope");
     let scoped = WorkspaceTools::new(
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
+        WorkspaceToolsConfig::new(temp.path().to_path_buf())
             .with_patch_write_scope(Some(vec![PathBuf::from("allowed")])),
     )
     .expect("workspace tools should construct");
@@ -278,7 +340,7 @@ fn workspace_path_denies_the_root_itself_and_reads_prefix_lookalikes() {
     assert_eq!(
         json_content(&sibling)["path"],
         lookalike_text,
-        "the sibling is not inside a configured root, so it is reported absolute"
+        "the sibling is not inside the workspace root, so it is reported absolute"
     );
     fs::remove_dir_all(&lookalike_dir).expect("lookalike tree should be removable");
 }

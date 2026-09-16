@@ -236,7 +236,7 @@ async fn opt_in_patch_success_continuation_does_not_leak_internal_evidence() {
 async fn patch_proposal_and_audit_do_not_leak_into_sanitized_result_or_continuation() {
     let temp = TempWorkspace::new("patch-policy-no-leak");
     temp.write_text("note.txt", "alpha\nold\nomega\n");
-    let tools = WorkspaceTools::new(WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]))
+    let tools = WorkspaceTools::new(WorkspaceToolsConfig::new(temp.path().to_path_buf()))
         .expect("workspace tools should construct");
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(pending_patch_call("note.txt", "old", "new"))],
@@ -406,7 +406,7 @@ async fn delete_outside_the_write_scope_is_denied_and_keeps_the_file() {
     temp.write_text("allowed/note.txt", "alpha\n");
     temp.write_text("denied/note.txt", "alpha\n");
     let tools = WorkspaceTools::new(
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
+        WorkspaceToolsConfig::new(temp.path().to_path_buf())
             .with_patch_write_scope(Some(vec![PathBuf::from("allowed")])),
     )
     .expect("workspace tools should construct");

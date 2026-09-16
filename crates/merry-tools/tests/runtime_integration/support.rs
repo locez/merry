@@ -221,7 +221,7 @@ pub(super) fn runtime_with_workspace_tools_and_provider(
     root: &Path,
     model_event: ModelEvent,
 ) -> (Runtime, FakeModelProvider) {
-    let tools = WorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
+    let tools = WorkspaceTools::new(WorkspaceToolsConfig::new(root.to_path_buf()))
         .expect("workspace tools should construct");
     let provider = FakeModelProvider::new(vec![Ok(model_event)]);
     let provider_handle = provider.clone();
@@ -237,7 +237,7 @@ pub(super) fn runtime_with_workspace_tools_and_provider(
 }
 
 pub(super) fn runtime_with_apply_patch_tools(root: &Path, model_event: ModelEvent) -> Runtime {
-    let tools = WorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
+    let tools = WorkspaceTools::new(WorkspaceToolsConfig::new(root.to_path_buf()))
         .expect("workspace tools should construct");
     let provider = FakeModelProvider::new(vec![Ok(model_event)]);
     let mut builder =
@@ -252,7 +252,7 @@ pub(super) fn runtime_with_opt_in_apply_patch_tools(
     root: &Path,
     model_event: ModelEvent,
 ) -> Runtime {
-    let tools = WorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
+    let tools = WorkspaceTools::new(WorkspaceToolsConfig::new(root.to_path_buf()))
         .expect("workspace tools should construct");
     let provider = FakeModelProvider::new(vec![Ok(model_event)]);
     let mut builder = Runtime::builder(session_id())
@@ -268,7 +268,7 @@ pub(super) fn runtime_with_opt_in_apply_patch_tools_and_provider(
     root: &Path,
     provider: ScriptedModelProvider,
 ) -> Runtime {
-    let tools = WorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
+    let tools = WorkspaceTools::new(WorkspaceToolsConfig::new(root.to_path_buf()))
         .expect("workspace tools should construct");
     let mut builder = Runtime::builder(session_id())
         .model_provider(Arc::new(provider), model_name())

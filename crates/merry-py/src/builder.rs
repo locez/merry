@@ -84,7 +84,7 @@ impl PyAgentBuilder {
     #[allow(clippy::too_many_arguments)]
     fn with_workspace(
         &mut self,
-        roots: Vec<String>,
+        root: String,
         readonly_resource_roots: Vec<String>,
         enable_patch: bool,
         patch_write_scope: Option<Vec<String>>,
@@ -94,22 +94,19 @@ impl PyAgentBuilder {
         max_write_bytes: usize,
         max_patch_bytes: usize,
     ) -> PyResult<()> {
-        if roots.is_empty() {
-            return Err(error::config_message_to_py(
-                "workspace requires at least one root",
-            ));
+        if root.is_empty() {
+            return Err(error::config_message_to_py("workspace requires a root"));
         }
-        let mut profile_builder = merry::profiles::CodingAgentProfileBuilder::with_roots(
-            roots.into_iter().map(PathBuf::from),
-        )
-        .readonly_resource_roots(readonly_resource_roots.into_iter().map(PathBuf::from))
-        .limits(WorkspaceToolLimits {
-            max_read_bytes,
-            max_read_lines,
-            max_write_bytes,
-            max_patch_bytes,
-        })
-        .forbidden_paths(forbidden_paths.into_iter().map(PathBuf::from));
+        let mut profile_builder =
+            merry::profiles::CodingAgentProfileBuilder::new(PathBuf::from(root))
+                .readonly_resource_roots(readonly_resource_roots.into_iter().map(PathBuf::from))
+                .limits(WorkspaceToolLimits {
+                    max_read_bytes,
+                    max_read_lines,
+                    max_write_bytes,
+                    max_patch_bytes,
+                })
+                .forbidden_paths(forbidden_paths.into_iter().map(PathBuf::from));
         if enable_patch {
             profile_builder = profile_builder.patch_tool();
             if let Some(scope) = patch_write_scope {

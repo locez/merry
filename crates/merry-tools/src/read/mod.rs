@@ -122,7 +122,7 @@ fn read_text_blocking_checked(
     if is_cancelled() {
         return Err(ToolExecutionError::Cancelled);
     }
-    let relative = match validate_workspace_path_argument(&args.path, state.read_roots()) {
+    let relative = match validate_workspace_path_argument(&args.path, &state.root) {
         Ok(relative) => relative,
         Err(error) => {
             return Ok(failed_outcome(
@@ -143,47 +143,45 @@ fn read_text_blocking_checked(
             Some(relative.display),
         ));
     }
-    for root in state.read_roots() {
-        if is_cancelled() {
-            return Err(ToolExecutionError::Cancelled);
-        }
-        match resolve_existing_path(root, &relative) {
-            Ok(Some(resolved)) => {
-                return match read_resolved_text(
-                    &relative,
-                    &resolved.path,
-                    start_line,
-                    max_lines,
-                    &state.limits,
-                    is_cancelled,
-                ) {
-                    Ok(outcome) => Ok(outcome),
-                    Err(BlockingToolError::Cancelled) => Err(ToolExecutionError::Cancelled),
-                    Err(BlockingToolError::Domain(error)) => Ok(failed_outcome(
-                        READ_TEXT_TOOL,
-                        error.code,
-                        error.message,
-                        Some(relative.display),
-                    )),
-                };
-            }
-            Ok(None) => {}
-            Err(error) => {
-                return Ok(failed_outcome(
-                    READ_TEXT_TOOL,
-                    error.code,
-                    error.message,
-                    Some(relative.display),
-                ));
-            }
-        }
+    if is_cancelled() {
+        return Err(ToolExecutionError::Cancelled);
     }
-    Ok(failed_outcome(
-        READ_TEXT_TOOL,
-        ERROR_FILE_NOT_FOUND,
-        "workspace file was not found",
-        Some(relative.display),
-    ))
+    let resolved = match resolve_existing_path(&relative, state.read_roots()) {
+        Ok(Some(resolved)) => resolved,
+        Ok(None) => {
+            return Ok(failed_outcome(
+                READ_TEXT_TOOL,
+                ERROR_FILE_NOT_FOUND,
+                "workspace file was not found",
+                Some(relative.display),
+            ));
+        }
+        Err(error) => {
+            return Ok(failed_outcome(
+                READ_TEXT_TOOL,
+                error.code,
+                error.message,
+                Some(relative.display),
+            ));
+        }
+    };
+    match read_resolved_text(
+        &relative,
+        &resolved,
+        start_line,
+        max_lines,
+        &state.limits,
+        is_cancelled,
+    ) {
+        Ok(outcome) => Ok(outcome),
+        Err(BlockingToolError::Cancelled) => Err(ToolExecutionError::Cancelled),
+        Err(BlockingToolError::Domain(error)) => Ok(failed_outcome(
+            READ_TEXT_TOOL,
+            error.code,
+            error.message,
+            Some(relative.display),
+        )),
+    }
 }
 
 fn read_resolved_text(

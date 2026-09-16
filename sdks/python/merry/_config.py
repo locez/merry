@@ -127,7 +127,7 @@ class PatchConfig:
 class WorkspaceConfig:
     """Rust coding-profile workspace configuration."""
 
-    roots: tuple[Path, ...]
+    root: Path
     readonly_resource_roots: tuple[Path, ...]
     patch: PatchConfig | None
     forbidden_paths: tuple[Path, ...]
@@ -135,29 +135,21 @@ class WorkspaceConfig:
 
     def __init__(
         self,
-        root: PathInput | None = None,
+        root: PathInput,
         *,
-        roots: Sequence[PathInput] | None = None,
         readonly_resource_roots: Sequence[PathInput] = (),
         patch: PatchConfig | None = None,
         forbidden_paths: Sequence[PathInput] = (),
         limits: WorkspaceLimits | None = None,
     ) -> None:
-        if root is not None and roots is not None:
-            raise ValueError("WorkspaceConfig accepts root or roots, not both")
-        if roots is None:
-            if root is None:
-                raise ValueError("WorkspaceConfig requires root or roots")
-            normalized_roots = (Path(root),)
-        else:
-            normalized_roots = _paths(roots, "roots")
-        if not normalized_roots:
-            raise ValueError("WorkspaceConfig.roots must contain at least one path")
+        if isinstance(root, str) and not root.strip():
+            raise ValueError("WorkspaceConfig.root must not be blank")
+        normalized_root = Path(root)
         if patch is not None and not isinstance(patch, PatchConfig):
             raise TypeError("patch must be a PatchConfig or None")
         if limits is not None and not isinstance(limits, WorkspaceLimits):
             raise TypeError("limits must be a WorkspaceLimits or None")
-        object.__setattr__(self, "roots", normalized_roots)
+        object.__setattr__(self, "root", normalized_root)
         object.__setattr__(
             self,
             "readonly_resource_roots",

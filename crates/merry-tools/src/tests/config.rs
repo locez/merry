@@ -1,10 +1,27 @@
 use super::*;
 
 #[test]
-fn config_rejects_missing_roots() {
-    let err = WorkspaceTools::new(WorkspaceToolsConfig::new(Vec::new()))
-        .expect_err("empty roots should be rejected");
-    assert!(matches!(err, WorkspaceToolConfigError::NoRoots));
+fn config_rejects_missing_workspace_root() {
+    let temp = TempWorkspace::new("missing-root");
+
+    let err = WorkspaceTools::new(WorkspaceToolsConfig::new(temp.path().join("absent")))
+        .expect_err("a missing workspace root should be rejected");
+    assert!(matches!(err, WorkspaceToolConfigError::RootNotFound { .. }));
+}
+
+#[test]
+fn config_skips_missing_and_duplicate_resource_roots() {
+    let temp = TempWorkspace::new("resource-roots");
+    let config = WorkspaceToolsConfig::new(temp.path().to_path_buf())
+        .with_readonly_resource_roots(vec![temp.path().join("absent"), temp.path().to_path_buf()]);
+
+    let tools = WorkspaceTools::new(config).expect("resource roots are optional");
+
+    assert!(
+        tools.state.readonly_resource_roots.is_empty(),
+        "a missing or workspace-identical resource root must be skipped: {:?}",
+        tools.state.readonly_resource_roots
+    );
 }
 
 #[test]
@@ -12,10 +29,8 @@ fn config_rejects_non_directory_root() {
     let temp = TempWorkspace::new("non-directory-root");
     temp.write_text("file.txt", "content\n");
 
-    let err = WorkspaceTools::new(WorkspaceToolsConfig::new(vec![
-        temp.path().join("file.txt"),
-    ]))
-    .expect_err("file root should be rejected");
+    let err = WorkspaceTools::new(WorkspaceToolsConfig::new(temp.path().join("file.txt")))
+        .expect_err("file root should be rejected");
     assert!(matches!(
         err,
         WorkspaceToolConfigError::RootNotDirectory { .. }
@@ -25,12 +40,11 @@ fn config_rejects_non_directory_root() {
 #[test]
 fn config_rejects_zero_read_limit() {
     let temp = TempWorkspace::new("zero-limit");
-    let config = WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
-        WorkspaceToolLimits {
+    let config =
+        WorkspaceToolsConfig::new(temp.path().to_path_buf()).with_limits(WorkspaceToolLimits {
             max_read_bytes: 0,
             ..WorkspaceToolLimits::default()
-        },
-    );
+        });
 
     let err = WorkspaceTools::new(config).expect_err("zero limit should be rejected");
     assert!(matches!(
@@ -60,7 +74,7 @@ fn config_rejects_each_zero_limit() {
             other => panic!("unexpected limit name {other}"),
         }
 
-        let config = WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(limits);
+        let config = WorkspaceToolsConfig::new(temp.path().to_path_buf()).with_limits(limits);
         let err = WorkspaceTools::new(config).expect_err("zero limit should be rejected");
         assert!(matches!(
             err,
@@ -74,9 +88,9 @@ fn config_rejects_invalid_patch_scope_paths() {
     let temp = TempWorkspace::new("invalid-patch-scope");
 
     for config in [
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
+        WorkspaceToolsConfig::new(temp.path().to_path_buf())
             .with_patch_write_scope(Some(vec![PathBuf::from("../outside")])),
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
+        WorkspaceToolsConfig::new(temp.path().to_path_buf())
             .with_forbidden_paths(vec![PathBuf::from("bad\npath")]),
     ] {
         let err = WorkspaceTools::new(config).expect_err("invalid scope should be rejected");
@@ -153,7 +167,7 @@ fn hidden_path_components_are_ordinary_spelling() {
 fn non_utf8_component_is_rejected_when_constructible() {
     let path = PathBuf::from(OsStr::new("plain"));
     let text = path.to_str().expect("plain path is utf8");
-    let validated = validate_workspace_path_argument(text, std::iter::empty::<PathBuf>())
+    let validated = validate_workspace_path_argument(text, Path::new("/workspace"))
         .expect("plain path validates");
     assert_eq!(validated.display, "plain");
 }

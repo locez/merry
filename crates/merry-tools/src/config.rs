@@ -1,4 +1,7 @@
-use std::{io, path::PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use thiserror::Error;
 
@@ -29,7 +32,7 @@ impl Default for WorkspaceToolLimits {
 /// Configuration for workspace tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceToolsConfig {
-    pub(crate) roots: Vec<PathBuf>,
+    pub(crate) root: PathBuf,
     pub(crate) readonly_resource_roots: Vec<PathBuf>,
     pub(crate) limits: WorkspaceToolLimits,
     pub(crate) patch_write_scope: Option<Vec<PathBuf>>,
@@ -37,11 +40,15 @@ pub struct WorkspaceToolsConfig {
 }
 
 impl WorkspaceToolsConfig {
-    /// Creates a config with explicit workspace roots.
+    /// Creates a config with one workspace root.
+    ///
+    /// A workspace has exactly one root, so a relative path never has to be
+    /// guessed between candidates. Anything outside that root is named by its
+    /// own absolute path, where the sandbox decides reachability.
     #[must_use]
-    pub fn new(roots: Vec<PathBuf>) -> Self {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
-            roots,
+            root: root.into(),
             readonly_resource_roots: Vec::new(),
             limits: WorkspaceToolLimits::default(),
             patch_write_scope: None,
@@ -49,20 +56,21 @@ impl WorkspaceToolsConfig {
         }
     }
 
-    /// Returns the configured, pre-canonical roots.
+    /// Returns the configured, pre-canonical workspace root.
     #[must_use]
-    pub fn roots(&self) -> &[PathBuf] {
-        &self.roots
+    pub fn root(&self) -> &Path {
+        &self.root
     }
 
-    /// Returns independent read-only resource roots. Resources are addressable
-    /// by the same relative read APIs but are never patch targets.
+    /// Returns independent read-only resource roots, such as skill directories.
+    /// Resources are addressable by the same relative read APIs but are never
+    /// patch targets.
     #[must_use]
     pub fn readonly_resource_roots(&self) -> &[PathBuf] {
         &self.readonly_resource_roots
     }
 
-    /// Adds read-only resource roots without treating them as workspace roots.
+    /// Adds read-only resource roots without treating them as a workspace root.
     #[must_use]
     pub fn with_readonly_resource_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.readonly_resource_roots = roots;
@@ -94,17 +102,17 @@ impl WorkspaceToolsConfig {
         self
     }
 
-    /// Sets the optional workspace-relative write scope for `apply_patch`.
+    /// Sets the optional root-relative write scope for `apply_patch`.
     ///
-    /// `None` preserves existing unrestricted patch behavior under configured
-    /// roots. `Some([])` makes the patch tool read-only by denying all writes.
+    /// `None` preserves existing unrestricted patch behavior. `Some([])` makes
+    /// the patch tool read-only by denying all writes.
     #[must_use]
     pub fn with_patch_write_scope(mut self, paths: Option<Vec<PathBuf>>) -> Self {
         self.patch_write_scope = paths;
         self
     }
 
-    /// Sets workspace-relative paths forbidden to `apply_patch`.
+    /// Sets root-relative paths forbidden to `apply_patch`.
     #[must_use]
     pub fn with_forbidden_paths(mut self, paths: Vec<PathBuf>) -> Self {
         self.forbidden_paths = paths;
@@ -118,9 +126,6 @@ pub enum WorkspaceToolConfigError {
     /// A built-in tool declaration could not be validated.
     #[error("invalid built-in tool definition: {0}")]
     ToolDefinition(#[from] merry_runtime::ToolBuildError),
-    /// At least one root must be configured explicitly.
-    #[error("at least one workspace root must be configured")]
-    NoRoots,
     /// A configured root does not exist.
     #[error("workspace root does not exist: {root}")]
     RootNotFound {

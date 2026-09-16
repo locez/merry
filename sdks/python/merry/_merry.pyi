@@ -17,7 +17,7 @@ class AgentBuilder:
     ) -> None: ...
     def with_workspace(
         self,
-        roots: list[str],
+        root: str,
         readonly_resource_roots: list[str],
         enable_patch: bool,
         patch_write_scope: list[str] | None,

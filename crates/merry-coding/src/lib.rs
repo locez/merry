@@ -274,33 +274,14 @@ impl CodingAgentProfileBuilder {
         }
     }
 
-    /// Creates a coding-agent profile builder with explicit workspace roots.
-    pub fn with_roots<I, P>(roots: I) -> Self
-    where
-        I: IntoIterator<Item = P>,
-        P: Into<PathBuf>,
-    {
-        Self {
-            workspace: WorkspaceCodingProfileBuilder::with_roots(roots),
-            retry_policy: None,
-            run_policy: CodingAgentRunPolicy::default(),
-            allow_bridge_tools: false,
-            skill_catalog: None,
-            project_rules: None,
-            task_anchor: None,
-            tools: Vec::new(),
-            registered_tools: Vec::new(),
-        }
-    }
-
-    /// Adds another workspace root.
+    /// Replaces the workspace root.
     #[must_use]
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
         self.workspace = self.workspace.root(root);
         self
     }
 
-    /// Adds read-only resource roots that are not writable workspace roots.
+    /// Adds read-only resource roots that are not the writable workspace root.
     #[must_use]
     pub fn readonly_resource_roots<I, P>(mut self, roots: I) -> Self
     where

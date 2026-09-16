@@ -177,12 +177,10 @@ fn apply_patch_add_file_rejects_existing_directory() {
 fn apply_patch_add_file_rejects_write_limit_without_creating_file() {
     let temp = TempWorkspace::new("patch-add-write-limit");
     let tools = WorkspaceTools::new(
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(
-            WorkspaceToolLimits {
-                max_write_bytes: 4,
-                ..WorkspaceToolLimits::default()
-            },
-        ),
+        WorkspaceToolsConfig::new(temp.path().to_path_buf()).with_limits(WorkspaceToolLimits {
+            max_write_bytes: 4,
+            ..WorkspaceToolLimits::default()
+        }),
     )
     .expect("workspace tools should construct");
 

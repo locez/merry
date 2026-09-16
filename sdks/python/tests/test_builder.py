@@ -117,16 +117,15 @@ def test_workspace_and_patch_configuration_are_explicit(tmp_path: Path) -> None:
 
     assert agent.session_id == "workspace-config"
     assert patch.write_scope == (Path("src"),)
+    assert workspace.root == tmp_path
     assert workspace.limits.max_read_bytes == 2048
 
 
 def test_invalid_workspace_and_limits_fail_before_native_build(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="write_scope"):
         merry.PatchConfig(write_scope=[])
-    with pytest.raises(ValueError, match="root or roots"):
-        merry.WorkspaceConfig()
-    with pytest.raises(ValueError, match="root or roots"):
-        merry.WorkspaceConfig(root=tmp_path, roots=[tmp_path])
+    with pytest.raises(ValueError, match="root"):
+        merry.WorkspaceConfig("")
 
     builder = merry.AgentBuilder("limits")
     with pytest.raises(ValueError, match="max_model_turns"):

@@ -8,7 +8,7 @@ fn apply_patch_respects_configured_write_scope() {
     temp.write_text("allowed/note.txt", "alpha\nold\nomega\n");
     temp.write_text("denied/note.txt", "alpha\nold\nomega\n");
     let tools = WorkspaceTools::new(
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
+        WorkspaceToolsConfig::new(temp.path().to_path_buf())
             .with_patch_write_scope(Some(vec![PathBuf::from("allowed")])),
     )
     .expect("workspace tools should construct");
@@ -36,7 +36,7 @@ fn apply_patch_forbidden_paths_override_write_scope() {
     temp.write_text("allowed/public.txt", "alpha\nold\nomega\n");
     temp.write_text("allowed/secret.txt", "alpha\nold\nomega\n");
     let tools = WorkspaceTools::new(
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()])
+        WorkspaceToolsConfig::new(temp.path().to_path_buf())
             .with_patch_write_scope(Some(vec![PathBuf::from("allowed")]))
             .with_forbidden_paths(vec![PathBuf::from("allowed/secret.txt")]),
     )

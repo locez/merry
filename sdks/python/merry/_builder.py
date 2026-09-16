@@ -83,7 +83,7 @@ class AgentBuilder:
         forbidden.extend(patch_forbidden)
         try:
             self._native.with_workspace(
-                [str(path) for path in config.roots],
+                str(config.root),
                 [str(path) for path in config.readonly_resource_roots],
                 config.patch is not None,
                 patch_scope,

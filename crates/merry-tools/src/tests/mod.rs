@@ -152,7 +152,7 @@ impl Drop for TempWorkspace {
 }
 
 fn tools_for(root: &Path) -> WorkspaceTools {
-    WorkspaceTools::new(WorkspaceToolsConfig::new(vec![root.to_path_buf()]))
+    WorkspaceTools::new(WorkspaceToolsConfig::new(root.to_path_buf()))
         .expect("workspace tools should construct")
 }
 
@@ -197,7 +197,7 @@ fn workspace_schemas_project_session_limits() {
         ..WorkspaceToolLimits::default()
     };
     let tools = WorkspaceTools::new(
-        WorkspaceToolsConfig::new(vec![temp.path().to_path_buf()]).with_limits(limits),
+        WorkspaceToolsConfig::new(temp.path().to_path_buf()).with_limits(limits),
     )
     .expect("workspace tools should construct");
     let registered = tools.into_registered_tools_with_patch();

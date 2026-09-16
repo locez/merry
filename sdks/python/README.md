@@ -68,9 +68,10 @@ agent = (
 )
 ```
 
-`WorkspaceConfig` maps to the Rust coding profile. Patch and forbidden paths
-are workspace-relative normalized paths; workspace roots themselves may be
-absolute. Every workspace limit is positive and is enforced again by Rust.
+`WorkspaceConfig` maps to the Rust coding profile. A workspace has one root,
+which may be absolute or relative; patch and forbidden paths are root-relative
+normalized paths. Every workspace limit is positive and is enforced again by
+Rust.
 
 Anthropic Messages uses the same builder:
 

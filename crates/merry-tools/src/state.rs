@@ -1,15 +1,14 @@
 use std::{
     collections::BTreeSet,
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Component, PathBuf},
 };
 
 use crate::config::{WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceToolsConfig};
-use crate::path::ValidatedToolPath;
 
 #[derive(Debug)]
 pub(crate) struct WorkspaceToolState {
-    pub(crate) roots: Vec<PathBuf>,
+    pub(crate) root: PathBuf,
     pub(crate) readonly_resource_roots: Vec<PathBuf>,
     pub(crate) limits: WorkspaceToolLimits,
     pub(crate) patch_write_scope: Option<Vec<String>>,
@@ -18,44 +17,14 @@ pub(crate) struct WorkspaceToolState {
 
 impl WorkspaceToolState {
     pub(crate) fn new(config: WorkspaceToolsConfig) -> Result<Self, WorkspaceToolConfigError> {
-        if config.roots.is_empty() {
-            return Err(WorkspaceToolConfigError::NoRoots);
-        }
-
         validate_limits(&config.limits)?;
 
-        let mut roots = Vec::with_capacity(config.roots.len());
-        for root in config.roots {
-            if !root.exists() {
-                return Err(WorkspaceToolConfigError::RootNotFound { root });
-            }
-
-            let canonical = fs::canonicalize(&root).map_err(|source| {
-                WorkspaceToolConfigError::RootCanonicalize {
-                    root: root.clone(),
-                    source,
-                }
-            })?;
-
-            if !canonical.is_dir() {
-                return Err(WorkspaceToolConfigError::RootNotDirectory { root });
-            }
-
-            roots.push(canonical);
-        }
-
+        let root = canonical_root(config.root)?;
         let mut readonly_resource_roots = Vec::with_capacity(config.readonly_resource_roots.len());
-        for root in config.readonly_resource_roots {
-            if !root.exists() {
-                continue;
-            }
-            let canonical = fs::canonicalize(&root).map_err(|source| {
-                WorkspaceToolConfigError::RootCanonicalize {
-                    root: root.clone(),
-                    source,
-                }
-            })?;
-            if canonical.is_dir() && !roots.iter().any(|workspace| workspace == &canonical) {
+        for resource_root in config.readonly_resource_roots {
+            if let Some(canonical) = canonical_optional_root(resource_root)?
+                && canonical != root
+            {
                 readonly_resource_roots.push(canonical);
             }
         }
@@ -70,7 +39,7 @@ impl WorkspaceToolState {
         }
 
         Ok(Self {
-            roots,
+            root,
             readonly_resource_roots,
             limits: config.limits,
             patch_write_scope,
@@ -78,42 +47,47 @@ impl WorkspaceToolState {
         })
     }
 
-    pub(crate) fn read_roots(&self) -> impl Iterator<Item = &PathBuf> {
-        self.roots.iter().chain(self.readonly_resource_roots.iter())
-    }
-
-    /// Returns the root-relative scope spelling of a validated tool path.
+    /// Returns the workspace root followed by every read-only resource root.
     ///
-    /// Child workspace scope patterns are root-relative, so only a target below
-    /// a configured root has a scope spelling. An absolute path outside every
-    /// root returns `None`, which no relative pattern can authorize, so a child
-    /// agent cannot leave its own scope by naming an absolute path.
-    #[must_use]
-    pub(crate) fn scope_path(&self, path: &ValidatedToolPath) -> Option<String> {
-        let Some(absolute) = path.absolute_path() else {
-            return Some(path.display.clone());
-        };
-        self.roots.iter().find_map(|root| {
-            absolute
-                .strip_prefix(root)
-                .ok()
-                .filter(|rest| !rest.as_os_str().is_empty())
-                .and_then(scope_display)
-        })
+    /// A relative argument is looked up in this order, so the workspace stays
+    /// the primary namespace and a skill's own relative `SKILL.md` path still
+    /// resolves. An absolute argument names one path and ignores this order.
+    pub(crate) fn read_roots(&self) -> impl Iterator<Item = &PathBuf> {
+        std::iter::once(&self.root).chain(self.readonly_resource_roots.iter())
     }
 }
 
-/// Returns the slash-joined scope spelling of a path below a workspace root.
-fn scope_display(relative: &Path) -> Option<String> {
-    let mut components = Vec::new();
-    for component in relative.components() {
-        match component {
-            Component::Normal(value) => components.push(value.to_str()?.to_owned()),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
-        }
+/// Canonicalizes a required workspace root.
+fn canonical_root(root: PathBuf) -> Result<PathBuf, WorkspaceToolConfigError> {
+    if !root.exists() {
+        return Err(WorkspaceToolConfigError::RootNotFound { root });
     }
-    (!components.is_empty()).then(|| components.join("/"))
+
+    let canonical =
+        fs::canonicalize(&root).map_err(|source| WorkspaceToolConfigError::RootCanonicalize {
+            root: root.clone(),
+            source,
+        })?;
+
+    if !canonical.is_dir() {
+        return Err(WorkspaceToolConfigError::RootNotDirectory { root });
+    }
+
+    Ok(canonical)
+}
+
+/// Canonicalizes an optional read-only resource root.
+///
+/// Resource roots are optional configuration, so a missing or non-directory
+/// entry is skipped instead of failing the whole tool set. A root that exists
+/// but cannot be canonicalized is still an error.
+fn canonical_optional_root(root: PathBuf) -> Result<Option<PathBuf>, WorkspaceToolConfigError> {
+    match canonical_root(root) {
+        Ok(canonical) => Ok(Some(canonical)),
+        Err(WorkspaceToolConfigError::RootNotFound { .. })
+        | Err(WorkspaceToolConfigError::RootNotDirectory { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn normalize_scope_paths(paths: Vec<PathBuf>) -> Result<Vec<String>, WorkspaceToolConfigError> {
