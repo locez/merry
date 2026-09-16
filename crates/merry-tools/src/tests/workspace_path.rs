@@ -32,29 +32,24 @@ fn sibling_of(root: &Path, suffix: &str) -> PathBuf {
         .join(format!("{name}{suffix}"))
 }
 
-/// Returns tools whose workspace root and read-only resource root both exist.
-fn tools_with_resource_root(root: &Path, resource: &Path) -> WorkspaceTools {
-    WorkspaceTools::new(
-        WorkspaceToolsConfig::new(root.to_path_buf())
-            .with_readonly_resource_roots(vec![resource.to_path_buf()]),
-    )
-    .expect("workspace tools should construct")
-}
-
 #[test]
 fn read_text_absolute_resource_path_is_not_shadowed_by_a_workspace_file() {
     let temp = TempWorkspace::new("path-resource-anchor");
+    let tools = tools_for(temp.path());
+    let root = canonical_root(&temp);
+    let resource = sibling_of(&root, "-resource");
     temp.write_text("demo/SKILL.md", "workspace copy\n");
-    let resource = temp.path().join("resource");
     fs::create_dir_all(resource.join("demo")).expect("resource directory should be creatable");
     fs::write(resource.join("demo/SKILL.md"), "resource copy\n")
         .expect("resource file should be writable");
-    let tools = tools_with_resource_root(temp.path(), &resource);
-    let absolute = fs::canonicalize(&resource)
-        .expect("resource root should canonicalize")
-        .join("demo/SKILL.md");
+    let absolute = resource.join("demo/SKILL.md");
+    let absolute_text = absolute.to_str().expect("resource path should be utf8");
 
-    let outcome = read_outcome(&tools, absolute.to_str().expect("utf8"));
+    // The resource root is its own directory tree, so it holds a file with the
+    // same relative path as the workspace copy. Naming the resource file must
+    // read that file: resolving the components below a different root would
+    // silently answer with the workspace file instead.
+    let outcome = read_outcome(&tools, absolute_text);
 
     assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
     assert_eq!(
@@ -62,34 +57,36 @@ fn read_text_absolute_resource_path_is_not_shadowed_by_a_workspace_file() {
         "resource copy\n",
         "an absolute path must name the file it was written for, not a same-named file below another root"
     );
+    assert_eq!(
+        json_content(&outcome)["path"],
+        absolute_text,
+        "a file outside the workspace root keeps its absolute spelling"
+    );
+    fs::remove_dir_all(&resource).expect("resource tree should be removable");
 }
 
 #[test]
-fn apply_patch_absolute_workspace_path_edits_the_named_file_only() {
+fn apply_patch_absolute_path_edits_outside_file_and_not_the_workspace_copy() {
     let temp = TempWorkspace::new("path-absolute-anchor");
-    temp.write_text("demo/note.txt", "alpha\nold\nomega\n");
-    let resource = temp.path().join("resource");
-    fs::create_dir_all(resource.join("demo")).expect("resource directory should be creatable");
-    fs::write(resource.join("demo/note.txt"), "alpha\nold\nomega\n")
-        .expect("resource file should be writable");
-    let tools = tools_with_resource_root(temp.path(), &resource);
-    let absolute = canonical_root(&temp).join("demo/note.txt");
+    let tools = tools_for(temp.path());
+    let root = canonical_root(&temp);
+    let outside = sibling_of(&root, "-outside.txt");
+    temp.write_text("note.txt", "alpha\nold\nomega\n");
+    fs::write(&outside, "alpha\nold\nomega\n").expect("outside file should be writable");
+    let outside_text = outside.to_str().expect("outside path should be utf8");
 
-    let outcome = patch_text_outcome(
-        &tools,
-        &update_patch(absolute.to_str().expect("utf8"), "old", "new"),
-    );
+    // Both files share a name, so an anchored patch must touch the sibling the
+    // caller named and leave the same-named workspace file alone.
+    let outcome = patch_text_outcome(&tools, &update_patch(outside_text, "old", "new"));
 
     assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(read_text(&outside), "alpha\nnew\nomega\n");
     assert_eq!(
-        read_text(&temp.path().join("demo/note.txt")),
-        "alpha\nnew\nomega\n"
-    );
-    assert_eq!(
-        read_text(&resource.join("demo/note.txt")),
+        read_text(&temp.path().join("note.txt")),
         "alpha\nold\nomega\n",
-        "a read-only resource root must not receive a write intended for the workspace root"
+        "a same-named workspace file must not receive the outside write"
     );
+    fs::remove_file(&outside).expect("outside file should be removable");
 }
 
 #[test]
