@@ -158,7 +158,7 @@ pub(super) fn parse_apply_patch(
         if path.is_empty() {
             return Err(WorkspacePatchParseError::syntax(
                 format!(
-                    "workspace patch {} section must name a workspace-relative path",
+                    "workspace patch {} section must name a path inside the workspace",
                     kind.marker().trim(),
                 ),
                 None,

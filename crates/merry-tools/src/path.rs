@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fs, io,
     path::{Component, Path, PathBuf},
 };
@@ -297,18 +298,31 @@ pub(crate) struct ValidatedRelativePath {
     pub(crate) display: String,
 }
 
-pub(crate) fn validate_relative_path(
+/// Validates a workspace tool path and normalizes it to workspace-relative
+/// components.
+///
+/// A caller may name the target either relative to a workspace root or with an
+/// absolute path inside one of `roots`. Both address the same file, and a
+/// caller that copied an absolute path out of process output or a tool result
+/// should not have to translate it first. `.` segments are redundant spelling
+/// and are dropped, `..` is resolved against the segments before it, and a path
+/// that escapes every root is denied, so accepting another spelling never
+/// widens what may be read or written. The resulting components go through the
+/// same hidden-path, write-scope, forbidden-path, symlink, and
+/// canonical-containment checks as any other path.
+///
+/// Failures report the workspace-relative form of the argument. A host absolute
+/// path is never echoed, because failure text is provider-visible and a root
+/// path is host detail the model does not need back.
+pub(crate) fn validate_workspace_path_argument<I, P>(
     raw_path: &str,
     allow_hidden: bool,
-) -> Result<ValidatedRelativePath, PathValidationError> {
-    validate_relative_path_impl(raw_path, allow_hidden, false)
-}
-
-fn validate_relative_path_impl(
-    raw_path: &str,
-    allow_hidden: bool,
-    allow_root: bool,
-) -> Result<ValidatedRelativePath, PathValidationError> {
+    roots: I,
+) -> Result<ValidatedRelativePath, PathValidationError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
     if raw_path.is_empty() {
         return Err(PathValidationError::new(
             ERROR_PATH_DENIED,
@@ -325,32 +339,12 @@ fn validate_relative_path_impl(
         ));
     }
 
-    if allow_root && raw_path == "." {
-        return Ok(ValidatedRelativePath {
-            components: Vec::new(),
-            display: ".".to_owned(),
-        });
-    }
-
-    let path = Path::new(raw_path);
-    if path.is_absolute() {
-        return Err(PathValidationError::new(
-            ERROR_PATH_DENIED,
-            "workspace path must be relative",
-            None,
-        ));
-    }
-
-    if has_forbidden_raw_dot_segment(raw_path) {
-        return Err(PathValidationError::new(
-            ERROR_PATH_DENIED,
-            "workspace path must not contain '.' or '..' components",
-            Some(raw_path.to_owned()),
-        ));
-    }
-
+    let relative_text = match absolute_path_within_root(raw_path, roots)? {
+        Some(relative_text) => Cow::Owned(relative_text),
+        None => Cow::Borrowed(raw_path),
+    };
     let mut components = Vec::new();
-    for component in path.components() {
+    for component in Path::new(relative_text.as_ref()).components() {
         match component {
             Component::Normal(value) => {
                 let Some(value) = value.to_str() else {
@@ -364,29 +358,29 @@ fn validate_relative_path_impl(
                     return Err(PathValidationError::new(
                         ERROR_PATH_DENIED,
                         "workspace hidden paths are not allowed",
-                        Some(raw_path.to_owned()),
+                        Some(relative_text.as_ref().to_owned()),
                     ));
                 }
                 components.push(value.to_owned());
             }
-            Component::CurDir => {
-                return Err(PathValidationError::new(
-                    ERROR_PATH_DENIED,
-                    "workspace path must not contain '.' components",
-                    Some(raw_path.to_owned()),
-                ));
-            }
+            // A `.` segment is redundant spelling for the same path, so it is
+            // dropped. `..` is resolved here, before any filesystem access, and
+            // cannot reach above the workspace root because popping an empty
+            // component list is denied.
+            Component::CurDir => {}
             Component::ParentDir => {
-                return Err(PathValidationError::new(
-                    ERROR_PATH_DENIED,
-                    "workspace path must not contain '..' components",
-                    Some(raw_path.to_owned()),
-                ));
+                if components.pop().is_none() {
+                    return Err(PathValidationError::new(
+                        ERROR_PATH_DENIED,
+                        "workspace path escapes the workspace root through '..' components",
+                        Some(relative_text.as_ref().to_owned()),
+                    ));
+                }
             }
             Component::RootDir | Component::Prefix(_) => {
                 return Err(PathValidationError::new(
                     ERROR_PATH_DENIED,
-                    "workspace path must be relative",
+                    "workspace path must be relative to a workspace root",
                     None,
                 ));
             }
@@ -394,15 +388,10 @@ fn validate_relative_path_impl(
     }
 
     if components.is_empty() {
-        let message = if allow_root {
-            "workspace path must be exact '.' or name a relative path"
-        } else {
-            "workspace path must name a file"
-        };
         return Err(PathValidationError::new(
             ERROR_PATH_DENIED,
-            message,
-            Some(raw_path.to_owned()),
+            "workspace path must name a file inside the workspace root",
+            Some(relative_text.as_ref().to_owned()),
         ));
     }
 
@@ -413,8 +402,49 @@ fn validate_relative_path_impl(
     })
 }
 
-fn has_forbidden_raw_dot_segment(raw_path: &str) -> bool {
-    raw_path
-        .split('/')
-        .any(|segment| segment == "." || segment == "..")
+/// Converts an absolute argument inside a workspace root into a relative path.
+///
+/// Returns `None` when the argument is already relative, and denies an absolute
+/// path that no root contains. Roots are canonical and the comparison is
+/// lexical over path components, so a path that only shares a prefix string
+/// with a root does not match it.
+fn absolute_path_within_root<I, P>(
+    raw_path: &str,
+    roots: I,
+) -> Result<Option<String>, PathValidationError>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<Path>,
+{
+    let requested = Path::new(raw_path);
+    if !requested.is_absolute() {
+        return Ok(None);
+    }
+
+    for root in roots {
+        let Ok(stripped) = requested.strip_prefix(root.as_ref()) else {
+            continue;
+        };
+        let Some(stripped) = stripped.to_str() else {
+            return Err(PathValidationError::new(
+                ERROR_PATH_DENIED,
+                "workspace path must be UTF-8",
+                None,
+            ));
+        };
+        if stripped.is_empty() {
+            return Err(PathValidationError::new(
+                ERROR_PATH_DENIED,
+                "workspace path must name a file inside the workspace root, not the root itself",
+                None,
+            ));
+        }
+        return Ok(Some(stripped.to_owned()));
+    }
+
+    Err(PathValidationError::new(
+        ERROR_PATH_DENIED,
+        "workspace path is an absolute path outside every configured workspace root; use a workspace-relative path or an absolute path inside the workspace",
+        None,
+    ))
 }

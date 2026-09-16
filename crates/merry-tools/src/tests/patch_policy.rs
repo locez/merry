@@ -289,7 +289,6 @@ fn apply_patch_rejects_bad_hidden_missing_and_directory_paths_without_mutation()
         "/etc/passwd".to_owned(),
         "../outside.txt".to_owned(),
         ".secret".to_owned(),
-        "dir/./file.txt".to_owned(),
     ] {
         let outcome = patch_outcome(&tools, &denied, "old", "new");
         let expected_path = if denied.starts_with('/') {
@@ -306,6 +305,17 @@ fn apply_patch_rejects_bad_hidden_missing_and_directory_paths_without_mutation()
         );
     }
     assert_eq!(read_text(&temp.path().join(".secret")), "old\n");
+
+    // A redundant `.` segment is spelling, not a path error: the section is
+    // normalized and the reported path is the workspace-relative form.
+    let normalized = patch_outcome(&tools, "dir/./file.txt", "old", "new");
+    assert_failed_json_for_tool(
+        &normalized,
+        APPLY_PATCH_TOOL,
+        ERROR_FILE_NOT_FOUND,
+        Some("dir/file.txt"),
+        temp.path(),
+    );
 
     let missing = patch_outcome(&tools, "missing.txt", "old", "new");
     assert_failed_json_for_tool(

@@ -13,7 +13,7 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadTextInput {
     #[schemars(
-        description = "Workspace-relative UTF-8 text file path to read. Do not use host-absolute paths or parent traversal.",
+        description = "UTF-8 text file path to read, relative to a workspace root or absolute inside the workspace. A path outside the workspace is denied.",
         length(min = 1)
     )]
     pub(crate) path: String,

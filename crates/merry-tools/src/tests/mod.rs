@@ -11,7 +11,7 @@ use crate::{
         ApplyPatchExecutor, ApplyPatchInput, apply_patch_blocking, apply_patch_blocking_checked,
         propose_apply_patch_blocking_checked, stable_content_fingerprint,
     },
-    path::validate_relative_path,
+    path::validate_workspace_path_argument,
     read::{ReadTextExecutor, ReadTextInput, read_text_blocking},
     trace::{
         TRACE_PATH_MAX_CHARS, bounded_trace_text, install_patch_test_after_write_hook,
@@ -561,6 +561,7 @@ mod patch;
 mod patch_policy;
 mod read;
 mod trace;
+mod workspace_path;
 
 fn read_text_spec_default() -> ToolSpec {
     crate::read::spec(&WorkspaceToolLimits::default()).expect("valid read tool schema")

@@ -21,7 +21,7 @@ use crate::{
     },
     path::{
         NewWorkspacePath, ValidatedRelativePath, open_file_for_read, resolve_existing_path,
-        resolve_new_file_path, validate_relative_path,
+        resolve_new_file_path, validate_workspace_path_argument,
     },
     state::{WorkspaceToolState, matches_any_scope_path},
 };
@@ -352,12 +352,20 @@ fn plan_apply_patch_file(
 ) -> Result<WorkspacePatchFilePlan, WorkspacePatchFilePlanError> {
     match file_patch.operation {
         WorkspacePatchOperation::Add { lines } => {
-            let relative = validate_relative_path(&file_patch.path, state.allow_hidden)
-                .map_err(WorkspacePatchFilePlanError::Path)?;
+            let relative = validate_workspace_path_argument(
+                &file_patch.path,
+                state.allow_hidden,
+                &state.roots,
+            )
+            .map_err(WorkspacePatchFilePlanError::Path)?;
+            // Failures report the normalized workspace-relative path so a
+            // section that named the file with an absolute path never sends a
+            // host path back through a tool result.
+            let display = relative.display.clone();
             validate_patch_write_boundary(state, &relative).map_err(|error| {
                 WorkspacePatchFilePlanError::Domain {
                     error,
-                    path: file_patch.path.clone(),
+                    path: display.clone(),
                 }
             })?;
 
@@ -384,7 +392,7 @@ fn plan_apply_patch_file(
                             BlockingToolError::Domain(error) => {
                                 WorkspacePatchFilePlanError::Domain {
                                     error,
-                                    path: file_patch.path.clone(),
+                                    path: display.clone(),
                                 }
                             }
                             BlockingToolError::Cancelled => WorkspacePatchFilePlanError::Cancelled,
@@ -420,11 +428,12 @@ fn plan_apply_patch_file(
             }
 
             if let Some(path) = first_parent_missing {
+                let display = relative.display.clone();
                 return plan_new_apply_patch_file(relative, path, lines, state, is_cancelled)
                     .map_err(|error| match error {
                         BlockingToolError::Domain(error) => WorkspacePatchFilePlanError::Domain {
                             error,
-                            path: file_patch.path,
+                            path: display,
                         },
                         BlockingToolError::Cancelled => WorkspacePatchFilePlanError::Cancelled,
                     });
@@ -441,6 +450,7 @@ fn plan_apply_patch_file(
         WorkspacePatchOperation::Update { hunks } => {
             let (relative, path) =
                 resolve_existing_patch_path(state, &file_patch.path, is_cancelled)?;
+            let display = relative.display.clone();
             plan_resolved_apply_patch_file(
                 relative,
                 path,
@@ -449,13 +459,14 @@ fn plan_apply_patch_file(
                 state,
                 is_cancelled,
             )
-            .map_err(|error| file_plan_error(error, file_patch.path))
+            .map_err(|error| file_plan_error(error, display))
         }
         WorkspacePatchOperation::Delete => {
             let (relative, path) =
                 resolve_existing_patch_path(state, &file_patch.path, is_cancelled)?;
+            let display = relative.display.clone();
             plan_resolved_apply_patch_delete(relative, path, state, is_cancelled)
-                .map_err(|error| file_plan_error(error, file_patch.path))
+                .map_err(|error| file_plan_error(error, display))
         }
     }
 }
@@ -471,12 +482,12 @@ fn resolve_existing_patch_path(
     requested: &str,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<(ValidatedRelativePath, PathBuf), WorkspacePatchFilePlanError> {
-    let relative = validate_relative_path(requested, state.allow_hidden)
+    let relative = validate_workspace_path_argument(requested, state.allow_hidden, &state.roots)
         .map_err(WorkspacePatchFilePlanError::Path)?;
     validate_patch_write_boundary(state, &relative).map_err(|error| {
         WorkspacePatchFilePlanError::Domain {
             error,
-            path: requested.to_owned(),
+            path: relative.display.clone(),
         }
     })?;
 

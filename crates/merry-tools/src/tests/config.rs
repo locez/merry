@@ -151,6 +151,7 @@ fn hidden_paths_can_be_enabled_explicitly() {
 fn non_utf8_component_is_rejected_when_constructible() {
     let path = PathBuf::from(OsStr::new("plain"));
     let text = path.to_str().expect("plain path is utf8");
-    let validated = validate_relative_path(text, false).expect("plain path validates");
+    let validated = validate_workspace_path_argument(text, false, std::iter::empty::<PathBuf>())
+        .expect("plain path validates");
     assert_eq!(validated.display, "plain");
 }

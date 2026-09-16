@@ -20,12 +20,12 @@ pub(crate) const ERROR_PATCH_NOOP: &str = "apply_patch_noop";
 pub(crate) const ERROR_PREIMAGE_ABSENT: &str = "apply_patch_preimage_absent";
 pub(crate) const ERROR_PREIMAGE_AMBIGUOUS: &str = "apply_patch_preimage_ambiguous";
 
-pub(crate) const WORKSPACE_PATH_CONTRACT: &str = "workspace tool path values are relative to a configured workspace root; do not prefix them with a process cwd, repository root, or absolute host path";
+pub(crate) const WORKSPACE_PATH_CONTRACT: &str = "workspace tool path values are resolved against a configured workspace root: a path relative to that root and an absolute path inside it both address the same file, while an absolute path outside the workspace is denied";
 
 const MAX_FAILURE_DIAGNOSTIC_CHARS: usize = 512;
 
-const GUIDANCE_INVALID_ARGUMENTS: &str = "Fix the workspace tool arguments before retrying. Use the tool schema exactly; path fields must be workspace-relative and must not include host absolute paths, process cwd prefixes, or parent traversal.";
-const GUIDANCE_PATH_RECOVERY: &str = "Use a workspace-relative path from the configured root. If the target is unclear, use `run_process` for focused discovery when available, or ask for the exact path before retrying.";
+const GUIDANCE_INVALID_ARGUMENTS: &str = "Fix the workspace tool arguments before retrying. Use the tool schema exactly; path fields name a file inside the workspace, either relative to the workspace root or as an absolute path inside it, and must not escape the root.";
+const GUIDANCE_PATH_RECOVERY: &str = "Use a path inside the configured workspace root, relative to that root or absolute. If the target is unclear, use `run_process` for focused discovery when available, or ask for the exact path before retrying.";
 const GUIDANCE_FILE_TOO_LARGE: &str = "Do not assume omitted content or rejected patch content is irrelevant. Narrow the read or patch range, split the change, use `read_text` for focused ranges, or use an authorized process command for exact inspection when available.";
 const GUIDANCE_PATCH_PREIMAGE: &str = "Re-read the target file at the reported lines, then retry with a smaller unique preimage that matches the current bytes exactly. Do not guess file state from an old observation.";
 const GUIDANCE_PATCH_SYNTAX: &str = "Fix the patch text itself: send exactly one `*** Begin Patch` ... `*** End Patch` envelope, at most one `*** Add File:` or `*** Delete File:` section per file, and prefix every hunk line with one space, `+`, or `-`. Repeated `*** Update File:` sections for one file merge into a single change. Use `read_text` for the exact current lines instead of guessing them.";
