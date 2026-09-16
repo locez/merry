@@ -26,5 +26,8 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tokio-util.workspace = true
 
+[build-dependencies]
+pyo3-build-config.workspace = true
+
 [lints]
 workspace = true

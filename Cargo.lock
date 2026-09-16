@@ -1751,6 +1751,7 @@ dependencies = [
  "merry-llm",
  "pyo3",
  "pyo3-async-runtimes",
+ "pyo3-build-config",
  "schemars",
  "serde",
  "serde_json",
