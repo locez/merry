@@ -14,14 +14,20 @@ use crate::errors::{ERROR_INVALID_ARGUMENTS, failed_outcome};
 pub(crate) const TRACE_PATH_MAX_CHARS: usize = 96;
 
 #[cfg(test)]
-static PATCH_TEST_AFTER_WRITE_HOOK: OnceLock<Mutex<Option<PatchTestAfterWriteHook>>> =
-    OnceLock::new();
+static PATCH_TEST_BEFORE_MUTATION_HOOK: OnceLock<Mutex<Option<PatchTestHook>>> = OnceLock::new();
+#[cfg(test)]
+static PATCH_TEST_AFTER_WRITE_HOOK: OnceLock<Mutex<Option<PatchTestHook>>> = OnceLock::new();
 #[cfg(test)]
 static TRACE_START_TEST_HOOK: OnceLock<Mutex<Option<TraceStartTestHook>>> = OnceLock::new();
 
+/// A one-shot patch-execution hook bound to one file path.
+///
+/// The hook runs at most once, for the path it was installed with, so a test
+/// can place a filesystem or cancellation change exactly inside patch execution
+/// without affecting another file or a later patch in the same test.
 #[cfg(test)]
 #[derive(Debug)]
-struct PatchTestAfterWriteHook {
+struct PatchTestHook {
     root: PathBuf,
     hook: fn(&Path),
     consumed: AtomicBool,
@@ -36,13 +42,23 @@ struct TraceStartTestHook {
 }
 
 #[cfg(test)]
-impl PatchTestAfterWriteHook {
+impl PatchTestHook {
     fn new(root: PathBuf, hook: fn(&Path)) -> Self {
         Self {
             root,
             hook,
             consumed: AtomicBool::new(false),
         }
+    }
+
+    fn run_once(&self, path: &Path) {
+        if path != self.root {
+            return;
+        }
+        if self.consumed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        (self.hook)(&self.root);
     }
 }
 
@@ -57,13 +73,28 @@ impl TraceStartTestHook {
     }
 }
 
+/// Installs the hook that runs after a patch writes or removes a file.
 #[cfg(test)]
 pub(crate) fn install_patch_test_after_write_hook(root: PathBuf, hook: fn(&Path)) {
-    PATCH_TEST_AFTER_WRITE_HOOK
-        .get_or_init(|| Mutex::new(None))
+    install_patch_test_hook(&PATCH_TEST_AFTER_WRITE_HOOK, root, hook);
+}
+
+/// Installs the hook that runs immediately before a patch mutates a file.
+#[cfg(test)]
+pub(crate) fn install_patch_test_before_mutation_hook(root: PathBuf, hook: fn(&Path)) {
+    install_patch_test_hook(&PATCH_TEST_BEFORE_MUTATION_HOOK, root, hook);
+}
+
+#[cfg(test)]
+fn install_patch_test_hook(
+    slot: &'static OnceLock<Mutex<Option<PatchTestHook>>>,
+    root: PathBuf,
+    hook: fn(&Path),
+) {
+    slot.get_or_init(|| Mutex::new(None))
         .lock()
         .expect("patch test hook mutex should not be poisoned")
-        .replace(PatchTestAfterWriteHook::new(root, hook));
+        .replace(PatchTestHook::new(root, hook));
 }
 
 #[cfg(test)]
@@ -75,9 +106,21 @@ pub(crate) fn install_trace_start_test_hook(tool_call_id: &str, hook: fn()) {
         .replace(TraceStartTestHook::new(tool_call_id.to_owned(), hook));
 }
 
+/// Runs the installed before-mutation hook for a matching path.
+#[cfg(test)]
+pub(crate) fn maybe_run_patch_test_before_mutation_hook(root: &Path) {
+    maybe_run_patch_test_hook(&PATCH_TEST_BEFORE_MUTATION_HOOK, root);
+}
+
+/// Runs the installed after-write hook for a matching path.
 #[cfg(test)]
 pub(crate) fn maybe_run_patch_test_after_write_hook(root: &Path) {
-    let Some(hook_slot) = PATCH_TEST_AFTER_WRITE_HOOK.get() else {
+    maybe_run_patch_test_hook(&PATCH_TEST_AFTER_WRITE_HOOK, root);
+}
+
+#[cfg(test)]
+fn maybe_run_patch_test_hook(slot: &'static OnceLock<Mutex<Option<PatchTestHook>>>, root: &Path) {
+    let Some(hook_slot) = slot.get() else {
         return;
     };
     let hook_guard = hook_slot
@@ -86,13 +129,7 @@ pub(crate) fn maybe_run_patch_test_after_write_hook(root: &Path) {
     let Some(hook) = hook_guard.as_ref() else {
         return;
     };
-    if root != hook.root {
-        return;
-    }
-    if hook.consumed.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    (hook.hook)(&hook.root);
+    hook.run_once(root);
 }
 
 #[cfg(test)]

@@ -541,6 +541,62 @@ fn apply_patch_delete_respects_write_scope_and_forbidden_paths() {
     assert!(temp.path().join("allowed/secret.txt").exists());
 }
 
+/// Rewrites a planned target between planning and mutation.
+fn rewrite_file_before_mutation(path: &Path) {
+    fs::write(path, "changed after planning\n").expect("test hook should rewrite the target file");
+}
+
+#[test]
+fn apply_patch_delete_refuses_file_changed_before_mutation() {
+    let temp = TempWorkspace::new("patch-delete-stale-mutation");
+    temp.write_text("note.txt", "alpha\nbeta\n");
+    let tools = tools_for(temp.path());
+    let note_path =
+        fs::canonicalize(temp.path().join("note.txt")).expect("note path should canonicalize");
+    install_patch_test_before_mutation_hook(note_path.clone(), rewrite_file_before_mutation);
+
+    let outcome = patch_text_outcome(&tools, &delete_patch("note.txt"));
+
+    assert_failed_json_for_tool(
+        &outcome,
+        APPLY_PATCH_TOOL,
+        ERROR_WRITE_FAILED,
+        Some("note.txt"),
+        temp.path(),
+    );
+    assert_eq!(
+        read_text(&note_path),
+        "changed after planning\n",
+        "a delete must not remove content that replaced the planned preimage"
+    );
+    assert!(
+        outcome.execution_evidence().is_none(),
+        "a refused delete must not report execution evidence for content it did not remove"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn apply_patch_delete_removes_write_protected_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempWorkspace::new("patch-delete-write-protected");
+    temp.write_text("note.txt", "alpha\n");
+    let tools = tools_for(temp.path());
+    let note_path = temp.path().join("note.txt");
+    fs::set_permissions(&note_path, fs::Permissions::from_mode(0o444))
+        .expect("note file should be made write-protected");
+
+    let outcome = patch_text_outcome(&tools, &delete_patch("note.txt"));
+
+    assert_eq!(
+        outcome.status(),
+        ToolCallResultStatus::Succeeded,
+        "removal needs write permission on the parent directory, not the file"
+    );
+    assert!(!note_path.exists());
+}
+
 #[test]
 fn apply_patch_cancellation_after_write_returns_durable_outcome() {
     let temp = TempWorkspace::new("patch-cancel-after-write");

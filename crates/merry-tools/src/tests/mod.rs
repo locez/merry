@@ -4,8 +4,8 @@ use crate::{
         ERROR_FILE_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_FILE_TOO_LARGE,
         ERROR_INVALID_ARGUMENTS, ERROR_NOT_DIRECTORY, ERROR_NOT_FILE, ERROR_NOT_UTF8,
         ERROR_PATCH_NOOP, ERROR_PATCH_SYNTAX, ERROR_PATH_DENIED, ERROR_PREIMAGE_ABSENT,
-        ERROR_PREIMAGE_AMBIGUOUS, ERROR_PROPOSAL_MISMATCH, WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE,
-        WORKSPACE_PATH_CONTRACT,
+        ERROR_PREIMAGE_AMBIGUOUS, ERROR_PROPOSAL_MISMATCH, ERROR_WRITE_FAILED,
+        WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE, WORKSPACE_PATH_CONTRACT,
     },
     patch::{
         ApplyPatchExecutor, ApplyPatchInput, apply_patch_blocking, apply_patch_blocking_checked,
@@ -15,7 +15,7 @@ use crate::{
     read::{ReadTextExecutor, ReadTextInput, read_text_blocking},
     trace::{
         TRACE_PATH_MAX_CHARS, bounded_trace_text, install_patch_test_after_write_hook,
-        install_trace_start_test_hook,
+        install_patch_test_before_mutation_hook, install_trace_start_test_hook,
     },
 };
 use merry_core::{

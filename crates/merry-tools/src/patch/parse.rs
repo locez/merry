@@ -43,6 +43,18 @@ impl SectionKind {
             Self::Delete => DELETE_PREFIX,
         }
     }
+
+    /// Splits a `*** Add File:`, `*** Update File:`, or `*** Delete File:`
+    /// header into its kind and the raw path that follows it.
+    ///
+    /// Every place that decides whether a line starts a new file section uses
+    /// this, so adding another section kind cannot leave a body parser that
+    /// still swallows the new header as content.
+    fn from_header(line: &str) -> Option<(Self, &str)> {
+        [Self::Add, Self::Update, Self::Delete]
+            .into_iter()
+            .find_map(|kind| line.strip_prefix(kind.marker()).map(|path| (kind, path)))
+    }
 }
 
 #[derive(Debug)]
@@ -133,13 +145,7 @@ pub(super) fn parse_apply_patch(
             ));
         }
 
-        let (kind, path) = if let Some(path) = line.strip_prefix(ADD_PREFIX) {
-            (SectionKind::Add, path.trim())
-        } else if let Some(path) = line.strip_prefix(UPDATE_PREFIX) {
-            (SectionKind::Update, path.trim())
-        } else if let Some(path) = line.strip_prefix(DELETE_PREFIX) {
-            (SectionKind::Delete, path.trim())
-        } else {
+        let Some((kind, path)) = SectionKind::from_header(line) else {
             return Err(WorkspacePatchParseError::syntax(
                 format!(
                     "workspace patch expected `*** Add File: <path>`, `*** Update File: <path>`, or `*** Delete File: <path>`; found `{}`",
@@ -148,6 +154,7 @@ pub(super) fn parse_apply_patch(
                 None,
             ));
         };
+        let path = path.trim();
         if path.is_empty() {
             return Err(WorkspacePatchParseError::syntax(
                 format!(
@@ -252,11 +259,7 @@ pub(super) fn parse_apply_patch_update_hunks(
     let mut hunks = Vec::new();
     let mut current = Vec::new();
     while let Some(line) = patch_line(lines.get(*index).copied()) {
-        if line == end
-            || line.starts_with(ADD_PREFIX)
-            || line.starts_with(UPDATE_PREFIX)
-            || line.starts_with(DELETE_PREFIX)
-        {
+        if line == end || SectionKind::from_header(line).is_some() {
             break;
         }
         if line.trim().is_empty() && current.is_empty() {
@@ -311,11 +314,7 @@ fn parse_apply_patch_add_lines(
 ) -> Result<Vec<String>, WorkspacePatchParseError> {
     let mut contents = Vec::new();
     while let Some(line) = patch_line(lines.get(*index).copied()) {
-        if line == end
-            || line.starts_with(ADD_PREFIX)
-            || line.starts_with(UPDATE_PREFIX)
-            || line.starts_with(DELETE_PREFIX)
-        {
+        if line == end || SectionKind::from_header(line).is_some() {
             break;
         }
 
@@ -365,11 +364,7 @@ fn parse_apply_patch_delete_section(
     end: &str,
 ) -> Result<(), WorkspacePatchParseError> {
     while let Some(line) = patch_line(lines.get(*index).copied()) {
-        if line == end
-            || line.starts_with(ADD_PREFIX)
-            || line.starts_with(UPDATE_PREFIX)
-            || line.starts_with(DELETE_PREFIX)
-        {
+        if line == end || SectionKind::from_header(line).is_some() {
             return Ok(());
         }
         if line.trim().is_empty() {

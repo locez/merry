@@ -9,14 +9,16 @@ use merry_runtime::{
 };
 
 #[cfg(test)]
-use crate::trace::maybe_run_patch_test_after_write_hook;
+use crate::trace::{
+    maybe_run_patch_test_after_write_hook, maybe_run_patch_test_before_mutation_hook,
+};
 use crate::{
     APPLY_PATCH_TOOL,
     errors::{
         BlockingToolError, DomainError, ERROR_FILE_TOO_LARGE, ERROR_NOT_FILE, ERROR_READ_FAILED,
         ERROR_WRITE_FAILED, failed_outcome,
     },
-    path::{open_file_for_patch, open_file_for_patch_create_new},
+    path::{open_file_for_patch, open_file_for_patch_create_new, open_file_for_read},
 };
 
 use super::{
@@ -106,6 +108,19 @@ enum PatchFileWriteError {
     Cancelled,
 }
 
+/// Opens the planned file with the access mode its operation needs.
+///
+/// An update rewrites the file, so it opens read-write. A delete only reads the
+/// file to verify its preimage and then unlinks it, so it opens read-only:
+/// removal needs write permission on the parent directory, not on the file.
+fn open_planned_patch_file(plan: &WorkspacePatchFilePlan) -> Result<fs::File, DomainError> {
+    match plan.mode {
+        WorkspacePatchFileMode::CreateNew => open_file_for_patch_create_new(&plan.path),
+        WorkspacePatchFileMode::UpdateExisting => open_file_for_patch(&plan.path),
+        WorkspacePatchFileMode::DeleteExisting => open_file_for_read(&plan.path),
+    }
+}
+
 fn execute_apply_patch_file_plan(
     plan: &WorkspacePatchFilePlan,
     is_cancelled: &dyn Fn() -> bool,
@@ -114,11 +129,11 @@ fn execute_apply_patch_file_plan(
     if is_cancelled() {
         return Err(PatchFileWriteError::Cancelled);
     }
-    let mut file = match if plan.mode == WorkspacePatchFileMode::CreateNew {
-        open_file_for_patch_create_new(&plan.path)
-    } else {
-        open_file_for_patch(&plan.path)
-    } {
+
+    #[cfg(test)]
+    maybe_run_patch_test_before_mutation_hook(&plan.path);
+
+    let mut file = match open_planned_patch_file(plan) {
         Ok(file) => file,
         Err(error) => {
             return Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(
@@ -129,14 +144,19 @@ fn execute_apply_patch_file_plan(
             ))));
         }
     };
-    if plan.mode == WorkspacePatchFileMode::UpdateExisting {
+    // Re-read the preimage immediately before the mutation. This closes the
+    // window between planning and acting: an edit, replacement, or removal that
+    // landed after the plan was built must fail here instead of overwriting or
+    // unlinking bytes the caller never saw. Updates and deletes share it so a
+    // stale delete cannot report evidence for content it did not remove.
+    if plan.mode != WorkspacePatchFileMode::CreateNew {
         match read_open_patch_file_before_write(&mut file, plan.max_read_bytes, is_cancelled) {
             Ok(bytes) if bytes == plan.content_before.as_bytes() => {}
             Ok(_) => {
                 return Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(
                     APPLY_PATCH_TOOL,
                     ERROR_WRITE_FAILED,
-                    "workspace file changed before patch write",
+                    "workspace file changed after the patch was planned; re-read the target file and submit a fresh patch",
                     Some(relative_display),
                 ))));
             }
@@ -152,7 +172,8 @@ fn execute_apply_patch_file_plan(
         }
     }
     if plan.mode == WorkspacePatchFileMode::DeleteExisting {
-        return delete_apply_patch_file(plan, file, relative_display);
+        drop(file);
+        return delete_apply_patch_file(plan, relative_display);
     }
     if file.seek(SeekFrom::Start(0)).is_err() {
         return Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(
@@ -219,18 +240,17 @@ fn execute_apply_patch_file_plan(
     Ok(content_after)
 }
 
-/// Unlinks a planned file whose preimage was already verified.
+/// Unlinks a planned file whose preimage was verified immediately before this
+/// call.
 ///
 /// Deletion is verified the same way a write is: the plan recorded the exact
-/// preimage and byte count, and the caller re-read the file before this point.
-/// Success requires the path to be absent afterwards, so a partial or blocked
-/// removal reports a failure instead of claiming the file is gone.
+/// preimage and byte count, the caller compared the current bytes against it,
+/// and success requires the path to be absent afterwards. A partial or blocked
+/// removal therefore reports a failure instead of claiming the file is gone.
 fn delete_apply_patch_file(
     plan: &WorkspacePatchFilePlan,
-    file: fs::File,
     relative_display: String,
 ) -> Result<String, PatchFileWriteError> {
-    drop(file);
     if fs::remove_file(&plan.path).is_err() {
         return Err(PatchFileWriteError::Outcome(Box::new(failed_outcome(
             APPLY_PATCH_TOOL,

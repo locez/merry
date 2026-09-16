@@ -62,6 +62,7 @@ fn apply_patch_paths(patch: &str) -> Vec<&str> {
         .filter_map(|line| {
             line.strip_prefix("*** Add File: ")
                 .or_else(|| line.strip_prefix("*** Update File: "))
+                .or_else(|| line.strip_prefix("*** Delete File: "))
                 .map(str::trim)
         })
         .filter(|path| !path.is_empty())
@@ -181,6 +182,21 @@ mod tests {
             format_tool_call_detail("apply_patch", arguments.as_object().unwrap()).unwrap();
 
         assert!(detail.starts_with("patch=notes/new.txt"));
+    }
+
+    #[test]
+    fn apply_patch_detail_names_delete_file_path() {
+        let arguments = json!({
+            "patch": "*** Begin Patch\n*** Delete File: notes/obsolete.txt\n*** End Patch"
+        });
+
+        let detail =
+            format_tool_call_detail("apply_patch", arguments.as_object().unwrap()).unwrap();
+
+        assert!(
+            detail.starts_with("patch=notes/obsolete.txt"),
+            "a delete must name the file it removes, not only the payload size: {detail}"
+        );
     }
 
     #[test]
