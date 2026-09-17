@@ -1,7 +1,14 @@
 use super::{
-    CitationCompactionPolicy, CompactionError, CompactionReasoningReserve,
-    allowed_input_tokens_for_window, tightened_covered_budget,
+    CitationCompactionPolicy, CompactionError, CompactionReasoningReserve, tightened_covered_budget,
 };
+
+/// Compaction output ceiling for `window` at `input_tokens`.
+fn ceiling(reserve: CompactionReasoningReserve, window: u64, input_tokens: u64) -> u64 {
+    let resolved = CitationCompactionPolicy::default()
+        .resolve(window)
+        .expect("budget resolves");
+    reserve.output_ceiling(resolved, window, input_tokens)
+}
 
 /// Numbers below come from the session that exposed the starvation.
 ///
@@ -19,8 +26,11 @@ fn reasoning_reserve_grows_with_request_input_instead_of_the_text_budget() {
     let measured_input_tokens = 200_387;
 
     assert_eq!(text_budget, 21_760);
-    let ceiling =
-        CompactionReasoningReserve::INITIAL.output_ceiling(resolved, measured_input_tokens);
+    let ceiling = CompactionReasoningReserve::INITIAL.output_ceiling(
+        resolved,
+        272_000,
+        measured_input_tokens,
+    );
     assert!(
         ceiling > 2 * text_budget,
         "the reserve must exceed the old text-budget multiple, got {ceiling}"
@@ -29,7 +39,7 @@ fn reasoning_reserve_grows_with_request_input_instead_of_the_text_budget() {
     // fitter covers less history before it sends the request.
     let mut fitted_input_tokens = measured_input_tokens;
     while fitted_input_tokens
-        + CompactionReasoningReserve::INITIAL.output_ceiling(resolved, fitted_input_tokens)
+        + CompactionReasoningReserve::INITIAL.output_ceiling(resolved, 272_000, fitted_input_tokens)
         > 272_000
     {
         fitted_input_tokens -= fitted_input_tokens / 100;
@@ -40,13 +50,17 @@ fn reasoning_reserve_grows_with_request_input_instead_of_the_text_budget() {
     );
     assert!(
         fitted_input_tokens
-            + CompactionReasoningReserve::INITIAL.output_ceiling(resolved, fitted_input_tokens)
+            + CompactionReasoningReserve::INITIAL.output_ceiling(
+                resolved,
+                272_000,
+                fitted_input_tokens
+            )
             <= 272_000
     );
 
     let degraded = CompactionReasoningReserve::INITIAL.degraded();
     assert!(
-        degraded.output_ceiling(resolved, measured_input_tokens) > ceiling,
+        degraded.output_ceiling(resolved, 272_000, measured_input_tokens) > ceiling,
         "a truncated attempt must retry with a strictly larger reserve"
     );
 }
@@ -155,7 +169,7 @@ fn proportional_reserve_refit_keeps_a_usable_covered_window() {
     let reserve = CompactionReasoningReserve::INITIAL.degraded();
 
     assert_eq!(reserve.percent(), 50);
-    let allowed_input = allowed_input_tokens_for_window(window, text_budget, reserve);
+    let allowed_input = reserve.allowed_input_tokens(window, text_budget);
     let tightened = tightened_covered_budget(covered_payload, measured_input, allowed_input)
         .expect("a proportional refit must keep some covered window");
 
@@ -164,12 +178,7 @@ fn proportional_reserve_refit_keeps_a_usable_covered_window() {
         "the refit must not collapse coverage to zero"
     );
     let projected_input = measured_input - (covered_payload - tightened);
-    let projected_output = reserve.output_ceiling(
-        CitationCompactionPolicy::default()
-            .resolve(window)
-            .expect("budget resolves"),
-        projected_input,
-    );
+    let projected_output = ceiling(reserve, window, projected_input);
     assert!(
         projected_input + projected_output <= window,
         "refitted request must fit the window: input {projected_input} plus output {projected_output}"
@@ -181,13 +190,10 @@ fn reserve_shrinks_the_input_budget_monotonically() {
     let window = 272_000;
     let text_budget = 21_760;
 
-    let initial =
-        allowed_input_tokens_for_window(window, text_budget, CompactionReasoningReserve::INITIAL);
-    let degraded = allowed_input_tokens_for_window(
-        window,
-        text_budget,
-        CompactionReasoningReserve::INITIAL.degraded(),
-    );
+    let initial = CompactionReasoningReserve::INITIAL.allowed_input_tokens(window, text_budget);
+    let degraded = CompactionReasoningReserve::INITIAL
+        .degraded()
+        .allowed_input_tokens(window, text_budget);
     assert!(
         degraded < initial,
         "a larger reserve must leave room for less input: {initial} then {degraded}"
@@ -198,7 +204,101 @@ fn reserve_shrinks_the_input_budget_monotonically() {
 #[test]
 fn window_smaller_than_the_text_budget_admits_no_input() {
     assert_eq!(
-        allowed_input_tokens_for_window(16_000, 21_760, CompactionReasoningReserve::INITIAL),
+        CompactionReasoningReserve::INITIAL.allowed_input_tokens(16_000, 21_760),
         0
     );
+}
+
+/// Numbers from the session that looped between truncation and archive-only.
+///
+/// The window was 272,000 tokens, the checkpoint text budget 21,760, the covered
+/// payload 773,342, and the first fitted request measured 798,687 input tokens.
+/// The old refit gave up 1.25x the excess input, collapsed coverage to zero, and
+/// degraded to archive-only, which never replaced the checkpoint: the session
+/// stayed at ~236k tokens and re-ran compaction every couple of minutes.
+#[test]
+fn refit_keeps_coverage_when_the_window_cannot_host_the_full_request() {
+    let window = 272_000;
+    let resolved = CitationCompactionPolicy::default()
+        .resolve(window)
+        .expect("budget resolves");
+    let text_budget = resolved.output_token_limit();
+    let covered_payload = 773_342;
+    let measured_input = 798_687;
+
+    let allowed_input =
+        CompactionReasoningReserve::INITIAL.allowed_input_tokens(window, text_budget);
+    let tightened = tightened_covered_budget(covered_payload, measured_input, allowed_input)
+        .expect("the refit must keep a covered window");
+    assert!(
+        tightened > 0,
+        "the refit must not collapse coverage to zero"
+    );
+    assert!(
+        tightened >= covered_payload / 8,
+        "the refit must keep a useful share of the covered history, kept {tightened} of {covered_payload}"
+    );
+
+    let projected_input = measured_input - (covered_payload - tightened);
+    let projected_output =
+        CompactionReasoningReserve::INITIAL.output_ceiling(resolved, window, projected_input);
+    assert!(
+        projected_input + projected_output <= window,
+        "the refitted request must fit: input {projected_input} plus output {projected_output}"
+    );
+}
+
+/// A small request still gets a usable ceiling, because reasoning does not shrink.
+///
+/// The same session truncated at a 34,022-token ceiling for a 49,051-token input
+/// and at 44,337 for 90,308, while 59,624 and 66,956 finished larger requests.
+/// The floor keeps small requests above that unreliable range.
+#[test]
+fn small_requests_still_receive_a_usable_output_ceiling() {
+    let window = 272_000;
+    let resolved = CitationCompactionPolicy::default()
+        .resolve(window)
+        .expect("budget resolves");
+    let text_budget = resolved.output_token_limit();
+
+    for input in [49_051, 90_308] {
+        let ceiling = CompactionReasoningReserve::INITIAL.output_ceiling(resolved, window, input);
+        assert!(
+            ceiling >= 3 * text_budget,
+            "ceiling {ceiling} for input {input} must clear the observed truncation range"
+        );
+        assert!(
+            input + ceiling <= window,
+            "the floored ceiling must still fit the window: input {input} plus output {ceiling}"
+        );
+    }
+}
+
+/// The floor and the share agree with the allowed-input solver.
+#[test]
+fn allowed_input_matches_the_ceiling_it_promises() {
+    let window = 272_000;
+    let resolved = CitationCompactionPolicy::default()
+        .resolve(window)
+        .expect("budget resolves");
+    let text_budget = resolved.output_token_limit();
+
+    for reserve in [
+        CompactionReasoningReserve::INITIAL,
+        CompactionReasoningReserve::INITIAL.degraded(),
+    ] {
+        let allowed = reserve.allowed_input_tokens(window, text_budget);
+        let ceiling = reserve.output_ceiling(resolved, window, allowed);
+        assert!(
+            allowed + ceiling <= window,
+            "allowed input {allowed} must fit with ceiling {ceiling}"
+        );
+        // Integer division leaves a token of rounding slack, so the solver must
+        // simply not waste meaningful headroom beyond that.
+        let next = allowed + 4;
+        assert!(
+            next + reserve.output_ceiling(resolved, window, next) > window,
+            "allowed input {allowed} leaves room for input {next}"
+        );
+    }
 }

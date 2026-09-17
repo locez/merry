@@ -2,7 +2,7 @@
 
 use super::super::RuntimeInner;
 use super::fit::{
-    CompactionRequestFit, ReservePolicy, compile_fitted_compaction_request,
+    CompactionModelLimits, CompactionRequestFit, ReservePolicy, compile_fitted_compaction_request,
     trace_compaction_request,
 };
 use super::{
@@ -13,8 +13,7 @@ use crate::{
     CompactionError, RuntimeError, RuntimeModelRole,
     compaction::{
         CompactionCoverageBudget, CompactionPreparation, CompactionReasoningReserve,
-        allowed_input_tokens_for_window, compaction_model_window, tightened_covered_budget,
-        validate_compaction_model_window,
+        compaction_model_window, tightened_covered_budget, validate_compaction_model_window,
     },
 };
 use merry_llm::ReasoningEffort;
@@ -76,6 +75,10 @@ pub(crate) async fn fit_compaction_plan(
         &inner.session_id,
         provider.name(),
     )?;
+    let limits = CompactionModelLimits {
+        window_tokens: compactor_window_tokens,
+        max_output_tokens: provider.capabilities().max_output_tokens(),
+    };
     let stable_prefix = compaction_stable_prefix(inner).await?;
 
     let mut preparation = preparation;
@@ -121,7 +124,7 @@ pub(crate) async fn fit_compaction_plan(
             provider_config.model(),
             &stable_prefix,
             reasoning_effort,
-            compactor_window_tokens,
+            limits,
             reserve,
             policy,
         )? {
@@ -148,10 +151,9 @@ pub(crate) async fn fit_compaction_plan(
                 // token of covered history frees its own reserve as well. Solve
                 // for the input the window can host instead of subtracting the
                 // raw overshoot, which would give up far more history than needed.
-                let allowed_input_tokens = allowed_input_tokens_for_window(
+                let allowed_input_tokens = reserve.allowed_input_tokens(
                     compactor_window_tokens,
                     input.resolved_budget().output_token_limit(),
-                    reserve,
                 );
                 let Some(tightened) = tightened_covered_budget(
                     covered_payload_tokens,

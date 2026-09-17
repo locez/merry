@@ -42,6 +42,15 @@ pub(crate) enum ReservePolicy {
     Required,
 }
 
+/// What the compaction model allows one request to occupy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompactionModelLimits {
+    /// Total token window one request may occupy.
+    pub(crate) window_tokens: u64,
+    /// Output limit the model declares, when it declares one.
+    pub(crate) max_output_tokens: Option<u64>,
+}
+
 /// Compiles one compaction request sized for the window and this attempt's reserve.
 ///
 /// The requested output is the checkpoint text budget plus the reasoning reserve.
@@ -49,12 +58,16 @@ pub(crate) enum ReservePolicy {
 /// the ceiling is sized from it. `policy` decides whether the window has to afford
 /// the whole reserve or only the text budget; a window that affords neither is
 /// reported as `WindowTooSmall` so the caller covers less history instead.
+///
+/// `limits` carries the model's declared output limit as well. The reserve must
+/// not ask for output the compaction model cannot produce, because the provider
+/// rejects such a request outright.
 pub(crate) fn compile_fitted_compaction_request(
     input: &CitationCompactionInput,
     model: &merry_llm::ModelName,
     stable_prefix: &[ModelInputItem],
     reasoning_effort: Option<&ReasoningEffort>,
-    compactor_window_tokens: u64,
+    limits: CompactionModelLimits,
     reserve: CompactionReasoningReserve,
     policy: ReservePolicy,
 ) -> Result<CompactionRequestFit, RuntimeError> {
@@ -73,9 +86,15 @@ pub(crate) fn compile_fitted_compaction_request(
     let text_budget_tokens = input.resolved_budget().output_token_limit();
     let measured = compile(text_budget_tokens)?;
     let estimated_input_tokens = compaction_request_required_tokens(&measured).0;
-    let reserved_output_tokens =
-        reserve.output_ceiling(input.resolved_budget(), estimated_input_tokens);
-    let available_output_tokens = compactor_window_tokens.saturating_sub(estimated_input_tokens);
+    let reserved_output_tokens = reserve
+        .output_ceiling(
+            input.resolved_budget(),
+            limits.window_tokens,
+            estimated_input_tokens,
+        )
+        .min(limits.max_output_tokens.unwrap_or(u64::MAX))
+        .max(text_budget_tokens);
+    let available_output_tokens = limits.window_tokens.saturating_sub(estimated_input_tokens);
     let affordable_output_tokens = available_output_tokens
         .saturating_sub(compaction_window_safety_tokens(available_output_tokens));
     let output_ceiling_tokens = match policy {
