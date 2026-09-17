@@ -102,6 +102,33 @@ fn one_shot_covers_everything_and_shortens_all_but_the_newest_tool_exchanges() {
             "each result names its artifact so a checkpoint entry can cite it"
         );
     }
+
+    // Covered call arguments are dropped outside the retained newest exchange.
+    // Measured on a real session they were 225,800 tokens against a 190,400 token
+    // input budget, so the payload could not fit while they stayed at full length.
+    let tool_exchanges = payload["window"]
+        .as_array()
+        .expect("window is an array")
+        .iter()
+        .flat_map(|turn| turn["items"].as_array().expect("items are an array"))
+        .filter(|item| item["role"] == "tool_exchange")
+        .collect::<Vec<_>>();
+    let full_arguments = tool_exchanges
+        .iter()
+        .filter(|item| item["arguments"]["merry_archived"] != true)
+        .count();
+    assert_eq!(
+        full_arguments, 1,
+        "only the newest covered exchange keeps its call arguments"
+    );
+    let elided_arguments = tool_exchanges
+        .iter()
+        .filter(|item| item["arguments"]["merry_archived"] == true)
+        .count();
+    assert_eq!(
+        elided_arguments, 2,
+        "older covered calls keep only a marker instead of their arguments"
+    );
 }
 
 /// A window that shrank below the retained history still yields a rolling pass.

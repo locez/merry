@@ -115,9 +115,9 @@ pub(crate) enum CompactionShape {
     SinglePass,
     /// Cover the largest window one request hosts, repeating until the request fits.
     Rolling,
-    /// Cover everything before the retained tail once, shortening older tool results.
+    /// Cover everything before the retained tail once, shortening older tool exchanges.
     OneShot {
-        /// Newest covered tool exchanges kept at full length.
+        /// Newest covered tool exchanges kept at full length, arguments and result.
         retained_tool_exchanges: usize,
     },
 }

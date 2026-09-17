@@ -278,10 +278,11 @@ impl SessionState {
     /// Builds one one-shot pass that covers everything before the retained tail.
     ///
     /// The pass keeps the newest `retained_tool_exchanges` covered tool exchanges at
-    /// full length and shortens the older ones, so the payload stops growing with the
-    /// number of tool calls in the covered history. This is what a window that
-    /// shrank far below the history needs: rolling would re-summarize the previous
-    /// checkpoint on every pass.
+    /// full length and shortens the older ones: their arguments are replaced by a
+    /// marker and their results by artifact notices. The payload therefore stops
+    /// growing with the number of tool calls in the covered history. This is what a
+    /// window that shrank far below the history needs, because rolling would
+    /// re-summarize the previous checkpoint on every pass.
     pub(crate) fn build_one_shot_compaction_preparation(
         &self,
         policy: CitationCompactionPolicy,

@@ -163,10 +163,10 @@ retained_model_turns = 5
 # pass instead of rolling. 150 means a body of one and a half windows, which only
 # happens after the context window shrinks below history the session already holds.
 # A rolling reduction would need several passes there, and each pass re-summarizes
-# the previous checkpoint, so the loss compounds. The one-shot pass shortens the
-# older covered tool results to notices, which keeps their status, artifact id, and
-# ref so the checkpoint can still cite them and read the body on demand. Set 0 to
-# always roll.
+# the previous checkpoint, so the loss compounds. The one-shot pass drops the older
+# covered tool calls' arguments and replaces their results with notices, keeping the
+# tool name, call id, status, artifact id, and ref so the checkpoint still records
+# what ran and can cite it. Set 0 to always roll.
 # one_shot_window_percent = 150
 # Covered tool exchanges the one-shot pass keeps at full length, newest first.
 # one_shot_retained_tool_exchanges = 5
