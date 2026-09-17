@@ -1,5 +1,5 @@
 use super::checkpoint_ref_tool::merry_read_checkpoint_ref_tool;
-use super::config::AutomaticCompactionConfig;
+use super::config::CompactionConfig;
 use super::state::AcceptedLocalWorkspaceProcessRunner;
 use super::{Runtime, RuntimeInner};
 use crate::{
@@ -52,7 +52,7 @@ pub struct RuntimeBuilder {
     max_parallel_tool_calls: NonZeroUsize,
     model_configs: RuntimeModelConfigs,
     model_retry_policy: ModelRetryPolicy,
-    automatic_compaction: AutomaticCompactionConfig,
+    automatic_compaction: CompactionConfig,
     capabilities: RuntimeCapabilities,
     prompt_profile: PromptProfile,
     progress_commentary: bool,
@@ -95,7 +95,7 @@ impl RuntimeBuilder {
                 .expect("default parallel tool-call limit is non-zero"),
             model_configs: RuntimeModelConfigs::default(),
             model_retry_policy: ModelRetryPolicy::default(),
-            automatic_compaction: AutomaticCompactionConfig::default(),
+            automatic_compaction: CompactionConfig::default(),
             capabilities: RuntimeCapabilities::default(),
             prompt_profile: PromptProfile::default(),
             progress_commentary: false,
@@ -216,7 +216,7 @@ impl RuntimeBuilder {
     /// the hard context watermark. The current step input is still outside the
     /// compaction input and is projected raw after any installed checkpoint.
     #[must_use]
-    pub fn automatic_compaction(mut self, config: AutomaticCompactionConfig) -> Self {
+    pub fn automatic_compaction(mut self, config: CompactionConfig) -> Self {
         self.automatic_compaction = config;
         self
     }

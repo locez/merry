@@ -2,7 +2,7 @@ use crate::{
     CheckpointHandoffAction, CheckpointId, CheckpointSection, CitationCompactionPolicy,
     ContextCompiler, FileSessionStore, RuntimeModelRole, SessionTranscriptItem, StepContext,
     runtime::{
-        AutomaticCompactionConfig, Runtime,
+        CompactionConfig, Runtime,
         tests::support::{
             common::{collect_step, completed_event_with, model_name, named_model, session_id},
             model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
@@ -115,7 +115,7 @@ async fn run_three_cycle_case(window_tokens: u64) {
             Arc::new(compactor.clone()),
             named_model("fake/rolling-compactor"),
         )
-        .automatic_compaction(AutomaticCompactionConfig::enabled(policy))
+        .automatic_compaction(CompactionConfig::enabled(policy))
         .build()
         .expect("runtime builds");
 
@@ -307,7 +307,7 @@ async fn run_resume_probe(
             Arc::new(RecordingModelProvider::new()),
             named_model("fake/rolling-compactor"),
         )
-        .automatic_compaction(AutomaticCompactionConfig::enabled(policy))
+        .automatic_compaction(CompactionConfig::enabled(policy))
         .resume_from_store(store)
         .await
         .expect("cycle state resumes");

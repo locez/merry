@@ -151,7 +151,7 @@ pub use profile::{
     RuntimeCapabilities, RuntimeProfile, RuntimeProfileBuilder, RuntimeProfileError,
 };
 pub use prompt::{PromptBlock, PromptError, PromptProfile};
-pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
+pub use runtime::{CompactionConfig, Runtime, RuntimeBuilder};
 pub use session_projection::SessionTranscriptItem;
 pub use session_store::{
     FileSessionStore, PlanPersistenceLocation, SessionReservation, SessionStoreError,

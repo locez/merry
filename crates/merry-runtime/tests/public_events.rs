@@ -8,7 +8,7 @@ use merry_llm::{
     ModelToolCallId, ToolArguments, testing::FakeModelProvider,
 };
 use merry_runtime::{
-    AutomaticCompactionConfig, CitationCompactionPolicy, RegisteredTool, Runtime, RuntimeModelRole,
+    CitationCompactionPolicy, CompactionConfig, RegisteredTool, Runtime, RuntimeModelRole,
     StepContext, StepInput,
 };
 use schemars::Schema;
@@ -240,7 +240,7 @@ async fn auto_compaction_lifecycle_projects_to_public_stream() {
             Arc::new(compactor),
             merry_llm::ModelName::new("fake/compactor").expect("valid model"),
         )
-        .automatic_compaction(AutomaticCompactionConfig::enabled(
+        .automatic_compaction(CompactionConfig::enabled(
             CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
         ))
         .build()

@@ -62,8 +62,10 @@ impl MerryConfig {
         } else {
             ProviderConfigSource::User
         };
-        let reasoning_effort =
-            parse_provider_reasoning_effort(alias.as_str(), provider.reasoning_effort.as_deref())?;
+        let reasoning_effort = parse_reasoning_effort(
+            &format!("providers.{alias}.reasoning_effort"),
+            provider.reasoning_effort.as_deref(),
+        )?;
         let service_tier =
             parse_provider_service_tier(alias.as_str(), provider.service_tier.as_deref())?;
         let protocol = match kind {
@@ -109,13 +111,11 @@ impl MerryConfig {
             .and_then(|providers| providers.default.as_ref())
             .filter(|default| default.provider == alias)
             .and_then(|default| default.reasoning_effort.as_deref())
-            .map(ReasoningEffort::new)
-            .transpose()
-            .map_err(|error| {
-                ConfigError::Invalid(format!(
-                    "providers.default.reasoning_effort is invalid: {error}"
-                ))
-            })?;
+            .map(|effort| {
+                parse_reasoning_effort("providers.default.reasoning_effort", Some(effort))
+            })
+            .transpose()?
+            .flatten();
 
         match default_reasoning_effort {
             Some(reasoning_effort) => Ok(Some(reasoning_effort)),
@@ -246,8 +246,10 @@ impl MerryConfig {
             .ok_or_else(|| ConfigError::Invalid(format!("[providers.{alias}] is required")))?;
         let kind = provider.kind.as_deref().unwrap_or(alias);
         let api_key = resolve_api_key_source(alias, provider, &self.config_dir, &self.home)?;
-        let reasoning_effort =
-            parse_provider_reasoning_effort(alias, provider.reasoning_effort.as_deref())?;
+        let reasoning_effort = parse_reasoning_effort(
+            &format!("providers.{alias}.reasoning_effort"),
+            provider.reasoning_effort.as_deref(),
+        )?;
         let service_tier = parse_provider_service_tier(alias, provider.service_tier.as_deref())?;
         let protocol = provider.protocol.unwrap_or_default();
         match kind {
@@ -359,18 +361,19 @@ fn resolve_api_key_source(
     Ok(api_key)
 }
 
-fn parse_provider_reasoning_effort(
-    alias: &str,
+/// Parses one reasoning-effort config value under its own config path.
+///
+/// Every place that accepts a reasoning-effort string shares this, so the
+/// accepted values and the diagnostic shape stay identical for providers,
+/// provider defaults, and runtime compaction.
+pub(super) fn parse_reasoning_effort(
+    field: &str,
     value: Option<&str>,
 ) -> Result<Option<ReasoningEffort>, ConfigError> {
     value
         .map(ReasoningEffort::new)
         .transpose()
-        .map_err(|error| {
-            ConfigError::Invalid(format!(
-                "providers.{alias}.reasoning_effort is invalid: {error}"
-            ))
-        })
+        .map_err(|error| ConfigError::Invalid(format!("{field} is invalid: {error}")))
 }
 
 fn parse_provider_service_tier(

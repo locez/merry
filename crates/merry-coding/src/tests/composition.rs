@@ -29,7 +29,7 @@ async fn parent_builder_composes_full_coding_runtime_and_loop_policy() {
         model.clone(),
         process_backend(),
     )
-    .with_automatic_compaction(merry_runtime::AutomaticCompactionConfig::disabled())
+    .with_automatic_compaction(merry_runtime::CompactionConfig::disabled())
     .with_retry_policy(ModelRetryPolicy::disabled())
     .with_model_role(
         CodingModelRoleConfig::new(RuntimeModelRole::ContextCompaction, provider_input, model)

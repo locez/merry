@@ -8,7 +8,7 @@ use crate::support::{
 use merry_core::{InteractiveRunState, RuntimeEvent};
 use merry_llm::{GenerationConfig, ModelName, ModelRetryPolicy, ReasoningEffort};
 use merry_runtime::{
-    AgentLoopConfig, AutomaticCompactionConfig, CitationCompactionPolicy, InteractivePrimaryModel,
+    AgentLoopConfig, CitationCompactionPolicy, CompactionConfig, InteractivePrimaryModel,
     InteractiveSettingsUpdate, InteractiveSubagentSettings, Runtime, StepContext, SubagentConfig,
     SubagentManager, SubagentTaskSpec, WaitMode, subagent_registered_tools,
 };
@@ -130,7 +130,7 @@ async fn interactive_settings_update_changes_automatic_compaction_at_request_bou
     let provider = RecordingProvider::new_with_steps(Vec::new());
     let runtime = Runtime::builder(session_id("interactive-update-compaction"))
         .model_provider(Arc::new(provider), model_name())
-        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .automatic_compaction(CompactionConfig::disabled())
         .build()
         .expect("runtime builds");
     let run = runtime
@@ -147,7 +147,7 @@ async fn interactive_settings_update_changes_automatic_compaction_at_request_bou
         .expect("waiting state");
     let policy =
         CitationCompactionPolicy::new(Some(128), Some(6144), 1).expect("valid compact policy");
-    let updated = AutomaticCompactionConfig::enabled(policy);
+    let updated = CompactionConfig::enabled(policy);
 
     control
         .update_settings(

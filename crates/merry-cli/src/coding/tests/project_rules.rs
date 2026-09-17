@@ -36,7 +36,7 @@ async fn coding_projects_root_agents_in_the_stable_prefix() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             process_backend: test_process_backend(),
@@ -89,7 +89,7 @@ async fn coding_omits_project_rules_when_root_agents_is_missing() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             process_backend: test_process_backend(),

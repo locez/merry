@@ -4,9 +4,9 @@ use crate::{
     checkpoint::{CheckpointError, CheckpointRef, CheckpointRefId, CheckpointSourceKind},
     compaction::{
         ArchiveOnlyCompactionInput, CitationCompactionInput, CitationCompactionPolicy,
-        CompactionError, CompactionOutcome, CompactionPreparation, CompactionWindowBudget,
-        CompactionWindowFingerprint, CompactionWindowPlan, ResolvedCitationCompactionBudget,
-        checkpoint_from_candidate_json,
+        CompactionCoverageBudget, CompactionError, CompactionOutcome, CompactionPreparation,
+        CompactionWindowBudget, CompactionWindowFingerprint, CompactionWindowPlan,
+        ResolvedCitationCompactionBudget, checkpoint_from_candidate_json,
     },
     context::{CompactedCheckpoint, CompactedCheckpointSummary},
     permission::PermissionReviewContextEntry,
@@ -214,6 +214,7 @@ impl SessionState {
             policy,
             resolved_budget,
             window_budget,
+            CompactionCoverageBudget::unbounded(),
         )
     }
 
@@ -222,11 +223,13 @@ impl SessionState {
         policy: CitationCompactionPolicy,
         resolved_budget: ResolvedCitationCompactionBudget,
         window_budget: CompactionWindowBudget,
+        coverage: CompactionCoverageBudget,
     ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
         match self.build_compaction_preparation_with_window_budget(
             policy,
             resolved_budget,
             window_budget,
+            coverage,
         )? {
             Some(CompactionPreparation::ReplaceCheckpoint(input)) => Ok(Some(*input)),
             Some(CompactionPreparation::ArchiveToolResults(_)) | None => Ok(None),
@@ -238,13 +241,15 @@ impl SessionState {
         policy: CitationCompactionPolicy,
         resolved_budget: ResolvedCitationCompactionBudget,
         window_budget: CompactionWindowBudget,
+        coverage: CompactionCoverageBudget,
     ) -> Result<Option<CompactionPreparation>, RuntimeError> {
         if !self.pending_tool_calls.is_empty() {
             return Err(CompactionError::PendingToolCalls.into());
         }
 
         let turns = self.model_turn_histories(HiddenToolExchangeVisibility::Include, true)?;
-        let Some(plan) = self.plan_compaction_window_from_turns(policy, window_budget, &turns)?
+        let Some(plan) =
+            self.plan_compaction_window_from_turns(policy, window_budget, coverage, &turns)?
         else {
             return Ok(None);
         };
@@ -285,7 +290,12 @@ impl SessionState {
             return Err(CompactionError::PendingToolCalls.into());
         }
         let turns = self.model_turn_histories(HiddenToolExchangeVisibility::Include, true)?;
-        self.plan_compaction_window_from_turns(policy, window_budget, &turns)
+        self.plan_compaction_window_from_turns(
+            policy,
+            window_budget,
+            CompactionCoverageBudget::unbounded(),
+            &turns,
+        )
     }
 
     #[cfg(test)]

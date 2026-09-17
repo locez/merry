@@ -1,6 +1,5 @@
 use crate::{
-    AutomaticCompactionConfig, CitationCompactionPolicy, RuntimeError, RuntimeModelRole,
-    StepContext,
+    CitationCompactionPolicy, CompactionConfig, RuntimeError, RuntimeModelRole, StepContext,
     runtime::{
         Runtime,
         tests::{
@@ -88,7 +87,7 @@ fn runtime_with_compactor_and_steps(
         )
         // These tests exercise the manual compaction path, so seeding must not
         // spend the scripted compactor responses on automatic reductions.
-        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .automatic_compaction(CompactionConfig::disabled())
         .build()
         .expect("runtime builds")
 }

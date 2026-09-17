@@ -7,24 +7,27 @@ fn default_automatic_compaction_policy() -> CitationCompactionPolicy {
 
 /// Runtime-owned policy for checkpoint compaction.
 ///
-/// This controls the pre-provider hard-watermark compaction path. Manual
+/// `enabled` and `policy` drive the pre-provider hard-watermark path. Manual
 /// [`crate::Runtime::compact_context_once`] calls still take an explicit
 /// [`CitationCompactionPolicy`] so tests and callers can run one-off compaction
 /// passes without mutating runtime construction policy.
 ///
-/// Compaction is a summarization turn over the whole covered window, so it does
-/// not inherit the primary model's reasoning effort: a primary tuned for hard
+/// `reasoning_effort` is not path-specific: it applies to every compaction
+/// request, automatic or manual, which is why this type is named for compaction
+/// rather than for one of its callers.
+///
+/// Compaction is a summarization turn over the whole covered window, so it never
+/// inherits the primary model's reasoning effort: a primary tuned for hard
 /// coding turns can spend its entire output budget reasoning about history and
-/// never write the checkpoint. `reasoning_effort` names the level compaction
-/// requests use, and `None` leaves the provider default in place.
+/// never write the checkpoint. `None` leaves the provider default in place.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AutomaticCompactionConfig {
+pub struct CompactionConfig {
     enabled: bool,
     policy: CitationCompactionPolicy,
     reasoning_effort: Option<ReasoningEffort>,
 }
 
-impl AutomaticCompactionConfig {
+impl CompactionConfig {
     /// Enables automatic hard-watermark compaction with the provided policy.
     #[must_use]
     pub fn enabled(policy: CitationCompactionPolicy) -> Self {
@@ -72,7 +75,7 @@ impl AutomaticCompactionConfig {
     }
 }
 
-impl Default for AutomaticCompactionConfig {
+impl Default for CompactionConfig {
     fn default() -> Self {
         Self::enabled(default_automatic_compaction_policy())
     }

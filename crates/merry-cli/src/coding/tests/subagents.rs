@@ -31,7 +31,7 @@ async fn hides_subagent_tools_by_default() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             process_backend: test_process_backend(),
@@ -78,7 +78,7 @@ async fn exposes_subagent_tools_when_enabled() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             process_backend: test_process_backend(),
@@ -176,7 +176,7 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::AutomaticCompactionConfig::disabled(),
+            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             process_backend: test_process_backend(),

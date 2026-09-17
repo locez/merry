@@ -54,7 +54,7 @@ pub use merry_core::SessionId;
 pub use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
 pub use merry_runtime::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus,
-    AutomaticCompactionConfig, FINAL_OUTPUT_TOOL_NAME, FileSessionStore, FinalOutput,
+    CompactionConfig, FINAL_OUTPUT_TOOL_NAME, FileSessionStore, FinalOutput,
     InteractivePrimaryModel, StructuredOutputRetryPolicy,
 };
 pub use profile::{AgentProfile, AgentProfileContext};

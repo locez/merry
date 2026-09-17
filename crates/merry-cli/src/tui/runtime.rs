@@ -23,7 +23,7 @@ use merry_core::SessionId;
 use merry_llm::GenerationConfig;
 use merry_mcp::McpServerDiagnostic;
 use merry_runtime::{
-    AgentLoopControl, AgentLoopInput, AutomaticCompactionConfig, ChannelPermissionAdmissionSource,
+    AgentLoopControl, AgentLoopInput, ChannelPermissionAdmissionSource, CompactionConfig,
     InteractivePrimaryModel, InteractiveRunEventStream, InteractiveSettingsUpdate,
     InteractiveSubagentSettings, LoadedSession, PermissionReviewRequest, Runtime,
     SessionReservation, SessionTranscriptItem, SkillMetadata, StepContext,
@@ -493,7 +493,7 @@ fn generation_config_with_preferences(
 fn automatic_compaction_config_with_preferences(
     merry_config: Option<&MerryConfig>,
     preferences: &TuiPreferences,
-) -> Result<AutomaticCompactionConfig, CliError> {
+) -> Result<CompactionConfig, CliError> {
     let inherited = automatic_compaction_config(merry_config).map_err(unexpected)?;
     let policy = match preferences.compaction_strategy {
         None | Some(CompactionStrategy::Balanced) => inherited.policy(),
@@ -510,9 +510,9 @@ fn automatic_compaction_config_with_preferences(
         .auto_compaction_enabled
         .unwrap_or_else(|| inherited.is_enabled());
     Ok(if enabled {
-        AutomaticCompactionConfig::enabled(policy)
+        CompactionConfig::enabled(policy)
     } else {
-        AutomaticCompactionConfig::disabled()
+        CompactionConfig::disabled()
     })
 }
 

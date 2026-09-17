@@ -3,10 +3,11 @@ use crate::{
     CitationCompactionInput, CitationCompactionPolicy, CompactionError, CompactionOutcome,
     ResolvedCitationCompactionBudget, ResolvedContextWindow, RuntimeError, RuntimeModelRole,
     compaction::{
-        ArchiveOnlyCompactionInput, CompactionPreparation, CompactionReasoningReserve,
-        CompactionWindowBudget, compaction_model_window, compaction_request_required_tokens,
-        compaction_window_safety_tokens, compile_citation_compaction_model_request,
-        generate_validated_compaction_candidate, validate_compaction_model_window,
+        ArchiveOnlyCompactionInput, CompactionCoverageBudget, CompactionPreparation,
+        CompactionReasoningReserve, CompactionWindowBudget, compaction_model_window,
+        compaction_request_required_tokens, compaction_window_safety_tokens,
+        compile_citation_compaction_model_request, generate_validated_compaction_candidate,
+        validate_compaction_model_window,
     },
     events::ActiveStepPermit,
     session::{PreparedCompactionInstall, SessionState},
@@ -29,6 +30,7 @@ pub(super) async fn compaction_preparation_for_hard_watermark(
         policy,
         resolved_budget,
         window_budget,
+        CompactionCoverageBudget::unbounded(),
     )?;
     Ok(preparation.map(|preparation| {
         (
@@ -232,7 +234,6 @@ async fn fit_compaction_plan(
     let reasoning_effort = compaction_reasoning_effort(inner).await;
 
     let mut preparation = preparation;
-    let mut window_budget = budget.window_budget;
     let mut attempt = 0;
     let mut tightened_coverage = false;
     let mut previous_input_tokens: Option<u64> = None;
@@ -331,7 +332,7 @@ async fn fit_compaction_plan(
                     tightened_covered_payload_tokens = tightened,
                     "compaction window cannot host the checkpoint text budget and reasoning reserve; retaining more raw history"
                 );
-                window_budget = window_budget.with_max_covered_payload_tokens(tightened);
+                let coverage = CompactionCoverageBudget::limited(tightened);
                 tightened_coverage = true;
                 previous_input_tokens = Some(estimated_input_tokens);
                 let rebuilt = {
@@ -339,7 +340,8 @@ async fn fit_compaction_plan(
                     session.build_compaction_preparation_with_window_budget(
                         budget.policy,
                         budget.resolved_budget,
-                        window_budget,
+                        budget.window_budget,
+                        coverage,
                     )?
                 };
                 let Some(rebuilt) = rebuilt else {
@@ -431,6 +433,7 @@ pub(super) async fn generate_and_install_compaction(
                         budget.policy,
                         budget.resolved_budget,
                         budget.window_budget,
+                        CompactionCoverageBudget::unbounded(),
                     )?
                 };
                 let Some(rebuilt) = rebuilt else {
@@ -667,6 +670,7 @@ pub(super) async fn compact_context_once_inner(
             policy,
             resolved_budget,
             window_budget,
+            CompactionCoverageBudget::unbounded(),
         )?
     };
     let Some(preparation) = preparation else {

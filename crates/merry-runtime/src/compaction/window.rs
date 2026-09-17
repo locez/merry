@@ -15,7 +15,6 @@ pub(crate) struct CompactionWindowBudget {
     replacement_fixed_dynamic_body_tokens: u64,
     archive_only_fixed_dynamic_body_tokens: u64,
     checkpoint_output_ceiling_tokens: u64,
-    max_covered_payload_tokens: u64,
 }
 
 impl CompactionWindowBudget {
@@ -45,7 +44,6 @@ impl CompactionWindowBudget {
             replacement_fixed_dynamic_body_tokens,
             archive_only_fixed_dynamic_body_tokens,
             checkpoint_output_ceiling_tokens,
-            max_covered_payload_tokens: u64::MAX,
         })
     }
 
@@ -53,21 +51,6 @@ impl CompactionWindowBudget {
         checkpoint_output_ceiling_tokens: u64,
     ) -> Result<Self, CompactionError> {
         Self::new(u64::MAX, u64::MAX, 0, 0, checkpoint_output_ceiling_tokens)
-    }
-
-    /// Returns a copy that caps how much covered history one compaction request reads.
-    ///
-    /// The default is unbounded, which keeps the planner's preferred coverage.
-    /// When a compaction request would not fit the compaction model window, the
-    /// runtime lowers this budget so the planner keeps more turns raw instead of
-    /// sending a request the provider cannot answer completely.
-    #[must_use]
-    pub(crate) fn with_max_covered_payload_tokens(
-        mut self,
-        max_covered_payload_tokens: u64,
-    ) -> Self {
-        self.max_covered_payload_tokens = max_covered_payload_tokens;
-        self
     }
 
     pub(crate) const fn primary_window_tokens(self) -> u64 {
@@ -89,9 +72,36 @@ impl CompactionWindowBudget {
     pub(crate) const fn checkpoint_output_ceiling_tokens(self) -> u64 {
         self.checkpoint_output_ceiling_tokens
     }
+}
 
-    pub(crate) const fn max_covered_payload_tokens(self) -> u64 {
-        self.max_covered_payload_tokens
+/// Upper bound on how much covered history one compaction request may read.
+///
+/// This bounds the compaction *request*, while [`CompactionWindowBudget`] bounds
+/// the request the compaction installs. They answer different questions, so the
+/// runtime tracks them separately: a replacement that cannot fit the compaction
+/// model window lowers this budget, which keeps more turns raw until the request
+/// fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct CompactionCoverageBudget {
+    max_tokens: Option<u64>,
+}
+
+impl CompactionCoverageBudget {
+    /// Keeps the planner's configured retention without a coverage cap.
+    pub(crate) const fn unbounded() -> Self {
+        Self { max_tokens: None }
+    }
+
+    /// Caps the covered payload at `max_tokens`.
+    pub(crate) const fn limited(max_tokens: u64) -> Self {
+        Self {
+            max_tokens: Some(max_tokens),
+        }
+    }
+
+    /// Returns the cap, or `None` when coverage is unbounded.
+    pub(crate) const fn max_tokens(self) -> Option<u64> {
+        self.max_tokens
     }
 }
 

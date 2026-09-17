@@ -3,9 +3,8 @@ use crate::{CodingAgentProfileBuilder, runtime::CodingRuntimePolicy};
 use merry_llm::{ModelName, ModelProvider};
 use merry_process::ProcessBackend;
 use merry_runtime::{
-    AutomaticCompactionConfig, ChildRuntimeFactory, ChildRuntimeInput, ChildWorkspaceScope,
-    Runtime, RuntimeError, SubagentConfig, SubagentManager, ToolAdmission,
-    subagent_registered_tools,
+    ChildRuntimeFactory, ChildRuntimeInput, ChildWorkspaceScope, CompactionConfig, Runtime,
+    RuntimeError, SubagentConfig, SubagentManager, ToolAdmission, subagent_registered_tools,
 };
 use std::sync::Arc;
 
@@ -31,7 +30,7 @@ pub(crate) struct CodingRuntimeComposition {
     pub(crate) model: ModelName,
     pub(crate) process_backend: Arc<dyn ProcessBackend>,
     pub(crate) subagent_config: SubagentConfig,
-    pub(crate) automatic_compaction: AutomaticCompactionConfig,
+    pub(crate) automatic_compaction: CompactionConfig,
     pub(crate) policy: CodingRuntimePolicy,
 }
 
@@ -139,12 +138,11 @@ mod tests {
     };
     use merry_process::{LocalProcessBackend, ProcessBackend, ProcessSession, TokioProcessRunner};
     use merry_runtime::{
-        AcceptedLocalWorkspaceProcessAdmission, AutomaticCompactionConfig,
-        CitationCompactionPolicy, PermissionAdmissionContext, PermissionAdmissionDecision,
-        PermissionAdmissionFuture, PermissionAdmissionSource,
-        ProcessRunner as RuntimeProcessRunner, Runtime, RuntimeModelRole,
-        StaticPermissionedProcessRunnerFactory, StepContext, StepInput, SubagentConfig,
-        SubagentTaskSpec, TaskAnchor,
+        AcceptedLocalWorkspaceProcessAdmission, CitationCompactionPolicy, CompactionConfig,
+        PermissionAdmissionContext, PermissionAdmissionDecision, PermissionAdmissionFuture,
+        PermissionAdmissionSource, ProcessRunner as RuntimeProcessRunner, Runtime,
+        RuntimeModelRole, StaticPermissionedProcessRunnerFactory, StepContext, StepInput,
+        SubagentConfig, SubagentTaskSpec, TaskAnchor,
     };
     use serde_json::json;
     use std::sync::{
@@ -207,7 +205,7 @@ mod tests {
                 .expect("subagent config should be valid")
                 .with_model_turn_bounds(2048, 2048)
                 .expect("coding subagent bounds should be valid"),
-            automatic_compaction: AutomaticCompactionConfig::disabled(),
+            automatic_compaction: CompactionConfig::disabled(),
             policy,
         })
     }

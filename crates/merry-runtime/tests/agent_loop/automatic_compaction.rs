@@ -9,8 +9,8 @@ use crate::support::{
 use merry_core::ToolCallResultStatus;
 use merry_llm::{ModelCapabilities, ModelName};
 use merry_runtime::{
-    AgentLoopConfig, AgentLoopStatus, AutomaticCompactionConfig, CitationCompactionPolicy,
-    ProjectRules, Runtime, RuntimeModelRole, StepContext, StepInput, TaskAnchor,
+    AgentLoopConfig, AgentLoopStatus, CitationCompactionPolicy, CompactionConfig, ProjectRules,
+    Runtime, RuntimeModelRole, StepContext, StepInput, TaskAnchor,
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -54,7 +54,7 @@ async fn provider_step_auto_compacts_before_hard_watermark_request() {
             Arc::new(compactor.clone()),
             ModelName::new("fake/compactor").expect("valid model"),
         )
-        .automatic_compaction(AutomaticCompactionConfig::enabled(
+        .automatic_compaction(CompactionConfig::enabled(
             CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
         ))
         .build()
@@ -152,7 +152,7 @@ async fn auto_compaction_config_controls_retained_model_turns() {
             Arc::new(compactor.clone()),
             ModelName::new("fake/compactor").expect("valid model"),
         )
-        .automatic_compaction(AutomaticCompactionConfig::enabled(policy))
+        .automatic_compaction(CompactionConfig::enabled(policy))
         .build()
         .expect("runtime should build");
 
@@ -249,7 +249,7 @@ async fn auto_compaction_keeps_current_tool_turn_raw_during_continuation() {
             Arc::new(compactor.clone()),
             ModelName::new("fake/compactor").expect("valid model"),
         )
-        .automatic_compaction(AutomaticCompactionConfig::enabled(policy))
+        .automatic_compaction(CompactionConfig::enabled(policy))
         .build()
         .expect("runtime should build");
 
@@ -419,7 +419,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
             Arc::new(compactor.clone()),
             ModelName::new("fake/compactor").expect("valid model"),
         )
-        .automatic_compaction(AutomaticCompactionConfig::enabled(policy))
+        .automatic_compaction(CompactionConfig::enabled(policy))
         .build()
         .expect("runtime should build");
 
@@ -580,7 +580,7 @@ async fn auto_compaction_config_can_disable_hard_watermark_compaction() {
             Arc::new(compactor.clone()),
             ModelName::new("fake/compactor").expect("valid model"),
         )
-        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .automatic_compaction(CompactionConfig::disabled())
         .build()
         .expect("runtime should build");
 

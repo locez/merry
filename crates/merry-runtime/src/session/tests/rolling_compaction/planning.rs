@@ -1,6 +1,9 @@
 use crate::{
     CompactionError,
-    compaction::{CompactionPreparation, CompactionWindowBudget, retained_turn_fallbacks},
+    compaction::{
+        CompactionCoverageBudget, CompactionPreparation, CompactionWindowBudget,
+        retained_turn_fallbacks,
+    },
     context::compacted_checkpoint_wrapper_token_ceiling,
     session::tests::{
         RuntimeError, SessionId, SessionState,
@@ -25,7 +28,8 @@ fn bounded_coverage_budget_retains_more_turns_before_replacing() {
         .build_compaction_preparation_with_window_budget(
             policy(1),
             policy(1).resolve(64_000).expect("budget resolves"),
-            window_budget(10_000).with_max_covered_payload_tokens(2_100),
+            window_budget(10_000),
+            CompactionCoverageBudget::limited(2_100),
         )
         .expect("preparation succeeds")
         .expect("a smaller covered window stays compressible");
@@ -55,7 +59,8 @@ fn zero_coverage_budget_keeps_every_turn_raw_and_archives_tool_results() {
         .build_compaction_preparation_with_window_budget(
             policy(1),
             policy(1).resolve(64_000).expect("budget resolves"),
-            window_budget(1_300).with_max_covered_payload_tokens(0),
+            window_budget(1_300),
+            CompactionCoverageBudget::limited(0),
         )
         .expect("preparation succeeds")
         .expect("archive-only reduction is required");
@@ -96,7 +101,8 @@ fn coverage_budget_holds_under_the_authoritative_payload_measurement() {
             .build_compaction_preparation_with_window_budget(
                 policy(1),
                 policy(1).resolve(64_000).expect("budget resolves"),
-                window_budget(10_000).with_max_covered_payload_tokens(coverage_budget),
+                window_budget(10_000),
+                CompactionCoverageBudget::limited(coverage_budget),
             )
             .expect("preparation succeeds");
         let Some(CompactionPreparation::ReplaceCheckpoint(input)) = preparation else {
@@ -195,6 +201,7 @@ fn compaction_input_contains_fact_after_1200_bytes() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(10_000),
+            CompactionCoverageBudget::unbounded(),
         )
         .expect("input builds")
         .expect("old prefix is compressible");
@@ -251,6 +258,7 @@ fn exactly_five_completed_turns_that_fit_need_no_preparation() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(10_000),
+            CompactionCoverageBudget::unbounded(),
         )
         .expect("preparation succeeds");
 
@@ -275,6 +283,7 @@ fn exactly_five_large_tool_turns_use_archive_only_without_dropping_turns() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(1_300),
+            CompactionCoverageBudget::unbounded(),
         )
         .expect("preparation succeeds")
         .expect("archive-only preparation is required");
@@ -314,6 +323,7 @@ fn configured_five_with_two_small_completed_turns_needs_no_preparation() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(10_000),
+            CompactionCoverageBudget::unbounded(),
         )
         .expect("preparation builds");
     assert!(preparation.is_none());
@@ -337,6 +347,7 @@ fn configured_five_with_two_large_tool_turns_archives_without_dropping_one() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(400),
+            CompactionCoverageBudget::unbounded(),
         )
         .expect("preparation builds")
         .expect("archive-only is required");

@@ -4,7 +4,7 @@ use crate::{
     CompactedCheckpointCandidate, RuntimeError, StepContext,
     artifact::ArtifactContent,
     runtime::{
-        AutomaticCompactionConfig, Runtime, RuntimeBuilder, merry_read_checkpoint_ref_tool_name,
+        CompactionConfig, Runtime, RuntimeBuilder, merry_read_checkpoint_ref_tool_name,
         tests::support::{
             common::{
                 RuntimeSessionStateTestExt, collect_step, completed_event, event_kind_names,
@@ -44,7 +44,7 @@ fn runtime_builder_registers_checkpoint_ref_tool_when_auto_compaction_enabled() 
 #[test]
 fn runtime_builder_omits_checkpoint_ref_tool_when_auto_compaction_disabled() {
     let runtime = Runtime::builder(session_id("runtime-checkpoint-ref-tool-disabled"))
-        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .automatic_compaction(CompactionConfig::disabled())
         .build()
         .expect("runtime should build");
     let name = merry_read_checkpoint_ref_tool_name();
@@ -124,7 +124,7 @@ async fn provider_step_fails_when_final_output_contract_requires_unsupported_too
             .expect("valid capabilities"),
     );
     let runtime = Runtime::builder(session_id("runtime-final-output-no-tool-provider"))
-        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .automatic_compaction(CompactionConfig::disabled())
         .model_provider(Arc::new(provider.clone()), model_name())
         .build()
         .expect("runtime should build");

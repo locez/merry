@@ -214,7 +214,7 @@ async fn run_parent_child_policy(
         ModelName::new("parent-primary").expect("primary model should be valid"),
         process_backend(),
     )
-    .with_automatic_compaction(merry_runtime::AutomaticCompactionConfig::disabled())
+    .with_automatic_compaction(merry_runtime::CompactionConfig::disabled())
     .with_retry_policy(ModelRetryPolicy::disabled())
     .with_model_roles(model_roles)
     .with_subagents(CodingSubagentsConfig::enabled(

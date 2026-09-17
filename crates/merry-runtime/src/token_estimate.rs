@@ -5,7 +5,10 @@ use merry_llm::{ModelContent, ModelInputItem};
 /// Bytes per token used by every text estimate in the runtime.
 ///
 /// Budgets, window fitting, and planning all compare against this one ratio, so
-/// a change here moves all of them together.
+/// a change here moves all of them together. It is deliberately the optimistic
+/// axis of the estimate, distinct from compaction's accepted-output byte
+/// ceiling ([`crate::compaction`]), which adds slack so a checkpoint that fits
+/// the token budget is not rejected on byte count.
 pub(crate) const BYTES_PER_TOKEN: u64 = 4;
 
 pub(crate) fn estimate_model_input_tokens(input: &[ModelInputItem]) -> u64 {

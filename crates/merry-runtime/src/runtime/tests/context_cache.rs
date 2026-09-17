@@ -2,8 +2,7 @@ use crate::{
     CheckpointDecision, CitationCompactionPolicy, CompactedCheckpoint, RuntimeModelRole,
     StepContext,
     runtime::{
-        AutomaticCompactionConfig, Runtime, merry_read_checkpoint_ref_tool_name,
-        request_context_budget,
+        CompactionConfig, Runtime, merry_read_checkpoint_ref_tool_name, request_context_budget,
         tests::support::{
             common::{collect_step, completed_event_with, model_name, named_model, session_id},
             memory::{ScriptedMemoryActivationSource, activated_memory, record_memory_artifact},
@@ -160,7 +159,7 @@ async fn soft_watermark_does_not_call_the_compaction_provider() {
             Arc::new(compactor.clone()),
             named_model("fake/soft-watermark-compactor"),
         )
-        .automatic_compaction(AutomaticCompactionConfig::enabled(
+        .automatic_compaction(CompactionConfig::enabled(
             CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
         ))
         .build()
@@ -218,7 +217,7 @@ async fn primary_and_compaction_streams_use_the_runtime_session_as_prompt_cache_
             Arc::new(compactor.clone()),
             named_model("fake/cache-key-compactor"),
         )
-        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .automatic_compaction(CompactionConfig::disabled())
         .build()
         .expect("runtime should build");
 
@@ -323,21 +322,20 @@ async fn compaction_request_reuses_the_step_stable_prefix_and_appends_the_direct
         ModelCapabilities::new(true, true, false, true, Some(256_000), None)
             .expect("valid compactor capabilities"),
     );
-    let runtime =
-        Runtime::builder(session_id("runtime-compaction-prefix-reuse"))
-            .model_provider(Arc::new(primary.clone()), model_name())
-            .model_provider_for_role(
-                RuntimeModelRole::ContextCompaction,
-                Arc::new(compactor.clone()),
-                named_model("fake/prefix-reuse-compactor"),
-            )
-            // The compaction config owns the reasoning level and must override
-            // whatever the primary model asks for.
-            .automatic_compaction(AutomaticCompactionConfig::disabled().with_reasoning_effort(
-                Some(merry_llm::ReasoningEffort::new("low").expect("valid reasoning effort")),
-            ))
-            .build()
-            .expect("runtime should build");
+    let runtime = Runtime::builder(session_id("runtime-compaction-prefix-reuse"))
+        .model_provider(Arc::new(primary.clone()), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor.clone()),
+            named_model("fake/prefix-reuse-compactor"),
+        )
+        // The compaction config owns the reasoning level and must override
+        // whatever the primary model asks for.
+        .automatic_compaction(CompactionConfig::disabled().with_reasoning_effort(Some(
+            merry_llm::ReasoningEffort::new("low").expect("valid reasoning effort"),
+        )))
+        .build()
+        .expect("runtime should build");
     let generation = GenerationConfig::new(None, false)
         .expect("valid generation")
         .with_reasoning_effort(Some(

@@ -14,9 +14,9 @@ use merry_core::{CoreError, SessionId};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_process::ProcessBackend;
 use merry_runtime::{
-    AgentLoopConfig, AgentLoopConfigError, AutomaticCompactionConfig, ChildRuntimeFactory,
-    FileSessionStore, LoadedSession, RegisteredTool, Runtime, RuntimeBuilder, RuntimeError,
-    RuntimeModelRole, SkillCatalog, SkillError, SubagentConfig, SubagentError, SubagentManager,
+    AgentLoopConfig, AgentLoopConfigError, ChildRuntimeFactory, CompactionConfig, FileSessionStore,
+    LoadedSession, RegisteredTool, Runtime, RuntimeBuilder, RuntimeError, RuntimeModelRole,
+    SkillCatalog, SkillError, SubagentConfig, SubagentError, SubagentManager,
     subagent_registered_tools,
 };
 use merry_tools::WorkspaceToolLimits;
@@ -182,7 +182,7 @@ pub struct CodingRuntimeInput {
     model: ModelName,
     process_backend: Option<Arc<dyn ProcessBackend>>,
     extra_tools: Vec<RegisteredTool>,
-    automatic_compaction: AutomaticCompactionConfig,
+    automatic_compaction: CompactionConfig,
     retry_policy: Option<ModelRetryPolicy>,
     model_roles: Vec<CodingModelRoleConfig>,
     skill_roots: Vec<PathBuf>,
@@ -207,7 +207,7 @@ impl CodingRuntimeInput {
             model,
             process_backend: Some(process_backend),
             extra_tools: Vec::new(),
-            automatic_compaction: AutomaticCompactionConfig::default(),
+            automatic_compaction: CompactionConfig::default(),
             retry_policy: None,
             model_roles: Vec::new(),
             skill_roots: Vec::new(),
@@ -231,7 +231,7 @@ impl CodingRuntimeInput {
             model,
             process_backend: None,
             extra_tools: Vec::new(),
-            automatic_compaction: AutomaticCompactionConfig::default(),
+            automatic_compaction: CompactionConfig::default(),
             retry_policy: None,
             model_roles: Vec::new(),
             skill_roots: Vec::new(),
@@ -252,7 +252,7 @@ impl CodingRuntimeInput {
 
     /// Sets automatic context compaction policy.
     #[must_use]
-    pub fn with_automatic_compaction(mut self, config: AutomaticCompactionConfig) -> Self {
+    pub fn with_automatic_compaction(mut self, config: CompactionConfig) -> Self {
         self.automatic_compaction = config;
         self
     }

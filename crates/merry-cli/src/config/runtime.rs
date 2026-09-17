@@ -1,18 +1,20 @@
-use super::{ConfigError, MerryConfig, RuntimeModelToml, default_true, validate_model_text};
+use super::{
+    ConfigError, MerryConfig, RuntimeModelToml, default_true, provider::parse_reasoning_effort,
+    validate_model_text,
+};
 use merry::profiles::{DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS, MIN_CODING_SUBAGENT_MODEL_TURNS};
-use merry_llm::ReasoningEffort;
-use merry_runtime::{AutomaticCompactionConfig, CitationCompactionPolicy};
+use merry_runtime::{CitationCompactionPolicy, CompactionConfig};
 use serde::Deserialize;
 
 impl MerryConfig {
-    pub fn automatic_compaction_config(&self) -> Result<AutomaticCompactionConfig, ConfigError> {
+    pub fn automatic_compaction_config(&self) -> Result<CompactionConfig, ConfigError> {
         let Some(auto_compaction) = self
             .raw
             .runtime
             .as_ref()
             .and_then(|runtime| runtime.auto_compaction.as_ref())
         else {
-            return Ok(AutomaticCompactionConfig::default());
+            return Ok(CompactionConfig::default());
         };
 
         auto_compaction.to_config()
@@ -129,21 +131,14 @@ struct AutoCompactionToml {
 }
 
 impl AutoCompactionToml {
-    fn to_config(&self) -> Result<AutomaticCompactionConfig, ConfigError> {
+    fn to_config(&self) -> Result<CompactionConfig, ConfigError> {
         self.validate_removed_fields()?;
-        let reasoning_effort = self
-            .reasoning_effort
-            .as_deref()
-            .map(|effort| {
-                ReasoningEffort::new(effort).map_err(|error| {
-                    ConfigError::Invalid(format!(
-                        "runtime.auto_compaction.reasoning_effort is invalid: {error}"
-                    ))
-                })
-            })
-            .transpose()?;
+        let reasoning_effort = parse_reasoning_effort(
+            "runtime.auto_compaction.reasoning_effort",
+            self.reasoning_effort.as_deref(),
+        )?;
         let config = if self.enabled {
-            let defaults = AutomaticCompactionConfig::default().policy();
+            let defaults = CompactionConfig::default().policy();
             let policy = CitationCompactionPolicy::new(
                 self.target_output_tokens
                     .or_else(|| defaults.target_output_tokens()),
@@ -153,9 +148,9 @@ impl AutoCompactionToml {
                     .unwrap_or_else(|| defaults.retained_model_turns()),
             )
             .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-            AutomaticCompactionConfig::enabled(policy)
+            CompactionConfig::enabled(policy)
         } else {
-            AutomaticCompactionConfig::disabled()
+            CompactionConfig::disabled()
         };
         Ok(config.with_reasoning_effort(reasoning_effort))
     }
@@ -362,7 +357,7 @@ reasoning_effort = " padded "
             .expect("config should be present")
             .automatic_compaction_config()
             .expect("default auto compaction config should validate");
-        assert_eq!(missing, merry_runtime::AutomaticCompactionConfig::default());
+        assert_eq!(missing, merry_runtime::CompactionConfig::default());
 
         let disabled = MerryConfig::load_optional_from_text(
             Some(
@@ -381,7 +376,7 @@ retained_model_turns = 4
         assert!(!disabled.is_enabled());
         assert_eq!(
             disabled.policy(),
-            merry_runtime::AutomaticCompactionConfig::default().policy()
+            merry_runtime::CompactionConfig::default().policy()
         );
     }
 

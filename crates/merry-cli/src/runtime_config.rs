@@ -5,8 +5,7 @@ use crate::sandbox::default_inner_development_path_rules;
 use merry_core::SessionId;
 use merry_llm::{GenerationConfig, ReasoningEffort, ServiceTier};
 use merry_runtime::{
-    AutomaticCompactionConfig, PathAccess, PathAccessRule, PathAccessRuleSource, Runtime,
-    RuntimeBuilder,
+    CompactionConfig, PathAccess, PathAccessRule, PathAccessRuleSource, Runtime, RuntimeBuilder,
 };
 use std::{env, ffi::OsString, path::PathBuf};
 
@@ -45,7 +44,7 @@ pub(crate) fn effective_log_settings(
 
 pub(crate) fn automatic_compaction_config(
     config: Option<&MerryConfig>,
-) -> Result<AutomaticCompactionConfig, config::ConfigError> {
+) -> Result<CompactionConfig, config::ConfigError> {
     config
         .map(MerryConfig::automatic_compaction_config)
         .transpose()

@@ -18,8 +18,8 @@ use merry_core::{
 };
 use merry_llm::ModelCapabilities;
 use merry_runtime::{
-    AgentLoopConfig, AgentLoopStatus, ArtifactError, AutomaticCompactionConfig,
-    ProcessActionIntent, Runtime, RuntimeError, StepContext, StepInput, TaskAnchor, ToolActionKind,
+    AgentLoopConfig, AgentLoopStatus, ArtifactError, CompactionConfig, ProcessActionIntent,
+    Runtime, RuntimeError, StepContext, StepInput, TaskAnchor, ToolActionKind,
     process_command_tool,
 };
 use serde_json::{Value, json};
@@ -177,7 +177,7 @@ async fn provider_request_still_runs_when_budget_is_unavailable_and_auto_compact
         );
     let runtime = Runtime::builder(session_id("agent-loop-disabled-context-budget-unavailable"))
         .model_provider(Arc::new(provider.clone()), model_name())
-        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .automatic_compaction(CompactionConfig::disabled())
         .build()
         .expect("runtime should build");
 

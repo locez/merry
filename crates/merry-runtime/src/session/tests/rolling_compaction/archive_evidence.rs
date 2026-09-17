@@ -1,6 +1,6 @@
 use crate::{
     CheckpointError, FileSessionStore,
-    compaction::{CompactionPreparation, checkpoint_from_candidate_json},
+    compaction::{CompactionCoverageBudget, CompactionPreparation, checkpoint_from_candidate_json},
     session::{
         tests::{
             ArtifactContent, ArtifactKind, ArtifactRef, ErrorInfo, PendingToolCallBatch,
@@ -69,7 +69,12 @@ fn reverse_tool_results_archive_by_result_arrival_and_keep_pairs_valid() {
 
     let resolved = policy(5).resolve(64_000).expect("budget resolves");
     let input = session
-        .build_citation_compaction_input_with_window_budget(policy(5), resolved, budget)
+        .build_citation_compaction_input_with_window_budget(
+            policy(5),
+            resolved,
+            budget,
+            CompactionCoverageBudget::unbounded(),
+        )
         .expect("input builds")
         .expect("old prefix is compressible");
     let result_b_ref = session
@@ -172,6 +177,7 @@ fn retained_archive_ref_stays_pinned_but_hidden_across_rolling_compactions() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(10_000),
+            CompactionCoverageBudget::unbounded(),
         )
         .expect("input builds")
         .expect("old prefix is compressible");
@@ -221,6 +227,7 @@ fn retained_archive_ref_stays_pinned_but_hidden_across_rolling_compactions() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(10_000),
+            CompactionCoverageBudget::unbounded(),
         )
         .expect("second input builds")
         .expect("the next oldest turn is compressible");
@@ -345,6 +352,7 @@ async fn archive_only_manifest_resolves_refs_and_round_trips_through_store() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(1_300),
+            CompactionCoverageBudget::unbounded(),
         )
         .expect("preparation builds")
         .expect("archive-only is required");
@@ -422,6 +430,7 @@ fn failed_archived_result_notice_has_exact_four_json_fields() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(1_300),
+            CompactionCoverageBudget::unbounded(),
         )
         .expect("preparation builds")
         .expect("archive-only is required");

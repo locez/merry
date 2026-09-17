@@ -87,8 +87,8 @@ pub use schema::citation_compaction_response_schema;
 
 pub(crate) use window::{
     ArchiveOnlyCompactionInput, CitationCompactionModelTurn, CitationCompactionToolResult,
-    CitationCompactionTurnItem, CompactionWindowBudget, CompactionWindowFingerprint,
-    CompactionWindowPlan, retained_turn_fallbacks,
+    CitationCompactionTurnItem, CompactionCoverageBudget, CompactionWindowBudget,
+    CompactionWindowFingerprint, CompactionWindowPlan, retained_turn_fallbacks,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +101,12 @@ pub struct CitationCompactionPolicy {
 const DEFAULT_CHECKPOINT_WINDOW_PERCENT: u64 = 8;
 const MIN_CHECKPOINT_OUTPUT_TOKENS: u64 = 2_048;
 const MAX_CHECKPOINT_OUTPUT_TOKENS: u64 = 32_768;
-const DEFAULT_ACCEPTED_BYTES_PER_TOKEN: u64 = 8;
+/// Bytes per token used to convert an accepted-checkpoint byte cap into tokens.
+///
+/// This is a size ceiling with slack, not the runtime's estimation ratio
+/// ([`crate::token_estimate`]): the cap is deliberately looser than the estimate
+/// so a checkpoint that fits the token budget is never rejected on byte count.
+const DEFAULT_ACCEPTED_OUTPUT_BYTES_PER_TOKEN: u64 = 8;
 const DEFAULT_RETAINED_MODEL_TURNS: usize = 5;
 
 impl CitationCompactionPolicy {
@@ -175,7 +180,7 @@ impl CitationCompactionPolicy {
             .clamp(MIN_CHECKPOINT_OUTPUT_TOKENS, MAX_CHECKPOINT_OUTPUT_TOKENS);
         let output_token_limit = self.target_output_tokens.unwrap_or(automatic);
         let derived_bytes = output_token_limit
-            .checked_mul(DEFAULT_ACCEPTED_BYTES_PER_TOKEN)
+            .checked_mul(DEFAULT_ACCEPTED_OUTPUT_BYTES_PER_TOKEN)
             .and_then(|value| usize::try_from(value).ok())
             .ok_or(CompactionError::BudgetOverflow)?;
 

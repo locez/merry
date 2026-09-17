@@ -2,7 +2,7 @@ use crate::{
     CheckpointId, CitationCompactionPolicy, CompactionError, FileSessionStore, RuntimeError,
     RuntimeModelRole, StepContext, StepInput, TaskAnchor,
     runtime::{
-        AutomaticCompactionConfig, Runtime,
+        CompactionConfig, Runtime,
         tests::support::{
             common::{completed_event_with, model_name, named_model, session_id},
             model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
@@ -423,7 +423,7 @@ async fn automatic_compaction_completed_waits_for_directory_durability() {
                 .expect("turn completes");
         }
     }
-    *runtime.inner.automatic_compaction.write().await = AutomaticCompactionConfig::enabled(
+    *runtime.inner.automatic_compaction.write().await = CompactionConfig::enabled(
         CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
     );
 

@@ -4,8 +4,9 @@ use crate::{
     RuntimeError,
     checkpoint::CheckpointRef,
     compaction::{
-        CitationCompactionPolicy, CompactionError, CompactionWindowBudget,
-        CompactionWindowFingerprint, CompactionWindowPlan, retained_turn_fallbacks,
+        CitationCompactionPolicy, CompactionCoverageBudget, CompactionError,
+        CompactionWindowBudget, CompactionWindowFingerprint, CompactionWindowPlan,
+        retained_turn_fallbacks,
     },
     session::{
         ModelTurnStatus, SessionState,
@@ -27,6 +28,27 @@ enum RetentionCandidate {
     ArchiveOnly,
 }
 
+impl RetentionCandidate {
+    /// Returns what an empty covered window means for this candidate.
+    fn empty_coverage_meaning(self) -> EmptyCoverage {
+        match self {
+            Self::CompletedTurns(_) => EmptyCoverage::NothingToDo,
+            // Archiving tool results is a real reduction, so the empty covered set
+            // is the requested plan rather than a no-op.
+            Self::ArchiveOnly => EmptyCoverage::Reduction,
+        }
+    }
+}
+
+/// What an empty covered window means for one retention candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyCoverage {
+    /// Nothing to summarize: the caller reports that no compression applies.
+    NothingToDo,
+    /// Archive-only reduction: the empty covered set is the plan.
+    Reduction,
+}
+
 /// Result of evaluating one retention candidate.
 enum CandidateOutcome {
     Plan(CompactionWindowPlan),
@@ -39,6 +61,7 @@ impl SessionState {
         &self,
         policy: CitationCompactionPolicy,
         window_budget: CompactionWindowBudget,
+        coverage: CompactionCoverageBudget,
         turns: &[ModelTurnHistory],
     ) -> Result<Option<CompactionWindowPlan>, RuntimeError> {
         debug_assert!(
@@ -63,18 +86,17 @@ impl SessionState {
             .filter(|turn| turn.status == ModelTurnStatus::Completed)
             .count();
         let mut candidates =
-            self.retention_candidates(policy, window_budget, closed_turns, available_completed)?;
-        // A covered-payload budget only exists when the runtime already knows a
+            self.retention_candidates(policy, coverage, closed_turns, available_completed)?;
+        // A coverage budget only exists when the runtime already knows a
         // checkpoint replacement does not fit its request. Archiving tool results
         // is then the remaining degradation, because it reduces the request body
         // without spending another model call.
-        let bounded_coverage = window_budget.max_covered_payload_tokens() != u64::MAX;
+        let bounded_coverage = coverage.max_tokens().is_some();
         if bounded_coverage {
             candidates.push(RetentionCandidate::ArchiveOnly);
         }
 
         let mut last_failure: Option<CompactionError> = None;
-        let mut saw_completed_turn = false;
         for candidate in candidates {
             let (covered, raw_turns, base_tokens) = match candidate {
                 RetentionCandidate::CompletedTurns(retained_completed_count) => {
@@ -83,7 +105,6 @@ impl SessionState {
                     else {
                         continue;
                     };
-                    saw_completed_turn = true;
                     let candidate_covered = &closed_turns[..retained_start];
                     if candidate_covered.iter().any(|turn| !turn.items.is_empty()) {
                         (
@@ -109,16 +130,13 @@ impl SessionState {
                 ),
             };
 
-            // Archiving tool results is a real reduction here, so an empty covered
-            // window is the plan rather than "nothing to do".
-            let empty_coverage_is_a_plan = matches!(candidate, RetentionCandidate::ArchiveOnly);
             match plan_retained_window(
                 window_budget,
                 covered,
                 raw_turns,
                 base_tokens,
                 fingerprint,
-                empty_coverage_is_a_plan,
+                candidate.empty_coverage_meaning(),
             )? {
                 CandidateOutcome::Plan(plan) => return Ok(Some(plan)),
                 CandidateOutcome::NothingToDo => return Ok(None),
@@ -151,7 +169,11 @@ impl SessionState {
         match last_failure {
             Some(error) => Err(error.into()),
             None => {
-                if !saw_completed_turn {
+                // Every retention candidate needs one completed turn to retain,
+                // so an empty candidate list means the history holds no completed
+                // turn at all. That case can still be uncompressible when the open
+                // turns alone exceed the hard watermark.
+                if available_completed == 0 {
                     let existing_open_archives = existing_archived_tool_call_ids(open_turns);
                     let current_only_tokens = window_budget
                         .archive_only_fixed_dynamic_body_tokens()
@@ -168,28 +190,27 @@ impl SessionState {
 
     /// Returns the retention options to evaluate, in preference order.
     ///
-    /// Without a covered-payload budget the planner keeps the configured
-    /// retention and falls back to smaller raw tails when the request body does
-    /// not fit. With a budget, the covered window itself must fit one compaction
-    /// request, so the planner retains more completed turns until the covered
-    /// payload fits; covering less than the configured retention would only grow
-    /// the payload the budget just rejected.
+    /// Without a coverage budget the planner keeps the configured retention and
+    /// falls back to smaller raw tails when the request body does not fit. With a
+    /// budget, the covered window itself must fit one compaction request, so the
+    /// planner retains more completed turns until the covered payload fits;
+    /// covering less than the configured retention would only grow the payload the
+    /// budget just rejected.
     fn retention_candidates(
         &self,
         policy: CitationCompactionPolicy,
-        window_budget: CompactionWindowBudget,
+        coverage: CompactionCoverageBudget,
         closed_turns: &[ModelTurnHistory],
         available_completed: usize,
     ) -> Result<Vec<RetentionCandidate>, RuntimeError> {
-        let coverage_budget = window_budget.max_covered_payload_tokens();
-        if coverage_budget == u64::MAX {
+        let Some(coverage_budget) = coverage.max_tokens() else {
             return Ok(
                 retained_turn_fallbacks(policy.retained_model_turns(), available_completed)
                     .into_iter()
                     .map(RetentionCandidate::CompletedTurns)
                     .collect(),
             );
-        }
+        };
         let configured = policy
             .retained_model_turns()
             .min(available_completed)
@@ -215,15 +236,15 @@ impl SessionState {
 /// Returns the plan when the split fits, `NothingToDo` when an empty covered set
 /// means there is nothing to summarize, and `DoesNotFit` when neither the split
 /// nor additional tool-result archiving brings the projection below the hard
-/// watermark. `empty_coverage_is_a_plan` marks the archive-only candidate, where
-/// an empty covered set is the intended reduction rather than a no-op.
+/// watermark. `empty_coverage` carries what an empty covered set means for the
+/// candidate being evaluated.
 fn plan_retained_window(
     window_budget: CompactionWindowBudget,
     covered: &[ModelTurnHistory],
     raw_turns: &[ModelTurnHistory],
     base_tokens: u64,
     fingerprint: CompactionWindowFingerprint,
-    empty_coverage_is_a_plan: bool,
+    empty_coverage: EmptyCoverage,
 ) -> Result<CandidateOutcome, RuntimeError> {
     let mut archived_tool_call_ids = existing_archived_tool_call_ids(raw_turns);
     let fits = |archived_tool_call_ids: &BTreeSet<ToolCallId>| {
@@ -236,7 +257,7 @@ fn plan_retained_window(
     };
 
     if fits(&archived_tool_call_ids)? {
-        if covered.is_empty() && !empty_coverage_is_a_plan {
+        if covered.is_empty() && empty_coverage == EmptyCoverage::NothingToDo {
             return Ok(CandidateOutcome::NothingToDo);
         }
         return Ok(CandidateOutcome::Plan(compaction_window_plan(
