@@ -48,13 +48,19 @@ async fn transactional_compaction_fixture(
         ModelCapabilities::new(true, true, false, true, Some(64_000), None)
             .expect("valid primary capabilities"),
     );
-    let compactor =
-        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+    // The compaction model needs room for the covered turn plus the checkpoint
+    // text budget and the reasoning reserve, so it declares a wider window than
+    // the primary model's working context.
+    let compactor = RecordingModelProvider::with_script_and_capabilities(
+        vec![ScriptedModelProviderResponse::Stream(vec![Ok(
             completed_event_with(
                 vec![ModelOutput::text(TRANSACTIONAL_COMPACTION_CANDIDATE)],
                 FinishReason::Stop,
             ),
-        )])]);
+        )])],
+        ModelCapabilities::new(true, true, false, true, Some(256_000), None)
+            .expect("valid compactor capabilities"),
+    );
     let runtime = Runtime::builder(id.clone())
         .session_store(runtime_store)
         .model_provider(Arc::new(primary), model_name())

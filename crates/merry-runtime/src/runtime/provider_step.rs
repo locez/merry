@@ -1,6 +1,6 @@
 use super::auto_compaction::{
-    compact_prepared_context, compaction_preparation_for_hard_watermark,
-    install_archive_only_compaction_transactionally,
+    CompactionAttempt, compaction_preparation_for_hard_watermark, generate_and_install_compaction,
+    install_archive_only_compaction_transactionally, plan_compaction_attempt,
 };
 use super::journal_emission::{
     send_assistant_text_output_completed_events, send_assistant_text_output_delta_event,
@@ -32,7 +32,7 @@ use super::{
 };
 use crate::{
     CheckpointDecision, CompactionError,
-    compaction::{CompactionPreparation, CompactionWindowBudget},
+    compaction::{ArchiveOnlyCompactionInput, CompactionPreparation, CompactionWindowBudget},
     context::compacted_checkpoint_wrapper_token_ceiling,
     events::{ActiveStepPermit, RuntimeJournalEventBatch},
     memory::MemoryActivationContext,
@@ -49,6 +49,50 @@ use tokio_util::sync::CancellationToken;
 async fn has_unresolved_pending_tool_calls(inner: &RuntimeInner) -> bool {
     let session = inner.session.lock().await;
     session.has_pending_tool_calls()
+}
+
+/// Installs one archive-only reduction and reports whether the step may continue.
+///
+/// Returns `false` when this call already emitted the terminal event for the
+/// step, which happens on cancellation or install failure.
+async fn install_archive_only_reduction(
+    inner: &Arc<RuntimeInner>,
+    sender: &mpsc::Sender<RuntimeJournalEventBatch>,
+    archive_input: ArchiveOnlyCompactionInput,
+    token: &CancellationToken,
+    active_permit: &ActiveStepPermit,
+) -> bool {
+    if token.is_cancelled() {
+        clear_current_activated_memories(inner).await;
+        trace_provider_step_cancelled();
+        let _ = send_cancelled_event(inner, sender).await;
+        return false;
+    }
+    if let Err(error) = install_archive_only_compaction_transactionally(
+        Arc::clone(inner),
+        archive_input,
+        token.clone(),
+        active_permit.clone(),
+    )
+    .await
+    {
+        clear_current_activated_memories(inner).await;
+        if token.is_cancelled() {
+            trace_provider_step_cancelled();
+            let _ = send_cancelled_event(inner, sender).await;
+            return false;
+        }
+        let diagnostic = diagnostic_from_text("auto_compaction", error.to_string());
+        trace_provider_step_failed(&diagnostic);
+        let _ = send_failed_event(inner, sender, token, diagnostic).await;
+        return false;
+    }
+    tracing::debug!(
+        event = "runtime.compaction.archive_only",
+        session_id = inner.session_id.as_str(),
+        "archived retained tool results without replacing the checkpoint"
+    );
+    true
 }
 
 pub(super) struct ProviderStepControl<'a> {
@@ -308,7 +352,7 @@ pub(super) async fn run_provider_step(
         .map(std::num::NonZeroU64::get);
     let mut request_budget =
         request_context_budget(provider.capabilities(), &request, context_window_override);
-    let automatic_config = *inner.automatic_compaction.read().await;
+    let automatic_config = inner.automatic_compaction.read().await.clone();
     if let Err(error) = &request_budget {
         trace_provider_request_budget_unavailable(
             inner.session_id.as_str(),
@@ -379,12 +423,13 @@ pub(super) async fn run_provider_step(
                     policy,
                     resolved_budget,
                     window_budget,
+                    current_request_budget.window.tokens(),
                 )
                 .await
             }
             Err(source) => Err(crate::RuntimeError::Compaction { source }),
         };
-        let preparation = match preparation {
+        let (preparation, compaction_budget) = match preparation {
             Ok(Some(preparation)) => preparation,
             Ok(None) => {
                 clear_current_activated_memories(inner).await;
@@ -412,19 +457,15 @@ pub(super) async fn run_provider_step(
 
         let replacement_outcome = match preparation {
             CompactionPreparation::ReplaceCheckpoint(compaction_input) => {
-                if !send_compaction_started_event(inner, sender, token).await {
-                    return;
-                }
-                let outcome = match compact_prepared_context(
+                let attempt = match plan_compaction_attempt(
                     inner,
-                    *compaction_input,
-                    current_request_budget.window.tokens(),
-                    token.clone(),
-                    active_permit,
+                    CompactionPreparation::ReplaceCheckpoint(compaction_input),
+                    &compaction_budget,
+                    token,
                 )
                 .await
                 {
-                    Ok(outcome) => outcome,
+                    Ok(attempt) => attempt,
                     Err(error) => {
                         clear_current_activated_memories(inner).await;
                         if token.is_cancelled() {
@@ -439,39 +480,78 @@ pub(super) async fn run_provider_step(
                         return;
                     }
                 };
-                Some(outcome)
+                match attempt {
+                    // The request cannot fit the compaction model window even
+                    // with a smaller covered window, so the runtime archives
+                    // tool results instead of spending a model call.
+                    CompactionAttempt::ArchiveOnly { input, reason } => {
+                        if let Some(error) = reason.budget_failure() {
+                            tracing::debug!(
+                                event = "runtime.compaction.archive_only_budget",
+                                session_id = inner.session_id.as_str(),
+                                error = runtime_error_message(&error),
+                                "compaction window cannot host a checkpoint replacement; archiving tool results instead"
+                            );
+                        }
+                        if !install_archive_only_reduction(
+                            inner,
+                            sender,
+                            input,
+                            token,
+                            active_permit,
+                        )
+                        .await
+                        {
+                            return;
+                        }
+                        None
+                    }
+                    CompactionAttempt::Generate(plan) => {
+                        if !send_compaction_started_event(inner, sender, token).await {
+                            return;
+                        }
+                        let outcome = match generate_and_install_compaction(
+                            inner,
+                            plan,
+                            &compaction_budget,
+                            token.clone(),
+                            active_permit,
+                        )
+                        .await
+                        {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                clear_current_activated_memories(inner).await;
+                                if token.is_cancelled() {
+                                    trace_provider_step_cancelled();
+                                    let _ = send_cancelled_event(inner, sender).await;
+                                    return;
+                                }
+                                let diagnostic = diagnostic_from_text(
+                                    "auto_compaction",
+                                    runtime_error_message(&error),
+                                );
+                                trace_provider_step_failed(&diagnostic);
+                                let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                                return;
+                            }
+                        };
+                        Some(outcome)
+                    }
+                }
             }
             CompactionPreparation::ArchiveToolResults(archive_input) => {
-                if token.is_cancelled() {
-                    clear_current_activated_memories(inner).await;
-                    trace_provider_step_cancelled();
-                    let _ = send_cancelled_event(inner, sender).await;
-                    return;
-                }
-                if let Err(error) = install_archive_only_compaction_transactionally(
-                    Arc::clone(inner),
+                if !install_archive_only_reduction(
+                    inner,
+                    sender,
                     archive_input,
-                    token.clone(),
-                    active_permit.clone(),
+                    token,
+                    active_permit,
                 )
                 .await
                 {
-                    clear_current_activated_memories(inner).await;
-                    if token.is_cancelled() {
-                        trace_provider_step_cancelled();
-                        let _ = send_cancelled_event(inner, sender).await;
-                        return;
-                    }
-                    let diagnostic = diagnostic_from_text("auto_compaction", error.to_string());
-                    trace_provider_step_failed(&diagnostic);
-                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
                     return;
                 }
-                tracing::debug!(
-                    event = "runtime.compaction.archive_only",
-                    session_id = inner.session_id.as_str(),
-                    "archived retained tool results without replacing the checkpoint"
-                );
                 None
             }
         };

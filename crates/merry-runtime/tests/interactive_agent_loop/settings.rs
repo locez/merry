@@ -150,7 +150,9 @@ async fn interactive_settings_update_changes_automatic_compaction_at_request_bou
     let updated = AutomaticCompactionConfig::enabled(policy);
 
     control
-        .update_settings(InteractiveSettingsUpdate::default().with_automatic_compaction(updated))
+        .update_settings(
+            InteractiveSettingsUpdate::default().with_automatic_compaction(updated.clone()),
+        )
         .await
         .expect("settings update accepted");
 

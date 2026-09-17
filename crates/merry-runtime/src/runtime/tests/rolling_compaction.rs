@@ -67,15 +67,15 @@ struct CycleState {
 
 #[tokio::test(flavor = "current_thread")]
 async fn rolling_compaction_preserves_protocol_and_meaning_for_64k_three_times() {
-    run_three_cycle_case(64_000, 5_120).await;
+    run_three_cycle_case(64_000).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn rolling_compaction_preserves_protocol_and_meaning_for_256k_three_times() {
-    run_three_cycle_case(256_000, 20_480).await;
+    run_three_cycle_case(256_000).await;
 }
 
-async fn run_three_cycle_case(window_tokens: u64, expected_output_ceiling: u64) {
+async fn run_three_cycle_case(window_tokens: u64) {
     let fixture: RollingCompactionFixture =
         serde_json::from_str(FIXTURE_JSON).expect("rolling compaction fixture parses");
     assert_eq!(fixture.candidates.len(), 3);
@@ -187,9 +187,21 @@ async fn run_three_cycle_case(window_tokens: u64, expected_output_ceiling: u64) 
         let compactor_request = compactor_requests
             .get(cycle - 1)
             .expect("one compactor request per completed cycle");
-        assert_eq!(
-            compactor_request.generation().max_output_tokens(),
-            Some(expected_output_ceiling)
+        // Every cycle must ask the compactor for the checkpoint text budget plus
+        // its reasoning reserve, and the whole request must stay inside the window.
+        let output_ceiling = compactor_request
+            .generation()
+            .max_output_tokens()
+            .expect("compaction always sends an output ceiling");
+        assert!(
+            output_ceiling > window_tokens * 8 / 100,
+            "cycle {cycle} must reserve reasoning room above the checkpoint text budget, got {output_ceiling}"
+        );
+        let compaction_input_tokens =
+            crate::token_estimate::estimate_model_input_tokens(compactor_request.input());
+        assert!(
+            compaction_input_tokens + output_ceiling <= window_tokens,
+            "cycle {cycle} compaction request must fit the window: input {compaction_input_tokens} plus output {output_ceiling} exceeds {window_tokens}"
         );
         let compactor_input =
             serde_json::to_string(compactor_request.input()).expect("compactor input serializes");

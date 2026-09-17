@@ -2,12 +2,20 @@
 
 use merry_llm::{ModelContent, ModelInputItem};
 
+/// Bytes per token used by every text estimate in the runtime.
+///
+/// Budgets, window fitting, and planning all compare against this one ratio, so
+/// a change here moves all of them together.
+pub(crate) const BYTES_PER_TOKEN: u64 = 4;
+
 pub(crate) fn estimate_model_input_tokens(input: &[ModelInputItem]) -> u64 {
     input.iter().map(estimate_model_input_item_tokens).sum()
 }
 
 pub(crate) fn estimate_text_tokens(text: &str) -> u64 {
-    u64::try_from(text.len().div_ceil(4)).expect("usize should fit in u64 on supported targets")
+    u64::try_from(text.len())
+        .expect("usize should fit in u64 on supported targets")
+        .div_ceil(BYTES_PER_TOKEN)
 }
 
 fn estimate_model_input_item_tokens(item: &ModelInputItem) -> u64 {

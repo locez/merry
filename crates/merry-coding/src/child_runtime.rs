@@ -51,7 +51,7 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
             .any(|tool| tool.as_str() == CODING_LOOP_PROCESS_TOOL);
         let mut builder = Runtime::builder(input.session_id.clone())
             .task_anchor(input.task_anchor)
-            .automatic_compaction(self.composition.automatic_compaction)
+            .automatic_compaction(self.composition.automatic_compaction.clone())
             .model_provider(
                 Arc::clone(&self.composition.provider),
                 self.composition.model.clone(),

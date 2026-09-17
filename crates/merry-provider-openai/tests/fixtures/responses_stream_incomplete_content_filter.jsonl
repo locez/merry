@@ -1,0 +1,3 @@
+data: {"type":"response.created","response":{"id":"resp_filtered","status":"in_progress","output":[]}}
+data: {"type":"response.incomplete","response":{"id":"resp_filtered","status":"incomplete","output":[],"incomplete_details":{"reason":"content_filter"}}}
+data: [DONE]

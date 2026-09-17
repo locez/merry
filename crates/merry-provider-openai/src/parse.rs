@@ -4,14 +4,14 @@ use crate::{
     OpenAiProviderError,
     provider::{bounded_provider_error_message, bounded_provider_metadata},
     wire::{
-        ResponsesOutputContent, ResponsesOutputItem, ResponsesResponse, ResponsesStreamEvent,
-        ResponsesStreamOutputItem, ResponsesUsage,
+        ResponsesIncompleteDetails, ResponsesOutputContent, ResponsesOutputItem, ResponsesResponse,
+        ResponsesStreamEvent, ResponsesStreamOutputItem, ResponsesUsage,
     },
 };
 use merry_core::ToolName;
 use merry_llm::{
-    FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
-    ProviderErrorKind, ToolArguments, Usage,
+    FinishDetail, FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall,
+    ModelToolCallId, ProviderErrorKind, ToolArguments, Usage,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -291,15 +291,23 @@ impl ResponsesStreamParser {
             ));
         }
 
+        if !self.tool_calls.is_empty() {
+            return Ok(ModelResponse::new(
+                stream_outputs(&self.aggregate_text, &self.tool_calls),
+                FinishReason::ToolCalls,
+                usage,
+            ));
+        }
+        let (finish_reason, finish_detail) = parse_terminal_finish(
+            response.status.as_deref().or(Some(fallback_status)),
+            response.incomplete_details.as_ref(),
+        )?;
         Ok(ModelResponse::new(
             stream_outputs(&self.aggregate_text, &self.tool_calls),
-            if self.tool_calls.is_empty() {
-                parse_response_status(response.status.as_deref().or(Some(fallback_status)))?
-            } else {
-                FinishReason::ToolCalls
-            },
+            finish_reason,
             usage,
-        ))
+        )
+        .with_finish_detail(finish_detail))
     }
 }
 
@@ -405,26 +413,53 @@ fn parse_response(response: ResponsesResponse) -> Result<ModelResponse, OpenAiPr
     let has_tool_call = outputs
         .iter()
         .any(|output| matches!(output, ModelOutput::ToolCall { .. }));
+    if has_tool_call {
+        return Ok(ModelResponse::new(
+            outputs,
+            FinishReason::ToolCalls,
+            response.usage.map(usage_from_wire).transpose()?,
+        ));
+    }
+    let (finish_reason, finish_detail) = parse_terminal_finish(
+        response.status.as_deref(),
+        response.incomplete_details.as_ref(),
+    )?;
     Ok(ModelResponse::new(
         outputs,
-        if has_tool_call {
-            FinishReason::ToolCalls
-        } else {
-            parse_response_status(response.status.as_deref())?
-        },
+        finish_reason,
         response.usage.map(usage_from_wire).transpose()?,
-    ))
+    )
+    .with_finish_detail(finish_detail))
 }
 
-fn parse_response_status(status: Option<&str>) -> Result<FinishReason, OpenAiProviderError> {
+/// Normalizes a terminal Responses status and its `incomplete_details`.
+///
+/// The Responses API explains an `incomplete` terminal state through
+/// `incomplete_details.reason`. The adapter keeps the causes the runtime can
+/// report and treats unknown or missing reasons as a plain length stop, so a
+/// new provider reason never becomes a protocol failure.
+fn parse_terminal_finish(
+    status: Option<&str>,
+    incomplete_details: Option<&ResponsesIncompleteDetails>,
+) -> Result<(FinishReason, Option<FinishDetail>), OpenAiProviderError> {
     match status {
-        Some("completed") => Ok(FinishReason::Stop),
-        Some("incomplete") => Ok(FinishReason::Length),
-        Some("failed") => Ok(FinishReason::Error),
+        Some("completed") => Ok((FinishReason::Stop, None)),
+        Some("incomplete") => Ok(
+            match incomplete_details.and_then(|details| details.reason.as_deref()) {
+                Some("max_output_tokens") => {
+                    (FinishReason::Length, Some(FinishDetail::MaxOutputTokens))
+                }
+                Some("content_filter") => {
+                    (FinishReason::Blocked, Some(FinishDetail::ContentFilter))
+                }
+                _ => (FinishReason::Length, None),
+            },
+        ),
+        Some("failed") => Ok((FinishReason::Error, None)),
         Some(other) => Err(OpenAiProviderError::protocol(format!(
             "unsupported Responses status `{other}`"
         ))),
-        None => Ok(FinishReason::Stop),
+        None => Ok((FinishReason::Stop, None)),
     }
 }
 

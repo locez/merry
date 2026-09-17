@@ -12,8 +12,8 @@ use crate::{
 };
 use merry_core::EvidenceRef;
 use merry_llm::{
-    GenerationConfig, ModelContent, ModelError, ModelMessage, ModelMessageRole, ModelName,
-    ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat,
+    GenerationConfig, ModelContent, ModelError, ModelInputItem, ModelMessage, ModelMessageRole,
+    ModelName, ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat, ReasoningEffort,
 };
 use schemars::Schema;
 use serde::Serialize;
@@ -33,6 +33,9 @@ pub enum CompactionError {
 
     #[error("no compressible history exists before retained model turns")]
     NoCompressibleWindow,
+
+    #[error("no compaction window fits the compaction request budget")]
+    NoWindowFitsCompactionRequest,
 
     #[error("compaction payload serialization failed: {message}")]
     PayloadSerialization { message: String },
@@ -73,8 +76,11 @@ mod schema;
 #[path = "compaction/runner.rs"]
 mod runner;
 
-pub use prompt::citation_compaction_system_prompt;
+pub use prompt::{
+    COMPACTION_PAYLOAD_TAG, citation_compaction_tail_directive, compaction_payload_block,
+};
 pub(crate) use runner::{
+    compaction_model_window, compaction_request_required_tokens,
     generate_validated_compaction_candidate, validate_compaction_model_window,
 };
 pub use schema::citation_compaction_response_schema;
@@ -373,6 +379,24 @@ impl CitationCompactionInput {
         })
     }
 
+    /// Estimated tokens the covered turns contribute to the serialized payload.
+    ///
+    /// The runtime uses this to decide how much covered history to give up when a
+    /// compaction request does not fit the compaction model window. It measures
+    /// the serialized payload with and without the covered window, so it stays
+    /// consistent with the request the runtime is about to send.
+    pub(crate) fn covered_payload_token_estimate(&self) -> Result<u64, CompactionError> {
+        let full = estimate_text_tokens(&self.to_model_payload_json()?);
+        let mut payload = self.payload.clone();
+        payload.window.clear();
+        let fixed = serde_json::to_string(&payload).map_err(|error| {
+            CompactionError::PayloadSerialization {
+                message: error.to_string(),
+            }
+        })?;
+        Ok(full.saturating_sub(estimate_text_tokens(&fixed)))
+    }
+
     /// Builds the exact structured-output schema for the references visible in
     /// this compaction input.
     pub fn model_response_schema(&self) -> Result<Schema, CompactionError> {
@@ -559,22 +583,51 @@ fn validate_candidate_uses_model_supplied_refs(
     Ok(())
 }
 
+/// Compiles the model request that produces one compacted checkpoint candidate.
+///
+/// The request reuses the session's stable prefix item by item, then appends the
+/// compaction directive and the JSON payload as trailing user messages. Both
+/// trailing messages carry their own boundary tag: the directive as runtime
+/// instructions, the payload as data. Sharing the prefix lets a provider serve
+/// this request from the session's cached prefix; the request itself stays
+/// outside the agent loop, carries no tools, and keeps structured output as its
+/// only response contract.
+///
+/// Compaction carries its own reasoning-effort level instead of inheriting the
+/// primary model's. `reasoning_effort` of `None` leaves the provider default in
+/// place, which is the conservative choice for a summarization turn.
+///
+/// `output_ceiling_tokens` is the provider output budget for this attempt. The
+/// runtime sizes it from the compaction model window so reasoning tokens and
+/// checkpoint text both fit instead of the provider truncating the candidate.
 pub(crate) fn compile_citation_compaction_model_request(
     input: &CitationCompactionInput,
     model: &ModelName,
+    stable_prefix: &[ModelInputItem],
+    reasoning_effort: Option<&ReasoningEffort>,
+    output_ceiling_tokens: u64,
 ) -> Result<ModelRequest, ModelError> {
+    if stable_prefix.is_empty() {
+        return Err(ModelError::invalid_request(
+            "compaction request requires the session stable prefix",
+        ));
+    }
     let payload = input
         .to_model_payload_json()
         .map_err(|error| ModelError::invalid_request(error.to_string()))?;
-    let messages = vec![
-        ModelMessage::new(
-            ModelMessageRole::System,
-            ModelContent::text(citation_compaction_system_prompt())?,
-        )?,
-        ModelMessage::new(ModelMessageRole::User, ModelContent::text(&payload)?)?,
-    ];
-    let generation =
-        GenerationConfig::new(Some(input.resolved_budget().output_token_limit()), false)?;
+    let mut items = Vec::with_capacity(stable_prefix.len() + 2);
+    items.extend(stable_prefix.iter().cloned());
+    let stable_prefix_item_count = items.len();
+    items.push(ModelInputItem::Message(ModelMessage::new(
+        ModelMessageRole::User,
+        ModelContent::text(citation_compaction_tail_directive())?,
+    )?));
+    items.push(ModelInputItem::Message(ModelMessage::new(
+        ModelMessageRole::User,
+        ModelContent::text(&compaction_payload_block(&payload))?,
+    )?));
+    let generation = GenerationConfig::new(Some(output_ceiling_tokens), false)?
+        .with_reasoning_effort(reasoning_effort.cloned());
     let response_schema = input
         .model_response_schema()
         .map_err(|error| ModelError::invalid_request(error.to_string()))?;
@@ -583,15 +636,81 @@ pub(crate) fn compile_citation_compaction_model_request(
         response_schema,
     )?);
 
-    ModelRequest::new_with_continuations_and_stable_prefix_and_response_format(
+    ModelRequest::new_with_input_and_stable_prefix_and_response_format(
         model.clone(),
-        messages,
-        Vec::new(),
+        items,
         Vec::new(),
         generation,
-        1,
+        stable_prefix_item_count,
         Some(response_format),
     )
+}
+
+/// Safety room kept between a fitted request and the compaction model window.
+///
+/// Request sizes are byte-based estimates, so a request that exactly fills the
+/// window may still be counted larger by the provider. The margin scales with the
+/// room that is actually available, so a small model window can still host a
+/// useful request while a large window keeps a fixed reserve.
+#[must_use]
+pub(crate) fn compaction_window_safety_tokens(available_tokens: u64) -> u64 {
+    const PERCENT: u64 = 8;
+    const MIN_TOKENS: u64 = 128;
+    const MAX_TOKENS: u64 = 1_024;
+    (available_tokens / PERCENT).clamp(MIN_TOKENS, MAX_TOKENS)
+}
+
+/// Reasoning allowance one compaction request reserves, as a percentage of its input.
+///
+/// Compaction reasoning shares the provider output ceiling with the checkpoint
+/// text, and it is the part that grows with the request: the model reads every
+/// covered turn before it can write the checkpoint. Measured on a real session,
+/// compaction reasoning ran to the full granted ceiling on every attempt
+/// (43,518 of 43,520 tokens) and the checkpoint text never started, so a ceiling
+/// reserved against the text budget alone starves the answer. Sizing the reserve
+/// against the request input is what gives the model room to finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompactionReasoningReserve {
+    percent: u64,
+}
+
+impl CompactionReasoningReserve {
+    /// Reserve used for a first attempt.
+    pub(crate) const INITIAL: Self = Self { percent: 25 };
+
+    /// Largest reserve a retried attempt may ask for.
+    const MAX_PERCENT: u64 = 100;
+
+    /// Returns the reserve to use after the provider truncated an attempt.
+    ///
+    /// A truncation proves the reserve was too small. Covering less history does
+    /// not fix that on its own, because the reasoning demand shrinks with the
+    /// input the model reads; the reserve ratio is what has to change. The caller
+    /// still re-plans, because a larger reserve needs more window room.
+    #[must_use]
+    pub(crate) fn degraded(self) -> Self {
+        Self {
+            percent: (self.percent * 2).min(Self::MAX_PERCENT),
+        }
+    }
+
+    /// Returns this reserve as a percentage of request input.
+    #[must_use]
+    pub(crate) const fn percent(self) -> u64 {
+        self.percent
+    }
+
+    /// Returns the provider `max_output_tokens` for a request with this input size.
+    #[must_use]
+    pub(crate) fn output_ceiling(
+        self,
+        resolved_budget: ResolvedCitationCompactionBudget,
+        input_tokens: u64,
+    ) -> u64 {
+        resolved_budget
+            .output_token_limit()
+            .saturating_add(input_tokens.saturating_mul(self.percent) / 100)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

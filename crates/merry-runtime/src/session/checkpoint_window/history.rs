@@ -20,6 +20,7 @@ use crate::{
             ToolCallPromptProjection, ToolResultPromptProjection, TranscriptItem, TranscriptItemId,
         },
     },
+    token_estimate::BYTES_PER_TOKEN,
 };
 use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef, ToolCallId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,6 +37,18 @@ pub(super) struct ModelTurnHistory {
     pub(super) items: Vec<CompactionHistoryRecord>,
 }
 
+/// JSON keys, the turn id, the status tag, and separators one payload turn adds.
+const COMPACTION_PAYLOAD_TURN_ENVELOPE_BYTES: u64 = 64;
+
+/// Estimated tokens the covered turns contribute to the compaction payload.
+pub(super) fn covered_payload_tokens(turns: &[ModelTurnHistory]) -> Result<u64, RuntimeError> {
+    turns.iter().try_fold(0_u64, |total, turn| {
+        total
+            .checked_add(turn.compaction_payload_token_estimate()?)
+            .ok_or_else(|| RuntimeError::from(CompactionError::BudgetOverflow))
+    })
+}
+
 #[derive(Clone)]
 pub(super) struct CompactionHistoryRecord {
     pub(super) item: CompactionHistoryItem,
@@ -43,6 +56,16 @@ pub(super) struct CompactionHistoryRecord {
 }
 
 impl ModelTurnHistory {
+    pub(super) fn compaction_payload_token_estimate(&self) -> Result<u64, RuntimeError> {
+        let item_tokens = self.items.iter().try_fold(0_u64, |total, record| {
+            total
+                .checked_add(record.item.compaction_payload_token_estimate()?)
+                .ok_or_else(|| RuntimeError::from(CompactionError::BudgetOverflow))
+        })?;
+        Ok(item_tokens
+            .saturating_add(COMPACTION_PAYLOAD_TURN_ENVELOPE_BYTES.div_ceil(BYTES_PER_TOKEN)))
+    }
+
     pub(super) fn projected_token_estimate(
         &self,
         archived_tool_call_ids: &BTreeSet<ToolCallId>,

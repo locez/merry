@@ -6,6 +6,27 @@
 
 use thiserror::Error;
 
+/// Wraps provider-visible content in one runtime boundary tag.
+///
+/// This is the single formatting contract for runtime-owned prompt blocks:
+/// `<tag>\n` + content + `\n</tag>`. Callers own tag naming, and compaction
+/// reuses this so its boundary frames match the stable prefix frames byte for
+/// byte.
+pub(crate) fn render_prompt_block(tag: &str, content: &str) -> String {
+    let mut block = String::with_capacity(tag.len() * 2 + content.len() + 7);
+    block.push('<');
+    block.push_str(tag);
+    block.push_str(">\n");
+    block.push_str(content);
+    if !content.ends_with('\n') {
+        block.push('\n');
+    }
+    block.push_str("</");
+    block.push_str(tag);
+    block.push('>');
+    block
+}
+
 pub(crate) const DEFAULT_RUNTIME_BASE_INSTRUCTIONS: &str = r#"<merry_runtime_instructions>
 You are Merry, a software engineering agent. The user's current instruction, applicable project rules, and runtime-provided context define success.
 
@@ -67,18 +88,7 @@ impl PromptBlock {
     }
 
     pub(crate) fn render(&self) -> String {
-        let mut rendered = String::with_capacity(self.tag.len() * 2 + self.text.len() + 7);
-        rendered.push('<');
-        rendered.push_str(&self.tag);
-        rendered.push_str(">\n");
-        rendered.push_str(&self.text);
-        if !self.text.ends_with('\n') {
-            rendered.push('\n');
-        }
-        rendered.push_str("</");
-        rendered.push_str(&self.tag);
-        rendered.push('>');
-        rendered
+        render_prompt_block(&self.tag, &self.text)
     }
 }
 

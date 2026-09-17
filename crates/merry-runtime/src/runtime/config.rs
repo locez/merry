@@ -1,19 +1,27 @@
 use crate::CitationCompactionPolicy;
+use merry_llm::ReasoningEffort;
 
 fn default_automatic_compaction_policy() -> CitationCompactionPolicy {
     CitationCompactionPolicy::default()
 }
 
-/// Runtime-owned policy for automatic checkpoint compaction.
+/// Runtime-owned policy for checkpoint compaction.
 ///
 /// This controls the pre-provider hard-watermark compaction path. Manual
 /// [`crate::Runtime::compact_context_once`] calls still take an explicit
 /// [`CitationCompactionPolicy`] so tests and callers can run one-off compaction
 /// passes without mutating runtime construction policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Compaction is a summarization turn over the whole covered window, so it does
+/// not inherit the primary model's reasoning effort: a primary tuned for hard
+/// coding turns can spend its entire output budget reasoning about history and
+/// never write the checkpoint. `reasoning_effort` names the level compaction
+/// requests use, and `None` leaves the provider default in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomaticCompactionConfig {
     enabled: bool,
     policy: CitationCompactionPolicy,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl AutomaticCompactionConfig {
@@ -23,6 +31,7 @@ impl AutomaticCompactionConfig {
         Self {
             enabled: true,
             policy,
+            reasoning_effort: None,
         }
     }
 
@@ -35,17 +44,31 @@ impl AutomaticCompactionConfig {
         Self {
             enabled: false,
             policy: default_automatic_compaction_policy(),
+            reasoning_effort: None,
         }
     }
 
     #[must_use]
-    pub fn is_enabled(self) -> bool {
+    pub const fn is_enabled(&self) -> bool {
         self.enabled
     }
 
     #[must_use]
-    pub fn policy(self) -> CitationCompactionPolicy {
+    pub const fn policy(&self) -> CitationCompactionPolicy {
         self.policy
+    }
+
+    /// Returns a copy configured with a reasoning-effort level for compaction.
+    #[must_use]
+    pub fn with_reasoning_effort(mut self, reasoning_effort: Option<ReasoningEffort>) -> Self {
+        self.reasoning_effort = reasoning_effort;
+        self
+    }
+
+    /// Optional reasoning-effort level for compaction model requests.
+    #[must_use]
+    pub fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
+        self.reasoning_effort.as_ref()
     }
 }
 

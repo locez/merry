@@ -1,5 +1,6 @@
 use super::{ConfigError, MerryConfig, RuntimeModelToml, default_true, validate_model_text};
 use merry::profiles::{DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS, MIN_CODING_SUBAGENT_MODEL_TURNS};
+use merry_llm::ReasoningEffort;
 use merry_runtime::{AutomaticCompactionConfig, CitationCompactionPolicy};
 use serde::Deserialize;
 
@@ -120,6 +121,7 @@ struct AutoCompactionToml {
     target_output_tokens: Option<u64>,
     max_accepted_output_bytes: Option<usize>,
     retained_model_turns: Option<usize>,
+    reasoning_effort: Option<String>,
     model_output_token_limit: Option<u64>,
     retained_raw_tail_items: Option<usize>,
     max_ref_excerpt_bytes: Option<usize>,
@@ -129,21 +131,33 @@ struct AutoCompactionToml {
 impl AutoCompactionToml {
     fn to_config(&self) -> Result<AutomaticCompactionConfig, ConfigError> {
         self.validate_removed_fields()?;
-        if !self.enabled {
-            return Ok(AutomaticCompactionConfig::disabled());
-        }
-
-        let defaults = AutomaticCompactionConfig::default().policy();
-        let policy = CitationCompactionPolicy::new(
-            self.target_output_tokens
-                .or_else(|| defaults.target_output_tokens()),
-            self.max_accepted_output_bytes
-                .or_else(|| defaults.max_accepted_output_bytes()),
-            self.retained_model_turns
-                .unwrap_or_else(|| defaults.retained_model_turns()),
-        )
-        .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-        Ok(AutomaticCompactionConfig::enabled(policy))
+        let reasoning_effort = self
+            .reasoning_effort
+            .as_deref()
+            .map(|effort| {
+                ReasoningEffort::new(effort).map_err(|error| {
+                    ConfigError::Invalid(format!(
+                        "runtime.auto_compaction.reasoning_effort is invalid: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
+        let config = if self.enabled {
+            let defaults = AutomaticCompactionConfig::default().policy();
+            let policy = CitationCompactionPolicy::new(
+                self.target_output_tokens
+                    .or_else(|| defaults.target_output_tokens()),
+                self.max_accepted_output_bytes
+                    .or_else(|| defaults.max_accepted_output_bytes()),
+                self.retained_model_turns
+                    .unwrap_or_else(|| defaults.retained_model_turns()),
+            )
+            .map_err(|error| ConfigError::Invalid(error.to_string()))?;
+            AutomaticCompactionConfig::enabled(policy)
+        } else {
+            AutomaticCompactionConfig::disabled()
+        };
+        Ok(config.with_reasoning_effort(reasoning_effort))
     }
 
     fn validate_removed_fields(&self) -> Result<(), ConfigError> {
@@ -290,6 +304,7 @@ enabled = true
 target_output_tokens = 160
 max_accepted_output_bytes = 4096
 retained_model_turns = 4
+reasoning_effort = "medium"
 "#,
             ),
             &paths,
@@ -305,6 +320,38 @@ retained_model_turns = 4
         assert_eq!(policy.target_output_tokens(), Some(160));
         assert_eq!(policy.max_accepted_output_bytes(), Some(4096));
         assert_eq!(policy.retained_model_turns(), 4);
+        assert_eq!(
+            auto_compaction
+                .reasoning_effort()
+                .map(merry_llm::ReasoningEffort::as_str),
+            Some("medium")
+        );
+    }
+
+    #[test]
+    fn runtime_auto_compaction_rejects_invalid_reasoning_effort() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[runtime.auto_compaction]
+reasoning_effort = " padded "
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let error = config
+            .automatic_compaction_config()
+            .expect_err("invalid reasoning effort must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("runtime.auto_compaction.reasoning_effort is invalid"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

@@ -1,4 +1,52 @@
-use super::{CitationCompactionPolicy, CompactionError};
+use super::{CitationCompactionPolicy, CompactionError, CompactionReasoningReserve};
+
+/// Numbers below come from the session that exposed the starvation.
+///
+/// The compaction model window resolved to 272,000 tokens, the request measured
+/// 200,387 input tokens, and the provider truncated at the 43,520-token ceiling —
+/// exactly twice the checkpoint text budget — with 43,518 of those tokens spent
+/// on reasoning. The reserve must therefore grow with the request, not with the
+/// text budget.
+#[test]
+fn reasoning_reserve_grows_with_request_input_instead_of_the_text_budget() {
+    let resolved = CitationCompactionPolicy::default()
+        .resolve(272_000)
+        .expect("budget resolves");
+    let text_budget = resolved.output_token_limit();
+    let measured_input_tokens = 200_387;
+
+    assert_eq!(text_budget, 21_760);
+    let ceiling =
+        CompactionReasoningReserve::INITIAL.output_ceiling(resolved, measured_input_tokens);
+    assert!(
+        ceiling > 2 * text_budget,
+        "the reserve must exceed the old text-budget multiple, got {ceiling}"
+    );
+    // The reserve alone can overshoot the window, which is why the runtime's
+    // fitter covers less history before it sends the request.
+    let mut fitted_input_tokens = measured_input_tokens;
+    while fitted_input_tokens
+        + CompactionReasoningReserve::INITIAL.output_ceiling(resolved, fitted_input_tokens)
+        > 272_000
+    {
+        fitted_input_tokens -= fitted_input_tokens / 100;
+    }
+    assert!(
+        fitted_input_tokens < measured_input_tokens,
+        "this window needs a smaller covered window before it can host the reserve"
+    );
+    assert!(
+        fitted_input_tokens
+            + CompactionReasoningReserve::INITIAL.output_ceiling(resolved, fitted_input_tokens)
+            <= 272_000
+    );
+
+    let degraded = CompactionReasoningReserve::INITIAL.degraded();
+    assert!(
+        degraded.output_ceiling(resolved, measured_input_tokens) > ceiling,
+        "a truncated attempt must retry with a strictly larger reserve"
+    );
+}
 
 #[test]
 fn adaptive_budget_scales_for_64k_and_256k_windows() {

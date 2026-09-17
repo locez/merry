@@ -74,7 +74,7 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
             Arc::new(compactor.clone()),
             ModelName::new("compaction-model").expect("valid model"),
         )
-        .automatic_compaction(automatic_compaction)
+        .automatic_compaction(automatic_compaction.clone())
         .build()
         .expect("runtime builds");
 
@@ -117,14 +117,18 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
             covered_history_item_count: 2
         } if checkpoint_id.starts_with("checkpoint-auto-compaction-events-")
     ));
-    assert_eq!(
-        compactor.recorded_requests()[0]
-            .generation()
-            .max_output_tokens(),
-        Some(5_120),
-        "automatic compaction budget must come from the 64k primary window"
-    );
+    // The output ceiling is the checkpoint text budget plus the reasoning
+    // reserve sized from the request input, so it must exceed the text budget
+    // while the whole request still fits the primary window.
     let compactor_request = &compactor.recorded_requests()[0];
+    let output_ceiling = compactor_request
+        .generation()
+        .max_output_tokens()
+        .expect("compaction always sends an output ceiling");
+    assert!(
+        output_ceiling > 5_120,
+        "automatic compaction must reserve reasoning room above the checkpoint text budget, got {output_ceiling}"
+    );
     let compactor_input = compactor_request
         .input()
         .iter()

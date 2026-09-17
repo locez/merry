@@ -3,7 +3,7 @@ use crate::{
     artifact::ArtifactContent,
     compaction::{CitationCompactionToolResult, CitationCompactionTurnItem, CompactionError},
     permission::PermissionReviewContextEntry,
-    token_estimate::estimate_text_tokens,
+    token_estimate::{BYTES_PER_TOKEN, estimate_text_tokens},
 };
 use merry_core::{PendingToolCall, ToolCallResult};
 use std::collections::BTreeSet;
@@ -14,6 +14,16 @@ use super::transcript::{
 };
 
 const PERMISSION_REVIEW_ENTRY_MAX_BYTES: usize = 2048;
+
+/// Fixed JSON keys, tags, ids, and separators one payload item adds beyond its text.
+///
+/// Measured against the serialized payload: a small user item carries about 60
+/// bytes beyond its text, and a tool exchange about 160 because it also names the
+/// call, the artifact, the result status, and the content kind. These constants
+/// are upper bounds, because an underestimated envelope makes the planner believe
+/// a larger covered window fits than the runtime can actually measure.
+const COMPACTION_PAYLOAD_ITEM_ENVELOPE_BYTES: u64 = 64;
+const COMPACTION_PAYLOAD_TOOL_ITEM_ENVELOPE_BYTES: u64 = 192;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CompactionHistoryItem {
@@ -163,6 +173,46 @@ impl CompactionHistoryItem {
                     + estimate_text_tokens(&result_text))
             }
         }
+    }
+
+    /// Estimated tokens this item contributes to the compaction payload.
+    ///
+    /// Covered turns travel through the payload with their full text, including
+    /// tool results that the retained request may project as artifact notices.
+    /// Window planning uses this estimate to cap how much history one compaction
+    /// request reads.
+    ///
+    /// This estimate is not the authority. Text is measured from its raw byte
+    /// length while the payload serializes it with JSON escaping, so content with
+    /// many newlines can add up to one extra byte per escaped character, and the
+    /// envelope constants only bound the fixed part. The authority is
+    /// [`crate::compaction::CitationCompactionInput::covered_payload_token_estimate`],
+    /// which measures the built payload; the runtime sizes a request from that
+    /// value and re-plans when this estimate was too optimistic.
+    pub(super) fn compaction_payload_token_estimate(&self) -> Result<u64, RuntimeError> {
+        let (content_tokens, envelope_bytes) = match &self.kind {
+            CompactionHistoryItemKind::User { text }
+            | CompactionHistoryItemKind::Assistant { text } => (
+                estimate_text_tokens(text),
+                COMPACTION_PAYLOAD_ITEM_ENVELOPE_BYTES,
+            ),
+            CompactionHistoryItemKind::ToolExchange { call, content, .. } => {
+                let (_, result_text) = exact_artifact_text(content)?;
+                let arguments =
+                    serde_json::to_string(call.arguments().as_object()).map_err(|error| {
+                        RuntimeError::from(CompactionError::PayloadSerialization {
+                            message: error.to_string(),
+                        })
+                    })?;
+                (
+                    estimate_text_tokens(call.name().as_str())
+                        .saturating_add(estimate_text_tokens(&arguments))
+                        .saturating_add(estimate_text_tokens(result_text)),
+                    COMPACTION_PAYLOAD_TOOL_ITEM_ENVELOPE_BYTES,
+                )
+            }
+        };
+        Ok(content_tokens.saturating_add(envelope_bytes.div_ceil(BYTES_PER_TOKEN)))
     }
 
     pub(super) fn tool_result_archive_candidate(

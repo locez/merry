@@ -450,7 +450,7 @@ impl CodingRuntimeBuilder {
             );
         }
         let mut runtime_builder = Runtime::builder(session_id.clone())
-            .automatic_compaction(automatic_compaction)
+            .automatic_compaction(automatic_compaction.clone())
             .model_provider(Arc::clone(&provider), model.clone());
         if matches!(variant, CodingRuntimeVariant::FullCoding) {
             runtime_builder = runtime_builder.coordinator_plan_tools();

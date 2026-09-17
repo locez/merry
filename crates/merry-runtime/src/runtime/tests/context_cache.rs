@@ -298,3 +298,154 @@ async fn coordinator_tool_specs_and_stable_prefix_stay_fixed_across_plan_activat
         );
     }
 }
+
+fn message_text(item: &merry_llm::ModelInputItem) -> &str {
+    match item {
+        merry_llm::ModelInputItem::Message(message) => message.content().as_text(),
+        other => panic!("expected a message input item, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_request_reuses_the_step_stable_prefix_and_appends_the_directive() {
+    let primary = RecordingModelProvider::with_script_and_capabilities(
+        Vec::new(),
+        ModelCapabilities::new(true, true, false, true, Some(64_000), None)
+            .expect("valid primary capabilities"),
+    );
+    let compactor = RecordingModelProvider::with_script_and_capabilities(
+        vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event_with(
+                vec![ModelOutput::text(CACHE_KEY_COMPACTION_CANDIDATE)],
+                FinishReason::Stop,
+            ),
+        )])],
+        ModelCapabilities::new(true, true, false, true, Some(256_000), None)
+            .expect("valid compactor capabilities"),
+    );
+    let runtime =
+        Runtime::builder(session_id("runtime-compaction-prefix-reuse"))
+            .model_provider(Arc::new(primary.clone()), model_name())
+            .model_provider_for_role(
+                RuntimeModelRole::ContextCompaction,
+                Arc::new(compactor.clone()),
+                named_model("fake/prefix-reuse-compactor"),
+            )
+            // The compaction config owns the reasoning level and must override
+            // whatever the primary model asks for.
+            .automatic_compaction(AutomaticCompactionConfig::disabled().with_reasoning_effort(
+                Some(merry_llm::ReasoningEffort::new("low").expect("valid reasoning effort")),
+            ))
+            .build()
+            .expect("runtime should build");
+    let generation = GenerationConfig::new(None, false)
+        .expect("valid generation")
+        .with_reasoning_effort(Some(
+            merry_llm::ReasoningEffort::new("max").expect("valid reasoning effort"),
+        ));
+
+    for text in ["old turn before prefix reuse", "retained raw tail"] {
+        collect_step(
+            &runtime,
+            text,
+            StepContext::default().with_generation_config(generation.clone()),
+        )
+        .await;
+    }
+    runtime
+        .compact_context_once(
+            CitationCompactionPolicy::new(Some(512), Some(16_384), 1)
+                .expect("valid compaction policy"),
+            StepContext::default().with_generation_config(generation),
+        )
+        .await
+        .expect("compaction should succeed")
+        .expect("history should compact");
+
+    let primary_requests = primary.recorded_requests();
+    let primary_request = primary_requests.last().expect("primary request recorded");
+    let compaction_requests = compactor.recorded_requests();
+    let compaction_request = compaction_requests
+        .first()
+        .expect("compaction request recorded");
+
+    assert_eq!(
+        compaction_request.stable_prefix_item_count(),
+        primary_request.stable_prefix_item_count(),
+        "compaction must reuse the session stable prefix item count"
+    );
+    assert_eq!(
+        compaction_request.stable_prefix_input(),
+        primary_request.stable_prefix_input(),
+        "compaction prefix items must stay byte-identical to the step prefix"
+    );
+    assert!(
+        !compaction_request.stable_prefix_input().is_empty(),
+        "compaction must keep the session prefix instead of a dedicated system prompt"
+    );
+
+    let input = compaction_request.input();
+    let prefix_len = compaction_request.stable_prefix_item_count();
+    assert_eq!(
+        input.len(),
+        prefix_len + 2,
+        "compaction input is the stable prefix, the directive, and the payload"
+    );
+    assert!(
+        message_text(&input[0]).starts_with("<merry_runtime_instructions>\n"),
+        "compaction must reuse the session's tagged runtime instructions"
+    );
+    let directive = message_text(&input[prefix_len]);
+    assert!(
+        directive.starts_with("<merry_compaction_instructions>\n")
+            && directive.ends_with("\n</merry_compaction_instructions>"),
+        "the compaction directive must be one bounded instruction block: {directive}"
+    );
+    assert!(
+        directive.contains("Context compaction request."),
+        "unexpected compaction directive: {directive}"
+    );
+    let payload = message_text(&input[prefix_len + 1]);
+    assert!(
+        payload.starts_with("<merry_compaction_payload>\n")
+            && payload.ends_with("\n</merry_compaction_payload>"),
+        "the compaction payload must be one bounded data block: {payload}"
+    );
+    assert!(
+        payload.contains("\"available_ref_ids\""),
+        "the payload block must still carry the structured compaction payload"
+    );
+    let payload_json = payload
+        .trim_start_matches("<merry_compaction_payload>\n")
+        .trim_end_matches("\n</merry_compaction_payload>");
+    assert!(
+        serde_json::from_str::<serde_json::Value>(payload_json).is_ok(),
+        "the payload boundary must wrap strict JSON without escaping it"
+    );
+
+    let format = compaction_request
+        .response_format()
+        .expect("compaction must keep structured output");
+    let merry_llm::ModelResponseFormat::StructuredOutput(format) = format;
+    assert_eq!(format.name(), "compacted_checkpoint_candidate");
+    assert!(
+        compaction_request.tools().is_empty(),
+        "compaction stays outside the agent loop and carries no tools"
+    );
+    assert_eq!(
+        compaction_request
+            .generation()
+            .reasoning_effort()
+            .map(merry_llm::ReasoningEffort::as_str),
+        Some("low"),
+        "compaction must use the configured compaction reasoning level, not the primary model's"
+    );
+    assert_eq!(
+        primary_request
+            .generation()
+            .reasoning_effort()
+            .map(merry_llm::ReasoningEffort::as_str),
+        Some("max"),
+        "the primary request keeps its own reasoning effort"
+    );
+}

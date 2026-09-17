@@ -299,7 +299,7 @@ fn map_permission_review_completion_error(error: ModelCompletionError) -> Permis
         ModelCompletionError::ToolCallRequested => PermissionAdmissionError::InvalidReviewOutput {
             message: "permission review model must not request tools".to_owned(),
         },
-        ModelCompletionError::NonStopFinish { finish_reason } => {
+        ModelCompletionError::NonStopFinish { finish_reason, .. } => {
             classify_non_stop_review_finish(finish_reason)
         }
         ModelCompletionError::NotSingleText => PermissionAdmissionError::InvalidReviewOutput {

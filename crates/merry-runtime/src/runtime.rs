@@ -618,7 +618,7 @@ impl Runtime {
 impl Runtime {
     /// Returns the automatic compaction policy used by subsequent requests.
     pub async fn automatic_compaction_config(&self) -> AutomaticCompactionConfig {
-        *self.inner.automatic_compaction.read().await
+        self.inner.automatic_compaction.read().await.clone()
     }
 
     pub(crate) async fn update_interactive_primary_model(

@@ -11,6 +11,112 @@ use crate::{
     },
 };
 
+/// A covered-payload budget keeps more completed turns raw before replacing.
+#[test]
+fn bounded_coverage_budget_retains_more_turns_before_replacing() {
+    let mut session =
+        SessionState::new(SessionId::new("rolling-bounded-coverage").expect("valid session id"));
+    for turn in 1..=5 {
+        let text = format!("turn {turn} {}", "y".repeat(4_000));
+        record_completed_user_turn(&mut session, &text);
+    }
+
+    let preparation = session
+        .build_compaction_preparation_with_window_budget(
+            policy(1),
+            policy(1).resolve(64_000).expect("budget resolves"),
+            window_budget(10_000).with_max_covered_payload_tokens(2_100),
+        )
+        .expect("preparation succeeds")
+        .expect("a smaller covered window stays compressible");
+    let CompactionPreparation::ReplaceCheckpoint(input) = preparation else {
+        panic!("a bounded coverage budget must still replace the checkpoint");
+    };
+
+    assert_eq!(input.window_plan().covered_turn_ids_u64(), vec![1, 2]);
+    assert_eq!(input.window_plan().retained_turn_ids_u64(), vec![3, 4, 5]);
+}
+
+/// When no covered window fits the request budget, tool results are archived instead.
+#[test]
+fn zero_coverage_budget_keeps_every_turn_raw_and_archives_tool_results() {
+    let mut session =
+        SessionState::new(SessionId::new("rolling-zero-coverage").expect("valid session id"));
+    for turn in 1..=5 {
+        record_completed_tool_turn(
+            &mut session,
+            &format!("zero-call-{turn}"),
+            &format!("zero-result-{turn}"),
+            &"x".repeat(1_000),
+        );
+    }
+
+    let preparation = session
+        .build_compaction_preparation_with_window_budget(
+            policy(1),
+            policy(1).resolve(64_000).expect("budget resolves"),
+            window_budget(1_300).with_max_covered_payload_tokens(0),
+        )
+        .expect("preparation succeeds")
+        .expect("archive-only reduction is required");
+    let CompactionPreparation::ArchiveToolResults(input) = preparation else {
+        panic!("a zero coverage budget must not replace the checkpoint");
+    };
+
+    assert!(input.window_plan().covered_turn_ids_u64().is_empty());
+    assert_eq!(
+        input.window_plan().retained_turn_ids_u64(),
+        vec![1, 2, 3, 4, 5]
+    );
+}
+
+/// The planner's coverage budget must hold under the authoritative measurement.
+///
+/// Planning estimates covered payload tokens from raw text plus a fixed envelope,
+/// while the runtime measures the built payload after `serde_json` escaping. Tool
+/// turns carry the largest fixed envelope, so an underestimated envelope shows up
+/// here as a request the runtime would refuse to send.
+#[test]
+fn coverage_budget_holds_under_the_authoritative_payload_measurement() {
+    let mut session = SessionState::new(
+        SessionId::new("rolling-coverage-budget-authority").expect("valid session id"),
+    );
+    for turn in 1..=5 {
+        record_completed_tool_turn(
+            &mut session,
+            &format!("budget-call-{turn}"),
+            &format!("budget-result-{turn}"),
+            "exit code 0",
+        );
+    }
+
+    let mut checkpoint_replacements = 0;
+    for coverage_budget in [150, 200, 250, 300, 400, 600] {
+        let preparation = session
+            .build_compaction_preparation_with_window_budget(
+                policy(1),
+                policy(1).resolve(64_000).expect("budget resolves"),
+                window_budget(10_000).with_max_covered_payload_tokens(coverage_budget),
+            )
+            .expect("preparation succeeds");
+        let Some(CompactionPreparation::ReplaceCheckpoint(input)) = preparation else {
+            continue;
+        };
+        checkpoint_replacements += 1;
+        let measured = input
+            .covered_payload_token_estimate()
+            .expect("payload measures");
+        assert!(
+            measured <= coverage_budget,
+            "authoritative measurement {measured} exceeds the coverage budget {coverage_budget}"
+        );
+    }
+    assert!(
+        checkpoint_replacements > 0,
+        "at least one budget must still replace the checkpoint"
+    );
+}
+
 #[test]
 fn default_plan_keeps_latest_five_completed_turns_raw() {
     let mut session =

@@ -154,6 +154,11 @@ retained_model_turns = 5
 # clamped to 2048-32768 tokens. These optional fields override that calculation.
 # target_output_tokens = 8192
 # max_accepted_output_bytes = 65536
+# Reasoning level for compaction model requests. Compaction never inherits the
+# primary model's reasoning_effort: a request sized for hard coding turns can
+# spend its whole output budget reasoning about history without writing the
+# checkpoint. Omitted, the provider default applies.
+# reasoning_effort = "medium"
 
 [runtime.subagents]
 # Disabled by default. Enable this to expose spawn_subagents, wait_subagents,

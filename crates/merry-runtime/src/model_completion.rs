@@ -18,7 +18,7 @@
 
 use futures_util::StreamExt;
 use merry_llm::{
-    FinishReason, ModelError, ModelEvent, ModelOutput, ModelProvider, ModelRequest,
+    FinishDetail, FinishReason, ModelError, ModelEvent, ModelOutput, ModelProvider, ModelRequest,
     ModelStreamContext, ProviderErrorKind,
 };
 use tokio_util::sync::CancellationToken;
@@ -56,6 +56,8 @@ pub(crate) enum ModelCompletionError {
     NonStopFinish {
         /// Finish reason reported by the provider.
         finish_reason: FinishReason,
+        /// Optional provider-neutral detail, such as an exhausted output budget.
+        finish_detail: Option<FinishDetail>,
     },
     /// The answer was not exactly one text item.
     NotSingleText,
@@ -114,6 +116,7 @@ pub(crate) async fn complete_single_text(
                 if response.finish_reason() != FinishReason::Stop {
                     return Err(ModelCompletionError::NonStopFinish {
                         finish_reason: response.finish_reason(),
+                        finish_detail: response.finish_detail(),
                     });
                 }
                 let [ModelOutput::Text { text }] = response.outputs() else {

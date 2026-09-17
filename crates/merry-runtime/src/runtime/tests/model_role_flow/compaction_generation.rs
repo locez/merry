@@ -1,19 +1,21 @@
 use crate::{
-    CitationCompactionPolicy, RuntimeError, RuntimeModelRole, StepContext,
+    AutomaticCompactionConfig, CitationCompactionPolicy, RuntimeError, RuntimeModelRole,
+    StepContext,
     runtime::{
         Runtime,
         tests::{
             model_role_flow::seed_two_history_items_for_compaction,
             support::{
                 common::{
-                    capture_traces_for, completed_event, completed_event_with, model_name,
-                    model_tool_call, session_id,
+                    capture_traces_for, collect_step, completed_event, completed_event_with,
+                    model_name, model_tool_call, session_id,
                 },
                 model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
             },
         },
     },
 };
+use merry_core::RuntimeJournalPayload;
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
     ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelStreamContext,
@@ -61,11 +63,19 @@ fn runtime_with_compactor(
     compactor: RecordingModelProvider,
     primary_window_tokens: u64,
 ) -> Runtime {
+    runtime_with_compactor_and_steps(session_name, compactor, primary_window_tokens, 2)
+}
+
+fn runtime_with_compactor_and_steps(
+    session_name: &str,
+    compactor: RecordingModelProvider,
+    primary_window_tokens: u64,
+    primary_steps: usize,
+) -> Runtime {
     let primary = RecordingModelProvider::with_script_and_capabilities(
-        vec![
-            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
-            ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
-        ],
+        (0..primary_steps)
+            .map(|_| ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]))
+            .collect(),
         ModelCapabilities::new(true, true, false, true, Some(primary_window_tokens), None)
             .expect("valid primary capabilities"),
     );
@@ -76,6 +86,9 @@ fn runtime_with_compactor(
             Arc::new(compactor),
             ModelName::new("compaction-model").expect("valid model"),
         )
+        // These tests exercise the manual compaction path, so seeding must not
+        // spend the scripted compactor responses on automatic reductions.
+        .automatic_compaction(AutomaticCompactionConfig::disabled())
         .build()
         .expect("runtime builds")
 }
@@ -256,7 +269,7 @@ fn repeated_failure(kind: &str) -> ScriptedModelProviderResponse {
 
 #[tokio::test(flavor = "current_thread")]
 async fn compactor_failure_kinds_share_two_attempt_total_limit() {
-    for kind in ["setup", "stream", "eof", "non_stop", "tool_output"] {
+    for kind in ["setup", "stream", "eof", "tool_output"] {
         let compactor = RecordingModelProvider::with_script(vec![
             repeated_failure(kind),
             repeated_failure(kind),
@@ -285,6 +298,171 @@ async fn compactor_failure_kinds_share_two_attempt_total_limit() {
             "failure kind {kind} must leave the third response untouched"
         );
     }
+}
+
+/// A truncated candidate is not retried with the identical request.
+///
+/// The truncation proves the reasoning reserve was too small, so the retry asks
+/// for a larger output ceiling instead of repeating the same budget.
+#[tokio::test(flavor = "current_thread")]
+async fn truncated_compaction_is_not_retried_with_the_same_output_budget() {
+    let compactor = RecordingModelProvider::with_script(vec![
+        repeated_failure("non_stop"),
+        completed_candidate(VALID_CANDIDATE),
+    ]);
+    let runtime = runtime_with_compactor(
+        "compaction-truncation-budget-growth",
+        compactor.clone(),
+        64_000,
+    );
+    seed_two_history_items_for_compaction(&runtime).await;
+
+    runtime
+        .compact_context_once(compaction_policy(), StepContext::default())
+        .await
+        .expect("the degraded retry should install a checkpoint")
+        .expect("a checkpoint replacement should install");
+
+    let requests = compactor.recorded_requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one truncated attempt plus one degraded retry"
+    );
+    let first_ceiling = requests[0]
+        .generation()
+        .max_output_tokens()
+        .expect("compaction always sends an output ceiling");
+    let second_ceiling = requests[1]
+        .generation()
+        .max_output_tokens()
+        .expect("compaction always sends an output ceiling");
+    assert!(
+        second_ceiling > first_ceiling,
+        "the retry must reserve more reasoning room than the truncated attempt: {first_ceiling} then {second_ceiling}"
+    );
+}
+
+/// One truncated attempt degrades into an affordable request for a bigger reserve.
+#[tokio::test(flavor = "current_thread")]
+async fn truncated_compaction_retries_with_a_bigger_reserve() {
+    let compactor = RecordingModelProvider::with_script(vec![
+        repeated_failure("non_stop"),
+        completed_candidate(VALID_CANDIDATE),
+    ]);
+    let runtime = runtime_with_compactor_and_steps(
+        "compaction-truncation-degrade",
+        compactor.clone(),
+        256_000,
+        6,
+    );
+    for index in 0..6 {
+        let events = collect_step(
+            &runtime,
+            &format!("covered turn {index} {}", "payload ballast ".repeat(400)),
+            StepContext::default(),
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted)),
+            "seed step {index} should complete"
+        );
+    }
+
+    let outcome = runtime
+        .compact_context_once(
+            CitationCompactionPolicy::new(Some(512), Some(16_384), 1).expect("valid policy"),
+            StepContext::default(),
+        )
+        .await
+        .expect("degraded compaction should complete")
+        .expect("a checkpoint replacement should install");
+
+    assert!(outcome.covered_history_item_count() > 0);
+    let requests = compactor.recorded_requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "one truncated attempt plus one degraded retry"
+    );
+    let first = serde_json::to_string(requests[0].input()).expect("request input serializes");
+    let second = serde_json::to_string(requests[1].input()).expect("request input serializes");
+    // Covering less history only happens when the window cannot afford the
+    // bigger reserve; either way both attempts stay inside the window.
+    for (label, request) in [("truncated attempt", &requests[0]), ("retry", &requests[1])] {
+        let ceiling = request
+            .generation()
+            .max_output_tokens()
+            .expect("compaction always sends an output ceiling");
+        let input = crate::token_estimate::estimate_model_input_tokens(request.input());
+        assert!(
+            input + ceiling <= 256_000,
+            "{label} must fit the window: input {input} plus output {ceiling}"
+        );
+    }
+    assert!(
+        !first.is_empty() && !second.is_empty(),
+        "both attempts must carry the compaction payload"
+    );
+}
+
+/// A request that cannot fit the compaction window keeps more turns raw.
+///
+/// The runtime must shrink the covered window before calling the provider, so the
+/// sent request holds its input and output budget inside the model window.
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_shrinks_the_covered_window_to_fit_the_compactor_window() {
+    let compactor = RecordingModelProvider::with_script(vec![completed_candidate(VALID_CANDIDATE)]);
+    let runtime =
+        runtime_with_compactor_and_steps("compaction-window-refit", compactor.clone(), 32_000, 6);
+    for index in 0..6 {
+        let events = collect_step(
+            &runtime,
+            &format!("covered turn {index} {}", "payload ballast ".repeat(1_200)),
+            StepContext::default(),
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted)),
+            "seed step {index} should complete"
+        );
+    }
+
+    let outcome = runtime
+        .compact_context_once(
+            CitationCompactionPolicy::new(Some(10_000), Some(99_999), 1).expect("valid policy"),
+            StepContext::default(),
+        )
+        .await
+        .expect("fitted compaction should complete")
+        .expect("a checkpoint replacement should install");
+
+    let requests = compactor.recorded_requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "the runtime fits the request before calling the provider"
+    );
+    let request = &requests[0];
+    let estimated_input_tokens =
+        crate::token_estimate::estimate_model_input_tokens(request.input());
+    let max_output_tokens = request
+        .generation()
+        .max_output_tokens()
+        .expect("compaction always sends an output ceiling");
+    assert!(
+        estimated_input_tokens + max_output_tokens <= 32_000,
+        "compaction request must fit the model window: input {estimated_input_tokens} plus output {max_output_tokens}"
+    );
+    assert!(
+        outcome.covered_history_item_count() < 10,
+        "the fitted window must cover fewer history items than the preferred five turns"
+    );
+    assert!(outcome.covered_history_item_count() > 0);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -489,10 +667,11 @@ async fn actual_compactor_payload_too_large_is_rejected_before_provider_call() {
 
     assert!(matches!(
         error,
-        RuntimeError::CompactionModelInputTooLarge {
+        RuntimeError::CompactionModelRequestTooLarge {
             estimated_input_tokens,
+            max_output_tokens,
             compactor_window_tokens: 2_048,
-        } if estimated_input_tokens > 2_048
+        } if estimated_input_tokens + max_output_tokens > 2_048
     ));
     assert_eq!(compactor.calls.load(Ordering::SeqCst), 0);
 }

@@ -28,7 +28,7 @@ pub use request::{
     ModelResponseFormat, ModelStructuredOutputFormat, ParallelToolCalls, ReasoningEffort,
     RequestContentHash, ServiceTier, ToolProfileHash,
 };
-pub use response::{FinishReason, ModelOutput, ModelResponse};
+pub use response::{FinishDetail, FinishReason, ModelOutput, ModelResponse};
 pub use retry::{
     ModelRetryEvent, ModelRetryEventStream, ModelRetryPolicy, ModelRetryPolicyError,
     RetryModelStreamContext, RetryingModelProvider,

@@ -14,8 +14,9 @@ use merry_llm::{
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{
     CheckpointRefId, CheckpointSection, CheckpointSections, CitationCompactionInput,
-    CitationCompactionPolicy, CompactedCheckpointCandidate, ContextCompiler, Runtime,
-    RuntimeModelRole, StepContext, citation_compaction_system_prompt,
+    CitationCompactionPolicy, CompactedCheckpointCandidate, ContextCompiler, PromptProfile,
+    Runtime, RuntimeModelRole, StepContext, citation_compaction_tail_directive,
+    compaction_payload_block,
 };
 use std::{collections::BTreeSet, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -168,22 +169,37 @@ async fn request_live_compaction_candidate(
         )
         .expect("structured output format is valid"),
     );
-    let request = ModelRequest::new_with_continuations_and_stable_prefix_and_response_format(
+    // The live probe mirrors the runtime request shape: a stable system prefix,
+    // then the compaction directive and payload as trailing user messages. The
+    // runtime default profile stands in for the session's compiled prefix here
+    // because this probe does not run through a runtime step.
+    let stable_prefix = ModelMessage::new(
+        ModelMessageRole::System,
+        ModelContent::text(PromptProfile::default().base_instructions())
+            .expect("prefix text is valid"),
+    )
+    .expect("system message is valid");
+    let request = ModelRequest::new_with_input_and_stable_prefix_and_response_format(
         compaction_model.clone(),
         vec![
-            ModelMessage::new(
-                ModelMessageRole::System,
-                ModelContent::text(citation_compaction_system_prompt())
-                    .expect("system prompt is valid"),
-            )
-            .expect("system message is valid"),
-            ModelMessage::new(
-                ModelMessageRole::User,
-                ModelContent::text(&payload).expect("payload is valid model content"),
-            )
-            .expect("user message is valid"),
+            merry_llm::ModelInputItem::Message(stable_prefix),
+            merry_llm::ModelInputItem::Message(
+                ModelMessage::new(
+                    ModelMessageRole::User,
+                    ModelContent::text(citation_compaction_tail_directive())
+                        .expect("directive is valid"),
+                )
+                .expect("directive message is valid"),
+            ),
+            merry_llm::ModelInputItem::Message(
+                ModelMessage::new(
+                    ModelMessageRole::User,
+                    ModelContent::text(&compaction_payload_block(&payload))
+                        .expect("payload block is valid model content"),
+                )
+                .expect("user message is valid"),
+            ),
         ],
-        Vec::new(),
         Vec::new(),
         GenerationConfig::new(Some(input.resolved_budget().output_token_limit()), false)
             .expect("generation config is valid"),
