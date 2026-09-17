@@ -100,9 +100,29 @@ impl CompactionHistoryItem {
                 call,
                 result,
                 content,
+                prompt_projection,
                 ..
             } => {
-                let (content_kind, content) = exact_artifact_text(content)?;
+                let (content_kind, content) = match prompt_projection {
+                    // The request already replaced this result with a notice, so the
+                    // payload carries the same notice. Sending the archived body
+                    // instead would ask the compactor to read content the model never
+                    // saw, and the checkpoint only summarizes what the conversation
+                    // actually held; the notice still names the artifact, so the
+                    // checkpoint can cite the ref and retrieve the body later.
+                    ToolResultPromptProjection::ArtifactNotice => (
+                        "json",
+                        archived_tool_result_notice_json(
+                            TranscriptItemId::new(self.history_id),
+                            result.status(),
+                            result.artifact().id(),
+                        ),
+                    ),
+                    ToolResultPromptProjection::Full | ToolResultPromptProjection::Hidden => {
+                        let (content_kind, content) = exact_artifact_text(content)?;
+                        (content_kind, content.to_owned())
+                    }
+                };
                 CitationCompactionTurnItem::tool_exchange(
                     self.history_id,
                     ref_id.to_owned(),
@@ -113,7 +133,7 @@ impl CompactionHistoryItem {
                         result.status(),
                         result.artifact().id(),
                         content_kind,
-                        content.to_owned(),
+                        content,
                     ),
                 )
             }
@@ -177,10 +197,10 @@ impl CompactionHistoryItem {
 
     /// Estimated tokens this item contributes to the compaction payload.
     ///
-    /// Covered turns travel through the payload with their full text, including
-    /// tool results that the retained request may project as artifact notices.
-    /// Window planning uses this estimate to cap how much history one compaction
-    /// request reads.
+    /// Covered turns travel through the payload with the text the request itself
+    /// shows, so an archived tool result contributes its artifact notice rather
+    /// than the body the artifact holds. Window planning uses this estimate to cap
+    /// how much history one compaction request reads.
     ///
     /// This estimate is not the authority. Text is measured from its raw byte
     /// length while the payload serializes it with JSON escaping, so content with
@@ -196,8 +216,23 @@ impl CompactionHistoryItem {
                 estimate_text_tokens(text),
                 COMPACTION_PAYLOAD_ITEM_ENVELOPE_BYTES,
             ),
-            CompactionHistoryItemKind::ToolExchange { call, content, .. } => {
-                let (_, result_text) = exact_artifact_text(content)?;
+            CompactionHistoryItemKind::ToolExchange {
+                call,
+                result,
+                content,
+                prompt_projection,
+                ..
+            } => {
+                let result_text = match prompt_projection {
+                    ToolResultPromptProjection::ArtifactNotice => archived_tool_result_notice_json(
+                        TranscriptItemId::new(self.history_id),
+                        result.status(),
+                        result.artifact().id(),
+                    ),
+                    ToolResultPromptProjection::Full | ToolResultPromptProjection::Hidden => {
+                        exact_artifact_text(content)?.1.to_owned()
+                    }
+                };
                 let arguments =
                     serde_json::to_string(call.arguments().as_object()).map_err(|error| {
                         RuntimeError::from(CompactionError::PayloadSerialization {
@@ -207,7 +242,7 @@ impl CompactionHistoryItem {
                 (
                     estimate_text_tokens(call.name().as_str())
                         .saturating_add(estimate_text_tokens(&arguments))
-                        .saturating_add(estimate_text_tokens(result_text)),
+                        .saturating_add(estimate_text_tokens(&result_text)),
                     COMPACTION_PAYLOAD_TOOL_ITEM_ENVELOPE_BYTES,
                 )
             }
