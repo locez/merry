@@ -46,7 +46,14 @@ async fn provider_step_auto_compacts_before_hard_watermark_request() {
           "exact_details": [],
           "handoffs": []
         }"#,
-    ))]]);
+    ))]])
+    // The design requires the compaction model's window to cover the primary
+    // model's, because one request hosts the whole covered window. The primary
+    // window here is deliberately tiny so the loop crosses the hard watermark.
+    .with_capabilities(
+        ModelCapabilities::new(true, true, false, true, Some(64_000), None)
+            .expect("valid compactor capabilities"),
+    );
     let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-hard-watermark"))
         .model_provider(Arc::new(primary.clone()), model_name())
         .model_provider_for_role(
