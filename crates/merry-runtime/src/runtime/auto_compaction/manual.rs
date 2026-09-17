@@ -1,14 +1,11 @@
 //! Manual, single-pass compaction requested by a caller.
 
 use super::{
-    CompactionAttempt, CompactionRequestBudget, RuntimeInner, compaction_cancelled_before_request,
-    generate_and_install_compaction, plan_compaction_attempt, resolved_primary_context_window,
+    CompactionAttempt, RuntimeInner, compaction_cancelled_before_request,
+    compaction_preparation_for_budget, generate_and_install_compaction, manual_compaction_budget,
+    plan_compaction_attempt,
 };
-use crate::{
-    CitationCompactionPolicy, CompactionOutcome, RuntimeError,
-    compaction::{CompactionCoverageBudget, CompactionShape, CompactionWindowBudget},
-    events::ActiveStepPermit,
-};
+use crate::{CitationCompactionPolicy, CompactionOutcome, RuntimeError, events::ActiveStepPermit};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 pub(in crate::runtime) async fn compact_context_once_inner(
@@ -29,28 +26,9 @@ pub(in crate::runtime) async fn compact_context_once_inner(
         .await
         .reasoning_effort()
         .cloned();
-    let primary_window = resolved_primary_context_window(inner).await?;
-    let resolved_budget = policy.resolve(primary_window.tokens())?;
-    let window_budget = CompactionWindowBudget::unbounded_for_manual_compaction(
-        resolved_budget.output_token_limit(),
-    )?;
-    let budget = CompactionRequestBudget {
-        policy,
-        resolved_budget,
-        window_budget,
-        primary_window_tokens: primary_window.tokens(),
-        shape: CompactionShape::SinglePass,
-    };
-    let preparation = {
-        let session = inner.session.lock().await;
-        session.build_compaction_preparation_with_window_budget(
-            policy,
-            resolved_budget,
-            window_budget,
-            CompactionCoverageBudget::unbounded(),
-        )?
-    };
-    let Some(preparation) = preparation else {
+    let budget = manual_compaction_budget(inner, policy).await?;
+    let Some((preparation, budget)) = compaction_preparation_for_budget(inner, budget).await?
+    else {
         return Ok(None);
     };
 

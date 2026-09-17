@@ -22,6 +22,10 @@ fn reverse_tool_results_archive_by_result_arrival_and_keep_pairs_valid() {
         SessionState::new(SessionId::new("rolling-reverse-results").expect("valid session id"));
     record_completed_user_turn(&mut session, "old prefix");
 
+    for turn in 3..=6 {
+        record_completed_user_turn(&mut session, &format!("small retained {turn}"));
+    }
+
     let tool_turn = session.begin_model_turn().expect("tool turn begins");
     let call_a = pending_tool_call("reverse-call-a");
     let call_b = pending_tool_call("reverse-call-b");
@@ -51,9 +55,6 @@ fn reverse_tool_results_archive_by_result_arrival_and_keep_pairs_valid() {
                 ArtifactContent::text(body),
             )
             .expect("tool result records");
-    }
-    for turn in 3..=6 {
-        record_completed_user_turn(&mut session, &format!("small retained {turn}"));
     }
 
     let budget = window_budget(450);
@@ -102,16 +103,14 @@ fn reverse_tool_results_archive_by_result_arrival_and_keep_pairs_valid() {
     let provider = session
         .provider_transcript_snapshot()
         .expect("provider projection builds");
-    assert!(matches!(
-        &provider[0],
-        crate::session::TranscriptItemSnapshot::ToolCall { call }
-            if call.id() == call_a.id()
-    ));
-    assert!(matches!(
-        &provider[1],
-        crate::session::TranscriptItemSnapshot::ToolCall { call }
-            if call.id() == call_b.id()
-    ));
+    let calls = provider
+        .iter()
+        .filter_map(|item| match item {
+            crate::session::TranscriptItemSnapshot::ToolCall { call } => Some(call.id()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls, [call_a.id(), call_b.id()]);
     let notice = provider
         .iter()
         .find_map(|item| match item {
@@ -352,7 +351,7 @@ async fn archive_only_manifest_resolves_refs_and_round_trips_through_store() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(1_300),
-            CompactionCoverageBudget::unbounded(),
+            CompactionCoverageBudget::limited(0),
         )
         .expect("preparation builds")
         .expect("archive-only is required");
@@ -430,7 +429,7 @@ fn failed_archived_result_notice_has_exact_four_json_fields() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(1_300),
-            CompactionCoverageBudget::unbounded(),
+            CompactionCoverageBudget::limited(0),
         )
         .expect("preparation builds")
         .expect("archive-only is required");

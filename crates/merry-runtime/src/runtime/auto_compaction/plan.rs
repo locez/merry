@@ -7,14 +7,14 @@ use super::fit::{
 };
 use super::{
     ArchiveOnlyReason, CompactionAttempt, CompactionPlan, CompactionRequestBudget,
-    build_preparation_for_shape, compaction_cancelled_before_request, compaction_stable_prefix,
+    build_preparation_for_shape, compaction_cancelled_before_request,
 };
 use crate::{
     CompactionError, RuntimeError, RuntimeModelRole,
     compaction::{
         CompactionCoverageBudget, CompactionPreparation, CompactionReasoningReserve,
-        CompactionShape, compaction_model_window, tightened_covered_budget,
-        validate_compaction_model_window,
+        CompactionRequestMode, CompactionRequestProjection, CompactionShape,
+        compaction_model_window, tightened_covered_budget, validate_compaction_model_window,
     },
 };
 use merry_llm::ReasoningEffort;
@@ -80,7 +80,7 @@ pub(super) async fn fit_compaction_plan(
         window_tokens: compactor_window_tokens,
         max_output_tokens: provider.capabilities().max_output_tokens(),
     };
-    let stable_prefix = compaction_stable_prefix(inner).await?;
+    let mut mode = CompactionRequestMode::Append;
 
     let mut preparation = preparation;
     // The shape the loop is currently building, which starts at the strategy the
@@ -95,7 +95,7 @@ pub(super) async fn fit_compaction_plan(
     let mut smallest_rejected_request: Option<(u64, u64)> = None;
     loop {
         attempt += 1;
-        let input = match preparation {
+        let mut input = match preparation {
             CompactionPreparation::ArchiveToolResults(input) => {
                 let reason = if tightened_coverage {
                     let Some((estimated_input_tokens, max_output_tokens)) =
@@ -126,10 +126,16 @@ pub(super) async fn fit_compaction_plan(
             }
             CompactionPreparation::ReplaceCheckpoint(input) => *input,
         };
+        if mode == CompactionRequestMode::Append {
+            budget.source.retain_visible_refs(&mut input);
+        }
         let request = match compile_fitted_compaction_request(
             &input,
             provider_config.model(),
-            &stable_prefix,
+            CompactionRequestProjection {
+                source: &budget.source,
+                mode,
+            },
             reasoning_effort,
             limits,
             reserve,
@@ -146,36 +152,28 @@ pub(super) async fn fit_compaction_plan(
                     compactor_window_tokens,
                 };
                 smallest_rejected_request = Some((estimated_input_tokens, max_output_tokens));
-                // A one-shot pass shrinks the payload by omitting covered tool
-                // exchanges before it considers covering less history: covering less
-                // would keep more raw history, which is the state this strategy exists
-                // to leave.
-                if shape.is_one_shot() {
-                    let next_shape = match shape {
+                let next_shape = if mode == CompactionRequestMode::Append {
+                    mode = CompactionRequestMode::Payload;
+                    Some(CompactionShape::OneShot {
+                        retained_tool_exchanges: budget
+                            .policy
+                            .one_shot_retained_tool_exchanges()
+                            .min(input.payload_tool_exchange_count()),
+                    })
+                } else {
+                    match shape {
                         CompactionShape::OneShot {
                             retained_tool_exchanges,
-                        } if retained_tool_exchanges > 0 => shape.with_all_tool_exchanges_dropped(),
-                        _ => {
-                            // Every covered tool exchange is already omitted, so this
-                            // history cannot fit one pass. Fall back to rolling, which
-                            // covers less history per pass and repeats.
-                            CompactionShape::Rolling
-                        }
-                    };
-                    // Changing the shape is progress even when the estimate does not
-                    // move, so the rolling no-progress guard starts over.
-                    previous_input_tokens = None;
-                    if next_shape.is_one_shot() {
-                        tracing::debug!(
-                            event = "runtime.compaction.one_shot_refit",
-                            session_id = inner.session_id.as_str(),
-                            attempt,
-                            estimated_input_tokens,
-                            max_output_tokens,
-                            "one-shot payload does not fit; omitting every covered tool exchange"
-                        );
+                        } if retained_tool_exchanges > 0 => Some(CompactionShape::OneShot {
+                            retained_tool_exchanges: retained_tool_exchanges - 1,
+                        }),
+                        CompactionShape::OneShot { .. } => Some(CompactionShape::RollingText),
+                        _ => None,
                     }
+                };
+                if let Some(next_shape) = next_shape {
                     shape = next_shape;
+                    previous_input_tokens = None;
                     let Some(rebuilt) = rebuild_preparation(
                         inner,
                         budget,
@@ -243,6 +241,7 @@ pub(super) async fn fit_compaction_plan(
         // window to try, and this check decides whether the request may be sent.
         validate_compaction_model_window(&request, compactor_window_tokens)?;
         return Ok(CompactionAttempt::Generate(CompactionPlan {
+            compactor_window_tokens,
             input: Box::new(input),
             request,
             reserve,

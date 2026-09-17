@@ -1,4 +1,4 @@
-use super::{CitationCompactionInput, checkpoint_from_candidate_json};
+use super::{CitationCompactionInput, repair::repair_request, validation::evaluate_candidate};
 use crate::{
     RuntimeError,
     model_completion::{ModelCompletionError, complete_single_text},
@@ -54,7 +54,9 @@ pub(crate) fn compaction_model_window(
 /// so callers must size the window against both numbers together.
 pub(crate) fn compaction_request_required_tokens(request: &ModelRequest) -> (u64, u64) {
     (
-        estimate_model_input_tokens(request.input()),
+        estimate_model_input_tokens(request.input()).saturating_add(
+            crate::token_estimate::estimate_request_contract_tokens(request),
+        ),
         request.generation().max_output_tokens().unwrap_or(0),
     )
 }
@@ -92,9 +94,11 @@ pub(crate) fn validate_compaction_model_window(
 
 pub(crate) async fn generate_validated_compaction_candidate(
     provider: Arc<dyn ModelProvider>,
-    request: ModelRequest,
+    mut request: ModelRequest,
     stream_context: ModelStreamContext,
     input: &CitationCompactionInput,
+    compactor_window_tokens: u64,
+    session_id: &SessionId,
     token: &CancellationToken,
 ) -> Result<String, RuntimeError> {
     for attempt in 1..=MAX_COMPACTION_PROVIDER_ATTEMPTS {
@@ -103,8 +107,14 @@ pub(crate) async fn generate_validated_compaction_candidate(
         }
         tracing::debug!(
             event = "runtime.compaction.attempt_started",
+            session_id = session_id.as_str(),
             attempt,
             max_attempts = MAX_COMPACTION_PROVIDER_ATTEMPTS,
+            soft_target_tokens = input.resolved_budget().target_output_tokens(),
+            hard_limit_tokens = input.resolved_budget().output_token_limit(),
+            retained_turn_count = input.window_plan().retained_turn_ids().len(),
+            covered_turn_count = input.window_plan().covered_turn_ids().len(),
+            archived_tool_count = input.window_plan().archived_tool_call_ids().len(),
             model = request.model().as_str(),
             message_count = request.messages().len(),
             estimated_input_tokens = estimate_model_input_tokens(request.input()),
@@ -133,13 +143,24 @@ pub(crate) async fn generate_validated_compaction_candidate(
             }
         };
 
-        match checkpoint_from_candidate_json(
-            input.manifest().checkpoint_id().clone(),
-            input,
-            &candidate,
-        ) {
+        let evaluation =
+            evaluate_candidate(input.manifest().checkpoint_id().clone(), input, &candidate);
+        evaluation
+            .metrics
+            .trace(session_id, attempt, evaluation.result.is_ok());
+        match evaluation.result {
             Ok(_) => return Ok(candidate),
             Err(error) if attempt < MAX_COMPACTION_PROVIDER_ATTEMPTS => {
+                let Some(repaired) = repair_request(
+                    &request,
+                    &candidate,
+                    evaluation.metrics,
+                    compactor_window_tokens,
+                )?
+                else {
+                    return Err(error);
+                };
+                request = repaired;
                 trace_retry(attempt, &error);
                 wait_before_compaction_retry(token).await?;
             }

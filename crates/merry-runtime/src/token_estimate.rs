@@ -1,6 +1,26 @@
 //! Deterministic token estimates used by request budgeting and compaction planning.
 
-use merry_llm::{ModelContent, ModelInputItem};
+use merry_llm::{ModelContent, ModelInputItem, ModelRequest, ModelResponseFormat};
+
+/// Estimates provider-visible tools and response schemas in addition to messages.
+pub(crate) fn estimate_request_contract_tokens(request: &ModelRequest) -> u64 {
+    let tools = request
+        .tools()
+        .iter()
+        .map(|tool| {
+            estimate_text_tokens(tool.name().as_str())
+                + estimate_text_tokens(tool.description())
+                + estimate_text_tokens(&tool.input_schema().as_schema().as_value().to_string())
+        })
+        .sum::<u64>();
+    let format = match request.response_format() {
+        Some(ModelResponseFormat::StructuredOutput(format)) => {
+            estimate_text_tokens(&format.schema().as_value().to_string())
+        }
+        None => 0,
+    };
+    tools.saturating_add(format)
+}
 
 /// Bytes per token used by every text estimate in the runtime.
 ///

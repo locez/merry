@@ -302,7 +302,10 @@ pub(super) fn request_context_budget(
         .or_else(|| capabilities.max_output_tokens())
         .unwrap_or_else(|| default_output_reserve_tokens(window.tokens()));
     let policy = ContextBudgetPolicy::Balanced;
-    let stable_prefix_estimated_tokens = estimate_model_input_tokens(request.stable_prefix_input());
+    let stable_prefix_estimated_tokens = estimate_model_input_tokens(request.stable_prefix_input())
+        .saturating_add(crate::token_estimate::estimate_request_contract_tokens(
+            request,
+        ));
     let budget = ContextBudget::from_window(
         window.tokens(),
         DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,

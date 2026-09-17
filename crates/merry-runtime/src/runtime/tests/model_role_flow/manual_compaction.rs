@@ -14,6 +14,8 @@ use crate::{
 use merry_llm::{FinishReason, ModelCapabilities, ModelEvent, ModelName, ModelOutput};
 use std::sync::Arc;
 
+mod tail_budget;
+
 /// Asserts one compaction request fits `window_tokens` with room to reason.
 ///
 /// The ceiling is the checkpoint text budget plus the reasoning reserve, so the
@@ -93,7 +95,7 @@ async fn compaction_uses_context_compaction_role_when_configured() {
         .expect("manual compaction input exists");
     assert_eq!(
         prepared.resolved_budget().output_token_limit(),
-        5_120,
+        6_400,
         "manual input budget must come from the 64k primary window"
     );
 
@@ -110,7 +112,7 @@ async fn compaction_uses_context_compaction_role_when_configured() {
         compactor.recorded_requests()[0].model().as_str(),
         "compaction-model"
     );
-    assert_compaction_request_fits(&compactor.recorded_requests()[0], 64_000);
+    assert_compaction_request_fits(&compactor.recorded_requests()[0], 256_000);
 }
 
 #[tokio::test(flavor = "current_thread")]

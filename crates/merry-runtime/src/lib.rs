@@ -89,9 +89,8 @@ pub use checkpoint::{
 };
 pub use compaction::{
     COMPACTION_PAYLOAD_TAG, CitationCompactionInput, CitationCompactionPolicy, CompactionError,
-    CompactionOutcome, CompactionStrategy, ResolvedCitationCompactionBudget,
-    citation_compaction_response_schema, citation_compaction_tail_directive,
-    compaction_payload_block,
+    CompactionOutcome, ResolvedCitationCompactionBudget, citation_compaction_response_schema,
+    citation_compaction_tail_directive, compaction_payload_block,
 };
 pub use context::{
     CheckpointDecision, CompactedCheckpoint, CompactedCheckpointSummary, CompiledContext,

@@ -56,15 +56,42 @@ enum CandidateOutcome {
     DoesNotFit,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolArchival {
+    Preserve,
+    Allow,
+}
+
+struct RetainedWindowPolicy {
+    empty_coverage: EmptyCoverage,
+    retained_fit: RetainedFit,
+    archival: ToolArchival,
+}
+
 impl SessionState {
     pub(super) fn plan_compaction_window_from_turns(
         &self,
-        policy: CitationCompactionPolicy,
+        mut policy: CitationCompactionPolicy,
         window_budget: CompactionWindowBudget,
         coverage: CompactionCoverageBudget,
         shape: CompactionShape,
         turns: &[ModelTurnHistory],
     ) -> Result<Option<CompactionWindowPlan>, RuntimeError> {
+        if coverage.max_tokens().is_none()
+            && shape.retained_fit() == RetainedFit::Required
+            && let Some(preferred) = window_budget.preferred()
+        {
+            match self.plan_compaction_window_from_turns(policy, preferred, coverage, shape, turns)
+            {
+                Err(RuntimeError::Compaction {
+                    source:
+                        CompactionError::MinimumRawTurnCannotFit
+                        | CompactionError::UncompressibleCurrentInput
+                        | CompactionError::NoWindowFitsCompactionRequest,
+                }) => policy = policy.with_retained_model_turns(1)?,
+                outcome => return outcome,
+            }
+        }
         debug_assert!(
             window_budget.max_dynamic_body_tokens() <= window_budget.primary_window_tokens()
         );
@@ -97,8 +124,17 @@ impl SessionState {
             candidates.push(RetentionCandidate::ArchiveOnly);
         }
 
+        let modes: &[ToolArchival] =
+            if !bounded_coverage && shape.retained_fit() == RetainedFit::Required {
+                &[ToolArchival::Preserve, ToolArchival::Allow]
+            } else {
+                &[ToolArchival::Allow]
+            };
         let mut last_failure: Option<CompactionError> = None;
-        for candidate in candidates {
+        for (archival, candidate) in modes
+            .iter()
+            .flat_map(|mode| candidates.iter().map(move |candidate| (*mode, *candidate)))
+        {
             let (covered, raw_turns, base_tokens) = match candidate {
                 RetentionCandidate::CompletedTurns(retained_completed_count) => {
                     let Some(retained_start) =
@@ -137,8 +173,11 @@ impl SessionState {
                 raw_turns,
                 base_tokens,
                 fingerprint,
-                candidate.empty_coverage_meaning(),
-                shape.retained_fit(),
+                RetainedWindowPolicy {
+                    empty_coverage: candidate.empty_coverage_meaning(),
+                    retained_fit: shape.retained_fit(),
+                    archival,
+                },
             )? {
                 CandidateOutcome::Plan(plan) => return Ok(Some(plan)),
                 CandidateOutcome::NothingToDo => return Ok(None),
@@ -157,9 +196,6 @@ impl SessionState {
                             } else {
                                 CompactionError::MinimumRawTurnCannotFit
                             };
-                        if !bounded_coverage {
-                            return Err(error.into());
-                        }
                         last_failure = Some(error);
                     } else if last_failure.is_none() {
                         last_failure = Some(CompactionError::NoWindowFitsCompactionRequest);
@@ -206,18 +242,6 @@ impl SessionState {
         closed_turns: &[ModelTurnHistory],
         available_completed: usize,
     ) -> Result<Vec<RetentionCandidate>, RuntimeError> {
-        if shape.is_one_shot() {
-            // One pass covers everything before the retained tail, so the only
-            // candidate is the configured retention. The fallbacks below retain
-            // fewer turns, which would cover more history and grow the payload the
-            // one-shot pass is trying to fit.
-            return Ok(vec![RetentionCandidate::CompletedTurns(
-                policy
-                    .retained_model_turns()
-                    .min(available_completed)
-                    .max(1),
-            )]);
-        }
         let Some(coverage_budget) = coverage.max_tokens() else {
             return Ok(
                 retained_turn_fallbacks(policy.retained_model_turns(), available_completed)
@@ -236,7 +260,11 @@ impl SessionState {
             else {
                 continue;
             };
-            if covered_payload_tokens(&closed_turns[..retained_start])? <= coverage_budget {
+            if covered_payload_tokens(
+                &closed_turns[..retained_start],
+                shape == CompactionShape::RollingText,
+            )? <= coverage_budget
+            {
                 return Ok(vec![RetentionCandidate::CompletedTurns(
                     retained_completed_count,
                 )]);
@@ -259,8 +287,7 @@ fn plan_retained_window(
     raw_turns: &[ModelTurnHistory],
     base_tokens: u64,
     fingerprint: CompactionWindowFingerprint,
-    empty_coverage: EmptyCoverage,
-    retained_fit: RetainedFit,
+    policy: RetainedWindowPolicy,
 ) -> Result<CandidateOutcome, RuntimeError> {
     let mut archived_tool_call_ids = existing_archived_tool_call_ids(raw_turns);
     let fits = |archived_tool_call_ids: &BTreeSet<ToolCallId>| {
@@ -273,7 +300,7 @@ fn plan_retained_window(
     };
 
     if fits(&archived_tool_call_ids)? {
-        if covered.is_empty() && empty_coverage == EmptyCoverage::NothingToDo {
+        if covered.is_empty() && policy.empty_coverage == EmptyCoverage::NothingToDo {
             return Ok(CandidateOutcome::NothingToDo);
         }
         return Ok(CandidateOutcome::Plan(compaction_window_plan(
@@ -284,6 +311,9 @@ fn plan_retained_window(
         )?));
     }
 
+    if policy.archival == ToolArchival::Preserve {
+        return Ok(CandidateOutcome::DoesNotFit);
+    }
     let mut archive_candidates = raw_turns
         .iter()
         .flat_map(ModelTurnHistory::archive_candidates_in_result_order)
@@ -301,7 +331,7 @@ fn plan_retained_window(
         }
     }
 
-    match retained_fit {
+    match policy.retained_fit {
         RetainedFit::Required => Ok(CandidateOutcome::DoesNotFit),
         // Another pass follows, so install the largest covered window instead of
         // reporting that nothing fits. The wait for the budget to hold moves to the

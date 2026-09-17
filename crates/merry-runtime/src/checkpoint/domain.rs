@@ -1,6 +1,6 @@
 use super::{
     CheckpointError, CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
-    CheckpointValidationPolicy, candidate::CompactedCheckpointCandidate, format_ref_list,
+    CheckpointValidationPolicy, candidate::CompactedCheckpointCandidate,
 };
 use crate::checkpoint::candidate::{CheckpointHandoff, CheckpointSection, CheckpointSections};
 use std::collections::BTreeSet;
@@ -173,11 +173,7 @@ impl CitationBackedCheckpoint {
         for section in CheckpointSection::ALL {
             lines.push(format!("{}:", section.as_str()));
             for entry in self.sections.entries(section) {
-                lines.push(format!("- [{}] {}", entry.id().as_str(), entry.text()));
-                if let Some(rationale) = entry.rationale() {
-                    lines.push(format!("  reason: {rationale}"));
-                }
-                lines.push(format!("  refs: [{}]", format_ref_list(entry.refs())));
+                lines.push(entry.render_prompt_text());
             }
         }
         lines.join("\n")

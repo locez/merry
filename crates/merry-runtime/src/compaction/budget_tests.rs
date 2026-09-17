@@ -1,70 +1,83 @@
 use super::{
-    CitationCompactionPolicy, CompactionError, CompactionReasoningReserve, CompactionStrategy,
+    CitationCompactionPolicy, CompactionError, CompactionReasoningReserve, CompactionWindowBudget,
     tightened_covered_budget,
 };
 
-/// The strategy turns on the body-to-window ratio, measured against the window the
-/// request is built for.
-///
-/// A small reduction keeps rolling so the shared prefix stays cached; a window that
-/// shrank far below the history needs one pass that covers everything.
 #[test]
-fn strategy_follows_the_body_to_window_ratio() {
-    let policy = CitationCompactionPolicy::default();
-
-    assert_eq!(
-        policy.strategy_for(272_000, 360_847),
-        CompactionStrategy::Rolling,
-        "a body of 1.33 windows still rolls"
-    );
-    assert_eq!(
-        policy.strategy_for(272_000, 408_000),
-        CompactionStrategy::Rolling,
-        "exactly 1.5 windows still rolls"
-    );
-    assert_eq!(
-        policy.strategy_for(272_000, 410_720),
-        CompactionStrategy::OneShot,
-        "the first ratio above 1.5 covers everything in one pass"
-    );
-    assert_eq!(
-        policy.strategy_for(272_000, 700_000),
-        CompactionStrategy::OneShot
-    );
-    assert_eq!(
-        policy.strategy_for(1_000_000, 900_000),
-        CompactionStrategy::Rolling,
-        "a wide window keeps rolling even with a large body"
-    );
-}
-
-#[test]
-fn zero_percent_disables_one_shot_and_a_zero_window_never_divides() {
-    let disabled = CitationCompactionPolicy::default().with_one_shot(0, 5);
-    assert_eq!(
-        disabled.strategy_for(272_000, 900_000),
-        CompactionStrategy::Rolling
-    );
-    assert_eq!(
-        CitationCompactionPolicy::default().strategy_for(0, 900_000),
-        CompactionStrategy::Rolling
-    );
-}
-
-/// The tunables round-trip so configuration can set them.
-#[test]
-fn one_shot_tunables_round_trip() {
-    let policy = CitationCompactionPolicy::default().with_one_shot(200, 2);
-    assert_eq!(policy.one_shot_window_percent(), 200);
+fn changing_retention_preserves_other_policy_settings() {
+    let policy = CitationCompactionPolicy::new(Some(1024), Some(16000), 5)
+        .expect("valid policy")
+        .with_one_shot_retained_tool_exchanges(2)
+        .with_retained_model_turns(3)
+        .expect("valid retention");
+    assert_eq!(policy.retained_model_turns(), 3);
     assert_eq!(policy.one_shot_retained_tool_exchanges(), 2);
+    assert_eq!(policy.target_output_tokens(), Some(1024));
+    assert_eq!(policy.max_accepted_output_bytes(), Some(16000));
+}
+
+#[test]
+fn destination_window_bounds_summary_and_retained_history_independently() {
+    for (window, summary_target, summary_limit, history_target) in [
+        (8, 1, 1, 1),
+        (64_000, 1_920, 6_400, 6_400),
+        (128_000, 3_840, 12_800, 12_800),
+        (272_000, 8_160, 16_384, 27_200),
+        (1_000_000, 8_192, 16_384, 32_768),
+        (2_000_000, 8_192, 16_384, 32_768),
+    ] {
+        let budget = CitationCompactionPolicy::default()
+            .resolve(window)
+            .expect("destination budget resolves");
+        assert_eq!(budget.target_output_tokens(), summary_target);
+        assert_eq!(budget.output_token_limit(), summary_limit);
+        assert_eq!(budget.retained_history_token_target(), history_target);
+    }
+    let explicit = CitationCompactionPolicy::new(Some(9000), None, 5)
+        .expect("valid policy")
+        .resolve(64_000)
+        .expect("destination budget resolves");
+    assert_eq!(explicit.retained_history_token_target(), 6_400);
+}
+
+#[test]
+fn preferred_installation_budget_accounts_for_fixed_input_and_summary() {
+    for (fixed_input, expected_target) in [(1_000, 9_500), (40_000, 48_500), (55_000, 56_000)] {
+        let budget = CompactionWindowBudget::new(64_000, 56_000, fixed_input, fixed_input, 2_100)
+            .expect("valid window budget")
+            .with_retained_history_target(6_400)
+            .expect("valid history target");
+        assert_eq!(
+            budget
+                .preferred()
+                .expect("preferred budget")
+                .max_dynamic_body_tokens(),
+            expected_target,
+        );
+        assert_eq!(budget.max_dynamic_body_tokens(), 56_000);
+    }
     assert_eq!(
-        CitationCompactionPolicy::default().one_shot_window_percent(),
-        150
+        CompactionWindowBudget::new(64_000, 56_000, u64::MAX, 0, 2_100)
+            .expect("valid base budget")
+            .with_retained_history_target(6_400),
+        Err(CompactionError::BudgetOverflow),
     );
-    assert_eq!(
-        CitationCompactionPolicy::default().one_shot_retained_tool_exchanges(),
-        5
-    );
+}
+
+#[test]
+fn summary_target_is_bounded_independently_of_reasoning_output() {
+    let policy = CitationCompactionPolicy::default();
+    for window in [64_000, 272_000, 1_000_000, 2_000_000] {
+        let budget = policy.resolve(window).expect("valid budget");
+        assert!(budget.target_output_tokens() <= 8192);
+        assert!(budget.output_token_limit() <= 16384);
+        assert!(budget.output_token_limit() < window / 8);
+        assert!(budget.target_output_tokens() < budget.output_token_limit());
+        assert!(
+            CompactionReasoningReserve::INITIAL.output_ceiling(budget, window, window / 2)
+                > budget.output_token_limit()
+        );
+    }
 }
 
 /// Compaction output ceiling for `window` at `input_tokens`.
@@ -88,9 +101,9 @@ fn reasoning_reserve_grows_with_request_input_instead_of_the_text_budget() {
         .resolve(272_000)
         .expect("budget resolves");
     let text_budget = resolved.output_token_limit();
-    let measured_input_tokens = 200_387;
+    let measured_input_tokens = 220_000;
 
-    assert_eq!(text_budget, 21_760);
+    assert_eq!(text_budget, 16_384);
     let ceiling = CompactionReasoningReserve::INITIAL.output_ceiling(
         resolved,
         272_000,
@@ -139,14 +152,14 @@ fn adaptive_budget_scales_for_64k_and_256k_windows() {
             .resolve(64_000)
             .expect("64k budget resolves")
             .output_token_limit(),
-        5_120
+        6_400
     );
     assert_eq!(
         policy
             .resolve(256_000)
             .expect("256k budget resolves")
             .output_token_limit(),
-        20_480
+        16_384
     );
 }
 
@@ -159,14 +172,14 @@ fn adaptive_budget_clamps_low_and_high_windows() {
             .resolve(8_000)
             .expect("low budget resolves")
             .output_token_limit(),
-        2_048
+        1_000
     );
     assert_eq!(
         policy
             .resolve(1_000_000)
             .expect("high budget resolves")
             .output_token_limit(),
-        32_768
+        16_384
     );
 }
 
@@ -176,6 +189,7 @@ fn explicit_output_limit_overrides_adaptive_ceiling() {
         CitationCompactionPolicy::new(Some(9_000), None, 5).expect("valid override policy");
     let budget = policy.resolve(64_000).expect("override budget resolves");
 
+    assert_eq!(budget.target_output_tokens(), 1_920);
     assert_eq!(budget.output_token_limit(), 9_000);
     assert_eq!(budget.max_accepted_output_bytes(), 72_000);
 }

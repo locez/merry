@@ -94,6 +94,16 @@ impl CheckpointEntry {
         &self.refs
     }
 
+    /// Renders one entry exactly as it appears in an installed checkpoint.
+    pub(crate) fn render_prompt_text(&self) -> String {
+        let mut lines = vec![format!("- [{}] {}", self.id.as_str(), self.text)];
+        if let Some(rationale) = &self.rationale {
+            lines.push(format!("  reason: {rationale}"));
+        }
+        lines.push(format!("  refs: [{}]", super::format_ref_list(&self.refs)));
+        lines.join("\n")
+    }
+
     fn try_from_wire(
         section: CheckpointSection,
         wire: CheckpointEntryWire,

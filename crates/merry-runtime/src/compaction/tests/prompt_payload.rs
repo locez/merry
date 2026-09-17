@@ -158,6 +158,7 @@ fn compaction_payload_carries_only_enforced_output_limits() {
     .expect("payload parses");
 
     assert_eq!(payload["policy"]["target_output_tokens"], 420);
+    assert_eq!(payload["policy"]["max_output_tokens"], 420);
     assert_eq!(payload["available_ref_ids"], serde_json::json!(["r1"]));
     assert_eq!(
         payload["policy"]
@@ -168,6 +169,7 @@ fn compaction_payload_carries_only_enforced_output_limits() {
             .collect::<BTreeSet<_>>(),
         [
             "max_accepted_output_bytes".to_owned(),
+            "max_output_tokens".to_owned(),
             "target_output_tokens".to_owned()
         ]
         .into_iter()
@@ -242,7 +244,17 @@ fn previous_checkpoint_payload_keeps_all_entries_above_legacy_cap() {
     .expect("previous checkpoint payload serializes");
     let entries = payload["entries"].as_array().expect("entries array");
 
+    assert_eq!(
+        payload["estimated_tokens"],
+        crate::token_estimate::estimate_text_tokens(&checkpoint.render_prompt_text())
+    );
     assert_eq!(entries.len(), 17);
+    for ((_, entry), value) in checkpoint.sections().iter().zip(entries) {
+        assert_eq!(
+            value["estimated_tokens"],
+            crate::token_estimate::estimate_text_tokens(&entry.render_prompt_text())
+        );
+    }
     assert_eq!(entries[0]["entry_id"], "entry-0");
     assert_eq!(entries[0]["section"], "durable_conclusions");
     assert_eq!(entries[0]["text"], "Durable conclusion 0.");

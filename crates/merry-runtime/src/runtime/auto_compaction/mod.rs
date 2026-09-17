@@ -7,8 +7,8 @@
 //!
 //! - this module owns the shared request types and the session preparation that
 //!   turns runtime state into a [`CompactionPreparation`];
-//! - [`prefix`] compiles the stable prefix a compaction request shares with the
-//!   agent loop;
+//! - [`source`] reuses primary request compilation for manual compaction;
+//!   automatic compaction carries the actual step request unchanged;
 //! - [`fit`] sizes and compiles one request against the compaction model window;
 //! - [`plan`] picks a covered window the window can host;
 //! - [`generate`] generates a candidate and installs it;
@@ -16,13 +16,17 @@
 //! - [`manual`] serves an explicit caller request;
 //! - [`phase`] drives the automatic hard-watermark path for one provider step.
 
-use super::{RuntimeInner, provider_request::resolve_request_context_window};
+use super::{
+    RuntimeInner,
+    provider_request::{CompactionFixedDynamicTokens, RequestContextBudget},
+};
 use crate::{
     CitationCompactionInput, CitationCompactionPolicy, CompactionError,
-    ResolvedCitationCompactionBudget, ResolvedContextWindow, RuntimeError, RuntimeModelRole,
+    ResolvedCitationCompactionBudget, RuntimeError,
     compaction::{
         CompactionCoverageBudget, CompactionPreparation, CompactionShape, CompactionWindowBudget,
     },
+    context::compacted_checkpoint_wrapper_token_ceiling,
     session::SessionState,
 };
 
@@ -32,7 +36,7 @@ mod install;
 mod manual;
 mod phase;
 mod plan;
-mod prefix;
+mod source;
 
 pub(super) use phase::{
     HardWatermarkCompaction, HardWatermarkOutcome, reduce_context_at_hard_watermark,
@@ -45,37 +49,22 @@ pub(super) use install::{
 };
 pub(super) use manual::compact_context_once_inner;
 pub(super) use plan::plan_compaction_attempt;
-pub(super) use prefix::compaction_stable_prefix;
+use source::manual_compaction_budget;
 
-pub(super) async fn compaction_preparation_for_hard_watermark(
+pub(super) async fn compaction_preparation_for_budget(
     inner: &RuntimeInner,
-    policy: CitationCompactionPolicy,
-    resolved_budget: ResolvedCitationCompactionBudget,
-    window_budget: CompactionWindowBudget,
-    primary_window_tokens: u64,
-    shape: CompactionShape,
+    budget: CompactionRequestBudget,
 ) -> Result<Option<(CompactionPreparation, CompactionRequestBudget)>, RuntimeError> {
     let session = inner.session.lock().await;
     let preparation = build_preparation_for_shape(
         &session,
-        policy,
-        resolved_budget,
-        window_budget,
-        shape,
+        budget.policy,
+        budget.resolved_budget,
+        budget.window_budget,
+        budget.shape,
         CompactionCoverageBudget::unbounded(),
     )?;
-    Ok(preparation.map(|preparation| {
-        (
-            preparation,
-            CompactionRequestBudget {
-                policy,
-                resolved_budget,
-                window_budget,
-                primary_window_tokens,
-                shape,
-            },
-        )
-    }))
+    Ok(preparation.map(|preparation| (preparation, budget)))
 }
 
 /// Builds the preparation one shape asks for.
@@ -101,6 +90,13 @@ pub(super) fn build_preparation_for_shape(
             coverage,
             retained_tool_exchanges,
         ),
+        CompactionShape::RollingText => session.build_compaction_preparation(
+            policy,
+            resolved_budget,
+            window_budget,
+            coverage,
+            shape,
+        ),
         CompactionShape::Rolling => session.build_rolling_compaction_preparation(
             policy,
             resolved_budget,
@@ -120,52 +116,64 @@ pub(super) async fn compaction_input_for_policy(
     inner: &RuntimeInner,
     policy: CitationCompactionPolicy,
 ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
-    let primary_window = resolved_primary_context_window(inner).await?;
-    build_compaction_input(inner, policy, primary_window).await
-}
-
-async fn build_compaction_input(
-    inner: &RuntimeInner,
-    policy: CitationCompactionPolicy,
-    primary_window: ResolvedContextWindow,
-) -> Result<Option<CitationCompactionInput>, RuntimeError> {
-    let resolved_budget = policy.resolve(primary_window.tokens())?;
+    let budget = manual_compaction_budget(inner, policy).await?;
     let session = inner.session.lock().await;
-    session.build_citation_compaction_input(policy, resolved_budget)
-}
-
-async fn resolved_primary_context_window(
-    inner: &RuntimeInner,
-) -> Result<ResolvedContextWindow, RuntimeError> {
-    let provider_config = inner.model_config(RuntimeModelRole::Primary).await.ok_or(
-        RuntimeError::MissingModelProvider {
-            role: RuntimeModelRole::Primary.as_str(),
-        },
-    )?;
-    let context_window_override = inner
-        .context_window_tokens
-        .read()
-        .await
-        .map(std::num::NonZeroU64::get);
-    resolve_request_context_window(
-        provider_config.provider().capabilities(),
-        context_window_override,
+    session.build_citation_compaction_input_with_window_budget(
+        policy,
+        budget.resolved_budget,
+        budget.window_budget,
+        CompactionCoverageBudget::unbounded(),
     )
-    .map_err(RuntimeError::from)
 }
 
 /// Parameters the runtime keeps so it can rebuild a compaction request under a budget.
 pub(super) struct CompactionRequestBudget {
+    pub(super) source: crate::compaction::CompactionRequestSource,
     pub(super) policy: CitationCompactionPolicy,
     pub(super) resolved_budget: ResolvedCitationCompactionBudget,
     pub(super) window_budget: CompactionWindowBudget,
     pub(super) primary_window_tokens: u64,
-    /// How this step reduces history, chosen from the request it is building.
+    /// Initial coverage, before the measured request chooses a fallback.
     pub(super) shape: CompactionShape,
+}
+
+impl CompactionRequestBudget {
+    /// Reserves the full accepted summary and selects a bounded raw-tail target.
+    /// Both manual and automatic planning account for fixed context, tools and output.
+    pub(super) fn new(
+        source: crate::compaction::CompactionRequestSource,
+        policy: CitationCompactionPolicy,
+        request_budget: &RequestContextBudget,
+        fixed_dynamic_body_tokens: CompactionFixedDynamicTokens,
+    ) -> Result<Self, CompactionError> {
+        let primary_window_tokens = request_budget.window.tokens();
+        let resolved_budget = policy.resolve(primary_window_tokens)?;
+        let checkpoint_output_ceiling_tokens = resolved_budget
+            .output_token_limit()
+            .checked_add(compacted_checkpoint_wrapper_token_ceiling())
+            .ok_or(CompactionError::BudgetOverflow)?;
+        let window_budget = CompactionWindowBudget::new(
+            primary_window_tokens,
+            request_budget.budget.hard_water_tokens(),
+            fixed_dynamic_body_tokens.replacement,
+            fixed_dynamic_body_tokens.archive_only,
+            checkpoint_output_ceiling_tokens,
+        )?
+        .with_retained_history_target(resolved_budget.retained_history_token_target())?;
+        Ok(Self {
+            source,
+            policy,
+            resolved_budget,
+            window_budget,
+            primary_window_tokens,
+            shape: CompactionShape::SinglePass,
+        })
+    }
 }
 
 /// A compaction request that already fits the compaction model window.
 pub(super) struct CompactionPlan {
+    pub(super) compactor_window_tokens: u64,
     pub(super) input: Box<CitationCompactionInput>,
     pub(super) request: Box<merry_llm::ModelRequest>,
     /// Reasoning allowance this request was sized with.

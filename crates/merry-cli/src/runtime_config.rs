@@ -612,7 +612,7 @@ retained_model_turns = 2
             vec![Ok(ModelEvent::Completed {
                 response: ModelResponse::new(
                     vec![ModelOutput::text(
-                        &"tail two assistant from configured builder ".repeat(300),
+                        &"tail two assistant from configured builder ".repeat(80),
                     )],
                     FinishReason::Stop,
                     None,
@@ -699,7 +699,8 @@ retained_model_turns = 2
         .expect("tail two step should run");
         collect_runtime_step_events(
             &runtime,
-            StepInput::user_text("current user from configured builder").expect("valid input"),
+            StepInput::user_text(&"current user from configured builder ".repeat(600))
+                .expect("valid input"),
             context,
         )
         .await
@@ -714,8 +715,19 @@ retained_model_turns = 2
             .collect::<Vec<_>>()
             .join("\n");
         assert!(compaction_text.contains("old user from configured builder"));
-        assert!(!compaction_text.contains("tail one user from configured builder"));
-        assert!(!compaction_text.contains("tail two user from configured builder"));
-        assert!(!compaction_text.contains("current user from configured builder"));
+        let primary_requests = primary.recorded_requests();
+        let continuation = primary_requests.last().expect("primary continuation");
+        let continuation_text = continuation
+            .messages()
+            .iter()
+            .map(|message| message.content().as_text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!continuation_text.contains("old user from configured builder"));
+        assert!(continuation_text.contains("tail one user from configured builder"));
+        assert!(continuation_text.contains("tail one assistant from configured builder"));
+        assert!(continuation_text.contains("tail two user from configured builder"));
+        assert!(continuation_text.contains("tail two assistant from configured builder"));
+        assert!(continuation_text.contains("current user from configured builder"));
     }
 }

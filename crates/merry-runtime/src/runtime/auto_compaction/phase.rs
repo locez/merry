@@ -12,21 +12,18 @@ use super::super::journal_emission::{
 };
 use super::super::memory_activation::clear_current_activated_memories;
 use super::super::provider_request::{
-    CompactionFixedDynamicTokens, RequestContextBudget, StepRequestInputs,
-    estimate_compaction_fixed_dynamic_tokens, step_request_compile_diagnostic,
+    RequestContextBudget, StepRequestInputs, estimate_compaction_fixed_dynamic_tokens,
+    step_request_compile_diagnostic,
 };
 use super::super::{RuntimeInner, diagnostic_from_text, runtime_error_message};
 use super::{
-    ArchiveOnlyReason, CompactionAttempt, compaction_preparation_for_hard_watermark,
-    generate_and_install_compaction, install_archive_only_compaction_transactionally,
-    plan_compaction_attempt,
+    ArchiveOnlyReason, CompactionAttempt, CompactionRequestBudget,
+    compaction_preparation_for_budget, generate_and_install_compaction,
+    install_archive_only_compaction_transactionally, plan_compaction_attempt,
 };
 use crate::{
-    CitationCompactionPolicy, CompactionError, CompactionOutcome, CompactionStrategy,
-    ResolvedCitationCompactionBudget,
-    compaction::CompactionShape,
-    compaction::{ArchiveOnlyCompactionInput, CompactionPreparation, CompactionWindowBudget},
-    context::compacted_checkpoint_wrapper_token_ceiling,
+    CitationCompactionPolicy, CompactionError, CompactionOutcome,
+    compaction::{ArchiveOnlyCompactionInput, CompactionPreparation},
     events::{ActiveStepPermit, RuntimeJournalEventBatch},
     step::StepInput,
 };
@@ -54,6 +51,7 @@ pub(in crate::runtime) struct HardWatermarkCompaction<'a> {
     pub(crate) generation_config: GenerationConfig,
     /// Primary model, used to estimate the replacement request.
     pub(crate) primary_model: &'a ModelName,
+    pub(crate) request: &'a merry_llm::ModelRequest,
 }
 
 /// Result of the hard-watermark compaction phase for one step.
@@ -85,6 +83,7 @@ pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
         tool_specs,
         generation_config,
         primary_model,
+        request,
     } = parts;
 
     let fixed_dynamic_body_tokens = match estimate_compaction_fixed_dynamic_tokens(
@@ -107,30 +106,35 @@ pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
             .await;
         }
     };
-    let window_budget =
-        match window_budget_for_step(policy, request_budget, fixed_dynamic_body_tokens) {
-            Ok(budget) => budget,
-            Err(source) => {
-                let error = crate::RuntimeError::Compaction { source };
-                return abort_with_diagnostic(
-                    inner,
-                    sender,
-                    token,
-                    diagnostic_from_text("auto_compaction", error.to_string()),
-                )
-                .await;
-            }
-        };
-
-    let preparation = compaction_preparation_for_hard_watermark(
-        inner,
+    let history_ids = inner.session.lock().await.provider_transcript_history_ids();
+    let source = match crate::compaction::CompactionRequestSource::new(
+        request.clone(),
+        &history_ids,
+        input.user_messages_for_request().len(),
+    ) {
+        Ok(source) => source,
+        Err(error) => {
+            return abort_with_error(
+                inner,
+                sender,
+                token,
+                crate::RuntimeError::CompactionModelRequest {
+                    message: error.to_string(),
+                },
+            )
+            .await;
+        }
+    };
+    let budget = match CompactionRequestBudget::new(
+        source,
         policy,
-        window_budget.resolved_budget,
-        window_budget.window_budget,
-        request_budget.window.tokens(),
-        shape_for_request(policy, request_budget),
-    )
-    .await;
+        request_budget,
+        fixed_dynamic_body_tokens,
+    ) {
+        Ok(budget) => budget,
+        Err(error) => return abort_with_error(inner, sender, token, error.into()).await,
+    };
+    let preparation = compaction_preparation_for_budget(inner, budget).await;
     let (preparation, compaction_budget) = match preparation {
         Ok(Some(preparation)) => preparation,
         Ok(None) => {
@@ -205,55 +209,6 @@ pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
             HardWatermarkOutcome::Continue { replacement: None }
         }
     }
-}
-
-/// Window budget resolved for one hard-watermark compaction.
-struct StepWindowBudget {
-    resolved_budget: ResolvedCitationCompactionBudget,
-    window_budget: CompactionWindowBudget,
-}
-
-/// Returns how this step reduces history, chosen from the request it is building.
-///
-/// A window that shrank far below the history needs one pass that covers
-/// everything; a moderate reduction keeps rolling, so the shared prefix stays
-/// cached across passes.
-fn shape_for_request(
-    policy: CitationCompactionPolicy,
-    request_budget: &RequestContextBudget,
-) -> CompactionShape {
-    match policy.strategy_for(
-        request_budget.window.tokens(),
-        request_budget.dynamic_body_estimated_tokens,
-    ) {
-        CompactionStrategy::OneShot => CompactionShape::OneShot {
-            retained_tool_exchanges: policy.one_shot_retained_tool_exchanges(),
-        },
-        CompactionStrategy::Rolling => CompactionShape::Rolling,
-    }
-}
-
-fn window_budget_for_step(
-    policy: CitationCompactionPolicy,
-    request_budget: &RequestContextBudget,
-    fixed_dynamic_body_tokens: CompactionFixedDynamicTokens,
-) -> Result<StepWindowBudget, CompactionError> {
-    let resolved_budget = policy.resolve(request_budget.window.tokens())?;
-    let checkpoint_output_ceiling_tokens = resolved_budget
-        .output_token_limit()
-        .checked_add(compacted_checkpoint_wrapper_token_ceiling())
-        .ok_or(CompactionError::BudgetOverflow)?;
-    let window_budget = CompactionWindowBudget::new(
-        request_budget.window.tokens(),
-        request_budget.budget.hard_water_tokens(),
-        fixed_dynamic_body_tokens.replacement,
-        fixed_dynamic_body_tokens.archive_only,
-        checkpoint_output_ceiling_tokens,
-    )?;
-    Ok(StepWindowBudget {
-        resolved_budget,
-        window_budget,
-    })
 }
 
 /// Installs one archive-only reduction and reports whether the step may continue.

@@ -144,32 +144,36 @@ roots = [
 ]
 
 [runtime.auto_compaction]
-# Automatic compaction runs when dynamic context crosses the runtime hard
-# watermark. Current user input is not included in the compaction input.
+# Automatic compaction runs at the hard watermark. It first appends a summary
+# directive to the unchanged session request, including its tools and history.
+# Current input and retained turns remain visible but are excluded from the summary.
 enabled = true
-# Retain this many recent completed model turns verbatim. Aborted turns after
-# the retained boundary stay verbatim without consuming this count.
+# Maximum recent completed turns to retain. Choose the largest complete suffix
+# that fits the token budget: 5, 4, 3, 2, 1. Never split a turn or tool exchange.
+# Prefer a smaller verbatim tail before archiving retained tool results.
+# Manual compaction and compaction previews apply the same destination budget.
 retained_model_turns = 5
-# By default the checkpoint output budget is 8% of the primary model window,
-# clamped to 2048-32768 tokens. These optional fields override that calculation.
+# Summary soft target: 3% of the primary window, clamped to 512-8192 tokens.
+# Independent hard acceptance limit: 10%, clamped to 1024-16384 tokens and at most
+# 1/8 of tiny windows. The soft target never exceeds the hard limit. Exceeding the
+# soft target alone does not fail compaction; planning reserves the hard limit.
+# Both limits count restored keep entries, rationale, refs and framing. A failed
+# candidate gets bounded corrective feedback on retry, not an identical request.
+# After compaction, prefer fixed input + summary ceiling + retained raw history.
+# Raw history targets 10% of the primary window, capped at 32768 tokens; this is
+# not half the hard watermark. If even one raw turn exceeds the target, keep the
+# minimum raw tail that fits the hard watermark rather than rejecting the step.
+# The provider output allowance separately includes reasoning room.
+# target_output_tokens overrides the rendered summary ceiling, not provider output.
 # target_output_tokens = 8192
 # max_accepted_output_bytes = 65536
-# Reasoning level for compaction model requests. Compaction never inherits the
-# primary model's reasoning_effort: a request sized for hard coding turns can
-# spend its whole output budget reasoning about history without writing the
-# checkpoint. Omitted, the provider default applies.
+# Compaction does not inherit primary reasoning_effort; omission uses the provider default.
 # reasoning_effort = "medium"
-# Body-to-window percentage above which compaction covers the whole history in one
-# pass instead of rolling. 150 means a body of one and a half windows, which only
-# happens after the context window shrinks below history the session already holds.
-# A rolling reduction would need several passes there, and each pass re-summarizes
-# the previous checkpoint, so the loss compounds. The one-shot pass drops the older
-# covered tool calls' arguments and replaces their results with notices, keeping the
-# tool name, call id, status, artifact id, and ref so the checkpoint still records
-# what ran and can cite it. Set 0 to always roll.
-# one_shot_window_percent = 150
-# Covered tool exchanges the one-shot pass keeps at full length, newest first.
+# When the full request cannot fit, rebuild once with only user/assistant history
+# and this many newest covered tool exchanges. Reduce the count down to zero if
+# necessary; roll over text only as a last resort. Exact artifacts remain on disk.
 # one_shot_retained_tool_exchanges = 5
+# one_shot_window_percent was removed: actual request fit replaces ratio thresholds.
 
 [runtime.subagents]
 # Disabled by default. Enable this to expose spawn_subagents, wait_subagents,

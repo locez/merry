@@ -1,24 +1,7 @@
-/// Tail directive appended after the session's stable prefix for compaction.
-///
-/// Model-backed compaction reuses the session's cached prefix, so this text is
-/// appended as the last instruction message instead of replacing the agent
-/// system prompt. Because the agent instructions stay in the prefix, the
-/// directive states its own contract explicitly.
-///
-/// The directive asks for compression, not transcription. An earlier version
-/// listed only what to preserve, so the model filled the output ceiling with an
-/// execution record: a real checkpoint came out at 21,158 of its 21,760 allowed
-/// tokens across 161 entries, including session metadata and tool-call counts
-/// that the design keeps in the ledger instead. The wording below states the
-/// mission, what to keep, what to drop, and the handoff and citation contracts,
-/// so the checkpoint is a summary of what later work needs.
-///
-/// The text carries its own boundary tag, the same way the default runtime
-/// instructions carry `<merry_runtime_instructions>`. This directive arrives in
-/// a user-role message, so the boundary is what marks it as runtime control text
-/// rather than user input or the data payload that follows it. The tag stays
-/// distinct from the prefix instructions so one request never holds two blocks
-/// with the same tag.
+/// Summary-only control appended after the unchanged session request when it fits.
+/// The trailing payload indexes covered evidence; raw tail and current input may
+/// remain visible for cache reuse but are never part of the checkpoint coverage.
+/// Tool definitions remain stable, while the compaction runner rejects tool calls.
 pub fn citation_compaction_tail_directive() -> &'static str {
     concat!(
         "<merry_compaction_instructions>\n",
@@ -48,6 +31,7 @@ pub fn citation_compaction_tail_directive() -> &'static str {
         "4. HANDOFFS & SCHEMAS\n",
         "- Return ONLY a single valid JSON object strictly adhering to the structured output schema. The section arrays form the complete new checkpoint; any prior entry omitted from these arrays is removed automatically.\n",
         "- For 'keep': Set `old_id` in handoffs with placeholders `new_ids: null` and `reason: null`. OMIT the old entry body from the section arrays (runtime carries it forward automatically).\n",
+        "- BUDGET: `previous_checkpoint.estimated_tokens` measures the old summary; each old entry's `estimated_tokens` is its restored cost, not the size of the keep handoff. A keep is NOT free. If the previous summary exceeds the new budget, rewrite and merge it aggressively; do not preserve oversized old entries verbatim. Omit obsolete entries from both sections and handoffs.\n",
         "- For 'replace': Emit the newly rewritten entry inside the section arrays AND record the `old_id` -> `new_ids` relationship in handoffs (`reason` may be null if unneeded).\n",
         "- DO NOT emit 'drop' handoffs.\n",
         "- Every object property required by the strict schema must be present. Use `rationale: null` when no rationale applies.\n\n",

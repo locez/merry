@@ -10,11 +10,12 @@ use super::CompactionRequestBudget;
 use crate::{
     CitationCompactionInput, RuntimeError,
     compaction::{
-        CompactionReasoningReserve, compaction_request_required_tokens,
-        compaction_window_safety_tokens, compile_citation_compaction_model_request,
+        CompactionReasoningReserve, CompactionRequestProjection,
+        compaction_request_required_tokens, compaction_window_safety_tokens,
+        compile_citation_compaction_model_request,
     },
 };
-use merry_llm::{ModelInputItem, ReasoningEffort};
+use merry_llm::ReasoningEffort;
 pub(super) enum CompactionRequestFit {
     /// The request fits the window under this attempt's reserve.
     Request {
@@ -65,7 +66,7 @@ pub(super) struct CompactionModelLimits {
 pub(super) fn compile_fitted_compaction_request(
     input: &CitationCompactionInput,
     model: &merry_llm::ModelName,
-    stable_prefix: &[ModelInputItem],
+    projection: CompactionRequestProjection<'_>,
     reasoning_effort: Option<&ReasoningEffort>,
     limits: CompactionModelLimits,
     reserve: CompactionReasoningReserve,
@@ -75,7 +76,8 @@ pub(super) fn compile_fitted_compaction_request(
         compile_citation_compaction_model_request(
             input,
             model,
-            stable_prefix,
+            projection.source,
+            projection.mode,
             reasoning_effort,
             output_ceiling_tokens,
         )
@@ -84,6 +86,15 @@ pub(super) fn compile_fitted_compaction_request(
         })
     };
     let text_budget_tokens = input.resolved_budget().output_token_limit();
+    if let Some(model_limit_tokens) = limits.max_output_tokens
+        && model_limit_tokens < text_budget_tokens
+    {
+        return Err(crate::CompactionError::OutputBudgetExceedsModelLimit {
+            summary_tokens: text_budget_tokens,
+            model_limit_tokens,
+        }
+        .into());
+    }
     let measured = compile(text_budget_tokens)?;
     let estimated_input_tokens = compaction_request_required_tokens(&measured).0;
     let reserved_output_tokens = reserve
@@ -92,8 +103,7 @@ pub(super) fn compile_fitted_compaction_request(
             limits.window_tokens,
             estimated_input_tokens,
         )
-        .min(limits.max_output_tokens.unwrap_or(u64::MAX))
-        .max(text_budget_tokens);
+        .min(limits.max_output_tokens.unwrap_or(u64::MAX));
     let available_output_tokens = limits.window_tokens.saturating_sub(estimated_input_tokens);
     let affordable_output_tokens = available_output_tokens
         .saturating_sub(compaction_window_safety_tokens(available_output_tokens));

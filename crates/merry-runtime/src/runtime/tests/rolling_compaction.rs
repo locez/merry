@@ -200,14 +200,17 @@ async fn run_three_cycle_case(window_tokens: u64) {
         let compaction_input_tokens =
             crate::token_estimate::estimate_model_input_tokens(compactor_request.input());
         assert!(
-            compaction_input_tokens + output_ceiling <= window_tokens,
+            compaction_input_tokens + output_ceiling
+                <= compactor_capabilities()
+                    .max_input_tokens()
+                    .expect("compactor window"),
             "cycle {cycle} compaction request must fit the window: input {compaction_input_tokens} plus output {output_ceiling} exceeds {window_tokens}"
         );
         let compactor_input =
             serde_json::to_string(compactor_request.input()).expect("compactor input serializes");
         assert!(
-            !compactor_input.contains(&marker),
-            "current user input must stay out of compaction input"
+            compactor_input.contains(&marker),
+            "cache-preserving compaction leaves the current input intact"
         );
         if cycle == 1 {
             assert!(compactor_input.contains(DEEP_SOURCE_SENTINEL));
@@ -240,12 +243,34 @@ async fn run_three_cycle_case(window_tokens: u64) {
         if let Some(previous) = &previous_cycle {
             assert!(boundary > previous.boundary);
         }
+        let projected_count = runtime
+            .inner
+            .session
+            .lock()
+            .await
+            .provider_transcript_snapshot()
+            .expect("projection")
+            .len()
+            / 2;
         assert_eq!(
             boundary.as_u64(),
-            u64::try_from(submitted_inputs.len() - 6).expect("step count fits u64"),
-            "a completed trigger turn follows the five completed turns retained at the boundary"
+            u64::try_from(submitted_inputs.len() - projected_count).expect("step count fits u64")
         );
-        assert_provider_projection_has_six_raw_turns(&runtime, &submitted_inputs).await;
+        let budget = crate::runtime::request_context_budget(
+            &primary_capabilities(window_tokens),
+            trigger_request,
+            None,
+        )
+        .expect("request budget");
+        assert_eq!(
+            projected_count, 2,
+            "retain one large raw turn and the current input"
+        );
+        assert!(
+            budget.dynamic_body_estimated_tokens < budget.budget.hard_water_tokens(),
+            "the minimum raw tail and current input must fit the destination window"
+        );
+        assert_provider_projection_has_complete_raw_tail(&runtime, &submitted_inputs).await;
         assert_checkpoint_meaning(&runtime, &fixture.semantic_values, cycle).await;
         assert_current_refs_read_original_source(
             &runtime,
@@ -492,10 +517,15 @@ fn assert_recent_raw_turns(request: &ModelRequest, submitted_inputs: &[String]) 
         })
         .cloned()
         .collect::<Vec<_>>();
-    let expected_users = &submitted_inputs[submitted_inputs.len() - 6..];
-    let first_global_index = submitted_inputs.len() - 6;
+    assert!(
+        body.len() >= 3 && body.len() <= 11,
+        "retain one to five complete turns plus the current input"
+    );
+    let retained = (body.len() - 1) / 2;
+    let expected_users = &submitted_inputs[submitted_inputs.len() - retained - 1..];
+    let first_global_index = submitted_inputs.len() - retained - 1;
     let mut expected = Vec::with_capacity(11);
-    for (offset, user) in expected_users[..5].iter().enumerate() {
+    for (offset, user) in expected_users[..retained].iter().enumerate() {
         expected.push(text_message(ModelMessageRole::User, user));
         expected.push(text_message(
             ModelMessageRole::Assistant,
@@ -504,7 +534,7 @@ fn assert_recent_raw_turns(request: &ModelRequest, submitted_inputs: &[String]) 
     }
     expected.push(text_message(
         ModelMessageRole::User,
-        expected_users[5].as_str(),
+        expected_users[retained].as_str(),
     ));
     assert_eq!(body, expected);
 }
@@ -530,7 +560,7 @@ async fn prompt_boundary(runtime: &Runtime) -> ModelTurnId {
         .expect("rolling compaction advances the prompt boundary")
 }
 
-async fn assert_provider_projection_has_six_raw_turns(
+async fn assert_provider_projection_has_complete_raw_tail(
     runtime: &Runtime,
     submitted_inputs: &[String],
 ) {
@@ -538,9 +568,11 @@ async fn assert_provider_projection_has_six_raw_turns(
     let projection = session
         .provider_transcript_snapshot()
         .expect("provider transcript projects");
-    assert_eq!(projection.len(), 12);
-    let expected_users = &submitted_inputs[submitted_inputs.len() - 6..];
-    let first_global_index = submitted_inputs.len() - 6;
+    assert!(projection.len() >= 4 && projection.len() <= 12);
+    assert_eq!(projection.len() % 2, 0);
+    let retained = projection.len() / 2 - 1;
+    let expected_users = &submitted_inputs[submitted_inputs.len() - retained - 1..];
+    let first_global_index = submitted_inputs.len() - retained - 1;
     for (index, pair) in projection.as_chunks::<2>().0.iter().enumerate() {
         assert!(matches!(
             &pair[0],

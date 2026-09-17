@@ -44,6 +44,8 @@ pub(in crate::runtime) async fn generate_and_install_compaction(
             plan.request.as_ref().clone(),
             stream_context,
             &plan.input,
+            plan.compactor_window_tokens,
+            &inner.session_id,
             &token,
         )
         .await
@@ -71,10 +73,12 @@ pub(in crate::runtime) async fn generate_and_install_compaction(
                 // the fit loop find that covered window.
                 let rebuilt = {
                     let session = inner.session.lock().await;
-                    session.build_rolling_compaction_preparation(
+                    super::build_preparation_for_shape(
+                        &session,
                         budget.policy,
                         budget.resolved_budget,
                         budget.window_budget,
+                        budget.shape,
                         CompactionCoverageBudget::unbounded(),
                     )?
                 };

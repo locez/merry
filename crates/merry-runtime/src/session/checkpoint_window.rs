@@ -202,14 +202,14 @@ impl SessionState {
         Ok((reference.source_kind(), page))
     }
 
+    #[cfg(test)]
     pub(crate) fn build_citation_compaction_input(
         &self,
         policy: CitationCompactionPolicy,
         resolved_budget: ResolvedCitationCompactionBudget,
     ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
-        let window_budget = CompactionWindowBudget::unbounded_for_manual_compaction(
-            resolved_budget.output_token_limit(),
-        )?;
+        let window_budget =
+            CompactionWindowBudget::unbounded_for_tests(resolved_budget.output_token_limit())?;
         self.build_citation_compaction_input_with_window_budget(
             policy,
             resolved_budget,
@@ -278,8 +278,7 @@ impl SessionState {
     /// Builds one one-shot pass that covers everything before the retained tail.
     ///
     /// The pass keeps the newest `retained_tool_exchanges` covered tool exchanges at
-    /// full length and shortens the older ones: their arguments are replaced by a
-    /// marker and their results by artifact notices. The payload therefore stops
+    /// full length and omits older exchanges entirely from the model payload. The payload therefore stops
     /// growing with the number of tool calls in the covered history. This is what a
     /// window that shrank far below the history needs, because rolling would
     /// re-summarize the previous checkpoint on every pass.
@@ -302,7 +301,7 @@ impl SessionState {
         )
     }
 
-    fn build_compaction_preparation(
+    pub(crate) fn build_compaction_preparation(
         &self,
         policy: CitationCompactionPolicy,
         resolved_budget: ResolvedCitationCompactionBudget,

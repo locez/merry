@@ -389,6 +389,7 @@ pub(super) async fn run_provider_step(
                     tool_specs: tool_specs.clone(),
                     generation_config: generation_config.clone(),
                     primary_model: provider_config.model(),
+                    request: &request,
                 },
             )
             .await;

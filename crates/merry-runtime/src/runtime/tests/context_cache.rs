@@ -382,57 +382,33 @@ async fn compaction_request_reuses_the_step_stable_prefix_and_appends_the_direct
         "compaction must keep the session prefix instead of a dedicated system prompt"
     );
 
-    let input = compaction_request.input();
-    let prefix_len = compaction_request.stable_prefix_item_count();
+    assert!(
+        compaction_request
+            .input()
+            .starts_with(primary_request.input())
+    );
+    assert_eq!(compaction_request.tools(), primary_request.tools());
     assert_eq!(
-        input.len(),
-        prefix_len + 2,
-        "compaction input is the stable prefix, the directive, and the payload"
+        compaction_request.tool_profile_hash(),
+        primary_request.tool_profile_hash()
     );
-    assert!(
-        message_text(&input[0]).starts_with("<merry_runtime_instructions>\n"),
-        "compaction must reuse the session's tagged runtime instructions"
+    assert_eq!(
+        compaction_request.response_format(),
+        primary_request.response_format()
     );
-    let directive = message_text(&input[prefix_len]);
-    assert!(
-        directive.starts_with("<merry_compaction_instructions>\n")
-            && directive.ends_with("\n</merry_compaction_instructions>"),
-        "the compaction directive must be one bounded instruction block: {directive}"
+    assert_eq!(
+        compaction_request.stable_prefix_hash(),
+        primary_request.stable_prefix_hash()
     );
+    let directive = message_text(compaction_request.input().last().expect("tail directive"));
+    assert!(directive.contains("COMPACTION REQUEST: Update the session checkpoint"));
+    assert!(directive.contains(
+        "Summary soft target: at most 512 estimated tokens; hard rendered-summary limit: 512 estimated tokens"
+    ));
+    assert!(directive.contains("covered_history_references"));
     assert!(
-        directive.contains("COMPACTION REQUEST: Update the session checkpoint"),
-        "unexpected compaction directive: {directive}"
-    );
-    assert!(
-        directive.contains("CORE MISSION & COMPRESSION GOAL"),
-        "unexpected compaction directive: {directive}"
-    );
-    let payload = message_text(&input[prefix_len + 1]);
-    assert!(
-        payload.starts_with("<merry_compaction_payload>\n")
-            && payload.ends_with("\n</merry_compaction_payload>"),
-        "the compaction payload must be one bounded data block: {payload}"
-    );
-    assert!(
-        payload.contains("\"available_ref_ids\""),
-        "the payload block must still carry the structured compaction payload"
-    );
-    let payload_json = payload
-        .trim_start_matches("<merry_compaction_payload>\n")
-        .trim_end_matches("\n</merry_compaction_payload>");
-    assert!(
-        serde_json::from_str::<serde_json::Value>(payload_json).is_ok(),
-        "the payload boundary must wrap strict JSON without escaping it"
-    );
-
-    let format = compaction_request
-        .response_format()
-        .expect("compaction must keep structured output");
-    let merry_llm::ModelResponseFormat::StructuredOutput(format) = format;
-    assert_eq!(format.name(), "compacted_checkpoint_candidate");
-    assert!(
-        compaction_request.tools().is_empty(),
-        "compaction stays outside the agent loop and carries no tools"
+        !directive.contains("old turn before prefix reuse"),
+        "history must not be duplicated into the directive"
     );
     assert_eq!(
         compaction_request
@@ -450,4 +426,126 @@ async fn compaction_request_reuses_the_step_stable_prefix_and_appends_the_direct
         Some("max"),
         "the primary request keeps its own reasoning effort"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_preserves_native_tool_items_and_indexes_only_covered_evidence() {
+    use crate::runtime::tests::support::common::{artifact_id, pending_tool_call};
+    use merry_core::{
+        ArtifactKind, ArtifactRef, PendingToolCallBatch, ToolCallBatchId, ToolCallResult,
+    };
+    use merry_llm::ModelInputItem;
+    let primary = RecordingModelProvider::new();
+    let compactor =
+        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+            completed_event_with(
+                vec![ModelOutput::text(
+                    &CACHE_KEY_COMPACTION_CANDIDATE.replace("\"h0\", \"h1\"", "\"h0\""),
+                )],
+                FinishReason::Stop,
+            ),
+        )])]);
+    let runtime = Runtime::builder(session_id("cache-native-tools"))
+        .model_provider(Arc::new(primary.clone()), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor.clone()),
+            model_name(),
+        )
+        .automatic_compaction(CompactionConfig::disabled())
+        .build()
+        .expect("runtime");
+    {
+        let mut session = runtime.inner.session.lock().await;
+        for index in 0..2 {
+            let turn = session.begin_model_turn().expect("turn");
+            session
+                .record_user_message_body(turn, &format!("covered user {index}"))
+                .expect("user");
+            let call = pending_tool_call(&format!("cache-call-{index}"));
+            session
+                .record_tool_call_batch_pending(
+                    turn,
+                    PendingToolCallBatch::new(
+                        ToolCallBatchId::new(&format!("cache-batch-{index}")).expect("batch id"),
+                        vec![call.clone()],
+                    )
+                    .expect("batch"),
+                )
+                .expect("call");
+            session.close_model_response(turn, true).expect("close");
+            session
+                .submit_tool_result(
+                    ToolCallResult::succeeded(
+                        call.id().clone(),
+                        ArtifactRef::new(
+                            artifact_id(&format!("cache-result-{index}")),
+                            ArtifactKind::Text,
+                        ),
+                    ),
+                    crate::ArtifactContent::text(format!("verbatim result {index}")),
+                )
+                .expect("result");
+        }
+    }
+    collect_step(&runtime, "retained current user", StepContext::default()).await;
+    runtime
+        .compact_context_once(
+            CitationCompactionPolicy::new(Some(512), Some(16384), 1).expect("policy"),
+            StepContext::default(),
+        )
+        .await
+        .expect("compaction");
+    let requests = compactor.recorded_requests();
+    let request = &requests[0];
+    let originals = primary.recorded_requests();
+    let original = originals.last().expect("primary request");
+    assert!(request.input().starts_with(original.input()));
+    assert_eq!(request.tools(), original.tools());
+    assert_eq!(request.stable_prefix_hash(), original.stable_prefix_hash());
+    assert_eq!(
+        request
+            .input()
+            .iter()
+            .filter(|item| matches!(item, ModelInputItem::ToolCall(_)))
+            .count(),
+        2
+    );
+    assert_eq!(
+        request
+            .input()
+            .iter()
+            .filter(|item| matches!(item, ModelInputItem::ToolResult(_)))
+            .count(),
+        2
+    );
+    let directive = message_text(request.input().last().expect("directive"));
+    assert!(!directive.contains("verbatim result"));
+    assert!(!directive.contains("retained current user"));
+    let payload_json = directive
+        .split_once("<merry_compaction_payload>\n")
+        .expect("payload start")
+        .1
+        .split_once("\n</merry_compaction_payload>")
+        .expect("payload end")
+        .0;
+    let payload: serde_json::Value = serde_json::from_str(payload_json).expect("payload json");
+    let references = payload["covered_history_references"]
+        .as_array()
+        .expect("ref index");
+    assert_eq!(references.len(), 4);
+    for reference in references {
+        let index = usize::try_from(reference["input_item_index"].as_u64().expect("input index"))
+            .expect("index fits");
+        match reference["ref_id"].as_str().expect("ref id") {
+            "h2" | "h5" => assert!(matches!(
+                &request.input()[index],
+                ModelInputItem::ToolResult(_)
+            )),
+            "h0" | "h3" => assert!(
+                matches!(&request.input()[index], ModelInputItem::Message(message) if message.role() == merry_llm::ModelMessageRole::User)
+            ),
+            other => panic!("uncovered ref {other}"),
+        }
+    }
 }

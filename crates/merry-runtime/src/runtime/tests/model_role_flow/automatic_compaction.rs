@@ -136,9 +136,10 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(compactor_input.contains("Old compressible ballast."));
-    assert!(!compactor_input.contains("Retained tail ballast."));
-    assert!(!compactor_input.contains("Trigger automatic compaction with a small current input."));
-    assert!(compactor_request.tools().is_empty());
+    assert!(compactor_input.contains("Retained tail ballast."));
+    assert!(compactor_input.contains("Trigger automatic compaction with a small current input."));
+    assert!(!compactor_request.tools().is_empty());
+    assert!(compactor_request.response_format().is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]

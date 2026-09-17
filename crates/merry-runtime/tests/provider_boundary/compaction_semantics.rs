@@ -468,8 +468,8 @@ async fn citation_compaction_fixture_preserves_required_design_meanings() {
         "the compactor must receive the covered source containing all approved meanings"
     );
     assert!(
-        !compaction_request_text.contains("Retained tail sentinel"),
-        "retained raw tail must stay out of the compactor request"
+        compaction_request_text.contains("Retained tail sentinel"),
+        "cache-preserving compaction keeps raw tail visible but excludes it from summary coverage"
     );
 
     let snapshot = ContextCompiler::new()

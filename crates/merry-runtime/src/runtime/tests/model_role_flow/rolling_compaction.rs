@@ -16,7 +16,7 @@ use merry_core::{
     ArtifactKind, ArtifactRef, PendingToolCallBatch, RuntimeJournalPayload, ToolCallBatchId,
     ToolCallResult,
 };
-use merry_llm::{FinishReason, ModelCapabilities, ModelName, ModelOutput};
+use merry_llm::{FinishReason, ModelCapabilities, ModelName, ModelOutput, ModelProvider};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -135,6 +135,57 @@ async fn automatic_compaction_rolls_when_the_window_shrinks_below_the_history() 
 /// compaction call and the payload still names every covered exchange.
 #[tokio::test(flavor = "current_thread")]
 async fn automatic_compaction_covers_everything_once_when_the_window_shrinks_far() {
+    assert_one_shot_reduction(64_000, 25_200, 10_000, 5).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_uses_request_fit_below_the_old_one_and_a_half_window_threshold() {
+    assert_one_shot_reduction(64_000, 14_000, 10_000, 5).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_reduces_700k_history_after_switching_from_1m_to_272k() {
+    assert_one_shot_reduction(272_000, 140_000, 40_000, 5).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rebuilt_request_keeps_four_tool_exchanges_when_five_do_not_fit() {
+    for retained_tools in [5, 1000] {
+        let request = assert_one_shot_reduction(64_000, 48_000, 10_000, retained_tools).await;
+        let text = request
+            .messages()
+            .last()
+            .expect("directive")
+            .content()
+            .as_text();
+        let payload = text
+            .split_once("<merry_compaction_payload>\n")
+            .expect("payload start")
+            .1
+            .split_once("\n</merry_compaction_payload>")
+            .expect("payload end")
+            .0;
+        let payload: serde_json::Value = serde_json::from_str(payload).expect("payload");
+        let exchanges = payload["window"]
+            .as_array()
+            .expect("window")
+            .iter()
+            .flat_map(|turn| turn["items"].as_array().expect("turn items"))
+            .filter(|item| item["role"] == "tool_exchange")
+            .count();
+        assert_eq!(
+            exchanges, 4,
+            "keep the largest affordable number, not a halved count"
+        );
+    }
+}
+
+async fn assert_one_shot_reduction(
+    window_tokens: u64,
+    result_bytes: usize,
+    max_installed_tokens: u64,
+    retained_tool_exchanges: usize,
+) -> merry_llm::ModelRequest {
     let primary = RecordingModelProvider::with_script_and_capabilities(
         (0..40)
             .map(|_| ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]))
@@ -151,18 +202,20 @@ async fn automatic_compaction_covers_everything_once_when_the_window_shrinks_far
                 ))])
             })
             .collect(),
-        ModelCapabilities::new(true, true, false, true, Some(64_000), None)
+        ModelCapabilities::new(true, true, false, true, Some(window_tokens), None)
             .expect("valid compactor capabilities"),
     );
     let runtime = Runtime::builder(session_id("one-shot-compaction-window-shrink"))
-        .model_provider(Arc::new(primary), model_name())
+        .model_provider(Arc::new(primary.clone()), model_name())
         .model_provider_for_role(
             RuntimeModelRole::ContextCompaction,
             Arc::new(compactor.clone()),
             ModelName::new("fake/one-shot-compactor").expect("valid model"),
         )
         .automatic_compaction(CompactionConfig::enabled(
-            CitationCompactionPolicy::new(None, None, 5).expect("valid policy"),
+            CitationCompactionPolicy::new(None, None, 5)
+                .expect("valid policy")
+                .with_one_shot_retained_tool_exchanges(retained_tool_exchanges),
         ))
         .build()
         .expect("runtime should build");
@@ -202,7 +255,7 @@ async fn automatic_compaction_covers_everything_once_when_the_window_shrinks_far
                     ),
                     ArtifactContent::text(format!(
                         "one-shot result body {index} {}",
-                        "result ballast ".repeat(1_800)
+                        "z".repeat(result_bytes)
                     )),
                 )
                 .expect("tool result records");
@@ -210,7 +263,7 @@ async fn automatic_compaction_covers_everything_once_when_the_window_shrinks_far
     }
 
     runtime
-        .update_interactive_context_window_tokens(NonZeroU64::new(64_000))
+        .update_interactive_context_window_tokens(NonZeroU64::new(window_tokens))
         .await;
     let events = collect_step(
         &runtime,
@@ -260,7 +313,25 @@ async fn automatic_compaction_covers_everything_once_when_the_window_shrinks_far
         "an omitted covered exchange must not name its artifact either"
     );
     assert!(
-        payload.contains("one-shot-call-11"),
+        payload.contains("one-shot-call-15"),
         "the newest covered exchanges are retained whole"
     );
+    let (input_tokens, output_tokens) =
+        crate::compaction::compaction_request_required_tokens(&requests[0]);
+    assert!(input_tokens + output_tokens <= window_tokens);
+    let final_requests = primary.recorded_requests();
+    let final_request = final_requests.last().expect("primary continuation");
+    assert_eq!(requests[0].tools(), final_request.tools());
+    let primary_budget = crate::runtime::provider_request::request_context_budget(
+        primary.capabilities(),
+        final_request,
+        Some(window_tokens),
+    )
+    .expect("primary budget");
+    assert!(
+        primary_budget.dynamic_body_estimated_tokens < max_installed_tokens,
+        "one reduction must meet the destination-sized target: {} >= {max_installed_tokens}",
+        primary_budget.dynamic_body_estimated_tokens
+    );
+    requests[0].clone()
 }

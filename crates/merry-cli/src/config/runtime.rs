@@ -150,9 +150,7 @@ impl AutoCompactionToml {
                     .unwrap_or_else(|| defaults.retained_model_turns()),
             )
             .map_err(|error| ConfigError::Invalid(error.to_string()))?
-            .with_one_shot(
-                self.one_shot_window_percent
-                    .unwrap_or_else(|| defaults.one_shot_window_percent()),
+            .with_one_shot_retained_tool_exchanges(
                 self.one_shot_retained_tool_exchanges
                     .unwrap_or_else(|| defaults.one_shot_retained_tool_exchanges()),
             );
@@ -164,6 +162,9 @@ impl AutoCompactionToml {
     }
 
     fn validate_removed_fields(&self) -> Result<(), ConfigError> {
+        if self.one_shot_window_percent.is_some() {
+            return Err(ConfigError::Invalid("runtime.auto_compaction.one_shot_window_percent was removed; compaction now selects its strategy by request fit".to_owned()));
+        }
         if self.retained_model_turns.is_some() && self.retained_raw_tail_items.is_some() {
             return Err(ConfigError::Invalid(
                 "runtime.auto_compaction cannot set both retained_model_turns and removed field retained_raw_tail_items"
@@ -191,7 +192,7 @@ impl AutoCompactionToml {
 
 fn removed_auto_compaction_field(field: &str) -> ConfigError {
     ConfigError::Invalid(format!(
-        "runtime.auto_compaction.{field} was removed; supported fields are enabled, retained_model_turns, target_output_tokens, and max_accepted_output_bytes"
+        "runtime.auto_compaction.{field} was removed; supported fields are enabled, retained_model_turns, target_output_tokens, max_accepted_output_bytes, and one_shot_retained_tool_exchanges"
     ))
 }
 
@@ -308,7 +309,6 @@ target_output_tokens = 160
 max_accepted_output_bytes = 4096
 retained_model_turns = 4
 reasoning_effort = "medium"
-one_shot_window_percent = 200
 one_shot_retained_tool_exchanges = 2
 "#,
             ),
@@ -325,7 +325,6 @@ one_shot_retained_tool_exchanges = 2
         assert_eq!(policy.target_output_tokens(), Some(160));
         assert_eq!(policy.max_accepted_output_bytes(), Some(4096));
         assert_eq!(policy.retained_model_turns(), 4);
-        assert_eq!(policy.one_shot_window_percent(), 200);
         assert_eq!(policy.one_shot_retained_tool_exchanges(), 2);
         assert_eq!(
             auto_compaction
@@ -398,7 +397,7 @@ retained_model_turns = 4
         let cases = [
             (
                 "model_output_token_limit = 256",
-                "Merry config is invalid: runtime.auto_compaction.model_output_token_limit was removed; supported fields are enabled, retained_model_turns, target_output_tokens, and max_accepted_output_bytes",
+                "Merry config is invalid: runtime.auto_compaction.model_output_token_limit was removed; supported fields are enabled, retained_model_turns, target_output_tokens, max_accepted_output_bytes, and one_shot_retained_tool_exchanges",
             ),
             (
                 "retained_raw_tail_items = 4",
@@ -406,11 +405,15 @@ retained_model_turns = 4
             ),
             (
                 "max_ref_excerpt_bytes = 900",
-                "Merry config is invalid: runtime.auto_compaction.max_ref_excerpt_bytes was removed; supported fields are enabled, retained_model_turns, target_output_tokens, and max_accepted_output_bytes",
+                "Merry config is invalid: runtime.auto_compaction.max_ref_excerpt_bytes was removed; supported fields are enabled, retained_model_turns, target_output_tokens, max_accepted_output_bytes, and one_shot_retained_tool_exchanges",
             ),
             (
                 "max_carried_prior_refs = 12",
-                "Merry config is invalid: runtime.auto_compaction.max_carried_prior_refs was removed; supported fields are enabled, retained_model_turns, target_output_tokens, and max_accepted_output_bytes",
+                "Merry config is invalid: runtime.auto_compaction.max_carried_prior_refs was removed; supported fields are enabled, retained_model_turns, target_output_tokens, max_accepted_output_bytes, and one_shot_retained_tool_exchanges",
+            ),
+            (
+                "one_shot_window_percent = 150",
+                "Merry config is invalid: runtime.auto_compaction.one_shot_window_percent was removed; compaction now selects its strategy by request fit",
             ),
         ];
 

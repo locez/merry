@@ -86,8 +86,8 @@ async fn provider_step_auto_compacts_before_hard_watermark_request() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(compaction_request_text.contains("old user sentinel"));
-    assert!(!compaction_request_text.contains("tail user sentinel"));
-    assert!(!compaction_request_text.contains("current user sentinel"));
+    assert!(compaction_request_text.contains("tail user sentinel"));
+    assert!(compaction_request_text.contains("current user sentinel"));
 
     let primary_requests = primary.recorded_requests();
     assert_eq!(primary_requests.len(), 3);
@@ -123,7 +123,7 @@ async fn auto_compaction_config_controls_retained_model_turns() {
     let primary = ScriptedModelProvider::new(vec![
         vec![Ok(completed_text_event("old assistant configurable tail"))],
         vec![Ok(completed_text_event("tail one assistant"))],
-        vec![Ok(completed_text_event(&"tail two assistant ".repeat(300)))],
+        vec![Ok(completed_text_event(&"tail two assistant ".repeat(120)))],
         vec![Ok(completed_text_event(
             "final after configurable automatic compaction",
         ))],
@@ -150,7 +150,11 @@ async fn auto_compaction_config_controls_retained_model_turns() {
           "exact_details": [],
           "handoffs": []
         }"#,
-    ))]]);
+    ))]])
+    .with_capabilities(
+        ModelCapabilities::new(true, true, false, true, Some(64_000), None)
+            .expect("valid compactor capabilities"),
+    );
     let policy = CitationCompactionPolicy::new(Some(192), Some(8192), 2).expect("valid policy");
     let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-config-tail"))
         .model_provider(Arc::new(primary.clone()), model_name())
@@ -163,13 +167,13 @@ async fn auto_compaction_config_controls_retained_model_turns() {
         .build()
         .expect("runtime should build");
 
-    let first = run_default_loop(&runtime, &"old configurable tail user ".repeat(650)).await;
+    let first = run_default_loop(&runtime, &"old configurable tail user ".repeat(450)).await;
     assert_eq!(first.status(), &AgentLoopStatus::Completed);
     let second = run_default_loop(&runtime, "tail one user").await;
     assert_eq!(second.status(), &AgentLoopStatus::Completed);
     let third = run_default_loop(&runtime, "tail two user").await;
     assert_eq!(third.status(), &AgentLoopStatus::Completed);
-    let fourth = run_default_loop(&runtime, "current configurable tail user").await;
+    let fourth = run_default_loop(&runtime, &"current configurable tail user ".repeat(200)).await;
     assert_eq!(fourth.status(), &AgentLoopStatus::Completed);
 
     assert_eq!(compactor.recorded_requests().len(), 1);
@@ -180,9 +184,9 @@ async fn auto_compaction_config_controls_retained_model_turns() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(compaction_request_text.contains("old configurable tail user"));
-    assert!(!compaction_request_text.contains("tail one user"));
-    assert!(!compaction_request_text.contains("tail two user"));
-    assert!(!compaction_request_text.contains("current configurable tail user"));
+    assert!(compaction_request_text.contains("tail one user"));
+    assert!(compaction_request_text.contains("tail two user"));
+    assert!(compaction_request_text.contains("current configurable tail user"));
 
     let primary_requests = primary.recorded_requests();
     assert_eq!(primary_requests.len(), 4);
@@ -396,7 +400,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
           ]
         }"#,
         ))],
-    ]);
+    ]).with_capabilities(ModelCapabilities::new(true, true, false, true, Some(64_000), None).expect("valid compactor capabilities"));
     let policy = CitationCompactionPolicy::new(Some(192), Some(8192), 1).expect("valid policy");
     let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-checkpoint-refs"))
         .project_rules(
@@ -450,27 +454,27 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
 
     let compactor_requests = compactor.recorded_requests();
     let first_compaction_request_text = compactor_requests[0]
-        .messages()
+        .input()
         .iter()
-        .map(|message| message.content().as_text())
+        .map(|item| serde_json::to_string(item).expect("input serializes"))
         .collect::<Vec<_>>()
         .join("\n");
     assert!(first_compaction_request_text.contains("prelude user sentinel"));
     assert!(first_compaction_request_text.contains("prelude assistant sentinel"));
-    assert!(!first_compaction_request_text.contains("long coding loop task sentinel"));
+    assert!(first_compaction_request_text.contains("long coding loop task sentinel"));
     assert!(!first_compaction_request_text.contains("covered tool result sentinel"));
     assert!(!first_compaction_request_text.contains("Continue after tool result."));
 
     let second_compaction_request_text = compactor_requests[1]
-        .messages()
+        .input()
         .iter()
-        .map(|message| message.content().as_text())
+        .map(|item| serde_json::to_string(item).expect("input serializes"))
         .collect::<Vec<_>>()
         .join("\n");
     assert!(second_compaction_request_text.contains("The prelude turn was checkpointed."));
     assert!(second_compaction_request_text.contains("long coding loop task sentinel"));
     assert!(second_compaction_request_text.contains("covered tool result sentinel"));
-    assert!(!second_compaction_request_text.contains("retained tool result sentinel"));
+    assert!(second_compaction_request_text.contains("retained tool result sentinel"));
     assert!(!second_compaction_request_text.contains("Continue after tool result."));
 
     let primary_requests = primary.recorded_requests();
@@ -603,9 +607,9 @@ async fn auto_compaction_config_can_disable_hard_watermark_compaction() {
     let primary_requests = primary.recorded_requests();
     assert_eq!(primary_requests.len(), 2);
     let final_text = primary_requests[1]
-        .messages()
+        .input()
         .iter()
-        .map(|message| message.content().as_text())
+        .map(|item| serde_json::to_string(item).expect("input serializes"))
         .collect::<Vec<_>>()
         .join("\n");
     assert!(!final_text.contains("compacted-checkpoint:"));

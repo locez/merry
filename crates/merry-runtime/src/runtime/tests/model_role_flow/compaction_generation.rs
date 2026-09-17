@@ -168,9 +168,21 @@ async fn invalid_json_first_attempt_then_valid_second_attempt_succeeds() {
     assert_eq!(compactor.calls.load(Ordering::SeqCst), 2);
     let requests = compactor.recorded_requests();
     assert_eq!(requests.len(), 2);
+    assert!(requests[1].input().starts_with(requests[0].input()));
+    assert_eq!(requests[0].tools(), requests[1].tools());
+    assert_eq!(requests[0].generation(), requests[1].generation());
     assert_eq!(
-        requests[0], requests[1],
-        "both attempts must reuse the same precompiled immutable request"
+        requests[0].stable_prefix_hash(),
+        requests[1].stable_prefix_hash()
+    );
+    assert!(
+        requests[1]
+            .messages()
+            .last()
+            .expect("repair message")
+            .content()
+            .as_text()
+            .contains("COMPACTION REPAIR")
     );
 }
 
@@ -631,7 +643,28 @@ async fn actual_compactor_payload_too_large_is_rejected_before_provider_call() {
         ModelCapabilities::new(true, true, false, true, Some(2_048), None)
             .expect("valid capabilities"),
     );
-    let runtime = runtime_with_compactor("compaction-payload-too-large", compactor.clone(), 2_048);
+    let primary = RecordingModelProvider::with_script_and_capabilities(
+        Vec::new(),
+        ModelCapabilities::new(
+            true,
+            true,
+            false,
+            true,
+            Some(2_048),
+            Some(super::TIGHT_WINDOW_OUTPUT_CAP_TOKENS),
+        )
+        .expect("tight primary capabilities"),
+    );
+    let runtime = Runtime::builder(session_id("compaction-payload-too-large"))
+        .model_provider(Arc::new(primary), model_name())
+        .model_provider_for_role(
+            RuntimeModelRole::ContextCompaction,
+            Arc::new(compactor.clone()),
+            ModelName::new("compaction-model").expect("model"),
+        )
+        .automatic_compaction(CompactionConfig::disabled())
+        .build()
+        .expect("runtime");
     {
         let mut session = runtime.inner.session.lock().await;
         let covered_turn = session.begin_model_turn().expect("covered turn begins");
@@ -659,19 +692,30 @@ async fn actual_compactor_payload_too_large_is_rejected_before_provider_call() {
             .expect("retained turn completes");
     }
 
+    let policy = CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("tight policy");
+    assert!(
+        runtime
+            .citation_compaction_input(policy)
+            .await
+            .expect("destination fits")
+            .is_some()
+    );
     let error = runtime
-        .compact_context_once(compaction_policy(), StepContext::default())
+        .compact_context_once(policy, StepContext::default())
         .await
         .expect_err("oversized compactor request must be rejected");
 
-    assert!(matches!(
-        error,
-        RuntimeError::CompactionModelRequestTooLarge {
-            estimated_input_tokens,
-            max_output_tokens,
-            compactor_window_tokens: 2_048,
-        } if estimated_input_tokens + max_output_tokens > 2_048
-    ));
+    assert!(
+        matches!(
+            error,
+            RuntimeError::CompactionModelRequestTooLarge {
+                estimated_input_tokens,
+                max_output_tokens,
+                compactor_window_tokens: 2_048,
+            } if estimated_input_tokens + max_output_tokens > 2_048
+        ),
+        "unexpected error: {error:?}"
+    );
     assert_eq!(compactor.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -828,3 +872,32 @@ async fn cancelled_failure_classes_do_not_retry_compactor() {
         assert_eq!(compactor.responses.lock().expect("response mutex").len(), 1);
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_rejects_summary_budget_above_declared_output_limit_without_a_call() {
+    let compactor = RecordingModelProvider::with_script_and_capabilities(
+        vec![completed_candidate(VALID_CANDIDATE)],
+        ModelCapabilities::new(true, true, false, true, Some(64_000), Some(128))
+            .expect("capabilities"),
+    );
+    let runtime = runtime_with_compactor("compaction-output-limit", compactor.clone(), 64_000);
+    seed_two_history_items_for_compaction(&runtime).await;
+    let error = runtime
+        .compact_context_once(compaction_policy(), StepContext::default())
+        .await
+        .expect_err("limit too small");
+    assert!(matches!(
+        error,
+        RuntimeError::Compaction {
+            source: crate::CompactionError::OutputBudgetExceedsModelLimit {
+                summary_tokens: 512,
+                model_limit_tokens: 128
+            }
+        }
+    ));
+    assert!(compactor.recorded_requests().is_empty());
+    assert!(runtime.compacted_checkpoint_summary().await.is_none());
+}
+
+#[path = "compaction_generation/repair.rs"]
+mod repair;

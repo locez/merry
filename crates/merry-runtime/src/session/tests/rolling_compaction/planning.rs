@@ -302,7 +302,46 @@ fn default_plan_keeps_latest_five_completed_turns_raw() {
 }
 
 #[test]
-fn oversized_tail_archives_oldest_tool_result_before_reducing_turn_count() {
+fn preferred_history_target_keeps_a_small_tail_in_a_large_window() {
+    let mut session = SessionState::new(SessionId::new("bounded-tail").expect("valid session id"));
+    for turn in 1..=8 {
+        record_completed_user_turn(&mut session, &format!("turn {turn} {}", "x".repeat(40_000)));
+    }
+    let resolved = policy(5).resolve(2_000_000).expect("budget resolves");
+    let budget =
+        CompactionWindowBudget::new(2_000_000, 1_800_000, 0, 0, resolved.output_token_limit())
+            .expect("valid budget")
+            .with_retained_history_target(resolved.retained_history_token_target())
+            .expect("valid history target");
+    let plan = session
+        .plan_compaction_window(policy(5), budget)
+        .expect("plan succeeds")
+        .expect("history needs a smaller tail");
+    assert_eq!(plan.covered_turn_ids_u64(), vec![1, 2, 3, 4, 5]);
+    assert_eq!(plan.retained_turn_ids_u64(), vec![6, 7, 8]);
+}
+
+#[test]
+fn oversized_minimum_turn_falls_back_to_one_turn_not_the_full_hard_budget() {
+    let mut session = SessionState::new(SessionId::new("minimum-tail").expect("valid session id"));
+    for turn in 1..=8 {
+        record_completed_user_turn(&mut session, &format!("turn {turn} {}", "x".repeat(32_000)));
+    }
+    let resolved = policy(5).resolve(64_000).expect("budget resolves");
+    let budget = CompactionWindowBudget::new(64_000, 56_000, 0, 0, resolved.output_token_limit())
+        .expect("valid budget")
+        .with_retained_history_target(resolved.retained_history_token_target())
+        .expect("valid history target");
+    let plan = session
+        .plan_compaction_window(policy(5), budget)
+        .expect("mandatory raw turn still fits the hard budget")
+        .expect("history is compacted");
+    assert_eq!(plan.covered_turn_ids_u64(), vec![1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(plan.retained_turn_ids_u64(), vec![8]);
+}
+
+#[test]
+fn oversized_five_turn_tail_keeps_four_whole_exchanges_before_archiving() {
     let mut session =
         SessionState::new(SessionId::new("rolling-archive-tools").expect("valid session id"));
     record_completed_user_turn(&mut session, "old prefix to compact");
@@ -320,21 +359,31 @@ fn oversized_tail_archives_oldest_tool_result_before_reducing_turn_count() {
         .expect("plan succeeds")
         .expect("old prefix is compressible");
 
-    assert_eq!(plan.retained_turn_ids_u64(), vec![2, 3, 4, 5, 6]);
-    assert_eq!(
-        plan.archived_tool_call_ids_for_tests(),
-        vec![tool_call_id("call-1")]
-    );
+    assert_eq!(plan.covered_turn_ids_u64(), vec![1, 2]);
+    assert_eq!(plan.retained_turn_ids_u64(), vec![3, 4, 5, 6]);
+    assert!(plan.archived_tool_call_ids_for_tests().is_empty());
 }
 
 #[test]
-fn planner_falls_back_from_five_to_three_then_one_completed_turn() {
+fn planner_selects_every_complete_tail_size_against_the_token_budget() {
     let mut session =
         SessionState::new(SessionId::new("rolling-fallback").expect("valid session id"));
     for turn in 1..=8 {
         record_completed_user_turn(&mut session, &format!("turn-{turn}-{}", "x".repeat(396)));
     }
 
+    for (tokens, retained) in [
+        (650, vec![4, 5, 6, 7, 8]),
+        (550, vec![5, 6, 7, 8]),
+        (350, vec![7, 8]),
+    ] {
+        let plan = session
+            .plan_compaction_window(policy(5), window_budget(tokens))
+            .expect("plan succeeds")
+            .expect("history needs compaction");
+        assert_eq!(plan.retained_turn_ids_u64(), retained);
+        assert!(plan.archived_tool_call_ids_for_tests().is_empty());
+    }
     let three = session
         .plan_compaction_window(policy(5), window_budget(450))
         .expect("three-turn plan succeeds")
@@ -444,7 +493,7 @@ fn exactly_five_large_tool_turns_use_archive_only_without_dropping_turns() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(1_300),
-            CompactionCoverageBudget::unbounded(),
+            CompactionCoverageBudget::limited(0),
         )
         .expect("preparation succeeds")
         .expect("archive-only preparation is required");
@@ -468,8 +517,8 @@ fn exactly_five_large_tool_turns_use_archive_only_without_dropping_turns() {
 
 #[test]
 fn retained_turn_fallbacks_keep_configured_order_for_seven_and_three() {
-    assert_eq!(retained_turn_fallbacks(7, 9), vec![7, 5, 3, 1]);
-    assert_eq!(retained_turn_fallbacks(3, 9), vec![3, 1]);
+    assert_eq!(retained_turn_fallbacks(7, 9), vec![7, 6, 5, 4, 3, 2, 1]);
+    assert_eq!(retained_turn_fallbacks(3, 9), vec![3, 2, 1]);
 }
 
 #[test]
@@ -508,7 +557,7 @@ fn configured_five_with_two_large_tool_turns_archives_without_dropping_one() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(400),
-            CompactionCoverageBudget::unbounded(),
+            CompactionCoverageBudget::limited(0),
         )
         .expect("preparation builds")
         .expect("archive-only is required");

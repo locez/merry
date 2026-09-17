@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CompactionWindowBudget {
     primary_window_tokens: u64,
+    preferred_dynamic_body_tokens: Option<u64>,
     max_dynamic_body_tokens: u64,
     replacement_fixed_dynamic_body_tokens: u64,
     archive_only_fixed_dynamic_body_tokens: u64,
@@ -40,6 +41,7 @@ impl CompactionWindowBudget {
 
         Ok(Self {
             primary_window_tokens,
+            preferred_dynamic_body_tokens: None,
             max_dynamic_body_tokens,
             replacement_fixed_dynamic_body_tokens,
             archive_only_fixed_dynamic_body_tokens,
@@ -47,10 +49,37 @@ impl CompactionWindowBudget {
         })
     }
 
-    pub(crate) fn unbounded_for_manual_compaction(
+    #[cfg(test)]
+    pub(crate) fn unbounded_for_tests(
         checkpoint_output_ceiling_tokens: u64,
     ) -> Result<Self, CompactionError> {
         Self::new(u64::MAX, u64::MAX, 0, 0, checkpoint_output_ceiling_tokens)
+    }
+
+    /// Adds a bounded raw-history target to fixed input and the summary ceiling.
+    /// The hard body budget remains authoritative; arithmetic overflow is rejected.
+    pub(crate) fn with_retained_history_target(
+        self,
+        retained_history_tokens: u64,
+    ) -> Result<Self, CompactionError> {
+        let preferred_tokens = self
+            .replacement_fixed_dynamic_body_tokens
+            .checked_add(self.checkpoint_output_ceiling_tokens)
+            .and_then(|tokens| tokens.checked_add(retained_history_tokens))
+            .ok_or(CompactionError::BudgetOverflow)?;
+        Ok(Self {
+            preferred_dynamic_body_tokens: Some(preferred_tokens.min(self.max_dynamic_body_tokens)),
+            ..self
+        })
+    }
+
+    /// Returns a stricter copy that uses the preferred body budget, when one exists.
+    pub(crate) fn preferred(self) -> Option<Self> {
+        self.preferred_dynamic_body_tokens.map(|tokens| Self {
+            max_dynamic_body_tokens: tokens,
+            preferred_dynamic_body_tokens: None,
+            ..self
+        })
     }
 
     pub(crate) const fn primary_window_tokens(self) -> u64 {
@@ -115,6 +144,8 @@ pub(crate) enum CompactionShape {
     SinglePass,
     /// Cover the largest window one request hosts, repeating until the request fits.
     Rolling,
+    /// Last resort when even user/assistant history cannot fit in one request.
+    RollingText,
     /// Cover everything before the retained tail once, omitting older tool exchanges.
     OneShot {
         /// Newest covered tool exchanges kept, arguments and result together.
@@ -126,8 +157,8 @@ impl CompactionShape {
     /// Returns how strictly this shape requires the retained history to fit.
     pub(crate) const fn retained_fit(self) -> RetainedFit {
         match self {
-            Self::SinglePass => RetainedFit::Required,
-            Self::Rolling | Self::OneShot { .. } => RetainedFit::Deferred,
+            Self::SinglePass | Self::OneShot { .. } => RetainedFit::Required,
+            Self::Rolling | Self::RollingText => RetainedFit::Deferred,
         }
     }
 
@@ -139,25 +170,8 @@ impl CompactionShape {
             Self::OneShot {
                 retained_tool_exchanges,
             } => Some(retained_tool_exchanges),
+            Self::RollingText => Some(0),
             Self::SinglePass | Self::Rolling => None,
-        }
-    }
-
-    /// Returns whether this shape covers everything before the retained tail.
-    pub(crate) const fn is_one_shot(self) -> bool {
-        matches!(self, Self::OneShot { .. })
-    }
-
-    /// Returns this shape with every covered tool exchange omitted.
-    ///
-    /// This is the last step before falling back to rolling: a payload of text and
-    /// the previous checkpoint alone is the smallest one this strategy can build.
-    pub(crate) const fn with_all_tool_exchanges_dropped(self) -> Self {
-        match self {
-            Self::OneShot { .. } => Self::OneShot {
-                retained_tool_exchanges: 0,
-            },
-            other => other,
         }
     }
 }
@@ -182,17 +196,7 @@ pub(crate) enum RetainedFit {
 }
 
 pub(crate) fn retained_turn_fallbacks(configured: usize, available_completed: usize) -> Vec<usize> {
-    let first = configured.min(available_completed);
-    if first == 0 {
-        return Vec::new();
-    }
-    let mut counts = Vec::with_capacity(4);
-    for count in [first, 5, 3, 1] {
-        if count <= first && !counts.contains(&count) {
-            counts.push(count);
-        }
-    }
-    counts
+    (1..=configured.min(available_completed)).rev().collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +327,13 @@ impl CitationCompactionModelTurn {
             status,
             items,
         })
+    }
+
+    pub(crate) fn tool_exchange_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| matches!(item, CitationCompactionTurnItem::ToolExchange { .. }))
+            .count()
     }
 
     pub(crate) fn ref_ids(&self) -> impl Iterator<Item = &str> {

@@ -686,10 +686,16 @@ impl SessionState {
         self.build_transcript_snapshot(true)
     }
 
-    fn build_transcript_snapshot(
+    pub(crate) fn provider_transcript_history_ids(&self) -> Vec<u64> {
+        self.transcript_items_for_projection(true)
+            .map(|item| item.id().as_u64())
+            .collect()
+    }
+
+    fn transcript_items_for_projection(
         &self,
         apply_prompt_projection: bool,
-    ) -> Result<Vec<TranscriptItemSnapshot>, ArtifactError> {
+    ) -> impl Iterator<Item = &TranscriptItem> {
         let transcript_items = self.transcript.items();
         let visible_items = if apply_prompt_projection {
             match self.prompt_history_projection.compacted_through() {
@@ -703,8 +709,27 @@ impl SessionState {
         } else {
             transcript_items
         };
-        let mut snapshot = Vec::with_capacity(visible_items.len());
-        for item in visible_items {
+        visible_items.iter().filter(move |item| {
+            !apply_prompt_projection
+                || !matches!(
+                    item,
+                    TranscriptItem::ToolCall {
+                        prompt_projection: ToolCallPromptProjection::Hidden,
+                        ..
+                    } | TranscriptItem::ToolResult {
+                        prompt_projection: ToolResultPromptProjection::Hidden,
+                        ..
+                    }
+                )
+        })
+    }
+
+    fn build_transcript_snapshot(
+        &self,
+        apply_prompt_projection: bool,
+    ) -> Result<Vec<TranscriptItemSnapshot>, ArtifactError> {
+        let mut snapshot = Vec::new();
+        for item in self.transcript_items_for_projection(apply_prompt_projection) {
             let item =
                 match item {
                     TranscriptItem::UserMessage {
@@ -741,16 +766,7 @@ impl SessionState {
                             text: text.to_owned(),
                         }
                     }
-                    TranscriptItem::ToolCall {
-                        call,
-                        prompt_projection,
-                        ..
-                    } => {
-                        if apply_prompt_projection
-                            && *prompt_projection == ToolCallPromptProjection::Hidden
-                        {
-                            continue;
-                        }
+                    TranscriptItem::ToolCall { call, .. } => {
                         TranscriptItemSnapshot::ToolCall { call: call.clone() }
                     }
                     TranscriptItem::ToolResult {
@@ -761,11 +777,6 @@ impl SessionState {
                         prompt_projection,
                         ..
                     } => {
-                        if apply_prompt_projection
-                            && *prompt_projection == ToolResultPromptProjection::Hidden
-                        {
-                            continue;
-                        }
                         let content = match (apply_prompt_projection, prompt_projection) {
                             (false, _) | (true, ToolResultPromptProjection::Full) => {
                                 self.read_artifact_content(artifact_id)?
