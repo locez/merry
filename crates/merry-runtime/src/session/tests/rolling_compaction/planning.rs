@@ -65,69 +65,44 @@ fn one_shot_covers_everything_and_shortens_all_but_the_newest_tool_exchanges() {
         .collect::<Vec<_>>();
     assert_eq!(
         covered_exchanges.len(),
-        3,
-        "every covered exchange stays in the payload as a pair"
+        1,
+        "only the newest covered exchange travels through the payload"
+    );
+    let retained = covered_exchanges[0];
+    assert_eq!(
+        retained["result"]["artifact_id"].as_str(),
+        Some("one-shot-result-3"),
+        "the retained exchange is the newest covered one"
+    );
+    assert!(
+        retained["result"]["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("result body 3")),
+        "the retained exchange keeps its result"
     );
 
-    let notice_count = covered_exchanges
-        .iter()
-        .filter(|item| {
-            item["result"]["content"]
-                .as_str()
-                .is_some_and(|content| content.contains("\"merry_archived\":true"))
-        })
-        .count();
-    assert_eq!(
-        notice_count, 2,
-        "only the newest covered exchange keeps its full result"
-    );
-    let full_count = covered_exchanges
-        .iter()
-        .filter(|item| {
-            item["result"]["content"]
-                .as_str()
-                .is_some_and(|content| content.contains("result body"))
-        })
-        .count();
-    assert_eq!(full_count, 1);
-    for item in &covered_exchanges {
+    // The omitted exchanges leave nothing behind: no exchange item, no artifact id,
+    // no marker. Measured on a real session, covered call arguments alone were
+    // 225,800 tokens against a 190,400 token input budget, and a minimal marker per
+    // exchange still cost about 95,000 tokens across 1,324 exchanges, so the payload
+    // could not fit while any per-exchange content remained.
+    let payload_text = input.to_model_payload_json().expect("payload serializes");
+    for omitted in 1..=2 {
         assert!(
-            item["call_id"].as_str().is_some_and(|id| !id.is_empty()),
-            "each exchange keeps its call id"
-        );
-        assert!(
-            item["result"]["artifact_id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("one-shot-result-")),
-            "each result names its artifact so a checkpoint entry can cite it"
+            !payload_text.contains(&format!("one-shot-result-{omitted}")),
+            "omitted exchange {omitted} must not name its artifact either"
         );
     }
-
-    // Covered call arguments are dropped outside the retained newest exchange.
-    // Measured on a real session they were 225,800 tokens against a 190,400 token
-    // input budget, so the payload could not fit while they stayed at full length.
-    let tool_exchanges = payload["window"]
-        .as_array()
-        .expect("window is an array")
-        .iter()
-        .flat_map(|turn| turn["items"].as_array().expect("items are an array"))
-        .filter(|item| item["role"] == "tool_exchange")
-        .collect::<Vec<_>>();
-    let full_arguments = tool_exchanges
-        .iter()
-        .filter(|item| item["arguments"]["merry_archived"] != true)
-        .count();
-    assert_eq!(
-        full_arguments, 1,
-        "only the newest covered exchange keeps its call arguments"
+    assert!(
+        covered_exchanges.iter().all(|item| {
+            item["call_id"].as_str() != Some("one-shot-call-1")
+                && item["call_id"].as_str() != Some("one-shot-call-2")
+        }),
+        "no omitted call survives as a tool exchange item"
     );
-    let elided_arguments = tool_exchanges
-        .iter()
-        .filter(|item| item["arguments"]["merry_archived"] == true)
-        .count();
-    assert_eq!(
-        elided_arguments, 2,
-        "older covered calls keep only a marker instead of their arguments"
+    assert!(
+        !payload_text.contains("merry_archived"),
+        "an omitted exchange leaves no marker behind"
     );
 }
 

@@ -115,9 +115,9 @@ pub(crate) enum CompactionShape {
     SinglePass,
     /// Cover the largest window one request hosts, repeating until the request fits.
     Rolling,
-    /// Cover everything before the retained tail once, shortening older tool exchanges.
+    /// Cover everything before the retained tail once, omitting older tool exchanges.
     OneShot {
-        /// Newest covered tool exchanges kept at full length, arguments and result.
+        /// Newest covered tool exchanges kept, arguments and result together.
         retained_tool_exchanges: usize,
     },
 }
@@ -148,8 +148,11 @@ impl CompactionShape {
         matches!(self, Self::OneShot { .. })
     }
 
-    /// Returns this shape with every covered tool exchange shortened.
-    pub(crate) const fn with_all_tool_exchanges_shortened(self) -> Self {
+    /// Returns this shape with every covered tool exchange omitted.
+    ///
+    /// This is the last step before falling back to rolling: a payload of text and
+    /// the previous checkpoint alone is the smallest one this strategy can build.
+    pub(crate) const fn with_all_tool_exchanges_dropped(self) -> Self {
         match self {
             Self::OneShot { .. } => Self::OneShot {
                 retained_tool_exchanges: 0,

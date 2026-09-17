@@ -114,15 +114,18 @@ pub enum CompactionStrategy {
     /// stable prefix stays untouched, so the provider can reuse its cache across
     /// passes. This is the normal path, and it is what a small reduction uses.
     Rolling,
-    /// Cover everything before the retained tail in one pass, dropping the older
-    /// tool calls' arguments and replacing their results with notices.
+    /// Cover everything before the retained tail in one pass, omitting the older
+    /// tool exchanges.
     ///
     /// A window that shrank far below the history would need many rolling passes,
     /// and each pass re-summarizes the previous checkpoint, so the loss compounds.
     /// Rewriting the history once avoids that; the cache is rebuilt anyway, because
     /// a big reduction changes the prefix and the projection either way. The
-    /// shortened exchanges keep the tool name, the call id, the status, the artifact
-    /// id, and the ref, so the checkpoint still records what ran and can cite it.
+    /// The newest exchanges travel whole; the rest are omitted, so the payload is
+    /// text, the previous checkpoint, and a bounded number of tool exchanges. The
+    /// transcript keeps every exchange, and the notice a request shows for an
+    /// archived result keeps the artifact id and ref, so later work can still read
+    /// the body on demand.
     OneShot,
 }
 

@@ -174,14 +174,14 @@ async fn automatic_compaction_covers_everything_once_when_the_window_shrinks_far
         for index in 1..=20 {
             let turn_id = session.begin_model_turn().expect("tool turn begins");
             session
-                .record_user_message_body(turn_id, &format!("one-shot turn {index}"))
+                .record_user_message_body(turn_id, &format!("one-shot turn {index:02}"))
                 .expect("tool user message records");
-            let call = pending_tool_call(&format!("one-shot-call-{index}"));
+            let call = pending_tool_call(&format!("one-shot-call-{index:02}"));
             session
                 .record_tool_call_batch_pending(
                     turn_id,
                     PendingToolCallBatch::new(
-                        ToolCallBatchId::new(&format!("one-shot-batch-{index}"))
+                        ToolCallBatchId::new(&format!("one-shot-batch-{index:02}"))
                             .expect("valid batch id"),
                         vec![call.clone()],
                     )
@@ -196,7 +196,7 @@ async fn automatic_compaction_covers_everything_once_when_the_window_shrinks_far
                     ToolCallResult::succeeded(
                         call.id().clone(),
                         ArtifactRef::new(
-                            artifact_id(&format!("one-shot-result-{index}")),
+                            artifact_id(&format!("one-shot-result-{index:02}")),
                             ArtifactKind::Text,
                         ),
                     ),
@@ -240,13 +240,27 @@ async fn automatic_compaction_covers_everything_once_when_the_window_shrinks_far
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        payload.contains("one-shot-call-1"),
-        "the single pass must cover the oldest covered turn"
+        payload.contains("one-shot turn 01"),
+        "the single pass must cover the oldest covered turn's text"
     );
     assert!(
-        // The notice is a JSON string inside the payload, so its own quotes arrive
-        // escaped in the message text.
-        payload.contains("merry_archived"),
-        "the older covered results must travel as notices"
+        !payload.contains("one-shot turn 20"),
+        "the retained tail stays in the conversation, not the payload"
+    );
+    // Covered tool exchanges outside the newest five are omitted entirely, leaving
+    // no call id, artifact id, or marker behind. On the measured session the covered
+    // exchanges were 225,800 tokens of arguments and 47,800 tokens of results against
+    // a 190,400 token input budget, so nothing per exchange could stay.
+    assert!(
+        !payload.contains("one-shot-call-01"),
+        "an omitted covered exchange must not appear in the payload"
+    );
+    assert!(
+        !payload.contains("one-shot-result-01"),
+        "an omitted covered exchange must not name its artifact either"
+    );
+    assert!(
+        payload.contains("one-shot-call-11"),
+        "the newest covered exchanges are retained whole"
     );
 }

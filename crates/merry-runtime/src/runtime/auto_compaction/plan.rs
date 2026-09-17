@@ -146,18 +146,17 @@ pub(super) async fn fit_compaction_plan(
                     compactor_window_tokens,
                 };
                 smallest_rejected_request = Some((estimated_input_tokens, max_output_tokens));
-                // A one-shot pass shrinks the payload by shortening tool results
-                // before it considers covering less history: covering less would keep
-                // more raw history, which is the state this strategy exists to leave.
+                // A one-shot pass shrinks the payload by omitting covered tool
+                // exchanges before it considers covering less history: covering less
+                // would keep more raw history, which is the state this strategy exists
+                // to leave.
                 if shape.is_one_shot() {
                     let next_shape = match shape {
                         CompactionShape::OneShot {
                             retained_tool_exchanges,
-                        } if retained_tool_exchanges > 0 => {
-                            shape.with_all_tool_exchanges_shortened()
-                        }
+                        } if retained_tool_exchanges > 0 => shape.with_all_tool_exchanges_dropped(),
                         _ => {
-                            // Every covered tool exchange is already shortened, so this
+                            // Every covered tool exchange is already omitted, so this
                             // history cannot fit one pass. Fall back to rolling, which
                             // covers less history per pass and repeats.
                             CompactionShape::Rolling
@@ -173,7 +172,7 @@ pub(super) async fn fit_compaction_plan(
                             attempt,
                             estimated_input_tokens,
                             max_output_tokens,
-                            "one-shot payload does not fit; shortening every covered tool result"
+                            "one-shot payload does not fit; omitting every covered tool exchange"
                         );
                     }
                     shape = next_shape;

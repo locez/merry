@@ -91,7 +91,6 @@ impl CompactionHistoryItem {
     pub(super) fn to_compaction_turn_item(
         &self,
         ref_id: &str,
-        keep_tool_exchange_full: bool,
     ) -> Result<CitationCompactionTurnItem, RuntimeError> {
         let item = match &self.kind {
             CompactionHistoryItemKind::User { text } => {
@@ -109,10 +108,9 @@ impl CompactionHistoryItem {
                 prompt_projection,
                 ..
             } => {
-                // The request already shortened this result, or a one-shot pass
-                // shortened it to make the payload fit.
-                let use_notice = !keep_tool_exchange_full
-                    || *prompt_projection == ToolResultPromptProjection::ArtifactNotice;
+                // The request already shortened this result, so the payload carries the
+                // same notice instead of the archived body.
+                let use_notice = *prompt_projection == ToolResultPromptProjection::ArtifactNotice;
                 let (content_kind, content) =
                     compaction_tool_result_text(self.history_id, result, content, use_notice)?;
                 CitationCompactionTurnItem::tool_exchange(
@@ -120,7 +118,7 @@ impl CompactionHistoryItem {
                     ref_id.to_owned(),
                     call.id(),
                     call.name().as_str().to_owned(),
-                    compaction_tool_arguments(call.arguments(), keep_tool_exchange_full),
+                    serde_json::Value::Object(call.arguments().as_object().clone()),
                     CitationCompactionToolResult::new(
                         result.status(),
                         result.artifact().id(),
@@ -314,26 +312,6 @@ pub(super) fn permission_review_context_entry(
 /// They disagreed once, and the runtime then believed a covered window fit while
 /// the payload it built did not, which ended the step with "no compaction window
 /// fits the compaction request budget".
-/// Arguments the compaction payload carries for one tool call.
-///
-/// A rolling payload keeps them exact, because rolling is the cheap path that
-/// preserves the shared prefix. A one-shot pass drops them for every covered call
-/// outside the retained newest exchanges: measured on a real session, covered call
-/// arguments were 225,800 tokens against a 190,400 token input budget, so the
-/// payload could not fit while they stayed. The tool name, the call id, and the
-/// result notice remain, so the checkpoint still records what ran and can cite the
-/// ref; the exact arguments stay in the transcript for the user and for tooling.
-fn compaction_tool_arguments(
-    arguments: &merry_core::ToolCallArguments,
-    keep_full: bool,
-) -> serde_json::Value {
-    if keep_full {
-        serde_json::Value::Object(arguments.as_object().clone())
-    } else {
-        serde_json::json!({ "merry_archived": true })
-    }
-}
-
 fn compaction_tool_result_text(
     history_id: u64,
     result: &ToolCallResult,
