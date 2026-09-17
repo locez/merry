@@ -400,7 +400,11 @@ async fn compaction_request_reuses_the_step_stable_prefix_and_appends_the_direct
         "the compaction directive must be one bounded instruction block: {directive}"
     );
     assert!(
-        directive.contains("Context compaction request."),
+        directive.contains("COMPACTION REQUEST: Update the session checkpoint"),
+        "unexpected compaction directive: {directive}"
+    );
+    assert!(
+        directive.contains("CORE MISSION & COMPRESSION GOAL"),
         "unexpected compaction directive: {directive}"
     );
     let payload = message_text(&input[prefix_len + 1]);
