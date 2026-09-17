@@ -283,10 +283,31 @@ impl SessionState {
         covered: &[&ModelTurnHistory],
         plan: CompactionWindowPlan,
         archived_refs: Vec<CheckpointRef>,
+        retained_tool_exchanges: Option<usize>,
     ) -> Result<CitationCompactionInput, RuntimeError> {
         if covered.iter().all(|turn| turn.items.is_empty()) {
             return Err(CompactionError::NoCompressibleWindow.into());
         }
+
+        // A one-shot payload keeps the newest tool exchanges at full length and
+        // shortens the older ones. Counting is per exchange, never per item, because
+        // a tool call and its result are one pair and the runtime rejects a window
+        // that carries only one of them.
+        let full_tool_exchanges = retained_tool_exchanges.map(|retained| {
+            let mut full = BTreeSet::new();
+            'covered: for turn in covered.iter().rev() {
+                for record in turn.items.iter().rev() {
+                    if !record.item.is_tool_exchange() {
+                        continue;
+                    }
+                    if full.len() == retained {
+                        break 'covered;
+                    }
+                    full.insert(record.item.history_id);
+                }
+            }
+            full
+        });
 
         let mut covered_history_ids = BTreeSet::new();
         let checkpoint_id = crate::CheckpointId::new(&format!(
@@ -321,9 +342,12 @@ impl SessionState {
             for record in &turn.items {
                 covered_history_ids.insert(record.item.history_id);
                 items.push(
-                    record
-                        .item
-                        .to_compaction_turn_item(record.reference.id().as_str())?,
+                    record.item.to_compaction_turn_item(
+                        record.reference.id().as_str(),
+                        full_tool_exchanges
+                            .as_ref()
+                            .is_none_or(|full| full.contains(&record.item.history_id)),
+                    )?,
                 );
                 refs_by_id
                     .entry(record.reference.id().clone())

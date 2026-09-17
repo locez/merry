@@ -87,7 +87,7 @@ pub use schema::citation_compaction_response_schema;
 
 pub(crate) use window::{
     ArchiveOnlyCompactionInput, CitationCompactionModelTurn, CitationCompactionToolResult,
-    CitationCompactionTurnItem, CompactionCoverageBudget, CompactionWindowBudget,
+    CitationCompactionTurnItem, CompactionCoverageBudget, CompactionShape, CompactionWindowBudget,
     CompactionWindowFingerprint, CompactionWindowPlan, RetainedFit, retained_turn_fallbacks,
 };
 
@@ -96,6 +96,34 @@ pub struct CitationCompactionPolicy {
     target_output_tokens: Option<u64>,
     max_accepted_output_bytes: Option<usize>,
     retained_model_turns: usize,
+    one_shot_window_percent: u64,
+    one_shot_retained_tool_exchanges: usize,
+}
+
+/// How one compaction reduces the history it was given.
+///
+/// The runtime picks a strategy from the request it is about to build, so a
+/// session keeps compacting when its context window shrinks below the history it
+/// already holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionStrategy {
+    /// Cover the largest window one request can host and repeat until the request
+    /// fits the watermark.
+    ///
+    /// Each pass sends the covered tool results at full length, and the shared
+    /// stable prefix stays untouched, so the provider can reuse its cache across
+    /// passes. This is the normal path, and it is what a small reduction uses.
+    Rolling,
+    /// Cover everything before the retained tail in one pass, shortening the older
+    /// tool results so the payload fits.
+    ///
+    /// A window that shrank far below the history would need many rolling passes,
+    /// and each pass re-summarizes the previous checkpoint, so the loss compounds.
+    /// Rewriting the history once avoids that; the cache is rebuilt anyway, because
+    /// a big reduction changes the prefix and the projection either way. The
+    /// shortened tool results keep their status, artifact id, and ref, so the model
+    /// can still cite them and read the body on demand.
+    OneShot,
 }
 
 const DEFAULT_CHECKPOINT_WINDOW_PERCENT: u64 = 8;
@@ -108,6 +136,23 @@ const MAX_CHECKPOINT_OUTPUT_TOKENS: u64 = 32_768;
 /// so a checkpoint that fits the token budget is never rejected on byte count.
 const DEFAULT_ACCEPTED_OUTPUT_BYTES_PER_TOKEN: u64 = 8;
 const DEFAULT_RETAINED_MODEL_TURNS: usize = 5;
+/// Body-to-window ratio above which one compaction pass covers the whole history.
+///
+/// 150 means a body of one and a half windows. Reaching that ratio means the body
+/// did not grow through ordinary turns, because those compact at the hard
+/// watermark, which sits below the window; it means the window shrank below
+/// history the session already held, or that earlier compaction did not succeed.
+/// Both want one pass rather than several, because at two windows of body a
+/// rolling reduction needs about two passes, and the count only grows from there.
+///
+/// Zero disables the one-shot strategy, so every reduction rolls.
+const DEFAULT_ONE_SHOT_WINDOW_PERCENT: u64 = 150;
+/// Tool exchanges kept at full length in the newest part of a one-shot payload.
+///
+/// Older covered exchanges travel as artifact notices. Keeping the newest ones
+/// full lets the checkpoint carry the detail of the work in progress without the
+/// payload growing with the number of tool calls in the whole covered history.
+const DEFAULT_ONE_SHOT_RETAINED_TOOL_EXCHANGES: usize = 5;
 
 impl CitationCompactionPolicy {
     pub fn new(
@@ -135,6 +180,8 @@ impl CitationCompactionPolicy {
             target_output_tokens,
             max_accepted_output_bytes,
             retained_model_turns,
+            one_shot_window_percent: DEFAULT_ONE_SHOT_WINDOW_PERCENT,
+            one_shot_retained_tool_exchanges: DEFAULT_ONE_SHOT_RETAINED_TOOL_EXCHANGES,
         })
     }
 
@@ -151,6 +198,48 @@ impl CitationCompactionPolicy {
     #[must_use]
     pub fn retained_model_turns(self) -> usize {
         self.retained_model_turns
+    }
+
+    #[must_use]
+    pub fn one_shot_window_percent(self) -> u64 {
+        self.one_shot_window_percent
+    }
+
+    #[must_use]
+    pub fn one_shot_retained_tool_exchanges(self) -> usize {
+        self.one_shot_retained_tool_exchanges
+    }
+
+    /// Returns the strategy for one request about to be built.
+    ///
+    /// The ratio is measured against the window the request is being built for, so
+    /// after a window shrinks it is the new window. There is no separate record of
+    /// the previous window, and none is needed: ordinary turns compact at the hard
+    /// watermark, so a body this far above the window means the window moved or
+    /// earlier compaction did not land.
+    #[must_use]
+    pub fn strategy_for(self, window_tokens: u64, dynamic_body_tokens: u64) -> CompactionStrategy {
+        if self.one_shot_window_percent == 0 || window_tokens == 0 {
+            return CompactionStrategy::Rolling;
+        }
+        let ratio_percent = dynamic_body_tokens.saturating_mul(100) / window_tokens;
+        if ratio_percent > self.one_shot_window_percent {
+            CompactionStrategy::OneShot
+        } else {
+            CompactionStrategy::Rolling
+        }
+    }
+
+    /// Returns a copy with different one-shot tunables.
+    ///
+    /// A `window_percent` of zero disables the one-shot strategy.
+    #[must_use]
+    pub fn with_one_shot(self, window_percent: u64, retained_tool_exchanges: usize) -> Self {
+        Self {
+            one_shot_window_percent: window_percent,
+            one_shot_retained_tool_exchanges: retained_tool_exchanges,
+            ..self
+        }
     }
 
     pub fn with_retained_model_turns(
@@ -197,6 +286,8 @@ impl Default for CitationCompactionPolicy {
             target_output_tokens: None,
             max_accepted_output_bytes: None,
             retained_model_turns: DEFAULT_RETAINED_MODEL_TURNS,
+            one_shot_window_percent: DEFAULT_ONE_SHOT_WINDOW_PERCENT,
+            one_shot_retained_tool_exchanges: DEFAULT_ONE_SHOT_RETAINED_TOOL_EXCHANGES,
         }
     }
 }

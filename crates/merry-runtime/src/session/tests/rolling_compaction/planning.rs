@@ -14,6 +14,96 @@ use crate::{
     },
 };
 
+/// A one-shot pass covers the whole history and shortens all but the newest exchanges.
+///
+/// Rolling cannot cover this much in one request because every covered tool result
+/// travels at full length, so the payload grows with the number of tool calls. The
+/// one-shot shape keeps the newest exchanges full and sends the older ones as
+/// notices, which is what lets a window that shrank far below the history reduce it
+/// in one pass. Call and result stay together in every exchange, because the runtime
+/// rejects a window that carries only one of the pair.
+#[test]
+fn one_shot_covers_everything_and_shortens_all_but_the_newest_tool_exchanges() {
+    let mut session =
+        SessionState::new(SessionId::new("one-shot-payload").expect("valid session id"));
+    for turn in 1..=4 {
+        record_completed_tool_turn(
+            &mut session,
+            &format!("one-shot-call-{turn}"),
+            &format!("one-shot-result-{turn}"),
+            &format!("result body {turn} {}", "x".repeat(4_000)),
+        );
+    }
+
+    let preparation = session
+        .build_one_shot_compaction_preparation(
+            policy(1),
+            policy(1).resolve(64_000).expect("budget resolves"),
+            window_budget(10_000),
+            CompactionCoverageBudget::unbounded(),
+            1,
+        )
+        .expect("preparation succeeds")
+        .expect("the one-shot pass replaces the checkpoint");
+    let CompactionPreparation::ReplaceCheckpoint(input) = preparation else {
+        panic!("a one-shot pass must replace the checkpoint rather than archive");
+    };
+
+    // The pass covers everything before the retained tail: turns 1 to 3.
+    assert_eq!(input.window_plan().covered_turn_ids_u64(), vec![1, 2, 3]);
+    assert_eq!(input.window_plan().retained_turn_ids_u64(), vec![4]);
+
+    let payload: serde_json::Value =
+        serde_json::from_str(&input.to_model_payload_json().expect("payload serializes"))
+            .expect("payload parses");
+    let covered_exchanges = payload["window"]
+        .as_array()
+        .expect("window is an array")
+        .iter()
+        .flat_map(|turn| turn["items"].as_array().expect("items are an array"))
+        .filter(|item| item["role"] == "tool_exchange")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        covered_exchanges.len(),
+        3,
+        "every covered exchange stays in the payload as a pair"
+    );
+
+    let notice_count = covered_exchanges
+        .iter()
+        .filter(|item| {
+            item["result"]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("\"merry_archived\":true"))
+        })
+        .count();
+    assert_eq!(
+        notice_count, 2,
+        "only the newest covered exchange keeps its full result"
+    );
+    let full_count = covered_exchanges
+        .iter()
+        .filter(|item| {
+            item["result"]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("result body"))
+        })
+        .count();
+    assert_eq!(full_count, 1);
+    for item in &covered_exchanges {
+        assert!(
+            item["call_id"].as_str().is_some_and(|id| !id.is_empty()),
+            "each exchange keeps its call id"
+        );
+        assert!(
+            item["result"]["artifact_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("one-shot-result-")),
+            "each result names its artifact so a checkpoint entry can cite it"
+        );
+    }
+}
+
 /// A window that shrank below the retained history still yields a rolling pass.
 ///
 /// This is the case that reported "no compaction window fits the compaction request

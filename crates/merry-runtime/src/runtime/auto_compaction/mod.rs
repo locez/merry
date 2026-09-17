@@ -20,7 +20,10 @@ use super::{RuntimeInner, provider_request::resolve_request_context_window};
 use crate::{
     CitationCompactionInput, CitationCompactionPolicy, CompactionError,
     ResolvedCitationCompactionBudget, ResolvedContextWindow, RuntimeError, RuntimeModelRole,
-    compaction::{CompactionPreparation, CompactionWindowBudget},
+    compaction::{
+        CompactionCoverageBudget, CompactionPreparation, CompactionShape, CompactionWindowBudget,
+    },
+    session::SessionState,
 };
 
 mod fit;
@@ -50,13 +53,16 @@ pub(super) async fn compaction_preparation_for_hard_watermark(
     resolved_budget: ResolvedCitationCompactionBudget,
     window_budget: CompactionWindowBudget,
     primary_window_tokens: u64,
+    shape: CompactionShape,
 ) -> Result<Option<(CompactionPreparation, CompactionRequestBudget)>, RuntimeError> {
     let session = inner.session.lock().await;
-    let preparation = session.build_rolling_compaction_preparation(
+    let preparation = build_preparation_for_shape(
+        &session,
         policy,
         resolved_budget,
         window_budget,
-        crate::compaction::CompactionCoverageBudget::unbounded(),
+        shape,
+        CompactionCoverageBudget::unbounded(),
     )?;
     Ok(preparation.map(|preparation| {
         (
@@ -66,9 +72,48 @@ pub(super) async fn compaction_preparation_for_hard_watermark(
                 resolved_budget,
                 window_budget,
                 primary_window_tokens,
+                shape,
             },
         )
     }))
+}
+
+/// Builds the preparation one shape asks for.
+///
+/// Every shape covers the whole history before the retained tail except rolling,
+/// which starts unbounded too and lets the fit loop lower the coverage when the
+/// request cannot host it.
+pub(super) fn build_preparation_for_shape(
+    session: &SessionState,
+    policy: CitationCompactionPolicy,
+    resolved_budget: ResolvedCitationCompactionBudget,
+    window_budget: CompactionWindowBudget,
+    shape: CompactionShape,
+    coverage: CompactionCoverageBudget,
+) -> Result<Option<CompactionPreparation>, RuntimeError> {
+    match shape {
+        CompactionShape::OneShot {
+            retained_tool_exchanges,
+        } => session.build_one_shot_compaction_preparation(
+            policy,
+            resolved_budget,
+            window_budget,
+            coverage,
+            retained_tool_exchanges,
+        ),
+        CompactionShape::Rolling => session.build_rolling_compaction_preparation(
+            policy,
+            resolved_budget,
+            window_budget,
+            coverage,
+        ),
+        CompactionShape::SinglePass => session.build_compaction_preparation_with_window_budget(
+            policy,
+            resolved_budget,
+            window_budget,
+            coverage,
+        ),
+    }
 }
 
 pub(super) async fn compaction_input_for_policy(
@@ -115,6 +160,8 @@ pub(super) struct CompactionRequestBudget {
     pub(super) resolved_budget: ResolvedCitationCompactionBudget,
     pub(super) window_budget: CompactionWindowBudget,
     pub(super) primary_window_tokens: u64,
+    /// How this step reduces history, chosen from the request it is building.
+    pub(super) shape: CompactionShape,
 }
 
 /// A compaction request that already fits the compaction model window.

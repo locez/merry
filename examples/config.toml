@@ -159,6 +159,17 @@ retained_model_turns = 5
 # spend its whole output budget reasoning about history without writing the
 # checkpoint. Omitted, the provider default applies.
 # reasoning_effort = "medium"
+# Body-to-window percentage above which compaction covers the whole history in one
+# pass instead of rolling. 150 means a body of one and a half windows, which only
+# happens after the context window shrinks below history the session already holds.
+# A rolling reduction would need several passes there, and each pass re-summarizes
+# the previous checkpoint, so the loss compounds. The one-shot pass shortens the
+# older covered tool results to notices, which keeps their status, artifact id, and
+# ref so the checkpoint can still cite them and read the body on demand. Set 0 to
+# always roll.
+# one_shot_window_percent = 150
+# Covered tool exchanges the one-shot pass keeps at full length, newest first.
+# one_shot_retained_tool_exchanges = 5
 
 [runtime.subagents]
 # Disabled by default. Enable this to expose spawn_subagents, wait_subagents,

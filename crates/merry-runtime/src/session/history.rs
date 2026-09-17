@@ -49,6 +49,11 @@ pub(super) enum CompactionHistoryItemKind {
 }
 
 impl CompactionHistoryItem {
+    /// Returns whether this item is one tool exchange, call and result together.
+    pub(super) const fn is_tool_exchange(&self) -> bool {
+        matches!(self.kind, CompactionHistoryItemKind::ToolExchange { .. })
+    }
+
     pub(super) fn user(history_id: u64, text: String) -> Self {
         Self {
             history_id,
@@ -86,6 +91,7 @@ impl CompactionHistoryItem {
     pub(super) fn to_compaction_turn_item(
         &self,
         ref_id: &str,
+        keep_tool_result_full: bool,
     ) -> Result<CitationCompactionTurnItem, RuntimeError> {
         let item = match &self.kind {
             CompactionHistoryItemKind::User { text } => {
@@ -103,26 +109,12 @@ impl CompactionHistoryItem {
                 prompt_projection,
                 ..
             } => {
-                let (content_kind, content) = match prompt_projection {
-                    // The request already replaced this result with a notice, so the
-                    // payload carries the same notice. Sending the archived body
-                    // instead would ask the compactor to read content the model never
-                    // saw, and the checkpoint only summarizes what the conversation
-                    // actually held; the notice still names the artifact, so the
-                    // checkpoint can cite the ref and retrieve the body later.
-                    ToolResultPromptProjection::ArtifactNotice => (
-                        "json",
-                        archived_tool_result_notice_json(
-                            TranscriptItemId::new(self.history_id),
-                            result.status(),
-                            result.artifact().id(),
-                        ),
-                    ),
-                    ToolResultPromptProjection::Full | ToolResultPromptProjection::Hidden => {
-                        let (content_kind, content) = exact_artifact_text(content)?;
-                        (content_kind, content.to_owned())
-                    }
-                };
+                // The request already shortened this result, or a one-shot pass
+                // shortened it to make the payload fit.
+                let use_notice = !keep_tool_result_full
+                    || *prompt_projection == ToolResultPromptProjection::ArtifactNotice;
+                let (content_kind, content) =
+                    compaction_tool_result_text(self.history_id, result, content, use_notice)?;
                 CitationCompactionTurnItem::tool_exchange(
                     self.history_id,
                     ref_id.to_owned(),
@@ -223,16 +215,13 @@ impl CompactionHistoryItem {
                 prompt_projection,
                 ..
             } => {
-                let result_text = match prompt_projection {
-                    ToolResultPromptProjection::ArtifactNotice => archived_tool_result_notice_json(
-                        TranscriptItemId::new(self.history_id),
-                        result.status(),
-                        result.artifact().id(),
-                    ),
-                    ToolResultPromptProjection::Full | ToolResultPromptProjection::Hidden => {
-                        exact_artifact_text(content)?.1.to_owned()
-                    }
-                };
+                let result_text = compaction_tool_result_text(
+                    self.history_id,
+                    result,
+                    content,
+                    *prompt_projection == ToolResultPromptProjection::ArtifactNotice,
+                )?
+                .1;
                 let arguments =
                     serde_json::to_string(call.arguments().as_object()).map_err(|error| {
                         RuntimeError::from(CompactionError::PayloadSerialization {
@@ -309,6 +298,40 @@ pub(super) fn permission_review_context_entry(
                 crate::compaction::bounded_excerpt(&text, PERMISSION_REVIEW_ENTRY_MAX_BYTES),
             )
         }
+    }
+}
+
+/// Text the compaction payload carries for one tool result.
+///
+/// The payload shows the same result text the request shows. When the request
+/// replaced an archived result with an artifact notice, the payload carries that
+/// notice: sending the archived body instead would ask the compactor to read
+/// content the model never saw, and the checkpoint only summarizes what the
+/// conversation actually held. The notice still names the artifact, so the
+/// checkpoint can cite the ref and read the body later.
+///
+/// Both the payload builder and the sizing estimate go through this one function.
+/// They disagreed once, and the runtime then believed a covered window fit while
+/// the payload it built did not, which ended the step with "no compaction window
+/// fits the compaction request budget".
+fn compaction_tool_result_text(
+    history_id: u64,
+    result: &ToolCallResult,
+    content: &ArtifactContent,
+    use_notice: bool,
+) -> Result<(&'static str, String), RuntimeError> {
+    if use_notice {
+        Ok((
+            "json",
+            archived_tool_result_notice_json(
+                TranscriptItemId::new(history_id),
+                result.status(),
+                result.artifact().id(),
+            ),
+        ))
+    } else {
+        let (content_kind, content) = exact_artifact_text(content)?;
+        Ok((content_kind, content.to_owned()))
     }
 }
 

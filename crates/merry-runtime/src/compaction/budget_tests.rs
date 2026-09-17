@@ -1,6 +1,71 @@
 use super::{
-    CitationCompactionPolicy, CompactionError, CompactionReasoningReserve, tightened_covered_budget,
+    CitationCompactionPolicy, CompactionError, CompactionReasoningReserve, CompactionStrategy,
+    tightened_covered_budget,
 };
+
+/// The strategy turns on the body-to-window ratio, measured against the window the
+/// request is built for.
+///
+/// A small reduction keeps rolling so the shared prefix stays cached; a window that
+/// shrank far below the history needs one pass that covers everything.
+#[test]
+fn strategy_follows_the_body_to_window_ratio() {
+    let policy = CitationCompactionPolicy::default();
+
+    assert_eq!(
+        policy.strategy_for(272_000, 360_847),
+        CompactionStrategy::Rolling,
+        "a body of 1.33 windows still rolls"
+    );
+    assert_eq!(
+        policy.strategy_for(272_000, 408_000),
+        CompactionStrategy::Rolling,
+        "exactly 1.5 windows still rolls"
+    );
+    assert_eq!(
+        policy.strategy_for(272_000, 410_720),
+        CompactionStrategy::OneShot,
+        "the first ratio above 1.5 covers everything in one pass"
+    );
+    assert_eq!(
+        policy.strategy_for(272_000, 700_000),
+        CompactionStrategy::OneShot
+    );
+    assert_eq!(
+        policy.strategy_for(1_000_000, 900_000),
+        CompactionStrategy::Rolling,
+        "a wide window keeps rolling even with a large body"
+    );
+}
+
+#[test]
+fn zero_percent_disables_one_shot_and_a_zero_window_never_divides() {
+    let disabled = CitationCompactionPolicy::default().with_one_shot(0, 5);
+    assert_eq!(
+        disabled.strategy_for(272_000, 900_000),
+        CompactionStrategy::Rolling
+    );
+    assert_eq!(
+        CitationCompactionPolicy::default().strategy_for(0, 900_000),
+        CompactionStrategy::Rolling
+    );
+}
+
+/// The tunables round-trip so configuration can set them.
+#[test]
+fn one_shot_tunables_round_trip() {
+    let policy = CitationCompactionPolicy::default().with_one_shot(200, 2);
+    assert_eq!(policy.one_shot_window_percent(), 200);
+    assert_eq!(policy.one_shot_retained_tool_exchanges(), 2);
+    assert_eq!(
+        CitationCompactionPolicy::default().one_shot_window_percent(),
+        150
+    );
+    assert_eq!(
+        CitationCompactionPolicy::default().one_shot_retained_tool_exchanges(),
+        5
+    );
+}
 
 /// Compaction output ceiling for `window` at `input_tokens`.
 fn ceiling(reserve: CompactionReasoningReserve, window: u64, input_tokens: u64) -> u64 {

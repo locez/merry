@@ -22,7 +22,9 @@ use super::{
     plan_compaction_attempt,
 };
 use crate::{
-    CitationCompactionPolicy, CompactionError, CompactionOutcome, ResolvedCitationCompactionBudget,
+    CitationCompactionPolicy, CompactionError, CompactionOutcome, CompactionStrategy,
+    ResolvedCitationCompactionBudget,
+    compaction::CompactionShape,
     compaction::{ArchiveOnlyCompactionInput, CompactionPreparation, CompactionWindowBudget},
     context::compacted_checkpoint_wrapper_token_ceiling,
     events::{ActiveStepPermit, RuntimeJournalEventBatch},
@@ -35,7 +37,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Everything the compaction phase needs from the step that triggered it.
-pub(crate) struct HardWatermarkCompaction<'a> {
+pub(in crate::runtime) struct HardWatermarkCompaction<'a> {
     /// Compaction policy for this step.
     pub(crate) policy: CitationCompactionPolicy,
     /// Reasoning level compaction requests use, resolved from the runtime config.
@@ -56,7 +58,7 @@ pub(crate) struct HardWatermarkCompaction<'a> {
 
 /// Result of the hard-watermark compaction phase for one step.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HardWatermarkOutcome {
+pub(in crate::runtime) enum HardWatermarkOutcome {
     /// The step continues, carrying the checkpoint replacement to report when there is one.
     Continue {
         /// Installed replacement, when compaction replaced the checkpoint.
@@ -67,7 +69,7 @@ pub(crate) enum HardWatermarkOutcome {
 }
 
 /// Reduces context for one step that crossed the hard watermark.
-pub(crate) async fn reduce_context_at_hard_watermark(
+pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
     inner: &Arc<RuntimeInner>,
     sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
@@ -126,6 +128,7 @@ pub(crate) async fn reduce_context_at_hard_watermark(
         window_budget.resolved_budget,
         window_budget.window_budget,
         request_budget.window.tokens(),
+        shape_for_request(policy, request_budget),
     )
     .await;
     let (preparation, compaction_budget) = match preparation {
@@ -208,6 +211,26 @@ pub(crate) async fn reduce_context_at_hard_watermark(
 struct StepWindowBudget {
     resolved_budget: ResolvedCitationCompactionBudget,
     window_budget: CompactionWindowBudget,
+}
+
+/// Returns how this step reduces history, chosen from the request it is building.
+///
+/// A window that shrank far below the history needs one pass that covers
+/// everything; a moderate reduction keeps rolling, so the shared prefix stays
+/// cached across passes.
+fn shape_for_request(
+    policy: CitationCompactionPolicy,
+    request_budget: &RequestContextBudget,
+) -> CompactionShape {
+    match policy.strategy_for(
+        request_budget.window.tokens(),
+        request_budget.dynamic_body_estimated_tokens,
+    ) {
+        CompactionStrategy::OneShot => CompactionShape::OneShot {
+            retained_tool_exchanges: policy.one_shot_retained_tool_exchanges(),
+        },
+        CompactionStrategy::Rolling => CompactionShape::Rolling,
+    }
 }
 
 fn window_budget_for_step(

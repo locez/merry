@@ -15,7 +15,7 @@ use crate::{
 use merry_llm::{ModelStreamContext, ReasoningEffort};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-pub(crate) async fn generate_and_install_compaction(
+pub(in crate::runtime) async fn generate_and_install_compaction(
     inner: &Arc<RuntimeInner>,
     plan: CompactionPlan,
     budget: &CompactionRequestBudget,

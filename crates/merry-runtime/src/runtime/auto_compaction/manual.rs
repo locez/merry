@@ -6,12 +6,12 @@ use super::{
 };
 use crate::{
     CitationCompactionPolicy, CompactionOutcome, RuntimeError,
-    compaction::{CompactionCoverageBudget, CompactionWindowBudget},
+    compaction::{CompactionCoverageBudget, CompactionShape, CompactionWindowBudget},
     events::ActiveStepPermit,
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-pub(crate) async fn compact_context_once_inner(
+pub(in crate::runtime) async fn compact_context_once_inner(
     inner: &Arc<RuntimeInner>,
     policy: CitationCompactionPolicy,
     token: CancellationToken,
@@ -39,6 +39,7 @@ pub(crate) async fn compact_context_once_inner(
         resolved_budget,
         window_budget,
         primary_window_tokens: primary_window.tokens(),
+        shape: CompactionShape::SinglePass,
     };
     let preparation = {
         let session = inner.session.lock().await;

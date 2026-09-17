@@ -4,7 +4,7 @@ use crate::{
     RuntimeError,
     checkpoint::CheckpointRef,
     compaction::{
-        CitationCompactionPolicy, CompactionCoverageBudget, CompactionError,
+        CitationCompactionPolicy, CompactionCoverageBudget, CompactionError, CompactionShape,
         CompactionWindowBudget, CompactionWindowFingerprint, CompactionWindowPlan, RetainedFit,
         retained_turn_fallbacks,
     },
@@ -62,7 +62,7 @@ impl SessionState {
         policy: CitationCompactionPolicy,
         window_budget: CompactionWindowBudget,
         coverage: CompactionCoverageBudget,
-        retained_fit: RetainedFit,
+        shape: CompactionShape,
         turns: &[ModelTurnHistory],
     ) -> Result<Option<CompactionWindowPlan>, RuntimeError> {
         debug_assert!(
@@ -87,7 +87,7 @@ impl SessionState {
             .filter(|turn| turn.status == ModelTurnStatus::Completed)
             .count();
         let mut candidates =
-            self.retention_candidates(policy, coverage, closed_turns, available_completed)?;
+            self.retention_candidates(policy, coverage, shape, closed_turns, available_completed)?;
         // A coverage budget only exists when the runtime already knows a
         // checkpoint replacement does not fit its request. Archiving tool results
         // is then the remaining degradation, because it reduces the request body
@@ -138,7 +138,7 @@ impl SessionState {
                 base_tokens,
                 fingerprint,
                 candidate.empty_coverage_meaning(),
-                retained_fit,
+                shape.retained_fit(),
             )? {
                 CandidateOutcome::Plan(plan) => return Ok(Some(plan)),
                 CandidateOutcome::NothingToDo => return Ok(None),
@@ -202,9 +202,22 @@ impl SessionState {
         &self,
         policy: CitationCompactionPolicy,
         coverage: CompactionCoverageBudget,
+        shape: CompactionShape,
         closed_turns: &[ModelTurnHistory],
         available_completed: usize,
     ) -> Result<Vec<RetentionCandidate>, RuntimeError> {
+        if shape.is_one_shot() {
+            // One pass covers everything before the retained tail, so the only
+            // candidate is the configured retention. The fallbacks below retain
+            // fewer turns, which would cover more history and grow the payload the
+            // one-shot pass is trying to fit.
+            return Ok(vec![RetentionCandidate::CompletedTurns(
+                policy
+                    .retained_model_turns()
+                    .min(available_completed)
+                    .max(1),
+            )]);
+        }
         let Some(coverage_budget) = coverage.max_tokens() else {
             return Ok(
                 retained_turn_fallbacks(policy.retained_model_turns(), available_completed)

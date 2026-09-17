@@ -15,7 +15,7 @@ use crate::{
     },
 };
 use merry_llm::{ModelInputItem, ReasoningEffort};
-pub(crate) enum CompactionRequestFit {
+pub(super) enum CompactionRequestFit {
     /// The request fits the window under this attempt's reserve.
     Request {
         request: Box<merry_llm::ModelRequest>,
@@ -29,7 +29,7 @@ pub(crate) enum CompactionRequestFit {
 
 /// How strictly one attempt has to afford its reasoning reserve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReservePolicy {
+pub(super) enum ReservePolicy {
     /// Grant the room the window has, as long as the checkpoint text budget fits.
     ///
     /// Used for the first attempt: a small window can still compact by granting
@@ -44,7 +44,7 @@ pub(crate) enum ReservePolicy {
 
 /// What the compaction model allows one request to occupy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CompactionModelLimits {
+pub(super) struct CompactionModelLimits {
     /// Total token window one request may occupy.
     pub(crate) window_tokens: u64,
     /// Output limit the model declares, when it declares one.
@@ -62,7 +62,7 @@ pub(crate) struct CompactionModelLimits {
 /// `limits` carries the model's declared output limit as well. The reserve must
 /// not ask for output the compaction model cannot produce, because the provider
 /// rejects such a request outright.
-pub(crate) fn compile_fitted_compaction_request(
+pub(super) fn compile_fitted_compaction_request(
     input: &CitationCompactionInput,
     model: &merry_llm::ModelName,
     stable_prefix: &[ModelInputItem],
@@ -121,7 +121,7 @@ pub(crate) fn compile_fitted_compaction_request(
     })
 }
 
-pub(crate) fn trace_compaction_request(
+pub(super) fn trace_compaction_request(
     inner: &RuntimeInner,
     provider: &dyn merry_llm::ModelProvider,
     request: &merry_llm::ModelRequest,

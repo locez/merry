@@ -5,8 +5,8 @@ use crate::{
     compaction::{
         ArchiveOnlyCompactionInput, CitationCompactionInput, CitationCompactionPolicy,
         CompactionCoverageBudget, CompactionError, CompactionOutcome, CompactionPreparation,
-        CompactionWindowBudget, CompactionWindowFingerprint, CompactionWindowPlan,
-        ResolvedCitationCompactionBudget, RetainedFit, checkpoint_from_candidate_json,
+        CompactionShape, CompactionWindowBudget, CompactionWindowFingerprint, CompactionWindowPlan,
+        ResolvedCitationCompactionBudget, checkpoint_from_candidate_json,
     },
     context::{CompactedCheckpoint, CompactedCheckpointSummary},
     permission::PermissionReviewContextEntry,
@@ -249,7 +249,7 @@ impl SessionState {
             resolved_budget,
             window_budget,
             coverage,
-            RetainedFit::Required,
+            CompactionShape::SinglePass,
         )
     }
 
@@ -271,7 +271,33 @@ impl SessionState {
             resolved_budget,
             window_budget,
             coverage,
-            RetainedFit::Deferred,
+            CompactionShape::Rolling,
+        )
+    }
+
+    /// Builds one one-shot pass that covers everything before the retained tail.
+    ///
+    /// The pass keeps the newest `retained_tool_exchanges` covered tool exchanges at
+    /// full length and shortens the older ones, so the payload stops growing with the
+    /// number of tool calls in the covered history. This is what a window that
+    /// shrank far below the history needs: rolling would re-summarize the previous
+    /// checkpoint on every pass.
+    pub(crate) fn build_one_shot_compaction_preparation(
+        &self,
+        policy: CitationCompactionPolicy,
+        resolved_budget: ResolvedCitationCompactionBudget,
+        window_budget: CompactionWindowBudget,
+        coverage: CompactionCoverageBudget,
+        retained_tool_exchanges: usize,
+    ) -> Result<Option<CompactionPreparation>, RuntimeError> {
+        self.build_compaction_preparation(
+            policy,
+            resolved_budget,
+            window_budget,
+            coverage,
+            CompactionShape::OneShot {
+                retained_tool_exchanges,
+            },
         )
     }
 
@@ -281,20 +307,15 @@ impl SessionState {
         resolved_budget: ResolvedCitationCompactionBudget,
         window_budget: CompactionWindowBudget,
         coverage: CompactionCoverageBudget,
-        retained_fit: RetainedFit,
+        shape: CompactionShape,
     ) -> Result<Option<CompactionPreparation>, RuntimeError> {
         if !self.pending_tool_calls.is_empty() {
             return Err(CompactionError::PendingToolCalls.into());
         }
 
         let turns = self.model_turn_histories(HiddenToolExchangeVisibility::Include, true)?;
-        let Some(plan) = self.plan_compaction_window_from_turns(
-            policy,
-            window_budget,
-            coverage,
-            retained_fit,
-            &turns,
-        )?
+        let Some(plan) =
+            self.plan_compaction_window_from_turns(policy, window_budget, coverage, shape, &turns)?
         else {
             return Ok(None);
         };
@@ -319,6 +340,7 @@ impl SessionState {
             &covered,
             plan,
             archived_refs,
+            shape.retained_tool_exchanges(),
         )
         .map(Box::new)
         .map(CompactionPreparation::ReplaceCheckpoint)
@@ -339,7 +361,7 @@ impl SessionState {
             policy,
             window_budget,
             CompactionCoverageBudget::unbounded(),
-            RetainedFit::Required,
+            CompactionShape::SinglePass,
             &turns,
         )
     }

@@ -6,7 +6,7 @@ use crate::{
     step::{StablePrefixParts, compile_stable_prefix_items},
 };
 use merry_llm::ModelInputItem;
-pub(crate) async fn compaction_stable_prefix(
+pub(in crate::runtime) async fn compaction_stable_prefix(
     inner: &RuntimeInner,
 ) -> Result<Vec<ModelInputItem>, RuntimeError> {
     let (skill_catalog, project_rules) = {

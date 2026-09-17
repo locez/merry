@@ -123,6 +123,8 @@ struct AutoCompactionToml {
     target_output_tokens: Option<u64>,
     max_accepted_output_bytes: Option<usize>,
     retained_model_turns: Option<usize>,
+    one_shot_window_percent: Option<u64>,
+    one_shot_retained_tool_exchanges: Option<usize>,
     reasoning_effort: Option<String>,
     model_output_token_limit: Option<u64>,
     retained_raw_tail_items: Option<usize>,
@@ -147,7 +149,13 @@ impl AutoCompactionToml {
                 self.retained_model_turns
                     .unwrap_or_else(|| defaults.retained_model_turns()),
             )
-            .map_err(|error| ConfigError::Invalid(error.to_string()))?;
+            .map_err(|error| ConfigError::Invalid(error.to_string()))?
+            .with_one_shot(
+                self.one_shot_window_percent
+                    .unwrap_or_else(|| defaults.one_shot_window_percent()),
+                self.one_shot_retained_tool_exchanges
+                    .unwrap_or_else(|| defaults.one_shot_retained_tool_exchanges()),
+            );
             CompactionConfig::enabled(policy)
         } else {
             CompactionConfig::disabled()
@@ -300,6 +308,8 @@ target_output_tokens = 160
 max_accepted_output_bytes = 4096
 retained_model_turns = 4
 reasoning_effort = "medium"
+one_shot_window_percent = 200
+one_shot_retained_tool_exchanges = 2
 "#,
             ),
             &paths,
@@ -315,6 +325,8 @@ reasoning_effort = "medium"
         assert_eq!(policy.target_output_tokens(), Some(160));
         assert_eq!(policy.max_accepted_output_bytes(), Some(4096));
         assert_eq!(policy.retained_model_turns(), 4);
+        assert_eq!(policy.one_shot_window_percent(), 200);
+        assert_eq!(policy.one_shot_retained_tool_exchanges(), 2);
         assert_eq!(
             auto_compaction
                 .reasoning_effort()

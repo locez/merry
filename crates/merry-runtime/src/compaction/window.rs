@@ -105,6 +105,60 @@ impl CompactionCoverageBudget {
     }
 }
 
+/// How one compaction pass chooses what to cover and what the payload carries.
+///
+/// The runtime selects this from the request it is about to build, so one value
+/// describes the whole reduction instead of several loose flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompactionShape {
+    /// One pass that must land inside the body budget; manual compaction.
+    SinglePass,
+    /// Cover the largest window one request hosts, repeating until the request fits.
+    Rolling,
+    /// Cover everything before the retained tail once, shortening older tool results.
+    OneShot {
+        /// Newest covered tool exchanges kept at full length.
+        retained_tool_exchanges: usize,
+    },
+}
+
+impl CompactionShape {
+    /// Returns how strictly this shape requires the retained history to fit.
+    pub(crate) const fn retained_fit(self) -> RetainedFit {
+        match self {
+            Self::SinglePass => RetainedFit::Required,
+            Self::Rolling | Self::OneShot { .. } => RetainedFit::Deferred,
+        }
+    }
+
+    /// Returns how many covered tool exchanges stay at full length.
+    ///
+    /// `None` keeps every covered tool exchange at full length.
+    pub(crate) const fn retained_tool_exchanges(self) -> Option<usize> {
+        match self {
+            Self::OneShot {
+                retained_tool_exchanges,
+            } => Some(retained_tool_exchanges),
+            Self::SinglePass | Self::Rolling => None,
+        }
+    }
+
+    /// Returns whether this shape covers everything before the retained tail.
+    pub(crate) const fn is_one_shot(self) -> bool {
+        matches!(self, Self::OneShot { .. })
+    }
+
+    /// Returns this shape with every covered tool exchange shortened.
+    pub(crate) const fn with_all_tool_exchanges_shortened(self) -> Self {
+        match self {
+            Self::OneShot { .. } => Self::OneShot {
+                retained_tool_exchanges: 0,
+            },
+            other => other,
+        }
+    }
+}
+
 /// How strictly one compaction pass must leave the retained history inside the body budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RetainedFit {
