@@ -78,49 +78,65 @@ fn zero_coverage_budget_keeps_every_turn_raw_and_archives_tool_results() {
 /// The planner's coverage budget must hold under the authoritative measurement.
 ///
 /// Planning estimates covered payload tokens from raw text plus a fixed envelope,
-/// while the runtime measures the built payload after `serde_json` escaping. Tool
-/// turns carry the largest fixed envelope, so an underestimated envelope shows up
-/// here as a request the runtime would refuse to send.
+/// while the runtime measures the built payload after `serde_json` escaping. An
+/// underestimated envelope shows up here as a covered window the budget never
+/// allowed, which is a request the runtime would then refuse to send.
 #[test]
 fn coverage_budget_holds_under_the_authoritative_payload_measurement() {
-    let mut session = SessionState::new(
-        SessionId::new("rolling-coverage-budget-authority").expect("valid session id"),
-    );
-    for turn in 1..=5 {
-        record_completed_tool_turn(
-            &mut session,
-            &format!("budget-call-{turn}"),
-            &format!("budget-result-{turn}"),
-            "exit code 0",
+    // Tool turns carry the largest fixed envelope; short user turns carry the
+    // smallest, where the fixed part dominates the estimate.
+    let tool_turns = {
+        let mut session = SessionState::new(
+            SessionId::new("rolling-coverage-budget-tools").expect("valid session id"),
         );
-    }
+        for turn in 1..=5 {
+            record_completed_tool_turn(
+                &mut session,
+                &format!("budget-call-{turn}"),
+                &format!("budget-result-{turn}"),
+                "exit code 0",
+            );
+        }
+        session
+    };
+    let plain_turns = {
+        let mut session = SessionState::new(
+            SessionId::new("rolling-coverage-budget-plain").expect("valid session id"),
+        );
+        for turn in 1..=5 {
+            record_completed_user_turn(&mut session, &format!("t{turn}"));
+        }
+        session
+    };
 
-    let mut checkpoint_replacements = 0;
-    for coverage_budget in [150, 200, 250, 300, 400, 600] {
-        let preparation = session
-            .build_compaction_preparation_with_window_budget(
-                policy(1),
-                policy(1).resolve(64_000).expect("budget resolves"),
-                window_budget(10_000),
-                CompactionCoverageBudget::limited(coverage_budget),
-            )
-            .expect("preparation succeeds");
-        let Some(CompactionPreparation::ReplaceCheckpoint(input)) = preparation else {
-            continue;
-        };
-        checkpoint_replacements += 1;
-        let measured = input
-            .covered_payload_token_estimate()
-            .expect("payload measures");
+    for (label, session) in [("tool turns", &tool_turns), ("plain turns", &plain_turns)] {
+        let mut checkpoint_replacements = 0;
+        for coverage_budget in [40, 80, 150, 200, 250, 300, 400, 600] {
+            let preparation = session
+                .build_compaction_preparation_with_window_budget(
+                    policy(1),
+                    policy(1).resolve(64_000).expect("budget resolves"),
+                    window_budget(10_000),
+                    CompactionCoverageBudget::limited(coverage_budget),
+                )
+                .expect("preparation succeeds");
+            let Some(CompactionPreparation::ReplaceCheckpoint(input)) = preparation else {
+                continue;
+            };
+            checkpoint_replacements += 1;
+            let measured = input
+                .covered_payload_token_estimate()
+                .expect("payload measures");
+            assert!(
+                measured <= coverage_budget,
+                "{label}: authoritative measurement {measured} exceeds the coverage budget {coverage_budget}"
+            );
+        }
         assert!(
-            measured <= coverage_budget,
-            "authoritative measurement {measured} exceeds the coverage budget {coverage_budget}"
+            checkpoint_replacements > 0,
+            "{label}: at least one budget must still replace the checkpoint"
         );
     }
-    assert!(
-        checkpoint_replacements > 0,
-        "at least one budget must still replace the checkpoint"
-    );
 }
 
 #[test]

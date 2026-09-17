@@ -718,6 +718,47 @@ impl CompactionReasoningReserve {
     }
 }
 
+/// Extra room one refit gives up beyond the input it has to release.
+const COMPACTION_FIT_MARGIN_PERCENT: u64 = 25;
+
+/// Returns the largest request input a compaction window can host for this reserve.
+///
+/// A request occupies `input + text_budget + input * reserve_percent / 100`, so
+/// the input budget is whatever is left after the checkpoint text budget once the
+/// reserve share is accounted for.
+#[must_use]
+pub(crate) fn allowed_input_tokens_for_window(
+    compactor_window_tokens: u64,
+    text_budget_tokens: u64,
+    reserve: CompactionReasoningReserve,
+) -> u64 {
+    compactor_window_tokens
+        .saturating_sub(text_budget_tokens)
+        .saturating_mul(100)
+        / (100 + reserve.percent())
+}
+
+/// Returns the covered-payload budget to try after one overshoot.
+///
+/// Gives up the input the window cannot host plus a margin. Returns `None` when
+/// the covered payload is already zero, because retaining more turns cannot
+/// shrink the request any further.
+#[must_use]
+pub(crate) fn tightened_covered_budget(
+    covered_payload_tokens: u64,
+    estimated_input_tokens: u64,
+    allowed_input_tokens: u64,
+) -> Option<u64> {
+    if covered_payload_tokens == 0 {
+        return None;
+    }
+    let excess_input_tokens = estimated_input_tokens.saturating_sub(allowed_input_tokens);
+    let margin = excess_input_tokens.saturating_mul(COMPACTION_FIT_MARGIN_PERCENT) / 100;
+    let step = excess_input_tokens.saturating_add(margin).max(1);
+    let tightened = covered_payload_tokens.saturating_sub(step);
+    (tightened < covered_payload_tokens).then_some(tightened)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct CitationCompactionPayload {
     policy: CitationCompactionPayloadPolicy,

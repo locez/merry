@@ -1,4 +1,7 @@
-use super::{CitationCompactionPolicy, CompactionError, CompactionReasoningReserve};
+use super::{
+    CitationCompactionPolicy, CompactionError, CompactionReasoningReserve,
+    allowed_input_tokens_for_window, tightened_covered_budget,
+};
 
 /// Numbers below come from the session that exposed the starvation.
 ///
@@ -133,5 +136,69 @@ fn adaptive_budget_rejects_zero_and_overflow() {
             .expect("override is structurally valid")
             .resolve(64_000),
         Err(CompactionError::BudgetOverflow)
+    );
+}
+
+/// Numbers from the session that exposed the collapsing retry.
+///
+/// The compaction window was 272,000 tokens, the checkpoint text budget
+/// 21,760, the covered payload 359,176, and the fitted first attempt measured
+/// 397,849 input tokens. At a doubled reserve the old arithmetic gave up
+/// 433,166 tokens of history and collapsed coverage to zero, which degraded a
+/// recoverable truncation into a failed step.
+#[test]
+fn proportional_reserve_refit_keeps_a_usable_covered_window() {
+    let window = 272_000;
+    let text_budget = 21_760;
+    let covered_payload = 359_176;
+    let measured_input = 397_849;
+    let reserve = CompactionReasoningReserve::INITIAL.degraded();
+
+    assert_eq!(reserve.percent(), 50);
+    let allowed_input = allowed_input_tokens_for_window(window, text_budget, reserve);
+    let tightened = tightened_covered_budget(covered_payload, measured_input, allowed_input)
+        .expect("a proportional refit must keep some covered window");
+
+    assert!(
+        tightened > 0,
+        "the refit must not collapse coverage to zero"
+    );
+    let projected_input = measured_input - (covered_payload - tightened);
+    let projected_output = reserve.output_ceiling(
+        CitationCompactionPolicy::default()
+            .resolve(window)
+            .expect("budget resolves"),
+        projected_input,
+    );
+    assert!(
+        projected_input + projected_output <= window,
+        "refitted request must fit the window: input {projected_input} plus output {projected_output}"
+    );
+}
+
+#[test]
+fn reserve_shrinks_the_input_budget_monotonically() {
+    let window = 272_000;
+    let text_budget = 21_760;
+
+    let initial =
+        allowed_input_tokens_for_window(window, text_budget, CompactionReasoningReserve::INITIAL);
+    let degraded = allowed_input_tokens_for_window(
+        window,
+        text_budget,
+        CompactionReasoningReserve::INITIAL.degraded(),
+    );
+    assert!(
+        degraded < initial,
+        "a larger reserve must leave room for less input: {initial} then {degraded}"
+    );
+}
+
+/// A window that cannot host the text budget admits no covered history.
+#[test]
+fn window_smaller_than_the_text_budget_admits_no_input() {
+    assert_eq!(
+        allowed_input_tokens_for_window(16_000, 21_760, CompactionReasoningReserve::INITIAL),
+        0
     );
 }
