@@ -88,7 +88,7 @@ pub use schema::citation_compaction_response_schema;
 pub(crate) use window::{
     ArchiveOnlyCompactionInput, CitationCompactionModelTurn, CitationCompactionToolResult,
     CitationCompactionTurnItem, CompactionCoverageBudget, CompactionWindowBudget,
-    CompactionWindowFingerprint, CompactionWindowPlan, retained_turn_fallbacks,
+    CompactionWindowFingerprint, CompactionWindowPlan, RetainedFit, retained_turn_fallbacks,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

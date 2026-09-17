@@ -71,7 +71,7 @@ pub(crate) async fn generate_and_install_compaction(
                 // the fit loop find that covered window.
                 let rebuilt = {
                     let session = inner.session.lock().await;
-                    session.build_compaction_preparation_with_window_budget(
+                    session.build_rolling_compaction_preparation(
                         budget.policy,
                         budget.resolved_budget,
                         budget.window_budget,

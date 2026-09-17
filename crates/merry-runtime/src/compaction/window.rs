@@ -105,6 +105,25 @@ impl CompactionCoverageBudget {
     }
 }
 
+/// How strictly one compaction pass must leave the retained history inside the body budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetainedFit {
+    /// The pass must land under the budget, or report that no window fits.
+    ///
+    /// Manual compaction uses this: a caller asked for one reduction and needs to
+    /// know whether one happened.
+    Required,
+    /// The pass may land above the budget because the runtime runs another pass.
+    ///
+    /// Rolling compaction uses this. Each pass covers as much history as the
+    /// compaction window can host, and the caller repeats while the recompiled
+    /// request still crosses the watermark. Without it, a window that shrank below
+    /// the retained history could never reduce anything: every candidate would fail
+    /// the budget check before anything could be installed, which is why shrinking
+    /// the context window reported that no compaction window fit.
+    Deferred,
+}
+
 pub(crate) fn retained_turn_fallbacks(configured: usize, available_completed: usize) -> Vec<usize> {
     let first = configured.min(available_completed);
     if first == 0 {

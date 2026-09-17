@@ -14,6 +14,59 @@ use crate::{
     },
 };
 
+/// A window that shrank below the retained history still yields a rolling pass.
+///
+/// This is the case that reported "no compaction window fits the compaction request
+/// budget" instead of compacting: the retained history alone no longer fits the body
+/// budget, so a pass that must land under the budget refuses to plan anything. A
+/// rolling pass covers the largest window the compaction request can host, keeps the
+/// newest turns raw, and lets the runtime run another pass until the request fits.
+#[test]
+fn rolling_pass_covers_the_front_when_the_window_shrank_below_the_history() {
+    let mut session =
+        SessionState::new(SessionId::new("rolling-window-shrink").expect("valid session id"));
+    for turn in 1..=6 {
+        let text = format!("turn {turn} {}", "z".repeat(8_000));
+        record_completed_user_turn(&mut session, &text);
+    }
+
+    // Each turn is about 2,000 tokens, the body budget holds less than one of them,
+    // and the covered budget holds the five older turns.
+    let window_budget = window_budget(2_000);
+    let resolved = policy(1).resolve(64_000).expect("budget resolves");
+    let required = session.build_compaction_preparation_with_window_budget(
+        policy(1),
+        resolved,
+        window_budget,
+        CompactionCoverageBudget::limited(12_000),
+    );
+    assert!(
+        matches!(required, Ok(None) | Err(_)),
+        "a required fit must refuse when the retained history cannot fit: {required:?}"
+    );
+
+    let preparation = session
+        .build_rolling_compaction_preparation(
+            policy(1),
+            resolved,
+            window_budget,
+            CompactionCoverageBudget::limited(12_000),
+        )
+        .expect("the rolling pass plans")
+        .expect("the rolling pass replaces the checkpoint");
+    let CompactionPreparation::ReplaceCheckpoint(input) = preparation else {
+        panic!("a rolling pass must replace the checkpoint rather than archive");
+    };
+
+    // The pass compresses the oldest turns and leaves the newest raw, so the next
+    // pass can continue from a smaller history.
+    assert_eq!(
+        input.window_plan().covered_turn_ids_u64(),
+        vec![1, 2, 3, 4, 5]
+    );
+    assert_eq!(input.window_plan().retained_turn_ids_u64(), vec![6]);
+}
+
 /// A covered-payload budget keeps more completed turns raw before replacing.
 #[test]
 fn bounded_coverage_budget_retains_more_turns_before_replacing() {

@@ -6,7 +6,7 @@ use crate::{
         ArchiveOnlyCompactionInput, CitationCompactionInput, CitationCompactionPolicy,
         CompactionCoverageBudget, CompactionError, CompactionOutcome, CompactionPreparation,
         CompactionWindowBudget, CompactionWindowFingerprint, CompactionWindowPlan,
-        ResolvedCitationCompactionBudget, checkpoint_from_candidate_json,
+        ResolvedCitationCompactionBudget, RetainedFit, checkpoint_from_candidate_json,
     },
     context::{CompactedCheckpoint, CompactedCheckpointSummary},
     permission::PermissionReviewContextEntry,
@@ -236,6 +236,7 @@ impl SessionState {
         }
     }
 
+    /// Builds one compaction preparation that must land inside the body budget.
     pub(crate) fn build_compaction_preparation_with_window_budget(
         &self,
         policy: CitationCompactionPolicy,
@@ -243,13 +244,57 @@ impl SessionState {
         window_budget: CompactionWindowBudget,
         coverage: CompactionCoverageBudget,
     ) -> Result<Option<CompactionPreparation>, RuntimeError> {
+        self.build_compaction_preparation(
+            policy,
+            resolved_budget,
+            window_budget,
+            coverage,
+            RetainedFit::Required,
+        )
+    }
+
+    /// Builds one rolling pass that may leave the retained history above the body budget.
+    ///
+    /// Each rolling pass covers as much history as the compaction window can host,
+    /// and the runtime repeats until the recompiled request lands back under the
+    /// watermark. This is what lets a session keep compacting after its context
+    /// window shrinks, when the retained history alone no longer fits the budget.
+    pub(crate) fn build_rolling_compaction_preparation(
+        &self,
+        policy: CitationCompactionPolicy,
+        resolved_budget: ResolvedCitationCompactionBudget,
+        window_budget: CompactionWindowBudget,
+        coverage: CompactionCoverageBudget,
+    ) -> Result<Option<CompactionPreparation>, RuntimeError> {
+        self.build_compaction_preparation(
+            policy,
+            resolved_budget,
+            window_budget,
+            coverage,
+            RetainedFit::Deferred,
+        )
+    }
+
+    fn build_compaction_preparation(
+        &self,
+        policy: CitationCompactionPolicy,
+        resolved_budget: ResolvedCitationCompactionBudget,
+        window_budget: CompactionWindowBudget,
+        coverage: CompactionCoverageBudget,
+        retained_fit: RetainedFit,
+    ) -> Result<Option<CompactionPreparation>, RuntimeError> {
         if !self.pending_tool_calls.is_empty() {
             return Err(CompactionError::PendingToolCalls.into());
         }
 
         let turns = self.model_turn_histories(HiddenToolExchangeVisibility::Include, true)?;
-        let Some(plan) =
-            self.plan_compaction_window_from_turns(policy, window_budget, coverage, &turns)?
+        let Some(plan) = self.plan_compaction_window_from_turns(
+            policy,
+            window_budget,
+            coverage,
+            retained_fit,
+            &turns,
+        )?
         else {
             return Ok(None);
         };
@@ -294,6 +339,7 @@ impl SessionState {
             policy,
             window_budget,
             CompactionCoverageBudget::unbounded(),
+            RetainedFit::Required,
             &turns,
         )
     }

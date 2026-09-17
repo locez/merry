@@ -181,7 +181,7 @@ pub(crate) async fn fit_compaction_plan(
                 previous_input_tokens = Some(estimated_input_tokens);
                 let rebuilt = {
                     let session = inner.session.lock().await;
-                    session.build_compaction_preparation_with_window_budget(
+                    session.build_rolling_compaction_preparation(
                         budget.policy,
                         budget.resolved_budget,
                         budget.window_budget,

@@ -52,7 +52,7 @@ pub(super) async fn compaction_preparation_for_hard_watermark(
     primary_window_tokens: u64,
 ) -> Result<Option<(CompactionPreparation, CompactionRequestBudget)>, RuntimeError> {
     let session = inner.session.lock().await;
-    let preparation = session.build_compaction_preparation_with_window_budget(
+    let preparation = session.build_rolling_compaction_preparation(
         policy,
         resolved_budget,
         window_budget,

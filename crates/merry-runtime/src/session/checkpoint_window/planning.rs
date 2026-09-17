@@ -5,7 +5,7 @@ use crate::{
     checkpoint::CheckpointRef,
     compaction::{
         CitationCompactionPolicy, CompactionCoverageBudget, CompactionError,
-        CompactionWindowBudget, CompactionWindowFingerprint, CompactionWindowPlan,
+        CompactionWindowBudget, CompactionWindowFingerprint, CompactionWindowPlan, RetainedFit,
         retained_turn_fallbacks,
     },
     session::{
@@ -62,6 +62,7 @@ impl SessionState {
         policy: CitationCompactionPolicy,
         window_budget: CompactionWindowBudget,
         coverage: CompactionCoverageBudget,
+        retained_fit: RetainedFit,
         turns: &[ModelTurnHistory],
     ) -> Result<Option<CompactionWindowPlan>, RuntimeError> {
         debug_assert!(
@@ -137,6 +138,7 @@ impl SessionState {
                 base_tokens,
                 fingerprint,
                 candidate.empty_coverage_meaning(),
+                retained_fit,
             )? {
                 CandidateOutcome::Plan(plan) => return Ok(Some(plan)),
                 CandidateOutcome::NothingToDo => return Ok(None),
@@ -245,6 +247,7 @@ fn plan_retained_window(
     base_tokens: u64,
     fingerprint: CompactionWindowFingerprint,
     empty_coverage: EmptyCoverage,
+    retained_fit: RetainedFit,
 ) -> Result<CandidateOutcome, RuntimeError> {
     let mut archived_tool_call_ids = existing_archived_tool_call_ids(raw_turns);
     let fits = |archived_tool_call_ids: &BTreeSet<ToolCallId>| {
@@ -285,7 +288,18 @@ fn plan_retained_window(
         }
     }
 
-    Ok(CandidateOutcome::DoesNotFit)
+    match retained_fit {
+        RetainedFit::Required => Ok(CandidateOutcome::DoesNotFit),
+        // Another pass follows, so install the largest covered window instead of
+        // reporting that nothing fits. The wait for the budget to hold moves to the
+        // caller, which recompiles and decides whether to run one more pass.
+        RetainedFit::Deferred => Ok(CandidateOutcome::Plan(compaction_window_plan(
+            covered,
+            raw_turns,
+            existing_archived_tool_call_ids(raw_turns),
+            fingerprint,
+        )?)),
+    }
 }
 
 pub(super) fn retained_start_for_completed_count(
