@@ -48,7 +48,9 @@ async fn automatic_compaction_rolls_when_the_window_shrinks_below_the_history() 
             .expect("valid primary capabilities"),
     );
     let compactor = RecordingModelProvider::with_script_and_capabilities(
-        (0..8)
+        // One candidate per allowed pass, so exhausting the script would fail the
+        // test rather than silently falling back to a non-candidate response.
+        (0..12)
             .map(|_| {
                 ScriptedModelProviderResponse::Stream(vec![Ok(completed_event_with(
                     vec![ModelOutput::text(ROLLING_CANDIDATE)],
@@ -108,6 +110,11 @@ async fn automatic_compaction_rolls_when_the_window_shrinks_below_the_history() 
     assert!(
         requests.len() >= 2,
         "a shrunken window needs more than one reduction, got {}",
+        requests.len()
+    );
+    assert!(
+        requests.len() <= 12,
+        "passes must stay inside the rolling bound, got {}",
         requests.len()
     );
 }

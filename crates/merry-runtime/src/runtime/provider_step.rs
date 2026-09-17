@@ -31,10 +31,14 @@ use super::{DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, RuntimeInner, diagnostic_from_
 /// Automatic context reductions one step may run before reporting that it cannot fit.
 ///
 /// Rolling compaction covers as much history as the compaction window can host per
-/// pass, so a session whose context window shrank below the history it holds needs
-/// one pass per window-worth of covered history. The bound keeps a history that
-/// cannot be reduced from spending model calls forever.
-const MAX_AUTO_COMPACTION_PASSES: usize = 4;
+/// pass, and how much a later pass covers changes with the checkpoint and the
+/// covered range, so the passes a given shrink needs are only known as they run.
+/// Shrinking a wide window to a small one can need many: at a 272k window a pass
+/// covers roughly 140k to 160k tokens of history, so a session that ran near a 1M
+/// window needs several, and a wider window reduced further needs more. The bound
+/// is deliberately generous and exists only to stop a history that cannot be
+/// reduced at all from spending model calls forever.
+const MAX_AUTO_COMPACTION_PASSES: usize = 12;
 
 use crate::{
     CheckpointDecision,
