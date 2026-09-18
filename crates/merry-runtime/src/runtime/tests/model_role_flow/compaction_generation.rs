@@ -92,6 +92,22 @@ fn runtime_with_compactor_and_steps(
         .expect("runtime builds")
 }
 
+async fn seed_rolling_history(runtime: &Runtime) {
+    for index in 0..6 {
+        let events = collect_step(
+            runtime,
+            &format!("covered turn {index} {}", "payload ballast ".repeat(1_200)),
+            StepContext::default(),
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted))
+        );
+    }
+}
+
 fn unavailable(message: &str) -> ModelError {
     ModelError::provider(ProviderErrorKind::Unavailable, message)
 }
@@ -424,24 +440,14 @@ async fn truncated_compaction_retries_with_a_bigger_reserve() {
 /// The runtime must shrink the covered window before calling the provider, so the
 /// sent request holds its input and output budget inside the model window.
 #[tokio::test(flavor = "current_thread")]
-async fn compaction_shrinks_the_covered_window_to_fit_the_compactor_window() {
-    let compactor = RecordingModelProvider::with_script(vec![completed_candidate(VALID_CANDIDATE)]);
+async fn compaction_fits_each_rolling_request_before_installing_the_final_tail() {
+    let compactor = RecordingModelProvider::with_script(vec![
+        completed_candidate(VALID_CANDIDATE),
+        completed_candidate(VALID_CANDIDATE),
+    ]);
     let runtime =
         runtime_with_compactor_and_steps("compaction-window-refit", compactor.clone(), 32_000, 6);
-    for index in 0..6 {
-        let events = collect_step(
-            &runtime,
-            &format!("covered turn {index} {}", "payload ballast ".repeat(1_200)),
-            StepContext::default(),
-        )
-        .await;
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted)),
-            "seed step {index} should complete"
-        );
-    }
+    seed_rolling_history(&runtime).await;
 
     let outcome = runtime
         .compact_context_once(
@@ -455,25 +461,15 @@ async fn compaction_shrinks_the_covered_window_to_fit_the_compactor_window() {
     let requests = compactor.recorded_requests();
     assert_eq!(
         requests.len(),
-        1,
-        "the runtime fits the request before calling the provider"
+        2,
+        "fitting requires rolling, and manual compaction must complete both passes"
     );
-    let request = &requests[0];
-    let estimated_input_tokens =
-        crate::token_estimate::estimate_model_input_tokens(request.input());
-    let max_output_tokens = request
-        .generation()
-        .max_output_tokens()
-        .expect("compaction always sends an output ceiling");
-    assert!(
-        estimated_input_tokens + max_output_tokens <= 32_000,
-        "compaction request must fit the model window: input {estimated_input_tokens} plus output {max_output_tokens}"
-    );
-    assert!(
-        outcome.covered_history_item_count() < 10,
-        "the fitted window must cover fewer history items than the preferred five turns"
-    );
-    assert!(outcome.covered_history_item_count() > 0);
+    for request in &requests {
+        let (input, output) = crate::compaction::compaction_request_required_tokens(request);
+        assert!(input + output <= 32_000, "every rolling request must fit");
+    }
+    assert_eq!(outcome.covered_history_item_count(), 10);
+    assert_eq!(outcome.retained_history_item_count(), 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -901,3 +897,6 @@ async fn compaction_rejects_summary_budget_above_declared_output_limit_without_a
 
 #[path = "compaction_generation/repair.rs"]
 mod repair;
+
+#[path = "compaction_generation/boundaries.rs"]
+mod boundaries;

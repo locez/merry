@@ -14,6 +14,7 @@
 //! - [`generate`] generates a candidate and installs it;
 //! - [`install`] owns the installation transaction;
 //! - [`manual`] serves an explicit caller request;
+//! - [`progress`] decides when rolling has reached the destination body target;
 //! - [`phase`] drives the automatic hard-watermark path for one provider step.
 
 use super::{
@@ -36,7 +37,10 @@ mod install;
 mod manual;
 mod phase;
 mod plan;
+mod progress;
 mod source;
+
+pub(super) use progress::CompactionProgress;
 
 pub(super) use phase::{
     HardWatermarkCompaction, HardWatermarkOutcome, reduce_context_at_hard_watermark,
@@ -53,18 +57,17 @@ use source::manual_compaction_budget;
 
 pub(super) async fn compaction_preparation_for_budget(
     inner: &RuntimeInner,
-    budget: CompactionRequestBudget,
-) -> Result<Option<(CompactionPreparation, CompactionRequestBudget)>, RuntimeError> {
+    budget: &CompactionRequestBudget,
+) -> Result<Option<CompactionPreparation>, RuntimeError> {
     let session = inner.session.lock().await;
-    let preparation = build_preparation_for_shape(
+    build_preparation_for_shape(
         &session,
         budget.policy,
         budget.resolved_budget,
         budget.window_budget,
         budget.shape,
         CompactionCoverageBudget::unbounded(),
-    )?;
-    Ok(preparation.map(|preparation| (preparation, budget)))
+    )
 }
 
 /// Builds the preparation one shape asks for.
@@ -133,13 +136,15 @@ pub(super) struct CompactionRequestBudget {
     pub(super) resolved_budget: ResolvedCitationCompactionBudget,
     pub(super) window_budget: CompactionWindowBudget,
     pub(super) primary_window_tokens: u64,
+    pub(super) dynamic_body_estimated_tokens: u64,
     /// Initial coverage, before the measured request chooses a fallback.
     pub(super) shape: CompactionShape,
 }
 
 impl CompactionRequestBudget {
-    /// Reserves the full accepted summary and selects a bounded raw-tail target.
-    /// Both manual and automatic planning account for fixed context, tools and output.
+    /// Reserves the hard accepted summary and a bounded raw-tail target.
+    /// The install-time body is that sum plus fixed context, not half the watermark.
+    /// Both manual and automatic planning account for tools and output.
     pub(super) fn new(
         source: crate::compaction::CompactionRequestSource,
         policy: CitationCompactionPolicy,
@@ -166,8 +171,14 @@ impl CompactionRequestBudget {
             resolved_budget,
             window_budget,
             primary_window_tokens,
+            dynamic_body_estimated_tokens: request_budget.dynamic_body_estimated_tokens,
             shape: CompactionShape::SinglePass,
         })
+    }
+
+    /// Returns the destination body budget the installed checkpoint should reach.
+    pub(super) const fn target_dynamic_body_tokens(&self) -> u64 {
+        self.window_budget.target_dynamic_body_tokens()
     }
 }
 

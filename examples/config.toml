@@ -153,18 +153,23 @@ enabled = true
 # Prefer a smaller verbatim tail before archiving retained tool results.
 # Manual compaction and compaction previews apply the same destination budget.
 retained_model_turns = 5
-# Summary soft target: 3% of the primary window, clamped to 512-8192 tokens.
-# Independent hard acceptance limit: 10%, clamped to 1024-16384 tokens and at most
-# 1/8 of tiny windows. The soft target never exceeds the hard limit. Exceeding the
-# soft target alone does not fail compaction; planning reserves the hard limit.
-# Both limits count restored keep entries, rationale, refs and framing. A failed
-# candidate gets bounded corrective feedback on retry, not an identical request.
-# After compaction, prefer fixed input + summary ceiling + retained raw history.
-# Raw history targets 10% of the primary window, capped at 32768 tokens; this is
-# not half the hard watermark. If even one raw turn exceeds the target, keep the
-# minimum raw tail that fits the hard watermark rather than rejecting the step.
+# Summary soft target: 5% of the primary window, clamped to 512-8192 tokens.
+# Written into the prompt only. Hard acceptance is 10% below 32k windows so the
+# compaction request still fits, and 15% or 2.5x guidance (whichever is larger)
+# from 32k up, clamped to 20480. A 128k window therefore accepts an 8569-token
+# summary without retry; a 12k window still has room to host the request; a 2M
+# window saturates at 20480 rather than 15% of 2M. The soft target never exceeds
+# the hard limit. Planning reserves the hard limit. Both limits count restored
+# keep entries, rationale, refs and framing. A failed candidate gets bounded
+# corrective feedback on retry, not an identical request.
+# After compaction, prefer fixed input + hard summary ceiling + retained raw
+# history. Raw history targets 10% of the primary window, capped at 32768 tokens;
+# this is not half the hard watermark. The retained turn preference starts at 5
+# complete turns and shrinks to 4, 3, 2, or 1 when that suffix exceeds the token
+# budget. If even one raw turn exceeds the target, keep the minimum raw tail that
+# fits the hard watermark rather than rejecting the step.
 # The provider output allowance separately includes reasoning room.
-# target_output_tokens overrides the rendered summary ceiling, not provider output.
+# target_output_tokens overrides the hard rendered-summary ceiling, not provider output.
 # target_output_tokens = 8192
 # max_accepted_output_bytes = 65536
 # Compaction does not inherit primary reasoning_effort; omission uses the provider default.

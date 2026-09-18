@@ -10,7 +10,7 @@ use super::CompactionRequestBudget;
 use crate::{
     CitationCompactionInput, RuntimeError,
     compaction::{
-        CompactionReasoningReserve, CompactionRequestProjection,
+        CompactionReasoningReserve, CompactionRequestProjection, compaction_repair_reserve_tokens,
         compaction_request_required_tokens, compaction_window_safety_tokens,
         compile_citation_compaction_model_request,
     },
@@ -105,17 +105,23 @@ pub(super) fn compile_fitted_compaction_request(
         )
         .min(limits.max_output_tokens.unwrap_or(u64::MAX));
     let available_output_tokens = limits.window_tokens.saturating_sub(estimated_input_tokens);
-    let affordable_output_tokens = available_output_tokens
-        .saturating_sub(compaction_window_safety_tokens(available_output_tokens));
-    let output_ceiling_tokens = match policy {
-        ReservePolicy::BestEffort => affordable_output_tokens.min(reserved_output_tokens),
+    let safety_tokens = compaction_window_safety_tokens(available_output_tokens);
+    let room_tokens = available_output_tokens.saturating_sub(safety_tokens);
+    let repair_tokens = compaction_repair_reserve_tokens()?;
+    let output_ceiling_tokens = output_ceiling_tokens(
+        policy,
+        text_budget_tokens,
+        reserved_output_tokens,
+        room_tokens,
+        repair_tokens,
+    );
+    let required_output_tokens = match policy {
+        ReservePolicy::BestEffort => text_budget_tokens,
         ReservePolicy::Required => reserved_output_tokens,
     };
-    let affordable_budget = match policy {
-        ReservePolicy::BestEffort => text_budget_tokens,
-        ReservePolicy::Required => output_ceiling_tokens,
-    };
-    if affordable_output_tokens < affordable_budget {
+    // Admission uses the summary budget. Repair room is taken from leftover
+    // output so a small window can still send a first attempt.
+    if room_tokens < required_output_tokens {
         return Ok(CompactionRequestFit::WindowTooSmall {
             estimated_input_tokens,
             max_output_tokens: reserved_output_tokens,
@@ -129,6 +135,28 @@ pub(super) fn compile_fitted_compaction_request(
     Ok(CompactionRequestFit::Request {
         request: Box::new(request),
     })
+}
+
+/// Best-effort keeps repair room only when the summary still fits afterward.
+fn output_ceiling_tokens(
+    policy: ReservePolicy,
+    text_budget_tokens: u64,
+    reserved_output_tokens: u64,
+    room_tokens: u64,
+    repair_tokens: u64,
+) -> u64 {
+    match policy {
+        ReservePolicy::BestEffort => {
+            let with_repair = room_tokens.saturating_sub(repair_tokens);
+            let usable = if with_repair >= text_budget_tokens {
+                with_repair
+            } else {
+                room_tokens
+            };
+            usable.min(reserved_output_tokens)
+        }
+        ReservePolicy::Required => reserved_output_tokens,
+    }
 }
 
 pub(super) fn trace_compaction_request(

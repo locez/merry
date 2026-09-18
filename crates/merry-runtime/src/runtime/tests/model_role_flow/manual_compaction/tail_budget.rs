@@ -116,14 +116,21 @@ async fn manual_compaction_and_preview_keep_four_complete_pairs_when_five_exceed
 
 #[tokio::test(flavor = "current_thread")]
 async fn manual_tail_above_soft_target_keeps_one_pair_instead_of_filling_the_window() {
-    let (runtime, _, _) = runtime_with_tail_budget("manual-tail-soft-fallback");
-    seed_turns(&runtime, 32_000).await;
+    let (runtime, _, compactor) = runtime_with_tail_budget("manual-tail-soft-fallback");
+    seed_turns(&runtime, 4_000).await;
+    collect_step(&runtime, &"x".repeat(56_000), StepContext::default()).await;
     let preview = runtime
         .citation_compaction_input(CitationCompactionPolicy::default())
         .await
         .expect("one pair fits the hard budget")
         .expect("history is compressible");
-    assert_eq!(preview.window_plan().retained_turn_ids_u64(), vec![6]);
+    assert_eq!(preview.window_plan().retained_turn_ids_u64(), vec![7]);
+    runtime
+        .compact_context_once(CitationCompactionPolicy::default(), StepContext::default())
+        .await
+        .expect("an indivisible tail below the hard limit is acceptable")
+        .expect("checkpoint installed");
+    assert_eq!(compactor.recorded_requests().len(), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -149,4 +156,35 @@ async fn manual_compaction_rejects_a_tail_that_cannot_fit_before_calling_the_mod
     }
     assert!(compactor.recorded_requests().is_empty());
     assert!(runtime.compacted_checkpoint_summary().await.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn automatic_compaction_accepts_an_indivisible_tail_below_the_hard_limit() {
+    let (runtime, primary, compactor) = runtime_with_tail_budget("automatic-tail-soft-fallback");
+    collect_step(&runtime, &"x".repeat(180_000), StepContext::default()).await;
+    let retained = "y".repeat(56_000);
+    collect_step(&runtime, &retained, StepContext::default()).await;
+    runtime
+        .update_interactive_automatic_compaction(CompactionConfig::enabled(
+            CitationCompactionPolicy::default(),
+        ))
+        .await;
+    let events = collect_step(&runtime, "continue", StepContext::default()).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted)),
+        "{events:?}"
+    );
+    assert_eq!(compactor.recorded_requests().len(), 1);
+    let requests = primary.recorded_requests();
+    let users: Vec<_> = requests
+        .last()
+        .expect("continued request")
+        .messages()
+        .iter()
+        .filter(|message| message.role() == ModelMessageRole::User)
+        .map(|message| message.content().as_text())
+        .collect();
+    assert_eq!(users, vec![retained.as_str(), "continue"]);
 }

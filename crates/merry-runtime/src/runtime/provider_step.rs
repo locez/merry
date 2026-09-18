@@ -1,5 +1,6 @@
 use super::auto_compaction::{
-    HardWatermarkCompaction, HardWatermarkOutcome, reduce_context_at_hard_watermark,
+    CompactionProgress, HardWatermarkCompaction, HardWatermarkOutcome,
+    reduce_context_at_hard_watermark,
 };
 use super::journal_emission::{
     send_assistant_text_output_completed_events, send_assistant_text_output_delta_event,
@@ -27,18 +28,6 @@ use super::provider_stream::{
 };
 
 use super::{DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, RuntimeInner, diagnostic_from_text};
-
-/// Automatic context reductions one step may run before reporting that it cannot fit.
-///
-/// Rolling compaction covers as much history as the compaction window can host per
-/// pass, and how much a later pass covers changes with the checkpoint and the
-/// covered range, so the passes a given shrink needs are only known as they run.
-/// Shrinking a wide window to a small one can need many: at a 272k window a pass
-/// covers roughly 140k to 160k tokens of history, so a session that ran near a 1M
-/// window needs several, and a wider window reduced further needs more. The bound
-/// is deliberately generous and exists only to stop a history that cannot be
-/// reduced at all from spending model calls forever.
-const MAX_AUTO_COMPACTION_PASSES: usize = 12;
 
 use crate::{
     CheckpointDecision,
@@ -347,32 +336,20 @@ pub(super) async fn run_provider_step(
         }
     }
     if automatic_compaction_enabled
+        && let Ok(initial_budget) = &request_budget
         && matches!(
-            request_budget.as_ref().map(|budget| budget.decision),
-            Ok(CheckpointDecision::RequireCheckpoint)
+            initial_budget.decision,
+            CheckpointDecision::RequireCheckpoint
         )
     {
         // Rolling compaction: each pass covers as much history as the compaction
-        // window can host, and passes continue while the recompiled request still
-        // crosses the hard watermark. This keeps a session usable after its context
-        // window shrinks below the history it already holds, because one pass can
-        // only remove a window-worth of covered history.
-        let mut compaction_passes = 0_usize;
+        // window can host, and passes continue until the recompiled request lands
+        // under the destination body target. Crossing the hard watermark starts the
+        // work; finishing it requires the preferred tail, not merely dropping below
+        // the trigger.
+        let mut current_budget = *initial_budget;
+        let mut progress = CompactionProgress::new(current_budget.dynamic_body_estimated_tokens);
         loop {
-            if compaction_passes >= MAX_AUTO_COMPACTION_PASSES {
-                clear_current_activated_memories(inner).await;
-                let diagnostic = diagnostic_from_text(
-                    "auto_compaction",
-                    format!(
-                        "compiled request still crosses the hard context watermark after {compaction_passes} automatic context reductions; the retained history does not fit the current context window"
-                    ),
-                );
-                trace_provider_step_failed(&diagnostic);
-                let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                return;
-            }
-            compaction_passes += 1;
-
             let outcome = reduce_context_at_hard_watermark(
                 inner,
                 sender,
@@ -381,9 +358,7 @@ pub(super) async fn run_provider_step(
                 HardWatermarkCompaction {
                     policy: automatic_policy,
                     reasoning_effort: compaction_reasoning_effort.as_ref(),
-                    request_budget: request_budget
-                        .as_ref()
-                        .expect("checkpoint decision requires a resolved request budget"),
+                    request_budget: &current_budget,
                     input: &input,
                     request_inputs: &request_inputs,
                     tool_specs: tool_specs.clone(),
@@ -393,31 +368,34 @@ pub(super) async fn run_provider_step(
                 },
             )
             .await;
-            let replacement_outcome = match outcome {
-                HardWatermarkOutcome::Continue { replacement } => replacement,
+            let (replacement_outcome, target_dynamic_body_tokens) = match outcome {
+                HardWatermarkOutcome::Continue {
+                    replacement,
+                    target_dynamic_body_tokens,
+                } => (replacement, target_dynamic_body_tokens),
                 HardWatermarkOutcome::Aborted => return,
             };
             let installed_replacement = replacement_outcome.is_some();
 
             let refreshed = {
                 let session = inner.session.lock().await;
-                match step_request_inputs_from_session(
+                step_request_inputs_from_session(
                     &session,
                     plan_subagent_control.clone(),
                     inner.coordinator_plan_tools,
-                ) {
-                    Ok(inputs) => inputs,
-                    Err(error) => {
-                        clear_current_activated_memories(inner).await;
-                        let diagnostic =
-                            diagnostic_from_text("auto_compaction_projection", error.to_string());
-                        trace_provider_step_failed(&diagnostic);
-                        let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                        return;
-                    }
+                )
+            };
+            request_inputs = match refreshed {
+                Ok(inputs) => inputs,
+                Err(error) => {
+                    clear_current_activated_memories(inner).await;
+                    let diagnostic =
+                        diagnostic_from_text("auto_compaction_projection", error.to_string());
+                    trace_provider_step_failed(&diagnostic);
+                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                    return;
                 }
             };
-            request_inputs = refreshed;
             request = match compile_step_request_from_inputs(
                 &input,
                 provider_config.model(),
@@ -438,24 +416,27 @@ pub(super) async fn run_provider_step(
             };
             request_budget =
                 request_context_budget(provider.capabilities(), &request, context_window_override);
-            if let Err(error) = &request_budget {
-                trace_provider_request_budget_unavailable(
-                    inner.session_id.as_str(),
-                    provider.name().as_str(),
-                    &request,
-                    error,
-                );
-                clear_current_activated_memories(inner).await;
-                let diagnostic = diagnostic_from_text(
-                    "auto_compaction",
-                    format!(
-                        "cannot confirm request budget after automatic context reduction: {error}"
-                    ),
-                );
-                trace_provider_step_failed(&diagnostic);
-                let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                return;
-            }
+            current_budget = match &request_budget {
+                Ok(budget) => *budget,
+                Err(error) => {
+                    trace_provider_request_budget_unavailable(
+                        inner.session_id.as_str(),
+                        provider.name().as_str(),
+                        &request,
+                        error,
+                    );
+                    clear_current_activated_memories(inner).await;
+                    let diagnostic = diagnostic_from_text(
+                        "auto_compaction",
+                        format!(
+                            "cannot confirm request budget after automatic context reduction: {error}"
+                        ),
+                    );
+                    trace_provider_step_failed(&diagnostic);
+                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                    return;
+                }
+            };
 
             let compaction_event_sent = match replacement_outcome {
                 Some(outcome) => {
@@ -474,24 +455,21 @@ pub(super) async fn run_provider_step(
                 return;
             }
 
-            let still_requires_checkpoint = matches!(
-                request_budget.as_ref().map(|budget| budget.decision),
-                Ok(CheckpointDecision::RequireCheckpoint)
-            );
-            if !still_requires_checkpoint {
-                break;
-            }
-            if !installed_replacement {
-                // Archive-only reduction made no further room and installed no
-                // checkpoint, so another pass would repeat the same attempt.
-                clear_current_activated_memories(inner).await;
-                let diagnostic = diagnostic_from_text(
-                    "auto_compaction",
-                    "compiled request remains at or above the hard context watermark after automatic context reduction",
-                );
-                trace_provider_step_failed(&diagnostic);
-                let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                return;
+            match progress.observe(
+                current_budget.dynamic_body_estimated_tokens,
+                target_dynamic_body_tokens,
+                current_budget.budget.hard_water_tokens(),
+                installed_replacement,
+            ) {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(error) => {
+                    clear_current_activated_memories(inner).await;
+                    let diagnostic = diagnostic_from_text("auto_compaction", error.to_string());
+                    trace_provider_step_failed(&diagnostic);
+                    let _ = send_failed_event(inner, sender, token, diagnostic).await;
+                    return;
+                }
             }
         }
     }

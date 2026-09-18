@@ -90,6 +90,19 @@ impl CompactionWindowBudget {
         self.max_dynamic_body_tokens
     }
 
+    /// Returns the dynamic-body target used after a checkpoint is installed.
+    ///
+    /// The preferred budget includes the fixed request body, the accepted
+    /// checkpoint ceiling, and the bounded raw-history target. It is distinct
+    /// from the hard watermark: the latter decides when compaction is required,
+    /// while this target decides when repeated compaction has done enough work.
+    pub(crate) const fn target_dynamic_body_tokens(self) -> u64 {
+        match self.preferred_dynamic_body_tokens {
+            Some(tokens) => tokens,
+            None => self.max_dynamic_body_tokens,
+        }
+    }
+
     pub(crate) const fn replacement_fixed_dynamic_body_tokens(self) -> u64 {
         self.replacement_fixed_dynamic_body_tokens
     }

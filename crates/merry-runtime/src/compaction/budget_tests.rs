@@ -1,6 +1,6 @@
 use super::{
     CitationCompactionPolicy, CompactionError, CompactionReasoningReserve, CompactionWindowBudget,
-    tightened_covered_budget,
+    retained_turn_fallbacks, tightened_covered_budget,
 };
 
 #[test]
@@ -20,11 +20,11 @@ fn changing_retention_preserves_other_policy_settings() {
 fn destination_window_bounds_summary_and_retained_history_independently() {
     for (window, summary_target, summary_limit, history_target) in [
         (8, 1, 1, 1),
-        (64_000, 1_920, 6_400, 6_400),
-        (128_000, 3_840, 12_800, 12_800),
-        (272_000, 8_160, 16_384, 27_200),
-        (1_000_000, 8_192, 16_384, 32_768),
-        (2_000_000, 8_192, 16_384, 32_768),
+        (64_000, 3_200, 9_600, 6_400),
+        (128_000, 6_400, 19_200, 12_800),
+        (272_000, 8_192, 20_480, 27_200),
+        (1_000_000, 8_192, 20_480, 32_768),
+        (2_000_000, 8_192, 20_480, 32_768),
     ] {
         let budget = CitationCompactionPolicy::default()
             .resolve(window)
@@ -38,6 +38,53 @@ fn destination_window_bounds_summary_and_retained_history_independently() {
         .resolve(64_000)
         .expect("destination budget resolves");
     assert_eq!(explicit.retained_history_token_target(), 6_400);
+}
+
+#[test]
+fn hard_acceptance_covers_a_modest_overshoot_without_a_huge_window_percentage() {
+    let observed_overshoot = 8_569;
+    let compact = CitationCompactionPolicy::default()
+        .resolve(128_000)
+        .expect("128k budget resolves");
+    assert!(compact.target_output_tokens() < observed_overshoot);
+    assert!(compact.output_token_limit() >= observed_overshoot);
+    assert_eq!(compact.retained_history_token_target(), 12_800);
+
+    let huge = CitationCompactionPolicy::default()
+        .resolve(2_000_000)
+        .expect("2m budget resolves");
+    assert_eq!(huge.target_output_tokens(), 8_192);
+    assert_eq!(huge.output_token_limit(), 20_480);
+    assert!(huge.output_token_limit() * 20 < 2_000_000);
+}
+
+#[test]
+fn install_target_is_the_window_derived_body_not_half_the_watermark() {
+    let resolved = CitationCompactionPolicy::default()
+        .resolve(128_000)
+        .expect("128k budget resolves");
+    let hard_watermark = 102_400;
+    let budget = CompactionWindowBudget::new(
+        128_000,
+        hard_watermark,
+        2_000,
+        2_000,
+        resolved.output_token_limit(),
+    )
+    .expect("valid window budget")
+    .with_retained_history_target(resolved.retained_history_token_target())
+    .expect("valid history target");
+    let expected = 2_000 + resolved.output_token_limit() + resolved.retained_history_token_target();
+    assert_eq!(budget.target_dynamic_body_tokens(), expected);
+    assert_ne!(budget.target_dynamic_body_tokens(), hard_watermark / 2);
+    assert!(budget.target_dynamic_body_tokens() < hard_watermark);
+}
+
+#[test]
+fn retained_turn_fallbacks_try_the_longest_complete_suffix() {
+    assert_eq!(retained_turn_fallbacks(5, 8), vec![5, 4, 3, 2, 1]);
+    assert_eq!(retained_turn_fallbacks(5, 3), vec![3, 2, 1]);
+    assert_eq!(retained_turn_fallbacks(5, 0), Vec::<usize>::new());
 }
 
 #[test]
@@ -70,8 +117,8 @@ fn summary_target_is_bounded_independently_of_reasoning_output() {
     for window in [64_000, 272_000, 1_000_000, 2_000_000] {
         let budget = policy.resolve(window).expect("valid budget");
         assert!(budget.target_output_tokens() <= 8192);
-        assert!(budget.output_token_limit() <= 16384);
-        assert!(budget.output_token_limit() < window / 8);
+        assert!(budget.output_token_limit() <= 20_480);
+        assert!(budget.output_token_limit() <= window * 15 / 100);
         assert!(budget.target_output_tokens() < budget.output_token_limit());
         assert!(
             CompactionReasoningReserve::INITIAL.output_ceiling(budget, window, window / 2)
@@ -103,7 +150,7 @@ fn reasoning_reserve_grows_with_request_input_instead_of_the_text_budget() {
     let text_budget = resolved.output_token_limit();
     let measured_input_tokens = 220_000;
 
-    assert_eq!(text_budget, 16_384);
+    assert_eq!(text_budget, 20_480);
     let ceiling = CompactionReasoningReserve::INITIAL.output_ceiling(
         resolved,
         272_000,
@@ -152,14 +199,14 @@ fn adaptive_budget_scales_for_64k_and_256k_windows() {
             .resolve(64_000)
             .expect("64k budget resolves")
             .output_token_limit(),
-        6_400
+        9_600
     );
     assert_eq!(
         policy
             .resolve(256_000)
             .expect("256k budget resolves")
             .output_token_limit(),
-        16_384
+        20_480
     );
 }
 
@@ -179,7 +226,7 @@ fn adaptive_budget_clamps_low_and_high_windows() {
             .resolve(1_000_000)
             .expect("high budget resolves")
             .output_token_limit(),
-        16_384
+        20_480
     );
 }
 
@@ -189,7 +236,7 @@ fn explicit_output_limit_overrides_adaptive_ceiling() {
         CitationCompactionPolicy::new(Some(9_000), None, 5).expect("valid override policy");
     let budget = policy.resolve(64_000).expect("override budget resolves");
 
-    assert_eq!(budget.target_output_tokens(), 1_920);
+    assert_eq!(budget.target_output_tokens(), 3_200);
     assert_eq!(budget.output_token_limit(), 9_000);
     assert_eq!(budget.max_accepted_output_bytes(), 72_000);
 }

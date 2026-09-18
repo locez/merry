@@ -95,7 +95,7 @@ async fn compaction_uses_context_compaction_role_when_configured() {
         .expect("manual compaction input exists");
     assert_eq!(
         prepared.resolved_budget().output_token_limit(),
-        6_400,
+        9_600,
         "manual input budget must come from the 64k primary window"
     );
 

@@ -61,7 +61,14 @@ pub(in crate::runtime) async fn generate_and_install_compaction(
                 .await;
             }
             Err(RuntimeError::CompactionModelTruncated { message }) => {
-                if attempt > MAX_COMPACTION_TRUNCATION_REFITS {
+                let previous_output_tokens =
+                    plan.request.generation().max_output_tokens().unwrap_or(0);
+                if attempt > MAX_COMPACTION_TRUNCATION_REFITS
+                    || provider
+                        .capabilities()
+                        .max_output_tokens()
+                        .is_some_and(|limit| previous_output_tokens >= limit)
+                {
                     return Err(RuntimeError::CompactionModelTruncated { message });
                 }
                 let next_reserve = plan.reserve.degraded();
@@ -101,6 +108,15 @@ pub(in crate::runtime) async fn generate_and_install_compaction(
                     // caller announced.
                     return Err(RuntimeError::CompactionModelTruncated { message });
                 };
+                if next_plan
+                    .request
+                    .generation()
+                    .max_output_tokens()
+                    .unwrap_or(0)
+                    <= previous_output_tokens
+                {
+                    return Err(RuntimeError::CompactionModelTruncated { message });
+                }
                 tracing::debug!(
                     event = "runtime.compaction.truncation_refit",
                     session_id = inner.session_id.as_str(),

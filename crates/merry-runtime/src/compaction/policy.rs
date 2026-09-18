@@ -9,12 +9,24 @@ pub struct CitationCompactionPolicy {
     one_shot_retained_tool_exchanges: usize,
 }
 
-const SOFT_CHECKPOINT_WINDOW_PERCENT: u64 = 3;
-const HARD_CHECKPOINT_WINDOW_PERCENT: u64 = 10;
-const MIN_CHECKPOINT_TARGET_TOKENS: u64 = 512;
-const MAX_CHECKPOINT_TARGET_TOKENS: u64 = 8_192;
-const MIN_CHECKPOINT_OUTPUT_TOKENS: u64 = 1_024;
-const MAX_CHECKPOINT_OUTPUT_TOKENS: u64 = 16_384;
+/// Prompt guidance as a share of the destination window. This is not an
+/// acceptance limit: the model may exceed it up to the hard ceiling.
+const GUIDANCE_WINDOW_PERCENT: u64 = 5;
+const MIN_GUIDANCE_TOKENS: u64 = 512;
+const MAX_GUIDANCE_TOKENS: u64 = 8_192;
+/// Hard acceptance is generous enough that a typical overshoot does not spend
+/// another model call, without starving the compaction request on a small
+/// window. Below 32k the share stays at 10%; at 32k and above it is 15% or
+/// 2.5× guidance, whichever is larger, then clamped to 20480. A 128k window
+/// therefore accepts an 8569-token summary; a 12k window still has room to
+/// host the request; a 2M window saturates at 20480 rather than 15% of 2M.
+const ACCEPTANCE_OVERSHOOT_NUMERATOR: u64 = 5;
+const ACCEPTANCE_OVERSHOOT_DENOMINATOR: u64 = 2;
+const SMALL_WINDOW_TOKENS: u64 = 32_000;
+const SMALL_WINDOW_ACCEPTANCE_PERCENT: u64 = 10;
+const ACCEPTANCE_WINDOW_PERCENT: u64 = 15;
+const MIN_ACCEPTANCE_TOKENS: u64 = 1_024;
+const MAX_ACCEPTANCE_TOKENS: u64 = 20_480;
 const RETAINED_HISTORY_WINDOW_PERCENT: u64 = 10;
 const MAX_RETAINED_HISTORY_TOKENS: u64 = 32_768;
 /// Bytes per token used to convert an accepted-checkpoint byte cap into tokens.
@@ -59,7 +71,7 @@ impl CitationCompactionPolicy {
     }
 
     #[must_use]
-    /// Optional override of the rendered summary ceiling, not provider output.
+    /// Optional override of the hard rendered-summary ceiling, not provider output.
     pub fn target_output_tokens(self) -> Option<u64> {
         self.target_output_tokens
     }
@@ -107,7 +119,12 @@ impl CitationCompactionPolicy {
         })
     }
 
-    /// Resolves bounded summary limits for the destination window; rejects zero and overflow.
+    /// Resolves prompt guidance, hard acceptance, and the preferred raw tail.
+    ///
+    /// These three numbers stay independent: the prompt aims at the soft target,
+    /// validation accepts anything up to the hard ceiling, and installation
+    /// reserves that ceiling plus the retained-history target. Rejects a zero
+    /// window and arithmetic overflow.
     pub fn resolve(
         self,
         primary_window_tokens: u64,
@@ -117,23 +134,12 @@ impl CitationCompactionPolicy {
                 field: "primary_window_tokens",
             });
         }
-        let target_output_tokens = primary_window_tokens
-            .checked_mul(SOFT_CHECKPOINT_WINDOW_PERCENT)
-            .and_then(|value| value.checked_div(100))
-            .ok_or(CompactionError::BudgetOverflow)?
-            .clamp(MIN_CHECKPOINT_TARGET_TOKENS, MAX_CHECKPOINT_TARGET_TOKENS);
-        let automatic = primary_window_tokens
-            .checked_mul(HARD_CHECKPOINT_WINDOW_PERCENT)
-            .and_then(|value| value.checked_div(100))
-            .ok_or(CompactionError::BudgetOverflow)?
-            .clamp(MIN_CHECKPOINT_OUTPUT_TOKENS, MAX_CHECKPOINT_OUTPUT_TOKENS)
-            .min((primary_window_tokens / 8).max(1));
-        let retained_history_token_target = primary_window_tokens
-            .checked_mul(RETAINED_HISTORY_WINDOW_PERCENT)
-            .and_then(|value| value.checked_div(100))
-            .ok_or(CompactionError::BudgetOverflow)?
-            .clamp(1, MAX_RETAINED_HISTORY_TOKENS);
-        let output_token_limit = self.target_output_tokens.unwrap_or(automatic);
+        let (target_output_tokens, automatic_acceptance) =
+            window_summary_limits(primary_window_tokens)?;
+        let retained_history_token_target =
+            window_share(primary_window_tokens, RETAINED_HISTORY_WINDOW_PERCENT)?
+                .clamp(1, MAX_RETAINED_HISTORY_TOKENS);
+        let output_token_limit = self.target_output_tokens.unwrap_or(automatic_acceptance);
         let derived_bytes = output_token_limit
             .checked_mul(DEFAULT_ACCEPTED_OUTPUT_BYTES_PER_TOKEN)
             .and_then(|value| usize::try_from(value).ok())
@@ -148,6 +154,40 @@ impl CitationCompactionPolicy {
     }
 }
 
+fn window_share(window_tokens: u64, percent: u64) -> Result<u64, CompactionError> {
+    window_tokens
+        .checked_mul(percent)
+        .and_then(|value| value.checked_div(100))
+        .ok_or(CompactionError::BudgetOverflow)
+}
+
+/// Returns `(guidance, acceptance)` for one destination window.
+fn window_summary_limits(window_tokens: u64) -> Result<(u64, u64), CompactionError> {
+    let guidance = window_share(window_tokens, GUIDANCE_WINDOW_PERCENT)?
+        .clamp(MIN_GUIDANCE_TOKENS, MAX_GUIDANCE_TOKENS);
+    let scaled = guidance
+        .checked_mul(ACCEPTANCE_OVERSHOOT_NUMERATOR)
+        .and_then(|value| value.checked_div(ACCEPTANCE_OVERSHOOT_DENOMINATOR))
+        .ok_or(CompactionError::BudgetOverflow)?;
+    let share_percent = if window_tokens < SMALL_WINDOW_TOKENS {
+        SMALL_WINDOW_ACCEPTANCE_PERCENT
+    } else {
+        ACCEPTANCE_WINDOW_PERCENT
+    };
+    let window_share_tokens = window_share(window_tokens, share_percent)?.max(1);
+    let unclamped = if window_tokens < SMALL_WINDOW_TOKENS {
+        window_share_tokens
+    } else {
+        scaled.max(window_share_tokens)
+    };
+    let mut acceptance = unclamped.clamp(MIN_ACCEPTANCE_TOKENS, MAX_ACCEPTANCE_TOKENS);
+    if window_tokens < SMALL_WINDOW_TOKENS {
+        acceptance = acceptance.min((window_tokens / 8).max(1));
+    }
+    let acceptance = acceptance.min(window_tokens.saturating_sub(1).max(1));
+    Ok((guidance.min(acceptance), acceptance))
+}
+
 impl Default for CitationCompactionPolicy {
     fn default() -> Self {
         Self {
@@ -159,7 +199,11 @@ impl Default for CitationCompactionPolicy {
     }
 }
 
-/// Summary ceilings and preferred raw-history budget for a destination window.
+/// Soft guidance, hard acceptance, and the preferred raw-history budget.
+///
+/// The install-time body target is not stored here. The runtime builds it from
+/// this hard ceiling plus the retained-history target and the fixed request body,
+/// rather than from half the hard watermark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedCitationCompactionBudget {
     target_output_tokens: u64,
@@ -188,14 +232,16 @@ impl ResolvedCitationCompactionBudget {
         self.retained_history_token_target
     }
 
-    /// Window-derived soft target; exceeding it is allowed within the hard ceiling.
+    /// Prompt guidance written into the compaction instruction.
+    /// Exceeding it is allowed within [`Self::output_token_limit`].
     #[must_use]
     pub fn target_output_tokens(self) -> u64 {
         self.target_output_tokens
     }
 
     #[must_use]
-    /// Maximum accepted rendered summary size, including checkpoint framing.
+    /// Hard rendered-summary ceiling, including restored keep entries and framing.
+    /// Crossing it repairs; staying under it installs without another model call.
     pub fn output_token_limit(self) -> u64 {
         self.output_token_limit
     }

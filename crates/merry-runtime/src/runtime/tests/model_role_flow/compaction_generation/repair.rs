@@ -3,7 +3,7 @@ use crate::compaction::compaction_request_required_tokens;
 use crate::token_estimate::estimate_text_tokens;
 use serde_json::Value;
 
-fn repair_payload(request: &ModelRequest) -> Value {
+pub(super) fn repair_payload(request: &ModelRequest) -> Value {
     let text = request
         .messages()
         .last()
@@ -42,11 +42,11 @@ async fn window_128k_accepts_summary_above_soft_target_without_retry() {
         .expect("installed context")
         .to_snapshot();
     let tokens = estimate_text_tokens(&summary);
-    assert!(tokens > 3_840 && tokens < 12_800);
+    assert!(tokens > 6_400 && tokens < 19_200);
     assert_eq!(compactor.recorded_requests().len(), 1);
     assert!(logs.contains("\"event\":\"runtime.compaction.candidate_evaluated\""));
-    assert!(logs.contains("\"soft_target_tokens\":3840"));
-    assert!(logs.contains("\"hard_limit_tokens\":12800"));
+    assert!(logs.contains("\"soft_target_tokens\":6400"));
+    assert!(logs.contains("\"hard_limit_tokens\":19200"));
     assert!(logs.contains("\"accepted\":true"));
 }
 

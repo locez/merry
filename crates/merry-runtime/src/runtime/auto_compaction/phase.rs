@@ -61,6 +61,8 @@ pub(in crate::runtime) enum HardWatermarkOutcome {
     Continue {
         /// Installed replacement, when compaction replaced the checkpoint.
         replacement: Option<CompactionOutcome>,
+        /// Destination dynamic-body target for this compaction pass.
+        target_dynamic_body_tokens: u64,
     },
     /// The phase already emitted the step's terminal event; the caller returns.
     Aborted,
@@ -125,7 +127,7 @@ pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
             .await;
         }
     };
-    let budget = match CompactionRequestBudget::new(
+    let compaction_budget = match CompactionRequestBudget::new(
         source,
         policy,
         request_budget,
@@ -134,9 +136,18 @@ pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
         Ok(budget) => budget,
         Err(error) => return abort_with_error(inner, sender, token, error.into()).await,
     };
-    let preparation = compaction_preparation_for_budget(inner, budget).await;
-    let (preparation, compaction_budget) = match preparation {
+    let preparation = compaction_preparation_for_budget(inner, &compaction_budget).await;
+    let preparation = match preparation {
         Ok(Some(preparation)) => preparation,
+        Ok(None)
+            if request_budget.dynamic_body_estimated_tokens
+                < compaction_budget.window_budget.max_dynamic_body_tokens() =>
+        {
+            return HardWatermarkOutcome::Continue {
+                replacement: None,
+                target_dynamic_body_tokens: compaction_budget.target_dynamic_body_tokens(),
+            };
+        }
         Ok(None) => {
             return abort_with_diagnostic(
                 inner,
@@ -176,7 +187,10 @@ pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
                     {
                         return HardWatermarkOutcome::Aborted;
                     }
-                    HardWatermarkOutcome::Continue { replacement: None }
+                    HardWatermarkOutcome::Continue {
+                        replacement: None,
+                        target_dynamic_body_tokens: compaction_budget.target_dynamic_body_tokens(),
+                    }
                 }
                 CompactionAttempt::Generate(plan) => {
                     if !send_compaction_started_event(inner, sender, token).await {
@@ -194,6 +208,8 @@ pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
                     {
                         Ok(replacement) => HardWatermarkOutcome::Continue {
                             replacement: Some(replacement),
+                            target_dynamic_body_tokens: compaction_budget
+                                .target_dynamic_body_tokens(),
                         },
                         Err(error) => abort_with_error(inner, sender, token, error).await,
                     }
@@ -206,7 +222,10 @@ pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
             {
                 return HardWatermarkOutcome::Aborted;
             }
-            HardWatermarkOutcome::Continue { replacement: None }
+            HardWatermarkOutcome::Continue {
+                replacement: None,
+                target_dynamic_body_tokens: compaction_budget.target_dynamic_body_tokens(),
+            }
         }
     }
 }

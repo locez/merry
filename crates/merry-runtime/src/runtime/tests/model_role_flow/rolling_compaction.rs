@@ -47,6 +47,15 @@ const ROLLING_CANDIDATE: &str = r#"{
 /// request fits the new watermark.
 #[tokio::test(flavor = "current_thread")]
 async fn automatic_compaction_rolls_when_the_window_shrinks_below_the_history() {
+    assert_rolling_reaches_retained_tail(false).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn manual_compaction_rolls_until_the_destination_tail_fits() {
+    assert_rolling_reaches_retained_tail(true).await;
+}
+
+async fn assert_rolling_reaches_retained_tail(manual: bool) {
     let primary = RecordingModelProvider::with_script_and_capabilities(
         (0..70)
             .map(|_| ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]))
@@ -71,7 +80,7 @@ async fn automatic_compaction_rolls_when_the_window_shrinks_below_the_history() 
             .expect("valid compactor capabilities"),
     );
     let runtime = Runtime::builder(session_id("rolling-compaction-window-shrink"))
-        .model_provider(Arc::new(primary), model_name())
+        .model_provider(Arc::new(primary.clone()), model_name())
         .model_provider_for_role(
             RuntimeModelRole::ContextCompaction,
             Arc::new(compactor.clone()),
@@ -99,6 +108,18 @@ async fn automatic_compaction_rolls_when_the_window_shrinks_below_the_history() 
     runtime
         .update_interactive_context_window_tokens(NonZeroU64::new(64_000))
         .await;
+    let manual_outcome = if manual {
+        Some(
+            runtime
+                .compact_context_once(CitationCompactionPolicy::default(), StepContext::default())
+                .await
+                .expect("manual rolling succeeds")
+                .expect("installed checkpoint"),
+        )
+    } else {
+        None
+    };
+    let calls_before_step = compactor.recorded_requests().len();
     let events = collect_step(
         &runtime,
         "final turn after the window shrank",
@@ -124,6 +145,27 @@ async fn automatic_compaction_rolls_when_the_window_shrinks_below_the_history() 
         "passes must stay inside the rolling bound, got {}",
         requests.len()
     );
+    let primary_requests = primary.recorded_requests();
+    let resumed = primary_requests.last().expect("resumed primary request");
+    let raw_users = resumed
+        .messages()
+        .iter()
+        .filter(|message| message.role() == merry_llm::ModelMessageRole::User)
+        .count();
+    assert!(
+        raw_users <= 6,
+        "rolling must reach the bounded tail, not just the trigger"
+    );
+    if let Some(outcome) = manual_outcome {
+        assert_eq!(
+            calls_before_step,
+            requests.len(),
+            "manual compaction must finish the reduction"
+        );
+        assert_eq!(outcome.covered_model_turn_count(), 61 - raw_users);
+        assert_eq!(outcome.covered_history_item_count(), (61 - raw_users) * 2);
+        assert_eq!(outcome.retained_history_item_count(), (raw_users - 1) * 2);
+    }
 }
 
 /// A window that shrank far below the history is reduced in one pass.

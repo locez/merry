@@ -591,7 +591,9 @@ impl Runtime {
         .await
     }
 
-    /// Runs one model-backed compaction pass when a compressible history prefix exists.
+    /// Reduces history toward the destination budget, using bounded rolling passes if needed.
+    /// Returns aggregate coverage and the final checkpoint. Each pass installs durably;
+    /// cancellation or a later failure preserves any previously installed checkpoint.
     pub async fn compact_context_once(
         &self,
         policy: CitationCompactionPolicy,

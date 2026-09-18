@@ -39,6 +39,15 @@ pub enum CompactionError {
     #[error("no compaction window fits the compaction request budget")]
     NoWindowFitsCompactionRequest,
 
+    #[error(
+        "compaction cannot reduce the request below the hard watermark after {passes} passes: estimated {estimated_tokens} tokens, limit {hard_limit_tokens}"
+    )]
+    ConvergenceExhausted {
+        passes: usize,
+        estimated_tokens: u64,
+        hard_limit_tokens: u64,
+    },
+
     #[error("compaction payload serialization failed: {message}")]
     PayloadSerialization { message: String },
 
@@ -97,6 +106,7 @@ pub(crate) use budget::{
 };
 pub(crate) use policy::CitationCompactionInputPolicy;
 pub use policy::{CitationCompactionPolicy, ResolvedCitationCompactionBudget};
+pub(crate) use repair::compaction_repair_reserve_tokens;
 pub(crate) use request::{
     CompactionRequestMode, CompactionRequestProjection, CompactionRequestSource,
     compile_citation_compaction_model_request,
@@ -118,6 +128,21 @@ pub struct CompactionOutcome {
 }
 
 impl CompactionOutcome {
+    /// Aggregates rolling coverage while keeping the final checkpoint and retained tail.
+    pub(crate) fn followed_by(self, next: Self) -> Result<Self, CompactionError> {
+        Ok(Self {
+            covered_model_turn_count: self
+                .covered_model_turn_count
+                .checked_add(next.covered_model_turn_count)
+                .ok_or(CompactionError::BudgetOverflow)?,
+            covered_history_item_count: self
+                .covered_history_item_count
+                .checked_add(next.covered_history_item_count)
+                .ok_or(CompactionError::BudgetOverflow)?,
+            ..next
+        })
+    }
+
     pub(crate) fn new(
         checkpoint_id: CheckpointId,
         covered_model_turn_count: usize,
