@@ -144,16 +144,41 @@ roots = [
 ]
 
 [runtime.auto_compaction]
-# Automatic compaction runs when dynamic context crosses the runtime hard
-# watermark. Current user input is not included in the compaction input.
+# Automatic compaction runs at the hard watermark. It first appends a summary
+# directive to the unchanged session request, including its tools and history.
+# Current input and retained turns remain visible but are excluded from the summary.
 enabled = true
-# Retain this many recent completed model turns verbatim. Aborted turns after
-# the retained boundary stay verbatim without consuming this count.
+# Maximum recent completed turns to retain. Choose the largest complete suffix
+# that fits the token budget: 5, 4, 3, 2, 1. Never split a turn or tool exchange.
+# Prefer a smaller verbatim tail before archiving retained tool results.
+# Manual compaction and compaction previews apply the same destination budget.
 retained_model_turns = 5
-# By default the checkpoint output budget is 8% of the primary model window,
-# clamped to 2048-32768 tokens. These optional fields override that calculation.
+# Summary soft target: 5% of the primary window, clamped to 512-8192 tokens.
+# Written into the prompt only. Hard acceptance is 10% below 32k windows so the
+# compaction request still fits, and 15% or 2.5x guidance (whichever is larger)
+# from 32k up, clamped to 20480. A 128k window therefore accepts an 8569-token
+# summary without retry; a 12k window still has room to host the request; a 2M
+# window saturates at 20480 rather than 15% of 2M. The soft target never exceeds
+# the hard limit. Planning reserves the hard limit. Both limits count restored
+# keep entries, rationale, refs and framing. A failed candidate gets bounded
+# corrective feedback on retry, not an identical request.
+# After compaction, prefer fixed input + hard summary ceiling + retained raw
+# history. Raw history targets 10% of the primary window, capped at 32768 tokens;
+# this is not half the hard watermark. The retained turn preference starts at 5
+# complete turns and shrinks to 4, 3, 2, or 1 when that suffix exceeds the token
+# budget. If even one raw turn exceeds the target, keep the minimum raw tail that
+# fits the hard watermark rather than rejecting the step.
+# The provider output allowance separately includes reasoning room.
+# target_output_tokens overrides the hard rendered-summary ceiling, not provider output.
 # target_output_tokens = 8192
 # max_accepted_output_bytes = 65536
+# Compaction does not inherit primary reasoning_effort; omission uses the provider default.
+# reasoning_effort = "medium"
+# When the full request cannot fit, rebuild once with only user/assistant history
+# and this many newest covered tool exchanges. Reduce the count down to zero if
+# necessary; roll over text only as a last resort. Exact artifacts remain on disk.
+# one_shot_retained_tool_exchanges = 5
+# one_shot_window_percent was removed: actual request fit replaces ratio thresholds.
 
 [runtime.subagents]
 # Disabled by default. Enable this to expose spawn_subagents, wait_subagents,

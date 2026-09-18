@@ -13,10 +13,9 @@ use merry_core::{InteractiveRunState, RuntimeEvent};
 use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelResponse};
 use merry_process::ProcessSession;
 use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, AutomaticCompactionConfig,
-    ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
-    StaticPermissionedProcessRunnerFactory, StepContext,
+    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, CompactionConfig, ProcessActionIntent,
+    ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
+    ProcessRunnerFuture, ProcessRunnerOutput, StaticPermissionedProcessRunnerFactory, StepContext,
 };
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Notify;
@@ -98,7 +97,7 @@ async fn runtime_process_stays_running_and_animates_until_the_backend_completes(
                 permissioned_factory,
             )),
             extra_tools: Vec::new(),
-            automatic_compaction: AutomaticCompactionConfig::disabled(),
+            automatic_compaction: CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             approval_review: None,

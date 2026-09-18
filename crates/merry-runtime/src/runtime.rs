@@ -60,7 +60,7 @@ use self::auto_compaction::{
 pub use self::builder::RuntimeBuilder;
 #[cfg(test)]
 use self::checkpoint_ref_tool::merry_read_checkpoint_ref_tool_name;
-pub use self::config::AutomaticCompactionConfig;
+pub use self::config::CompactionConfig;
 use self::diagnostics::{
     APPLY_PATCH_TOOL_NAME, DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
     DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, DIAGNOSTIC_TOOL_NOT_REGISTERED,
@@ -591,7 +591,9 @@ impl Runtime {
         .await
     }
 
-    /// Runs one model-backed compaction pass when a compressible history prefix exists.
+    /// Reduces history toward the destination budget, using bounded rolling passes if needed.
+    /// Returns aggregate coverage and the final checkpoint. Each pass installs durably;
+    /// cancellation or a later failure preserves any previously installed checkpoint.
     pub async fn compact_context_once(
         &self,
         policy: CitationCompactionPolicy,
@@ -617,8 +619,8 @@ impl Runtime {
 
 impl Runtime {
     /// Returns the automatic compaction policy used by subsequent requests.
-    pub async fn automatic_compaction_config(&self) -> AutomaticCompactionConfig {
-        *self.inner.automatic_compaction.read().await
+    pub async fn automatic_compaction_config(&self) -> CompactionConfig {
+        self.inner.automatic_compaction.read().await.clone()
     }
 
     pub(crate) async fn update_interactive_primary_model(
@@ -646,10 +648,7 @@ impl Runtime {
         manager.update_policy(enabled, config).await
     }
 
-    pub(crate) async fn update_interactive_automatic_compaction(
-        &self,
-        config: AutomaticCompactionConfig,
-    ) {
+    pub(crate) async fn update_interactive_automatic_compaction(&self, config: CompactionConfig) {
         *self.inner.automatic_compaction.write().await = config;
     }
 

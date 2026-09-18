@@ -14,6 +14,29 @@ use crate::{
 use merry_llm::{FinishReason, ModelCapabilities, ModelEvent, ModelName, ModelOutput};
 use std::sync::Arc;
 
+mod tail_budget;
+
+/// Asserts one compaction request fits `window_tokens` with room to reason.
+///
+/// The ceiling is the checkpoint text budget plus the reasoning reserve, so the
+/// contract is that the whole request stays inside the window and that the
+/// reserve is strictly larger than the text budget alone.
+fn assert_compaction_request_fits(request: &merry_llm::ModelRequest, window_tokens: u64) {
+    let text_budget = request
+        .generation()
+        .max_output_tokens()
+        .expect("compaction always sends an output ceiling");
+    let estimated_input = crate::token_estimate::estimate_model_input_tokens(request.input());
+    assert!(
+        estimated_input + text_budget <= window_tokens,
+        "compaction request must fit the window: input {estimated_input} plus output {text_budget} exceeds {window_tokens}"
+    );
+    assert!(
+        text_budget > window_tokens * 8 / 100,
+        "the output ceiling must reserve reasoning room above the checkpoint text budget, got {text_budget}"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_uses_context_compaction_role_when_configured() {
     let primary = RecordingModelProvider::with_script_and_capabilities(
@@ -72,7 +95,7 @@ async fn compaction_uses_context_compaction_role_when_configured() {
         .expect("manual compaction input exists");
     assert_eq!(
         prepared.resolved_budget().output_token_limit(),
-        5_120,
+        9_600,
         "manual input budget must come from the 64k primary window"
     );
 
@@ -89,13 +112,7 @@ async fn compaction_uses_context_compaction_role_when_configured() {
         compactor.recorded_requests()[0].model().as_str(),
         "compaction-model"
     );
-    assert_eq!(
-        compactor.recorded_requests()[0]
-            .generation()
-            .max_output_tokens(),
-        Some(5_120),
-        "manual compaction budget must come from the 64k primary window"
-    );
+    assert_compaction_request_fits(&compactor.recorded_requests()[0], 256_000);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -159,13 +176,7 @@ async fn manual_compaction_uses_explicit_primary_window_override() {
         .expect("manual compaction succeeds")
         .expect("manual compaction runs");
 
-    assert_eq!(
-        compactor.recorded_requests()[0]
-            .generation()
-            .max_output_tokens(),
-        Some(10_240),
-        "explicit 128k primary window must override both provider windows"
-    );
+    assert_compaction_request_fits(&compactor.recorded_requests()[0], 128_000);
 }
 
 #[tokio::test(flavor = "current_thread")]

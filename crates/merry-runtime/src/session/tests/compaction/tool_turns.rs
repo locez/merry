@@ -123,7 +123,7 @@ fn compaction_groups_user_commentary_and_two_tool_pairs_in_one_turn() {
 }
 
 #[test]
-fn artifact_notice_is_provider_only_and_compaction_reads_exact_content() {
+fn artifact_notice_reaches_the_compaction_payload_instead_of_the_archived_body() {
     let mut session =
         SessionState::new(SessionId::new("compaction-artifact-notice").expect("valid session id"));
     let call = pending_tool_call("artifact-notice-call");
@@ -131,14 +131,18 @@ fn artifact_notice_is_provider_only_and_compaction_reads_exact_content() {
         .record_test_tool_call_pending(call.clone())
         .expect("tool call records");
     let result_artifact_id = artifact_id("artifact-notice-result");
-    let exact_content = "exact artifact notice source content";
+    // Large enough that sending it to the compactor would dominate the request.
+    let exact_content = format!(
+        "exact artifact notice source content {}",
+        "archived ballast ".repeat(2_000)
+    );
     session
         .submit_tool_result(
             ToolCallResult::succeeded(
                 call.id().clone(),
                 ArtifactRef::new(result_artifact_id.clone(), ArtifactKind::Text),
             ),
-            ArtifactContent::text(exact_content),
+            ArtifactContent::text(&exact_content),
         )
         .expect("tool result records");
     let result_projection = session
@@ -193,8 +197,33 @@ fn artifact_notice_is_provider_only_and_compaction_reads_exact_content() {
         .expect("input builds")
         .expect("tool turn is compressible");
     let payload = input.to_model_payload_json().expect("payload serializes");
-    assert!(payload.contains(exact_content));
-    assert!(!payload.contains("merry_archived"));
+    // The payload carries the same notice the request shows, not the archived body.
+    // Reading the body sent a real session 916,710 payload tokens against a 360,847
+    // token request body, so no retention choice could host the compaction request;
+    // honoring the notice keeps the payload proportional to what the conversation
+    // held. The notice still names the artifact, so a checkpoint entry can cite the
+    // ref and read the body on demand.
+    let payload_json: serde_json::Value = serde_json::from_str(&payload).expect("payload parses");
+    let result = payload_json["window"][0]["items"]
+        .as_array()
+        .expect("turn items are an array")
+        .iter()
+        .find(|item| item["role"] == "tool_exchange")
+        .map(|item| item["result"].clone())
+        .expect("covered tool exchange is in the payload");
+    let notice: serde_json::Value =
+        serde_json::from_str(result["content"].as_str().expect("result content is text"))
+            .expect("notice parses");
+    assert_eq!(notice["merry_archived"], true);
+    assert_eq!(notice["artifact_id"], "artifact-notice-result");
+    assert_eq!(result["artifact_id"], "artifact-notice-result");
+    assert!(!payload.contains("archived ballast"));
+    assert!(
+        payload.len() * 10 < exact_content.len(),
+        "payload of {} bytes must stay far below the archived body of {} bytes",
+        payload.len(),
+        exact_content.len()
+    );
 
     session
         .install_citation_compaction_candidate(
@@ -232,7 +261,7 @@ fn artifact_notice_is_provider_only_and_compaction_reads_exact_content() {
             .full_transcript_snapshot()
             .expect("full transcript remains exact")[1],
         crate::session::TranscriptItemSnapshot::ToolResult { content, .. }
-            if content.as_text() == Some(exact_content)
+            if content.as_text() == Some(exact_content.as_str())
     ));
 }
 

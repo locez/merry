@@ -1,20 +1,14 @@
 //! Citation-backed checkpoint compaction input construction.
 
 use crate::{
-    RuntimeError,
     checkpoint::{
-        CheckpointError, CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
-        CheckpointSourceKind, CheckpointValidationPolicy, CitationBackedCheckpoint,
-        CompactedCheckpointCandidate,
+        CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest, CheckpointSourceKind,
+        CitationBackedCheckpoint,
     },
     context::TaskAnchor,
     token_estimate::estimate_text_tokens,
 };
 use merry_core::EvidenceRef;
-use merry_llm::{
-    GenerationConfig, ModelContent, ModelError, ModelMessage, ModelMessageRole, ModelName,
-    ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat,
-};
 use schemars::Schema;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -25,6 +19,14 @@ pub enum CompactionError {
     #[error("compaction policy field {field} must be greater than zero")]
     InvalidPolicy { field: &'static str },
 
+    #[error("summary budget {summary_tokens} exceeds compactor output limit {model_limit_tokens}")]
+    OutputBudgetExceedsModelLimit {
+        /// Rendered summary ceiling the runtime asked for.
+        summary_tokens: u64,
+        /// Maximum output tokens the compaction model declared.
+        model_limit_tokens: u64,
+    },
+
     #[error("compaction budget arithmetic overflowed")]
     BudgetOverflow,
 
@@ -33,6 +35,18 @@ pub enum CompactionError {
 
     #[error("no compressible history exists before retained model turns")]
     NoCompressibleWindow,
+
+    #[error("no compaction window fits the compaction request budget")]
+    NoWindowFitsCompactionRequest,
+
+    #[error(
+        "compaction cannot reduce the request below the hard watermark after {passes} passes: estimated {estimated_tokens} tokens, limit {hard_limit_tokens}"
+    )]
+    ConvergenceExhausted {
+        passes: usize,
+        estimated_tokens: u64,
+        hard_limit_tokens: u64,
+    },
 
     #[error("compaction payload serialization failed: {message}")]
     PayloadSerialization { message: String },
@@ -47,7 +61,7 @@ pub enum CompactionError {
     MinimumRawTurnCannotFit,
 
     #[error(
-        "rendered checkpoint is estimated at {estimated_tokens} tokens, above output limit {max_tokens}"
+        "rendered checkpoint is estimated at {estimated_tokens} tokens, above hard summary limit {max_tokens}"
     )]
     RenderedCheckpointTooLarge {
         estimated_tokens: u64,
@@ -73,154 +87,37 @@ mod schema;
 #[path = "compaction/runner.rs"]
 mod runner;
 
-pub use prompt::citation_compaction_system_prompt;
+pub use prompt::{
+    COMPACTION_PAYLOAD_TAG, citation_compaction_tail_directive, compaction_payload_block,
+};
 pub(crate) use runner::{
+    compaction_model_window, compaction_request_required_tokens,
     generate_validated_compaction_candidate, validate_compaction_model_window,
 };
 pub use schema::citation_compaction_response_schema;
 
+mod budget;
+mod policy;
+mod repair;
+mod request;
+mod validation;
+pub(crate) use budget::{
+    CompactionReasoningReserve, compaction_window_safety_tokens, tightened_covered_budget,
+};
+pub(crate) use policy::CitationCompactionInputPolicy;
+pub use policy::{CitationCompactionPolicy, ResolvedCitationCompactionBudget};
+pub(crate) use repair::compaction_repair_reserve_tokens;
+pub(crate) use request::{
+    CompactionRequestMode, CompactionRequestProjection, CompactionRequestSource,
+    compile_citation_compaction_model_request,
+};
+pub(crate) use validation::checkpoint_from_candidate_json;
+
 pub(crate) use window::{
     ArchiveOnlyCompactionInput, CitationCompactionModelTurn, CitationCompactionToolResult,
-    CitationCompactionTurnItem, CompactionWindowBudget, CompactionWindowFingerprint,
-    CompactionWindowPlan, retained_turn_fallbacks,
+    CitationCompactionTurnItem, CompactionCoverageBudget, CompactionShape, CompactionWindowBudget,
+    CompactionWindowFingerprint, CompactionWindowPlan, RetainedFit, retained_turn_fallbacks,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CitationCompactionPolicy {
-    target_output_tokens: Option<u64>,
-    max_accepted_output_bytes: Option<usize>,
-    retained_model_turns: usize,
-}
-
-const DEFAULT_CHECKPOINT_WINDOW_PERCENT: u64 = 8;
-const MIN_CHECKPOINT_OUTPUT_TOKENS: u64 = 2_048;
-const MAX_CHECKPOINT_OUTPUT_TOKENS: u64 = 32_768;
-const DEFAULT_ACCEPTED_BYTES_PER_TOKEN: u64 = 8;
-const DEFAULT_RETAINED_MODEL_TURNS: usize = 5;
-
-impl CitationCompactionPolicy {
-    pub fn new(
-        target_output_tokens: Option<u64>,
-        max_accepted_output_bytes: Option<usize>,
-        retained_model_turns: usize,
-    ) -> Result<Self, CompactionError> {
-        if target_output_tokens == Some(0) {
-            return Err(CompactionError::InvalidPolicy {
-                field: "target_output_tokens",
-            });
-        }
-        if max_accepted_output_bytes == Some(0) {
-            return Err(CompactionError::InvalidPolicy {
-                field: "max_accepted_output_bytes",
-            });
-        }
-        if retained_model_turns == 0 {
-            return Err(CompactionError::InvalidPolicy {
-                field: "retained_model_turns",
-            });
-        }
-
-        Ok(Self {
-            target_output_tokens,
-            max_accepted_output_bytes,
-            retained_model_turns,
-        })
-    }
-
-    #[must_use]
-    pub fn target_output_tokens(self) -> Option<u64> {
-        self.target_output_tokens
-    }
-
-    #[must_use]
-    pub fn max_accepted_output_bytes(self) -> Option<usize> {
-        self.max_accepted_output_bytes
-    }
-
-    #[must_use]
-    pub fn retained_model_turns(self) -> usize {
-        self.retained_model_turns
-    }
-
-    pub fn with_retained_model_turns(
-        self,
-        retained_model_turns: usize,
-    ) -> Result<Self, CompactionError> {
-        Self::new(
-            self.target_output_tokens,
-            self.max_accepted_output_bytes,
-            retained_model_turns,
-        )
-    }
-
-    pub fn resolve(
-        self,
-        primary_window_tokens: u64,
-    ) -> Result<ResolvedCitationCompactionBudget, CompactionError> {
-        if primary_window_tokens == 0 {
-            return Err(CompactionError::InvalidPolicy {
-                field: "primary_window_tokens",
-            });
-        }
-        let automatic = primary_window_tokens
-            .checked_mul(DEFAULT_CHECKPOINT_WINDOW_PERCENT)
-            .and_then(|value| value.checked_div(100))
-            .ok_or(CompactionError::BudgetOverflow)?
-            .clamp(MIN_CHECKPOINT_OUTPUT_TOKENS, MAX_CHECKPOINT_OUTPUT_TOKENS);
-        let output_token_limit = self.target_output_tokens.unwrap_or(automatic);
-        let derived_bytes = output_token_limit
-            .checked_mul(DEFAULT_ACCEPTED_BYTES_PER_TOKEN)
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or(CompactionError::BudgetOverflow)?;
-
-        Ok(ResolvedCitationCompactionBudget {
-            output_token_limit,
-            max_accepted_output_bytes: self.max_accepted_output_bytes.unwrap_or(derived_bytes),
-        })
-    }
-}
-
-impl Default for CitationCompactionPolicy {
-    fn default() -> Self {
-        Self {
-            target_output_tokens: None,
-            max_accepted_output_bytes: None,
-            retained_model_turns: DEFAULT_RETAINED_MODEL_TURNS,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResolvedCitationCompactionBudget {
-    output_token_limit: u64,
-    max_accepted_output_bytes: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CitationCompactionInputPolicy {
-    resolved_budget: ResolvedCitationCompactionBudget,
-}
-
-impl CitationCompactionInputPolicy {
-    pub(crate) const fn new(
-        _policy: CitationCompactionPolicy,
-        resolved_budget: ResolvedCitationCompactionBudget,
-    ) -> Self {
-        Self { resolved_budget }
-    }
-}
-
-impl ResolvedCitationCompactionBudget {
-    #[must_use]
-    pub fn output_token_limit(self) -> u64 {
-        self.output_token_limit
-    }
-
-    #[must_use]
-    pub fn max_accepted_output_bytes(self) -> usize {
-        self.max_accepted_output_bytes
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionOutcome {
@@ -231,6 +128,21 @@ pub struct CompactionOutcome {
 }
 
 impl CompactionOutcome {
+    /// Aggregates rolling coverage while keeping the final checkpoint and retained tail.
+    pub(crate) fn followed_by(self, next: Self) -> Result<Self, CompactionError> {
+        Ok(Self {
+            covered_model_turn_count: self
+                .covered_model_turn_count
+                .checked_add(next.covered_model_turn_count)
+                .ok_or(CompactionError::BudgetOverflow)?,
+            covered_history_item_count: self
+                .covered_history_item_count
+                .checked_add(next.covered_history_item_count)
+                .ok_or(CompactionError::BudgetOverflow)?,
+            ..next
+        })
+    }
+
     pub(crate) fn new(
         checkpoint_id: CheckpointId,
         covered_model_turn_count: usize,
@@ -337,7 +249,8 @@ impl CitationCompactionInput {
             .collect();
         let payload = CitationCompactionPayload {
             policy: CitationCompactionPayloadPolicy {
-                target_output_tokens: resolved_budget.output_token_limit(),
+                target_output_tokens: resolved_budget.target_output_tokens(),
+                max_output_tokens: resolved_budget.output_token_limit(),
                 max_accepted_output_bytes: resolved_budget.max_accepted_output_bytes(),
             },
             control: CitationCompactionControl {
@@ -371,6 +284,33 @@ impl CitationCompactionInput {
                 message: error.to_string(),
             }
         })
+    }
+
+    /// Bounds retention fitting by exchanges present, not an arbitrarily large configuration.
+    pub(crate) fn payload_tool_exchange_count(&self) -> usize {
+        self.payload
+            .window
+            .iter()
+            .map(CitationCompactionModelTurn::tool_exchange_count)
+            .sum()
+    }
+
+    /// Estimated tokens the covered turns contribute to the serialized payload.
+    ///
+    /// The runtime uses this to decide how much covered history to give up when a
+    /// compaction request does not fit the compaction model window. It measures
+    /// the serialized payload with and without the covered window, so it stays
+    /// consistent with the request the runtime is about to send.
+    pub(crate) fn covered_payload_token_estimate(&self) -> Result<u64, CompactionError> {
+        let full = estimate_text_tokens(&self.to_model_payload_json()?);
+        let mut payload = self.payload.clone();
+        payload.window.clear();
+        let fixed = serde_json::to_string(&payload).map_err(|error| {
+            CompactionError::PayloadSerialization {
+                message: error.to_string(),
+            }
+        })?;
+        Ok(full.saturating_sub(estimate_text_tokens(&fixed)))
     }
 
     /// Builds the exact structured-output schema for the references visible in
@@ -454,12 +394,14 @@ pub(crate) fn previous_checkpoint_payload(
                 .collect::<BTreeSet<_>>();
             CitationCompactionPreviousCheckpoint {
                 checkpoint_id: checkpoint.id().as_str().to_owned(),
+                estimated_tokens: estimate_text_tokens(&checkpoint.render_prompt_text()),
                 text: None,
                 entries: checkpoint
                     .sections()
                     .iter()
                     .map(|(section, entry)| CitationCompactionPriorEntry {
                         entry_id: entry.id().as_str().to_owned(),
+                        estimated_tokens: estimate_text_tokens(&entry.render_prompt_text()),
                         section: section.as_str().to_owned(),
                         text: entry.text().to_owned(),
                         rationale: entry.rationale().map(str::to_owned),
@@ -486,112 +428,13 @@ pub(crate) fn previous_checkpoint_payload(
         CitationCompactionPreviousCheckpointInput::PlainText { text } => {
             CitationCompactionPreviousCheckpoint {
                 checkpoint_id: "plain-text-checkpoint".to_owned(),
+                estimated_tokens: estimate_text_tokens(text),
                 text: Some(text.to_owned()),
                 entries: Vec::new(),
                 original_ref_manifest: None,
             }
         }
     }
-}
-
-pub(crate) fn checkpoint_from_candidate_json(
-    checkpoint_id: CheckpointId,
-    input: &CitationCompactionInput,
-    candidate_json: &str,
-) -> Result<CitationBackedCheckpoint, RuntimeError> {
-    if candidate_json.len() > input.resolved_budget().max_accepted_output_bytes() {
-        return Err(CheckpointError::OutputTooLarge {
-            actual_bytes: candidate_json.len(),
-            max_bytes: input.resolved_budget().max_accepted_output_bytes(),
-        }
-        .into());
-    }
-
-    let mut candidate = CompactedCheckpointCandidate::from_json(candidate_json)?;
-    if let Some(previous) = input.previous_checkpoint_snapshot() {
-        candidate.materialize_kept_entries(previous);
-    }
-    validate_candidate_uses_model_supplied_refs(&candidate, input)?;
-    let policy = CheckpointValidationPolicy::default();
-    let checkpoint = match input.previous_checkpoint_snapshot() {
-        Some(previous) => CitationBackedCheckpoint::from_rolling_candidate_with_pinned_refs(
-            checkpoint_id,
-            candidate,
-            input.manifest().clone(),
-            previous,
-            policy,
-            input.pinned_refs(),
-        ),
-        None => CitationBackedCheckpoint::from_candidate_with_pinned_refs(
-            checkpoint_id,
-            candidate,
-            input.manifest().clone(),
-            policy,
-            input.pinned_refs(),
-        ),
-    }
-    .map_err(RuntimeError::from)?;
-    let estimated_tokens = estimate_text_tokens(&checkpoint.render_prompt_text());
-    if estimated_tokens > input.resolved_budget().output_token_limit() {
-        return Err(CompactionError::RenderedCheckpointTooLarge {
-            estimated_tokens,
-            max_tokens: input.resolved_budget().output_token_limit(),
-        }
-        .into());
-    }
-    Ok(checkpoint)
-}
-
-fn validate_candidate_uses_model_supplied_refs(
-    candidate: &CompactedCheckpointCandidate,
-    input: &CitationCompactionInput,
-) -> Result<(), CheckpointError> {
-    for (_, entry) in candidate.sections().iter() {
-        for ref_id in entry.refs() {
-            if !input.model_supplied_ref_ids().contains(ref_id) {
-                return Err(CheckpointError::UnknownRef {
-                    entry_id: entry.id().as_str().to_owned(),
-                    ref_id: ref_id.as_str().to_owned(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn compile_citation_compaction_model_request(
-    input: &CitationCompactionInput,
-    model: &ModelName,
-) -> Result<ModelRequest, ModelError> {
-    let payload = input
-        .to_model_payload_json()
-        .map_err(|error| ModelError::invalid_request(error.to_string()))?;
-    let messages = vec![
-        ModelMessage::new(
-            ModelMessageRole::System,
-            ModelContent::text(citation_compaction_system_prompt())?,
-        )?,
-        ModelMessage::new(ModelMessageRole::User, ModelContent::text(&payload)?)?,
-    ];
-    let generation =
-        GenerationConfig::new(Some(input.resolved_budget().output_token_limit()), false)?;
-    let response_schema = input
-        .model_response_schema()
-        .map_err(|error| ModelError::invalid_request(error.to_string()))?;
-    let response_format = ModelResponseFormat::StructuredOutput(ModelStructuredOutputFormat::new(
-        "compacted_checkpoint_candidate",
-        response_schema,
-    )?);
-
-    ModelRequest::new_with_continuations_and_stable_prefix_and_response_format(
-        model.clone(),
-        messages,
-        Vec::new(),
-        Vec::new(),
-        generation,
-        1,
-        Some(response_format),
-    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -606,6 +449,7 @@ struct CitationCompactionPayload {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct CitationCompactionPayloadPolicy {
     target_output_tokens: u64,
+    max_output_tokens: u64,
     max_accepted_output_bytes: usize,
 }
 
@@ -618,6 +462,7 @@ struct CitationCompactionControl {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CitationCompactionPreviousCheckpoint {
     checkpoint_id: String,
+    estimated_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
     entries: Vec<CitationCompactionPriorEntry>,
@@ -663,6 +508,7 @@ impl From<&CheckpointRef> for CitationCompactionOriginalRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CitationCompactionPriorEntry {
     entry_id: String,
+    estimated_tokens: u64,
     section: String,
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -2,7 +2,7 @@ use crate::{
     CitationCompactionPolicy, RuntimeModelRole, StepContext,
     artifact::ArtifactContent,
     runtime::{
-        AutomaticCompactionConfig, Runtime,
+        CompactionConfig, Runtime,
         tests::{
             model_role_flow::{
                 TIGHT_WINDOW_OUTPUT_CAP_TOKENS, seed_two_history_items_for_compaction,
@@ -64,7 +64,7 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
         ModelCapabilities::new(true, true, false, true, Some(256_000), None)
             .expect("valid compactor capabilities"),
     );
-    let automatic_compaction = AutomaticCompactionConfig::enabled(
+    let automatic_compaction = CompactionConfig::enabled(
         CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
     );
     let runtime = Runtime::builder(session_id("auto-compaction-events"))
@@ -74,11 +74,11 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
             Arc::new(compactor.clone()),
             ModelName::new("compaction-model").expect("valid model"),
         )
-        .automatic_compaction(automatic_compaction)
+        .automatic_compaction(automatic_compaction.clone())
         .build()
         .expect("runtime builds");
 
-    *runtime.inner.automatic_compaction.write().await = AutomaticCompactionConfig::disabled();
+    *runtime.inner.automatic_compaction.write().await = CompactionConfig::disabled();
     for seed in [
         format!("Old compressible ballast.\n{}", "ballast ".repeat(24_000)),
         format!("Retained tail ballast.\n{}", "tail ".repeat(6_400)),
@@ -117,14 +117,18 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
             covered_history_item_count: 2
         } if checkpoint_id.starts_with("checkpoint-auto-compaction-events-")
     ));
-    assert_eq!(
-        compactor.recorded_requests()[0]
-            .generation()
-            .max_output_tokens(),
-        Some(5_120),
-        "automatic compaction budget must come from the 64k primary window"
-    );
+    // The output ceiling is the checkpoint text budget plus the reasoning
+    // reserve sized from the request input, so it must exceed the text budget
+    // while the whole request still fits the primary window.
     let compactor_request = &compactor.recorded_requests()[0];
+    let output_ceiling = compactor_request
+        .generation()
+        .max_output_tokens()
+        .expect("compaction always sends an output ceiling");
+    assert!(
+        output_ceiling > 5_120,
+        "automatic compaction must reserve reasoning room above the checkpoint text budget, got {output_ceiling}"
+    );
     let compactor_input = compactor_request
         .input()
         .iter()
@@ -132,9 +136,10 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(compactor_input.contains("Old compressible ballast."));
-    assert!(!compactor_input.contains("Retained tail ballast."));
-    assert!(!compactor_input.contains("Trigger automatic compaction with a small current input."));
-    assert!(compactor_request.tools().is_empty());
+    assert!(compactor_input.contains("Retained tail ballast."));
+    assert!(compactor_input.contains("Trigger automatic compaction with a small current input."));
+    assert!(!compactor_request.tools().is_empty());
+    assert!(compactor_request.response_format().is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -169,7 +174,7 @@ async fn pre_turn_auto_compaction_failure_does_not_consume_model_turn_id() {
             Arc::new(compactor),
             ModelName::new("compaction-model").expect("valid model"),
         )
-        .automatic_compaction(AutomaticCompactionConfig::enabled(
+        .automatic_compaction(CompactionConfig::enabled(
             CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
         ))
         .build()
@@ -202,7 +207,7 @@ async fn pre_turn_auto_compaction_failure_does_not_consume_model_turn_id() {
         "pre-turn compaction failure must not allocate the next model turn"
     );
 
-    *runtime.inner.automatic_compaction.write().await = AutomaticCompactionConfig::disabled();
+    *runtime.inner.automatic_compaction.write().await = CompactionConfig::disabled();
     let recovered = collect_step(
         &runtime,
         "Use the still-next model turn after compaction failure.",
@@ -307,7 +312,7 @@ async fn hard_watermark_archives_tool_results_without_replacing_five_retained_tu
             Arc::new(compactor.clone()),
             ModelName::new("compaction-model").expect("valid model"),
         )
-        .automatic_compaction(AutomaticCompactionConfig::enabled(
+        .automatic_compaction(CompactionConfig::enabled(
             CitationCompactionPolicy::new(None, None, 5).expect("valid policy"),
         ))
         .build()

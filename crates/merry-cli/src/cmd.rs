@@ -10,9 +10,8 @@ use merry::profiles::{CodingRuntime, CodingRuntimeBuilder, CodingRuntimeInput};
 use merry_core::{ErrorInfo, PendingToolCall, SessionId, ToolInputSchema};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{
-    AgentLoopConfig, AgentLoopStatus, AutomaticCompactionConfig, RegisteredTool, Runtime,
-    StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
-    ToolExecutorFuture,
+    AgentLoopConfig, AgentLoopStatus, CompactionConfig, RegisteredTool, Runtime, StepContext,
+    StepInput, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
@@ -189,7 +188,7 @@ pub(crate) struct RuntimeInput<'a> {
     pub(crate) environment: CommandGenerationEnvironment,
     pub(crate) provider: Arc<dyn ModelProvider>,
     pub(crate) model: ModelName,
-    pub(crate) automatic_compaction: AutomaticCompactionConfig,
+    pub(crate) automatic_compaction: CompactionConfig,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
     pub(crate) skill_roots: Vec<PathBuf>,

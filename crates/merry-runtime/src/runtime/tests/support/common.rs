@@ -4,7 +4,7 @@ use crate::{
     plan::PlanController,
     process::AcceptedLocalWorkspaceProcessAdmission,
     runtime::{
-        AutomaticCompactionConfig, Runtime, RuntimeInner,
+        CompactionConfig, Runtime, RuntimeInner,
         tests::support::model_provider::RecordingModelProvider,
     },
     session::SessionState,
@@ -126,7 +126,7 @@ pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
         max_parallel_tool_calls: NonZeroUsize::new(4).expect("non-zero limit"),
         model_configs: RuntimeModelConfigs::default(),
         primary_model_override: tokio::sync::RwLock::new(None),
-        automatic_compaction: tokio::sync::RwLock::new(AutomaticCompactionConfig::default()),
+        automatic_compaction: tokio::sync::RwLock::new(CompactionConfig::default()),
         context_window_tokens: tokio::sync::RwLock::new(None),
         capabilities: crate::RuntimeCapabilities::default(),
         prompt_profile: crate::PromptProfile::default(),

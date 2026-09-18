@@ -11,7 +11,7 @@ use merry_core::{
 };
 use merry_llm::{ModelMessageRole, ModelToolCall, ModelToolCallId, ToolArguments};
 use merry_runtime::{
-    AgentLoopConfig, AutomaticCompactionConfig, BeginPlanInput, FileSessionStore, InteractiveError,
+    AgentLoopConfig, BeginPlanInput, CompactionConfig, FileSessionStore, InteractiveError,
     PlanApprovalInput, PlanChangeInput, PlanExecutionIntent, PlanNodeInput, Runtime, StepContext,
     UpdatePlanInput,
 };
@@ -141,7 +141,7 @@ async fn interactive_run_stops_before_another_model_turn_when_plan_awaits_approv
     let runtime = Runtime::builder(session_id("interactive-plan-awaiting-approval-boundary"))
         .model_provider(Arc::new(provider.clone()), model_name())
         .coordinator_plan_tools()
-        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .automatic_compaction(CompactionConfig::disabled())
         .build()
         .expect("runtime builds");
     runtime
@@ -204,7 +204,7 @@ async fn interactive_run_stops_before_another_model_turn_for_a_non_empty_plannin
     let runtime = Runtime::builder(session_id("interactive-planning-draft-boundary"))
         .model_provider(Arc::new(provider.clone()), model_name())
         .coordinator_plan_tools()
-        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .automatic_compaction(CompactionConfig::disabled())
         .build()
         .expect("runtime builds");
     runtime
@@ -263,7 +263,7 @@ async fn plan_approval_triggers_a_model_continuation_with_explicit_approval() {
     let runtime = Runtime::builder(session_id("interactive-plan-approval-continuation"))
         .model_provider(Arc::new(provider.clone()), model_name())
         .coordinator_plan_tools()
-        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .automatic_compaction(CompactionConfig::disabled())
         .build()
         .expect("runtime builds");
     let run = runtime
@@ -344,7 +344,7 @@ async fn interactive_run_continues_when_user_already_authorized_plan_execution()
     let runtime = Runtime::builder(session_id("interactive-plan-preauthorized-execution"))
         .model_provider(Arc::new(provider.clone()), model_name())
         .coordinator_plan_tools()
-        .automatic_compaction(AutomaticCompactionConfig::disabled())
+        .automatic_compaction(CompactionConfig::disabled())
         .build()
         .expect("runtime builds");
     runtime

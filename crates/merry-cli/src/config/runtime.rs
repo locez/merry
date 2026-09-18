@@ -1,17 +1,20 @@
-use super::{ConfigError, MerryConfig, RuntimeModelToml, default_true, validate_model_text};
+use super::{
+    ConfigError, MerryConfig, RuntimeModelToml, default_true, provider::parse_reasoning_effort,
+    validate_model_text,
+};
 use merry::profiles::{DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS, MIN_CODING_SUBAGENT_MODEL_TURNS};
-use merry_runtime::{AutomaticCompactionConfig, CitationCompactionPolicy};
+use merry_runtime::{CitationCompactionPolicy, CompactionConfig};
 use serde::Deserialize;
 
 impl MerryConfig {
-    pub fn automatic_compaction_config(&self) -> Result<AutomaticCompactionConfig, ConfigError> {
+    pub fn automatic_compaction_config(&self) -> Result<CompactionConfig, ConfigError> {
         let Some(auto_compaction) = self
             .raw
             .runtime
             .as_ref()
             .and_then(|runtime| runtime.auto_compaction.as_ref())
         else {
-            return Ok(AutomaticCompactionConfig::default());
+            return Ok(CompactionConfig::default());
         };
 
         auto_compaction.to_config()
@@ -120,6 +123,9 @@ struct AutoCompactionToml {
     target_output_tokens: Option<u64>,
     max_accepted_output_bytes: Option<usize>,
     retained_model_turns: Option<usize>,
+    one_shot_window_percent: Option<u64>,
+    one_shot_retained_tool_exchanges: Option<usize>,
+    reasoning_effort: Option<String>,
     model_output_token_limit: Option<u64>,
     retained_raw_tail_items: Option<usize>,
     max_ref_excerpt_bytes: Option<usize>,
@@ -127,26 +133,38 @@ struct AutoCompactionToml {
 }
 
 impl AutoCompactionToml {
-    fn to_config(&self) -> Result<AutomaticCompactionConfig, ConfigError> {
+    fn to_config(&self) -> Result<CompactionConfig, ConfigError> {
         self.validate_removed_fields()?;
-        if !self.enabled {
-            return Ok(AutomaticCompactionConfig::disabled());
-        }
-
-        let defaults = AutomaticCompactionConfig::default().policy();
-        let policy = CitationCompactionPolicy::new(
-            self.target_output_tokens
-                .or_else(|| defaults.target_output_tokens()),
-            self.max_accepted_output_bytes
-                .or_else(|| defaults.max_accepted_output_bytes()),
-            self.retained_model_turns
-                .unwrap_or_else(|| defaults.retained_model_turns()),
-        )
-        .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-        Ok(AutomaticCompactionConfig::enabled(policy))
+        let reasoning_effort = parse_reasoning_effort(
+            "runtime.auto_compaction.reasoning_effort",
+            self.reasoning_effort.as_deref(),
+        )?;
+        let config = if self.enabled {
+            let defaults = CompactionConfig::default().policy();
+            let policy = CitationCompactionPolicy::new(
+                self.target_output_tokens
+                    .or_else(|| defaults.target_output_tokens()),
+                self.max_accepted_output_bytes
+                    .or_else(|| defaults.max_accepted_output_bytes()),
+                self.retained_model_turns
+                    .unwrap_or_else(|| defaults.retained_model_turns()),
+            )
+            .map_err(|error| ConfigError::Invalid(error.to_string()))?
+            .with_one_shot_retained_tool_exchanges(
+                self.one_shot_retained_tool_exchanges
+                    .unwrap_or_else(|| defaults.one_shot_retained_tool_exchanges()),
+            );
+            CompactionConfig::enabled(policy)
+        } else {
+            CompactionConfig::disabled()
+        };
+        Ok(config.with_reasoning_effort(reasoning_effort))
     }
 
     fn validate_removed_fields(&self) -> Result<(), ConfigError> {
+        if self.one_shot_window_percent.is_some() {
+            return Err(ConfigError::Invalid("runtime.auto_compaction.one_shot_window_percent was removed; compaction now selects its strategy by request fit".to_owned()));
+        }
         if self.retained_model_turns.is_some() && self.retained_raw_tail_items.is_some() {
             return Err(ConfigError::Invalid(
                 "runtime.auto_compaction cannot set both retained_model_turns and removed field retained_raw_tail_items"
@@ -174,7 +192,7 @@ impl AutoCompactionToml {
 
 fn removed_auto_compaction_field(field: &str) -> ConfigError {
     ConfigError::Invalid(format!(
-        "runtime.auto_compaction.{field} was removed; supported fields are enabled, retained_model_turns, target_output_tokens, and max_accepted_output_bytes"
+        "runtime.auto_compaction.{field} was removed; supported fields are enabled, retained_model_turns, target_output_tokens, max_accepted_output_bytes, and one_shot_retained_tool_exchanges"
     ))
 }
 
@@ -290,6 +308,8 @@ enabled = true
 target_output_tokens = 160
 max_accepted_output_bytes = 4096
 retained_model_turns = 4
+reasoning_effort = "medium"
+one_shot_retained_tool_exchanges = 2
 "#,
             ),
             &paths,
@@ -305,6 +325,39 @@ retained_model_turns = 4
         assert_eq!(policy.target_output_tokens(), Some(160));
         assert_eq!(policy.max_accepted_output_bytes(), Some(4096));
         assert_eq!(policy.retained_model_turns(), 4);
+        assert_eq!(policy.one_shot_retained_tool_exchanges(), 2);
+        assert_eq!(
+            auto_compaction
+                .reasoning_effort()
+                .map(merry_llm::ReasoningEffort::as_str),
+            Some("medium")
+        );
+    }
+
+    #[test]
+    fn runtime_auto_compaction_rejects_invalid_reasoning_effort() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[runtime.auto_compaction]
+reasoning_effort = " padded "
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let error = config
+            .automatic_compaction_config()
+            .expect_err("invalid reasoning effort must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("runtime.auto_compaction.reasoning_effort is invalid"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -315,7 +368,7 @@ retained_model_turns = 4
             .expect("config should be present")
             .automatic_compaction_config()
             .expect("default auto compaction config should validate");
-        assert_eq!(missing, merry_runtime::AutomaticCompactionConfig::default());
+        assert_eq!(missing, merry_runtime::CompactionConfig::default());
 
         let disabled = MerryConfig::load_optional_from_text(
             Some(
@@ -334,7 +387,7 @@ retained_model_turns = 4
         assert!(!disabled.is_enabled());
         assert_eq!(
             disabled.policy(),
-            merry_runtime::AutomaticCompactionConfig::default().policy()
+            merry_runtime::CompactionConfig::default().policy()
         );
     }
 
@@ -344,7 +397,7 @@ retained_model_turns = 4
         let cases = [
             (
                 "model_output_token_limit = 256",
-                "Merry config is invalid: runtime.auto_compaction.model_output_token_limit was removed; supported fields are enabled, retained_model_turns, target_output_tokens, and max_accepted_output_bytes",
+                "Merry config is invalid: runtime.auto_compaction.model_output_token_limit was removed; supported fields are enabled, retained_model_turns, target_output_tokens, max_accepted_output_bytes, and one_shot_retained_tool_exchanges",
             ),
             (
                 "retained_raw_tail_items = 4",
@@ -352,11 +405,15 @@ retained_model_turns = 4
             ),
             (
                 "max_ref_excerpt_bytes = 900",
-                "Merry config is invalid: runtime.auto_compaction.max_ref_excerpt_bytes was removed; supported fields are enabled, retained_model_turns, target_output_tokens, and max_accepted_output_bytes",
+                "Merry config is invalid: runtime.auto_compaction.max_ref_excerpt_bytes was removed; supported fields are enabled, retained_model_turns, target_output_tokens, max_accepted_output_bytes, and one_shot_retained_tool_exchanges",
             ),
             (
                 "max_carried_prior_refs = 12",
-                "Merry config is invalid: runtime.auto_compaction.max_carried_prior_refs was removed; supported fields are enabled, retained_model_turns, target_output_tokens, and max_accepted_output_bytes",
+                "Merry config is invalid: runtime.auto_compaction.max_carried_prior_refs was removed; supported fields are enabled, retained_model_turns, target_output_tokens, max_accepted_output_bytes, and one_shot_retained_tool_exchanges",
+            ),
+            (
+                "one_shot_window_percent = 150",
+                "Merry config is invalid: runtime.auto_compaction.one_shot_window_percent was removed; compaction now selects its strategy by request fit",
             ),
         ];
 

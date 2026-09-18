@@ -1,4 +1,4 @@
-use crate::{AutomaticCompactionConfig, SubagentConfig};
+use crate::{CompactionConfig, SubagentConfig};
 use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
 use std::{num::NonZeroU64, sync::Arc};
 
@@ -45,7 +45,7 @@ pub struct InteractiveSettingsUpdate {
     pub(super) generation_config: Option<GenerationConfig>,
     pub(super) primary_model: Option<InteractivePrimaryModel>,
     pub(super) subagents: Option<InteractiveSubagentSettings>,
-    pub(super) automatic_compaction: Option<AutomaticCompactionConfig>,
+    pub(super) automatic_compaction: Option<CompactionConfig>,
     pub(super) context_window_tokens: Option<Option<NonZeroU64>>,
 }
 
@@ -73,10 +73,7 @@ impl InteractiveSettingsUpdate {
 
     /// Replaces automatic compaction policy for subsequent model requests.
     #[must_use]
-    pub fn with_automatic_compaction(
-        mut self,
-        automatic_compaction: AutomaticCompactionConfig,
-    ) -> Self {
+    pub fn with_automatic_compaction(mut self, automatic_compaction: CompactionConfig) -> Self {
         self.automatic_compaction = Some(automatic_compaction);
         self
     }

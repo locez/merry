@@ -10,7 +10,17 @@ use crate::{
     },
     compaction::{compile_citation_compaction_model_request, schema},
 };
-use merry_llm::ModelName;
+use merry_llm::{ModelContent, ModelInputItem, ModelMessage, ModelMessageRole, ModelName};
+
+fn test_stable_prefix() -> Vec<ModelInputItem> {
+    vec![ModelInputItem::Message(
+        ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text("stable runtime instructions").expect("valid prefix text"),
+        )
+        .expect("valid system message"),
+    )]
+}
 
 #[test]
 fn compaction_schema_has_exact_eight_sections_and_handoffs() {
@@ -49,6 +59,22 @@ fn compaction_schema_has_exact_eight_sections_and_handoffs() {
     let request = compile_citation_compaction_model_request(
         &input,
         &ModelName::new("compaction-model").expect("valid model"),
+        &crate::compaction::CompactionRequestSource::new(
+            merry_llm::ModelRequest::new_with_input_and_stable_prefix(
+                ModelName::new("compaction-model").expect("valid model"),
+                test_stable_prefix(),
+                Vec::new(),
+                merry_llm::GenerationConfig::default(),
+                1,
+            )
+            .expect("valid request"),
+            &[],
+            0,
+        )
+        .expect("valid source"),
+        crate::compaction::CompactionRequestMode::Payload,
+        Some(&merry_llm::ReasoningEffort::new("high").expect("valid reasoning effort")),
+        input.resolved_budget().output_token_limit(),
     )
     .expect("compaction request compiles");
     let format = request

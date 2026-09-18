@@ -1,0 +1,4 @@
+data: {"type":"response.created","response":{"id":"resp_incomplete","status":"in_progress","output":[]}}
+data: {"type":"response.reasoning_text.delta","delta":"thinking"}
+data: {"type":"response.incomplete","response":{"id":"resp_incomplete","status":"incomplete","output":[],"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":11,"output_tokens":21760,"total_tokens":21771}}}
+data: [DONE]

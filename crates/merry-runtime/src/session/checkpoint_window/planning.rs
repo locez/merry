@@ -4,21 +4,94 @@ use crate::{
     RuntimeError,
     checkpoint::CheckpointRef,
     compaction::{
-        CitationCompactionPolicy, CompactionError, CompactionWindowBudget,
-        CompactionWindowFingerprint, CompactionWindowPlan, retained_turn_fallbacks,
+        CitationCompactionPolicy, CompactionCoverageBudget, CompactionError, CompactionShape,
+        CompactionWindowBudget, CompactionWindowFingerprint, CompactionWindowPlan, RetainedFit,
+        retained_turn_fallbacks,
     },
-    session::{ModelTurnStatus, SessionState, checkpoint_window::history::ModelTurnHistory},
+    session::{
+        ModelTurnStatus, SessionState,
+        checkpoint_window::history::{ModelTurnHistory, covered_payload_tokens},
+    },
 };
 use merry_core::ToolCallId;
 use std::collections::BTreeSet;
 
+/// One retention option the planner evaluates.
+///
+/// `CompletedTurns` keeps that many completed turns raw and covers everything
+/// older. `ArchiveOnly` keeps every turn raw and only archives tool results; the
+/// runtime installs it without another model call, which is the degradation path
+/// when no checkpoint replacement fits the compaction request budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetentionCandidate {
+    CompletedTurns(usize),
+    ArchiveOnly,
+}
+
+impl RetentionCandidate {
+    /// Returns what an empty covered window means for this candidate.
+    fn empty_coverage_meaning(self) -> EmptyCoverage {
+        match self {
+            Self::CompletedTurns(_) => EmptyCoverage::NothingToDo,
+            // Archiving tool results is a real reduction, so the empty covered set
+            // is the requested plan rather than a no-op.
+            Self::ArchiveOnly => EmptyCoverage::Reduction,
+        }
+    }
+}
+
+/// What an empty covered window means for one retention candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyCoverage {
+    /// Nothing to summarize: the caller reports that no compression applies.
+    NothingToDo,
+    /// Archive-only reduction: the empty covered set is the plan.
+    Reduction,
+}
+
+/// Result of evaluating one retention candidate.
+enum CandidateOutcome {
+    Plan(CompactionWindowPlan),
+    NothingToDo,
+    DoesNotFit,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolArchival {
+    Preserve,
+    Allow,
+}
+
+struct RetainedWindowPolicy {
+    empty_coverage: EmptyCoverage,
+    retained_fit: RetainedFit,
+    archival: ToolArchival,
+}
+
 impl SessionState {
     pub(super) fn plan_compaction_window_from_turns(
         &self,
-        policy: CitationCompactionPolicy,
+        mut policy: CitationCompactionPolicy,
         window_budget: CompactionWindowBudget,
+        coverage: CompactionCoverageBudget,
+        shape: CompactionShape,
         turns: &[ModelTurnHistory],
     ) -> Result<Option<CompactionWindowPlan>, RuntimeError> {
+        if coverage.max_tokens().is_none()
+            && shape.retained_fit() == RetainedFit::Required
+            && let Some(preferred) = window_budget.preferred()
+        {
+            match self.plan_compaction_window_from_turns(policy, preferred, coverage, shape, turns)
+            {
+                Err(RuntimeError::Compaction {
+                    source:
+                        CompactionError::MinimumRawTurnCannotFit
+                        | CompactionError::UncompressibleCurrentInput
+                        | CompactionError::NoWindowFitsCompactionRequest,
+                }) => policy = policy.with_retained_model_turns(1)?,
+                outcome => return outcome,
+            }
+        }
         debug_assert!(
             window_budget.max_dynamic_body_tokens() <= window_budget.primary_window_tokens()
         );
@@ -36,101 +109,239 @@ impl SessionState {
         let open_turns = &turns[first_open..];
 
         let fingerprint = self.compaction_window_fingerprint()?;
-        let mut saw_completed_turn = false;
         let available_completed = closed_turns
             .iter()
             .filter(|turn| turn.status == ModelTurnStatus::Completed)
             .count();
-        for retained_completed_count in
-            retained_turn_fallbacks(policy.retained_model_turns(), available_completed)
+        let mut candidates =
+            self.retention_candidates(policy, coverage, shape, closed_turns, available_completed)?;
+        // A coverage budget only exists when the runtime already knows a
+        // checkpoint replacement does not fit its request. Archiving tool results
+        // is then the remaining degradation, because it reduces the request body
+        // without spending another model call.
+        let bounded_coverage = coverage.max_tokens().is_some();
+        if bounded_coverage {
+            candidates.push(RetentionCandidate::ArchiveOnly);
+        }
+
+        let modes: &[ToolArchival] =
+            if !bounded_coverage && shape.retained_fit() == RetainedFit::Required {
+                &[ToolArchival::Preserve, ToolArchival::Allow]
+            } else {
+                &[ToolArchival::Allow]
+            };
+        let mut last_failure: Option<CompactionError> = None;
+        for (archival, candidate) in modes
+            .iter()
+            .flat_map(|mode| candidates.iter().map(move |candidate| (*mode, *candidate)))
         {
+            let (covered, raw_turns, base_tokens) = match candidate {
+                RetentionCandidate::CompletedTurns(retained_completed_count) => {
+                    let Some(retained_start) =
+                        retained_start_for_completed_count(closed_turns, retained_completed_count)
+                    else {
+                        continue;
+                    };
+                    let candidate_covered = &closed_turns[..retained_start];
+                    if candidate_covered.iter().any(|turn| !turn.items.is_empty()) {
+                        (
+                            candidate_covered,
+                            &turns[retained_start..],
+                            window_budget
+                                .replacement_fixed_dynamic_body_tokens()
+                                .checked_add(window_budget.checkpoint_output_ceiling_tokens())
+                                .ok_or(CompactionError::BudgetOverflow)?,
+                        )
+                    } else {
+                        (
+                            &closed_turns[..0],
+                            turns,
+                            window_budget.archive_only_fixed_dynamic_body_tokens(),
+                        )
+                    }
+                }
+                RetentionCandidate::ArchiveOnly => (
+                    &closed_turns[..0],
+                    turns,
+                    window_budget.archive_only_fixed_dynamic_body_tokens(),
+                ),
+            };
+
+            match plan_retained_window(
+                window_budget,
+                covered,
+                raw_turns,
+                base_tokens,
+                fingerprint,
+                RetainedWindowPolicy {
+                    empty_coverage: candidate.empty_coverage_meaning(),
+                    retained_fit: shape.retained_fit(),
+                    archival,
+                },
+            )? {
+                CandidateOutcome::Plan(plan) => return Ok(Some(plan)),
+                CandidateOutcome::NothingToDo => return Ok(None),
+                CandidateOutcome::DoesNotFit => {
+                    if matches!(candidate, RetentionCandidate::CompletedTurns(1)) {
+                        let existing_open_archives = existing_archived_tool_call_ids(open_turns);
+                        let current_only_tokens = base_tokens
+                            .checked_add(projected_turn_tokens(
+                                open_turns,
+                                &existing_open_archives,
+                            )?)
+                            .ok_or(CompactionError::BudgetOverflow)?;
+                        let error =
+                            if current_only_tokens >= window_budget.max_dynamic_body_tokens() {
+                                CompactionError::UncompressibleCurrentInput
+                            } else {
+                                CompactionError::MinimumRawTurnCannotFit
+                            };
+                        last_failure = Some(error);
+                    } else if last_failure.is_none() {
+                        last_failure = Some(CompactionError::NoWindowFitsCompactionRequest);
+                    }
+                }
+            }
+        }
+
+        match last_failure {
+            Some(error) => Err(error.into()),
+            None => {
+                // Every retention candidate needs one completed turn to retain,
+                // so an empty candidate list means the history holds no completed
+                // turn at all. That case can still be uncompressible when the open
+                // turns alone exceed the hard watermark.
+                if available_completed == 0 {
+                    let existing_open_archives = existing_archived_tool_call_ids(open_turns);
+                    let current_only_tokens = window_budget
+                        .archive_only_fixed_dynamic_body_tokens()
+                        .checked_add(projected_turn_tokens(open_turns, &existing_open_archives)?)
+                        .ok_or(CompactionError::BudgetOverflow)?;
+                    if current_only_tokens >= window_budget.max_dynamic_body_tokens() {
+                        return Err(CompactionError::UncompressibleCurrentInput.into());
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    /// Returns the retention options to evaluate, in preference order.
+    ///
+    /// Without a coverage budget the planner keeps the configured retention and
+    /// falls back to smaller raw tails when the request body does not fit. With a
+    /// budget, the covered window itself must fit one compaction request, so the
+    /// planner retains more completed turns until the covered payload fits;
+    /// covering less than the configured retention would only grow the payload the
+    /// budget just rejected.
+    fn retention_candidates(
+        &self,
+        policy: CitationCompactionPolicy,
+        coverage: CompactionCoverageBudget,
+        shape: CompactionShape,
+        closed_turns: &[ModelTurnHistory],
+        available_completed: usize,
+    ) -> Result<Vec<RetentionCandidate>, RuntimeError> {
+        let Some(coverage_budget) = coverage.max_tokens() else {
+            return Ok(
+                retained_turn_fallbacks(policy.retained_model_turns(), available_completed)
+                    .into_iter()
+                    .map(RetentionCandidate::CompletedTurns)
+                    .collect(),
+            );
+        };
+        let configured = policy
+            .retained_model_turns()
+            .min(available_completed)
+            .max(1);
+        for retained_completed_count in configured..=available_completed {
             let Some(retained_start) =
                 retained_start_for_completed_count(closed_turns, retained_completed_count)
             else {
                 continue;
             };
-            saw_completed_turn = true;
-            let candidate_covered = &closed_turns[..retained_start];
-            let covered_has_evidence = candidate_covered.iter().any(|turn| !turn.items.is_empty());
-            let (covered, raw_turns, base_tokens) = if covered_has_evidence {
-                (
-                    candidate_covered,
-                    &turns[retained_start..],
-                    window_budget
-                        .replacement_fixed_dynamic_body_tokens()
-                        .checked_add(window_budget.checkpoint_output_ceiling_tokens())
-                        .ok_or(CompactionError::BudgetOverflow)?,
-                )
-            } else {
-                (
-                    &closed_turns[..0],
-                    turns,
-                    window_budget.archive_only_fixed_dynamic_body_tokens(),
-                )
-            };
-            let mut archived_tool_call_ids = existing_archived_tool_call_ids(raw_turns);
-            let fits = |archived_tool_call_ids: &BTreeSet<ToolCallId>| {
-                retained_projection_fits(
-                    base_tokens,
-                    raw_turns,
-                    archived_tool_call_ids,
-                    window_budget.max_dynamic_body_tokens(),
-                )
-            };
-
-            if fits(&archived_tool_call_ids)? {
-                if covered.is_empty() {
-                    return Ok(None);
-                }
-                return Ok(Some(compaction_window_plan(
-                    covered,
-                    raw_turns,
-                    archived_tool_call_ids,
-                    fingerprint,
-                )?));
-            }
-
-            let mut archive_candidates = raw_turns
-                .iter()
-                .flat_map(ModelTurnHistory::archive_candidates_in_result_order)
-                .collect::<Vec<_>>();
-            archive_candidates.sort_by_key(|(result_item_id, _)| *result_item_id);
-            for (_, call_id) in archive_candidates {
-                archived_tool_call_ids.insert(call_id);
-                if fits(&archived_tool_call_ids)? {
-                    return Ok(Some(compaction_window_plan(
-                        covered,
-                        raw_turns,
-                        archived_tool_call_ids,
-                        fingerprint,
-                    )?));
-                }
-            }
-
-            if retained_completed_count == 1 {
-                let existing_open_archives = existing_archived_tool_call_ids(open_turns);
-                let current_only_tokens = base_tokens
-                    .checked_add(projected_turn_tokens(open_turns, &existing_open_archives)?)
-                    .ok_or(CompactionError::BudgetOverflow)?;
-                return if current_only_tokens >= window_budget.max_dynamic_body_tokens() {
-                    Err(CompactionError::UncompressibleCurrentInput.into())
-                } else {
-                    Err(CompactionError::MinimumRawTurnCannotFit.into())
-                };
+            if covered_payload_tokens(
+                &closed_turns[..retained_start],
+                shape == CompactionShape::RollingText,
+            )? <= coverage_budget
+            {
+                return Ok(vec![RetentionCandidate::CompletedTurns(
+                    retained_completed_count,
+                )]);
             }
         }
+        Ok(Vec::new())
+    }
+}
 
-        if !saw_completed_turn {
-            let existing_open_archives = existing_archived_tool_call_ids(open_turns);
-            let current_only_tokens = window_budget
-                .archive_only_fixed_dynamic_body_tokens()
-                .checked_add(projected_turn_tokens(open_turns, &existing_open_archives)?)
-                .ok_or(CompactionError::BudgetOverflow)?;
-            if current_only_tokens >= window_budget.max_dynamic_body_tokens() {
-                return Err(CompactionError::UncompressibleCurrentInput.into());
-            }
+/// Evaluates one covered/retained split against the request body budget.
+///
+/// Returns the plan when the split fits, `NothingToDo` when an empty covered set
+/// means there is nothing to summarize, and `DoesNotFit` when neither the split
+/// nor additional tool-result archiving brings the projection below the hard
+/// watermark. `empty_coverage` carries what an empty covered set means for the
+/// candidate being evaluated.
+fn plan_retained_window(
+    window_budget: CompactionWindowBudget,
+    covered: &[ModelTurnHistory],
+    raw_turns: &[ModelTurnHistory],
+    base_tokens: u64,
+    fingerprint: CompactionWindowFingerprint,
+    policy: RetainedWindowPolicy,
+) -> Result<CandidateOutcome, RuntimeError> {
+    let mut archived_tool_call_ids = existing_archived_tool_call_ids(raw_turns);
+    let fits = |archived_tool_call_ids: &BTreeSet<ToolCallId>| {
+        retained_projection_fits(
+            base_tokens,
+            raw_turns,
+            archived_tool_call_ids,
+            window_budget.max_dynamic_body_tokens(),
+        )
+    };
+
+    if fits(&archived_tool_call_ids)? {
+        if covered.is_empty() && policy.empty_coverage == EmptyCoverage::NothingToDo {
+            return Ok(CandidateOutcome::NothingToDo);
         }
-        Ok(None)
+        return Ok(CandidateOutcome::Plan(compaction_window_plan(
+            covered,
+            raw_turns,
+            archived_tool_call_ids,
+            fingerprint,
+        )?));
+    }
+
+    if policy.archival == ToolArchival::Preserve {
+        return Ok(CandidateOutcome::DoesNotFit);
+    }
+    let mut archive_candidates = raw_turns
+        .iter()
+        .flat_map(ModelTurnHistory::archive_candidates_in_result_order)
+        .collect::<Vec<_>>();
+    archive_candidates.sort_by_key(|(result_item_id, _)| *result_item_id);
+    for (_, call_id) in archive_candidates {
+        archived_tool_call_ids.insert(call_id);
+        if fits(&archived_tool_call_ids)? {
+            return Ok(CandidateOutcome::Plan(compaction_window_plan(
+                covered,
+                raw_turns,
+                archived_tool_call_ids,
+                fingerprint,
+            )?));
+        }
+    }
+
+    match policy.retained_fit {
+        RetainedFit::Required => Ok(CandidateOutcome::DoesNotFit),
+        // Another pass follows, so install the largest covered window instead of
+        // reporting that nothing fits. The wait for the budget to hold moves to the
+        // caller, which recompiles and decides whether to run one more pass.
+        RetainedFit::Deferred => Ok(CandidateOutcome::Plan(compaction_window_plan(
+            covered,
+            raw_turns,
+            existing_archived_tool_call_ids(raw_turns),
+            fingerprint,
+        )?)),
     }
 }
 

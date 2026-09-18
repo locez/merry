@@ -7,7 +7,8 @@
 pub use crate::user_input::StepInput;
 use crate::{
     CompiledContext, FinalOutputContract, ProjectRules, PromptProfile, SkillCatalog, TaskAnchor,
-    UserMessageInput, artifact::ArtifactContent, session::TranscriptItemSnapshot,
+    UserMessageInput, artifact::ArtifactContent, prompt::render_prompt_block,
+    session::TranscriptItemSnapshot,
 };
 use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus, ToolSpec};
 use merry_llm::{
@@ -16,21 +17,6 @@ use merry_llm::{
     ToolArguments,
 };
 use tokio_util::sync::CancellationToken;
-
-fn prompt_block(tag: &str, content: &str) -> String {
-    let mut block = String::with_capacity(tag.len() * 2 + content.len() + 7);
-    block.push('<');
-    block.push_str(tag);
-    block.push_str(">\n");
-    block.push_str(content);
-    if !content.ends_with('\n') {
-        block.push('\n');
-    }
-    block.push_str("</");
-    block.push_str(tag);
-    block.push('>');
-    block
-}
 
 /// Context shared with runtime step producers.
 ///
@@ -126,6 +112,81 @@ pub(crate) struct StepModelRequestParts<'a> {
     pub(crate) progress_commentary: bool,
 }
 
+/// Stable prompt material every request for one session starts with.
+///
+/// The agent loop and model-backed compaction share this prefix byte for byte so
+/// a provider can serve the compaction request from the same cached prefix as
+/// the session's normal requests. Compaction therefore appends its directive
+/// and payload after the prefix instead of replacing it with a second system
+/// prompt.
+pub(crate) struct StablePrefixParts<'a> {
+    pub(crate) prompt_profile: &'a PromptProfile,
+    pub(crate) progress_commentary: bool,
+    pub(crate) skill_catalog: Option<&'a SkillCatalog>,
+    pub(crate) project_rules: Option<&'a ProjectRules>,
+}
+
+/// Compiles the ordered stable prefix items for one session.
+///
+/// The order is part of the provider-visible cache contract: base runtime
+/// instructions, optional progress commentary instructions, profile stable
+/// blocks, available skill metadata, then project rules. Callers that append
+/// further items must not rewrite or reorder these messages.
+pub(crate) fn compile_stable_prefix_items(
+    parts: StablePrefixParts<'_>,
+) -> Result<Vec<ModelInputItem>, merry_llm::ModelError> {
+    let StablePrefixParts {
+        prompt_profile,
+        progress_commentary,
+        skill_catalog,
+        project_rules,
+    } = parts;
+    let mut items = Vec::with_capacity(
+        2 + prompt_profile.stable_blocks().len() + usize::from(project_rules.is_some()),
+    );
+
+    items.push(ModelInputItem::Message(ModelMessage::new(
+        ModelMessageRole::System,
+        ModelContent::text(prompt_profile.base_instructions())?,
+    )?));
+
+    if progress_commentary {
+        items.push(ModelInputItem::Message(ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text(prompt_profile.progress_commentary_instructions())?,
+        )?));
+    }
+
+    for block in prompt_profile.stable_blocks() {
+        let block_text = block.render();
+        items.push(ModelInputItem::Message(ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text(&block_text)?,
+        )?));
+    }
+
+    if let Some(skill_metadata_text) =
+        skill_catalog.and_then(SkillCatalog::to_stable_prefix_message_text)
+    {
+        let skill_metadata_text = render_prompt_block("merry_skill_catalog", &skill_metadata_text);
+        items.push(ModelInputItem::Message(ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text(&skill_metadata_text)?,
+        )?));
+    }
+
+    if let Some(project_rules) = project_rules {
+        let project_rules_text = project_rules.to_stable_prefix_message_text();
+        let project_rules_text = render_prompt_block("merry_project_rules", &project_rules_text);
+        items.push(ModelInputItem::Message(ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text(&project_rules_text)?,
+        )?));
+    }
+
+    Ok(items)
+}
+
 pub(crate) fn compile_step_model_request(
     parts: StepModelRequestParts<'_>,
 ) -> Result<ModelRequest, merry_llm::ModelError> {
@@ -146,17 +207,19 @@ pub(crate) fn compile_step_model_request(
 
     let checkpoint_snapshot = context.checkpoint_snapshot();
     let context_body_snapshot = context.body_snapshot();
-    let skill_metadata_text = skill_catalog
-        .and_then(SkillCatalog::to_stable_prefix_message_text)
-        .map(|text| prompt_block("merry_skill_catalog", &text));
-    let stable_prefix_message_count = 1
-        + usize::from(progress_commentary)
-        + prompt_profile.stable_blocks().len()
-        + usize::from(skill_metadata_text.is_some())
-        + usize::from(project_rules.is_some());
-    let mut messages = Vec::with_capacity(
-        stable_prefix_message_count
-            + usize::from(!checkpoint_snapshot.is_empty())
+    // Keep provider prompt projection allowlisted and ordered: the shared
+    // stable prefix, the current checkpoint, task anchor control-plane context,
+    // live compiled context, prior ordered transcript, then current user or
+    // loop-control input.
+    let mut messages = compile_stable_prefix_items(StablePrefixParts {
+        prompt_profile,
+        progress_commentary,
+        skill_catalog,
+        project_rules,
+    })?;
+    let stable_prefix_message_count = messages.len();
+    messages.reserve(
+        usize::from(!checkpoint_snapshot.is_empty())
             + usize::from(task_anchor.is_some())
             + usize::from(plan_control.is_some())
             + usize::from(!context_body_snapshot.is_empty())
@@ -164,48 +227,8 @@ pub(crate) fn compile_step_model_request(
             + input.user_messages_for_request().len(),
     );
 
-    // Keep provider prompt projection allowlisted and ordered:
-    // stable runtime instructions, available skill metadata, project rules,
-    // the current checkpoint, task anchor control-plane context, live compiled
-    // context, prior ordered transcript, then current user or loop-control input.
-    messages.push(ModelInputItem::Message(ModelMessage::new(
-        ModelMessageRole::System,
-        ModelContent::text(prompt_profile.base_instructions())?,
-    )?));
-
-    if progress_commentary {
-        messages.push(ModelInputItem::Message(ModelMessage::new(
-            ModelMessageRole::System,
-            ModelContent::text(prompt_profile.progress_commentary_instructions())?,
-        )?));
-    }
-
-    for block in prompt_profile.stable_blocks() {
-        let block_text = block.render();
-        messages.push(ModelInputItem::Message(ModelMessage::new(
-            ModelMessageRole::System,
-            ModelContent::text(&block_text)?,
-        )?));
-    }
-
-    if let Some(skill_metadata_text) = skill_metadata_text {
-        messages.push(ModelInputItem::Message(ModelMessage::new(
-            ModelMessageRole::System,
-            ModelContent::text(&skill_metadata_text)?,
-        )?));
-    }
-
-    if let Some(project_rules) = project_rules {
-        let project_rules_text = project_rules.to_stable_prefix_message_text();
-        let project_rules_text = prompt_block("merry_project_rules", &project_rules_text);
-        messages.push(ModelInputItem::Message(ModelMessage::new(
-            ModelMessageRole::System,
-            ModelContent::text(&project_rules_text)?,
-        )?));
-    }
-
     if !checkpoint_snapshot.is_empty() {
-        let checkpoint_text = prompt_block("merry_checkpoint", &checkpoint_snapshot);
+        let checkpoint_text = render_prompt_block("merry_checkpoint", &checkpoint_snapshot);
         messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
             ModelContent::text(&checkpoint_text)?,
@@ -214,7 +237,7 @@ pub(crate) fn compile_step_model_request(
 
     if let Some(task_anchor) = task_anchor {
         let task_anchor_text = task_anchor.to_dynamic_control_message_text();
-        let task_anchor_text = prompt_block("merry_task_anchor", &task_anchor_text);
+        let task_anchor_text = render_prompt_block("merry_task_anchor", &task_anchor_text);
         messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
             ModelContent::text(&task_anchor_text)?,
@@ -229,7 +252,7 @@ pub(crate) fn compile_step_model_request(
     }
 
     if !context_body_snapshot.is_empty() {
-        let context_text = prompt_block("merry_compiled_context", &context_body_snapshot);
+        let context_text = render_prompt_block("merry_compiled_context", &context_body_snapshot);
         messages.push(ModelInputItem::Message(ModelMessage::new(
             ModelMessageRole::System,
             ModelContent::text(&context_text)?,

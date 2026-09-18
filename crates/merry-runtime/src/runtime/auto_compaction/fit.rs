@@ -1,0 +1,192 @@
+//! Sizing and compiling one compaction request against the compaction window.
+//!
+//! This module owns the arithmetic that decides whether a request may be sent:
+//! how much input the window can host for a reserve, how much covered history to
+//! give up when it cannot, and how to compile the request with the resulting
+//! output ceiling.
+
+use super::super::RuntimeInner;
+use super::CompactionRequestBudget;
+use crate::{
+    CitationCompactionInput, RuntimeError,
+    compaction::{
+        CompactionReasoningReserve, CompactionRequestProjection, compaction_repair_reserve_tokens,
+        compaction_request_required_tokens, compaction_window_safety_tokens,
+        compile_citation_compaction_model_request,
+    },
+};
+use merry_llm::ReasoningEffort;
+pub(super) enum CompactionRequestFit {
+    /// The request fits the window under this attempt's reserve.
+    Request {
+        request: Box<merry_llm::ModelRequest>,
+    },
+    /// The window cannot host the checkpoint text budget plus the reasoning reserve.
+    WindowTooSmall {
+        estimated_input_tokens: u64,
+        max_output_tokens: u64,
+    },
+}
+
+/// How strictly one attempt has to afford its reasoning reserve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReservePolicy {
+    /// Grant the room the window has, as long as the checkpoint text budget fits.
+    ///
+    /// Used for the first attempt: a small window can still compact by granting
+    /// less reasoning room, and refusing outright would stall the session.
+    BestEffort,
+    /// Only accept a window that can host the checkpoint text budget and the whole reserve.
+    ///
+    /// Used after the provider truncated an attempt, because best effort is what
+    /// produced the truncation. Covering less history is how the retry makes room.
+    Required,
+}
+
+/// What the compaction model allows one request to occupy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CompactionModelLimits {
+    /// Total token window one request may occupy.
+    pub(crate) window_tokens: u64,
+    /// Output limit the model declares, when it declares one.
+    pub(crate) max_output_tokens: Option<u64>,
+}
+
+/// Compiles one compaction request sized for the window and this attempt's reserve.
+///
+/// The requested output is the checkpoint text budget plus the reasoning reserve.
+/// Input size does not depend on that ceiling, so the input is measured first and
+/// the ceiling is sized from it. `policy` decides whether the window has to afford
+/// the whole reserve or only the text budget; a window that affords neither is
+/// reported as `WindowTooSmall` so the caller covers less history instead.
+///
+/// `limits` carries the model's declared output limit as well. The reserve must
+/// not ask for output the compaction model cannot produce, because the provider
+/// rejects such a request outright.
+pub(super) fn compile_fitted_compaction_request(
+    input: &CitationCompactionInput,
+    model: &merry_llm::ModelName,
+    projection: CompactionRequestProjection<'_>,
+    reasoning_effort: Option<&ReasoningEffort>,
+    limits: CompactionModelLimits,
+    reserve: CompactionReasoningReserve,
+    policy: ReservePolicy,
+) -> Result<CompactionRequestFit, RuntimeError> {
+    let compile = |output_ceiling_tokens: u64| {
+        compile_citation_compaction_model_request(
+            input,
+            model,
+            projection.source,
+            projection.mode,
+            reasoning_effort,
+            output_ceiling_tokens,
+        )
+        .map_err(|error| RuntimeError::CompactionModelRequest {
+            message: error.to_string(),
+        })
+    };
+    let text_budget_tokens = input.resolved_budget().output_token_limit();
+    if let Some(model_limit_tokens) = limits.max_output_tokens
+        && model_limit_tokens < text_budget_tokens
+    {
+        return Err(crate::CompactionError::OutputBudgetExceedsModelLimit {
+            summary_tokens: text_budget_tokens,
+            model_limit_tokens,
+        }
+        .into());
+    }
+    let measured = compile(text_budget_tokens)?;
+    let estimated_input_tokens = compaction_request_required_tokens(&measured).0;
+    let reserved_output_tokens = reserve
+        .output_ceiling(
+            input.resolved_budget(),
+            limits.window_tokens,
+            estimated_input_tokens,
+        )
+        .min(limits.max_output_tokens.unwrap_or(u64::MAX));
+    let available_output_tokens = limits.window_tokens.saturating_sub(estimated_input_tokens);
+    let safety_tokens = compaction_window_safety_tokens(available_output_tokens);
+    let room_tokens = available_output_tokens.saturating_sub(safety_tokens);
+    let repair_tokens = compaction_repair_reserve_tokens()?;
+    let output_ceiling_tokens = output_ceiling_tokens(
+        policy,
+        text_budget_tokens,
+        reserved_output_tokens,
+        room_tokens,
+        repair_tokens,
+    );
+    let required_output_tokens = match policy {
+        ReservePolicy::BestEffort => text_budget_tokens,
+        ReservePolicy::Required => reserved_output_tokens,
+    };
+    // Admission uses the summary budget. Repair room is taken from leftover
+    // output so a small window can still send a first attempt.
+    if room_tokens < required_output_tokens {
+        return Ok(CompactionRequestFit::WindowTooSmall {
+            estimated_input_tokens,
+            max_output_tokens: reserved_output_tokens,
+        });
+    }
+    let request = if output_ceiling_tokens == text_budget_tokens {
+        measured
+    } else {
+        compile(output_ceiling_tokens)?
+    };
+    Ok(CompactionRequestFit::Request {
+        request: Box::new(request),
+    })
+}
+
+/// Best-effort keeps repair room only when the summary still fits afterward.
+fn output_ceiling_tokens(
+    policy: ReservePolicy,
+    text_budget_tokens: u64,
+    reserved_output_tokens: u64,
+    room_tokens: u64,
+    repair_tokens: u64,
+) -> u64 {
+    match policy {
+        ReservePolicy::BestEffort => {
+            let with_repair = room_tokens.saturating_sub(repair_tokens);
+            let usable = if with_repair >= text_budget_tokens {
+                with_repair
+            } else {
+                room_tokens
+            };
+            usable.min(reserved_output_tokens)
+        }
+        ReservePolicy::Required => reserved_output_tokens,
+    }
+}
+
+pub(super) fn trace_compaction_request(
+    inner: &RuntimeInner,
+    provider: &dyn merry_llm::ModelProvider,
+    request: &merry_llm::ModelRequest,
+    budget: &CompactionRequestBudget,
+    attempt: usize,
+) {
+    let response_format_name = match request.response_format() {
+        Some(merry_llm::ModelResponseFormat::StructuredOutput(format)) => format.name(),
+        None => "none",
+    };
+    tracing::debug!(
+        event = "runtime.compaction.request",
+        session_id = inner.session_id.as_str(),
+        provider_name = provider.name().as_str(),
+        model = request.model().as_str(),
+        attempt,
+        message_count = request.messages().len(),
+        stable_prefix_message_count = request.stable_prefix_message_count(),
+        reasoning_effort = request
+            .generation()
+            .reasoning_effort()
+            .map(merry_llm::ReasoningEffort::as_str),
+        estimated_input_tokens = crate::token_estimate::estimate_model_input_tokens(request.input()),
+        max_output_tokens = request.generation().max_output_tokens(),
+        response_format = response_format_name,
+        primary_window_tokens = budget.primary_window_tokens,
+        compactor_window_tokens = ?provider.capabilities().max_input_tokens(),
+        "compaction model request prepared"
+    );
+}

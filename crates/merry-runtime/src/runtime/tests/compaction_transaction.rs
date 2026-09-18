@@ -2,7 +2,7 @@ use crate::{
     CheckpointId, CitationCompactionPolicy, CompactionError, FileSessionStore, RuntimeError,
     RuntimeModelRole, StepContext, StepInput, TaskAnchor,
     runtime::{
-        AutomaticCompactionConfig, Runtime,
+        CompactionConfig, Runtime,
         tests::support::{
             common::{completed_event_with, model_name, named_model, session_id},
             model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
@@ -48,13 +48,19 @@ async fn transactional_compaction_fixture(
         ModelCapabilities::new(true, true, false, true, Some(64_000), None)
             .expect("valid primary capabilities"),
     );
-    let compactor =
-        RecordingModelProvider::with_script(vec![ScriptedModelProviderResponse::Stream(vec![Ok(
+    // The compaction model needs room for the covered turn plus the checkpoint
+    // text budget and the reasoning reserve, so it declares a wider window than
+    // the primary model's working context.
+    let compactor = RecordingModelProvider::with_script_and_capabilities(
+        vec![ScriptedModelProviderResponse::Stream(vec![Ok(
             completed_event_with(
                 vec![ModelOutput::text(TRANSACTIONAL_COMPACTION_CANDIDATE)],
                 FinishReason::Stop,
             ),
-        )])]);
+        )])],
+        ModelCapabilities::new(true, true, false, true, Some(256_000), None)
+            .expect("valid compactor capabilities"),
+    );
     let runtime = Runtime::builder(id.clone())
         .session_store(runtime_store)
         .model_provider(Arc::new(primary), model_name())
@@ -417,7 +423,7 @@ async fn automatic_compaction_completed_waits_for_directory_durability() {
                 .expect("turn completes");
         }
     }
-    *runtime.inner.automatic_compaction.write().await = AutomaticCompactionConfig::enabled(
+    *runtime.inner.automatic_compaction.write().await = CompactionConfig::enabled(
         CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
     );
 

@@ -374,15 +374,24 @@ pub enum RuntimeError {
         compactor_window_tokens: u64,
     },
 
-    /// The compiled compaction request cannot fit in the compaction model input window.
+    /// The compiled compaction request cannot hold its input and reserved output together.
     #[error(
-        "compaction model request estimated input {estimated_input_tokens} tokens exceeds compaction model input window {compactor_window_tokens} tokens"
+        "compaction model request estimated input {estimated_input_tokens} tokens plus max output {max_output_tokens} tokens exceeds compaction model window {compactor_window_tokens} tokens"
     )]
-    CompactionModelInputTooLarge {
+    CompactionModelRequestTooLarge {
         /// Deterministic estimate of the compiled provider-neutral request input.
         estimated_input_tokens: u64,
-        /// Reported or primary-window-assumed compaction input window.
+        /// Output ceiling reserved for reasoning and checkpoint text.
+        max_output_tokens: u64,
+        /// Reported or primary-window-assumed compaction model window.
         compactor_window_tokens: u64,
+    },
+
+    /// The compaction model stopped before it produced a complete checkpoint.
+    #[error("compaction model output was truncated: {message}")]
+    CompactionModelTruncated {
+        /// Actionable truncation diagnostic, including the provider's reason.
+        message: String,
     },
 
     /// Compaction model setup failed before a stream was returned.
@@ -451,7 +460,8 @@ impl RuntimeError {
             Self::MissingModelProvider { .. } => "missing_model_provider",
             Self::CompactionModelRequest { .. } => "compaction_model_request",
             Self::CompactionModelWindowTooSmall { .. } => "compaction_model_window_too_small",
-            Self::CompactionModelInputTooLarge { .. } => "compaction_model_input_too_large",
+            Self::CompactionModelRequestTooLarge { .. } => "compaction_model_request_too_large",
+            Self::CompactionModelTruncated { .. } => "compaction_model_truncated",
             Self::CompactionModelSetup { .. } => "compaction_model_setup",
             Self::CompactionModelStream { .. } => "compaction_model_stream",
         }

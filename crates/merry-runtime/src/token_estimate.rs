@@ -1,13 +1,44 @@
 //! Deterministic token estimates used by request budgeting and compaction planning.
 
-use merry_llm::{ModelContent, ModelInputItem};
+use merry_llm::{ModelContent, ModelInputItem, ModelRequest, ModelResponseFormat};
+
+/// Estimates provider-visible tools and response schemas in addition to messages.
+pub(crate) fn estimate_request_contract_tokens(request: &ModelRequest) -> u64 {
+    let tools = request
+        .tools()
+        .iter()
+        .map(|tool| {
+            estimate_text_tokens(tool.name().as_str())
+                + estimate_text_tokens(tool.description())
+                + estimate_text_tokens(&tool.input_schema().as_schema().as_value().to_string())
+        })
+        .sum::<u64>();
+    let format = match request.response_format() {
+        Some(ModelResponseFormat::StructuredOutput(format)) => {
+            estimate_text_tokens(&format.schema().as_value().to_string())
+        }
+        None => 0,
+    };
+    tools.saturating_add(format)
+}
+
+/// Bytes per token used by every text estimate in the runtime.
+///
+/// Budgets, window fitting, and planning all compare against this one ratio, so
+/// a change here moves all of them together. It is deliberately the optimistic
+/// axis of the estimate, distinct from compaction's accepted-output byte
+/// ceiling ([`crate::compaction`]), which adds slack so a checkpoint that fits
+/// the token budget is not rejected on byte count.
+pub(crate) const BYTES_PER_TOKEN: u64 = 4;
 
 pub(crate) fn estimate_model_input_tokens(input: &[ModelInputItem]) -> u64 {
     input.iter().map(estimate_model_input_item_tokens).sum()
 }
 
 pub(crate) fn estimate_text_tokens(text: &str) -> u64 {
-    u64::try_from(text.len().div_ceil(4)).expect("usize should fit in u64 on supported targets")
+    u64::try_from(text.len())
+        .expect("usize should fit in u64 on supported targets")
+        .div_ceil(BYTES_PER_TOKEN)
 }
 
 fn estimate_model_input_item_tokens(item: &ModelInputItem) -> u64 {

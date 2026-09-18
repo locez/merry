@@ -1,6 +1,6 @@
 use crate::{
     CompactionError,
-    compaction::CompactionPreparation,
+    compaction::{CompactionCoverageBudget, CompactionPreparation},
     session::{
         tests::{
             CitationCompactionPolicy, RuntimeError, SessionId, SessionState, TaskAnchor,
@@ -50,7 +50,7 @@ fn invalid_candidate_does_not_apply_planned_tool_archives() {
             &mut session,
             &format!("invalid-call-{turn}"),
             &format!("invalid-result-{turn}"),
-            &"x".repeat(1_000),
+            &"x".repeat(8_000),
         );
     }
     let budget = window_budget(1_300);
@@ -59,6 +59,7 @@ fn invalid_candidate_does_not_apply_planned_tool_archives() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             budget,
+            CompactionCoverageBudget::unbounded(),
         )
         .expect("input builds")
         .expect("old prefix is compressible");
@@ -142,6 +143,7 @@ fn prepared_archive_only_install_is_read_only_until_commit() {
             policy(5),
             policy(5).resolve(64_000).expect("budget resolves"),
             window_budget(1_300),
+            CompactionCoverageBudget::limited(0),
         )
         .expect("preparation builds")
         .expect("archive-only preparation exists");

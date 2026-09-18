@@ -655,6 +655,73 @@ mod tests {
     }
 
     #[test]
+    fn streamed_incomplete_response_keeps_the_output_budget_reason() {
+        let fixture =
+            include_str!("../tests/fixtures/responses_stream_incomplete_max_output.jsonl");
+        let events = crate::parse::parse_responses_stream_events(fixture)
+            .expect("incomplete stream should parse");
+        let ModelEvent::Completed { response } = events.last().expect("terminal event") else {
+            panic!("expected a completed event for the incomplete terminal state");
+        };
+
+        assert_eq!(response.finish_reason(), FinishReason::Length);
+        assert_eq!(
+            response.finish_detail(),
+            Some(merry_llm::FinishDetail::MaxOutputTokens)
+        );
+    }
+
+    #[test]
+    fn streamed_incomplete_response_maps_content_filter_to_blocked() {
+        let fixture =
+            include_str!("../tests/fixtures/responses_stream_incomplete_content_filter.jsonl");
+        let events = crate::parse::parse_responses_stream_events(fixture)
+            .expect("filtered stream should parse");
+        let ModelEvent::Completed { response } = events.last().expect("terminal event") else {
+            panic!("expected a completed event for the filtered terminal state");
+        };
+
+        assert_eq!(response.finish_reason(), FinishReason::Blocked);
+        assert_eq!(
+            response.finish_detail(),
+            Some(merry_llm::FinishDetail::ContentFilter)
+        );
+    }
+
+    #[test]
+    fn non_streaming_incomplete_response_keeps_the_output_budget_reason() {
+        let fixture = r#"{
+            "id": "resp_incomplete",
+            "status": "incomplete",
+            "output": [],
+            "incomplete_details": { "reason": "max_output_tokens" }
+        }"#;
+        let response = crate::parse::parse_responses_response(fixture)
+            .expect("incomplete response should parse");
+
+        assert_eq!(response.finish_reason(), FinishReason::Length);
+        assert_eq!(
+            response.finish_detail(),
+            Some(merry_llm::FinishDetail::MaxOutputTokens)
+        );
+    }
+
+    #[test]
+    fn incomplete_response_with_unknown_reason_stays_a_plain_length_stop() {
+        let fixture = r#"{
+            "id": "resp_incomplete",
+            "status": "incomplete",
+            "output": [],
+            "incomplete_details": { "reason": "provider_new_reason" }
+        }"#;
+        let response = crate::parse::parse_responses_response(fixture)
+            .expect("unknown incomplete reason must not fail the protocol");
+
+        assert_eq!(response.finish_reason(), FinishReason::Length);
+        assert_eq!(response.finish_detail(), None);
+    }
+
+    #[test]
     fn parse_tool_call_response_fixture_to_model_response() {
         let fixture = include_str!("../tests/fixtures/responses_tool_call.json");
         let response =

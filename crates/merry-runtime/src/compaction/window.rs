@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CompactionWindowBudget {
     primary_window_tokens: u64,
+    preferred_dynamic_body_tokens: Option<u64>,
     max_dynamic_body_tokens: u64,
     replacement_fixed_dynamic_body_tokens: u64,
     archive_only_fixed_dynamic_body_tokens: u64,
@@ -40,6 +41,7 @@ impl CompactionWindowBudget {
 
         Ok(Self {
             primary_window_tokens,
+            preferred_dynamic_body_tokens: None,
             max_dynamic_body_tokens,
             replacement_fixed_dynamic_body_tokens,
             archive_only_fixed_dynamic_body_tokens,
@@ -47,10 +49,37 @@ impl CompactionWindowBudget {
         })
     }
 
-    pub(crate) fn unbounded_for_manual_compaction(
+    #[cfg(test)]
+    pub(crate) fn unbounded_for_tests(
         checkpoint_output_ceiling_tokens: u64,
     ) -> Result<Self, CompactionError> {
         Self::new(u64::MAX, u64::MAX, 0, 0, checkpoint_output_ceiling_tokens)
+    }
+
+    /// Adds a bounded raw-history target to fixed input and the summary ceiling.
+    /// The hard body budget remains authoritative; arithmetic overflow is rejected.
+    pub(crate) fn with_retained_history_target(
+        self,
+        retained_history_tokens: u64,
+    ) -> Result<Self, CompactionError> {
+        let preferred_tokens = self
+            .replacement_fixed_dynamic_body_tokens
+            .checked_add(self.checkpoint_output_ceiling_tokens)
+            .and_then(|tokens| tokens.checked_add(retained_history_tokens))
+            .ok_or(CompactionError::BudgetOverflow)?;
+        Ok(Self {
+            preferred_dynamic_body_tokens: Some(preferred_tokens.min(self.max_dynamic_body_tokens)),
+            ..self
+        })
+    }
+
+    /// Returns a stricter copy that uses the preferred body budget, when one exists.
+    pub(crate) fn preferred(self) -> Option<Self> {
+        self.preferred_dynamic_body_tokens.map(|tokens| Self {
+            max_dynamic_body_tokens: tokens,
+            preferred_dynamic_body_tokens: None,
+            ..self
+        })
     }
 
     pub(crate) const fn primary_window_tokens(self) -> u64 {
@@ -59,6 +88,19 @@ impl CompactionWindowBudget {
 
     pub(crate) const fn max_dynamic_body_tokens(self) -> u64 {
         self.max_dynamic_body_tokens
+    }
+
+    /// Returns the dynamic-body target used after a checkpoint is installed.
+    ///
+    /// The preferred budget includes the fixed request body, the accepted
+    /// checkpoint ceiling, and the bounded raw-history target. It is distinct
+    /// from the hard watermark: the latter decides when compaction is required,
+    /// while this target decides when repeated compaction has done enough work.
+    pub(crate) const fn target_dynamic_body_tokens(self) -> u64 {
+        match self.preferred_dynamic_body_tokens {
+            Some(tokens) => tokens,
+            None => self.max_dynamic_body_tokens,
+        }
     }
 
     pub(crate) const fn replacement_fixed_dynamic_body_tokens(self) -> u64 {
@@ -74,18 +116,100 @@ impl CompactionWindowBudget {
     }
 }
 
-pub(crate) fn retained_turn_fallbacks(configured: usize, available_completed: usize) -> Vec<usize> {
-    let first = configured.min(available_completed);
-    if first == 0 {
-        return Vec::new();
+/// Upper bound on how much covered history one compaction request may read.
+///
+/// This bounds the compaction *request*, while [`CompactionWindowBudget`] bounds
+/// the request the compaction installs. They answer different questions, so the
+/// runtime tracks them separately: a replacement that cannot fit the compaction
+/// model window lowers this budget, which keeps more turns raw until the request
+/// fits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct CompactionCoverageBudget {
+    max_tokens: Option<u64>,
+}
+
+impl CompactionCoverageBudget {
+    /// Keeps the planner's configured retention without a coverage cap.
+    pub(crate) const fn unbounded() -> Self {
+        Self { max_tokens: None }
     }
-    let mut counts = Vec::with_capacity(4);
-    for count in [first, 5, 3, 1] {
-        if count <= first && !counts.contains(&count) {
-            counts.push(count);
+
+    /// Caps the covered payload at `max_tokens`.
+    pub(crate) const fn limited(max_tokens: u64) -> Self {
+        Self {
+            max_tokens: Some(max_tokens),
         }
     }
-    counts
+
+    /// Returns the cap, or `None` when coverage is unbounded.
+    pub(crate) const fn max_tokens(self) -> Option<u64> {
+        self.max_tokens
+    }
+}
+
+/// How one compaction pass chooses what to cover and what the payload carries.
+///
+/// The runtime selects this from the request it is about to build, so one value
+/// describes the whole reduction instead of several loose flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompactionShape {
+    /// One pass that must land inside the body budget; manual compaction.
+    SinglePass,
+    /// Cover the largest window one request hosts, repeating until the request fits.
+    Rolling,
+    /// Last resort when even user/assistant history cannot fit in one request.
+    RollingText,
+    /// Cover everything before the retained tail once, omitting older tool exchanges.
+    OneShot {
+        /// Newest covered tool exchanges kept, arguments and result together.
+        retained_tool_exchanges: usize,
+    },
+}
+
+impl CompactionShape {
+    /// Returns how strictly this shape requires the retained history to fit.
+    pub(crate) const fn retained_fit(self) -> RetainedFit {
+        match self {
+            Self::SinglePass | Self::OneShot { .. } => RetainedFit::Required,
+            Self::Rolling | Self::RollingText => RetainedFit::Deferred,
+        }
+    }
+
+    /// Returns how many covered tool exchanges stay at full length.
+    ///
+    /// `None` keeps every covered tool exchange at full length.
+    pub(crate) const fn retained_tool_exchanges(self) -> Option<usize> {
+        match self {
+            Self::OneShot {
+                retained_tool_exchanges,
+            } => Some(retained_tool_exchanges),
+            Self::RollingText => Some(0),
+            Self::SinglePass | Self::Rolling => None,
+        }
+    }
+}
+
+/// How strictly one compaction pass must leave the retained history inside the body budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetainedFit {
+    /// The pass must land under the budget, or report that no window fits.
+    ///
+    /// Manual compaction uses this: a caller asked for one reduction and needs to
+    /// know whether one happened.
+    Required,
+    /// The pass may land above the budget because the runtime runs another pass.
+    ///
+    /// Rolling compaction uses this. Each pass covers as much history as the
+    /// compaction window can host, and the caller repeats while the recompiled
+    /// request still crosses the watermark. Without it, a window that shrank below
+    /// the retained history could never reduce anything: every candidate would fail
+    /// the budget check before anything could be installed, which is why shrinking
+    /// the context window reported that no compaction window fit.
+    Deferred,
+}
+
+pub(crate) fn retained_turn_fallbacks(configured: usize, available_completed: usize) -> Vec<usize> {
+    (1..=configured.min(available_completed)).rev().collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +340,13 @@ impl CitationCompactionModelTurn {
             status,
             items,
         })
+    }
+
+    pub(crate) fn tool_exchange_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|item| matches!(item, CitationCompactionTurnItem::ToolExchange { .. }))
+            .count()
     }
 
     pub(crate) fn ref_ids(&self) -> impl Iterator<Item = &str> {

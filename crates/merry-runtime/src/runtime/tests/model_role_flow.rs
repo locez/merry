@@ -37,6 +37,7 @@ async fn seed_two_history_items_for_compaction(runtime: &Runtime) {
 mod automatic_compaction;
 
 mod budget;
+mod rolling_compaction;
 
 mod manual_compaction;
 

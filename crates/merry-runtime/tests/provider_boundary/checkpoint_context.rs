@@ -332,7 +332,7 @@ async fn dynamic_context_projection_keeps_checkpoint_tail_and_current_input_outs
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn compaction_model_request_excludes_retained_tail_and_tools() {
+async fn compaction_model_request_preserves_retained_tail_and_tools() {
     let compactor = ScriptedModelProvider::new(vec![
         vec![Ok(completed_text_event("old compacted assistant sentinel"))],
         vec![Ok(completed_text_event("tail assistant sentinel"))],
@@ -389,8 +389,9 @@ async fn compaction_model_request_excludes_retained_tail_and_tools() {
 
     assert!(request_text.contains("old compacted user sentinel"));
     assert!(request_text.contains("old compacted assistant sentinel"));
-    assert!(!request_text.contains("retained raw tail sentinel"));
-    assert!(requests[2].tools().is_empty());
+    assert!(request_text.contains("retained raw tail sentinel"));
+    assert_eq!(requests[2].tools(), requests[1].tools());
+    assert!(requests[2].input().starts_with(requests[1].input()));
     assert!(requests[2].continuations().is_empty());
 }
 

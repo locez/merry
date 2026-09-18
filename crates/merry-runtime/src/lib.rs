@@ -88,9 +88,9 @@ pub use checkpoint::{
     CheckpointValidationPolicy, CitationBackedCheckpoint, CompactedCheckpointCandidate,
 };
 pub use compaction::{
-    CitationCompactionInput, CitationCompactionPolicy, CompactionError, CompactionOutcome,
-    ResolvedCitationCompactionBudget, citation_compaction_response_schema,
-    citation_compaction_system_prompt,
+    COMPACTION_PAYLOAD_TAG, CitationCompactionInput, CitationCompactionPolicy, CompactionError,
+    CompactionOutcome, ResolvedCitationCompactionBudget, citation_compaction_response_schema,
+    citation_compaction_tail_directive, compaction_payload_block,
 };
 pub use context::{
     CheckpointDecision, CompactedCheckpoint, CompactedCheckpointSummary, CompiledContext,
@@ -151,7 +151,7 @@ pub use profile::{
     RuntimeCapabilities, RuntimeProfile, RuntimeProfileBuilder, RuntimeProfileError,
 };
 pub use prompt::{PromptBlock, PromptError, PromptProfile};
-pub use runtime::{AutomaticCompactionConfig, Runtime, RuntimeBuilder};
+pub use runtime::{CompactionConfig, Runtime, RuntimeBuilder};
 pub use session_projection::SessionTranscriptItem;
 pub use session_store::{
     FileSessionStore, PlanPersistenceLocation, SessionReservation, SessionStoreError,

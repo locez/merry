@@ -178,8 +178,16 @@ pub(crate) struct ResponsesResponse {
     pub(crate) output: Vec<ResponsesOutputItem>,
     pub(crate) status: Option<String>,
     pub(crate) usage: Option<ResponsesUsage>,
+    pub(crate) incomplete_details: Option<ResponsesIncompleteDetails>,
     #[serde(default)]
     pub(crate) error: Option<ResponsesResponseError>,
+}
+
+/// Why a Responses generation ended before it completed; interpreted by the adapter.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ResponsesIncompleteDetails {
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
 }
 
 /// Error details from a failed Responses generation; interpreted by the adapter.

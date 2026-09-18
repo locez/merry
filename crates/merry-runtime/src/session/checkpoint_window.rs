@@ -4,9 +4,9 @@ use crate::{
     checkpoint::{CheckpointError, CheckpointRef, CheckpointRefId, CheckpointSourceKind},
     compaction::{
         ArchiveOnlyCompactionInput, CitationCompactionInput, CitationCompactionPolicy,
-        CompactionError, CompactionOutcome, CompactionPreparation, CompactionWindowBudget,
-        CompactionWindowFingerprint, CompactionWindowPlan, ResolvedCitationCompactionBudget,
-        checkpoint_from_candidate_json,
+        CompactionCoverageBudget, CompactionError, CompactionOutcome, CompactionPreparation,
+        CompactionShape, CompactionWindowBudget, CompactionWindowFingerprint, CompactionWindowPlan,
+        ResolvedCitationCompactionBudget, checkpoint_from_candidate_json,
     },
     context::{CompactedCheckpoint, CompactedCheckpointSummary},
     permission::PermissionReviewContextEntry,
@@ -202,18 +202,19 @@ impl SessionState {
         Ok((reference.source_kind(), page))
     }
 
+    #[cfg(test)]
     pub(crate) fn build_citation_compaction_input(
         &self,
         policy: CitationCompactionPolicy,
         resolved_budget: ResolvedCitationCompactionBudget,
     ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
-        let window_budget = CompactionWindowBudget::unbounded_for_manual_compaction(
-            resolved_budget.output_token_limit(),
-        )?;
+        let window_budget =
+            CompactionWindowBudget::unbounded_for_tests(resolved_budget.output_token_limit())?;
         self.build_citation_compaction_input_with_window_budget(
             policy,
             resolved_budget,
             window_budget,
+            CompactionCoverageBudget::unbounded(),
         )
     }
 
@@ -222,29 +223,99 @@ impl SessionState {
         policy: CitationCompactionPolicy,
         resolved_budget: ResolvedCitationCompactionBudget,
         window_budget: CompactionWindowBudget,
+        coverage: CompactionCoverageBudget,
     ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
         match self.build_compaction_preparation_with_window_budget(
             policy,
             resolved_budget,
             window_budget,
+            coverage,
         )? {
             Some(CompactionPreparation::ReplaceCheckpoint(input)) => Ok(Some(*input)),
             Some(CompactionPreparation::ArchiveToolResults(_)) | None => Ok(None),
         }
     }
 
+    /// Builds one compaction preparation that must land inside the body budget.
     pub(crate) fn build_compaction_preparation_with_window_budget(
         &self,
         policy: CitationCompactionPolicy,
         resolved_budget: ResolvedCitationCompactionBudget,
         window_budget: CompactionWindowBudget,
+        coverage: CompactionCoverageBudget,
+    ) -> Result<Option<CompactionPreparation>, RuntimeError> {
+        self.build_compaction_preparation(
+            policy,
+            resolved_budget,
+            window_budget,
+            coverage,
+            CompactionShape::SinglePass,
+        )
+    }
+
+    /// Builds one rolling pass that may leave the retained history above the body budget.
+    ///
+    /// Each rolling pass covers as much history as the compaction window can host,
+    /// and the runtime repeats until the recompiled request lands back under the
+    /// watermark. This is what lets a session keep compacting after its context
+    /// window shrinks, when the retained history alone no longer fits the budget.
+    pub(crate) fn build_rolling_compaction_preparation(
+        &self,
+        policy: CitationCompactionPolicy,
+        resolved_budget: ResolvedCitationCompactionBudget,
+        window_budget: CompactionWindowBudget,
+        coverage: CompactionCoverageBudget,
+    ) -> Result<Option<CompactionPreparation>, RuntimeError> {
+        self.build_compaction_preparation(
+            policy,
+            resolved_budget,
+            window_budget,
+            coverage,
+            CompactionShape::Rolling,
+        )
+    }
+
+    /// Builds one one-shot pass that covers everything before the retained tail.
+    ///
+    /// The pass keeps the newest `retained_tool_exchanges` covered tool exchanges at
+    /// full length and omits older exchanges entirely from the model payload. The payload therefore stops
+    /// growing with the number of tool calls in the covered history. This is what a
+    /// window that shrank far below the history needs, because rolling would
+    /// re-summarize the previous checkpoint on every pass.
+    pub(crate) fn build_one_shot_compaction_preparation(
+        &self,
+        policy: CitationCompactionPolicy,
+        resolved_budget: ResolvedCitationCompactionBudget,
+        window_budget: CompactionWindowBudget,
+        coverage: CompactionCoverageBudget,
+        retained_tool_exchanges: usize,
+    ) -> Result<Option<CompactionPreparation>, RuntimeError> {
+        self.build_compaction_preparation(
+            policy,
+            resolved_budget,
+            window_budget,
+            coverage,
+            CompactionShape::OneShot {
+                retained_tool_exchanges,
+            },
+        )
+    }
+
+    pub(crate) fn build_compaction_preparation(
+        &self,
+        policy: CitationCompactionPolicy,
+        resolved_budget: ResolvedCitationCompactionBudget,
+        window_budget: CompactionWindowBudget,
+        coverage: CompactionCoverageBudget,
+        shape: CompactionShape,
     ) -> Result<Option<CompactionPreparation>, RuntimeError> {
         if !self.pending_tool_calls.is_empty() {
             return Err(CompactionError::PendingToolCalls.into());
         }
 
         let turns = self.model_turn_histories(HiddenToolExchangeVisibility::Include, true)?;
-        let Some(plan) = self.plan_compaction_window_from_turns(policy, window_budget, &turns)?
+        let Some(plan) =
+            self.plan_compaction_window_from_turns(policy, window_budget, coverage, shape, &turns)?
         else {
             return Ok(None);
         };
@@ -269,6 +340,7 @@ impl SessionState {
             &covered,
             plan,
             archived_refs,
+            shape.retained_tool_exchanges(),
         )
         .map(Box::new)
         .map(CompactionPreparation::ReplaceCheckpoint)
@@ -285,7 +357,13 @@ impl SessionState {
             return Err(CompactionError::PendingToolCalls.into());
         }
         let turns = self.model_turn_histories(HiddenToolExchangeVisibility::Include, true)?;
-        self.plan_compaction_window_from_turns(policy, window_budget, &turns)
+        self.plan_compaction_window_from_turns(
+            policy,
+            window_budget,
+            CompactionCoverageBudget::unbounded(),
+            CompactionShape::SinglePass,
+            &turns,
+        )
     }
 
     #[cfg(test)]

@@ -10,7 +10,7 @@ use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::FileSessionStore;
 #[cfg(test)]
 use merry_runtime::Runtime;
-use merry_runtime::{AutomaticCompactionConfig, LoadedSession, RegisteredTool};
+use merry_runtime::{CompactionConfig, LoadedSession, RegisteredTool};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -19,7 +19,7 @@ use std::{
 #[cfg(test)]
 pub(crate) struct CodingRuntimeOptions {
     pub(crate) approval_review: Option<RuntimeRoleProviderConfig>,
-    pub(crate) automatic_compaction: AutomaticCompactionConfig,
+    pub(crate) automatic_compaction: CompactionConfig,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
     pub(crate) process_backend: ActionProcessBackend,
@@ -36,7 +36,7 @@ pub(crate) struct HeadlessCodingRuntimeInput<'a> {
     pub(crate) model: ModelName,
     pub(crate) process_backend: ActionProcessBackend,
     pub(crate) extra_tools: Vec<RegisteredTool>,
-    pub(crate) automatic_compaction: AutomaticCompactionConfig,
+    pub(crate) automatic_compaction: CompactionConfig,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
     pub(crate) approval_review: Option<RuntimeRoleProviderConfig>,

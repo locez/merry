@@ -20,6 +20,7 @@ use crate::{
             ToolCallPromptProjection, ToolResultPromptProjection, TranscriptItem, TranscriptItemId,
         },
     },
+    token_estimate::BYTES_PER_TOKEN,
 };
 use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef, ToolCallId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,6 +37,21 @@ pub(super) struct ModelTurnHistory {
     pub(super) items: Vec<CompactionHistoryRecord>,
 }
 
+/// JSON keys, the turn id, the status tag, and separators one payload turn adds.
+const COMPACTION_PAYLOAD_TURN_ENVELOPE_BYTES: u64 = 64;
+
+/// Estimated tokens the covered turns contribute to the compaction payload.
+pub(super) fn covered_payload_tokens(
+    turns: &[ModelTurnHistory],
+    text_only: bool,
+) -> Result<u64, RuntimeError> {
+    turns.iter().try_fold(0_u64, |total, turn| {
+        total
+            .checked_add(turn.compaction_payload_token_estimate(text_only)?)
+            .ok_or_else(|| RuntimeError::from(CompactionError::BudgetOverflow))
+    })
+}
+
 #[derive(Clone)]
 pub(super) struct CompactionHistoryRecord {
     pub(super) item: CompactionHistoryItem,
@@ -43,6 +59,23 @@ pub(super) struct CompactionHistoryRecord {
 }
 
 impl ModelTurnHistory {
+    pub(super) fn compaction_payload_token_estimate(
+        &self,
+        text_only: bool,
+    ) -> Result<u64, RuntimeError> {
+        let item_tokens = self
+            .items
+            .iter()
+            .filter(|record| !text_only || !record.item.is_tool_exchange())
+            .try_fold(0_u64, |total, record| {
+                total
+                    .checked_add(record.item.compaction_payload_token_estimate()?)
+                    .ok_or_else(|| RuntimeError::from(CompactionError::BudgetOverflow))
+            })?;
+        Ok(item_tokens
+            .saturating_add(COMPACTION_PAYLOAD_TURN_ENVELOPE_BYTES.div_ceil(BYTES_PER_TOKEN)))
+    }
+
     pub(super) fn projected_token_estimate(
         &self,
         archived_tool_call_ids: &BTreeSet<ToolCallId>,
@@ -260,10 +293,34 @@ impl SessionState {
         covered: &[&ModelTurnHistory],
         plan: CompactionWindowPlan,
         archived_refs: Vec<CheckpointRef>,
+        retained_tool_exchanges: Option<usize>,
     ) -> Result<CitationCompactionInput, RuntimeError> {
         if covered.iter().all(|turn| turn.items.is_empty()) {
             return Err(CompactionError::NoCompressibleWindow.into());
         }
+
+        // A one-shot payload keeps the newest tool exchanges and omits the rest.
+        // Counting is per exchange, never per item, because a tool call and its result
+        // are one history item and the runtime rejects a window that carries only one
+        // of them. Omitting whole exchanges is what makes the payload fit: measured on
+        // a real session, covered call arguments alone were 225,800 tokens against a
+        // 190,400 token input budget, and keeping a minimal marker per exchange still
+        // cost about 95,000 tokens across 1,324 exchanges.
+        let retained_exchanges = retained_tool_exchanges.map(|retained| {
+            let mut full = BTreeSet::new();
+            'covered: for turn in covered.iter().rev() {
+                for record in turn.items.iter().rev() {
+                    if !record.item.is_tool_exchange() {
+                        continue;
+                    }
+                    if full.len() == retained {
+                        break 'covered;
+                    }
+                    full.insert(record.item.history_id);
+                }
+            }
+            full
+        });
 
         let mut covered_history_ids = BTreeSet::new();
         let checkpoint_id = crate::CheckpointId::new(&format!(
@@ -296,7 +353,21 @@ impl SessionState {
         for turn in covered {
             let mut items = Vec::with_capacity(turn.items.len());
             for record in &turn.items {
+                // A dropped exchange is still covered history: the plan marks it
+                // compacted, it just does not travel through the payload.
                 covered_history_ids.insert(record.item.history_id);
+                // Only tool exchanges are ever omitted: the conversation text is what
+                // the checkpoint summarizes, and a ref that leaves the payload cannot
+                // be cited. Omission is whole, never half a pair, because a tool call
+                // and its result are one history item and a window that carried only
+                // one of them would be rejected as stale.
+                if record.item.is_tool_exchange()
+                    && retained_exchanges
+                        .as_ref()
+                        .is_some_and(|retained| !retained.contains(&record.item.history_id))
+                {
+                    continue;
+                }
                 items.push(
                     record
                         .item
