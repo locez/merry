@@ -4,6 +4,7 @@ use crate::{
     artifact::{ArtifactContent, ArtifactError},
     ledger::{LedgerFactKind, LedgerUpdateKind},
     session::transcript::ToolResultPromptProjection,
+    tool::ToolResultContent,
 };
 use merry_core::{
     ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, RuntimeJournalEvent, RuntimeJournalPayload,
@@ -57,6 +58,7 @@ impl SessionState {
             result,
             artifact.id().clone(),
             ToolResultPromptProjection::Hidden,
+            None,
         )?;
         let recorded = self.artifacts.record_preflighted(artifact, content);
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
@@ -88,7 +90,7 @@ impl SessionState {
     pub(crate) fn submit_tool_result(
         &mut self,
         result: ToolCallResult,
-        content: ArtifactContent,
+        content: impl Into<ToolResultContent>,
     ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         let Some(pending_index) = self
             .pending_tool_calls
@@ -114,22 +116,15 @@ impl SessionState {
                 call_id: result.call_id().clone(),
             })?;
 
-        self.validate_tool_result_content(&result, &content)?;
-        self.artifacts
-            .ensure_recordable(result.artifact(), &content)?;
+        let artifacts = self.prepare_tool_result_artifacts(&result, content.into())?;
         let mut transcript = self.transcript.clone();
         transcript.push_tool_result(
             result.call_id().clone(),
             result.clone(),
             result.artifact().id().clone(),
             ToolResultPromptProjection::Full,
+            artifacts.model_artifact_id(),
         )?;
-        let content_bytes = content.as_bytes().len();
-        let recorded = self
-            .artifacts
-            .record_preflighted(result.artifact().clone(), content);
-        Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
-        debug_assert_eq!(&recorded, result.artifact());
         self.transcript = transcript;
         let pending = self.pending_tool_calls.remove(pending_index);
         let pending_for_skill_event = pending.clone();
@@ -140,10 +135,7 @@ impl SessionState {
             events.push(started);
         }
 
-        events.push(self.record_event(
-            RuntimeJournalPayload::ArtifactRecorded { artifact: recorded },
-            LedgerFactKind::ArtifactRecorded,
-        ));
+        events.extend(self.record_tool_result_artifacts(artifacts));
         events.push(self.record_event(
             RuntimeJournalPayload::ToolCallResolved {
                 result: result.clone(),
@@ -161,12 +153,13 @@ impl SessionState {
         &mut self,
         call_id: &ToolCallId,
         status: ToolCallResultStatus,
-        content: ArtifactContent,
+        content: impl Into<ToolResultContent>,
         diagnostic: Option<ErrorInfo>,
         execution_evidence: Option<ActionExecutionEvidence>,
     ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         debug_assert!(execution_evidence.is_none());
-        let artifact_kind = self.tool_result_artifact_kind(&content)?;
+        let content = content.into();
+        let artifact_kind = self.tool_result_artifact_kind(&content.artifact)?;
         let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
         let result = match status {
             ToolCallResultStatus::Succeeded => ToolCallResult::new(
@@ -288,6 +281,7 @@ impl SessionState {
             self.validate_tool_result_content(&result, outcome.content())?;
             self.artifacts
                 .ensure_recordable(result.artifact(), outcome.content())?;
+            self.validate_model_result_content(outcome.content(), outcome.model_content())?;
         }
         Ok(())
     }
@@ -321,27 +315,35 @@ impl SessionState {
         result: &ToolCallResult,
         content: &ArtifactContent,
     ) -> Result<(), RuntimeError> {
+        self.validate_tool_result_artifact(result.artifact(), content)
+    }
+
+    pub(super) fn validate_tool_result_artifact(
+        &self,
+        artifact: &ArtifactRef,
+        content: &ArtifactContent,
+    ) -> Result<(), RuntimeError> {
         let supported = matches!(
             content,
             ArtifactContent::Text { .. } | ArtifactContent::Json { .. }
         );
         let compatible = matches!(
-            (result.artifact().kind(), content),
+            (artifact.kind(), content),
             (ArtifactKind::Text, ArtifactContent::Text { .. })
                 | (ArtifactKind::Json, ArtifactContent::Json { .. })
         );
 
         if !supported {
             return Err(RuntimeError::UnsupportedToolResultContent {
-                artifact_id: result.artifact().id().clone(),
+                artifact_id: artifact.id().clone(),
                 content_kind: content.kind(),
             });
         }
 
         if !compatible {
             return Err(ArtifactError::IncompatibleContent {
-                id: result.artifact().id().clone(),
-                artifact_kind: result.artifact().kind().clone(),
+                id: artifact.id().clone(),
+                artifact_kind: artifact.kind().clone(),
                 content_kind: content.kind(),
             }
             .into());
@@ -352,7 +354,7 @@ impl SessionState {
                 if text.trim().is_empty() =>
             {
                 Err(RuntimeError::UnsupportedToolResultContent {
-                    artifact_id: result.artifact().id().clone(),
+                    artifact_id: artifact.id().clone(),
                     content_kind: content.kind(),
                 })
             }

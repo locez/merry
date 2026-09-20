@@ -128,14 +128,33 @@ pub trait ToolExecutor: Send + Sync {
 /// Domain-level result from a tool execution.
 ///
 /// Runtime code turns this into a stable artifact reference and a
-/// `ToolCallResult`; executors only provide the exact text or JSON payload.
+/// `ToolCallResult`. Executors provide the exact artifact payload and may supply
+/// a distinct model body when presentation or audit details are not useful in
+/// context. Without a model body, requests continue to use the artifact content.
 /// This type intentionally carries no artifact id, event, or ledger update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExecutionOutcome {
     pub(super) status: ToolCallResultStatus,
     pub(super) content: ArtifactContent,
+    model_content: Option<Box<ArtifactContent>>,
     pub(super) diagnostic: Option<ErrorInfo>,
     pub(super) execution_evidence: Option<ActionExecutionEvidence>,
+}
+
+/// Full evidence and an optional model body, kept together through admission.
+#[derive(Debug)]
+pub(crate) struct ToolResultContent {
+    pub(crate) artifact: ArtifactContent,
+    pub(crate) model: Option<ArtifactContent>,
+}
+
+impl From<ArtifactContent> for ToolResultContent {
+    fn from(artifact: ArtifactContent) -> Self {
+        Self {
+            artifact,
+            model: None,
+        }
+    }
 }
 
 /// Result of a tool action preflight/proposal hook.
@@ -201,6 +220,35 @@ impl ToolExecutionOutcome {
         &self.content
     }
 
+    /// Borrows the optional model-facing body instead of the full artifact.
+    ///
+    /// Runtime persists this body for request replay and compaction. Artifact
+    /// reads, evidence references, and presentation retain [`Self::content`].
+    #[must_use]
+    pub fn model_content(&self) -> Option<&ArtifactContent> {
+        self.model_content.as_deref()
+    }
+
+    /// Supplies model-facing text without changing the full result artifact.
+    ///
+    /// Keep execution status, useful output, and completeness warnings in this
+    /// body. Runtime rejects blank bodies before resolving the tool call.
+    #[must_use]
+    pub fn with_model_text(mut self, content: impl Into<String>) -> Self {
+        self.model_content = Some(Box::new(ArtifactContent::text(content)));
+        self
+    }
+
+    /// Supplies model-facing JSON without changing the full result artifact.
+    ///
+    /// The caller owns the JSON schema and must preserve actionable results.
+    /// Runtime rejects blank bodies before resolving the tool call.
+    #[must_use]
+    pub fn with_model_json(mut self, content: impl Into<String>) -> Self {
+        self.model_content = Some(Box::new(ArtifactContent::json(content)));
+        self
+    }
+
     /// Borrows the optional failure diagnostic.
     #[must_use]
     pub fn diagnostic(&self) -> Option<&ErrorInfo> {
@@ -228,13 +276,16 @@ impl ToolExecutionOutcome {
         self,
     ) -> (
         ToolCallResultStatus,
-        ArtifactContent,
+        ToolResultContent,
         Option<ErrorInfo>,
         Option<ActionExecutionEvidence>,
     ) {
         (
             self.status,
-            self.content,
+            ToolResultContent {
+                artifact: self.content,
+                model: self.model_content.map(|content| *content),
+            },
             self.diagnostic,
             self.execution_evidence,
         )
@@ -244,6 +295,7 @@ impl ToolExecutionOutcome {
         Self {
             status: ToolCallResultStatus::Succeeded,
             content,
+            model_content: None,
             diagnostic: None,
             execution_evidence: None,
         }
@@ -253,6 +305,7 @@ impl ToolExecutionOutcome {
         Self {
             status: ToolCallResultStatus::Failed,
             content,
+            model_content: None,
             diagnostic: Some(diagnostic),
             execution_evidence: None,
         }

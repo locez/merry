@@ -108,7 +108,12 @@ async fn read_only_shell_process_executes_under_shell_profile_when_opted_in() {
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
+        [
+            "ArtifactRecorded",
+            "ArtifactRecorded",
+            "ArtifactRecorded",
+            "ToolCallResolved"
+        ]
     );
     let RuntimeJournalPayload::ArtifactRecorded {
         artifact: input_artifact,
@@ -252,7 +257,12 @@ async fn read_only_shell_process_traces_payload_free_input_metadata_when_opted_i
 
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
+        [
+            "ArtifactRecorded",
+            "ArtifactRecorded",
+            "ArtifactRecorded",
+            "ToolCallResolved"
+        ]
     );
     assert_eq!(runner.call_count(), 1);
     assert!(logs.contains("\"event\":\"runtime.process.execute.start\""));

@@ -1,8 +1,9 @@
-//! Provider-visible result envelope of a successful `apply_patch` call.
+//! Full result artifact of a successful `apply_patch` call.
 //!
 //! These types are the single definition of that payload: the tool serializes
-//! them and every consumer deserializes them, so a field cannot drift between
-//! the writer and a reader in another crate. Fields added after the first
+//! them and presentation consumers deserialize them, so a field cannot drift
+//! between the writer and a reader in another crate. The model receives a
+//! separate operation summary. Fields added after the first
 //! release stay optional with `serde(default)` so a resumed session can still
 //! read an envelope recorded by an older build.
 
@@ -14,6 +15,28 @@ pub struct WorkspacePatchSuccess {
     pub ok: bool,
     pub tool: String,
     pub changes: Vec<WorkspacePatchSuccessChange>,
+}
+
+impl WorkspacePatchSuccess {
+    pub(crate) fn model_text(&self) -> String {
+        let mut text = "Applied patch:".to_owned();
+        for change in &self.changes {
+            let operation = match change.operation() {
+                WorkspacePatchOperationKind::Add => "added",
+                WorkspacePatchOperationKind::Update => "updated",
+                WorkspacePatchOperationKind::Delete => "deleted",
+                WorkspacePatchOperationKind::Unknown => "changed",
+            };
+            text.push_str(&format!("\n{operation} {}", change.path));
+            if change.ignored_context_hunks > 0 {
+                text.push_str(&format!(
+                    " (ignored {} context-only hunks)",
+                    change.ignored_context_hunks
+                ));
+            }
+        }
+        text
+    }
 }
 
 /// One file change inside a successful `apply_patch` result.
@@ -91,7 +114,7 @@ pub enum WorkspacePatchSuccessLineKind {
     Add,
     /// A kind this build does not know.
     ///
-    /// The serialized envelope is provider-visible output that a newer runtime
+    /// The serialized envelope is stored output that a newer runtime
     /// may extend, so an unknown kind is preserved as a line the reader ignores
     /// instead of failing the whole result.
     #[serde(other)]

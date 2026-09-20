@@ -15,6 +15,8 @@ use merry_core::{
 };
 use std::sync::Arc;
 
+mod output;
+
 pub(super) struct ProcessExecutionAdmission {
     policy_decision: ActionPolicyDecision,
     permission_profile_id: ProcessPermissionProfileId,
@@ -189,19 +191,21 @@ pub(super) async fn execute_admitted_process_action(
         shell_input_artifact_ref,
     );
 
+    let mut outcome = ProposedToolExecutionOutcome::new(
+        proposal,
+        status,
+        content,
+        diagnostic,
+        Some(execution_evidence),
+        ActionAuditPolicy::from_decision(&policy_decision),
+    )
+    .with_observation(observation);
+    if let Some(model_content) = output::model_text(&output) {
+        outcome = outcome.with_model_text(model_content);
+    }
     let result_events = {
         let mut session = inner.session.lock().await;
-        session.submit_proposed_tool_execution_outcome_record(
-            ProposedToolExecutionOutcome::new(
-                proposal,
-                status,
-                content,
-                diagnostic,
-                Some(execution_evidence),
-                ActionAuditPolicy::from_decision(&policy_decision),
-            )
-            .with_observation(observation),
-        )?
+        session.submit_proposed_tool_execution_outcome_record(outcome)?
     };
     Ok(merge_process_input_and_result_events(
         shell_input_artifact.map(|(_artifact, events)| events),

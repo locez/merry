@@ -148,6 +148,15 @@ struct FailureError<'a> {
     message: &'a str,
 }
 
+#[derive(Serialize)]
+struct FailureModelBody<'a> {
+    error: &'a FailureError<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guidance: Option<&'static str>,
+}
+
 #[derive(Debug, Serialize)]
 struct FailureRecovery {
     path_contract: &'static str,
@@ -177,6 +186,14 @@ pub(crate) fn failed_outcome(
     ToolExecutionOutcome::failed_json(
         serde_json::to_string(&envelope).expect("workspace failure envelope serializes"),
         failure_diagnostic(code, &message),
+    )
+    .with_model_json(
+        serde_json::to_string(&FailureModelBody {
+            error: &envelope.error,
+            path: envelope.path,
+            guidance: envelope.guidance.map(|guidance| guidance.message),
+        })
+        .expect("workspace model failure body serializes"),
     )
 }
 

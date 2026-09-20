@@ -500,6 +500,13 @@ let role_specific_spec = InspectWorkspaceInput::tool_spec_with(
 Use the generated `ToolSpec` with an explicitly constructed runtime
 `RegisteredTool` when the executor must remain runtime-owned.
 
+Low-level executors can keep full display/evidence content in
+`merry_runtime::ToolExecutionOutcome` and supply a distinct model body with
+`with_model_text` or `with_model_json`. The model body must retain actionable
+results and completeness warnings. Runtime persists it for replay and compaction;
+artifact reads and checkpoint references still return the original full result.
+Without a separate model body, tools keep their existing output behavior.
+
 Merry derives the input schema, decodes arguments, and serializes the handler's
 return value. `Infallible` means this example cannot return a domain error; use
 your application's error type for fallible handlers. The macro does not register

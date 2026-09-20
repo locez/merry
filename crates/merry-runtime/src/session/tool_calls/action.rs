@@ -3,9 +3,9 @@ use crate::{
     ActionExecutionEvidence, ActionProposal, RuntimeError, ToolActionKind,
     action_audit::ActionAuditPolicy,
     action_policy::ActionPolicyDecision,
-    artifact::ArtifactContent,
     ledger::LedgerFactKind,
     session::{tool_result::ProposedToolExecutionOutcome, transcript::ToolResultPromptProjection},
+    tool::ToolResultContent,
 };
 use merry_core::{
     ArtifactRef, ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload,
@@ -17,7 +17,7 @@ impl SessionState {
         &mut self,
         proposal: ActionProposal,
         status: ToolCallResultStatus,
-        content: ArtifactContent,
+        content: impl Into<ToolResultContent>,
         diagnostic: Option<ErrorInfo>,
         execution_evidence: Option<ActionExecutionEvidence>,
         policy: ActionAuditPolicy,
@@ -70,7 +70,7 @@ impl SessionState {
                 call_id: call_id.clone(),
             })?;
 
-        let artifact_kind = self.tool_result_artifact_kind(&content)?;
+        let artifact_kind = self.tool_result_artifact_kind(&content.artifact)?;
         let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
         let result = match status {
             ToolCallResultStatus::Succeeded => ToolCallResult::new(
@@ -91,15 +91,14 @@ impl SessionState {
         let observation =
             observation.map(|observation| observation.into_update_for_artifact(result.artifact()));
 
-        self.validate_tool_result_content(&result, &content)?;
-        self.artifacts
-            .ensure_recordable(result.artifact(), &content)?;
+        let artifacts = self.prepare_tool_result_artifacts(&result, content)?;
         let mut transcript = self.transcript.clone();
         transcript.push_tool_result(
             result.call_id().clone(),
             result.clone(),
             result.artifact().id().clone(),
             ToolResultPromptProjection::Full,
+            artifacts.model_artifact_id(),
         )?;
 
         let pending = self.pending_tool_calls.remove(pending_index);
@@ -111,7 +110,6 @@ impl SessionState {
 
         let action_kind = proposal.action_kind();
         self.record_proposed_tool_action_audit(proposal);
-        let content_bytes = content.as_bytes().len();
         if let Some(execution_evidence) = execution_evidence {
             self.record_executed_tool_action_audit(
                 &pending,
@@ -120,18 +118,10 @@ impl SessionState {
                 execution_evidence,
             );
         }
-        let recorded = self
-            .artifacts
-            .record_preflighted(result.artifact().clone(), content);
-        Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
-        debug_assert_eq!(&recorded, result.artifact());
         self.transcript = transcript;
         self.resolved_tool_calls.insert(result.call_id().clone());
 
-        events.push(self.record_event(
-            RuntimeJournalPayload::ArtifactRecorded { artifact: recorded },
-            LedgerFactKind::ArtifactRecorded,
-        ));
+        events.extend(self.record_tool_result_artifacts(artifacts));
         if let Some(observation) = observation {
             self.record_tool_result_observation(observation);
         }
@@ -153,7 +143,7 @@ impl SessionState {
         pending: &PendingToolCall,
         decision: &ActionPolicyDecision,
         proposal: Option<ActionProposal>,
-        content: ArtifactContent,
+        content: impl Into<ToolResultContent>,
         diagnostic: ErrorInfo,
     ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         debug_assert!(!decision.is_allowed());
@@ -182,70 +172,39 @@ impl SessionState {
                 call_id: pending.id().clone(),
             })?;
 
-        let artifact_kind = self.tool_result_artifact_kind(&content)?;
+        let content = content.into();
+        let artifact_kind = self.tool_result_artifact_kind(&content.artifact)?;
         let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
         let result = ToolCallResult::failed(pending.id().clone(), artifact, diagnostic);
 
-        self.validate_tool_result_content(&result, &content)?;
-        self.artifacts
-            .ensure_recordable(result.artifact(), &content)?;
+        let artifacts = self.prepare_tool_result_artifacts(&result, content)?;
         let mut transcript = self.transcript.clone();
         transcript.push_tool_result(
             result.call_id().clone(),
             result.clone(),
             result.artifact().id().clone(),
             ToolResultPromptProjection::Full,
+            artifacts.model_artifact_id(),
         )?;
 
         let pending = self.pending_tool_calls.remove(pending_index);
+        let mut events = Vec::new();
         if let Some(started) = self.record_session_started_if_needed() {
-            if let Some(proposal) = proposal {
-                self.record_proposed_tool_action_audit(proposal);
-            }
-            self.record_denied_tool_action_audit(&pending, decision);
-            let content_bytes = content.as_bytes().len();
-            let artifact = self
-                .artifacts
-                .record_preflighted(result.artifact().clone(), content);
-            Self::trace_artifact_record(self.session_id.as_str(), &artifact, content_bytes);
-            debug_assert_eq!(artifact, *result.artifact());
-            self.transcript = transcript;
-            self.resolved_tool_calls.insert(result.call_id().clone());
-            return Ok(vec![
-                started,
-                self.record_event(
-                    RuntimeJournalPayload::ArtifactRecorded { artifact },
-                    LedgerFactKind::ArtifactRecorded,
-                ),
-                self.record_event(
-                    RuntimeJournalPayload::ToolCallResolved { result },
-                    LedgerFactKind::ToolCallResolved,
-                ),
-            ]);
+            events.push(started);
         }
 
         if let Some(proposal) = proposal {
             self.record_proposed_tool_action_audit(proposal);
         }
         self.record_denied_tool_action_audit(&pending, decision);
-        let content_bytes = content.as_bytes().len();
-        let artifact = self
-            .artifacts
-            .record_preflighted(result.artifact().clone(), content);
-        Self::trace_artifact_record(self.session_id.as_str(), &artifact, content_bytes);
-        debug_assert_eq!(artifact, *result.artifact());
         self.transcript = transcript;
         self.resolved_tool_calls.insert(result.call_id().clone());
-        Ok(vec![
-            self.record_event(
-                RuntimeJournalPayload::ArtifactRecorded { artifact },
-                LedgerFactKind::ArtifactRecorded,
-            ),
-            self.record_event(
-                RuntimeJournalPayload::ToolCallResolved { result },
-                LedgerFactKind::ToolCallResolved,
-            ),
-        ])
+        events.extend(self.record_tool_result_artifacts(artifacts));
+        events.push(self.record_event(
+            RuntimeJournalPayload::ToolCallResolved { result },
+            LedgerFactKind::ToolCallResolved,
+        ));
+        Ok(events)
     }
 
     pub(crate) fn record_guarded_tool_action(

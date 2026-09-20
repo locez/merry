@@ -50,7 +50,7 @@ async fn opt_in_process_action_commits_output_after_runner_cancels_token() {
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
     );
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);

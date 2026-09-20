@@ -607,6 +607,7 @@ fn cancel_trace_start_token() {
 }
 
 mod config;
+mod model_content;
 mod patch;
 mod patch_policy;
 mod read;

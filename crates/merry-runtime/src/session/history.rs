@@ -43,6 +43,7 @@ pub(super) enum CompactionHistoryItemKind {
         call: Box<PendingToolCall>,
         result: Box<ToolCallResult>,
         content: Box<ArtifactContent>,
+        model_content: Option<Box<ArtifactContent>>,
         call_prompt_projection: ToolCallPromptProjection,
         prompt_projection: ToolResultPromptProjection,
     },
@@ -75,6 +76,7 @@ impl CompactionHistoryItem {
         content: ArtifactContent,
         call_prompt_projection: ToolCallPromptProjection,
         prompt_projection: ToolResultPromptProjection,
+        model_content: Option<ArtifactContent>,
     ) -> Self {
         Self {
             history_id,
@@ -82,6 +84,7 @@ impl CompactionHistoryItem {
                 call: Box::new(call),
                 result: Box::new(result),
                 content: Box::new(content),
+                model_content: model_content.map(Box::new),
                 call_prompt_projection,
                 prompt_projection,
             },
@@ -105,14 +108,19 @@ impl CompactionHistoryItem {
                 call,
                 result,
                 content,
+                model_content,
                 prompt_projection,
                 ..
             } => {
                 // The request already shortened this result, so the payload carries the
                 // same notice instead of the archived body.
                 let use_notice = *prompt_projection == ToolResultPromptProjection::ArtifactNotice;
-                let (content_kind, content) =
-                    compaction_tool_result_text(self.history_id, result, content, use_notice)?;
+                let (content_kind, content) = compaction_tool_result_text(
+                    self.history_id,
+                    result,
+                    model_content.as_deref().unwrap_or(content),
+                    use_notice,
+                )?;
                 CitationCompactionTurnItem::tool_exchange(
                     self.history_id,
                     ref_id.to_owned(),
@@ -143,6 +151,7 @@ impl CompactionHistoryItem {
                 call,
                 result,
                 content,
+                model_content,
                 call_prompt_projection,
                 prompt_projection,
             } => {
@@ -176,7 +185,9 @@ impl CompactionHistoryItem {
                         result.artifact().id(),
                     )
                 } else {
-                    exact_artifact_text(content)?.1.to_owned()
+                    exact_artifact_text(model_content.as_deref().unwrap_or(content))?
+                        .1
+                        .to_owned()
                 };
                 Ok(estimate_text_tokens(call.name().as_str())
                     + estimate_text_tokens(&arguments)
@@ -210,13 +221,14 @@ impl CompactionHistoryItem {
                 call,
                 result,
                 content,
+                model_content,
                 prompt_projection,
                 ..
             } => {
                 let result_text = compaction_tool_result_text(
                     self.history_id,
                     result,
-                    content,
+                    model_content.as_deref().unwrap_or(content),
                     *prompt_projection == ToolResultPromptProjection::ArtifactNotice,
                 )?
                 .1;

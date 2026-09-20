@@ -90,7 +90,12 @@ async fn read_only_shell_wrapper_records_input_and_result_artifacts() {
 
     assert_eq!(
         event_kind_names(&execution_events),
-        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
+        [
+            "ArtifactRecorded",
+            "ArtifactRecorded",
+            "ArtifactRecorded",
+            "ToolCallResolved"
+        ]
     );
     let input_artifact = execution_events
         .iter()

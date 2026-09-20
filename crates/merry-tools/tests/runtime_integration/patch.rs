@@ -183,7 +183,7 @@ async fn opt_in_apply_patch_preflight_failure_resolves_with_patch_diagnostic() {
         fs::read_to_string(temp.path().join("note.txt")).expect("workspace file should read"),
         "alpha\nold\nomega\n"
     );
-    assert_failed_json_result(&execution_events, "apply_patch_preimage_absent");
+    assert_failed_json_result(&execution_events, "apply_patch_preimage_absent", 2);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -226,10 +226,18 @@ async fn opt_in_patch_success_continuation_does_not_leak_internal_evidence() {
         continuation.result().status(),
         ToolCallResultStatus::Succeeded
     );
-    let ModelToolResultContent::Json(continuation_json) = continuation.result().content() else {
-        panic!("successful patch continuation should be JSON");
-    };
-    assert_successful_patch_content_does_not_leak_internal_metadata(continuation_json);
+    assert_eq!(
+        continuation.result().content().as_text(),
+        Some("Applied patch:\nupdated note.txt")
+    );
+    let result = resolved_tool_result(&execution_events);
+    let full = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .expect("full patch artifact");
+    assert_successful_patch_content_does_not_leak_internal_metadata(
+        full.as_text().expect("JSON artifact"),
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -359,10 +367,17 @@ async fn opt_in_apply_patch_tool_deletes_file_and_reports_the_operation() {
         continuation.result().status(),
         ToolCallResultStatus::Succeeded
     );
-    let ModelToolResultContent::Json(json) = continuation.result().content() else {
-        panic!("successful delete continuation should be JSON");
-    };
-    let envelope: Value = serde_json::from_str(json).expect("delete result should be JSON");
+    assert_eq!(
+        continuation.result().content().as_text(),
+        Some("Applied patch:\ndeleted dir/gone.txt")
+    );
+    let result = resolved_tool_result(&execution_events);
+    let full = runtime
+        .read_artifact_content(result.artifact().id())
+        .await
+        .expect("full delete artifact");
+    let envelope: Value = serde_json::from_str(full.as_text().expect("JSON artifact"))
+        .expect("delete result should be JSON");
     assert_eq!(envelope["ok"], true);
     assert_eq!(envelope["tool"], APPLY_PATCH_TOOL);
     assert_eq!(envelope["changes"][0]["path"], "dir/gone.txt");
@@ -392,7 +407,7 @@ async fn policy_denied_delete_resolves_without_removing_the_file() {
         .await
         .expect("runtime policy denial should resolve pending call");
 
-    assert_failed_json_result(&execution_events, "action_policy_denied");
+    assert_failed_json_result(&execution_events, "action_policy_denied", 1);
     assert_eq!(
         fs::read_to_string(temp.path().join("note.txt")).expect("workspace file should read"),
         "alpha\n",
@@ -422,7 +437,7 @@ async fn delete_outside_the_write_scope_is_denied_and_keeps_the_file() {
     let execution_events =
         execute_first_pending_call(&runtime, "delete a note outside scope").await;
 
-    assert_failed_json_result(&execution_events, "workspace_path_denied");
+    assert_failed_json_result(&execution_events, "workspace_path_denied", 2);
     assert_eq!(
         fs::read_to_string(temp.path().join("denied/note.txt")).expect("denied file should read"),
         "alpha\n",

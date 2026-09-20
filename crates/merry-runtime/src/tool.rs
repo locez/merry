@@ -26,6 +26,7 @@ pub use registry::{RegisteredTool, ToolConcurrency, ToolRunner};
 pub(crate) use registry::{ToolRegistry, ToolRegistryError};
 
 mod executor;
+pub(crate) use executor::ToolResultContent;
 mod patch_evidence;
 mod proposal;
 mod registry;

@@ -1,8 +1,8 @@
 use crate::{
     ActionExecutionEvidence, ActionProposal,
     action_audit::ActionAuditPolicy,
-    artifact::ArtifactContent,
     ledger::{CompactLedgerText, LedgerScope, LedgerUpdateKind},
+    tool::ToolResultContent,
 };
 use merry_core::{ArtifactRef, ErrorInfo, ToolCallResultStatus};
 
@@ -44,7 +44,7 @@ impl ToolResultLedgerObservation {
 pub(crate) struct ProposedToolExecutionOutcome {
     pub(super) proposal: ActionProposal,
     pub(super) status: ToolCallResultStatus,
-    pub(super) content: ArtifactContent,
+    pub(super) content: ToolResultContent,
     pub(super) diagnostic: Option<ErrorInfo>,
     pub(super) execution_evidence: Option<ActionExecutionEvidence>,
     pub(super) policy: ActionAuditPolicy,
@@ -55,7 +55,7 @@ impl ProposedToolExecutionOutcome {
     pub(crate) fn new(
         proposal: ActionProposal,
         status: ToolCallResultStatus,
-        content: ArtifactContent,
+        content: impl Into<ToolResultContent>,
         diagnostic: Option<ErrorInfo>,
         execution_evidence: Option<ActionExecutionEvidence>,
         policy: ActionAuditPolicy,
@@ -63,7 +63,7 @@ impl ProposedToolExecutionOutcome {
         Self {
             proposal,
             status,
-            content,
+            content: content.into(),
             diagnostic,
             execution_evidence,
             policy,
@@ -73,6 +73,11 @@ impl ProposedToolExecutionOutcome {
 
     pub(crate) fn with_observation(mut self, observation: ToolResultLedgerObservation) -> Self {
         self.observation = Some(observation);
+        self
+    }
+
+    pub(crate) fn with_model_text(mut self, content: impl Into<String>) -> Self {
+        self.content.model = Some(crate::ArtifactContent::text(content));
         self
     }
 }

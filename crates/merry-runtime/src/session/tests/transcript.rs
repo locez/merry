@@ -396,6 +396,7 @@ fn model_turn_grouping_keeps_full_batch_pairs_intact() {
             ),
             artifact_id("batch-b-result"),
             ToolResultPromptProjection::Full,
+            None,
         )
         .expect("second result records first");
     let result_a_id = transcript
@@ -407,6 +408,7 @@ fn model_turn_grouping_keeps_full_batch_pairs_intact() {
             ),
             artifact_id("batch-a-result"),
             ToolResultPromptProjection::Full,
+            None,
         )
         .expect("first result records second");
     let tail_turn_id = transcript

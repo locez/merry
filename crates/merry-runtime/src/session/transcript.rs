@@ -24,6 +24,7 @@ pub(crate) enum ToolCallPromptProjection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ToolResultPromptProjection {
+    /// Complete tool-authored model body, or the full artifact when absent.
     Full,
     ArtifactNotice,
     Hidden,
@@ -101,6 +102,7 @@ pub(crate) enum TranscriptItem {
         call_id: ToolCallId,
         result: ToolCallResult,
         artifact_id: ArtifactId,
+        model_artifact_id: Option<ArtifactId>,
         prompt_projection: ToolResultPromptProjection,
     },
 }
@@ -143,6 +145,8 @@ pub(crate) enum PersistedTranscriptItem {
         call_id: ToolCallId,
         result: ToolCallResult,
         artifact_id: ArtifactId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_artifact_id: Option<ArtifactId>,
         prompt_projection: ToolResultPromptProjection,
     },
 }
@@ -323,6 +327,7 @@ impl Transcript {
         result: ToolCallResult,
         artifact_id: ArtifactId,
         prompt_projection: ToolResultPromptProjection,
+        model_artifact_id: Option<ArtifactId>,
     ) -> Result<TranscriptItemId, RuntimeError> {
         let model_turn_id = self.model_turn_id_for_tool_call(&call_id).ok_or_else(|| {
             RuntimeError::TranscriptToolCallMissing {
@@ -339,6 +344,7 @@ impl Transcript {
             call_id,
             result,
             artifact_id,
+            model_artifact_id,
             prompt_projection,
         });
         if self.all_tool_calls_resolved(model_turn_id) {
@@ -523,6 +529,7 @@ impl From<&TranscriptItem> for PersistedTranscriptItem {
                 call_id,
                 result,
                 artifact_id,
+                model_artifact_id,
                 prompt_projection,
             } => Self::ToolResult {
                 id: id.as_u64(),
@@ -530,6 +537,7 @@ impl From<&TranscriptItem> for PersistedTranscriptItem {
                 call_id: call_id.clone(),
                 result: result.clone(),
                 artifact_id: artifact_id.clone(),
+                model_artifact_id: model_artifact_id.clone(),
                 prompt_projection: *prompt_projection,
             },
         }
@@ -580,6 +588,7 @@ impl TryFrom<PersistedTranscriptItem> for TranscriptItem {
                 call_id,
                 result,
                 artifact_id,
+                model_artifact_id,
                 prompt_projection,
             } => Self::ToolResult {
                 id: TranscriptItemId::new(id),
@@ -587,6 +596,7 @@ impl TryFrom<PersistedTranscriptItem> for TranscriptItem {
                 call_id,
                 result,
                 artifact_id,
+                model_artifact_id,
                 prompt_projection,
             },
         })
@@ -730,75 +740,78 @@ impl SessionState {
     ) -> Result<Vec<TranscriptItemSnapshot>, ArtifactError> {
         let mut snapshot = Vec::new();
         for item in self.transcript_items_for_projection(apply_prompt_projection) {
-            let item =
-                match item {
-                    TranscriptItem::UserMessage {
-                        artifact_id,
-                        image_artifact_ids,
-                        origin,
-                        ..
-                    } => {
-                        let content = self.read_artifact_content(artifact_id)?;
-                        let text = content.as_text().ok_or_else(|| {
-                            ArtifactError::InvalidEvidenceLocator {
+            let item = match item {
+                TranscriptItem::UserMessage {
+                    artifact_id,
+                    image_artifact_ids,
+                    origin,
+                    ..
+                } => {
+                    let content = self.read_artifact_content(artifact_id)?;
+                    let text =
+                        content
+                            .as_text()
+                            .ok_or_else(|| ArtifactError::InvalidEvidenceLocator {
                                 id: artifact_id.clone(),
                                 reason: "user transcript artifact is not textual",
-                            }
-                        })?;
-                        TranscriptItemSnapshot::UserMessage {
-                            text: text.to_owned(),
-                            images: image_artifact_ids
-                                .iter()
-                                .map(|artifact_id| self.transcript_image_snapshot(artifact_id))
-                                .collect::<Result<Vec<_>, _>>()?,
-                            origin: *origin,
-                        }
+                            })?;
+                    TranscriptItemSnapshot::UserMessage {
+                        text: text.to_owned(),
+                        images: image_artifact_ids
+                            .iter()
+                            .map(|artifact_id| self.transcript_image_snapshot(artifact_id))
+                            .collect::<Result<Vec<_>, _>>()?,
+                        origin: *origin,
                     }
-                    TranscriptItem::AssistantText { artifact_id, .. } => {
-                        let content = self.read_artifact_content(artifact_id)?;
-                        let text = content.as_text().ok_or_else(|| {
-                            ArtifactError::InvalidEvidenceLocator {
+                }
+                TranscriptItem::AssistantText { artifact_id, .. } => {
+                    let content = self.read_artifact_content(artifact_id)?;
+                    let text =
+                        content
+                            .as_text()
+                            .ok_or_else(|| ArtifactError::InvalidEvidenceLocator {
                                 id: artifact_id.clone(),
                                 reason: "assistant transcript artifact is not textual",
-                            }
-                        })?;
-                        TranscriptItemSnapshot::AssistantText {
-                            text: text.to_owned(),
+                            })?;
+                    TranscriptItemSnapshot::AssistantText {
+                        text: text.to_owned(),
+                    }
+                }
+                TranscriptItem::ToolCall { call, .. } => {
+                    TranscriptItemSnapshot::ToolCall { call: call.clone() }
+                }
+                TranscriptItem::ToolResult {
+                    id,
+                    call_id,
+                    result,
+                    artifact_id,
+                    model_artifact_id,
+                    prompt_projection,
+                    ..
+                } => {
+                    let content = match (apply_prompt_projection, prompt_projection) {
+                        (false, _) => self.read_artifact_content(artifact_id)?,
+                        (true, ToolResultPromptProjection::Full) => self.read_artifact_content(
+                            model_artifact_id.as_ref().unwrap_or(artifact_id),
+                        )?,
+                        (true, ToolResultPromptProjection::ArtifactNotice) => {
+                            ArtifactContent::json(archived_tool_result_notice_json(
+                                *id,
+                                result.status(),
+                                artifact_id,
+                            ))
                         }
+                        (true, ToolResultPromptProjection::Hidden) => unreachable!(
+                            "hidden tool results are filtered before snapshot construction"
+                        ),
+                    };
+                    TranscriptItemSnapshot::ToolResult {
+                        call_id: call_id.clone(),
+                        result: result.clone(),
+                        content,
                     }
-                    TranscriptItem::ToolCall { call, .. } => {
-                        TranscriptItemSnapshot::ToolCall { call: call.clone() }
-                    }
-                    TranscriptItem::ToolResult {
-                        id,
-                        call_id,
-                        result,
-                        artifact_id,
-                        prompt_projection,
-                        ..
-                    } => {
-                        let content = match (apply_prompt_projection, prompt_projection) {
-                            (false, _) | (true, ToolResultPromptProjection::Full) => {
-                                self.read_artifact_content(artifact_id)?
-                            }
-                            (true, ToolResultPromptProjection::ArtifactNotice) => {
-                                ArtifactContent::json(archived_tool_result_notice_json(
-                                    *id,
-                                    result.status(),
-                                    artifact_id,
-                                ))
-                            }
-                            (true, ToolResultPromptProjection::Hidden) => unreachable!(
-                                "hidden tool results are filtered before snapshot construction"
-                            ),
-                        };
-                        TranscriptItemSnapshot::ToolResult {
-                            call_id: call_id.clone(),
-                            result: result.clone(),
-                            content,
-                        }
-                    }
-                };
+                }
+            };
             snapshot.push(item);
         }
         Ok(snapshot)

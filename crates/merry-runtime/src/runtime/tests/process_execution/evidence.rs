@@ -51,7 +51,7 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
     );
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
@@ -61,7 +61,7 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
         RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
     ));
     assert!(matches!(
-        &events[1].payload,
+        &events[2].payload,
         RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
     assert!(runtime.pending_tool_calls().await.is_empty());

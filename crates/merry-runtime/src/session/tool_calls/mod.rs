@@ -6,6 +6,7 @@ use merry_core::{
 };
 
 mod action;
+mod content;
 mod result;
 mod skill;
 

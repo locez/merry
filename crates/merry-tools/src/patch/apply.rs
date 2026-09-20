@@ -96,6 +96,7 @@ pub(super) fn execute_apply_patch_plan(
     Ok(ToolExecutionOutcome::succeeded_json(
         serde_json::to_string(&payload).expect("workspace patch success envelope serializes"),
     )
+    .with_model_text(payload.model_text())
     .with_execution_evidence(ActionExecutionEvidence::WorkspacePatch(evidence)))
 }
 

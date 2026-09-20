@@ -211,7 +211,7 @@ fn read_text_executor_returns_cancelled_when_token_is_cancelled() {
     assert!(matches!(err, ToolExecutionError::Cancelled));
 }
 
-fn read_text_range_outcome(
+pub(super) fn read_text_range_outcome(
     tools: &WorkspaceTools,
     path: &str,
     start_line: usize,

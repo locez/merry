@@ -156,6 +156,7 @@ impl SessionState {
             result.clone(),
             recorded_artifact.id().clone(),
             ToolResultPromptProjection::Full,
+            None,
         )?;
         let mut pending_tool_calls = self.pending_tool_calls.clone();
         pending_tool_calls.remove(pending_index);

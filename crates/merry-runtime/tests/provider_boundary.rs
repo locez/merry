@@ -6,6 +6,8 @@ mod compaction_semantics;
 mod continuations;
 #[path = "provider_boundary/diagnostics.rs"]
 mod diagnostics;
+#[path = "provider_boundary/model_tool_content.rs"]
+mod model_tool_content;
 #[path = "provider_boundary/progress_commentary.rs"]
 mod progress_commentary;
 #[path = "provider_boundary/request_profile.rs"]

@@ -34,6 +34,7 @@ mod checkpoint_refs;
 mod compaction;
 mod context_memory;
 mod lifecycle;
+mod model_tool_content;
 mod persistence;
 mod rolling_compaction;
 mod tool_calls;

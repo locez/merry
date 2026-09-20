@@ -168,13 +168,20 @@ impl SessionState {
                 call_id,
                 result,
                 artifact_id,
+                model_artifact_id,
                 prompt_projection,
                 ..
             } = item
                 && results
                     .insert(
                         call_id.clone(),
-                        (*id, result, artifact_id, *prompt_projection),
+                        (
+                            *id,
+                            result,
+                            artifact_id,
+                            model_artifact_id.as_ref(),
+                            *prompt_projection,
+                        ),
                     )
                     .is_some()
             {
@@ -230,7 +237,7 @@ impl SessionState {
                     prompt_projection: call_projection,
                     ..
                 } => {
-                    let Some(&(id, result, artifact_id, result_projection)) =
+                    let Some(&(id, result, artifact_id, model_artifact_id, result_projection)) =
                         results.get(call.id())
                     else {
                         if turn.status().is_open() {
@@ -259,6 +266,9 @@ impl SessionState {
                         }
                     }
                     let content = self.read_artifact_content(artifact_id)?;
+                    let model_content = model_artifact_id
+                        .map(|id| self.read_artifact_content(id))
+                        .transpose()?;
                     items.push(CompactionHistoryRecord {
                         item: CompactionHistoryItem::tool_exchange(
                             id.as_u64(),
@@ -267,6 +277,7 @@ impl SessionState {
                             content,
                             *call_projection,
                             result_projection,
+                            model_content,
                         ),
                         reference: history_checkpoint_ref(
                             id,

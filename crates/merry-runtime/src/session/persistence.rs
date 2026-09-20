@@ -614,6 +614,7 @@ impl SessionState {
                     call_id,
                     result,
                     artifact_id,
+                    model_artifact_id,
                     prompt_projection,
                     ..
                 } => {
@@ -635,6 +636,23 @@ impl SessionState {
                         return Err(invalid_document(
                             "stored transcript tool result artifact is inconsistent",
                         ));
+                    }
+                    if let Some(model_id) = model_artifact_id {
+                        let model_ref = artifacts.read_ref(model_id).map_err(|_| {
+                            invalid_document("stored model tool result artifact is missing")
+                        })?;
+                        let model_content = artifacts.read_content(model_id).map_err(|_| {
+                            invalid_document("stored model tool result artifact is missing")
+                        })?;
+                        if !matches!(model_ref.kind(), ArtifactKind::Text | ArtifactKind::Json)
+                            || model_content
+                                .as_text()
+                                .is_none_or(|text| text.trim().is_empty())
+                        {
+                            return Err(invalid_document(
+                                "stored model tool result artifact is not textual",
+                            ));
+                        }
                     }
                     if !resolved_tool_calls.contains(call_id) {
                         return Err(invalid_document(

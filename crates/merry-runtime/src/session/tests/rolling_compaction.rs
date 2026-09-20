@@ -7,11 +7,11 @@ use crate::{
     },
 };
 
-fn policy(retained_model_turns: usize) -> CitationCompactionPolicy {
+pub(super) fn policy(retained_model_turns: usize) -> CitationCompactionPolicy {
     CitationCompactionPolicy::new(None, None, retained_model_turns).expect("valid policy")
 }
 
-fn window_budget(max_dynamic_body_tokens: u64) -> CompactionWindowBudget {
+pub(super) fn window_budget(max_dynamic_body_tokens: u64) -> CompactionWindowBudget {
     CompactionWindowBudget::new(64_000, max_dynamic_body_tokens, 0, 0, 128)
         .expect("valid window budget")
 }
@@ -57,7 +57,7 @@ fn record_completed_tool_turn(
         .expect("tool result records");
 }
 
-fn checkpoint_candidate(ref_id: &str) -> String {
+pub(super) fn checkpoint_candidate(ref_id: &str) -> String {
     serde_json::json!({
         "confirmed_decisions": [],
         "rejected_approaches": [],

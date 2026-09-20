@@ -351,11 +351,12 @@ pub(super) fn resolved_tool_result(events: &[RuntimeJournalEvent]) -> &ToolCallR
 fn assert_artifact_recorded_before_tool_resolution(
     events: &[RuntimeJournalEvent],
     result: &ToolCallResult,
+    expected_artifacts: usize,
 ) {
-    assert_eq!(
-        event_kind_names(events),
-        ["ArtifactRecorded", "ToolCallResolved"]
-    );
+    let expected = std::iter::repeat_n("ArtifactRecorded", expected_artifacts)
+        .chain(std::iter::once("ToolCallResolved"))
+        .collect::<Vec<_>>();
+    assert_eq!(event_kind_names(events), expected);
     assert!(
         events
             .iter()
@@ -367,14 +368,14 @@ fn assert_artifact_recorded_before_tool_resolution(
         RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
     ));
     assert!(matches!(
-        &events[1].payload,
+        &events[expected_artifacts].payload,
         RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
 }
 
 pub(super) fn assert_succeeded_json_result(events: &[RuntimeJournalEvent]) {
     let result = resolved_tool_result(events);
-    assert_artifact_recorded_before_tool_resolution(events, result);
+    assert_artifact_recorded_before_tool_resolution(events, result, 2);
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
     assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
     assert!(result.diagnostic().is_none());
@@ -426,9 +427,13 @@ pub(super) fn assert_successful_patch_content_does_not_leak_internal_metadata(js
     }
 }
 
-pub(super) fn assert_failed_json_result(events: &[RuntimeJournalEvent], diagnostic_code: &str) {
+pub(super) fn assert_failed_json_result(
+    events: &[RuntimeJournalEvent],
+    diagnostic_code: &str,
+    expected_artifacts: usize,
+) {
     let result = resolved_tool_result(events);
-    assert_artifact_recorded_before_tool_resolution(events, result);
+    assert_artifact_recorded_before_tool_resolution(events, result, expected_artifacts);
     assert_eq!(result.status(), ToolCallResultStatus::Failed);
     assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
     assert_eq!(

@@ -105,6 +105,35 @@ struct ReadTextSuccess<'a> {
     content: &'a str,
 }
 
+impl ReadTextSuccess<'_> {
+    fn model_text(&self) -> String {
+        let Some(end_line) = self.end_line else {
+            return if self.start_line == 1 {
+                format!("{}: empty file", self.path)
+            } else {
+                format!(
+                    "{}: no lines returned from line {} (past end of file)",
+                    self.path, self.start_line
+                )
+            };
+        };
+        let mut text = format!(
+            "{}:{}-{end_line}\n{}",
+            self.path, self.start_line, self.content
+        );
+        if self.truncated {
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&format!(
+                "[truncated: more file content remains; read from line {}]",
+                end_line.saturating_add(1)
+            ));
+        }
+        text
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn read_text_blocking(
     state: &WorkspaceToolState,
@@ -253,5 +282,6 @@ fn read_resolved_text(
     };
     Ok(ToolExecutionOutcome::succeeded_json(
         serde_json::to_string(&payload).expect("read_text success envelope serializes"),
-    ))
+    )
+    .with_model_text(payload.model_text()))
 }

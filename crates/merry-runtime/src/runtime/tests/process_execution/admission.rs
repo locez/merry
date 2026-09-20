@@ -231,7 +231,7 @@ async fn opt_in_accepted_local_workspace_process_action_executes_local_workspace
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
     );
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
@@ -446,7 +446,7 @@ async fn accepted_local_workspace_process_action_executes_unknown_argv_under_loc
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
     );
     assert_eq!(
         resolved_tool_result(&events).status(),

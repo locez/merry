@@ -16,7 +16,7 @@ use merry_runtime::{
     ToolExecutorFuture, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
     process_command_tool,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
@@ -244,6 +244,7 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
             "ToolCallPending",
             "ArtifactRecorded",
             "ArtifactRecorded",
+            "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
             "AssistantOutputRecorded",
@@ -282,16 +283,9 @@ async fn agent_loop_process_command_tool_executes_and_continues() {
     let content = continuation
         .result()
         .content()
-        .as_json()
-        .expect("process result should be JSON");
-    let value: Value = serde_json::from_str(content).expect("process result JSON should parse");
-    assert_eq!(value["ok"], true);
-    assert_eq!(value["kind"], "process_action");
-    assert_eq!(value["status"], json!({ "kind": "exited", "code": 0 }));
-    assert_eq!(value["intent"]["command"], "rustc --version");
-    assert_eq!(value["intent"]["cwd"], Value::Null);
-    assert_eq!(value["stdout"]["text"], "rustc 1.85.0\n");
-    assert_eq!(value["stderr"]["text"], "");
+        .as_text()
+        .expect("process result should be text");
+    assert_eq!(content, "exit 0\nstdout:\nrustc 1.85.0\n");
     for forbidden in ["proposal", "audit", "evidence"] {
         assert!(
             !content.contains(forbidden),
@@ -356,18 +350,12 @@ async fn agent_loop_process_command_tool_executes_rg_files_and_continues() {
     let content = continuation
         .result()
         .content()
-        .as_json()
-        .expect("process result should be JSON");
-    let value: Value = serde_json::from_str(content).expect("process result JSON should parse");
-    assert_eq!(value["ok"], true);
-    assert_eq!(value["kind"], "process_action");
-    assert_eq!(value["intent"]["command"], "rg --files");
-    assert_eq!(value["intent"]["cwd"], Value::Null);
+        .as_text()
+        .expect("process result should be text");
     assert_eq!(
-        value["stdout"]["text"],
-        "Cargo.toml\ncrates/merry-runtime/src/lib.rs\n"
+        content,
+        "exit 0\nstdout:\nCargo.toml\ncrates/merry-runtime/src/lib.rs\n"
     );
-    assert_eq!(value["stderr"]["text"], "");
     for forbidden in ["proposal", "audit", "evidence"] {
         assert!(
             !content.contains(forbidden),
