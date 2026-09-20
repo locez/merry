@@ -5,8 +5,30 @@ It keeps provider wire formats outside the runtime, streams model output as it
 arrives, records tool evidence as artifacts, and exposes the same runtime
 through a terminal client, Rust APIs, and Python bindings.
 
-The project is under active development. The default test suite is offline and
-deterministic; live provider checks are opt-in.
+Two commitments shape the design:
+
+- **Runtime-first state.** Sessions, ledger facts, artifacts, context
+  compilation, checkpoints, cancellation, and permissions are owned by the
+  runtime. Raw chat history is not the source of truth.
+- **An explicit action boundary.** Every process action runs inside the sandbox
+  mode you choose, under a permission ceiling that approval cannot widen, with
+  host integrations enabled one capability at a time.
+
+## Status And Focus
+
+Merry is under active development and has no released version yet. T0 through T8
+and the T10 architecture split are complete: the runtime, CLI, TUI, Rust facade,
+and Python SDK run end to end, backed by an offline deterministic test suite and
+CI gates; live provider checks are opt-in. Two milestones remain open:
+
+| Milestone | State |
+|---|---|
+| T9 external coding-agent evaluation | Harbor adapter and smoke workflow implemented; end-to-end Terminal-Bench and Rust SWE evidence pending |
+| T11 release gates and Definition of Done | open |
+
+The current focus is release readiness and external evaluation evidence, not new
+runtime surface. [ROADMAP.md](ROADMAP.md) keeps the delivery sequence, its
+dependencies, and links to the tracking issues.
 
 ## What Works
 
@@ -15,41 +37,47 @@ deterministic; live provider checks are opt-in.
 - OpenAI-compatible `responses` and `chat_completions` protocols.
 - Anthropic Messages streaming with text, tool use, usage, and stop-reason
   normalization.
-- Named providers and per-role provider/model selection.
+- Named providers and per-role provider/model selection, including the
+  `context_compaction` and `approval_review` roles.
 - Multiple tool calls in one model turn with ordered continuation results.
 - Explicit tool concurrency: consecutive `parallel_safe` calls use bounded
   concurrency; `exclusive` calls are barriers. Tools are exclusive by default.
 - Runtime-owned sessions, ledger facts, artifacts, context compilation,
   checkpoints, cancellation, permission review, and structured final output.
+- A sandbox and permission model where approval cannot widen the configured
+  ceiling and host integrations stay opt-in per capability.
 - A responsive terminal timeline with live deltas, compact tool activity,
   queues, completion, resume, and a balanced magenta theme. Detailed session
   inspection is provided by the local Web trajectory page.
 - Thin Rust and Python facades over the same Rust-owned runtime.
 
-## Build
+## Quick Start
 
 Requirements:
 
 - Stable Rust with Rust 2024 edition support.
-- Linux and `bubblewrap` for the default TUI and `merry run` sandbox.
+- Linux and `bubblewrap` for the default TUI and `merry run` sandbox; see
+  [SANDBOX.md](SANDBOX.md) when the host blocks nested bubblewrap.
 - Node.js and npm when building the local Web trajectory application.
 
-The Web application is built into the ignored `web/dist/` directory and is
-embedded into the Rust binary by `merry-web` at Cargo build time. Build it
-before compiling a Web-enabled Rust target:
+Build:
 
 ```bash
+# Build the Web assets that are embedded into the binary
 cd web
 npm ci
 npm test
 cd ..
+
 cargo build --release -p merry-cli
 ```
 
-`npm test` type-checks the TypeScript and runs the Web tests. `cargo build`
-embeds the files from `web/dist/` into `target/release/merry`; it does not
-invoke Node or rebuild the Web assets. CI verifies that the generated contract
-source is current.
+The Web application is built into the ignored `web/dist/` directory and is
+embedded into the Rust binary by `merry-web` at Cargo build time, so a Rust build
+fails with an explicit message until those assets exist. `npm test` type-checks
+the TypeScript and runs the Web tests; `cargo build` does not invoke Node or
+rebuild the Web assets. CI verifies that the generated contract source is
+current.
 
 When changing the Rust trajectory contract, refresh its canonical schema before
 running the Web checks:
@@ -59,7 +87,22 @@ cargo run -p merry-core --example trajectory-schema --quiet > crates/merry-core/
 (cd web && npm test)
 ```
 
-The binary is `target/release/merry`.
+Configure at least one provider ([Configure](#configure)), then run a task. The
+binary is `target/release/merry`:
+
+```bash
+# Headless coding task; sandboxed by default
+target/release/merry run "fix the failing tests"
+
+# Machine-readable runtime events
+target/release/merry run --events-jsonl "inspect the current failure"
+
+# Interactive streaming TUI; sandboxed by default
+target/release/merry
+```
+
+[Use The CLI](#use-the-cli) documents the full command surface, including
+session resume, stdin tasks, and shell completions.
 
 ## Configure
 
@@ -154,6 +197,8 @@ without any known definitions does not silently gain tools after reconnecting.
 This prevents connectivity-induced prompt-prefix changes, not provider cache
 expiration or changes to other parts of the prompt.
 
+### Session State
+
 Session state uses format 5 and requires an external tool catalog, even when it
 is empty. Other formats are rejected without migration; Merry is not yet released
 and does not support historical session formats. Start a new session if a saved
@@ -215,46 +260,19 @@ is bounded by the kernel's per-argument limit. Empty or whitespace-only stdin
 is rejected as a usage error (exit 2).
 
 Reading the task from stdin consumes that stream, so `merry run -` answers
-permission review on the controlling terminal rather than on stdin. Piping
-approval answers alongside the task does not work: they would be read as part
-of the task. Under the default outer sandbox, whose `--new-session` leaves the
-sandboxed process unable to open `/dev/tty`, a `run -` with a `model_then_human`
-or `human_only` policy binds only the parent's terminal device into the sandbox
-at `/dev/merry-review-tty` and reads answers there; tool processes never see
-it. When the process has no controlling terminal at all, review has no way to
-ask and each request is denied with that reason on stderr, so grant the
-capabilities up front, pass the task on argv, or pick `model_only` or `deny`
-when a piped run needs approvals without a terminal.
+permission review on the controlling terminal rather than on stdin; piping
+approval answers alongside the task does not work. When the process has no
+controlling terminal at all, each request is denied with that reason on stderr,
+so grant the capabilities up front, pass the task on argv, or pick `model_only`
+or `deny` for that run. [SANDBOX.md](SANDBOX.md) documents the review terminal
+bind and its limits.
 
-TUI and `run` use outer+inner bubblewrap automatically. Before the outer
-sandbox starts, Merry probes whether bubblewrap can run inside bubblewrap on
-this host. When it cannot, startup stops with a warning that quotes the
-bubblewrap error, names the likely cause, and points to
-[SANDBOX.md](SANDBOX.md); Merry never silently downgrades to a weaker mode.
-The usual cause is the bubblewrap AppArmor profile shipped by Ubuntu 24.04
-and newer, and SANDBOX.md describes the host change that allows nesting.
-`--inner-sandbox` selects the Codex-compatible single inner sandbox
-explicitly, while `--no-sandbox` selects the explicit unrestricted host mode:
-process actions inherit the host filesystem, environment, and permissions
-without any bubblewrap namespace.
-Both inner modes start from a read-only view of their parent filesystem, so
-ordinary commands can see host configuration and toolchains. The inner action
-policy controls workspace writes, network access, path review, and modeled host
-integrations (SSH agent, native GPG agent, and D-Bus session bus). It masks known
-unapproved socket endpoints, including endpoints under `/tmp`, rather than
-hiding their entire shared parent directory. It is not a general IPC filter:
-unmodeled Unix sockets visible through the inherited filesystem may remain
-reachable even with read-only mounts and network isolation. In the default
-outer+inner mode, the outer sandbox limits which host paths are visible before
-the inner action starts.
-In the normal mode, the outer `/tmp` is a session-scoped in-memory tmpfs reused
-by action sandboxes. With `--no-sandbox`, action `/tmp` maps to the current
-process's validated `TMPDIR` directly. Debug commands remain unsandboxed unless
-`--with-sandbox` is supplied.
+## Sandbox And Permissions
 
-The `[cli]` table in `config.toml` sets defaults for every `merry` invocation,
-so a preferred sandbox mode or approval policy does not need to be passed as a
-flag on each command:
+Every process action runs inside the sandbox mode you choose, under a permission
+ceiling that approval cannot widen. The `[cli]` table in `config.toml` sets the
+mode and the approval policy as defaults for every `merry` invocation, so neither
+has to be passed as a flag each time:
 
 ```toml
 [cli]
@@ -262,11 +280,19 @@ sandbox = "no-sandbox"
 approval_policy = "none"
 ```
 
-`sandbox` takes `with-sandbox` (outer+inner, the built-in default for TUI and
-`run`), `no-sandbox`, or `inner-sandbox`, matching the root flags; a sandbox
-mode given on the command line replaces the configured one. `approval_policy`
-is the config equivalent of `--approval-policy` and names who reviews
-permission requests before a command runs:
+### Sandbox Mode
+
+`sandbox` takes `with-sandbox` (outer+inner bubblewrap, the built-in default for
+the TUI and `run`), `inner-sandbox` (the Codex-compatible single action sandbox,
+without the outer layer), or `no-sandbox` (explicit unrestricted host execution:
+process actions inherit the host filesystem, environment, and permissions
+without any bubblewrap namespace), matching the root flags; a sandbox mode given
+on the command line replaces the configured one.
+
+### Approval Policy
+
+`approval_policy` is the config equivalent of `--approval-policy` and names who
+reviews permission requests before a command runs:
 
 | Value | Reviewer |
 |---|---|
@@ -283,44 +309,16 @@ the command line alike, and a flag for one dimension replaces only that
 dimension's configured default: `--with-sandbox` keeps a configured
 `approval_policy`, and `--approval-policy` keeps a configured `sandbox`.
 
-Outer filesystem mounts are applied parent-first after resolving access-rule
-precedence. Explicit file and directory imports preserve symbolic links instead
-of replacing them with their target's contents. Trusted and integration directory
-imports inspect only their direct children for link dependencies. Ordinary child
-directories remain covered by the whole-directory bind and are not traversed.
-Already-visible targets reuse their effective mount without further scanning;
-missing targets are added only from an already-admitted
-host source, without importing a file's whole parent directory. Directory aliases
-retain descendant denials and read-only restrictions. External targets outside
-the admitted source scopes still require an explicit path grant.
-
-Newly added directory targets receive the same one-level inspection. Deeper links
-inside ordinary subdirectories are not proactively discovered; explicitly imported
-subdirectories can be inspected independently. SSH Include discovery still follows
-referenced configuration paths within the admitted view.
-
-Directory scanning is bounded (250,000 entries, 8,192 mounts or aliases, depth
-128, and 10 seconds). Exceeding a bound fails preparation; dangling links, cycles
-among directory entries, and inaccessible entries retain their unavailable
-behavior. Explicit cyclic mount destinations fail preparation. Runtime-provided
-`/proc` and `/dev` are not recursively scanned or resolved through host process
-IDs. `/usr` remains one read-only directory import, not a per-file mount tree;
-base system imports and workspace/development trees are not automatic scan roots.
-Inner action sandboxes inherit these system mounts
-instead of repeating them; workspace overlays, read-only `.git` metadata,
-reviewed grants, network isolation, and host-integration controls still apply.
-Optional development paths such as `.rustup/toolchains` remain built in, but
-missing sources are skipped without creating directories beneath a read-only
-HOME. This applies to both inner-only and outer+inner execution.
+### Permissions
 
 `[permissions] network` is the inner sandbox's network capability ceiling and
 defaults to `true`. It does not preauthorize network access: ordinary actions
 remain network-isolated, and each action must request and obtain its own network
-approval. With `network = false`, network requests are rejected before review
-or execution, including under the `none` approval policy; approval cannot override
-the ceiling. The setting is inherited by new process sessions and does not
-restrict model-provider or configured MCP connections. Explicit `--no-sandbox`
-host execution remains outside this network-isolation boundary.
+approval. With `network = false`, network requests are rejected before review or
+execution, including under the `none` approval policy, and approval cannot
+override the ceiling. The setting is inherited by new process sessions and does
+not restrict model-provider or configured MCP connections. Explicit
+`--no-sandbox` host execution remains outside this network-isolation boundary.
 
 `--approval-policy none` skips model and host permission review for configured
 actions in the TUI and `merry run`; `[cli] approval_policy = "none"` applies it
@@ -333,7 +331,8 @@ masking, and `network = false` still apply.
 Trusted `readonly_paths` and `readwrite_paths` are preauthorized in the inner
 sandbox at their declared access level. `review_paths` marks existing subtrees
 within these grants for **per-action** review, without adding a new grant or
-raising the access ceiling. For example:
+raising the access ceiling, and `deny_paths` is never reopened by an approval.
+For example:
 
 ```toml
 [permissions]
@@ -341,128 +340,49 @@ readonly_paths = ["~/.config"]
 review_paths = ["~/.config"]
 ```
 
-With `readonly_paths = ["/abc"]` and `review_paths = ["/abc/d"]`, `/abc/e` remains
-readable; `/abc/d` is masked until the action explicitly requests that path or a
-specific descendant through `run_process.permissions` or `request_permissions`.
-Approval stays read-only and is not reused by later actions. A broader parent
-grant does not unlock a separately reviewed child; nested review markers and
-`deny_paths` still apply. Denied paths cannot be approved. Merry's configuration,
-state directories, and configured provider credential files are product-private
-and are not exposed to task processes merely because Merry itself needs them.
+`[permissions].environment` applies only inside Merry-managed action processes:
+values are injected after the inner sandbox defaults, so they may intentionally
+override them, and they never change the outer bootstrap or provider environment.
 
-Enforcement uses mount namespaces, not shell-path parsing: scripts receive the
-same restricted view. Directories are replaced with empty read-only mounts and
-individual files with empty read-only placeholders; an empty result or missing
-file inside the sandbox does not prove that the host path is absent. There is no
-transparent retry or automatic elevation. Known symlink and inherited bind-mount
-aliases receive the same restrictions. This is pathname isolation, not content
-tracking: separately copied data and arbitrary hard-link aliases are not covered.
-Missing or unprotectable review and explicit deny targets fail closed during
-preflight, before any action starts. Create the configured target first or protect
-an existing ancestor. Merry never creates host paths to install these masks;
-optional, absent development mounts remain skippable.
+### Host Integrations
 
-`ssh_agent`, `gpg_agent`, and `dbus` independently enable outer-sandbox forwarding
-and preauthorize the matching inner capability: when the validated endpoint exists,
-ordinary actions use the forwarded socket and automatically imported client files
-without a separate request, like trusted `readonly_paths` and `readwrite_paths`.
-`review_paths` still mask a configured endpoint until its exact path is approved
-for that action, and `deny_paths` always mask it; explicit trusted path rules that
-expose regular files do not thereby approve protected agent sockets. An
-integration that trusted configuration did not enable can still be requested for
-one permissioned action when its endpoint is visible. A missing agent does not
-prevent ordinary actions from starting; explicitly requesting an unavailable
-endpoint reports an error. Native GPG socket discovery uses `gpgconf --list-dirs`
-and honors `GNUPGHOME`; it does not assume sockets live in `.gnupg` or `/run`. Outer
-scaffolding preserves private socket-directory permissions without importing their
-other contents.
+`ssh_agent`, `gpg_agent`, and `dbus` independently enable outer-sandbox
+forwarding and preauthorize the matching inner capability: when the validated
+endpoint exists, ordinary actions use the forwarded socket and automatically
+imported client files without a separate request. `review_paths` still mask a
+configured endpoint until its exact path is approved for that action, and
+`deny_paths` always mask it. An integration that trusted configuration did not
+enable can still be requested for one permissioned action when its endpoint is
+visible; a missing agent does not prevent ordinary actions from starting.
 
-Path policy decides whether an enabled endpoint is reachable, not whether it is
-announced. `SSH_AUTH_SOCK`, `DBUS_SESSION_BUS_ADDRESS`, and `GNUPGHOME` name the
-configured endpoints for every action, while a `deny_paths` or `review_paths`
-entry covering the socket, the keyring, or one of their parent directories masks
-the mount itself. A broad deny therefore also hides the agent even though
-`ssh_agent`/`gpg_agent`/`dbus` is enabled: the client sees the endpoint and fails
-when it connects. Keep those denies narrow (or outside the endpoint tree) when the
-integration should stay usable, and remember that `deny_paths` is never reopened
-by an approval.
+### How The Boundary Works
 
-Once the SSH integration is available, `~/.ssh/known_hosts` and
-`known_hosts2` are exposed read-only to inner actions,
-without granting access to private keys, `~/.ssh/config`, or the network. These
-files still obey `deny_paths` and `review_paths`; an explicit deny of the entire
-`.ssh` directory blocks them as well. Existing host identities can be checked,
-but new or changed host keys are not automatically accepted and host trust files
-are not made writable. No `StrictHostKeyChecking` or SSH configuration override
-is injected.
+TUI and `run` default to outer+inner bubblewrap. Before the outer sandbox starts,
+Merry probes whether bubblewrap can run inside bubblewrap on this host; when it
+cannot, startup stops with a warning that quotes the bubblewrap error and points
+to [SANDBOX.md](SANDBOX.md) instead of silently downgrading to a weaker mode. The
+usual cause is the AppArmor profile shipped by Ubuntu 24.04 and newer, and
+SANDBOX.md describes the host change that allows nesting.
 
-Enabling `ssh_agent` imports `/etc/passwd` and `/etc/group` for client account
-lookup, plus `/etc/ssh/ssh_config` and `/etc/ssh/ssh_config.d`, read-only. It does
-not require granting the whole `/etc` directory or import SSH server
-configuration, host private keys, or shadow password databases. These imports
-obey explicit path denials; Include targets outside the existing sandbox view
-still need an explicit `readonly_paths` grant. System SSH configuration already
-exposed by filesystem rules remains available when `ssh_agent` is disabled.
+In both inner modes an action starts from a read-only view of its parent
+filesystem, so ordinary commands can see host configuration and toolchains, and
+the action policy controls workspace writes, network access, path review, and
+modeled host integrations (SSH agent, native GPG agent, and D-Bus session bus).
+It masks known unapproved socket endpoints rather than hiding their whole parent
+directory, and it is not a general IPC filter: unmodeled Unix sockets visible
+through the inherited filesystem may remain reachable. In the default
+outer+inner mode, the outer sandbox limits which host paths are visible before
+the inner action starts.
 
-Before entering a user namespace, Merry
-validates regular configuration files against OpenSSH's owner/write-mode rules.
-Safe root-owned files that would otherwise become UID 65534 are supplied as
-unchanged, read-only private snapshots at their resolved sandbox destinations;
-original symlinks remain in place and multiple aliases share one snapshot.
-Ordinary mount coverage does not suppress these deliberate replacements. Snapshots travel
-through sealed anonymous-memory FDs and are consumed by bubblewrap; the host
-files are never modified. Snapshot mounts replace the corresponding original
-file binds instead of stacking a second mount that inner actions cannot rebind.
-Both the outer and inner mount plans preserve path denials and per-action review.
-This does not import the whole `/etc/ssh` directory or make unsafe/unknown
-ownership acceptable.
+Enforcement uses mount namespaces rather than shell-path parsing, so scripts
+receive the same restricted view, and missing or unprotectable review and deny
+targets fail closed during preflight. Merry's configuration, state directories,
+and configured provider credential files are product-private and are not exposed
+to task processes merely because Merry itself needs them.
 
-Snapshot discovery starts at `/etc/ssh/ssh_config` and follows static recursive
-`Include` paths, quoted filenames, globs, and symlinks within the allowed view.
-Connection-dependent percent tokens, environment/tilde expansion, and unsupported
-Include patterns are left to OpenSSH and are not automatically snapshotted. This
-is scoped SSH compatibility, not a global UID remapping for other programs.
-Configuration copies last for the corresponding sandbox lifetime; restart the
-outer sandbox to pick up host changes.
-
-Bounded SSH discovery or read failures disable only this compatibility adaptation:
-Merry reports a warning, preserves the original mounts, and lets unrelated actions
-start. OpenSSH may still reject incompatible ownership; its security checks are
-never disabled. Errors resolving the admitted path policy remain fatal.
-
-Runtime owns the session capability store and retention decisions. Process adapters
-consume read-only snapshots and report normalized path constraints; they do not
-record grants. Each preparation captures a fresh mount-alias view, shared by path
-review, masking, and client-resource discovery, rather than caching the filesystem
-for an entire session. Trusted configuration flags are the preauthorized baseline
-for paths and host integrations; capabilities approved through a request may be
-retained within that session. Separately reviewed paths still require per-action
-approval.
-
-`gpg_agent = true` makes the conventional public-key stores available to inner
-actions. When the integration is available, inner actions import `pubring.kbx` and
-legacy `pubring.gpg` read-only, without additional `readonly_paths`. Each such
-action gets a private, temporary `GNUPGHOME` view
-at the original path for locks and a fresh trust database. These client writes
-never modify the host keyring, even when the host directory is declared read-only.
-Host private-key files, configuration, and trust state are not automatically
-imported. Listing public keys and verifying signatures do not require a running
-agent; a valid signature does not imply host ownertrust was imported. This
-file-based integration does not yet support keyboxd databases: their presence
-is reported explicitly rather than forwarding a writable host keyboxd interface
-or presenting a stale file-based keyring.
-
-Public-key sources still obey `deny_paths` and `review_paths`. A path grant does
-not authorize an otherwise masked agent socket. If a socket is also under
-`review_paths`, both the integration and the exact path approval are required.
-GPG's extra/browser and keyboxd endpoints are not implicitly exposed. No host
-keyring is made writable as a workaround.
-Direct `merry-process` consumers supply discovered `GpgAgentSockets` explicitly;
-the CLI performs discovery when preparing sandboxed process backends.
-
-`[permissions].environment` applies only inside Merry-managed action processes.
-Assignments are injected after the sandbox defaults and may intentionally
-override them; they do not change the outer bootstrap or provider environment.
+Endpoint reachability, SSH configuration snapshots, GPG public-key availability,
+mount-plan precedence, path masking, scanning bounds, and capability retention
+are in [SANDBOX.md](SANDBOX.md).
 
 ## Multi-Tool Execution
 
@@ -620,6 +540,20 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
 ```
 
-Python development and verification instructions are in
-[`sdks/python/README.md`](sdks/python/README.md). Architecture and contributor
-contracts are in [`AGENTS.md`](AGENTS.md).
+CI runs the same Rust checks through the Deterministic Reliability Gate, together
+with the Web contract check, the Python SDK workflow, and the benchmark smoke
+workflow.
+
+## Documentation
+
+- [ROADMAP.md](ROADMAP.md) — delivery sequence, dependencies, and current focus.
+- [SANDBOX.md](SANDBOX.md) — host setup and the full sandbox/permission reference.
+- [AGENTS.md](AGENTS.md) — architecture ownership, dependency direction, and
+  contributor contracts.
+- [`sdks/python/README.md`](sdks/python/README.md) — Python development and
+  verification.
+- [`sdks/python/CAPABILITY_MATRIX.md`](sdks/python/CAPABILITY_MATRIX.md) — Rust
+  and Python capability parity.
+- [`benchmark/README.md`](benchmark/README.md) — Harbor benchmark integration.
+- [`examples/config.toml`](examples/config.toml) — annotated configuration
+  starting point.
