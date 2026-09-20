@@ -83,12 +83,12 @@ class Anthropic:
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceLimits:
-    """Positive bounds applied by Rust-owned workspace tools."""
+    """Positive workspace bound overrides; None inherits the Rust default."""
 
-    max_read_bytes: int = 1024 * 1024
-    max_read_lines: int = 200
-    max_write_bytes: int = 1024 * 1024
-    max_patch_bytes: int = 128 * 1024
+    max_read_bytes: int | None = None
+    max_read_lines: int | None = None
+    max_write_bytes: int | None = None
+    max_patch_bytes: int | None = None
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -97,7 +97,8 @@ class WorkspaceLimits:
             ("max_write_bytes", self.max_write_bytes),
             ("max_patch_bytes", self.max_patch_bytes),
         ):
-            require_positive_int(name, value)
+            if value is not None:
+                require_positive_int(name, value)
 
 
 @dataclass(frozen=True, slots=True, init=False)

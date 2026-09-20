@@ -6,7 +6,8 @@ use crate::tui::{
     markdown::{RenderedMarkdown, markdown_lines},
     render::command_style::command_spans,
     state::{
-        CommandFailure, CommandView, PatchChangeView, PatchOperationView, TimelineItem, TuiState,
+        CommandFailure, CommandView, PatchChangeView, PatchOperationView, TimelineItem,
+        ToolOutputPreview, TuiState,
     },
     text_interaction::TextSelection,
     text_wrap::{
@@ -30,9 +31,6 @@ pub(crate) use super::timeline_layout::timeline_content_region;
 use super::timeline_layout::{
     TimelineLayout, timeline_layout, timeline_scroll_start, timeline_viewport,
 };
-
-// Keep prefix eviction below the viewport start when Paragraph scroll exceeds u16.
-pub(super) const TOOL_RESULT_PREVIEW_MAX_LINES: usize = 5;
 
 pub(super) fn render_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
     let mut block = Block::default()
@@ -345,12 +343,38 @@ pub(super) fn expanded_timeline_lines(
         return lines;
     }
 
+    lines.extend(output_preview_lines(
+        state,
+        &ToolOutputPreview::new(body.lines(), false),
+        true,
+        region_width,
+    ));
+    lines
+}
+
+pub(super) fn read_output_lines(
+    state: &TuiState,
+    title: &str,
+    preview: &ToolOutputPreview,
+    region_width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![expanded_title_line(state, title)];
+    lines.extend(output_preview_lines(state, preview, false, region_width));
+    lines
+}
+
+fn output_preview_lines(
+    state: &TuiState,
+    preview: &ToolOutputPreview,
+    always_show: bool,
+    region_width: u16,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if !always_show && !state.show_successful_command_output() {
+        return lines;
+    }
     let body_width = usize::from(region_width).saturating_sub(2).max(4);
-    for line in body
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .take(TOOL_RESULT_PREVIEW_MAX_LINES)
-    {
+    for line in &preview.lines {
         let clean = crate::text::without_control_chars(line);
         let clean = clean.trim();
         if clean.is_empty() {
@@ -358,6 +382,12 @@ pub(super) fn expanded_timeline_lines(
         }
         lines.push(Line::from(Span::styled(
             format!("  {}", truncate_chars(clean, body_width)),
+            semantic_style(state, SemanticColor::Muted),
+        )));
+    }
+    if preview.truncated {
+        lines.push(Line::from(Span::styled(
+            "  ...",
             semantic_style(state, SemanticColor::Muted),
         )));
     }
@@ -414,21 +444,8 @@ pub(super) fn command_lines(
             }
             append_command_elapsed(state, &mut title, *elapsed);
             let mut lines = wrap_command_title(title, region_width);
-            if failed || (failure.is_none() && state.show_successful_command_output()) {
-                let body_width = usize::from(region_width).saturating_sub(2).max(4);
-                for line in &preview.lines {
-                    let clean = crate::text::without_control_chars(line);
-                    lines.push(Line::from(Span::styled(
-                        format!("  {}", truncate_chars(clean.trim(), body_width)),
-                        semantic_style(state, SemanticColor::Muted),
-                    )));
-                }
-                if preview.truncated {
-                    lines.push(Line::from(Span::styled(
-                        "  ...",
-                        semantic_style(state, SemanticColor::Muted),
-                    )));
-                }
+            if failed || failure.is_none() {
+                lines.extend(output_preview_lines(state, preview, failed, region_width));
             }
             lines
         }

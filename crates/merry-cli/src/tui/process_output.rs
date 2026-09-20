@@ -1,4 +1,4 @@
-use crate::tui::state::ProcessOutputPreview;
+use crate::tui::state::ToolOutputPreview;
 use merry_runtime::ArtifactContent;
 use serde::Deserialize;
 use serde_json::Value;
@@ -68,7 +68,7 @@ impl CapturedOutput {
     }
 }
 
-pub(crate) fn process_output_preview(output: &str) -> Option<ProcessOutputPreview> {
+pub(crate) fn process_output_preview(output: &str) -> Option<ToolOutputPreview> {
     let value = serde_json::from_str::<Value>(output).ok()?;
     if value.get("kind").and_then(Value::as_str) != Some("process_action") {
         return None;
@@ -83,7 +83,10 @@ pub(crate) fn process_output_preview(output: &str) -> Option<ProcessOutputPrevie
         .unwrap_or_default();
     let truncated = value.pointer("/stdout/truncated").and_then(Value::as_bool) == Some(true)
         || value.pointer("/stderr/truncated").and_then(Value::as_bool) == Some(true);
-    Some(ProcessOutputPreview::new(stdout, stderr, truncated))
+    Some(ToolOutputPreview::new(
+        stdout.lines().chain(stderr.lines()),
+        truncated,
+    ))
 }
 
 pub(crate) fn process_exit_code(output: &str) -> Option<i64> {

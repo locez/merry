@@ -22,10 +22,10 @@ class AgentBuilder:
         enable_patch: bool,
         patch_write_scope: list[str] | None,
         forbidden_paths: list[str],
-        max_read_bytes: int,
-        max_read_lines: int,
-        max_write_bytes: int,
-        max_patch_bytes: int,
+        max_read_bytes: int | None,
+        max_read_lines: int | None,
+        max_write_bytes: int | None,
+        max_patch_bytes: int | None,
     ) -> None: ...
     def register_bridge_tool(
         self, name: str, description: str, schema_json: str

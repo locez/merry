@@ -8,9 +8,8 @@ use crate::{
         projector::StartedToolView,
         state::{
             CommandFailure, CommandView, PatchChangeView, PatchLineKind, PatchLineView,
-            PatchOperationView, ProcessOutputPreview, TimelineItem,
+            PatchOperationView, TimelineItem, ToolOutputPreview,
         },
-        text_wrap::truncate_chars,
         tool_error::compact_failed_tool_body,
     },
 };
@@ -22,11 +21,6 @@ use merry_tools::{
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-
-// This bounds the timeline preview only; the workspace tool and Focus retain the full file.
-pub(super) const READ_FILE_PREVIEW_MAX_LINES: usize = 120;
-
-pub(super) const READ_FILE_PREVIEW_MAX_CHARS: usize = 180;
 
 pub(super) fn expanded_tool_title(tool: &StartedToolView) -> String {
     if tool.detail.is_empty() {
@@ -111,14 +105,6 @@ pub(super) fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
     Some((server, tool))
 }
 
-pub(super) fn success_tool_bodies(name: &str, output: &str) -> Option<String> {
-    match name {
-        "request_permissions" => permission_output_bodies(output),
-        "read_text" => read_text_output_bodies(output),
-        _ => None,
-    }
-}
-
 pub(super) fn permission_output_bodies(output: &str) -> Option<String> {
     let value = serde_json::from_str::<Value>(output).ok()?;
     if value.get("ok").and_then(Value::as_bool) != Some(true)
@@ -138,25 +124,22 @@ pub(super) fn permission_output_bodies(output: &str) -> Option<String> {
     Some(body)
 }
 
-pub(super) fn read_text_output_bodies(output: &str) -> Option<String> {
+pub(super) fn read_text_output_preview(output: &str) -> Option<ToolOutputPreview> {
     let output = serde_json::from_str::<WorkspaceReadTextOutput>(output).ok()?;
     if !output.ok || output.tool.as_deref() != Some("read_text") {
         return None;
     }
 
-    let mut lines = output
-        .content
-        .lines()
-        .take(READ_FILE_PREVIEW_MAX_LINES)
-        .map(|line| truncate_chars(line, READ_FILE_PREVIEW_MAX_CHARS))
-        .collect::<Vec<_>>();
-    if output.truncated {
-        lines.push("... truncated".to_owned());
+    if output.content.is_empty() {
+        return Some(ToolOutputPreview::new(
+            std::iter::once(format!("{} is empty", output.path).as_str()),
+            output.truncated,
+        ));
     }
-    if lines.is_empty() {
-        lines.push(format!("{} is empty", output.path));
-    }
-    Some(lines.join("\n"))
+    Some(ToolOutputPreview::new(
+        output.content.lines(),
+        output.truncated,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,11 +171,10 @@ pub(super) fn completed_process_view(
         None
     };
     let mut preview = process_output_preview(output)
-        .unwrap_or_else(|| ProcessOutputPreview::new(&compact_tool_output(output), "", false));
+        .unwrap_or_else(|| ToolOutputPreview::new(compact_tool_output(output).lines(), false));
     if failure == Some(CommandFailure::Failed) {
-        preview = ProcessOutputPreview::new(
-            &failed_tool_body(result.diagnostic(), output),
-            "",
+        preview = ToolOutputPreview::new(
+            failed_tool_body(result.diagnostic(), output).lines(),
             preview.truncated,
         );
     }

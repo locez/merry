@@ -11,47 +11,6 @@ use merry_tools::APPLY_PATCH_TOOL;
 use serde_json::json;
 
 #[test]
-fn projector_keeps_non_patch_tool_results_compact_without_raw_json() {
-    let mut state = TuiState::new(
-        "/repo".into(),
-        "gpt-test".to_owned(),
-        Keymap::default(),
-        TuiTheme::default(),
-    );
-    let mut projector = TuiProjector::default();
-
-    projector.apply(
-        RuntimeEvent::ToolCallStarted {
-            call: pending_call("call-read", "read_text"),
-            source: source(),
-        },
-        &mut state,
-    );
-    projector.apply(
-        RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-read").unwrap(),
-                text_artifact("read-output"),
-            ),
-            output: Some(ToolOutput::Json {
-                json: r#"{"ok":true,"tool":"read_text","path":"AGENTS.md","bytes":19704,"content":"large raw content"}"#.to_owned(),
-            }),
-            source: source(),
-        },
-        &mut state,
-    );
-
-    assert_eq!(state.timeline().len(), 1);
-    let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
-        panic!("read tool result should expand to a compact preview");
-    };
-    assert_eq!(title, "Read read_text");
-    assert!(!body.contains("AGENTS.md:1"));
-    assert!(body.contains("large raw content"));
-    assert!(!body.contains(r#""content":"#));
-}
-
-#[test]
 fn projector_projects_apply_patch_using_patch_tool_format() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -416,13 +375,14 @@ fn projector_expands_apply_patch_by_tool_name() {
 }
 
 #[test]
-fn projector_keeps_diff_like_non_patch_output_muted() {
+fn projector_keeps_diff_like_non_patch_output_as_a_read_preview() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
         Keymap::default(),
         TuiTheme::default(),
-    );
+    )
+    .with_successful_command_output(true);
     let mut projector = TuiProjector::default();
 
     projector.apply(
@@ -447,7 +407,10 @@ fn projector_keeps_diff_like_non_patch_output_muted() {
     );
 
     assert_eq!(state.timeline().len(), 1);
-    assert!(matches!(state.timeline()[0], TimelineItem::Expanded { .. }));
+    assert!(!matches!(state.timeline()[0], TimelineItem::Patch { .. }));
+    let rendered = render_to_text(&state, 120, 24);
+    assert!(rendered.contains("Read read_text"));
+    assert!(rendered.contains("+not a patch result"));
 }
 
 #[test]

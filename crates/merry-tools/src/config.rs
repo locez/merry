@@ -10,7 +10,8 @@ use thiserror::Error;
 pub struct WorkspaceToolLimits {
     /// Maximum bytes returned or scanned by one `read_text` request.
     pub max_read_bytes: usize,
-    /// Maximum lines returned by one `read_text` request.
+    /// Maximum lines returned by one `read_text` request, also used when omitted.
+    /// Defaults to 2,000 lines; the independent byte limit still applies.
     pub max_read_lines: usize,
     /// Maximum bytes written to one file by `apply_patch`.
     pub max_write_bytes: usize,
@@ -22,7 +23,7 @@ impl Default for WorkspaceToolLimits {
     fn default() -> Self {
         Self {
             max_read_bytes: 1024 * 1024,
-            max_read_lines: 200,
+            max_read_lines: 2_000,
             max_write_bytes: 1024 * 1024,
             max_patch_bytes: 128 * 1024,
         }

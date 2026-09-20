@@ -32,9 +32,33 @@ fn read_text_returns_requested_line_window_without_host_root() {
 }
 
 #[test]
+fn read_text_defaults_to_complete_file_when_it_fits_line_budget() {
+    let temp = TempWorkspace::new("read-complete-file");
+    let tools = tools_for(temp.path());
+
+    for line_count in [559, 2_000] {
+        let content = (1..=line_count)
+            .map(|line| format!("line-{line}\n"))
+            .collect::<String>();
+        temp.write_text("note.txt", &content);
+
+        let outcome = read_outcome(&tools, "note.txt");
+        let payload = json_content(&outcome);
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        assert_eq!(payload["start_line"], 1);
+        assert_eq!(payload["end_line"], line_count);
+        assert_eq!(payload["lines"], line_count);
+        assert_eq!(payload["bytes"], content.len());
+        assert_eq!(payload["content"], content);
+        assert_eq!(payload["truncated"], false);
+    }
+}
+
+#[test]
 fn read_text_defaults_to_a_bounded_first_window() {
     let temp = TempWorkspace::new("read-default-window");
-    let content = (1..=205)
+    let content = (1..=2_005)
         .map(|line| format!("line-{line}\n"))
         .collect::<String>();
     temp.write_text("large.txt", &content);
@@ -45,20 +69,20 @@ fn read_text_defaults_to_a_bounded_first_window() {
 
     assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
     assert_eq!(payload["start_line"], 1);
-    assert_eq!(payload["lines"], 200);
-    assert_eq!(payload["end_line"], 200);
+    assert_eq!(payload["lines"], 2_000);
+    assert_eq!(payload["end_line"], 2_000);
     assert_eq!(payload["truncated"], true);
     assert!(
         payload["content"]
             .as_str()
             .expect("content text")
-            .contains("line-200\n")
+            .contains("line-2000\n")
     );
     assert!(
         !payload["content"]
             .as_str()
             .expect("content text")
-            .contains("line-201\n")
+            .contains("line-2001\n")
     );
 }
 

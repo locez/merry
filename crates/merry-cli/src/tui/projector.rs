@@ -4,17 +4,17 @@ use crate::tui::{
     process_output::process_exit_code,
     projector::tool_output::{
         compact_tool_output, completed_process_view, completed_tool_title, expanded_tool_title,
-        failed_tool_body, parse_apply_patch_view, started_tool_title_and_detail,
-        success_tool_bodies, tool_output_text,
+        failed_tool_body, parse_apply_patch_view, permission_output_bodies,
+        read_text_output_preview, started_tool_title_and_detail, tool_output_text,
     },
-    state::{CommandView, QueuePreview, TimelineItem, TuiState},
+    state::{CommandView, QueuePreview, TimelineItem, ToolOutputPreview, TuiState},
 };
 use merry_core::{
     PlanAttemptOutcome, PlanDirectiveStatus, PlanPhase, RuntimeEvent, TOOL_CANCELLED_BY_USER_CODE,
     ToolCallId, ToolCallResultStatus, ToolName,
 };
 use merry_runtime::SessionTranscriptItem;
-use merry_tools::APPLY_PATCH_TOOL;
+use merry_tools::{APPLY_PATCH_TOOL, READ_TEXT_TOOL};
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::time::Instant;
@@ -209,7 +209,19 @@ impl TuiProjector {
                         state.push_timeline_item(patch_item);
                     }
                 } else if let Some(tool) = tool.as_ref()
-                    && let Some(preview) = success_tool_bodies(tool.name.as_str(), &text)
+                    && tool.name.as_str() == READ_TEXT_TOOL
+                {
+                    state.replace_timeline_item(
+                        tool.timeline_index,
+                        TimelineItem::Read {
+                            title: expanded_tool_title(tool),
+                            preview: read_text_output_preview(&text)
+                                .unwrap_or_else(|| ToolOutputPreview::new(text.lines(), false)),
+                        },
+                    );
+                } else if let Some(tool) = tool.as_ref()
+                    && tool.name.as_str() == "request_permissions"
+                    && let Some(preview) = permission_output_bodies(&text)
                 {
                     state.replace_timeline_item(
                         tool.timeline_index,

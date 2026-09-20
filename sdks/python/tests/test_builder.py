@@ -121,6 +121,33 @@ def test_workspace_and_patch_configuration_are_explicit(tmp_path: Path) -> None:
     assert workspace.limits.max_read_bytes == 2048
 
 
+def test_workspace_limits_defer_defaults_to_rust_and_allow_partial_overrides(
+    tmp_path: Path,
+) -> None:
+    workspace = merry.WorkspaceConfig(root=tmp_path)
+    custom = merry.WorkspaceConfig(
+        root=tmp_path,
+        limits=merry.WorkspaceLimits(max_read_lines=17),
+    )
+
+    assert workspace.limits == merry.WorkspaceLimits()
+    assert workspace.limits.max_read_lines is None
+    assert workspace.limits.max_read_bytes is None
+    assert workspace.limits.max_write_bytes is None
+    assert workspace.limits.max_patch_bytes is None
+    assert custom.limits.max_read_lines == 17
+    assert custom.limits.max_read_bytes is None
+
+    for config in (workspace, custom):
+        agent = (
+            merry.AgentBuilder("workspace-defaults")
+            .provider(openai_provider())
+            .workspace(config)
+            .build()
+        )
+        assert agent.session_id == "workspace-defaults"
+
+
 def test_invalid_workspace_and_limits_fail_before_native_build(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="write_scope"):
         merry.PatchConfig(write_scope=[])

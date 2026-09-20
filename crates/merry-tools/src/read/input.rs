@@ -7,7 +7,7 @@ use serde::Deserialize;
 #[merry_tools_macros::tool(
     crate = "crate",
     name = "read_text",
-    description = "Read a bounded one-based line range from a UTF-8 text file. Omit start_line to begin at line 1 and omit max_lines to use the configured limit. Use multiple focused reads for larger files; do not request or assume complete-file content."
+    description = "Read UTF-8 text using one-based lines. Omit start_line to begin at line 1 and omit max_lines to use the configured per-call limit. A successful result contains the complete returned start_line..end_line range; truncated means more lines follow. Continue at end_line + 1 to read the next range, within the configured limits."
 )]
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

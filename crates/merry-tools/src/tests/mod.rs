@@ -186,6 +186,7 @@ fn workspace_tool_schemas_describe_bounded_file_operations() {
     assert_eq!(read_schema["properties"]["path"]["minLength"], 1);
     assert_eq!(read_schema["properties"]["start_line"]["minimum"], 1);
     assert_eq!(read_schema["properties"]["max_lines"]["minimum"], 1);
+    assert_eq!(read_schema["properties"]["max_lines"]["maximum"], 2_000);
     assert_eq!(patch_schema["properties"]["patch"]["minLength"], 1);
 }
 

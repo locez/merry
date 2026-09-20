@@ -2,7 +2,7 @@
 
 use super::timeline::{
     assistant_lines, command_lines, compact_patch_lines, diagnostic_lines, expanded_timeline_lines,
-    local_command_lines, muted_lines, user_lines,
+    local_command_lines, muted_lines, read_output_lines, user_lines,
 };
 use crate::tui::{
     copy_controls::CopyTarget,
@@ -67,6 +67,12 @@ pub(super) fn timeline_layout(state: &TuiState, region: Rect) -> TimelineLayout 
                 .into_iter()
                 .map(|line| TranscriptRow::new(line, SelectionPolicy::Keep))
                 .collect(),
+            TimelineItem::Read { title, preview } => {
+                read_output_lines(state, title, preview, region.width)
+                    .into_iter()
+                    .map(|line| TranscriptRow::new(line, SelectionPolicy::Keep))
+                    .collect()
+            }
             TimelineItem::LocalCommand { title, body } => {
                 let rendered = local_command_lines(state, title, body, region.width);
                 item_targets = rendered.copy_targets;

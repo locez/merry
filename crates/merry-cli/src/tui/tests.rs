@@ -112,9 +112,13 @@ mod input_controls;
 
 mod layout;
 
+mod output_preview;
+
 mod patch_projection;
 
 mod process_projection;
+
+mod read_output;
 
 mod provider_interactions;
 

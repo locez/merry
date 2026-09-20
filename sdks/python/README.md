@@ -71,7 +71,13 @@ agent = (
 `WorkspaceConfig` maps to the Rust coding profile. A workspace has one root,
 which may be absolute or relative; patch and forbidden paths are root-relative
 normalized paths. Every workspace limit is positive and is enforced again by
-Rust.
+Rust. `WorkspaceLimits` fields default to `None`, meaning the native builder uses
+Rust's current defaults rather than a separate set of Python defaults. Set only
+the fields you want to override; other fields continue to inherit Rust defaults.
+Currently, `read_text` returns up to 2,000 lines per call, subject to the independent
+1 MiB scan/return limit. `WorkspaceLimits(max_read_lines=...)` overrides both the
+default read window and the maximum accepted `max_lines` argument. The Python
+configuration retains `None` for inherited fields; it is not a resolved snapshot.
 
 Anthropic Messages uses the same builder:
 

@@ -89,22 +89,23 @@ impl PyAgentBuilder {
         enable_patch: bool,
         patch_write_scope: Option<Vec<String>>,
         forbidden_paths: Vec<String>,
-        max_read_bytes: usize,
-        max_read_lines: usize,
-        max_write_bytes: usize,
-        max_patch_bytes: usize,
+        max_read_bytes: Option<usize>,
+        max_read_lines: Option<usize>,
+        max_write_bytes: Option<usize>,
+        max_patch_bytes: Option<usize>,
     ) -> PyResult<()> {
         if root.is_empty() {
             return Err(error::config_message_to_py("workspace requires a root"));
         }
+        let defaults = WorkspaceToolLimits::default();
         let mut profile_builder =
             merry::profiles::CodingAgentProfileBuilder::new(PathBuf::from(root))
                 .readonly_resource_roots(readonly_resource_roots.into_iter().map(PathBuf::from))
                 .limits(WorkspaceToolLimits {
-                    max_read_bytes,
-                    max_read_lines,
-                    max_write_bytes,
-                    max_patch_bytes,
+                    max_read_bytes: max_read_bytes.unwrap_or(defaults.max_read_bytes),
+                    max_read_lines: max_read_lines.unwrap_or(defaults.max_read_lines),
+                    max_write_bytes: max_write_bytes.unwrap_or(defaults.max_write_bytes),
+                    max_patch_bytes: max_patch_bytes.unwrap_or(defaults.max_patch_bytes),
                 })
                 .forbidden_paths(forbidden_paths.into_iter().map(PathBuf::from));
         if enable_patch {

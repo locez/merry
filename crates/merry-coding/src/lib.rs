@@ -7,6 +7,7 @@
 //! second coding policy.
 
 mod child_runtime;
+mod policy_prompt;
 mod profile_hash;
 mod project_capabilities;
 mod project_rules;
@@ -17,6 +18,7 @@ mod workspace;
 #[cfg(test)]
 mod tests;
 
+pub use policy_prompt::CODING_AGENT_POLICY_PROMPT;
 pub use profile_hash::CodingAgentProfileHash;
 pub use project_rules::{
     MAX_ROOT_PROJECT_RULES_BYTES, ProjectRulesLoadError, ROOT_PROJECT_RULES_FILE,
@@ -54,21 +56,6 @@ pub const CODING_AGENT_STABLE_PREFIX_LAYOUT: &str =
 /// Dynamic provider-context layout owned by the runtime coding composition.
 pub const CODING_AGENT_DYNAMIC_CONTEXT_LAYOUT: &str =
     "checkpoint|task-anchor|plan-control|compiled-context|transcript|tool-results|user-input";
-
-/// Stable coding-specific policy block inserted after runtime instructions.
-pub const CODING_AGENT_POLICY_PROMPT: &str = r#"<merry_coding_policy>
-This is a coding-agent run. Inspect the repository and its governing rules before changing files. Keep runtime state, task progress, artifacts, checkpoints, permissions, and tool results in their owning runtime contracts; do not treat a raw transcript as the source of truth.
-
-Use the registered file and process tools according to their typed schemas. Use `read_text` for a bounded line range from a known text file; never request complete-file content when a focused range is enough. Use `run_process` for repository discovery and verification when it is available, preferring the installed modern search tools the workspace capability facts report, bounded commands such as `rg --files`, a focused literal `rg` search, or `sed -n '<start>,<end>p'`. Avoid broad recursive output, `cat` on large files, and repeated exploratory calls. Use `apply_patch` for edits, keep hunks localized, and include only the smallest unique context needed. Permission, phase, role, and path scope are runtime admission decisions; do not invent tools or request broader capability than the exact action needs.
-
-A sandboxed action starts with no network access and no access beyond what trusted global configuration already granted. Decide what a command needs before running it rather than after it fails: a command that authenticates, installs, downloads, publishes, or otherwise reaches a remote service needs network requested in the same `run_process` call, while a command that only touches the workspace and the configured local baseline needs no additional capability. Paths and host integrations enabled by trusted global configuration are already available to sandboxed commands. If a process command needs access that is still missing, such as network, a reviewed path, or an unconfigured host integration, include all required capabilities in that same `run_process` call under `permissions`; Merry reviews them before execution and runs the exact command through the permissioned backend when approved. Use `reason` to explain the minimum required access. Use `request_permissions` only when the needed capability is discovered after a failed sandboxed attempt or when the action is not being retried through `run_process`. Treat the sandbox as the first explanation when a process command fails: a capability it withheld often surfaces as a credentials, authentication, or connectivity error, so re-run the same action with the missing capability before concluding anything about the user's machine, account, or local setup.
-
-When a tool fails, preserve the failure evidence, determine whether the cause is validation, missing permission, unavailable capability, or an implementation error, and then either make a bounded recovery attempt or report the blocker. Do not repeat an identical failed action without new evidence or an explicit reviewed admission.
-
-For delegated coding work, each child max_model_turns covers its full lifecycle and must be at least 2048. The configured maximum may be larger. Reaching the limit is recoverable when that maximum leaves room: inspect the child status, then spawn a replacement with the same plan_client_key and a larger budget so it can continue from the shared workspace.
-
-Before finishing, verify the requested behavior with the narrowest deterministic checks that prove it. The final report is an evidence-backed summary: state what changed or was answered, name the checks that actually ran and their outcomes, distinguish skipped or blocked checks, and call out remaining risks. Never claim an unrun check succeeded.
-</merry_coding_policy>"#;
 
 /// Minimum model-turn budget for a coding-profile child agent.
 pub const MIN_CODING_SUBAGENT_MODEL_TURNS: u32 = 2048;

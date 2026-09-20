@@ -47,7 +47,8 @@ fn projector_rebuilds_resume_transcript_history() {
         "gpt-test".to_owned(),
         Keymap::default(),
         TuiTheme::default(),
-    );
+    )
+    .with_successful_command_output(true);
     let mut projector = TuiProjector::default();
     let call = pending_call_with_args("call-read", "read_text", json!({"path": "hello_world.py"}));
     let result = ToolCallResult::succeeded(
@@ -99,12 +100,9 @@ fn projector_rebuilds_resume_transcript_history() {
         &state.timeline()[1],
         TimelineItem::Assistant { text } if text == "我先读一下文件。"
     ));
-    assert!(matches!(
-        &state.timeline()[2],
-        TimelineItem::Expanded { title, body }
-            if title == "Read read_text path=hello_world.py"
-                && body.contains("print('hi')")
-    ));
+    let rendered = render_to_text(&state, 120, 24);
+    assert!(rendered.contains("Read read_text path=hello_world.py"));
+    assert!(rendered.contains("print('hi')"));
 }
 
 #[test]

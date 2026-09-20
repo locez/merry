@@ -2,30 +2,36 @@ use merry_core::{ArtifactRef, QueuedInputLane, QueuedInputView};
 use std::time::Duration;
 use tokio::time::Instant;
 
-const PROCESS_PREVIEW_MAX_LINES: usize = 5;
+const TOOL_PREVIEW_MAX_LINES: usize = 5;
+const TOOL_PREVIEW_MAX_LINE_CHARS: usize = 180;
 
-/// A bounded display preview; complete process output remains in runtime artifacts.
+/// A bounded display preview; complete tool output remains in runtime artifacts.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProcessOutputPreview {
+pub(crate) struct ToolOutputPreview {
     pub(crate) lines: Vec<String>,
     pub(crate) truncated: bool,
 }
 
-impl ProcessOutputPreview {
-    /// Keeps five nonempty stdout/stderr lines and records local or upstream truncation.
-    pub(crate) fn new(stdout: &str, stderr: &str, source_truncated: bool) -> Self {
-        let mut output_lines = stdout
-            .lines()
-            .chain(stderr.lines())
-            .filter(|line| !line.trim().is_empty());
-        let lines = output_lines
-            .by_ref()
-            .take(PROCESS_PREVIEW_MAX_LINES)
-            .map(str::to_owned)
-            .collect();
+impl ToolOutputPreview {
+    /// Keeps five nonempty lines of at most 180 Unicode scalar values each.
+    /// Records character, line, or upstream truncation without retaining full output.
+    pub(crate) fn new<'a>(lines: impl Iterator<Item = &'a str>, source_truncated: bool) -> Self {
+        let mut output_lines = lines.filter(|line| !line.trim().is_empty());
+        let mut lines = Vec::new();
+        let mut truncated = source_truncated;
+        for line in output_lines.by_ref().take(TOOL_PREVIEW_MAX_LINES) {
+            let mut characters = line.chars();
+            lines.push(
+                characters
+                    .by_ref()
+                    .take(TOOL_PREVIEW_MAX_LINE_CHARS)
+                    .collect(),
+            );
+            truncated |= characters.next().is_some();
+        }
         Self {
             lines,
-            truncated: source_truncated || output_lines.next().is_some(),
+            truncated: truncated || output_lines.next().is_some(),
         }
     }
 }
@@ -48,7 +54,7 @@ pub(crate) enum CommandView {
         detail: String,
         exit_code: Option<i64>,
         failure: Option<CommandFailure>,
-        preview: ProcessOutputPreview,
+        preview: ToolOutputPreview,
         command: String,
         cwd: String,
         artifact: ArtifactRef,
@@ -203,12 +209,37 @@ pub(crate) struct PatchChangeView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) enum TimelineItem {
-    User { text: String, lane: QueuedInputLane },
-    Assistant { text: String },
-    Muted { title: String, detail: String },
-    Command { view: CommandView },
-    LocalCommand { title: String, body: String },
-    Expanded { title: String, body: String },
-    Diagnostic { title: String, body: String },
-    Patch { changes: Vec<PatchChangeView> },
+    User {
+        text: String,
+        lane: QueuedInputLane,
+    },
+    Assistant {
+        text: String,
+    },
+    Muted {
+        title: String,
+        detail: String,
+    },
+    Command {
+        view: CommandView,
+    },
+    Read {
+        title: String,
+        preview: ToolOutputPreview,
+    },
+    LocalCommand {
+        title: String,
+        body: String,
+    },
+    Expanded {
+        title: String,
+        body: String,
+    },
+    Diagnostic {
+        title: String,
+        body: String,
+    },
+    Patch {
+        changes: Vec<PatchChangeView>,
+    },
 }

@@ -205,10 +205,13 @@ max_model_turns = 2048
 # tools = ["resolve-library-id", "get-library-docs"]
 
 [tui]
-# Show up to five output lines for successful commands. Failed commands always
-# show their output preview; an extra ... line indicates omitted output.
-# Ctrl+T inspects captured output independently of this default. In the viewer,
-# Left/Right selects a command, C copies its command, Y copies captured output,
+# Show up to five output lines for successful process commands and read_text calls.
+# Timeline previews retain at most 180 Unicode characters per line; captured
+# process output remains available in full through Ctrl+T.
+# Failed commands always show their output preview; failed reads show diagnostics.
+# An extra ... line indicates omitted output.
+# Ctrl+T inspects captured process output independently of this default. In the
+# viewer, Left/Right selects a command, C copies its command, Y copies captured output,
 # and Esc closes. Copy uses OSC 52 and requires terminal clipboard support.
 show_successful_command_output = false
 

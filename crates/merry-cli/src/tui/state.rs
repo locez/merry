@@ -19,7 +19,7 @@ use std::{
 pub(crate) use timeline::TimelineAnchor;
 pub(crate) use views::{
     CommandFailure, CommandView, PatchChangeView, PatchLineKind, PatchLineView, PatchOperationView,
-    ProcessOutputPreview, QueuePreview, QueuePreviewItem, QueuePreviewState, TimelineItem,
+    QueuePreview, QueuePreviewItem, QueuePreviewState, TimelineItem, ToolOutputPreview,
 };
 
 mod overlays;
@@ -132,7 +132,7 @@ impl TuiState {
         self
     }
 
-    /// Whether completed successful commands show their bounded output preview.
+    /// Whether successful process commands and file reads show their bounded output preview.
     pub(crate) fn show_successful_command_output(&self) -> bool {
         self.show_successful_command_output
     }
