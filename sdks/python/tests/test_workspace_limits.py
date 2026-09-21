@@ -210,19 +210,25 @@ def run_workspace_tool(
 
 
 @pytest.mark.parametrize(
-    ("limits", "expected_error"),
+    ("content", "limits", "expected_error"),
     [
-        (merry.WorkspaceLimits(), None),
-        (merry.WorkspaceLimits(max_read_bytes=3), "workspace_file_too_large"),
-        (merry.WorkspaceLimits(max_read_bytes=4), None),
-        (merry.WorkspaceLimits(max_write_bytes=1, max_patch_bytes=1), None),
+        ("界\n", merry.WorkspaceLimits(), None),
+        ("界\n", merry.WorkspaceLimits(max_read_bytes=3), "workspace_file_too_large"),
+        ("界\n", merry.WorkspaceLimits(max_read_bytes=4), None),
+        ("界\n", merry.WorkspaceLimits(max_write_bytes=1, max_patch_bytes=1), None),
+        ("界\r\n", merry.WorkspaceLimits(max_read_bytes=4), "workspace_file_too_large"),
+        ("界\r\n", merry.WorkspaceLimits(max_read_bytes=5), None),
     ],
 )
 def test_read_byte_limits_are_enforced_without_changing_other_limits(
-    tmp_path: Path, limits: merry.WorkspaceLimits, expected_error: str | None
+    tmp_path: Path,
+    content: str,
+    limits: merry.WorkspaceLimits,
+    expected_error: str | None,
 ) -> None:
     path = tmp_path / "note.txt"
-    path.write_text("界\n", encoding="utf-8")
+    encoded_content = content.encode("utf-8")
+    path.write_bytes(encoded_content)
     finished = run_workspace_tool(
         tmp_path, limits, "read_text", ReadArguments(path="note.txt")
     )
@@ -231,17 +237,19 @@ def test_read_byte_limits_are_enforced_without_changing_other_limits(
     if expected_error is None:
         assert finished.output is not None
         output = ReadOutput.model_validate_json(finished.output.value)
-        assert output.content == "界\n"
+        assert output.content == content
         assert output.lines == 1
         assert not output.truncated
-    assert path.read_text(encoding="utf-8") == "界\n"
+    assert path.read_bytes() == encoded_content
 
 
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n"], ids=["lf", "crlf"])
 @pytest.mark.parametrize("requested_lines", [None, 2, 3])
 def test_read_line_override_controls_default_window_and_explicit_limit(
-    tmp_path: Path, requested_lines: int | None
+    tmp_path: Path, requested_lines: int | None, line_ending: str
 ) -> None:
-    (tmp_path / "note.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    content = f"one{line_ending}two{line_ending}three{line_ending}"
+    (tmp_path / "note.txt").write_bytes(content.encode("utf-8"))
     finished = run_workspace_tool(
         tmp_path,
         merry.WorkspaceLimits(max_read_lines=2),
@@ -254,7 +262,7 @@ def test_read_line_override_controls_default_window_and_explicit_limit(
     if expected_error is None:
         assert finished.output is not None
         output = ReadOutput.model_validate_json(finished.output.value)
-        assert output.content == "one\ntwo\n"
+        assert output.content == f"one{line_ending}two{line_ending}"
         assert output.lines == 2
         assert output.truncated
 
@@ -282,14 +290,29 @@ def test_patch_limits_are_enforced_before_writes(
     tmp_path: Path, limits: merry.WorkspaceLimits, expected_error: str | None
 ) -> None:
     path = tmp_path / "note.txt"
-    path.write_text("old\n", encoding="utf-8")
+    path.write_bytes(b"old\n")
     finished = run_workspace_tool(
         tmp_path, limits, "apply_patch", PatchArguments(patch=PATCH)
     )
 
     assert_tool_status(finished, expected_error)
     expected_content = "changed\n" if expected_error is None else "old\n"
-    assert path.read_text(encoding="utf-8") == expected_content
+    assert path.read_bytes() == expected_content.encode("utf-8")
+
+
+def test_patch_preserves_crlf_file_when_lf_preimage_does_not_match(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "note.txt"
+    path.write_bytes(b"old\r\n")
+    finished = run_workspace_tool(
+        tmp_path, merry.WorkspaceLimits(), "apply_patch", PatchArguments(patch=PATCH)
+    )
+
+    assert_tool_status(finished, "apply_patch_preimage_absent")
+    assert finished.result.diagnostic is not None
+    assert "CRLF" in finished.result.diagnostic.message
+    assert path.read_bytes() == b"old\r\n"
 
 
 @pytest.mark.parametrize(
