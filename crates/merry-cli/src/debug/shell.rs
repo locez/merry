@@ -24,8 +24,8 @@ use merry_llm::{
 use merry_process::TokioProcessRunner;
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, ArtifactContent, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
-    ProcessActionIntent, ProcessEnvPolicy, ProcessRunner, Runtime, StepContext, StepInput,
-    ToolExecutionContext, process_command_tool, shell_command_for_argv,
+    ProcessActionIntent, ProcessEnvPolicy, ProcessOutputEnvelope, ProcessRunner, Runtime,
+    StepContext, StepInput, ToolExecutionContext, process_command_tool, shell_command_for_argv,
 };
 use std::{env, sync::Arc};
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
@@ -204,26 +204,13 @@ where
             "shell command result artifact was not JSON".to_owned(),
         ));
     };
-    let value = serde_json::from_str::<serde_json::Value>(&content).map_err(unexpected)?;
-    let stdout = value
-        .pointer("/stdout/text")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            CliError::Unexpected("shell command result missing stdout text".to_owned())
-        })?;
-    let stderr = value
-        .pointer("/stderr/text")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            CliError::Unexpected("shell command result missing stderr text".to_owned())
-        })?;
-
+    let output = serde_json::from_str::<ProcessOutputEnvelope<'_>>(&content).map_err(unexpected)?;
     writer
-        .write_all(stdout.as_bytes())
+        .write_all(output.stdout().text().as_bytes())
         .await
         .map_err(stdout_error)?;
     writer
-        .write_all(stderr.as_bytes())
+        .write_all(output.stderr().text().as_bytes())
         .await
         .map_err(stdout_error)
 }

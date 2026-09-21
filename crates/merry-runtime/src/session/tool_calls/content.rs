@@ -24,14 +24,14 @@ impl SessionState {
         result: &ToolCallResult,
         content: ToolResultContent,
     ) -> Result<ToolResultArtifacts, RuntimeError> {
-        self.validate_tool_result_content(result, &content.artifact)?;
+        self.validate_tool_result_content(result, content.artifact())?;
         self.artifacts
-            .ensure_recordable(result.artifact(), &content.artifact)?;
-        let model_ref =
-            self.validate_model_result_content(&content.artifact, content.model.as_ref())?;
+            .ensure_recordable(result.artifact(), content.artifact())?;
+        let model_ref = self.validate_model_result_content(content.artifact(), content.model())?;
+        let (full, model) = content.into_parts();
         Ok(ToolResultArtifacts {
-            full: (result.artifact().clone(), content.artifact),
-            model: model_ref.zip(content.model),
+            full: (result.artifact().clone(), full),
+            model: model_ref.zip(model),
         })
     }
 

@@ -1,11 +1,7 @@
-use crate::{
-    ArtifactContent,
-    tool::{
-        patch_evidence::WorkspacePatchProposal,
-        proposal::{ActionExecutionEvidence, ActionProposal},
-    },
+use crate::tool::{
+    ToolExecutionOutcome, patch_evidence::WorkspacePatchProposal, proposal::ActionProposal,
 };
-use merry_core::{ErrorInfo, PendingToolCall, ToolCallResultStatus};
+use merry_core::PendingToolCall;
 use std::{future::Future, pin::Pin};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -125,38 +121,6 @@ pub trait ToolExecutor: Send + Sync {
     ) -> ToolExecutorFuture<'a>;
 }
 
-/// Domain-level result from a tool execution.
-///
-/// Runtime code turns this into a stable artifact reference and a
-/// `ToolCallResult`. Executors provide the exact artifact payload and may supply
-/// a distinct model body when presentation or audit details are not useful in
-/// context. Without a model body, requests continue to use the artifact content.
-/// This type intentionally carries no artifact id, event, or ledger update.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolExecutionOutcome {
-    pub(super) status: ToolCallResultStatus,
-    pub(super) content: ArtifactContent,
-    model_content: Option<Box<ArtifactContent>>,
-    pub(super) diagnostic: Option<ErrorInfo>,
-    pub(super) execution_evidence: Option<ActionExecutionEvidence>,
-}
-
-/// Full evidence and an optional model body, kept together through admission.
-#[derive(Debug)]
-pub(crate) struct ToolResultContent {
-    pub(crate) artifact: ArtifactContent,
-    pub(crate) model: Option<ArtifactContent>,
-}
-
-impl From<ArtifactContent> for ToolResultContent {
-    fn from(artifact: ArtifactContent) -> Self {
-        Self {
-            artifact,
-            model: None,
-        }
-    }
-}
-
 /// Result of a tool action preflight/proposal hook.
 ///
 /// Mutating tools use this hook before runtime policy decides whether execution
@@ -172,144 +136,6 @@ pub enum ToolActionPreflight {
     Proposal(ActionProposal),
     /// The tool preflight produced a durable tool outcome.
     Outcome(ToolExecutionOutcome),
-}
-
-impl ToolExecutionOutcome {
-    /// Creates a successful text result.
-    #[must_use]
-    pub fn succeeded_text(content: impl Into<String>) -> Self {
-        Self::succeeded(ArtifactContent::text(content))
-    }
-
-    /// Creates a successful JSON result.
-    #[must_use]
-    pub fn succeeded_json(content: impl Into<String>) -> Self {
-        Self::succeeded(ArtifactContent::json(content))
-    }
-
-    /// Creates a failed text result with a small diagnostic.
-    ///
-    /// Use this when the tool ran and produced a domain-level failure that
-    /// should resolve the pending call durably.
-    #[must_use]
-    pub fn failed_text(content: impl Into<String>, diagnostic: ErrorInfo) -> Self {
-        Self::failed(ArtifactContent::text(content), diagnostic)
-    }
-
-    /// Creates a failed JSON result with a small diagnostic.
-    ///
-    /// Use this when the tool ran and produced a domain-level failure that
-    /// should resolve the pending call durably.
-    #[must_use]
-    pub fn failed_json(content: impl Into<String>, diagnostic: ErrorInfo) -> Self {
-        Self::failed(ArtifactContent::json(content), diagnostic)
-    }
-
-    /// Returns the tool execution status.
-    #[must_use]
-    pub fn status(&self) -> ToolCallResultStatus {
-        self.status
-    }
-
-    /// Borrows the exact execution content.
-    ///
-    /// Runtime code records this content into a generated artifact before
-    /// emitting the resolution event.
-    #[must_use]
-    pub fn content(&self) -> &ArtifactContent {
-        &self.content
-    }
-
-    /// Borrows the optional model-facing body instead of the full artifact.
-    ///
-    /// Runtime persists this body for request replay and compaction. Artifact
-    /// reads, evidence references, and presentation retain [`Self::content`].
-    #[must_use]
-    pub fn model_content(&self) -> Option<&ArtifactContent> {
-        self.model_content.as_deref()
-    }
-
-    /// Supplies model-facing text without changing the full result artifact.
-    ///
-    /// Keep execution status, useful output, and completeness warnings in this
-    /// body. Runtime rejects blank bodies before resolving the tool call.
-    #[must_use]
-    pub fn with_model_text(mut self, content: impl Into<String>) -> Self {
-        self.model_content = Some(Box::new(ArtifactContent::text(content)));
-        self
-    }
-
-    /// Supplies model-facing JSON without changing the full result artifact.
-    ///
-    /// The caller owns the JSON schema and must preserve actionable results.
-    /// Runtime rejects blank bodies before resolving the tool call.
-    #[must_use]
-    pub fn with_model_json(mut self, content: impl Into<String>) -> Self {
-        self.model_content = Some(Box::new(ArtifactContent::json(content)));
-        self
-    }
-
-    /// Borrows the optional failure diagnostic.
-    #[must_use]
-    pub fn diagnostic(&self) -> Option<&ErrorInfo> {
-        self.diagnostic.as_ref()
-    }
-
-    /// Borrows provider-invisible evidence produced by the actual execution.
-    ///
-    /// Runtime records this only in internal action audit state. It must not be
-    /// rendered into tool result artifacts, provider continuations, or provider
-    /// request payloads.
-    #[must_use]
-    pub fn execution_evidence(&self) -> Option<&ActionExecutionEvidence> {
-        self.execution_evidence.as_ref()
-    }
-
-    /// Attaches provider-invisible evidence from the actual execution.
-    #[must_use]
-    pub fn with_execution_evidence(mut self, evidence: ActionExecutionEvidence) -> Self {
-        self.execution_evidence = Some(evidence);
-        self
-    }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        ToolCallResultStatus,
-        ToolResultContent,
-        Option<ErrorInfo>,
-        Option<ActionExecutionEvidence>,
-    ) {
-        (
-            self.status,
-            ToolResultContent {
-                artifact: self.content,
-                model: self.model_content.map(|content| *content),
-            },
-            self.diagnostic,
-            self.execution_evidence,
-        )
-    }
-
-    pub(super) fn succeeded(content: ArtifactContent) -> Self {
-        Self {
-            status: ToolCallResultStatus::Succeeded,
-            content,
-            model_content: None,
-            diagnostic: None,
-            execution_evidence: None,
-        }
-    }
-
-    pub(super) fn failed(content: ArtifactContent, diagnostic: ErrorInfo) -> Self {
-        Self {
-            status: ToolCallResultStatus::Failed,
-            content,
-            model_content: None,
-            diagnostic: Some(diagnostic),
-            execution_evidence: None,
-        }
-    }
 }
 
 /// Infrastructure-level errors raised by tool executors.

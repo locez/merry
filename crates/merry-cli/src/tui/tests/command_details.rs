@@ -309,7 +309,7 @@ fn upstream_truncation_binary_text_and_load_failures_are_explicit() {
     let artifact = completed_command(&mut state, "limited", "build", 1, "");
     open(&mut state);
     apply_output(&mut state, artifact.id(), Ok(CapturedOutput::from_artifact(ArtifactContent::json(json!({
-        "kind": "process_action", "stdout": {"text": "prefix", "truncated": true, "utf8": false}, "stderr": {},
+        "kind": "process_action", "stdout": {"text": "prefix", "truncated": true, "utf8": false}, "stderr": {"text": ""},
     }).to_string())).unwrap()));
     let rendered = draw(&mut state, 110, 28);
     assert!(rendered.contains("capture truncated"));

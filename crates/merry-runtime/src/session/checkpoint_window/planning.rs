@@ -75,7 +75,7 @@ impl SessionState {
         window_budget: CompactionWindowBudget,
         coverage: CompactionCoverageBudget,
         shape: CompactionShape,
-        turns: &[ModelTurnHistory],
+        turns: &[ModelTurnHistory<'_>],
     ) -> Result<Option<CompactionWindowPlan>, RuntimeError> {
         if coverage.max_tokens().is_none()
             && shape.retained_fit() == RetainedFit::Required
@@ -239,7 +239,7 @@ impl SessionState {
         policy: CitationCompactionPolicy,
         coverage: CompactionCoverageBudget,
         shape: CompactionShape,
-        closed_turns: &[ModelTurnHistory],
+        closed_turns: &[ModelTurnHistory<'_>],
         available_completed: usize,
     ) -> Result<Vec<RetentionCandidate>, RuntimeError> {
         let Some(coverage_budget) = coverage.max_tokens() else {
@@ -283,8 +283,8 @@ impl SessionState {
 /// candidate being evaluated.
 fn plan_retained_window(
     window_budget: CompactionWindowBudget,
-    covered: &[ModelTurnHistory],
-    raw_turns: &[ModelTurnHistory],
+    covered: &[ModelTurnHistory<'_>],
+    raw_turns: &[ModelTurnHistory<'_>],
     base_tokens: u64,
     fingerprint: CompactionWindowFingerprint,
     policy: RetainedWindowPolicy,
@@ -346,7 +346,7 @@ fn plan_retained_window(
 }
 
 pub(super) fn retained_start_for_completed_count(
-    closed_turns: &[ModelTurnHistory],
+    closed_turns: &[ModelTurnHistory<'_>],
     retained_completed_count: usize,
 ) -> Option<usize> {
     let mut completed_seen = 0;
@@ -364,7 +364,9 @@ pub(super) fn retained_start_for_completed_count(
         })
 }
 
-pub(super) fn existing_archived_tool_call_ids(turns: &[ModelTurnHistory]) -> BTreeSet<ToolCallId> {
+pub(super) fn existing_archived_tool_call_ids(
+    turns: &[ModelTurnHistory<'_>],
+) -> BTreeSet<ToolCallId> {
     turns
         .iter()
         .flat_map(ModelTurnHistory::existing_archived_tool_call_ids)
@@ -372,7 +374,7 @@ pub(super) fn existing_archived_tool_call_ids(turns: &[ModelTurnHistory]) -> BTr
 }
 
 pub(super) fn archived_refs_for_plan(
-    turns: &[ModelTurnHistory],
+    turns: &[ModelTurnHistory<'_>],
     plan: &CompactionWindowPlan,
 ) -> Result<Vec<CheckpointRef>, RuntimeError> {
     let mut found_call_ids = BTreeSet::new();
@@ -400,7 +402,7 @@ pub(super) fn archived_refs_for_plan(
 }
 
 pub(super) fn projected_turn_tokens(
-    turns: &[ModelTurnHistory],
+    turns: &[ModelTurnHistory<'_>],
     archived_tool_call_ids: &BTreeSet<ToolCallId>,
 ) -> Result<u64, RuntimeError> {
     turns.iter().try_fold(0_u64, |total, turn| {
@@ -412,7 +414,7 @@ pub(super) fn projected_turn_tokens(
 
 pub(super) fn retained_projection_fits(
     base_tokens: u64,
-    raw_turns: &[ModelTurnHistory],
+    raw_turns: &[ModelTurnHistory<'_>],
     archived_tool_call_ids: &BTreeSet<ToolCallId>,
     max_dynamic_body_tokens: u64,
 ) -> Result<bool, RuntimeError> {
@@ -423,8 +425,8 @@ pub(super) fn retained_projection_fits(
 }
 
 pub(super) fn compaction_window_plan(
-    covered: &[ModelTurnHistory],
-    raw_turns: &[ModelTurnHistory],
+    covered: &[ModelTurnHistory<'_>],
+    raw_turns: &[ModelTurnHistory<'_>],
     archived_tool_call_ids: BTreeSet<ToolCallId>,
     fingerprint: CompactionWindowFingerprint,
 ) -> Result<CompactionWindowPlan, RuntimeError> {

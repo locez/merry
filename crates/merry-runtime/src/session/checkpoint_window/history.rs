@@ -31,10 +31,10 @@ pub(super) enum HiddenToolExchangeVisibility {
     Exclude,
 }
 
-pub(super) struct ModelTurnHistory {
+pub(super) struct ModelTurnHistory<'a> {
     pub(super) id: ModelTurnId,
     pub(super) status: ModelTurnStatus,
-    pub(super) items: Vec<CompactionHistoryRecord>,
+    pub(super) items: Vec<CompactionHistoryRecord<'a>>,
 }
 
 /// JSON keys, the turn id, the status tag, and separators one payload turn adds.
@@ -42,7 +42,7 @@ const COMPACTION_PAYLOAD_TURN_ENVELOPE_BYTES: u64 = 64;
 
 /// Estimated tokens the covered turns contribute to the compaction payload.
 pub(super) fn covered_payload_tokens(
-    turns: &[ModelTurnHistory],
+    turns: &[ModelTurnHistory<'_>],
     text_only: bool,
 ) -> Result<u64, RuntimeError> {
     turns.iter().try_fold(0_u64, |total, turn| {
@@ -53,12 +53,12 @@ pub(super) fn covered_payload_tokens(
 }
 
 #[derive(Clone)]
-pub(super) struct CompactionHistoryRecord {
-    pub(super) item: CompactionHistoryItem,
+pub(super) struct CompactionHistoryRecord<'a> {
+    pub(super) item: CompactionHistoryItem<'a>,
     pub(super) reference: CheckpointRef,
 }
 
-impl ModelTurnHistory {
+impl ModelTurnHistory<'_> {
     pub(super) fn compaction_payload_token_estimate(
         &self,
         text_only: bool,
@@ -121,7 +121,7 @@ impl SessionState {
         &self,
         hidden_tool_exchanges: HiddenToolExchangeVisibility,
         apply_prompt_projection: bool,
-    ) -> Result<Vec<ModelTurnHistory>, RuntimeError> {
+    ) -> Result<Vec<ModelTurnHistory<'_>>, RuntimeError> {
         self.model_turn_histories_for(
             &self.transcript,
             self.prompt_history_projection,
@@ -130,13 +130,13 @@ impl SessionState {
         )
     }
 
-    pub(super) fn model_turn_histories_for(
-        &self,
-        transcript: &Transcript,
+    pub(super) fn model_turn_histories_for<'a>(
+        &'a self,
+        transcript: &'a Transcript,
         prompt_history_projection: PromptHistoryProjection,
         hidden_tool_exchanges: HiddenToolExchangeVisibility,
         apply_prompt_projection: bool,
-    ) -> Result<Vec<ModelTurnHistory>, RuntimeError> {
+    ) -> Result<Vec<ModelTurnHistory<'a>>, RuntimeError> {
         let compacted_through = apply_prompt_projection
             .then(|| prompt_history_projection.compacted_through())
             .flatten();
@@ -155,14 +155,14 @@ impl SessionState {
             .collect()
     }
 
-    pub(super) fn history_items_for_model_turn(
-        &self,
-        turn: &ModelTurn<'_>,
+    pub(super) fn history_items_for_model_turn<'a>(
+        &'a self,
+        turn: &ModelTurn<'a>,
         hidden_tool_exchanges: HiddenToolExchangeVisibility,
-    ) -> Result<Vec<CompactionHistoryRecord>, RuntimeError> {
+    ) -> Result<Vec<CompactionHistoryRecord<'a>>, RuntimeError> {
         let mut items = Vec::with_capacity(turn.items().len());
         let mut results = BTreeMap::new();
-        for item in turn.items() {
+        for &item in turn.items() {
             if let TranscriptItem::ToolResult {
                 id,
                 call_id,
@@ -190,12 +190,12 @@ impl SessionState {
         }
         let mut matched_results = BTreeSet::new();
 
-        for item in turn.items() {
+        for &item in turn.items() {
             match item {
                 TranscriptItem::UserMessage {
                     id, artifact_id, ..
                 } => {
-                    let content = self.read_artifact_content(artifact_id)?;
+                    let content = self.artifacts.read_content(artifact_id)?;
                     let text =
                         content
                             .as_text()
@@ -204,7 +204,7 @@ impl SessionState {
                                 reason: "user transcript artifact is not textual",
                             })?;
                     items.push(CompactionHistoryRecord {
-                        item: CompactionHistoryItem::user(id.as_u64(), text.to_owned()),
+                        item: CompactionHistoryItem::user(id.as_u64(), text),
                         reference: history_checkpoint_ref(
                             *id,
                             CheckpointSourceKind::UserMessage,
@@ -215,7 +215,7 @@ impl SessionState {
                 TranscriptItem::AssistantText {
                     id, artifact_id, ..
                 } => {
-                    let content = self.read_artifact_content(artifact_id)?;
+                    let content = self.artifacts.read_content(artifact_id)?;
                     let text =
                         content
                             .as_text()
@@ -224,7 +224,7 @@ impl SessionState {
                                 reason: "assistant transcript artifact is not textual",
                             })?;
                     items.push(CompactionHistoryRecord {
-                        item: CompactionHistoryItem::assistant(id.as_u64(), text.to_owned()),
+                        item: CompactionHistoryItem::assistant(id.as_u64(), text),
                         reference: history_checkpoint_ref(
                             *id,
                             CheckpointSourceKind::AssistantMessage,
@@ -265,15 +265,15 @@ impl SessionState {
                             return Err(CompactionError::StaleWindow.into());
                         }
                     }
-                    let content = self.read_artifact_content(artifact_id)?;
+                    let content = self.artifacts.read_content(artifact_id)?;
                     let model_content = model_artifact_id
-                        .map(|id| self.read_artifact_content(id))
+                        .map(|id| self.artifacts.read_content(id))
                         .transpose()?;
                     items.push(CompactionHistoryRecord {
                         item: CompactionHistoryItem::tool_exchange(
                             id.as_u64(),
-                            call.clone(),
-                            result.clone(),
+                            call,
+                            result,
                             content,
                             *call_projection,
                             result_projection,
@@ -301,7 +301,7 @@ impl SessionState {
         &self,
         policy: CitationCompactionPolicy,
         resolved_budget: ResolvedCitationCompactionBudget,
-        covered: &[&ModelTurnHistory],
+        covered: &[&ModelTurnHistory<'_>],
         plan: CompactionWindowPlan,
         archived_refs: Vec<CheckpointRef>,
         retained_tool_exchanges: Option<usize>,

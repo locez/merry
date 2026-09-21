@@ -2,6 +2,7 @@ use crate::process::{ProcessActionIntent, ProcessEnvPolicy};
 
 mod classification;
 mod contracts;
+mod output;
 
 fn intent() -> ProcessActionIntent {
     ProcessActionIntent::new(

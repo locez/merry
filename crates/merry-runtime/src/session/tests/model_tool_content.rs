@@ -225,6 +225,31 @@ async fn compaction_uses_model_body_but_checkpoint_reads_full_artifact() {
 }
 
 #[test]
+fn permission_review_keeps_full_evidence_when_history_uses_a_model_body() {
+    let full = "full execution evidence ".repeat(500);
+    let (compact, _) = completed_result(&full, Some(MODEL_BODY));
+    let (legacy, _) = completed_result(&full, None);
+    let review = compact
+        .permission_review_context_snapshot()
+        .expect("review");
+    assert_eq!(review.len(), 1);
+    assert_eq!(
+        review,
+        legacy
+            .permission_review_context_snapshot()
+            .expect("full review")
+    );
+    assert_eq!(
+        result_body(
+            &compact
+                .provider_transcript_snapshot()
+                .expect("model history")
+        ),
+        &ArtifactContent::text(MODEL_BODY)
+    );
+}
+
+#[test]
 fn history_budget_and_compactor_budget_do_not_charge_for_display_only_bytes() {
     let build = |full: &str| {
         let (mut session, _) = completed_result(full, Some(MODEL_BODY));

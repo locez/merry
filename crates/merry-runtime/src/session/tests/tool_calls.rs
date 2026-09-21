@@ -1,6 +1,84 @@
 use super::*;
 
 #[test]
+fn invalid_result_diagnostics_are_rejected_before_publishing_state() {
+    use merry_core::{CoreError, ToolCallResultStatus};
+
+    for proposed in [false, true] {
+        for (status, diagnostic) in [
+            (ToolCallResultStatus::Failed, None),
+            (
+                ToolCallResultStatus::Succeeded,
+                Some(
+                    ErrorInfo::new("unexpected", "success cannot have a diagnostic")
+                        .expect("diagnostic"),
+                ),
+            ),
+        ] {
+            let mut session = SessionState::new(session_id());
+            let call = pending_tool_call("invalid-result");
+            session
+                .record_test_tool_call_pending(call.clone())
+                .expect("pending call");
+            let history = session.full_transcript_snapshot().expect("history");
+            let ledger = session.ledger_projection();
+            let sequence = session.next_sequence();
+            let content = ArtifactContent::text("must not be published");
+            let error = if proposed {
+                let evidence = WorkspacePatchProposal::new(
+                    "note.txt",
+                    3,
+                    5,
+                    16,
+                    18,
+                    "fnv1a64:0000000000000100",
+                    "fnv1a64:0000000000000101",
+                )
+                .expect("proposal evidence");
+                let proposal = ActionProposal::new(
+                    &call,
+                    crate::ToolActionKind::WorkspaceWrite,
+                    "workspace patch",
+                    "note.txt",
+                    "Replace one preimage in note.txt.",
+                    ActionProposalEvidence::WorkspacePatch(evidence),
+                )
+                .expect("proposal");
+                session.submit_proposed_tool_execution_outcome(
+                    proposal,
+                    status,
+                    content,
+                    diagnostic,
+                    None,
+                    ActionAuditPolicy::new(
+                        ActionRiskTier::EditLow,
+                        ActionPolicyDisposition::Allow,
+                        "test allow",
+                    ),
+                )
+            } else {
+                session.submit_tool_execution_outcome(call.id(), status, content, diagnostic, None)
+            }
+            .expect_err("inconsistent result must fail");
+            assert!(matches!(
+                error,
+                RuntimeError::Core {
+                    source: CoreError::InvalidToolCallResult { .. }
+                }
+            ));
+            assert_eq!(session.next_sequence(), sequence);
+            assert_eq!(
+                session.full_transcript_snapshot().expect("history"),
+                history
+            );
+            assert_eq!(session.ledger_projection(), ledger);
+            assert_eq!(session.pending_tool_calls(), vec![call]);
+            assert!(session.action_audit_snapshot().records().is_empty());
+        }
+    }
+}
+
+#[test]
 fn tool_result_inherits_originating_model_turn() {
     let mut session = SessionState::new(session_id());
     let turn_id = session.begin_model_turn().expect("model turn should begin");

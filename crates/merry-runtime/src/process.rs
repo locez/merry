@@ -6,6 +6,7 @@
 
 mod classification;
 mod contracts;
+mod output;
 mod session_permissions;
 mod validation;
 
@@ -22,6 +23,7 @@ pub use contracts::{
     ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
     StaticPermissionedProcessRunnerFactory,
 };
+pub use output::{ProcessOutputEnvelope, ProcessOutputStream};
 pub use session_permissions::{
     PreparedProcessPermission, ProcessPathGrant, ProcessPathGrantConstraint,
     ProcessSessionPermissionSnapshot, ProcessSessionPermissionView, ProcessSessionPermissions,

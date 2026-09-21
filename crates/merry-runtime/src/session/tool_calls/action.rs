@@ -70,24 +70,9 @@ impl SessionState {
                 call_id: call_id.clone(),
             })?;
 
-        let artifact_kind = self.tool_result_artifact_kind(&content.artifact)?;
+        let artifact_kind = self.tool_result_artifact_kind(content.artifact())?;
         let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
-        let result = match status {
-            ToolCallResultStatus::Succeeded => ToolCallResult::new(
-                call_id,
-                ToolCallResultStatus::Succeeded,
-                artifact,
-                diagnostic,
-            )?,
-            ToolCallResultStatus::Failed => {
-                let diagnostic = diagnostic.ok_or(RuntimeError::Core {
-                    source: merry_core::CoreError::InvalidToolCallResult {
-                        reason: "failed tool execution outcome must include a diagnostic",
-                    },
-                })?;
-                ToolCallResult::failed(call_id, artifact, diagnostic)
-            }
-        };
+        let result = ToolCallResult::new(call_id, status, artifact, diagnostic)?;
         let observation =
             observation.map(|observation| observation.into_update_for_artifact(result.artifact()));
 
@@ -173,7 +158,7 @@ impl SessionState {
             })?;
 
         let content = content.into();
-        let artifact_kind = self.tool_result_artifact_kind(&content.artifact)?;
+        let artifact_kind = self.tool_result_artifact_kind(content.artifact())?;
         let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
         let result = ToolCallResult::failed(pending.id().clone(), artifact, diagnostic);
 

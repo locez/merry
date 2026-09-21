@@ -287,12 +287,12 @@ async fn process_action_artifact_guides_model_when_output_is_truncated() {
         payload["guidance"]["message"]
             .as_str()
             .expect("guidance message should be text")
-            .contains("rerun with a narrower command")
+            .contains("Do not repeat a side-effecting command")
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn failed_process_action_artifact_explains_capability_recovery() {
+async fn failed_process_action_preserves_the_error_without_guessing_required_capabilities() {
     let executor = ProcessProposingToolExecutor::new();
     let runner = FakeProcessRunner::failing();
     let tool = RegisteredTool::new(
@@ -322,15 +322,9 @@ async fn failed_process_action_artifact_explains_capability_recovery() {
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Failed);
 
     let payload = resolved_artifact_json(&runtime, result, "failed process result").await;
-    assert_eq!(payload["guidance"]["kind"], "process_action_recovery");
-    let message = payload["guidance"]["message"]
-        .as_str()
-        .expect("recovery guidance should be text");
-    assert!(message.contains("network"));
-    assert!(message.contains("permissions"));
-    assert!(message.contains("host integration"));
-    assert!(message.contains("exact filesystem path"));
-    assert!(!message.contains("stderr"));
+    assert_eq!(payload["status"], json!({ "kind": "exited", "code": 1 }));
+    assert_eq!(payload["stderr"]["text"], "permission denied\n");
+    assert!(payload.get("guidance").is_none());
 }
 
 #[test]

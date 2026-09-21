@@ -506,6 +506,13 @@ Low-level executors can keep full display/evidence content in
 results and completeness warnings. Runtime persists it for replay and compaction;
 artifact reads and checkpoint references still return the original full result.
 Without a separate model body, tools keep their existing output behavior.
+Process model bodies preserve captured UTF-8 stdout and stderr unchanged, adding
+only status, stream labels, and applicable completeness or recovery warnings.
+Non-UTF-8 streams use the same text body, explicitly marking invalid UTF-8 as
+replacement characters (`�`) and advising byte-level inspection with a hex dump
+or format-aware tool. Full artifacts retain the exact captured bytes; model
+bodies do not repeat the JSON envelope or base64 encoding. Output from binary
+inspection tools is returned unchanged rather than summarized by runtime.
 
 Merry derives the input schema, decodes arguments, and serializes the handler's
 return value. `Infallible` means this example cannot return a domain error; use

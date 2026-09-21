@@ -75,9 +75,4 @@ impl ProposedToolExecutionOutcome {
         self.observation = Some(observation);
         self
     }
-
-    pub(crate) fn with_model_text(mut self, content: impl Into<String>) -> Self {
-        self.content.model = Some(crate::ArtifactContent::text(content));
-        self
-    }
 }

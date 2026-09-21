@@ -132,19 +132,7 @@ impl SessionState {
             super::artifacts::tool_result_id(next_sequence),
             artifact_kind,
         );
-        let result = match status {
-            ToolCallResultStatus::Succeeded => {
-                ToolCallResult::new(call_id.clone(), status, artifact.clone(), diagnostic)?
-            }
-            ToolCallResultStatus::Failed => {
-                let diagnostic = diagnostic.ok_or(RuntimeError::Core {
-                    source: merry_core::CoreError::InvalidToolCallResult {
-                        reason: "failed plan tool outcome must include a diagnostic",
-                    },
-                })?;
-                ToolCallResult::failed(call_id.clone(), artifact.clone(), diagnostic)
-            }
-        };
+        let result = ToolCallResult::new(call_id.clone(), status, artifact.clone(), diagnostic)?;
 
         let mut artifacts = self.artifacts.clone();
         artifacts.ensure_recordable(&artifact, &content)?;

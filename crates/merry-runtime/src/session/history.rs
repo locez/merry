@@ -6,7 +6,7 @@ use crate::{
     token_estimate::{BYTES_PER_TOKEN, estimate_text_tokens},
 };
 use merry_core::{PendingToolCall, ToolCallResult};
-use std::collections::BTreeSet;
+use std::{borrow::Cow, collections::BTreeSet};
 
 use super::transcript::{
     ToolCallPromptProjection, ToolResultPromptProjection, TranscriptItemId,
@@ -26,43 +26,43 @@ const COMPACTION_PAYLOAD_ITEM_ENVELOPE_BYTES: u64 = 64;
 const COMPACTION_PAYLOAD_TOOL_ITEM_ENVELOPE_BYTES: u64 = 192;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CompactionHistoryItem {
+pub(super) struct CompactionHistoryItem<'a> {
     pub(super) history_id: u64,
-    pub(super) kind: CompactionHistoryItemKind,
+    pub(super) kind: CompactionHistoryItemKind<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum CompactionHistoryItemKind {
+pub(super) enum CompactionHistoryItemKind<'a> {
     User {
-        text: String,
+        text: &'a str,
     },
     Assistant {
-        text: String,
+        text: &'a str,
     },
     ToolExchange {
-        call: Box<PendingToolCall>,
-        result: Box<ToolCallResult>,
-        content: Box<ArtifactContent>,
-        model_content: Option<Box<ArtifactContent>>,
+        call: &'a PendingToolCall,
+        result: &'a ToolCallResult,
+        content: &'a ArtifactContent,
+        model_content: &'a ArtifactContent,
         call_prompt_projection: ToolCallPromptProjection,
         prompt_projection: ToolResultPromptProjection,
     },
 }
 
-impl CompactionHistoryItem {
+impl<'a> CompactionHistoryItem<'a> {
     /// Returns whether this item is one tool exchange, call and result together.
     pub(super) const fn is_tool_exchange(&self) -> bool {
         matches!(self.kind, CompactionHistoryItemKind::ToolExchange { .. })
     }
 
-    pub(super) fn user(history_id: u64, text: String) -> Self {
+    pub(super) fn user(history_id: u64, text: &'a str) -> Self {
         Self {
             history_id,
             kind: CompactionHistoryItemKind::User { text },
         }
     }
 
-    pub(super) fn assistant(history_id: u64, text: String) -> Self {
+    pub(super) fn assistant(history_id: u64, text: &'a str) -> Self {
         Self {
             history_id,
             kind: CompactionHistoryItemKind::Assistant { text },
@@ -71,20 +71,20 @@ impl CompactionHistoryItem {
 
     pub(super) fn tool_exchange(
         history_id: u64,
-        call: PendingToolCall,
-        result: ToolCallResult,
-        content: ArtifactContent,
+        call: &'a PendingToolCall,
+        result: &'a ToolCallResult,
+        content: &'a ArtifactContent,
         call_prompt_projection: ToolCallPromptProjection,
         prompt_projection: ToolResultPromptProjection,
-        model_content: Option<ArtifactContent>,
+        model_content: Option<&'a ArtifactContent>,
     ) -> Self {
         Self {
             history_id,
             kind: CompactionHistoryItemKind::ToolExchange {
-                call: Box::new(call),
-                result: Box::new(result),
-                content: Box::new(content),
-                model_content: model_content.map(Box::new),
+                call,
+                result,
+                content,
+                model_content: model_content.unwrap_or(content),
                 call_prompt_projection,
                 prompt_projection,
             },
@@ -96,18 +96,19 @@ impl CompactionHistoryItem {
         ref_id: &str,
     ) -> Result<CitationCompactionTurnItem, RuntimeError> {
         let item = match &self.kind {
-            CompactionHistoryItemKind::User { text } => {
-                CitationCompactionTurnItem::user(self.history_id, ref_id.to_owned(), text.clone())
-            }
+            CompactionHistoryItemKind::User { text } => CitationCompactionTurnItem::user(
+                self.history_id,
+                ref_id.to_owned(),
+                (*text).to_owned(),
+            ),
             CompactionHistoryItemKind::Assistant { text } => CitationCompactionTurnItem::assistant(
                 self.history_id,
                 ref_id.to_owned(),
-                text.clone(),
+                (*text).to_owned(),
             ),
             CompactionHistoryItemKind::ToolExchange {
                 call,
                 result,
-                content,
                 model_content,
                 prompt_projection,
                 ..
@@ -118,7 +119,7 @@ impl CompactionHistoryItem {
                 let (content_kind, content) = compaction_tool_result_text(
                     self.history_id,
                     result,
-                    model_content.as_deref().unwrap_or(content),
+                    model_content,
                     use_notice,
                 )?;
                 CitationCompactionTurnItem::tool_exchange(
@@ -131,7 +132,7 @@ impl CompactionHistoryItem {
                         result.status(),
                         result.artifact().id(),
                         content_kind,
-                        content,
+                        content.into_owned(),
                     ),
                 )
             }
@@ -150,10 +151,10 @@ impl CompactionHistoryItem {
             CompactionHistoryItemKind::ToolExchange {
                 call,
                 result,
-                content,
                 model_content,
                 call_prompt_projection,
                 prompt_projection,
+                ..
             } => {
                 match (*call_prompt_projection, *prompt_projection) {
                     (ToolCallPromptProjection::Hidden, ToolResultPromptProjection::Hidden) => {
@@ -175,20 +176,13 @@ impl CompactionHistoryItem {
                             message: error.to_string(),
                         }
                     })?;
-                let result_text = if *prompt_projection
-                    == ToolResultPromptProjection::ArtifactNotice
-                    || archived_tool_call_ids.contains(call.id())
-                {
-                    archived_tool_result_notice_json(
-                        TranscriptItemId::new(self.history_id),
-                        result.status(),
-                        result.artifact().id(),
-                    )
-                } else {
-                    exact_artifact_text(model_content.as_deref().unwrap_or(content))?
-                        .1
-                        .to_owned()
-                };
+                let (_, result_text) = compaction_tool_result_text(
+                    self.history_id,
+                    result,
+                    model_content,
+                    *prompt_projection == ToolResultPromptProjection::ArtifactNotice
+                        || archived_tool_call_ids.contains(call.id()),
+                )?;
                 Ok(estimate_text_tokens(call.name().as_str())
                     + estimate_text_tokens(&arguments)
                     + estimate_text_tokens(&result_text))
@@ -220,7 +214,6 @@ impl CompactionHistoryItem {
             CompactionHistoryItemKind::ToolExchange {
                 call,
                 result,
-                content,
                 model_content,
                 prompt_projection,
                 ..
@@ -228,7 +221,7 @@ impl CompactionHistoryItem {
                 let result_text = compaction_tool_result_text(
                     self.history_id,
                     result,
-                    model_content.as_deref().unwrap_or(content),
+                    model_content,
                     *prompt_projection == ToolResultPromptProjection::ArtifactNotice,
                 )?
                 .1;
@@ -276,7 +269,7 @@ impl CompactionHistoryItem {
 }
 
 pub(super) fn permission_review_context_entry(
-    item: &CompactionHistoryItem,
+    item: &CompactionHistoryItem<'_>,
 ) -> PermissionReviewContextEntry {
     match &item.kind {
         CompactionHistoryItemKind::User { text } => PermissionReviewContextEntry::new(
@@ -324,24 +317,24 @@ pub(super) fn permission_review_context_entry(
 /// They disagreed once, and the runtime then believed a covered window fit while
 /// the payload it built did not, which ended the step with "no compaction window
 /// fits the compaction request budget".
-fn compaction_tool_result_text(
+fn compaction_tool_result_text<'a>(
     history_id: u64,
     result: &ToolCallResult,
-    content: &ArtifactContent,
+    content: &'a ArtifactContent,
     use_notice: bool,
-) -> Result<(&'static str, String), RuntimeError> {
+) -> Result<(&'static str, Cow<'a, str>), RuntimeError> {
     if use_notice {
         Ok((
             "json",
-            archived_tool_result_notice_json(
+            Cow::Owned(archived_tool_result_notice_json(
                 TranscriptItemId::new(history_id),
                 result.status(),
                 result.artifact().id(),
-            ),
+            )),
         ))
     } else {
         let (content_kind, content) = exact_artifact_text(content)?;
-        Ok((content_kind, content.to_owned()))
+        Ok((content_kind, Cow::Borrowed(content)))
     }
 }
 

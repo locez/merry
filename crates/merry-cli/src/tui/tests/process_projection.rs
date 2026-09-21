@@ -1,5 +1,6 @@
 use crate::tui::{
     keymap::Keymap,
+    process_output::{CapturedOutput, process_output_preview},
     projector::TuiProjector,
     render::render_to_text,
     state::{CommandView, TimelineItem, TuiState},
@@ -7,7 +8,28 @@ use crate::tui::{
     theme::TuiTheme,
 };
 use merry_core::{ErrorInfo, RuntimeEvent, ToolCallId, ToolCallResult, ToolOutput};
+use merry_runtime::ArtifactContent;
 use serde_json::json;
+
+#[test]
+fn malformed_process_streams_remain_inspectable_as_raw_output() {
+    for stream in [
+        json!({}),
+        json!({"content": "must not disappear"}),
+        json!({"text": 7}),
+    ] {
+        for name in ["stdout", "stderr"] {
+            let mut value = json!({"kind": "process_action"});
+            value[name] = stream.clone();
+            let output = value.to_string();
+            assert!(process_output_preview(&output).is_none());
+            let captured = CapturedOutput::from_artifact(ArtifactContent::json(&output))
+                .expect("unrecognized text stays inspectable");
+            assert_eq!(captured, CapturedOutput::Text(output.clone()));
+            assert_eq!(captured.copy_text(), output);
+        }
+    }
+}
 
 #[test]
 fn projector_renders_process_calls_as_ran_with_preview() {

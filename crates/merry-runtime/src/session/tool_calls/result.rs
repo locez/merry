@@ -159,24 +159,9 @@ impl SessionState {
     ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         debug_assert!(execution_evidence.is_none());
         let content = content.into();
-        let artifact_kind = self.tool_result_artifact_kind(&content.artifact)?;
+        let artifact_kind = self.tool_result_artifact_kind(content.artifact())?;
         let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
-        let result = match status {
-            ToolCallResultStatus::Succeeded => ToolCallResult::new(
-                call_id.clone(),
-                ToolCallResultStatus::Succeeded,
-                artifact,
-                diagnostic,
-            )?,
-            ToolCallResultStatus::Failed => {
-                let diagnostic = diagnostic.ok_or(RuntimeError::Core {
-                    source: merry_core::CoreError::InvalidToolCallResult {
-                        reason: "failed tool execution outcome must include a diagnostic",
-                    },
-                })?;
-                ToolCallResult::failed(call_id.clone(), artifact, diagnostic)
-            }
-        };
+        let result = ToolCallResult::new(call_id.clone(), status, artifact, diagnostic)?;
 
         self.submit_tool_result(result, content)
     }
@@ -262,22 +247,12 @@ impl SessionState {
 
             let artifact_kind = self.tool_result_artifact_kind(outcome.content())?;
             let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
-            let result = match outcome.status() {
-                ToolCallResultStatus::Succeeded => ToolCallResult::new(
-                    call_id.clone(),
-                    ToolCallResultStatus::Succeeded,
-                    artifact,
-                    outcome.diagnostic().cloned(),
-                )?,
-                ToolCallResultStatus::Failed => {
-                    let diagnostic = outcome.diagnostic().cloned().ok_or(RuntimeError::Core {
-                        source: merry_core::CoreError::InvalidToolCallResult {
-                            reason: "failed tool execution outcome must include a diagnostic",
-                        },
-                    })?;
-                    ToolCallResult::failed(call_id.clone(), artifact, diagnostic)
-                }
-            };
+            let result = ToolCallResult::new(
+                call_id.clone(),
+                outcome.status(),
+                artifact,
+                outcome.diagnostic().cloned(),
+            )?;
             self.validate_tool_result_content(&result, outcome.content())?;
             self.artifacts
                 .ensure_recordable(result.artifact(), outcome.content())?;

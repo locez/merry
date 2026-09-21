@@ -8,10 +8,8 @@ use crate::{
     session::ProposedToolExecutionOutcome, session::ToolResultLedgerObservation,
     tool::ActionProposalEvidence, tool::ToolExecutionContext,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use merry_core::{
-    ArtifactKind, ArtifactRef, PendingToolCall, RuntimeJournalEvent, SessionId,
-    ToolCallResultStatus,
+    ArtifactRef, PendingToolCall, RuntimeJournalEvent, SessionId, ToolCallResultStatus,
 };
 use std::sync::Arc;
 
@@ -160,7 +158,7 @@ pub(super) async fn execute_admitted_process_action(
     let shell_input_artifact_ref = shell_input_artifact
         .as_ref()
         .map(|(artifact, _events)| artifact);
-    let content = process_output_artifact_content(
+    let content = output::result_content(
         &intent,
         &output,
         permission_profile_id,
@@ -191,7 +189,7 @@ pub(super) async fn execute_admitted_process_action(
         shell_input_artifact_ref,
     );
 
-    let mut outcome = ProposedToolExecutionOutcome::new(
+    let outcome = ProposedToolExecutionOutcome::new(
         proposal,
         status,
         content,
@@ -200,9 +198,6 @@ pub(super) async fn execute_admitted_process_action(
         ActionAuditPolicy::from_decision(&policy_decision),
     )
     .with_observation(observation);
-    if let Some(model_content) = output::model_text(&output) {
-        outcome = outcome.with_model_text(model_content);
-    }
     let result_events = {
         let mut session = inner.session.lock().await;
         session.submit_proposed_tool_execution_outcome_record(outcome)?
@@ -327,104 +322,6 @@ fn shell_input_artifact_content(
     )
 }
 
-fn process_output_artifact_content(
-    intent: &ProcessActionIntent,
-    output: &ProcessRunnerOutput,
-    permission_profile_id: ProcessPermissionProfileId,
-    input_artifact: Option<&ArtifactRef>,
-    permission_review: Option<&PermissionAdmissionReview>,
-) -> ArtifactContent {
-    let shell_input = shell_process_input(intent);
-    let intent_payload = if let Some(shell_input) = shell_input {
-        serde_json::json!({
-            "summary": intent.summary(),
-            "command": shell_input.script(),
-            "cwd": intent.cwd(),
-        })
-    } else {
-        serde_json::json!({
-            "summary": intent.summary(),
-            "argv": intent.argv(),
-            "cwd": intent.cwd(),
-        })
-    };
-
-    let mut stdout_payload = serde_json::json!({
-        "text": output.stdout_text(),
-        "bytes": output.stdout_bytes(),
-        "truncated": output.stdout_truncated(),
-        "utf8": output.stdout_is_utf8(),
-    });
-    if !output.stdout_is_utf8() {
-        stdout_payload["bytes_base64"] = serde_json::json!(BASE64.encode(output.stdout_data()));
-    }
-
-    let mut stderr_payload = serde_json::json!({
-        "text": output.stderr_text(),
-        "bytes": output.stderr_bytes(),
-        "truncated": output.stderr_truncated(),
-        "utf8": output.stderr_is_utf8(),
-    });
-    if !output.stderr_is_utf8() {
-        stderr_payload["bytes_base64"] = serde_json::json!(BASE64.encode(output.stderr_data()));
-    }
-
-    let mut payload = serde_json::json!({
-        "ok": output.ok(),
-        "kind": "process_action",
-        "permission_profile_id": permission_profile_id.as_str(),
-        "status": process_status_json(output.status()),
-        "intent": intent_payload,
-        "stdout": stdout_payload,
-        "stderr": stderr_payload,
-    });
-
-    if let Some(review) = permission_review {
-        payload["permission_review"] = serde_json::json!({
-            "source": review.source().as_str(),
-            "risk": review.risk().as_str(),
-            "user_authorization": review.user_authorization().as_str(),
-            "rationale": review.rationale(),
-        });
-    }
-
-    if !output.ok() {
-        payload["guidance"] = serde_json::json!({
-            "kind": "process_action_recovery",
-            "message": "The process action ran inside the sandbox and failed. Treat the sandbox as the first suspect: a withheld network, filesystem, or host integration capability often surfaces as a credentials, authentication, or connectivity error, so check whether the command needed access it did not request. Include every minimum required capability under permissions in the next run_process call so runtime can review before execution. If the need was discovered only from this failure, call request_permissions for the exact same action before retrying it. An unmodeled Linux Unix socket may be requested as its exact filesystem path.",
-        });
-    }
-
-    if output.stdout_truncated() || output.stderr_truncated() {
-        let truncated_guidance = serde_json::json!({
-            "kind": "process_output_truncated",
-            "message": "The captured process output was truncated. Do not assume omitted output is absent; rerun with a narrower command, filter, range, or targeted file inspection before drawing conclusions from the output.",
-            "stdout_truncated": output.stdout_truncated(),
-            "stderr_truncated": output.stderr_truncated(),
-        });
-        if output.ok() {
-            payload["guidance"] = truncated_guidance;
-        } else {
-            payload["output_guidance"] = truncated_guidance;
-        }
-    }
-
-    if let Some(input_artifact) = input_artifact {
-        payload["input_artifact"] = artifact_ref_json(input_artifact);
-    } else if let Some(shell_input) = shell_input {
-        payload["input_evidence"] = serde_json::json!({
-            "kind": "shell_command_script",
-            "shell": shell_input.shell(),
-            "flag": shell_input.flag(),
-            "script": shell_input.script(),
-            "script_bytes": shell_input.script_bytes(),
-            "script_fingerprint": shell_input.script_fingerprint(),
-        });
-    }
-
-    ArtifactContent::json(payload.to_string())
-}
-
 fn process_result_ledger_observation(
     intent: &ProcessActionIntent,
     output: &ProcessRunnerOutput,
@@ -472,23 +369,6 @@ fn process_result_ledger_observation(
         .expect("process result ledger summary is built from a non-empty static prefix")
 }
 
-fn artifact_ref_json(artifact: &ArtifactRef) -> serde_json::Value {
-    serde_json::json!({
-        "id": artifact.id().as_str(),
-        "kind": artifact_kind_label(artifact.kind()),
-    })
-}
-
-fn artifact_kind_label(kind: &ArtifactKind) -> &'static str {
-    match kind {
-        ArtifactKind::Text => "text",
-        ArtifactKind::Json => "json",
-        ArtifactKind::Binary => "binary",
-        ArtifactKind::Image => "image",
-        ArtifactKind::Other => "other",
-    }
-}
-
 fn merge_process_input_and_result_events(
     input_events: Option<Vec<RuntimeJournalEvent>>,
     result_events: Vec<RuntimeJournalEvent>,
@@ -505,17 +385,6 @@ fn process_result_status_label(status: ToolCallResultStatus) -> &'static str {
     match status {
         ToolCallResultStatus::Succeeded => "succeeded",
         ToolCallResultStatus::Failed => "failed",
-    }
-}
-
-fn process_status_json(status: ProcessExitStatus) -> serde_json::Value {
-    match status {
-        ProcessExitStatus::Exited(code) => {
-            serde_json::json!({ "kind": "exited", "code": code })
-        }
-        ProcessExitStatus::Cancelled => serde_json::json!({ "kind": "cancelled" }),
-        ProcessExitStatus::FailedToStart => serde_json::json!({ "kind": "failed_to_start" }),
-        ProcessExitStatus::DomainFailed => serde_json::json!({ "kind": "domain_failed" }),
     }
 }
 

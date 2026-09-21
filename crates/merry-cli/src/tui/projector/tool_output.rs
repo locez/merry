@@ -14,6 +14,7 @@ use crate::{
     },
 };
 use merry_core::ToolOutput;
+use merry_runtime::ProcessOutputEnvelope;
 use merry_tools::{
     APPLY_PATCH_TOOL, WorkspacePatchOperationKind, WorkspacePatchSuccess,
     WorkspacePatchSuccessLineKind,
@@ -106,20 +107,14 @@ pub(super) fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
 }
 
 pub(super) fn permission_output_bodies(output: &str) -> Option<String> {
-    let value = serde_json::from_str::<Value>(output).ok()?;
-    if value.get("ok").and_then(Value::as_bool) != Some(true)
-        || value.get("kind").and_then(Value::as_str) != Some("process_action")
-    {
+    let output = serde_json::from_str::<ProcessOutputEnvelope<'_>>(output).ok()?;
+    if output.ok() != Some(true) {
         return None;
     }
-    let rationale = value
-        .pointer("/permission_review/rationale")
-        .and_then(Value::as_str)
+    let rationale = output
+        .permission_rationale()
         .unwrap_or("permission request was admitted");
-    let profile = value
-        .get("permission_profile_id")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
+    let profile = output.permission_profile_id().unwrap_or("unknown");
     let body = format!("allowed: {rationale}\nprofile: {profile}");
     Some(body)
 }

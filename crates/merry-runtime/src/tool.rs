@@ -12,9 +12,10 @@
 
 pub use executor::{
     ToolActionPreflight, ToolActionProposalFuture, ToolActionProposalResult, ToolExecutionContext,
-    ToolExecutionError, ToolExecutionOutcome, ToolExecutionResult, ToolExecutor,
-    ToolExecutorFuture,
+    ToolExecutionError, ToolExecutionResult, ToolExecutor, ToolExecutorFuture,
 };
+pub use outcome::ToolExecutionOutcome;
+pub(crate) use outcome::ToolResultContent;
 pub use patch_evidence::{
     WorkspacePatchChangeEvidence, WorkspacePatchExecutionEvidence, WorkspacePatchProposal,
 };
@@ -26,7 +27,7 @@ pub use registry::{RegisteredTool, ToolConcurrency, ToolRunner};
 pub(crate) use registry::{ToolRegistry, ToolRegistryError};
 
 mod executor;
-pub(crate) use executor::ToolResultContent;
+mod outcome;
 mod patch_evidence;
 mod proposal;
 mod registry;
