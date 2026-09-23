@@ -277,8 +277,13 @@ pub(crate) async fn run_controller(
                     };
                     match message {
                         InteractiveRunMessage::Event(event) => {
+                            let stream_progress = matches!(event,
+                                merry_core::RuntimeEvent::AssistantMessageDelta { .. }
+                                | merry_core::RuntimeEvent::ModelOutputRateUpdated { .. });
                             projector.apply(event, &mut state);
-                            render_once(&mut terminal, &mut state)?;
+                            if !stream_progress || !state.is_active_run() {
+                                render_once(&mut terminal, &mut state)?;
+                            }
                         }
                         InteractiveRunMessage::ToolInvocations { batch } => {
                             return Err(unexpected(format!(

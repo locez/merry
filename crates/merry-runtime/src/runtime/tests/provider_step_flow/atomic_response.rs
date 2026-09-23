@@ -50,6 +50,10 @@ async fn cancellation_after_atomic_tool_response_preserves_awaiting_turn() {
         stream.next().await.expect("step start event").payload,
         RuntimeJournalPayload::StepStarted
     ));
+    assert!(matches!(
+        stream.next().await.expect("rate reset event").payload,
+        RuntimeJournalPayload::ModelOutputRateUpdated { rate: None }
+    ));
     let commentary = stream.next().await.expect("commentary event");
     assert!(matches!(
         commentary.payload,

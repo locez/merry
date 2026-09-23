@@ -12,7 +12,7 @@ use merry_llm::{
 };
 use serde_json::Value;
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::Instrument;
 
 mod request;
@@ -139,7 +139,10 @@ impl ModelProvider for OpenAiProvider {
                 );
                 let event_stream: ModelEventStream = Box::pin(event_stream);
                 tracing::debug!("openai event stream created");
-                Ok(event_stream)
+                Ok(merry_llm::receive_model_stream(
+                    event_stream,
+                    context.cancellation_token(),
+                ))
             }
             .instrument(stream_span),
         )
@@ -210,11 +213,12 @@ impl OpenAiEventStreamState {
 
             match chunk {
                 Ok(Some(chunk)) => {
+                    let received_at = Instant::now();
                     tracing::trace!(
                         chunk_byte_length = chunk.len(),
                         "openai stream chunk received"
                     );
-                    if let Err(error) = self.events.parse_bytes(chunk.as_ref()) {
+                    if let Err(error) = self.events.parse_bytes_at(chunk.as_ref(), received_at) {
                         tracing::debug!("openai stream protocol error");
                         self.done = true;
                         return Some((
@@ -281,6 +285,7 @@ struct OpenAiEventStreamEvents {
     parser: OpenAiStreamParser,
     line_buffer: Vec<u8>,
     pending: VecDeque<ModelEvent>,
+    last_received_at: Option<Instant>,
 }
 
 impl OpenAiEventStreamEvents {
@@ -296,6 +301,7 @@ impl OpenAiEventStreamEvents {
             },
             line_buffer: Vec::new(),
             pending: VecDeque::from([ModelEvent::Started]),
+            last_received_at: None,
         }
     }
 
@@ -303,11 +309,21 @@ impl OpenAiEventStreamEvents {
         self.pending.pop_front()
     }
 
+    #[cfg(test)]
     fn parse_bytes(&mut self, bytes: &[u8]) -> Result<(), OpenAiProviderError> {
+        self.parse_bytes_at(bytes, Instant::now())
+    }
+
+    fn parse_bytes_at(
+        &mut self,
+        bytes: &[u8],
+        received_at: Instant,
+    ) -> Result<(), OpenAiProviderError> {
+        self.last_received_at = Some(received_at);
         for (byte_offset, byte) in bytes.iter().enumerate() {
             self.line_buffer.push(*byte);
             if *byte == b'\n'
-                && let Err(error) = self.parse_buffered_line()
+                && let Err(error) = self.parse_buffered_line(received_at)
             {
                 tracing::debug!(
                     chunk_byte_length = bytes.len(),
@@ -322,18 +338,27 @@ impl OpenAiEventStreamEvents {
         Ok(())
     }
 
-    fn parse_buffered_line(&mut self) -> Result<(), OpenAiProviderError> {
+    fn parse_buffered_line(&mut self, received_at: Instant) -> Result<(), OpenAiProviderError> {
         let line = std::str::from_utf8(&self.line_buffer).map_err(|error| {
             OpenAiProviderError::protocol(format!("stream line is not valid UTF-8: {error}"))
         })?;
-        self.pending.extend(self.parser.parse_sse_line(line)?);
+        let previous = self.parser.output_progress();
+        let events = self.parser.parse_sse_line_at(line, received_at)?;
+        if let Some(progress) = self.parser.output_progress()
+            && Some(progress) != previous
+        {
+            self.pending.push_back(ModelEvent::OutputProgress {
+                progress: Some(progress),
+            });
+        }
+        self.pending.extend(events);
         self.line_buffer.clear();
         Ok(())
     }
 
     fn finish_stream(&mut self) -> Result<(), OpenAiProviderError> {
         if !self.line_buffer.is_empty() {
-            self.parse_buffered_line()?;
+            self.parse_buffered_line(self.last_received_at.unwrap_or_else(Instant::now))?;
         }
 
         self.parser.finish()
@@ -351,10 +376,21 @@ enum OpenAiStreamParser {
 }
 
 impl OpenAiStreamParser {
-    fn parse_sse_line(&mut self, line: &str) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
+    fn parse_sse_line_at(
+        &mut self,
+        line: &str,
+        received_at: Instant,
+    ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
         match self {
-            Self::Responses(parser) => parser.parse_sse_line(line),
-            Self::ChatCompletions(parser) => parser.parse_sse_line(line),
+            Self::Responses(parser) => parser.parse_sse_line_at(line, received_at),
+            Self::ChatCompletions(parser) => parser.parse_sse_line_at(line, received_at),
+        }
+    }
+
+    fn output_progress(&self) -> Option<merry_llm::ModelOutputProgress> {
+        match self {
+            Self::Responses(parser) => parser.output_progress(),
+            Self::ChatCompletions(parser) => parser.output_progress(),
         }
     }
 
@@ -447,6 +483,7 @@ fn model_event_category(event: &ModelEvent) -> &'static str {
     match event {
         ModelEvent::Started => "started",
         ModelEvent::OutputTextDelta { .. } => "output_text_delta",
+        ModelEvent::OutputProgress { .. } => "output_progress",
         ModelEvent::ToolCallRequested { .. } => "tool_call_requested",
         ModelEvent::Completed { .. } => "completed",
     }

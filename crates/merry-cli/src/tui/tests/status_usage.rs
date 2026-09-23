@@ -57,7 +57,7 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
 
     assert_eq!(state.queue_preview().next[0].text, "urgent");
     assert!(state.timeline().is_empty());
-    assert!(state.status_text().contains("ctx 20.2k/54.8k"));
+    assert!(state.status_text().contains("ctx 20k/60.8k"));
     assert!(state.status_text().contains("win 64k fallback"));
     assert!(state.status_text().contains("cache 90%"));
     assert!(
@@ -65,6 +65,51 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
             .status_text()
             .contains("last in 20k out 1k | total 21k tok")
     );
+}
+
+#[test]
+fn context_shows_actual_input_over_safe_window_regardless_of_compaction_metadata() {
+    let compaction = CompactionUsageWindow {
+        auto_compaction_enabled: true,
+        dynamic_body_estimated_tokens: Some(1_700),
+        body_budget_tokens: 229_820,
+        soft_water_tokens: 218_940,
+        hard_water_tokens: 227_100,
+    };
+    for compaction in [
+        None,
+        Some(compaction),
+        Some(CompactionUsageWindow {
+            auto_compaction_enabled: false,
+            dynamic_body_estimated_tokens: None,
+            ..compaction
+        }),
+    ] {
+        let mut state = TuiState::new(
+            "/repo".into(),
+            "model".to_owned(),
+            Keymap::default(),
+            TuiTheme::default(),
+        );
+        let last = ModelUsage::with_details(20_800, Some(20_592), 68, None, 20_868);
+        state.set_usage(SessionUsage {
+            total: last,
+            last,
+            context: Some(UsageContextWindow {
+                resolved_model_window_tokens: 272_000,
+                effective_window_tokens: 258_400,
+                source: ContextWindowSource::Fallback,
+            }),
+            compaction,
+        });
+        let status = state.status_text();
+        assert!(status.contains("ctx 20.8k/258.4k"));
+        assert!(status.contains("win 272k fallback · cache 99% | last in 20.8k out 68"));
+        assert_eq!(
+            status.contains("compact off"),
+            compaction.is_some_and(|budget| !budget.auto_compaction_enabled),
+        );
+    }
 }
 
 #[test]
@@ -94,7 +139,7 @@ fn narrow_header_preserves_context_pressure_before_secondary_usage() {
 
     let rendered = render_to_text(&state, 72, 16);
 
-    assert!(rendered.contains("ctx 20.2k/54.8k"));
+    assert!(rendered.contains("ctx 29k/60.8k"));
     assert!(!rendered.contains("total 2659.1k"));
 }
 
@@ -125,7 +170,7 @@ fn narrow_header_counts_wide_characters_when_preserving_context() {
 
     let rendered = render_to_text(&state, 48, 16);
 
-    assert!(rendered.contains("ctx 20.2k/54.8k"));
+    assert!(rendered.contains("ctx 20k/60.8k"));
 }
 
 #[test]

@@ -86,6 +86,12 @@ async fn one_slot_commentary_observes_atomically_committed_tool_response() {
     let step_started = stream.next().await.expect("step start event");
     assert_eq!(session_started.sequence, 0);
     assert_eq!(step_started.sequence, 1);
+    let reset = stream.next().await.expect("rate reset event");
+    assert_eq!(reset.sequence, 2);
+    assert!(matches!(
+        reset.payload,
+        RuntimeJournalPayload::ModelOutputRateUpdated { rate: None }
+    ));
 
     let session = loop {
         let session = runtime.inner.session.lock().await;
@@ -108,14 +114,14 @@ async fn one_slot_commentary_observes_atomically_committed_tool_response() {
     };
 
     let commentary = stream.next().await.expect("commentary event");
-    assert_eq!(commentary.sequence, 2);
+    assert_eq!(commentary.sequence, 3);
     assert!(matches!(
         commentary.payload,
         RuntimeJournalPayload::AssistantOutputRecorded { .. }
     ));
 
     assert_eq!(session.pending_tool_calls().len(), 1);
-    assert_eq!(session.next_sequence(), 4);
+    assert_eq!(session.next_sequence(), 5);
     assert_eq!(
         session.model_turn_status(ModelTurnId::new(1)),
         Some(ModelTurnStatus::AwaitingToolResults)
@@ -132,7 +138,7 @@ async fn one_slot_commentary_observes_atomically_committed_tool_response() {
         matches!(
             entry,
             LedgerProjection::Lifecycle {
-                sequence: 2,
+                sequence: 3,
                 kind: LedgerFactKind::ArtifactRecorded,
                 ..
             }
@@ -142,7 +148,7 @@ async fn one_slot_commentary_observes_atomically_committed_tool_response() {
         matches!(
             entry,
             LedgerProjection::Lifecycle {
-                sequence: 3,
+                sequence: 4,
                 kind: LedgerFactKind::ToolCallPending,
                 ..
             }
@@ -158,5 +164,5 @@ async fn one_slot_commentary_observes_atomically_committed_tool_response() {
         session.model_turn_status(ModelTurnId::new(1)),
         Some(ModelTurnStatus::AwaitingToolResults)
     );
-    assert_eq!(session.next_sequence(), 4);
+    assert_eq!(session.next_sequence(), 5);
 }

@@ -1,4 +1,5 @@
 mod errors;
+mod output_progress;
 mod request;
 mod retry;
 mod stream;

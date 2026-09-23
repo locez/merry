@@ -14,7 +14,7 @@ use crate::{AgentLoopConfig, Runtime, bridge::BridgeToolResultCommand, events::A
 use merry_llm::GenerationConfig;
 use std::collections::BTreeSet;
 use std::sync::{Arc, atomic::AtomicU64};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 pub(super) struct InteractiveProducer {
@@ -24,6 +24,7 @@ pub(super) struct InteractiveProducer {
     pub(super) plan_event_receiver: crate::plan::PlanControllerEventReceiver,
     pub(super) subagent_completion_notify: Option<Arc<Notify>>,
     pub(super) message_sender: mpsc::Sender<InteractiveRunMessage>,
+    pub(super) rate_sender: watch::Sender<Option<merry_core::RuntimeEvent>>,
     pub(super) bridge_receiver: mpsc::Receiver<BridgeToolResultCommand>,
     pub(super) bridge_resolution_epoch: Arc<AtomicU64>,
     pub(super) bridge_pending: bool,
@@ -50,6 +51,7 @@ pub(super) struct InteractiveProducerInput {
     pub(super) plan_event_receiver: crate::plan::PlanControllerEventReceiver,
     pub(super) subagent_completion_notify: Option<Arc<Notify>>,
     pub(super) message_sender: mpsc::Sender<InteractiveRunMessage>,
+    pub(super) rate_sender: watch::Sender<Option<merry_core::RuntimeEvent>>,
     pub(super) bridge_receiver: mpsc::Receiver<BridgeToolResultCommand>,
     pub(super) bridge_resolution_epoch: Arc<AtomicU64>,
     pub(super) loop_token: CancellationToken,
@@ -66,6 +68,7 @@ impl InteractiveProducer {
             plan_event_receiver,
             subagent_completion_notify,
             message_sender,
+            rate_sender,
             bridge_receiver,
             bridge_resolution_epoch,
             loop_token,
@@ -80,6 +83,7 @@ impl InteractiveProducer {
             plan_event_receiver,
             subagent_completion_notify,
             message_sender,
+            rate_sender,
             bridge_receiver,
             bridge_resolution_epoch,
             bridge_pending: false,

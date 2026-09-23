@@ -2,6 +2,7 @@ use crate::tui::{
     completion::{CompletionMenu, CompletionSources},
     input::{DraftImage, InputHistory, TextInput, TuiSubmission},
     keymap::Keymap,
+    output_rate::OutputRate,
     plan::PlanUiState,
     preferences::{TuiPreferences, TuiSettingsDefaults},
     status::{format_header_status_parts, format_session_usage_full},
@@ -9,7 +10,7 @@ use crate::tui::{
     theme::TuiTheme,
 };
 use clipboard::ClipboardFeedback;
-use merry_core::{InteractiveRunState, QueuedInputLane, SessionUsage};
+use merry_core::{InteractiveRunState, QueuedInputLane, RuntimeEvent, SessionUsage};
 use merry_runtime::SkillMetadata;
 use overlays::OverlayState;
 use std::{
@@ -61,6 +62,7 @@ pub(crate) struct TuiState {
     last_completed_run_elapsed: Option<Duration>,
     pending_empty_input_quit: bool,
     usage: Option<SessionUsage>,
+    output_rate: OutputRate,
     overlays: OverlayState,
     preferences: TuiPreferences,
     settings_defaults: TuiSettingsDefaults,
@@ -119,6 +121,7 @@ impl TuiState {
             last_completed_run_elapsed: None,
             pending_empty_input_quit: false,
             usage: None,
+            output_rate: OutputRate::default(),
             overlays: OverlayState::default(),
             preferences: TuiPreferences::default(),
             settings_defaults: TuiSettingsDefaults::default(),
@@ -604,6 +607,10 @@ impl TuiState {
         self.usage = Some(usage);
     }
 
+    pub(crate) fn observe_output_rate(&mut self, event: &RuntimeEvent) {
+        self.output_rate.observe(event);
+    }
+
     pub(crate) fn set_reasoning_effort_label(&mut self, label: Option<String>) {
         self.reasoning_effort_label = label;
     }
@@ -674,14 +681,22 @@ impl TuiState {
     }
 
     pub(crate) fn status_parts(&self) -> [String; 3] {
-        let usage = format_session_usage_full(self.usage.as_ref());
+        let rate = self.output_rate.label();
+        let usage = format_session_usage_full(self.usage.as_ref(), &rate);
         let model = self.model_status_label();
         [self.workspace_root.display().to_string(), model, usage]
     }
 
     pub(crate) fn header_status_parts(&self, width: u16) -> [String; 3] {
         let model = self.model_status_label();
-        format_header_status_parts(&self.workspace_root, &model, self.usage.as_ref(), width)
+        let rate = self.output_rate.label();
+        format_header_status_parts(
+            &self.workspace_root,
+            &model,
+            self.usage.as_ref(),
+            &rate,
+            width,
+        )
     }
 
     pub(crate) fn interaction_status_text(&self) -> String {

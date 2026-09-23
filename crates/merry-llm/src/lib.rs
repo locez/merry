@@ -5,7 +5,9 @@ pub mod content;
 pub mod error;
 pub mod event;
 pub mod model_catalog;
+pub mod output_progress;
 pub mod provider;
+pub mod receive_stream;
 pub mod request;
 pub mod response;
 pub mod retry;
@@ -22,7 +24,9 @@ pub use model_catalog::{
     ModelCatalog, ModelCatalogEntry, ModelCatalogError, ModelCatalogErrorKind, ModelCatalogFuture,
     ModelCatalogProvider,
 };
+pub use output_progress::{ModelOutputProgress, OutputProgressTracker, StreamOutputKind};
 pub use provider::{ModelEventStream, ModelProvider, ModelProviderFuture, ModelStreamContext};
+pub use receive_stream::receive_model_stream;
 pub use request::{
     GenerationConfig, ModelInputItem, ModelMessage, ModelMessageRole, ModelName, ModelRequest,
     ModelResponseFormat, ModelStructuredOutputFormat, ParallelToolCalls, ReasoningEffort,

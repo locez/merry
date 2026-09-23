@@ -35,6 +35,9 @@ impl RuntimeEventProjector {
                 Ok(Some(RuntimeEvent::SessionStarted { source }))
             }
             RuntimeJournalPayload::StepStarted => Ok(Some(RuntimeEvent::StepStarted { source })),
+            RuntimeJournalPayload::ModelOutputRateUpdated { rate } => {
+                Ok(Some(RuntimeEvent::ModelOutputRateUpdated { rate, source }))
+            }
             RuntimeJournalPayload::StepCompleted => {
                 Ok(Some(RuntimeEvent::StepCompleted { source }))
             }

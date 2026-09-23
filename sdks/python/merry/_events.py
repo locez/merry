@@ -14,6 +14,7 @@ from ._event_payloads import (
     EvidenceReferencedPayload,
     FinalOutputRecordedPayload,
     InteractiveRunStateChangedPayload,
+    ModelOutputRateUpdatedPayload,
     ModelRetryAttemptStartedPayload,
     ModelRetryExhaustedPayload,
     ModelRetryScheduledPayload,
@@ -66,6 +67,7 @@ from ._event_types import (
     RuntimeToolResultStatus,
     SubagentStatus,
 )
+from ._output_rate import ModelOutputRate, OutputTimingQuality, OutputTokenSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,9 +104,13 @@ __all__ = [
     "FinalOutputRecordedPayload",
     "InteractiveRunState",
     "InteractiveRunStateChangedPayload",
+    "ModelOutputRate",
+    "ModelOutputRateUpdatedPayload",
     "ModelRetryAttemptStartedPayload",
     "ModelRetryExhaustedPayload",
     "ModelRetryScheduledPayload",
+    "OutputTimingQuality",
+    "OutputTokenSource",
     "PlanAttemptFinishedPayload",
     "PlanAttemptProgressReportedPayload",
     "PlanDirectiveUpdatedPayload",

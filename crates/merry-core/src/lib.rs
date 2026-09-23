@@ -6,6 +6,7 @@ pub mod event;
 pub mod evidence;
 pub mod id;
 pub mod journal;
+pub mod output_rate;
 pub mod plan;
 pub mod runtime_event;
 pub mod schema;
@@ -26,6 +27,7 @@ pub use id::{
     ToolSourceId, TrajectoryRecordId,
 };
 pub use journal::{RuntimeJournalEvent, RuntimeJournalPayload};
+pub use output_rate::{ModelOutputRate, OutputTimingQuality, OutputTokenSource};
 pub use plan::{
     CoordinatorDirectiveSnapshot, PlanActivationSource, PlanApprovalRequirementKind,
     PlanApprovalRequirementSnapshot, PlanApprovalRequirementStatus, PlanAttemptOutcome,

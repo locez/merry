@@ -6,6 +6,12 @@ use merry_core::{
 pub(crate) fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
     events
         .iter()
+        .filter(|event| {
+            !matches!(
+                event.payload,
+                RuntimeJournalPayload::ModelOutputRateUpdated { .. }
+            )
+        })
         .map(|event| match event.payload {
             RuntimeJournalPayload::SessionStarted => "SessionStarted",
             RuntimeJournalPayload::StepStarted => "StepStarted",

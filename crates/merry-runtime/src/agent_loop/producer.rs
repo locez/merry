@@ -142,7 +142,9 @@ pub(crate) async fn run_agent_loop_stream_producer(
         let mut step_events = Vec::new();
         tokio::pin!(stream);
         while let Some(event) = stream.next().await {
-            step_events.push(event.clone());
+            if !event.payload.is_transient() {
+                step_events.push(event.clone());
+            }
             publish_journal_event(&runtime, &mut projector, &sender, &mut events, event)
                 .await
                 .map_err(|source| {

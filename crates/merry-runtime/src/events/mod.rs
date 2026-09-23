@@ -6,6 +6,9 @@ mod public_stream;
 mod tool_output;
 
 pub use journal_stream::RuntimeJournalEventStream;
-pub(crate) use journal_stream::{ActiveStepPermit, RuntimeJournalEventBatch};
+pub(crate) use journal_stream::{
+    ActiveStepPermit, RuntimeJournalEventBatch, RuntimeRateUpdateSender,
+    runtime_rate_update_channel,
+};
 pub use projector::RuntimeEventProjector;
 pub use public_stream::RuntimeEventStream;

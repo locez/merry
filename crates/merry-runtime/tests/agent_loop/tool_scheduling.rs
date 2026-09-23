@@ -139,7 +139,7 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2, 3, 4, 5, 6, 7]
+        vec![0, 1, 3, 4, 5, 6, 8, 9]
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
     assert_eq!(executor.calls().len(), 1);

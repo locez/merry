@@ -393,7 +393,7 @@ async fn collect_text_output(stream: ModelEventStream) -> Result<String, String>
     let mut saw_delta = false;
     while let Some(item) = stream.next().await {
         match item {
-            Ok(ModelEvent::Started) => {}
+            Ok(ModelEvent::Started | ModelEvent::OutputProgress { .. }) => {}
             Ok(ModelEvent::OutputTextDelta { delta }) => {
                 if !delta.is_empty() {
                     saw_delta = true;

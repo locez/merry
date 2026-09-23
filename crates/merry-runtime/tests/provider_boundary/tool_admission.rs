@@ -44,7 +44,7 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2]
+        vec![0, 1, 2, 3]
     );
     let pending = pending_tool_call(&pending_events).clone();
 
@@ -62,7 +62,7 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![3, 4]
+        vec![4, 5]
     );
     let result = resolved_tool_result(&execution_events);
     assert!(matches!(
@@ -81,7 +81,7 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
             .code(),
         "tool_not_registered"
     );
-    assert_eq!(result.artifact().id().as_str(), "tool-result-3");
+    assert_eq!(result.artifact().id().as_str(), "tool-result-4");
     assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
     assert_eq!(result.call_id(), pending.id());
     assert!(failed_code(&execution_events).is_none());
@@ -106,17 +106,17 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 2,
+                sequence: 3,
                 order: 2,
                 kind: LedgerFactKind::ToolCallPending,
             },
             LedgerProjection::Lifecycle {
-                sequence: 3,
+                sequence: 4,
                 order: 3,
                 kind: LedgerFactKind::ArtifactRecorded,
             },
             LedgerProjection::Lifecycle {
-                sequence: 4,
+                sequence: 5,
                 order: 4,
                 kind: LedgerFactKind::ToolCallResolved,
             },
@@ -133,7 +133,7 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![5, 6, 7]
+        vec![6, 7, 8, 9]
     );
     assert_eq!(provider.recorded_requests()[1].continuations().len(), 1);
 }

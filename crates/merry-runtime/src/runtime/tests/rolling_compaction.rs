@@ -260,6 +260,7 @@ async fn run_three_cycle_case(window_tokens: u64) {
             &primary_capabilities(window_tokens),
             trigger_request,
             None,
+            Default::default(),
         )
         .expect("request budget");
         assert_eq!(

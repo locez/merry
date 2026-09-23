@@ -172,6 +172,56 @@ async fn retrying_provider_does_not_retry_after_visible_output() {
 }
 
 #[tokio::test]
+async fn telemetry_preserves_retry_policy_and_clears_failed_attempt_progress_in_stream_order() {
+    let progress = ModelEvent::OutputProgress {
+        progress: Some(crate::ModelOutputProgress::new(4, Duration::ZERO)),
+    };
+    let inner = AttemptScriptProvider::new(vec![
+        vec![
+            Ok(progress.clone()),
+            Err(ModelError::provider(
+                ProviderErrorKind::Unavailable,
+                "stream broke",
+            )),
+        ],
+        vec![Ok(completed("recovered"))],
+    ]);
+    let retrying = RetryingModelProvider::new(
+        Arc::new(inner.clone()),
+        ModelRetryPolicy::new(
+            true,
+            2,
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            Duration::from_secs(10),
+            false,
+        )
+        .unwrap(),
+    );
+    let events = retrying
+        .stream_model(request(), ModelStreamContext::default())
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    assert!(
+        events
+            .iter()
+            .any(|event| event.as_ref().is_ok_and(|event| event == &progress))
+    );
+    assert_eq!(
+        events.into_iter().collect::<Result<Vec<_>, _>>().unwrap(),
+        vec![
+            ModelEvent::Started,
+            progress,
+            ModelEvent::OutputProgress { progress: None },
+            completed("recovered"),
+        ]
+    );
+    assert_eq!(inner.attempts_remaining(), 0);
+}
+
+#[tokio::test]
 async fn retrying_provider_retries_before_visible_output_with_one_started_event() {
     let inner = AttemptScriptProvider::new(vec![
         vec![Err(ModelError::provider(

@@ -38,6 +38,7 @@ mod automatic_compaction;
 
 mod budget;
 mod rolling_compaction;
+mod token_calibration;
 
 mod manual_compaction;
 

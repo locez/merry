@@ -65,6 +65,13 @@ impl InteractiveProducer {
     }
 
     pub(super) async fn send_event(&self, event: RuntimeEvent) -> bool {
+        if matches!(&event, RuntimeEvent::ModelOutputRateUpdated { .. }) {
+            if self.rate_sender.is_closed() {
+                return false;
+            }
+            self.rate_sender.send_replace(Some(event));
+            return true;
+        }
         self.message_sender
             .send(InteractiveRunMessage::Event(event))
             .await

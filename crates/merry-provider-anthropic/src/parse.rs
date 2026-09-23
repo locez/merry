@@ -7,10 +7,11 @@ use crate::{
 };
 use merry_core::ToolName;
 use merry_llm::{
-    FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
-    ToolArguments, Usage,
+    FinishReason, ModelEvent, ModelOutput, ModelOutputProgress, ModelResponse, ModelToolCall,
+    ModelToolCallId, OutputProgressTracker, StreamOutputKind, ToolArguments, Usage,
 };
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 pub(crate) struct AnthropicStreamParser {
     aggregate_text: String,
@@ -20,6 +21,7 @@ pub(crate) struct AnthropicStreamParser {
     finish_reason: Option<FinishReason>,
     usage: UsageAccumulator,
     completed: bool,
+    output: OutputProgressTracker,
 }
 
 impl AnthropicStreamParser {
@@ -32,12 +34,26 @@ impl AnthropicStreamParser {
             finish_reason: None,
             usage: UsageAccumulator::default(),
             completed: false,
+            output: OutputProgressTracker::default(),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn parse_sse_line(
         &mut self,
         raw_line: &str,
+    ) -> Result<Vec<ModelEvent>, AnthropicProviderError> {
+        self.parse_sse_line_at(raw_line, Instant::now())
+    }
+
+    pub(crate) fn output_progress(&self) -> Option<ModelOutputProgress> {
+        self.output.snapshot()
+    }
+
+    pub(crate) fn parse_sse_line_at(
+        &mut self,
+        raw_line: &str,
+        received_at: Instant,
     ) -> Result<Vec<ModelEvent>, AnthropicProviderError> {
         let line = raw_line.trim_end_matches(['\r', '\n']);
         if line.is_empty() || line.starts_with(':') {
@@ -66,7 +82,14 @@ impl AnthropicStreamParser {
                 "failed to parse Anthropic stream event: {error}"
             ))
         })?;
-        self.parse_event(event)
+        self.parse_event(event, received_at)
+    }
+
+    /// Thinking text can be a summary rather than a complete token-level trace.
+    fn observe_thinking(&mut self, thinking: &str, received_at: Instant) {
+        self.output.mark_incomplete_reasoning();
+        self.output
+            .observe(StreamOutputKind::Reasoning, thinking, received_at);
     }
 
     pub(crate) fn finish(&self) -> Result<(), AnthropicProviderError> {
@@ -82,6 +105,7 @@ impl AnthropicStreamParser {
     fn parse_event(
         &mut self,
         event: AnthropicStreamEvent,
+        received_at: Instant,
     ) -> Result<Vec<ModelEvent>, AnthropicProviderError> {
         match event {
             AnthropicStreamEvent::MessageStart { message } => {
@@ -94,7 +118,17 @@ impl AnthropicStreamParser {
                 index,
                 content_block,
             } => match content_block {
+                AnthropicContentBlockStart::RedactedThinking => {
+                    self.output.mark_incomplete_reasoning();
+                    Ok(Vec::new())
+                }
+                AnthropicContentBlockStart::Thinking { thinking } => {
+                    self.observe_thinking(&thinking, received_at);
+                    Ok(Vec::new())
+                }
                 AnthropicContentBlockStart::Text { text } if !text.is_empty() => {
+                    self.output
+                        .observe(StreamOutputKind::Content, &text, received_at);
                     self.aggregate_text.push_str(&text);
                     Ok(vec![ModelEvent::OutputTextDelta { delta: text }])
                 }
@@ -112,6 +146,10 @@ impl AnthropicStreamParser {
                             ))
                         })?
                     };
+                    self.output
+                        .observe(StreamOutputKind::Content, &name, received_at);
+                    self.output
+                        .observe(StreamOutputKind::Content, &initial_input, received_at);
                     if self
                         .tool_buffers
                         .insert(
@@ -132,7 +170,13 @@ impl AnthropicStreamParser {
                 }
             },
             AnthropicStreamEvent::ContentBlockDelta { index, delta } => match delta {
+                AnthropicContentBlockDelta::ThinkingDelta { thinking } => {
+                    self.observe_thinking(&thinking, received_at);
+                    Ok(Vec::new())
+                }
                 AnthropicContentBlockDelta::TextDelta { text } if !text.is_empty() => {
+                    self.output
+                        .observe(StreamOutputKind::Content, &text, received_at);
                     self.aggregate_text.push_str(&text);
                     Ok(vec![ModelEvent::OutputTextDelta { delta: text }])
                 }
@@ -148,6 +192,8 @@ impl AnthropicStreamParser {
                         })?
                         .input
                         .push_str(&partial_json);
+                    self.output
+                        .observe(StreamOutputKind::Content, &partial_json, received_at);
                     Ok(Vec::new())
                 }
             },

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from enum import Enum
-from typing import TypeVar
 
+from ._event_fields import EVENT_FIELDS
 from ._event_payloads import (
     AssistantMessageDeltaPayload,
     AssistantMessagePayload,
@@ -16,6 +15,7 @@ from ._event_payloads import (
     EvidenceReferencedPayload,
     FinalOutputRecordedPayload,
     InteractiveRunStateChangedPayload,
+    ModelOutputRateUpdatedPayload,
     ModelRetryAttemptStartedPayload,
     ModelRetryExhaustedPayload,
     ModelRetryScheduledPayload,
@@ -67,6 +67,14 @@ from ._event_types import (
     RuntimeToolResultStatus,
     SubagentStatus,
 )
+from ._event_values import (
+    _enum_value,
+    _event_text,
+    _optional_string,
+    _required_int,
+    _required_string,
+    _required_strings,
+)
 from ._events import Event
 from ._json import (
     JsonObject,
@@ -75,80 +83,7 @@ from ._json import (
     validate_object_keys,
 )
 from ._models import SessionUsage
-
-EnumT = TypeVar("EnumT", bound=Enum)
-
-
-def _event_fields(
-    *fields: str, optional: tuple[str, ...] = ()
-) -> tuple[frozenset[str], frozenset[str]]:
-    return frozenset(("type", *fields)), frozenset(optional)
-
-
-_EVENT_FIELDS: dict[EventType, tuple[frozenset[str], frozenset[str]]] = {
-    EventType.SESSION_STARTED: _event_fields("source"),
-    EventType.STEP_STARTED: _event_fields("source"),
-    EventType.STEP_COMPLETED: _event_fields("source"),
-    EventType.COMPACTION_STARTED: _event_fields("source"),
-    EventType.COMPACTION_COMPLETED: _event_fields(
-        "checkpoint_id", "covered_history_item_count", "source"
-    ),
-    EventType.USAGE_UPDATED: _event_fields("usage", "source"),
-    EventType.ASSISTANT_MESSAGE: _event_fields("text", "artifact", "source"),
-    EventType.ASSISTANT_MESSAGE_DELTA: _event_fields("delta", "source"),
-    EventType.TOOL_CALL_STARTED: _event_fields("call", "source"),
-    EventType.TOOL_CALL_BATCH_STARTED: _event_fields("batch", "source"),
-    EventType.TOOL_CALL_FINISHED: _event_fields("result", "output", "source"),
-    EventType.FINAL_OUTPUT_RECORDED: _event_fields("call_id", "artifact", "source"),
-    EventType.MODEL_RETRY_ATTEMPT_STARTED: _event_fields(
-        "attempt", "max_attempts", "source"
-    ),
-    EventType.MODEL_RETRY_SCHEDULED: _event_fields(
-        "attempt", "next_attempt", "max_attempts", "delay_ms", "error_kind", "source"
-    ),
-    EventType.MODEL_RETRY_EXHAUSTED: _event_fields(
-        "attempts_run", "max_attempts", "error_kind", "source"
-    ),
-    EventType.EVIDENCE_REFERENCED: _event_fields("evidence", "source"),
-    EventType.SKILL_USED: _event_fields(
-        "skill_name", "skill_md_path", "tool_call_id", "artifact", "source"
-    ),
-    EventType.SUBAGENT_SPAWNED: _event_fields(
-        "agent_id", "task_id", "task_anchor", "source"
-    ),
-    EventType.SUBAGENT_STARTED: _event_fields("agent_id", "task_id", "source"),
-    EventType.SUBAGENT_STATUS_CHANGED: _event_fields(
-        "agent_id", "task_id", "status", "source"
-    ),
-    EventType.SUBAGENT_COMPLETED: _event_fields(
-        "agent_id", "task_id", "summary", "output_paths", "changed_paths", "source"
-    ),
-    EventType.SUBAGENT_FAILED: _event_fields(
-        "agent_id", "task_id", "diagnostic", "source"
-    ),
-    EventType.SUBAGENT_CANCELLED: _event_fields(
-        "agent_id", "task_id", "diagnostic", "source"
-    ),
-    EventType.PLAN_UPDATED: _event_fields("snapshot", "summary", "source"),
-    EventType.PLAN_PHASE_CHANGED: _event_fields("plan_id", "phase", "source"),
-    EventType.PLAN_NODE_READY: _event_fields(
-        "plan_id", "node_id", "node_revision", "source"
-    ),
-    EventType.PLAN_LEASE_STARTED: _event_fields("lease", "source"),
-    EventType.PLAN_PROGRESS_UPDATED: _event_fields("progress", "source"),
-    EventType.PLAN_PROGRESS_REVIEW_REQUESTED: _event_fields(
-        "plan_id", "attempt_id", "reason", "source"
-    ),
-    EventType.PLAN_ATTEMPT_PROGRESS_REPORTED: _event_fields("progress", "source"),
-    EventType.PLAN_DIRECTIVE_UPDATED: _event_fields("directive", "source"),
-    EventType.PLAN_ATTEMPT_FINISHED: _event_fields("attempt", "source"),
-    EventType.RUN_FAILED: _event_fields("diagnostic", "source"),
-    EventType.RUN_CANCELLED: _event_fields("diagnostic", "source"),
-    EventType.INTERACTIVE_RUN_STATE_CHANGED: _event_fields("state"),
-    EventType.QUEUED_INPUT_ACCEPTED: _event_fields("lane", "inputs"),
-    EventType.QUEUED_INPUTS_CHANGED: _event_fields("inputs"),
-    EventType.CLOSED: _event_fields(),
-}
+from ._output_rate import parse_output_rate
 
 
 def parse_event(value: object) -> Event:
@@ -163,7 +98,7 @@ def parse_event(value: object) -> Event:
             EventType.UNKNOWN, UnknownEventPayload(raw_type, RawEventData(data))
         )
 
-    required, optional = _EVENT_FIELDS[event_type]
+    required, optional = EVENT_FIELDS[event_type]
     validate_object_keys(
         data,
         "native runtime event",
@@ -194,6 +129,8 @@ def _parse_payload(
             )
         case EventType.USAGE_UPDATED:
             return UsageUpdatedPayload(_parse_usage(data["usage"]), _source(data))
+        case EventType.MODEL_OUTPUT_RATE_UPDATED:
+            return ModelOutputRateUpdatedPayload(parse_output_rate(data["rate"]), _source(data))
         case EventType.ASSISTANT_MESSAGE:
             return AssistantMessagePayload(
                 _event_text(data, "text"),
@@ -508,54 +445,3 @@ def _parse_usage(value: object) -> SessionUsage:
     from ._models import parse_session_usage
 
     return parse_session_usage(value)
-
-
-def _enum_value(enum_type: type[EnumT], value: object, label: str) -> EnumT:
-    if not isinstance(value, str):
-        raise TypeError(f"{label} must be a string")
-    try:
-        return enum_type(value)
-    except ValueError as error:
-        raise TypeError(f"{label} is unsupported") from error
-
-
-def _event_text(data: Mapping[str, JsonValue], key: str) -> str:
-    value = data[key]
-    if not isinstance(value, str):
-        raise TypeError(f"event field {key!r} must be a string")
-    return value
-
-
-def _required_string(data: Mapping[str, JsonValue], key: str) -> str:
-    value = data[key]
-    if not isinstance(value, str):
-        raise TypeError(f"event field {key!r} must be a string")
-    if not value.strip():
-        raise ValueError(f"event field {key!r} must not be blank")
-    return value
-
-
-def _optional_string(value: object) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise TypeError("optional event field must be a string or null")
-    return value
-
-
-def _required_int(data: Mapping[str, JsonValue], key: str) -> int:
-    value = data[key]
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError(f"event field {key!r} must be an integer")
-    return value
-
-
-def _required_strings(value: object, label: str) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        raise TypeError(f"{label} must be a list")
-    values: list[str] = []
-    for item in value:
-        if not isinstance(item, str):
-            raise TypeError(f"{label} must contain only strings")
-        values.append(item)
-    return tuple(values)

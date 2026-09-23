@@ -5,10 +5,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const BRAND_AND_SEPARATORS_WIDTH: usize = 11;
 const MIN_WORKSPACE_WIDTH: usize = 8;
 
-pub(crate) fn format_session_usage_full(usage: Option<&SessionUsage>) -> String {
+pub(crate) fn format_session_usage_full(usage: Option<&SessionUsage>, rate: &str) -> String {
     usage
-        .map(format_session_usage)
-        .unwrap_or_else(SessionUsageDisplay::unavailable)
+        .map(|usage| format_session_usage(usage, rate))
+        .unwrap_or_else(|| SessionUsageDisplay::unavailable(rate))
         .full
 }
 
@@ -16,12 +16,13 @@ pub(crate) fn format_header_status_parts(
     workspace: &Path,
     model: &str,
     usage: Option<&SessionUsage>,
+    rate: &str,
     width: u16,
 ) -> [String; 3] {
     let workspace = workspace.display().to_string();
     let usage = usage
-        .map(format_session_usage)
-        .unwrap_or_else(SessionUsageDisplay::unavailable);
+        .map(|usage| format_session_usage(usage, rate))
+        .unwrap_or_else(|| SessionUsageDisplay::unavailable(rate));
     let width = usize::from(width);
     let minimum_workspace_width = display_width(&workspace).min(MIN_WORKSPACE_WIDTH);
     let model_width = display_width(model);
@@ -34,7 +35,7 @@ pub(crate) fn format_header_status_parts(
                 + display_width(candidate)
                 <= width
         })
-        .unwrap_or(usage.compact.as_str())
+        .unwrap_or(usage.minimal.as_str())
         .to_owned();
 
     let remaining = width.saturating_sub(BRAND_AND_SEPARATORS_WIDTH + display_width(&usage));
@@ -53,14 +54,16 @@ struct SessionUsageDisplay {
     full: String,
     medium: String,
     compact: String,
+    minimal: String,
 }
 
 impl SessionUsageDisplay {
-    fn unavailable() -> Self {
+    fn unavailable(rate: &str) -> Self {
         Self {
-            full: "usage -".to_owned(),
-            medium: "usage -".to_owned(),
-            compact: "usage -".to_owned(),
+            full: format!("usage - · {rate}"),
+            medium: format!("usage - · {rate}"),
+            compact: format!("usage - · {rate}"),
+            minimal: "usage -".to_owned(),
         }
     }
 
@@ -69,19 +72,22 @@ impl SessionUsageDisplay {
             self.full.as_str(),
             self.medium.as_str(),
             self.compact.as_str(),
+            self.minimal.as_str(),
         ]
         .into_iter()
     }
 }
 
-fn format_session_usage(usage: &SessionUsage) -> SessionUsageDisplay {
-    let compact = format_context_pressure(usage);
+fn format_session_usage(usage: &SessionUsage, rate: &str) -> SessionUsageDisplay {
+    let minimal = format_context_pressure(usage);
+    let compact = format!("{minimal} · {rate}");
     let cache = format_cache_ratio(usage.last.input_tokens(), usage.last.cached_input_tokens());
-    let medium = cache
-        .as_ref()
-        .map_or_else(|| compact.clone(), |cache| format!("{compact} · {cache}"));
+    let medium = cache.as_ref().map_or_else(
+        || compact.clone(),
+        |cache| format!("{minimal} · {cache} · {rate}"),
+    );
 
-    let mut context_parts = vec![compact.clone()];
+    let mut context_parts = vec![minimal.clone()];
     if let Some(context) = usage.context {
         context_parts.push(format!(
             "win {} {}",
@@ -93,7 +99,7 @@ fn format_session_usage(usage: &SessionUsage) -> SessionUsageDisplay {
         context_parts.push(cache);
     }
     let full = format!(
-        "{} | last in {} out {} | total {} tok",
+        "{} | last in {} out {} | total {} tok | {rate}",
         context_parts.join(" · "),
         format_token_count(usage.last.input_tokens()),
         format_token_count(usage.last.output_tokens()),
@@ -104,35 +110,28 @@ fn format_session_usage(usage: &SessionUsage) -> SessionUsageDisplay {
         full,
         medium,
         compact,
+        minimal,
     }
 }
 
 fn format_context_pressure(usage: &SessionUsage) -> String {
-    let Some(compaction) = usage.compaction else {
-        return usage.context.map_or_else(
-            || "ctx -".to_owned(),
-            |context| {
-                format!(
-                    "ctx in {}/{}",
-                    format_token_count(usage.last.input_tokens()),
-                    format_token_count(context.resolved_model_window_tokens)
-                )
-            },
-        );
-    };
-
-    let current = compaction
-        .dynamic_body_estimated_tokens
-        .map(format_token_count)
-        .unwrap_or_else(|| "-".to_owned());
-    if compaction.auto_compaction_enabled {
-        format!(
-            "ctx {current}/{}",
-            format_token_count(compaction.hard_water_tokens)
-        )
-    } else {
-        format!("ctx {current} · compact off")
+    let mut context = usage.context.map_or_else(
+        || "ctx -".to_owned(),
+        |context| {
+            format!(
+                "ctx {}/{}",
+                format_token_count(usage.last.input_tokens()),
+                format_token_count(context.effective_window_tokens)
+            )
+        },
+    );
+    if usage
+        .compaction
+        .is_some_and(|compaction| !compaction.auto_compaction_enabled)
+    {
+        context.push_str(" · compact off");
     }
+    context
 }
 
 fn format_cache_ratio(input_tokens: u64, cached_input_tokens: Option<u64>) -> Option<String> {

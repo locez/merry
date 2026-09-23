@@ -24,6 +24,7 @@ class EventType(str, Enum):
     COMPACTION_STARTED = "compaction_started"
     COMPACTION_COMPLETED = "compaction_completed"
     USAGE_UPDATED = "usage_updated"
+    MODEL_OUTPUT_RATE_UPDATED = "model_output_rate_updated"
     ASSISTANT_MESSAGE = "assistant_message"
     ASSISTANT_MESSAGE_DELTA = "assistant_message_delta"
     TOOL_CALL_STARTED = "tool_call_started"

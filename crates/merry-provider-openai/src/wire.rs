@@ -256,6 +256,10 @@ pub(crate) enum ResponsesStreamEvent {
     Created,
     #[serde(rename = "response.output_text.delta")]
     OutputTextDelta { delta: String },
+    #[serde(rename = "response.reasoning_text.delta")]
+    ReasoningTextDelta { delta: String },
+    #[serde(rename = "response.reasoning_summary_text.delta")]
+    ReasoningSummaryTextDelta { delta: String },
     #[serde(rename = "response.output_item.added")]
     OutputItemAdded {
         output_index: u64,

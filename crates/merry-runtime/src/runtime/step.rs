@@ -1,7 +1,10 @@
 use super::{Runtime, RuntimeInner, journal_emission::*, provider_step};
 use crate::{
     RuntimeError, RuntimeModelRole,
-    events::{ActiveStepPermit, RuntimeJournalEventBatch, RuntimeJournalEventStream},
+    events::{
+        ActiveStepPermit, RuntimeJournalEventBatch, RuntimeJournalEventStream,
+        runtime_rate_update_channel,
+    },
     step::{StepContext, StepInput},
 };
 use merry_llm::GenerationConfig;
@@ -10,6 +13,11 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
+
+struct StepEventSenders {
+    journal: mpsc::Sender<RuntimeJournalEventBatch>,
+    rate: crate::events::RuntimeRateUpdateSender,
+}
 
 impl Runtime {
     pub(crate) fn step_with_active_permit(
@@ -22,6 +30,7 @@ impl Runtime {
         let step_token = parent_token.child_token();
         let producer_token = step_token.clone();
         let (sender, receiver) = mpsc::channel(self.inner.event_buffer_size.get());
+        let (rate_sender, rate_receiver) = runtime_rate_update_channel();
         let inner = Arc::clone(&self.inner);
         let producer_span = tracing::debug_span!(
             "runtime.step",
@@ -39,7 +48,10 @@ impl Runtime {
             async move {
                 run_step(
                     inner,
-                    sender,
+                    StepEventSenders {
+                        journal: sender,
+                        rate: rate_sender,
+                    },
                     producer_token,
                     input,
                     generation_config,
@@ -53,6 +65,7 @@ impl Runtime {
 
         Ok(RuntimeJournalEventStream::new(
             ReceiverStream::new(receiver),
+            rate_receiver,
             step_token,
             producer_handle,
         ))
@@ -61,13 +74,17 @@ impl Runtime {
 
 async fn run_step(
     inner: Arc<RuntimeInner>,
-    sender: mpsc::Sender<RuntimeJournalEventBatch>,
+    event_senders: StepEventSenders,
     token: CancellationToken,
     input: StepInput,
     generation_config: GenerationConfig,
     final_output_contract: Option<crate::FinalOutputContract>,
     active_permit: ActiveStepPermit,
 ) {
+    let StepEventSenders {
+        journal: sender,
+        rate,
+    } = event_senders;
     tracing::debug!(category = "started", "runtime step started");
 
     if token.is_cancelled() {
@@ -94,7 +111,7 @@ async fn run_step(
         return;
     }
 
-    let Some(step_started) = send_step_started_event(&inner, &sender, &token).await else {
+    let Some(step_started) = send_step_started_event(&inner, &sender, &rate, &token).await else {
         let _ = send_cancelled_if_requested(&inner, &sender, &token).await;
         return;
     };
@@ -126,7 +143,12 @@ async fn run_step(
     provider_step::run_provider_step(
         &inner,
         &sender,
-        provider_step::ProviderStepControl::new(&token, &active_permit, step_started.sequence),
+        provider_step::ProviderStepControl::new(
+            &token,
+            &active_permit,
+            &rate,
+            step_started.sequence,
+        ),
         input,
         generation_config,
         final_output_contract,

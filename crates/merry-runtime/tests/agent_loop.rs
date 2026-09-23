@@ -18,6 +18,8 @@ mod mutation_admission;
 mod stream_lifecycle;
 #[path = "agent_loop/support/mod.rs"]
 mod support;
+#[path = "agent_loop/telemetry_retention.rs"]
+mod telemetry_retention;
 #[path = "agent_loop/tool_scheduling.rs"]
 mod tool_scheduling;
 #[path = "agent_loop/tracing.rs"]

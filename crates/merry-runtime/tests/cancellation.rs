@@ -82,6 +82,12 @@ async fn collect_pending_step(runtime: &Runtime, text: &str) -> Vec<RuntimeJourn
 fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
     events
         .iter()
+        .filter(|event| {
+            !matches!(
+                event.payload,
+                RuntimeJournalPayload::ModelOutputRateUpdated { .. }
+            )
+        })
         .map(|event| match event.payload {
             RuntimeJournalPayload::SessionStarted => "SessionStarted",
             RuntimeJournalPayload::StepStarted => "StepStarted",
@@ -104,7 +110,7 @@ fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
 async fn assert_missing_tool_result_artifact(runtime: &Runtime) {
     let evidence_err = runtime
         .evidence_ref(
-            &artifact_id("tool-result-3"),
+            &artifact_id("tool-result-4"),
             EvidenceLocator::whole_artifact(),
         )
         .await
@@ -113,7 +119,7 @@ async fn assert_missing_tool_result_artifact(runtime: &Runtime) {
         evidence_err,
         RuntimeError::Artifact {
             source: ArtifactError::MissingArtifact { id }
-        } if id == artifact_id("tool-result-3")
+        } if id == artifact_id("tool-result-4")
     ));
 }
 
@@ -308,7 +314,7 @@ async fn pre_cancelled_tool_execution_keeps_pending_and_releases_active_permit()
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2]
+        vec![0, 1, 2, 3]
     );
     let projection_before_cancel = runtime.ledger_projection().await;
     assert_eq!(
@@ -325,7 +331,7 @@ async fn pre_cancelled_tool_execution_keeps_pending_and_releases_active_permit()
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 2,
+                sequence: 3,
                 order: 2,
                 kind: LedgerFactKind::ToolCallPending,
             },
@@ -409,7 +415,7 @@ async fn cancelling_during_tool_execution_keeps_pending_and_releases_active_perm
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2]
+        vec![0, 1, 2, 3]
     );
     let projection_before_cancel = runtime.ledger_projection().await;
     assert_eq!(
@@ -426,7 +432,7 @@ async fn cancelling_during_tool_execution_keeps_pending_and_releases_active_perm
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 2,
+                sequence: 3,
                 order: 2,
                 kind: LedgerFactKind::ToolCallPending,
             },
@@ -483,7 +489,7 @@ async fn cancelling_after_successful_tool_execution_keeps_pending_and_releases_a
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2]
+        vec![0, 1, 2, 3]
     );
     let pending_before_cancel = runtime.pending_tool_calls().await;
     assert_eq!(pending_before_cancel.len(), 1);
@@ -502,7 +508,7 @@ async fn cancelling_after_successful_tool_execution_keeps_pending_and_releases_a
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 2,
+                sequence: 3,
                 order: 2,
                 kind: LedgerFactKind::ToolCallPending,
             },

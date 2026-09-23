@@ -54,10 +54,10 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2, 3, 4]
+        vec![0, 1, 2, 3, 4, 5]
     );
     let artifact = assistant_output_artifact(&events);
-    assert_eq!(artifact.id().as_str(), "assistant-output-3");
+    assert_eq!(artifact.id().as_str(), "assistant-output-4");
     assert_eq!(artifact.kind(), &ArtifactKind::Text);
     let evidence = runtime
         .evidence_ref(artifact.id(), EvidenceLocator::whole_artifact())
@@ -80,12 +80,12 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 3,
+                sequence: 4,
                 order: 2,
                 kind: LedgerFactKind::ArtifactRecorded,
             },
             LedgerProjection::Lifecycle {
-                sequence: 4,
+                sequence: 5,
                 order: 3,
                 kind: LedgerFactKind::StepCompleted,
             },
@@ -236,7 +236,7 @@ async fn reserved_assistant_output_external_recording_does_not_block_runtime_own
         ]
     );
     let generated = assistant_output_artifact(&events);
-    assert_eq!(generated.id().as_str(), "assistant-output-2");
+    assert_eq!(generated.id().as_str(), "assistant-output-3");
     let evidence = runtime
         .evidence_ref(generated.id(), EvidenceLocator::whole_artifact())
         .await
@@ -407,14 +407,14 @@ async fn second_provider_step_continues_sequences_and_replays_transcript() {
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2, 3]
+        vec![0, 1, 2, 3, 4]
     );
     assert_eq!(
         second_events
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![4, 5, 6]
+        vec![5, 6, 7, 8]
     );
     assert_eq!(
         event_kind_names(&second_events),
@@ -422,11 +422,11 @@ async fn second_provider_step_continues_sequences_and_replays_transcript() {
     );
     assert_eq!(
         assistant_output_artifact(&first_events).id().as_str(),
-        "assistant-output-2"
+        "assistant-output-3"
     );
     assert_eq!(
         assistant_output_artifact(&second_events).id().as_str(),
-        "assistant-output-5"
+        "assistant-output-7"
     );
 
     let requests = provider.recorded_requests();

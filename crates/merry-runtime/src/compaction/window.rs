@@ -2,6 +2,7 @@ use super::CompactionError;
 use crate::{
     checkpoint::CheckpointRef,
     session::{ModelTurnId, ModelTurnStatus},
+    token_estimate::TokenEstimateScale,
 };
 use merry_core::{ArtifactId, ToolCallId, ToolCallResultStatus};
 use serde::Serialize;
@@ -16,6 +17,7 @@ pub(crate) struct CompactionWindowBudget {
     replacement_fixed_dynamic_body_tokens: u64,
     archive_only_fixed_dynamic_body_tokens: u64,
     checkpoint_output_ceiling_tokens: u64,
+    token_estimate_scale: TokenEstimateScale,
 }
 
 impl CompactionWindowBudget {
@@ -46,6 +48,7 @@ impl CompactionWindowBudget {
             replacement_fixed_dynamic_body_tokens,
             archive_only_fixed_dynamic_body_tokens,
             checkpoint_output_ceiling_tokens,
+            token_estimate_scale: TokenEstimateScale::default(),
         })
     }
 
@@ -56,7 +59,20 @@ impl CompactionWindowBudget {
         Self::new(u64::MAX, u64::MAX, 0, 0, checkpoint_output_ceiling_tokens)
     }
 
-    /// Adds a bounded raw-history target to fixed input and the summary ceiling.
+    /// Applies the primary request calibration to destination-body estimates only.
+    pub(crate) fn with_token_estimate_scale(self, scale: TokenEstimateScale) -> Self {
+        Self {
+            token_estimate_scale: scale,
+            ..self
+        }
+    }
+
+    /// Converts fixed context, checkpoint, and retained history to calibrated tokens.
+    pub(crate) fn estimate_body_tokens(self, base_tokens: u64) -> u64 {
+        self.token_estimate_scale.estimate(base_tokens)
+    }
+
+    /// Adds a bounded history target to calibrated fixed input and summary ceiling.
     /// The hard body budget remains authoritative; arithmetic overflow is rejected.
     pub(crate) fn with_retained_history_target(
         self,
@@ -65,6 +81,7 @@ impl CompactionWindowBudget {
         let preferred_tokens = self
             .replacement_fixed_dynamic_body_tokens
             .checked_add(self.checkpoint_output_ceiling_tokens)
+            .map(|tokens| self.estimate_body_tokens(tokens))
             .and_then(|tokens| tokens.checked_add(retained_history_tokens))
             .ok_or(CompactionError::BudgetOverflow)?;
         Ok(Self {

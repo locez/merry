@@ -118,7 +118,7 @@ mod tests {
 
         let text = String::from_utf8(output).expect("output should be utf-8");
         let lines = text.lines().collect::<Vec<_>>();
-        assert_eq!(lines.len(), 5);
+        assert_eq!(lines.len(), 6);
         let event_types = lines
             .iter()
             .map(|line| {
@@ -132,6 +132,7 @@ mod tests {
             [
                 "session_started",
                 "step_started",
+                "model_output_rate_updated",
                 "assistant_output_delta",
                 "assistant_output_recorded",
                 "step_completed"

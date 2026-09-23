@@ -260,8 +260,12 @@ async fn invalid_bridge_terminal_events_share_one_slot_without_stranding_produce
             .sequence,
         1
     );
+    assert!(matches!(
+        first_stream.next().await.expect("rate reset event").payload,
+        RuntimeJournalPayload::ModelOutputRateUpdated { rate: None }
+    ));
     let pending = first_stream.next().await.expect("pending tool event");
-    assert_eq!(pending.sequence, 2);
+    assert_eq!(pending.sequence, 3);
     assert!(matches!(
         pending.payload,
         RuntimeJournalPayload::ToolCallPending { .. }
@@ -290,6 +294,6 @@ async fn invalid_bridge_terminal_events_share_one_slot_without_stranding_produce
     let second_events = second_stream.collect::<Vec<_>>().await;
     assert_eq!(
         second_events.first().expect("second step event").sequence,
-        5
+        6
     );
 }

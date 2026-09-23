@@ -1,7 +1,7 @@
 //! Runtime event protocol types.
 
 pub use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, PendingToolCall, RuntimeEvent, RuntimeEventSource,
+    ArtifactId, ArtifactKind, ArtifactRef, ModelOutputRate, OutputTimingQuality, OutputTokenSource, PendingToolCall, RuntimeEvent, RuntimeEventSource,
     RuntimeJournalEvent, RuntimeJournalPayload, SubagentStatus, ToolCallId, ToolCallResult,
     ToolCallResultStatus, ToolOutput,
 };

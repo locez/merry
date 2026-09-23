@@ -24,7 +24,7 @@ use super::{
 use crate::{
     CitationCompactionPolicy, CompactionError, CompactionOutcome,
     compaction::{ArchiveOnlyCompactionInput, CompactionPreparation},
-    events::{ActiveStepPermit, RuntimeJournalEventBatch},
+    events::{ActiveStepPermit, RuntimeJournalEventBatch, RuntimeRateUpdateSender},
     step::StepInput,
 };
 use merry_core::{ErrorInfo, ToolSpec};
@@ -72,6 +72,7 @@ pub(in crate::runtime) enum HardWatermarkOutcome {
 pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
     inner: &Arc<RuntimeInner>,
     sender: &mpsc::Sender<RuntimeJournalEventBatch>,
+    rate_sender: &RuntimeRateUpdateSender,
     token: &CancellationToken,
     active_permit: &ActiveStepPermit,
     parts: HardWatermarkCompaction<'_>,
@@ -193,7 +194,7 @@ pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
                     }
                 }
                 CompactionAttempt::Generate(plan) => {
-                    if !send_compaction_started_event(inner, sender, token).await {
+                    if !send_compaction_started_event(inner, sender, rate_sender, token).await {
                         return HardWatermarkOutcome::Aborted;
                     }
                     match generate_and_install_compaction(

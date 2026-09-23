@@ -145,6 +145,8 @@ async fn typed_profile_tool_is_executed_inside_event_only_stream() {
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
     assert_eq!(result.final_output(), Some("order streamed"));
+    assert!(events.iter().any(RuntimeEvent::is_transient));
+    events.retain(|event| !event.is_transient());
     assert_eq!(events, result.events());
 }
 

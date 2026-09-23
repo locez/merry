@@ -167,6 +167,12 @@ wait for Rust to stop provider and tool work, so the returned result is durable.
 The Python async task may be cancelled; the SDK requests Rust cancellation and
 re-raises `asyncio.CancelledError`.
 
+Text deltas and output-rate observations are live-only events: consume them from
+the run stream. `result.events` retains terminal evidence and lifecycle events,
+not these transient updates, so long streamed output does not accumulate a
+second event-by-event copy in the result. Final assistant text remains available
+through `result.final_output` and assistant-message events.
+
 `AgentBuilder` is single-use for `build()` and `resume()`. A native operation
 that has consumed the builder also makes the Python builder terminal, including
 when that operation later fails. Start a new builder to retry that operation.

@@ -2,6 +2,18 @@
 
 use merry_llm::{ModelContent, ModelInputItem, ModelRequest, ModelResponseFormat};
 
+mod calibration;
+
+pub(crate) use calibration::{
+    RequestTokenCalibration, RequestTokenObservation, TokenEstimateScale,
+};
+
+/// Estimates the complete input, including tools and response schemas, before calibration.
+pub(crate) fn estimate_request_input_tokens(request: &ModelRequest) -> u64 {
+    estimate_model_input_tokens(request.input())
+        .saturating_add(estimate_request_contract_tokens(request))
+}
+
 /// Estimates provider-visible tools and response schemas in addition to messages.
 pub(crate) fn estimate_request_contract_tokens(request: &ModelRequest) -> u64 {
     let tools = request
@@ -22,13 +34,13 @@ pub(crate) fn estimate_request_contract_tokens(request: &ModelRequest) -> u64 {
     tools.saturating_add(format)
 }
 
-/// Bytes per token used by every text estimate in the runtime.
+/// Bytes per token used by the deterministic base text estimate.
 ///
-/// Budgets, window fitting, and planning all compare against this one ratio, so
-/// a change here moves all of them together. It is deliberately the optimistic
-/// axis of the estimate, distinct from compaction's accepted-output byte
-/// ceiling ([`crate::compaction`]), which adds slack so a checkpoint that fits
-/// the token budget is not rejected on byte count.
+/// Primary request budgets and destination-history planning apply session-owned
+/// usage calibration on top. Independent compactor requests do not inherit that
+/// model's multiplier. This remains distinct from compaction's accepted-output
+/// byte ceiling ([`crate::compaction`]), which adds slack so a checkpoint that
+/// fits the token budget is not rejected on byte count.
 pub(crate) const BYTES_PER_TOKEN: u64 = 4;
 
 pub(crate) fn estimate_model_input_tokens(input: &[ModelInputItem]) -> u64 {
@@ -36,9 +48,11 @@ pub(crate) fn estimate_model_input_tokens(input: &[ModelInputItem]) -> u64 {
 }
 
 pub(crate) fn estimate_text_tokens(text: &str) -> u64 {
-    u64::try_from(text.len())
-        .expect("usize should fit in u64 on supported targets")
-        .div_ceil(BYTES_PER_TOKEN)
+    estimate_utf8_tokens(u64::try_from(text.len()).unwrap_or(u64::MAX))
+}
+
+pub(crate) const fn estimate_utf8_tokens(bytes: u64) -> u64 {
+    bytes.div_ceil(BYTES_PER_TOKEN)
 }
 
 fn estimate_model_input_item_tokens(item: &ModelInputItem) -> u64 {

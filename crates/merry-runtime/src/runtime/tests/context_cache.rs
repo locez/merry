@@ -175,8 +175,13 @@ async fn soft_watermark_does_not_call_the_compaction_provider() {
 
     let requests = primary.recorded_requests();
     assert_eq!(requests.len(), 1);
-    let budget = request_context_budget(primary.capabilities(), &requests[0], None)
-        .expect("request budget should resolve");
+    let budget = request_context_budget(
+        primary.capabilities(),
+        &requests[0],
+        None,
+        Default::default(),
+    )
+    .expect("request budget should resolve");
     assert_eq!(budget.decision, CheckpointDecision::PlanCheckpoint);
     assert!(
         events

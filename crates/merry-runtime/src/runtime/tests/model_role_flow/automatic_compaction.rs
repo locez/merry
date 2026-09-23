@@ -110,13 +110,13 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
             "StepCompleted"
         ]
     );
-    assert!(matches!(
-        events[2].payload,
+    assert!(events.iter().any(|event| matches!(
+        event.payload,
         RuntimeJournalPayload::CompactionCompleted {
             ref checkpoint_id,
             covered_history_item_count: 2
         } if checkpoint_id.starts_with("checkpoint-auto-compaction-events-")
-    ));
+    )));
     // The output ceiling is the checkpoint text budget plus the reasoning
     // reserve sized from the request input, so it must exceed the text budget
     // while the whole request still fits the primary window.

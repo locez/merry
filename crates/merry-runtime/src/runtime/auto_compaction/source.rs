@@ -64,6 +64,11 @@ pub(super) async fn manual_compaction_budget(
         config.provider().capabilities(),
         &request,
         context_window_override,
+        inner
+            .session
+            .lock()
+            .await
+            .token_estimate_scale(config.provider().name(), &request),
     )?;
     let source = CompactionRequestSource::new(request, &history_ids, 0).map_err(|error| {
         RuntimeError::CompactionModelRequest {

@@ -120,6 +120,10 @@ pub(crate) struct AnthropicMessageStart {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum AnthropicContentBlockStart {
+    RedactedThinking,
+    Thinking {
+        thinking: String,
+    },
     Text {
         text: String,
     },
@@ -135,6 +139,9 @@ pub(crate) enum AnthropicContentBlockStart {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum AnthropicContentBlockDelta {
+    ThinkingDelta {
+        thinking: String,
+    },
     TextDelta {
         text: String,
     },

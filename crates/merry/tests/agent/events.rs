@@ -31,5 +31,7 @@ async fn stream_result_projects_the_same_public_contract() {
 
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
     assert_eq!(result.final_output(), Some("streamed"));
+    assert!(events.iter().any(RuntimeEvent::is_transient));
+    events.retain(|event| !event.is_transient());
     assert_eq!(events, result.events());
 }

@@ -77,7 +77,9 @@ impl InteractiveProducer {
                     let Some(event) = event else {
                         return Some(events);
                     };
-                    events.push(event.clone());
+                    if !event.payload.is_transient() {
+                        events.push(event.clone());
+                    }
                     if !self.project_and_send_runtime_event(&mut projector, event).await
                     {
                         return None;

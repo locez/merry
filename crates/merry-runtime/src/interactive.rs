@@ -14,7 +14,7 @@ mod types;
 use crate::{AgentLoopConfig, Runtime, RuntimeError, StepContext};
 use producer::{InteractiveProducer, InteractiveProducerInput};
 use std::sync::{Arc, atomic::AtomicU64};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 
 pub use self::handles::{
@@ -42,6 +42,7 @@ impl Runtime {
         let subagent_completion_notify = self.subagent_completion_notify();
         let run_id = types::next_interactive_run_id();
         let (message_sender, message_receiver) = mpsc::channel(16);
+        let (rate_sender, rate_receiver) = watch::channel(None);
         let (command_sender, command_receiver) = mpsc::channel(16);
         let (bridge_sender, bridge_receiver) = mpsc::channel(4);
         let bridge_resolution_epoch = Arc::new(AtomicU64::new(0));
@@ -52,6 +53,7 @@ impl Runtime {
             plan_event_receiver,
             subagent_completion_notify,
             message_sender,
+            rate_sender,
             bridge_receiver,
             bridge_resolution_epoch: Arc::clone(&bridge_resolution_epoch),
             loop_token: producer_token,
@@ -65,6 +67,7 @@ impl Runtime {
             InteractiveRunEventStream::new(
                 run_id,
                 ReceiverStream::new(message_receiver),
+                rate_receiver,
                 loop_token,
                 producer_handle,
                 bridge_sender,

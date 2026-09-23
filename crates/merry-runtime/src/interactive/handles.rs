@@ -13,7 +13,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
 use tokio_stream::wrappers::ReceiverStream;
@@ -31,6 +31,9 @@ pub use crate::agent_loop::AgentRunMessage as InteractiveRunMessage;
 /// bindings.
 pub struct InteractiveRunEventStream {
     inner: Option<ReceiverStream<InteractiveRunMessage>>,
+    inner_closed: bool,
+    rate_updates: watch::Receiver<Option<RuntimeEvent>>,
+    rate_updates_closed: bool,
     cancellation_token: CancellationToken,
     producer_handle: Option<JoinHandle<Result<(), InteractiveError>>>,
     bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
@@ -46,6 +49,7 @@ impl InteractiveRunEventStream {
     pub(super) fn new(
         run_id: InteractiveRunId,
         inner: ReceiverStream<InteractiveRunMessage>,
+        rate_updates: watch::Receiver<Option<RuntimeEvent>>,
         cancellation_token: CancellationToken,
         producer_handle: JoinHandle<Result<(), InteractiveError>>,
         bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
@@ -54,6 +58,9 @@ impl InteractiveRunEventStream {
         let observed_bridge_resolution_epoch = bridge_resolution_epoch.load(Ordering::Acquire);
         Self {
             inner: Some(inner),
+            inner_closed: false,
+            rate_updates,
+            rate_updates_closed: false,
             cancellation_token,
             producer_handle: Some(producer_handle),
             bridge_sender,
@@ -106,9 +113,51 @@ impl InteractiveRunEventStream {
             return Some(message);
         }
         use futures_util::StreamExt;
-        match self.inner.as_mut() {
-            Some(inner) => inner.next().await,
-            None => None,
+        loop {
+            if self.inner_closed && self.rate_updates_closed {
+                return None;
+            }
+            if self.inner_closed {
+                match self.rate_updates.changed().await {
+                    Ok(()) => {
+                        if let Some(event) = self.rate_updates.borrow_and_update().clone() {
+                            return Some(InteractiveRunMessage::Event(event));
+                        }
+                    }
+                    Err(_) => self.rate_updates_closed = true,
+                }
+                continue;
+            }
+            let Some(inner) = self.inner.as_mut() else {
+                self.inner_closed = true;
+                continue;
+            };
+            if self.rate_updates_closed {
+                let message = inner.next().await;
+                if message.is_none() {
+                    self.inner_closed = true;
+                }
+                return message;
+            }
+            tokio::select! {
+                biased;
+                message = inner.next() => {
+                    if message.is_none() {
+                        self.inner_closed = true;
+                    }
+                    return message;
+                }
+                changed = self.rate_updates.changed() => {
+                    match changed {
+                        Ok(()) => {
+                            if let Some(event) = self.rate_updates.borrow_and_update().clone() {
+                                return Some(InteractiveRunMessage::Event(event));
+                            }
+                        }
+                        Err(_) => self.rate_updates_closed = true,
+                    }
+                }
+            }
         }
     }
 

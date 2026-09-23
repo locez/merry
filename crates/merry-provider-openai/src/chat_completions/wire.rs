@@ -123,6 +123,8 @@ pub(crate) struct ChatChoice {
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ChatDelta {
     pub(crate) content: Option<String>,
+    pub(crate) reasoning_content: Option<String>,
+    pub(crate) reasoning: Option<String>,
     #[serde(default)]
     pub(crate) tool_calls: Vec<ChatToolCallDelta>,
 }

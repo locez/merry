@@ -437,7 +437,9 @@ async fn automatic_compaction_completed_waits_for_directory_durability() {
     loop {
         let event = events.next().await.expect("compaction should start");
         match event.payload {
-            RuntimeJournalPayload::SessionStarted | RuntimeJournalPayload::StepStarted => {}
+            RuntimeJournalPayload::SessionStarted
+            | RuntimeJournalPayload::StepStarted
+            | RuntimeJournalPayload::ModelOutputRateUpdated { rate: None } => {}
             RuntimeJournalPayload::CompactionStarted => break,
             payload => panic!("unexpected event before compaction starts: {payload:?}"),
         }

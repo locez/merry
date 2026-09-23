@@ -44,7 +44,7 @@ async fn submit_tool_result_records_success_artifact_resolves_pending_and_update
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![3, 4]
+        vec![4, 5]
     );
     assert!(matches!(
         &events[0].payload,
@@ -76,17 +76,17 @@ async fn submit_tool_result_records_success_artifact_resolves_pending_and_update
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 2,
+                sequence: 3,
                 order: 2,
                 kind: LedgerFactKind::ToolCallPending,
             },
             LedgerProjection::Lifecycle {
-                sequence: 3,
+                sequence: 4,
                 order: 3,
                 kind: LedgerFactKind::ArtifactRecorded,
             },
             LedgerProjection::Lifecycle {
-                sequence: 4,
+                sequence: 5,
                 order: 4,
                 kind: LedgerFactKind::ToolCallResolved,
             },
@@ -104,7 +104,7 @@ async fn submit_tool_result_records_success_artifact_resolves_pending_and_update
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![5, 6, 7]
+        vec![6, 7, 8, 9]
     );
 }
 
@@ -240,7 +240,7 @@ async fn artifact_error_while_submitting_tool_result_keeps_call_pending_and_sequ
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![4, 5]
+        vec![5, 6, 7]
     );
 }
 
@@ -346,7 +346,7 @@ async fn blank_text_tool_result_keeps_call_pending_and_sequence_stable() {
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![3, 4]
+        vec![4, 5, 6]
     );
 }
 

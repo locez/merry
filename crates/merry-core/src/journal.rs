@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 
 /// Ordered runtime journal event.
 ///
-/// Journal events are the runtime's durable execution log. They are suitable
-/// for diagnostics, replay inspection, and runtime control, but they are not
-/// the default SDK/UI event stream.
+/// Ordered execution records and live observations. Transient payloads are
+/// delivered to subscribers but excluded from replay and retained run results.
+/// Replaceable telemetry, such as output rate, may be coalesced by a stream
+/// consumer; semantic records retain their ordered delivery contract. This is
+/// not the default SDK/UI event stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeJournalEvent {
@@ -46,6 +48,12 @@ pub enum RuntimeJournalPayload {
     SessionStarted,
     /// A runtime step started.
     StepStarted,
+    /// Transient receive-side output throughput; not prompt or ledger state.
+    /// Consumers should treat this as replaceable telemetry rather than a
+    /// complete history of every intermediate sample.
+    ModelOutputRateUpdated {
+        rate: Option<crate::ModelOutputRate>,
+    },
     /// A model provider attempt started.
     ModelRetryAttemptStarted {
         /// 1-based attempt number.
@@ -202,4 +210,15 @@ pub enum RuntimeJournalPayload {
     Cancelled { diagnostic: ErrorInfo },
     /// The runtime failed.
     Failed { diagnostic: ErrorInfo },
+}
+
+impl RuntimeJournalPayload {
+    /// Whether this live-only observation is excluded from retained execution evidence.
+    #[must_use]
+    pub const fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::ModelOutputRateUpdated { .. } | Self::AssistantOutputDelta { .. }
+        )
+    }
 }

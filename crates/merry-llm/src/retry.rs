@@ -358,6 +358,7 @@ async fn run_retry_stream(
             result = inner.stream_model(request.clone(), context.stream_context()) => result,
         };
 
+        let mut observed_progress = false;
         let error = match setup {
             Ok(mut stream) => {
                 let mut committed = false;
@@ -375,6 +376,7 @@ async fn run_retry_stream(
                     match item {
                         Some(Ok(ModelEvent::Started)) => {}
                         Some(Ok(event)) => {
+                            observed_progress |= matches!(event, ModelEvent::OutputProgress { .. });
                             committed |= commits_output(&event);
                             let completed = matches!(event, ModelEvent::Completed { .. });
                             if !send_stream_item(&sender, &token, Ok(event)).await {
@@ -410,6 +412,18 @@ async fn run_retry_stream(
             let _ = send_stream_item(&sender, &token, Err(error)).await;
             return;
         };
+
+        if observed_progress
+            && !send_stream_item(
+                &sender,
+                &token,
+                Ok(ModelEvent::OutputProgress { progress: None }),
+            )
+            .await
+        {
+            send_cancelled_if_open(&sender);
+            return;
+        }
 
         tokio::select! {
             biased;

@@ -113,6 +113,7 @@ mod input_controls;
 mod layout;
 
 mod output_preview;
+mod output_rate;
 
 mod patch_projection;
 

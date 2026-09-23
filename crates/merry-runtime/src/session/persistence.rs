@@ -62,6 +62,8 @@ struct StoredSessionDocument {
     transcript: PersistedTranscript,
     resolved_tool_calls: Vec<ToolCallId>,
     usage: Option<SessionUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_token_calibration: Option<crate::token_estimate::RequestTokenCalibration>,
     task_anchor: Option<StoredTaskAnchor>,
     registries: StoredRegistries,
     active_plan: Option<PersistedPlanState>,
@@ -320,6 +322,7 @@ impl SessionState {
             transcript: view.transcript.persisted(),
             resolved_tool_calls: view.resolved_tool_calls.iter().cloned().collect(),
             usage: self.usage.clone(),
+            request_token_calibration: self.request_token_calibration.clone(),
             task_anchor: self.task_anchor.as_ref().map(|anchor| StoredTaskAnchor {
                 objective: anchor.objective().to_owned(),
             }),
@@ -416,6 +419,7 @@ impl SessionState {
                 .into_iter()
                 .collect::<BTreeSet<_>>(),
             usage: document.usage,
+            request_token_calibration: document.request_token_calibration,
             trajectory_snapshot: document.trajectory_snapshot,
             external_tool_catalog: document.external_tool_catalog,
         };

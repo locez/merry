@@ -190,12 +190,13 @@ impl SessionState {
                                 &existing_open_archives,
                             )?)
                             .ok_or(CompactionError::BudgetOverflow)?;
-                        let error =
-                            if current_only_tokens >= window_budget.max_dynamic_body_tokens() {
-                                CompactionError::UncompressibleCurrentInput
-                            } else {
-                                CompactionError::MinimumRawTurnCannotFit
-                            };
+                        let error = if window_budget.estimate_body_tokens(current_only_tokens)
+                            >= window_budget.max_dynamic_body_tokens()
+                        {
+                            CompactionError::UncompressibleCurrentInput
+                        } else {
+                            CompactionError::MinimumRawTurnCannotFit
+                        };
                         last_failure = Some(error);
                     } else if last_failure.is_none() {
                         last_failure = Some(CompactionError::NoWindowFitsCompactionRequest);
@@ -217,7 +218,9 @@ impl SessionState {
                         .archive_only_fixed_dynamic_body_tokens()
                         .checked_add(projected_turn_tokens(open_turns, &existing_open_archives)?)
                         .ok_or(CompactionError::BudgetOverflow)?;
-                    if current_only_tokens >= window_budget.max_dynamic_body_tokens() {
+                    if window_budget.estimate_body_tokens(current_only_tokens)
+                        >= window_budget.max_dynamic_body_tokens()
+                    {
                         return Err(CompactionError::UncompressibleCurrentInput.into());
                     }
                 }
@@ -295,7 +298,7 @@ fn plan_retained_window(
             base_tokens,
             raw_turns,
             archived_tool_call_ids,
-            window_budget.max_dynamic_body_tokens(),
+            window_budget,
         )
     };
 
@@ -416,12 +419,12 @@ pub(super) fn retained_projection_fits(
     base_tokens: u64,
     raw_turns: &[ModelTurnHistory<'_>],
     archived_tool_call_ids: &BTreeSet<ToolCallId>,
-    max_dynamic_body_tokens: u64,
+    window_budget: CompactionWindowBudget,
 ) -> Result<bool, RuntimeError> {
-    Ok(base_tokens
+    let base_tokens = base_tokens
         .checked_add(projected_turn_tokens(raw_turns, archived_tool_call_ids)?)
-        .ok_or(CompactionError::BudgetOverflow)?
-        < max_dynamic_body_tokens)
+        .ok_or(CompactionError::BudgetOverflow)?;
+    Ok(window_budget.estimate_body_tokens(base_tokens) < window_budget.max_dynamic_body_tokens())
 }
 
 pub(super) fn compaction_window_plan(

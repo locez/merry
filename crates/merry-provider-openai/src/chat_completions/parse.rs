@@ -2,10 +2,11 @@ use super::wire::{ChatChunk, ChatUsage};
 use crate::OpenAiProviderError;
 use merry_core::ToolName;
 use merry_llm::{
-    FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
-    ToolArguments, Usage,
+    FinishReason, ModelEvent, ModelOutput, ModelOutputProgress, ModelResponse, ModelToolCall,
+    ModelToolCallId, OutputProgressTracker, StreamOutputKind, ToolArguments, Usage,
 };
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 pub(crate) struct ChatStreamParser {
     aggregate_text: String,
@@ -14,6 +15,7 @@ pub(crate) struct ChatStreamParser {
     finish_reason: Option<FinishReason>,
     usage: Option<Usage>,
     completed: bool,
+    output: OutputProgressTracker,
 }
 
 impl ChatStreamParser {
@@ -25,12 +27,26 @@ impl ChatStreamParser {
             finish_reason: None,
             usage: None,
             completed: false,
+            output: OutputProgressTracker::default(),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn parse_sse_line(
         &mut self,
         raw_line: &str,
+    ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
+        self.parse_sse_line_at(raw_line, Instant::now())
+    }
+
+    pub(crate) fn output_progress(&self) -> Option<ModelOutputProgress> {
+        self.output.snapshot()
+    }
+
+    pub(crate) fn parse_sse_line_at(
+        &mut self,
+        raw_line: &str,
+        received_at: Instant,
     ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
         let line = raw_line.trim_end_matches(['\r', '\n']);
         if line.is_empty() || line.starts_with(':') {
@@ -65,7 +81,7 @@ impl ChatStreamParser {
                 "failed to parse Chat Completions stream chunk: {error}"
             ))
         })?;
-        self.parse_chunk(chunk)
+        self.parse_chunk(chunk, received_at)
     }
 
     pub(crate) fn finish(&self) -> Result<(), OpenAiProviderError> {
@@ -78,7 +94,11 @@ impl ChatStreamParser {
         }
     }
 
-    fn parse_chunk(&mut self, chunk: ChatChunk) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
+    fn parse_chunk(
+        &mut self,
+        chunk: ChatChunk,
+        received_at: Instant,
+    ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
         if chunk.choices.len() > 1 {
             return Err(OpenAiProviderError::protocol(
                 "Chat Completions stream returned multiple choices",
@@ -98,13 +118,34 @@ impl ChatStreamParser {
         }
 
         let mut events = Vec::new();
+        if let Some(reasoning) = choice
+            .delta
+            .reasoning_content
+            .as_deref()
+            .filter(|text| !text.is_empty())
+            .or(choice.delta.reasoning.as_deref())
+        {
+            self.output
+                .observe(StreamOutputKind::Reasoning, reasoning, received_at);
+        }
         if let Some(content) = choice.delta.content
             && !content.is_empty()
         {
+            self.output
+                .observe(StreamOutputKind::Content, &content, received_at);
             self.aggregate_text.push_str(&content);
             events.push(ModelEvent::OutputTextDelta { delta: content });
         }
         for delta in choice.delta.tool_calls {
+            if let Some(function) = delta.function.as_ref() {
+                for fragment in [function.name.as_deref(), function.arguments.as_deref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    self.output
+                        .observe(StreamOutputKind::Content, fragment, received_at);
+                }
+            }
             self.tool_buffers
                 .entry(delta.index)
                 .or_default()

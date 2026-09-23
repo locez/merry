@@ -185,7 +185,7 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2]
+        vec![0, 1, 2, 3]
     );
     let pending = pending_tool_call(&pending_events).clone();
     let reserved_artifact = ArtifactRef::new(artifact_id("tool-result-4"), ArtifactKind::Text);
@@ -231,7 +231,7 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![3, 4]
+        vec![4, 5]
     );
     let result = resolved_tool_result(&execution_events);
     assert!(matches!(
@@ -243,7 +243,7 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
         RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
-    assert_eq!(result.artifact().id().as_str(), "tool-result-3");
+    assert_eq!(result.artifact().id().as_str(), "tool-result-4");
     assert_eq!(result.artifact().kind(), &ArtifactKind::Text);
     assert_eq!(result.call_id(), pending.id());
     let evidence = runtime
@@ -267,17 +267,17 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 2,
+                sequence: 3,
                 order: 2,
                 kind: LedgerFactKind::ToolCallPending,
             },
             LedgerProjection::Lifecycle {
-                sequence: 3,
+                sequence: 4,
                 order: 3,
                 kind: LedgerFactKind::ArtifactRecorded,
             },
             LedgerProjection::Lifecycle {
-                sequence: 4,
+                sequence: 5,
                 order: 4,
                 kind: LedgerFactKind::ToolCallResolved,
             },
@@ -294,7 +294,7 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![5, 6, 7]
+        vec![6, 7, 8, 9]
     );
 
     let requests = provider.recorded_requests();
@@ -370,7 +370,7 @@ async fn reading_catalog_skill_file_emits_skill_used_event() {
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![3, 4, 5]
+        vec![4, 5, 6]
     );
     let result = resolved_tool_result(&execution_events);
     assert!(matches!(
@@ -406,7 +406,7 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2]
+        vec![0, 1, 2, 3]
     );
     let pending = pending_tool_call(&pending_events).clone();
 
@@ -424,7 +424,7 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![3, 4]
+        vec![4, 5]
     );
     assert!(
         execution_events
@@ -442,7 +442,7 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
         RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
     assert_eq!(result.status(), ToolCallResultStatus::Failed);
-    assert_eq!(result.artifact().id().as_str(), "tool-result-3");
+    assert_eq!(result.artifact().id().as_str(), "tool-result-4");
     assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
     assert_eq!(result.call_id(), pending.id());
     assert_eq!(
@@ -473,17 +473,17 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 2,
+                sequence: 3,
                 order: 2,
                 kind: LedgerFactKind::ToolCallPending,
             },
             LedgerProjection::Lifecycle {
-                sequence: 3,
+                sequence: 4,
                 order: 3,
                 kind: LedgerFactKind::ArtifactRecorded,
             },
             LedgerProjection::Lifecycle {
-                sequence: 4,
+                sequence: 5,
                 order: 4,
                 kind: LedgerFactKind::ToolCallResolved,
             },

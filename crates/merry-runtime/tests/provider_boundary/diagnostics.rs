@@ -107,7 +107,7 @@ async fn t6_failure_evidence_links_journal_artifact_ledger_and_trajectory() {
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![3, 4]
+        vec![4, 5]
     );
     assert!(matches!(
         &events[0].payload,
@@ -148,17 +148,17 @@ async fn t6_failure_evidence_links_journal_artifact_ledger_and_trajectory() {
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 2,
+                sequence: 3,
                 order: 2,
                 kind: LedgerFactKind::ToolCallPending,
             },
             LedgerProjection::Lifecycle {
-                sequence: 3,
+                sequence: 4,
                 order: 3,
                 kind: LedgerFactKind::ArtifactRecorded,
             },
             LedgerProjection::Lifecycle {
-                sequence: 4,
+                sequence: 5,
                 order: 4,
                 kind: LedgerFactKind::ToolCallResolved,
             },

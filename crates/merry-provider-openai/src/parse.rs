@@ -10,12 +10,14 @@ use crate::{
 };
 use merry_core::ToolName;
 use merry_llm::{
-    FinishDetail, FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall,
-    ModelToolCallId, ProviderErrorKind, ToolArguments, Usage,
+    FinishDetail, FinishReason, ModelEvent, ModelOutput, ModelOutputProgress, ModelResponse,
+    ModelToolCall, ModelToolCallId, OutputProgressTracker, ProviderErrorKind, StreamOutputKind,
+    ToolArguments, Usage,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 const OPENAI_COMPATIBLE_HEARTBEAT_EVENT: &str = "ping";
 
@@ -61,6 +63,7 @@ pub(crate) struct ResponsesStreamParser {
     tool_call_buffers: BTreeMap<u64, StreamToolCallBuffer>,
     tool_calls: Vec<ModelToolCall>,
     completed: bool,
+    output: OutputProgressTracker,
 }
 
 impl ResponsesStreamParser {
@@ -70,12 +73,25 @@ impl ResponsesStreamParser {
             tool_call_buffers: BTreeMap::new(),
             tool_calls: Vec::new(),
             completed: false,
+            output: OutputProgressTracker::default(),
         }
     }
 
     pub(crate) fn parse_sse_line(
         &mut self,
         raw_line: &str,
+    ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
+        self.parse_sse_line_at(raw_line, Instant::now())
+    }
+
+    pub(crate) fn output_progress(&self) -> Option<ModelOutputProgress> {
+        self.output.snapshot()
+    }
+
+    pub(crate) fn parse_sse_line_at(
+        &mut self,
+        raw_line: &str,
+        received_at: Instant,
     ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
         let line = raw_line.trim_end_matches(['\r', '\n']);
         if line.is_empty() || line.starts_with(':') {
@@ -142,7 +158,7 @@ impl ResponsesStreamParser {
             ))
         })?;
 
-        let result = self.parse_event(event);
+        let result = self.parse_event(event, received_at);
         tracing::debug!(
             event_type = metadata.event_type.unwrap_or("<missing-or-invalid>"),
             sequence_number = ?metadata.sequence_number,
@@ -169,25 +185,40 @@ impl ResponsesStreamParser {
     fn parse_event(
         &mut self,
         event: ResponsesStreamEvent,
+        received_at: Instant,
     ) -> Result<Vec<ModelEvent>, OpenAiProviderError> {
         match event {
             ResponsesStreamEvent::Created | ResponsesStreamEvent::Other => Ok(Vec::new()),
+            ResponsesStreamEvent::ReasoningTextDelta { delta } => {
+                self.output
+                    .observe(StreamOutputKind::Reasoning, &delta, received_at);
+                Ok(Vec::new())
+            }
+            ResponsesStreamEvent::ReasoningSummaryTextDelta { delta } => {
+                self.output
+                    .observe(StreamOutputKind::ReasoningSummary, &delta, received_at);
+                Ok(Vec::new())
+            }
             ResponsesStreamEvent::OutputTextDelta { delta } => {
                 if delta.is_empty() {
                     return Ok(Vec::new());
                 }
 
+                self.output
+                    .observe(StreamOutputKind::Content, &delta, received_at);
                 self.aggregate_text.push_str(&delta);
                 Ok(vec![ModelEvent::OutputTextDelta { delta }])
             }
             ResponsesStreamEvent::OutputItemAdded { output_index, item } => {
-                self.merge_output_item(output_index, item)?;
+                self.merge_output_item(output_index, item, received_at)?;
                 Ok(Vec::new())
             }
             ResponsesStreamEvent::FunctionCallArgumentsDelta {
                 output_index,
                 delta,
             } => {
+                self.output
+                    .observe(StreamOutputKind::Content, &delta, received_at);
                 self.tool_call_buffers
                     .entry(output_index)
                     .or_default()
@@ -199,16 +230,19 @@ impl ResponsesStreamParser {
                 output_index,
                 arguments,
             } => {
-                self.tool_call_buffers
-                    .entry(output_index)
-                    .or_default()
-                    .set_arguments(arguments)?;
+                let buffer = self.tool_call_buffers.entry(output_index).or_default();
+                let unseen = buffer.arguments.is_empty();
+                buffer.set_arguments(arguments)?;
+                if unseen {
+                    self.output
+                        .observe(StreamOutputKind::Content, &buffer.arguments, received_at);
+                }
                 Ok(Vec::new())
             }
             ResponsesStreamEvent::OutputItemDone { output_index, item } => match item {
                 ResponsesStreamOutputItem::Other => Ok(Vec::new()),
                 item @ ResponsesStreamOutputItem::FunctionCall { .. } => {
-                    self.merge_output_item(output_index, item)?;
+                    self.merge_output_item(output_index, item, received_at)?;
                     let buffer = self
                         .tool_call_buffers
                         .remove(&output_index)
@@ -264,17 +298,28 @@ impl ResponsesStreamParser {
         &mut self,
         output_index: u64,
         item: ResponsesStreamOutputItem,
+        received_at: Instant,
     ) -> Result<(), OpenAiProviderError> {
         match item {
             ResponsesStreamOutputItem::FunctionCall {
                 call_id,
                 name,
                 arguments,
-            } => self
-                .tool_call_buffers
-                .entry(output_index)
-                .or_default()
-                .merge(call_id, name, arguments),
+            } => {
+                let buffer = self.tool_call_buffers.entry(output_index).or_default();
+                let unseen_name = buffer.name.is_none();
+                let unseen_arguments = buffer.arguments.is_empty();
+                buffer.merge(call_id, name, arguments)?;
+                if unseen_name && let Some(name) = buffer.name.as_deref() {
+                    self.output
+                        .observe(StreamOutputKind::Content, name, received_at);
+                }
+                if unseen_arguments {
+                    self.output
+                        .observe(StreamOutputKind::Content, &buffer.arguments, received_at);
+                }
+                Ok(())
+            }
             ResponsesStreamOutputItem::Other => Ok(()),
         }
     }

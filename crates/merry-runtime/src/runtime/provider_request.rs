@@ -8,7 +8,7 @@ use crate::{
     resolve_context_window,
     session::{SessionState, TranscriptItemSnapshot},
     step::{StepInput, StepModelRequestParts, compile_step_model_request},
-    token_estimate::estimate_model_input_tokens,
+    token_estimate::{TokenEstimateScale, estimate_model_input_tokens},
 };
 use merry_core::{CompactionUsageWindow, ErrorInfo, UsageContextWindow};
 use merry_llm::{GenerationConfig, ModelError, ModelName};
@@ -248,6 +248,7 @@ pub(super) struct RequestContextBudget {
     pub(super) policy: ContextBudgetPolicy,
     pub(super) budget: ContextBudget,
     pub(super) dynamic_body_estimated_tokens: u64,
+    pub(super) token_estimate_scale: TokenEstimateScale,
     pub(super) decision: CheckpointDecision,
 }
 
@@ -294,6 +295,7 @@ pub(super) fn request_context_budget(
     capabilities: &merry_llm::ModelCapabilities,
     request: &merry_llm::ModelRequest,
     context_window_override: Option<u64>,
+    token_estimate_scale: TokenEstimateScale,
 ) -> Result<RequestContextBudget, crate::ContextError> {
     let window = resolve_request_context_window(capabilities, context_window_override)?;
     let output_reserve_tokens = request
@@ -309,11 +311,12 @@ pub(super) fn request_context_budget(
     let budget = ContextBudget::from_window(
         window.tokens(),
         DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
-        stable_prefix_estimated_tokens,
+        token_estimate_scale.estimate(stable_prefix_estimated_tokens),
         output_reserve_tokens,
         policy,
     )?;
-    let dynamic_body_estimated_tokens = estimate_model_input_tokens(request.dynamic_input());
+    let dynamic_body_estimated_tokens =
+        token_estimate_scale.estimate(estimate_model_input_tokens(request.dynamic_input()));
     let decision = decide_checkpoint(dynamic_body_estimated_tokens, budget);
 
     Ok(RequestContextBudget {
@@ -321,6 +324,7 @@ pub(super) fn request_context_budget(
         policy,
         budget,
         dynamic_body_estimated_tokens,
+        token_estimate_scale,
         decision,
     })
 }

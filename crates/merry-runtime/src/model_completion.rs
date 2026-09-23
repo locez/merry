@@ -105,7 +105,11 @@ pub(crate) async fn complete_single_text(
         };
 
         match item {
-            Some(Ok(ModelEvent::Started | ModelEvent::OutputTextDelta { .. })) => {}
+            Some(Ok(
+                ModelEvent::Started
+                | ModelEvent::OutputTextDelta { .. }
+                | ModelEvent::OutputProgress { .. },
+            )) => {}
             Some(Ok(ModelEvent::ToolCallRequested { .. })) => {
                 return Err(ModelCompletionError::ToolCallRequested);
             }

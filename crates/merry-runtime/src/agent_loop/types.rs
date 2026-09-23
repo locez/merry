@@ -57,7 +57,7 @@ impl AgentLoopResult {
         &self.status
     }
 
-    /// Runtime events collected in emission order.
+    /// Retained execution evidence in emission order, excluding live text deltas and rate samples.
     #[must_use]
     pub fn events(&self) -> &[RuntimeJournalEvent] {
         &self.events
@@ -87,7 +87,7 @@ impl AgentLoopResult {
         self.session_usage.as_ref()
     }
 
-    /// Consumes the result and returns the collected events.
+    /// Consumes the result and returns retained evidence, excluding transient observations.
     #[must_use]
     pub fn into_events(self) -> Vec<RuntimeJournalEvent> {
         self.events
@@ -160,7 +160,7 @@ impl AgentLoopError {
         }
     }
 
-    /// Runtime events collected before the method error.
+    /// Retained evidence before the method error, excluding live deltas and rate samples.
     #[must_use]
     pub fn events(&self) -> &[RuntimeJournalEvent] {
         &self.events

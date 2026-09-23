@@ -35,7 +35,7 @@ async fn provider_stream_error_emits_failed_without_step_completed() {
     let projection = runtime.ledger_projection().await;
     assert!(projection.entries().contains(&LedgerProjection::Lifecycle {
         sequence: failed_sequence,
-        order: failed_sequence,
+        order: 2,
         kind: LedgerFactKind::Failed
     }));
 }

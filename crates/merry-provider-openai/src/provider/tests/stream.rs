@@ -177,6 +177,15 @@ fn stream_state_emits_completed_from_final_usage_line_without_trailing_newline()
         .expect("text delta should parse");
     assert_eq!(
         events.pop_pending(),
+        Some(ModelEvent::OutputProgress {
+            progress: Some(merry_llm::ModelOutputProgress::new(
+                4,
+                std::time::Duration::ZERO
+            )),
+        })
+    );
+    assert_eq!(
+        events.pop_pending(),
         Some(ModelEvent::OutputTextDelta {
             delta: "Done".to_owned()
         })
@@ -210,6 +219,15 @@ fn eof_finalization_returns_completed_from_final_usage_line_without_trailing_new
     events
         .parse_bytes(b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Done\"}\n")
         .expect("text delta should parse");
+    assert_eq!(
+        events.pop_pending(),
+        Some(ModelEvent::OutputProgress {
+            progress: Some(merry_llm::ModelOutputProgress::new(
+                4,
+                std::time::Duration::ZERO
+            )),
+        })
+    );
     assert_eq!(
         events.pop_pending(),
         Some(ModelEvent::OutputTextDelta {

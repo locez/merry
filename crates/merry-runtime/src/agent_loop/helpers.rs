@@ -43,7 +43,10 @@ pub(crate) fn trace_loop_error(session_id: &str, model_turns_run: usize, source:
 pub(crate) async fn collect_step_events(
     stream: RuntimeJournalEventStream,
 ) -> Vec<RuntimeJournalEvent> {
-    stream.collect().await
+    stream
+        .filter(|event| std::future::ready(!event.payload.is_transient()))
+        .collect()
+        .await
 }
 
 pub(crate) async fn final_assistant_output_from_step(
@@ -128,9 +131,12 @@ pub(crate) async fn publish_journal_event(
     events: &mut Vec<RuntimeJournalEvent>,
     event: RuntimeJournalEvent,
 ) -> Result<(), RuntimeError> {
-    let projected = projector.project(event.clone(), runtime).await?;
+    let retained = (!event.payload.is_transient()).then(|| event.clone());
+    let projected = projector.project(event, runtime).await?;
 
-    events.push(event);
+    if let Some(event) = retained {
+        events.push(event);
+    }
 
     if let Some(projected) = projected
         && sender

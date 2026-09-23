@@ -159,6 +159,12 @@ async fn dropping_text_stream_while_savepoint_is_blocked_keeps_terminal_batch_co
         0
     );
     assert_eq!(stream.next().await.expect("step start event").sequence, 1);
+    let reset = stream.next().await.expect("rate reset event");
+    assert_eq!(reset.sequence, 2);
+    assert!(matches!(
+        reset.payload,
+        RuntimeJournalPayload::ModelOutputRateUpdated { rate: None }
+    ));
     let session = loop {
         let session = runtime.inner.session.lock().await;
         let assistant_recorded = session
@@ -180,21 +186,21 @@ async fn dropping_text_stream_while_savepoint_is_blocked_keeps_terminal_batch_co
     };
 
     let assistant = stream.next().await.expect("assistant output event");
-    assert_eq!(assistant.sequence, 2);
+    assert_eq!(assistant.sequence, 3);
     assert!(matches!(
         assistant.payload,
         RuntimeJournalPayload::AssistantOutputRecorded { .. }
     ));
     assert_eq!(
         session.next_sequence(),
-        4,
+        5,
         "StepCompleted must commit before the terminal batch becomes observable"
     );
     assert!(session.ledger_projection().entries().iter().any(|entry| {
         matches!(
             entry,
             LedgerProjection::Lifecycle {
-                sequence: 3,
+                sequence: 4,
                 kind: LedgerFactKind::StepCompleted,
                 ..
             }
@@ -202,7 +208,7 @@ async fn dropping_text_stream_while_savepoint_is_blocked_keeps_terminal_batch_co
     }));
 
     drop(stream);
-    assert_eq!(session.next_sequence(), 4);
+    assert_eq!(session.next_sequence(), 5);
     assert_eq!(
         session.model_turn_status(ModelTurnId::new(1)),
         Some(ModelTurnStatus::Completed)
@@ -242,6 +248,10 @@ async fn terminal_journal_batch_waits_for_resume_savepoint_before_delivery() {
         events.next().await.expect("step start event").payload,
         RuntimeJournalPayload::StepStarted
     ));
+    assert!(matches!(
+        events.next().await.expect("rate reset event").payload,
+        RuntimeJournalPayload::ModelOutputRateUpdated { rate: None }
+    ));
 
     tokio::select! {
         biased;
@@ -271,9 +281,9 @@ async fn terminal_journal_batch_waits_for_resume_savepoint_before_delivery() {
         .trajectory_snapshot()
         .await
         .expect("trajectory snapshot reads");
-    assert_eq!(snapshot.latest_sequence(), 2);
+    assert_eq!(snapshot.latest_sequence(), 3);
     assert!(snapshot.records().iter().any(|record| {
-        record.start_sequence() == 2
+        record.start_sequence() == 3
             && record.status() == merry_core::TrajectoryRecordStatus::Succeeded
     }));
 }

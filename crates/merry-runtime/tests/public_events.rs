@@ -91,6 +91,13 @@ async fn collect_journal_stream(runtime: &Runtime, text: &str) -> Vec<RuntimeJou
         .await
 }
 
+fn without_rate_updates(events: &[RuntimeEvent]) -> Vec<&RuntimeEvent> {
+    events
+        .iter()
+        .filter(|event| !matches!(event, RuntimeEvent::ModelOutputRateUpdated { .. }))
+        .collect()
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn assistant_output_projects_to_public_assistant_message() {
     let provider = FakeModelProvider::new(vec![Ok(completed_text_event("hello public event"))]);
@@ -100,21 +107,26 @@ async fn assistant_output_projects_to_public_assistant_message() {
         .expect("runtime should build");
 
     let events = collect_public_stream(&runtime, "Say hello.").await;
+    let durable = without_rate_updates(&events);
 
-    assert!(matches!(events[0], RuntimeEvent::SessionStarted { .. }));
-    assert!(matches!(events[1], RuntimeEvent::StepStarted { .. }));
+    assert!(matches!(durable[0], RuntimeEvent::SessionStarted { .. }));
+    assert!(matches!(durable[1], RuntimeEvent::StepStarted { .. }));
     let RuntimeEvent::AssistantMessage {
         text,
         artifact,
         source,
-    } = &events[2]
+    } = durable[2]
     else {
-        panic!("expected assistant message, got {:?}", events[2]);
+        panic!("expected assistant message, got {:?}", durable[2]);
     };
     assert_eq!(text, "hello public event");
     assert_eq!(artifact.kind(), &ArtifactKind::Text);
-    assert_eq!(source.sequence, 2);
-    assert!(matches!(events[3], RuntimeEvent::StepCompleted { .. }));
+    assert_eq!(source.sequence, 3);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ModelOutputRateUpdated { rate: None, .. }
+    )));
+    assert!(matches!(durable[3], RuntimeEvent::StepCompleted { .. }));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -134,25 +146,26 @@ async fn streamed_text_delta_projects_to_public_assistant_message_delta() {
         .expect("runtime should build");
 
     let events = collect_public_stream(&runtime, "Say hello.").await;
+    let durable = without_rate_updates(&events);
 
-    assert!(matches!(events[0], RuntimeEvent::SessionStarted { .. }));
-    assert!(matches!(events[1], RuntimeEvent::StepStarted { .. }));
+    assert!(matches!(durable[0], RuntimeEvent::SessionStarted { .. }));
+    assert!(matches!(durable[1], RuntimeEvent::StepStarted { .. }));
     assert!(matches!(
-        &events[2],
+        durable[2],
         RuntimeEvent::AssistantMessageDelta { delta, source }
-            if delta == "hel" && source.sequence == 2
+            if delta == "hel" && source.sequence == 3
     ));
     assert!(matches!(
-        &events[3],
+        durable[3],
         RuntimeEvent::AssistantMessageDelta { delta, source }
-            if delta == "lo" && source.sequence == 3
+            if delta == "lo" && source.sequence == 4
     ));
     assert!(matches!(
-        &events[4],
+        durable[4],
         RuntimeEvent::AssistantMessage { text, source, .. }
-            if text == "hello" && source.sequence == 4
+            if text == "hello" && source.sequence == 5
     ));
-    assert!(matches!(events[5], RuntimeEvent::StepCompleted { .. }));
+    assert!(matches!(durable[5], RuntimeEvent::StepCompleted { .. }));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -168,13 +181,14 @@ async fn usage_update_projects_to_public_stream_and_getter() {
 
     assert_eq!(runtime.usage().await, None);
     let events = collect_public_stream(&runtime, "Say hello.").await;
+    let durable = without_rate_updates(&events);
 
-    assert!(matches!(events[0], RuntimeEvent::SessionStarted { .. }));
-    assert!(matches!(events[1], RuntimeEvent::StepStarted { .. }));
-    let RuntimeEvent::UsageUpdated { usage, source } = &events[2] else {
-        panic!("expected usage update, got {:?}", events[2]);
+    assert!(matches!(durable[0], RuntimeEvent::SessionStarted { .. }));
+    assert!(matches!(durable[1], RuntimeEvent::StepStarted { .. }));
+    let RuntimeEvent::UsageUpdated { usage, source } = durable[2] else {
+        panic!("expected usage update, got {:?}", durable[2]);
     };
-    assert_eq!(source.sequence, 2);
+    assert_eq!(source.sequence, 3);
     assert_eq!(
         usage.last,
         ModelUsage::with_details(12, Some(8), 5, None, 17)
@@ -182,8 +196,8 @@ async fn usage_update_projects_to_public_stream_and_getter() {
     assert_eq!(usage.total, usage.last);
     assert!(usage.context.is_some());
     assert!(usage.compaction.is_some());
-    assert!(matches!(events[3], RuntimeEvent::AssistantMessage { .. }));
-    assert!(matches!(events[4], RuntimeEvent::StepCompleted { .. }));
+    assert!(matches!(durable[3], RuntimeEvent::AssistantMessage { .. }));
+    assert!(matches!(durable[4], RuntimeEvent::StepCompleted { .. }));
     assert_eq!(runtime.usage().await, Some(usage.clone()));
 }
 
@@ -326,20 +340,34 @@ async fn one_slot_commentary_tool_batch_projects_in_order_after_atomic_state_com
         events.next().await.expect("step started"),
         RuntimeEvent::StepStarted { .. }
     ));
+    let commentary = loop {
+        let event = events.next().await.expect("assistant commentary");
+        if matches!(event, RuntimeEvent::ModelOutputRateUpdated { .. }) {
+            continue;
+        }
+        break event;
+    };
     assert!(matches!(
-        events.next().await.expect("assistant commentary"),
+        commentary,
         RuntimeEvent::AssistantMessage { text, source, .. }
-            if text == "Public commentary before tool." && source.sequence == 2
+            if text == "Public commentary before tool." && source.sequence == 3
     ));
     assert_eq!(
         runtime.pending_tool_calls().await.len(),
         1,
         "tool state must already be committed when commentary is visible"
     );
+    let tool_started = loop {
+        let event = events.next().await.expect("tool started");
+        if matches!(event, RuntimeEvent::ModelOutputRateUpdated { .. }) {
+            continue;
+        }
+        break event;
+    };
     assert!(matches!(
-        events.next().await.expect("tool started"),
+        tool_started,
         RuntimeEvent::ToolCallStarted { call, source }
-            if call.id().as_str() == "call-public-commentary-tool" && source.sequence == 3
+            if call.id().as_str() == "call-public-commentary-tool" && source.sequence == 4
     ));
 }
 
@@ -386,8 +414,8 @@ async fn stream_and_journal_stream_are_separate_surfaces() {
 
     let journal_events = collect_journal_stream(&runtime, "Raw journal.").await;
 
-    assert!(matches!(
-        journal_events[2].payload,
+    assert!(journal_events.iter().any(|event| matches!(
+        event.payload,
         RuntimeJournalPayload::AssistantOutputRecorded { .. }
-    ));
+    )));
 }

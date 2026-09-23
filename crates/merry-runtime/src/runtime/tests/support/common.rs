@@ -209,6 +209,12 @@ pub(in crate::runtime::tests) fn event_kind_names(
 ) -> Vec<&'static str> {
     events
         .iter()
+        .filter(|event| {
+            !matches!(
+                event.payload,
+                RuntimeJournalPayload::ModelOutputRateUpdated { .. }
+            )
+        })
         .map(|event| match event.payload {
             RuntimeJournalPayload::SessionStarted => "SessionStarted",
             RuntimeJournalPayload::StepStarted => "StepStarted",

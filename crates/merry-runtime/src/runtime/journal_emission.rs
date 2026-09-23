@@ -8,6 +8,7 @@ use merry_core::{
     CompactionUsageWindow, ErrorInfo, ModelUsage, PendingToolCall, RuntimeJournalEvent,
     RuntimeJournalPayload, ToolCallResultStatus, UsageContextWindow,
 };
+use tokio::sync::watch;
 use tokio::sync::{mpsc, mpsc::Permit};
 use tokio_util::sync::CancellationToken;
 
@@ -80,7 +81,7 @@ pub(super) async fn send_assistant_text_output_delta_event(
         session.record_transient_event(RuntimeJournalPayload::AssistantOutputDelta { delta })
     };
 
-    inner.emit_journal_batch(permit, event.into());
+    inner.emit_journal_batch(permit, event.clone().into());
     true
 }
 
@@ -194,6 +195,7 @@ pub(super) async fn send_model_usage_updated_event(
     model_usage: ModelUsage,
     context: Option<UsageContextWindow>,
     compaction: Option<CompactionUsageWindow>,
+    observation: Option<crate::token_estimate::RequestTokenObservation>,
 ) -> Result<bool, ErrorInfo> {
     if token.is_cancelled() {
         return Ok(false);
@@ -208,16 +210,62 @@ pub(super) async fn send_model_usage_updated_event(
         if token.is_cancelled() {
             return Ok(false);
         }
-        session.record_model_usage(model_usage, context, compaction)?
+        let event = session.record_model_usage(model_usage, context, compaction)?;
+        if let Some(observation) = observation {
+            session.calibrate_request_tokens(observation, model_usage);
+        }
+        event
     };
 
-    inner.emit_journal_batch(permit, event.into());
+    inner.emit_journal_batch(permit, event.clone().into());
     Ok(true)
+}
+
+/// Whether contention may discard an intermediate sample or must preserve a boundary.
+pub(super) enum RateEventDelivery {
+    Replaceable,
+    Boundary,
+}
+
+/// Sends a boundary or best-effort sample through the latest-only rate channel;
+/// false means cancellation or receiver closure. Intermediate replaceable
+/// samples never wait behind the semantic event queue.
+pub(super) async fn send_model_output_rate_event(
+    inner: &RuntimeInner,
+    rate_sender: &watch::Sender<Option<RuntimeJournalEvent>>,
+    token: &CancellationToken,
+    rate: Option<merry_core::ModelOutputRate>,
+    delivery: RateEventDelivery,
+) -> bool {
+    if token.is_cancelled() {
+        return false;
+    }
+    if rate_sender.is_closed() {
+        return matches!(delivery, RateEventDelivery::Replaceable);
+    }
+    let event = {
+        let mut session = match delivery {
+            RateEventDelivery::Replaceable => {
+                let Ok(session) = inner.session.try_lock() else {
+                    return true;
+                };
+                session
+            }
+            RateEventDelivery::Boundary => inner.session.lock().await,
+        };
+        if token.is_cancelled() {
+            return false;
+        }
+        session.record_transient_event(RuntimeJournalPayload::ModelOutputRateUpdated { rate })
+    };
+    rate_sender.send_replace(Some(event));
+    true
 }
 
 pub(super) async fn send_compaction_started_event(
     inner: &RuntimeInner,
     sender: &mpsc::Sender<RuntimeJournalEventBatch>,
+    rate_sender: &watch::Sender<Option<RuntimeJournalEvent>>,
     token: &CancellationToken,
 ) -> bool {
     if token.is_cancelled() {
@@ -228,15 +276,18 @@ pub(super) async fn send_compaction_started_event(
         return false;
     };
 
-    let event = {
+    let (event, reset) = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             return false;
         }
-        session.record_compaction_started()
+        let reset = session
+            .record_transient_event(RuntimeJournalPayload::ModelOutputRateUpdated { rate: None });
+        (session.record_compaction_started(), reset)
     };
 
     inner.emit_journal_batch(permit, event.into());
+    rate_sender.send_replace(Some(reset));
     true
 }
 
@@ -410,6 +461,7 @@ pub(super) async fn send_normal_event(
 pub(super) async fn send_step_started_event(
     inner: &RuntimeInner,
     sender: &mpsc::Sender<RuntimeJournalEventBatch>,
+    rate_sender: &watch::Sender<Option<RuntimeJournalEvent>>,
     token: &CancellationToken,
 ) -> Option<RuntimeJournalEvent> {
     if token.is_cancelled() {
@@ -417,14 +469,29 @@ pub(super) async fn send_step_started_event(
     }
 
     let permit = reserve_normal_event_slot(sender, token).await?;
-    let event = {
+    let (event, reset) = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             return None;
         }
-        session.record_step_started()
+        let event = session.record_step_started();
+        let reset =
+            if inner
+                .model_configs
+                .contains_role(crate::RuntimeModelRole::Primary)
+            {
+                Some(session.record_transient_event(
+                    RuntimeJournalPayload::ModelOutputRateUpdated { rate: None },
+                ))
+            } else {
+                None
+            };
+        (event, reset)
     };
     inner.emit_journal_batch(permit, event.clone().into());
+    if let Some(reset) = reset {
+        rate_sender.send_replace(Some(reset));
+    }
     Some(event)
 }
 

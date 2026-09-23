@@ -66,6 +66,7 @@ pub(crate) struct SessionState {
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
     usage: Option<merry_core::SessionUsage>,
+    request_token_calibration: Option<crate::token_estimate::RequestTokenCalibration>,
     trajectory_snapshot: Option<TrajectorySnapshot>,
     external_tool_catalog: merry_core::SessionToolCatalog,
 }
@@ -101,6 +102,7 @@ impl SessionState {
             pending_tool_calls: Vec::new(),
             resolved_tool_calls: BTreeSet::new(),
             usage: None,
+            request_token_calibration: None,
             trajectory_snapshot: None,
             external_tool_catalog,
         }

@@ -101,7 +101,7 @@ class AgentRun(Generic[OutputT]):
             raise
 
     async def result(self) -> RunResult[OutputT]:
-        """Return the durable terminal result after the run reaches EOF."""
+        """Return terminal evidence after EOF, excluding live text deltas and rates."""
 
         if self._result is not None:
             return self._result

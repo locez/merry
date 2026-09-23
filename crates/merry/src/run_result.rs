@@ -40,7 +40,7 @@ impl RunResult {
         &self.status
     }
 
-    /// Returns SDK-facing events in durable emission order.
+    /// Returns retained SDK-facing evidence in emission order, excluding live deltas and rates.
     #[must_use]
     pub fn events(&self) -> &[RuntimeEvent] {
         &self.events
@@ -70,7 +70,7 @@ impl RunResult {
         self.session_usage.as_ref()
     }
 
-    /// Consumes the result and returns its public events.
+    /// Consumes the result and returns retained public events, excluding live deltas and rates.
     #[must_use]
     pub fn into_events(self) -> Vec<RuntimeEvent> {
         self.events

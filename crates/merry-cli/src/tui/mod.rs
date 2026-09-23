@@ -39,6 +39,7 @@ mod input_history_store;
 pub(crate) mod keymap;
 mod layout;
 mod markdown;
+mod output_rate;
 mod overlay;
 mod overlay_render;
 mod plan;

@@ -205,7 +205,7 @@ async fn provider_tool_call_pending_preserves_id_name_arguments_and_ledger_fact(
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 2,
+                sequence: 3,
                 order: 2,
                 kind: LedgerFactKind::ToolCallPending,
             },
@@ -294,17 +294,17 @@ async fn repeated_provider_tool_call_id_after_pending_fails_without_second_pendi
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 2,
+                sequence: 3,
                 order: 2,
                 kind: LedgerFactKind::ToolCallPending,
             },
             LedgerProjection::Lifecycle {
-                sequence: 3,
+                sequence: 4,
                 order: 3,
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 4,
+                sequence: 6,
                 order: 4,
                 kind: LedgerFactKind::Failed,
             },

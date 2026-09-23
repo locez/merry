@@ -111,26 +111,29 @@ def test_agent_run_preserves_multiline_assistant_output() -> None:
 
 
 def test_pure_newline_delta_keeps_run_active() -> None:
-    async def scenario() -> merry.RunResult[BaseModel]:
+    async def scenario() -> tuple[merry.RunResult[BaseModel], list[str]]:
         run = streamed_text_delta_agent(
             delta="\r\n",
             final_text="Order loaded.",
             session_id="newline-delta",
         ).stream("Stream a result.")
-        while await run.next() is not None:
-            pass
-        return await run.result()
+        deltas: list[str] = []
+        while (event := await run.next()) is not None:
+            if isinstance(event, merry.Event) and isinstance(
+                event.payload, merry.AssistantMessageDeltaPayload
+            ):
+                deltas.append(event.payload.delta)
+        return await run.result(), deltas
 
-    result = asyncio.run(scenario())
-
-    delta_payloads: list[merry.AssistantMessageDeltaPayload] = []
-    for event in result.events:
-        if isinstance(event.payload, merry.AssistantMessageDeltaPayload):
-            delta_payloads.append(event.payload)
+    result, deltas = asyncio.run(scenario())
 
     assert result.status is merry.RunStatus.COMPLETED
     assert result.final_output == "Order loaded."
-    assert [payload.delta for payload in delta_payloads] == ["\r\n"]
+    assert deltas == ["\r\n"]
+    assert not any(
+        isinstance(event.payload, merry.AssistantMessageDeltaPayload)
+        for event in result.events
+    )
 
 
 def test_result_requires_eof_and_cancel_is_idempotent() -> None:
@@ -365,7 +368,9 @@ def test_direct_next_cancellation_persists_a_terminal_result() -> None:
     async def scenario() -> merry.RunResult[BaseModel]:
         native = pending_native_agent("direct-next-cancel")
         run = merry.Agent._from_native(native).stream("Wait for cancellation.")
-        for expected_type in ("session_started", "step_started"):
+        for expected_type in (
+            "session_started", "step_started", "model_output_rate_updated"
+        ):
             message = await run.next()
             assert isinstance(message, merry.Event)
             assert message.type.value == expected_type
@@ -388,7 +393,9 @@ def test_concurrent_next_is_rejected_without_disrupting_active_run() -> None:
     async def scenario() -> merry.RunResult[BaseModel]:
         native = pending_native_agent("concurrent-next")
         run = merry.Agent._from_native(native).stream("Wait for cancellation.")
-        for expected_type in ("session_started", "step_started"):
+        for expected_type in (
+            "session_started", "step_started", "model_output_rate_updated"
+        ):
             message = await run.next()
             assert isinstance(message, merry.Event)
             assert message.type.value == expected_type

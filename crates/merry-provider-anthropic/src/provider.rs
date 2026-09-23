@@ -9,10 +9,16 @@ use merry_llm::{
     ModelProviderFuture, ModelRequest, ModelStreamContext, ProviderErrorKind,
 };
 use serde_json::Value;
-use std::{collections::VecDeque, time::Duration};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 use tracing::Instrument;
 
 const USER_AGENT_VALUE: &str = concat!("merry/", env!("CARGO_PKG_VERSION"));
+
+#[cfg(test)]
+mod output_progress_tests;
 
 /// Config-backed Anthropic Messages provider.
 #[derive(Debug, Clone)]
@@ -111,7 +117,10 @@ impl ModelProvider for AnthropicProvider {
                     AnthropicEventStreamState::new(response, token, stream_span),
                     |state| async move { state.next_item().await },
                 );
-                Ok(Box::pin(event_stream) as ModelEventStream)
+                Ok(merry_llm::receive_model_stream(
+                    Box::pin(event_stream),
+                    context.cancellation_token(),
+                ))
             }
             .instrument(span),
         )
@@ -175,7 +184,7 @@ impl AnthropicEventStreamState {
             };
             match chunk {
                 Ok(Some(chunk)) => {
-                    if let Err(error) = self.events.parse_bytes(&chunk) {
+                    if let Err(error) = self.events.parse_bytes_at(&chunk, Instant::now()) {
                         self.done = true;
                         return Some((
                             Err(add_stream_endpoint_context(
@@ -219,6 +228,7 @@ struct AnthropicEventStreamEvents {
     parser: AnthropicStreamParser,
     line_buffer: Vec<u8>,
     pending: VecDeque<ModelEvent>,
+    last_received_at: Option<Instant>,
 }
 
 impl AnthropicEventStreamEvents {
@@ -227,6 +237,7 @@ impl AnthropicEventStreamEvents {
             parser: AnthropicStreamParser::new(),
             line_buffer: Vec::new(),
             pending: VecDeque::from([ModelEvent::Started]),
+            last_received_at: None,
         }
     }
 
@@ -234,21 +245,35 @@ impl AnthropicEventStreamEvents {
         self.pending.pop_front()
     }
 
-    fn parse_bytes(&mut self, bytes: &[u8]) -> Result<(), AnthropicProviderError> {
+    fn parse_bytes_at(
+        &mut self,
+        bytes: &[u8],
+        received_at: Instant,
+    ) -> Result<(), AnthropicProviderError> {
+        self.last_received_at = Some(received_at);
         for byte in bytes {
             self.line_buffer.push(*byte);
             if *byte == b'\n' {
-                self.parse_buffered_line()?;
+                self.parse_buffered_line(received_at)?;
             }
         }
         Ok(())
     }
 
-    fn parse_buffered_line(&mut self) -> Result<(), AnthropicProviderError> {
+    fn parse_buffered_line(&mut self, received_at: Instant) -> Result<(), AnthropicProviderError> {
         let line = std::str::from_utf8(&self.line_buffer).map_err(|error| {
             AnthropicProviderError::protocol(format!("stream line is not UTF-8: {error}"))
         })?;
-        self.pending.extend(self.parser.parse_sse_line(line)?);
+        let previous = self.parser.output_progress();
+        let events = self.parser.parse_sse_line_at(line, received_at)?;
+        if let Some(progress) = self.parser.output_progress()
+            && Some(progress) != previous
+        {
+            self.pending.push_back(ModelEvent::OutputProgress {
+                progress: Some(progress),
+            });
+        }
+        self.pending.extend(events);
         self.line_buffer.clear();
         Ok(())
     }
@@ -257,7 +282,7 @@ impl AnthropicEventStreamEvents {
         &mut self,
     ) -> Result<Option<ModelEvent>, AnthropicProviderError> {
         if !self.line_buffer.is_empty() {
-            self.parse_buffered_line()?;
+            self.parse_buffered_line(self.last_received_at.unwrap_or_else(Instant::now))?;
         }
         self.parser.finish()?;
         Ok(self.pop_pending())

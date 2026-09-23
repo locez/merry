@@ -132,7 +132,7 @@ async fn executor_infrastructure_error_keeps_pending_without_artifact_or_result(
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2]
+        vec![0, 1, 2, 3]
     );
     let pending = pending_tool_call(&pending_events).clone();
     let before = runtime.ledger_projection().await;
@@ -150,7 +150,7 @@ async fn executor_infrastructure_error_keeps_pending_without_artifact_or_result(
                 kind: LedgerFactKind::StepStarted,
             },
             LedgerProjection::Lifecycle {
-                sequence: 2,
+                sequence: 3,
                 order: 2,
                 kind: LedgerFactKind::ToolCallPending,
             },
@@ -172,7 +172,7 @@ async fn executor_infrastructure_error_keeps_pending_without_artifact_or_result(
     assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
     let evidence_err = runtime
         .evidence_ref(
-            &artifact_id("tool-result-3"),
+            &artifact_id("tool-result-4"),
             EvidenceLocator::whole_artifact(),
         )
         .await
@@ -181,7 +181,7 @@ async fn executor_infrastructure_error_keeps_pending_without_artifact_or_result(
         evidence_err,
         merry_runtime::RuntimeError::Artifact {
             source: ArtifactError::MissingArtifact { id }
-        } if id == artifact_id("tool-result-3")
+        } if id == artifact_id("tool-result-4")
     ));
 }
 
@@ -213,13 +213,13 @@ async fn execute_tool_blank_text_outcome_keeps_pending_without_artifact_or_resul
         merry_runtime::RuntimeError::UnsupportedToolResultContent {
             artifact_id,
             content_kind: ArtifactContentKind::Text
-        } if artifact_id.as_str() == "tool-result-3"
+        } if artifact_id.as_str() == "tool-result-4"
     ));
     assert_eq!(before, after);
     assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
     let evidence_err = runtime
         .evidence_ref(
-            &artifact_id("tool-result-3"),
+            &artifact_id("tool-result-4"),
             EvidenceLocator::whole_artifact(),
         )
         .await
@@ -228,7 +228,7 @@ async fn execute_tool_blank_text_outcome_keeps_pending_without_artifact_or_resul
         evidence_err,
         merry_runtime::RuntimeError::Artifact {
             source: ArtifactError::MissingArtifact { id }
-        } if id == artifact_id("tool-result-3")
+        } if id == artifact_id("tool-result-4")
     ));
 }
 
@@ -262,13 +262,13 @@ async fn execute_tool_blank_json_outcome_keeps_pending_without_artifact_or_resul
         merry_runtime::RuntimeError::UnsupportedToolResultContent {
             artifact_id,
             content_kind: ArtifactContentKind::Json
-        } if artifact_id.as_str() == "tool-result-3"
+        } if artifact_id.as_str() == "tool-result-4"
     ));
     assert_eq!(before, after);
     assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
     let evidence_err = runtime
         .evidence_ref(
-            &artifact_id("tool-result-3"),
+            &artifact_id("tool-result-4"),
             EvidenceLocator::whole_artifact(),
         )
         .await
@@ -277,7 +277,7 @@ async fn execute_tool_blank_json_outcome_keeps_pending_without_artifact_or_resul
         evidence_err,
         merry_runtime::RuntimeError::Artifact {
             source: ArtifactError::MissingArtifact { id }
-        } if id == artifact_id("tool-result-3")
+        } if id == artifact_id("tool-result-4")
     ));
 }
 
@@ -318,7 +318,7 @@ async fn executor_reentrant_runtime_mutations_are_rejected_while_outer_execution
         ["ArtifactRecorded", "ToolCallResolved"]
     );
     let result = resolved_tool_result(&execution_events);
-    assert_eq!(result.artifact().id().as_str(), "tool-result-3");
+    assert_eq!(result.artifact().id().as_str(), "tool-result-4");
     assert_eq!(result.call_id(), pending.id());
     assert!(runtime.pending_tool_calls().await.is_empty());
     let outer_evidence = runtime

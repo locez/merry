@@ -1,44 +1,37 @@
+mod consume;
+
 use super::auto_compaction::{
     CompactionProgress, HardWatermarkCompaction, HardWatermarkOutcome,
     reduce_context_at_hard_watermark,
 };
 use super::journal_emission::{
-    send_assistant_text_output_completed_events, send_assistant_text_output_delta_event,
     send_cancelled_event, send_compaction_completed_event, send_failed_event,
-    send_model_tool_call_response_events, send_model_usage_updated_event,
     trace_provider_step_cancelled, trace_provider_step_failed,
 };
 use super::memory_activation::{
     ActivationProjectionGuard, clear_current_activated_memories,
     memory_activation_seed_from_step_input,
 };
-use super::model_output::{
-    DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT, diagnostic_from_model_error, is_cancelled_model_error,
-    pending_tool_call_from_model, pending_tool_calls_from_outputs, record_streamed_tool_call,
-    tool_call_commentary_text,
-};
+use super::model_output::{diagnostic_from_model_error, is_cancelled_model_error};
 use super::model_turn_lifecycle::{InProgressModelTurnGuard, cancel_model_turn, fail_model_turn};
 use super::provider_request::{
     compile_step_request_from_inputs, request_context_budget, step_request_compile_diagnostic,
     step_request_inputs_from_session, step_usage_context_snapshot, trace_provider_request,
     trace_provider_request_budget_unavailable,
 };
-use super::provider_stream::{
-    stream_model_with_retry_policy, wait_for_model_stream_item, wait_for_retrying_stream_setup,
-};
+use super::provider_stream::{stream_model_with_retry_policy, wait_for_retrying_stream_setup};
 
 use super::{DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, RuntimeInner, diagnostic_from_text};
 
 use crate::{
     CheckpointDecision,
-    events::{ActiveStepPermit, RuntimeJournalEventBatch},
+    events::{ActiveStepPermit, RuntimeJournalEventBatch, RuntimeRateUpdateSender},
     memory::MemoryActivationContext,
     model_config::ModelProviderConfig,
     plan::unix_time_ms,
     step::StepInput,
 };
-use merry_core::PendingToolCall;
-use merry_llm::{FinishReason, GenerationConfig, ModelEvent, ModelOutput, ModelStreamContext};
+use merry_llm::{GenerationConfig, ModelStreamContext};
 use std::sync::{Arc, atomic::Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -51,6 +44,7 @@ async fn has_unresolved_pending_tool_calls(inner: &RuntimeInner) -> bool {
 pub(super) struct ProviderStepControl<'a> {
     token: &'a CancellationToken,
     active_permit: &'a ActiveStepPermit,
+    rate_sender: &'a RuntimeRateUpdateSender,
     step_sequence: u64,
 }
 
@@ -58,11 +52,13 @@ impl<'a> ProviderStepControl<'a> {
     pub(super) const fn new(
         token: &'a CancellationToken,
         active_permit: &'a ActiveStepPermit,
+        rate_sender: &'a RuntimeRateUpdateSender,
         step_sequence: u64,
     ) -> Self {
         Self {
             token,
             active_permit,
+            rate_sender,
             step_sequence,
         }
     }
@@ -80,6 +76,7 @@ pub(super) async fn run_provider_step(
     let ProviderStepControl {
         token,
         active_permit,
+        rate_sender,
         step_sequence,
     } = control;
     if has_unresolved_pending_tool_calls(inner).await {
@@ -303,8 +300,17 @@ pub(super) async fn run_provider_step(
         .read()
         .await
         .map(std::num::NonZeroU64::get);
-    let mut request_budget =
-        request_context_budget(provider.capabilities(), &request, context_window_override);
+    let mut token_estimate_scale = inner
+        .session
+        .lock()
+        .await
+        .token_estimate_scale(provider.name(), &request);
+    let mut request_budget = request_context_budget(
+        provider.capabilities(),
+        &request,
+        context_window_override,
+        token_estimate_scale,
+    );
     // Read the compaction policy once for this step instead of re-locking per
     // compaction attempt.
     let (automatic_compaction_enabled, automatic_policy, compaction_reasoning_effort) = {
@@ -353,6 +359,7 @@ pub(super) async fn run_provider_step(
             let outcome = reduce_context_at_hard_watermark(
                 inner,
                 sender,
+                rate_sender,
                 token,
                 active_permit,
                 HardWatermarkCompaction {
@@ -414,8 +421,17 @@ pub(super) async fn run_provider_step(
                     return;
                 }
             };
-            request_budget =
-                request_context_budget(provider.capabilities(), &request, context_window_override);
+            token_estimate_scale = inner
+                .session
+                .lock()
+                .await
+                .token_estimate_scale(provider.name(), &request);
+            request_budget = request_context_budget(
+                provider.capabilities(),
+                &request,
+                context_window_override,
+                token_estimate_scale,
+            );
             current_budget = match &request_budget {
                 Ok(budget) => *budget,
                 Err(error) => {
@@ -478,6 +494,8 @@ pub(super) async fn run_provider_step(
         .observe_model_request(&request, step_sequence);
     let usage_context_snapshot =
         step_usage_context_snapshot(request_budget.as_ref().ok(), automatic_compaction_enabled);
+    let request_token_observation =
+        crate::token_estimate::RequestTokenObservation::new(provider.name(), &request);
     let sent_continuation_count = request.continuations().len();
 
     let turn_id = {
@@ -559,7 +577,7 @@ pub(super) async fn run_provider_step(
         }
     };
 
-    let mut stream = match stream_result {
+    let stream = match stream_result {
         Ok(stream) => {
             tracing::debug!(
                 category = "provider_setup_success",
@@ -587,210 +605,19 @@ pub(super) async fn run_provider_step(
     };
     projection_guard.disarm();
 
-    let mut commentary_text = String::new();
-    let mut streamed_tool_calls: Vec<PendingToolCall> = Vec::new();
-
-    loop {
-        let item = wait_for_model_stream_item(
-            inner,
-            sender,
-            token,
-            &mut stream,
-            &mut retry_event_receiver,
-        )
-        .await;
-
-        let item = match item {
-            Some(item) => item,
-            None => {
-                cancel_model_turn(inner, sender, turn_id).await;
-                return;
-            }
-        };
-
-        match item {
-            Some(Ok(ModelEvent::Started)) => {
-                tracing::debug!(category = "started", "runtime model stream event received");
-            }
-            Some(Ok(ModelEvent::OutputTextDelta { delta })) => {
-                if !delta.is_empty() {
-                    tracing::trace!(
-                        category = "output_text_delta_nonempty",
-                        "runtime model stream event received"
-                    );
-                    commentary_text.push_str(&delta);
-                    if !send_assistant_text_output_delta_event(inner, sender, token, delta).await {
-                        cancel_model_turn(inner, sender, turn_id).await;
-                        return;
-                    }
-                }
-            }
-            Some(Ok(ModelEvent::Completed { response })) => {
-                tracing::debug!(
-                    category = "completed",
-                    finish_reason = ?response.finish_reason(),
-                    "runtime model stream event received"
-                );
-                if let Some(model_usage) = response.usage() {
-                    match send_model_usage_updated_event(
-                        inner,
-                        sender,
-                        token,
-                        model_usage,
-                        usage_context_snapshot.context,
-                        usage_context_snapshot.compaction,
-                    )
-                    .await
-                    {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            cancel_model_turn(inner, sender, turn_id).await;
-                            return;
-                        }
-                        Err(diagnostic) => {
-                            fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
-                            return;
-                        }
-                    }
-                }
-                match response.finish_reason() {
-                    FinishReason::Stop => {
-                        if !streamed_tool_calls.is_empty() {
-                            let diagnostic = diagnostic_from_text(
-                                DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT,
-                                "model requested a tool call before completing with text output",
-                            );
-                            fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
-                            return;
-                        }
-
-                        let [ModelOutput::Text { text }] = response.outputs() else {
-                            let diagnostic = diagnostic_from_text(
-                                "model_output_unsupported",
-                                "model stop output must contain exactly one text item",
-                            );
-                            fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
-                            return;
-                        };
-
-                        if !send_assistant_text_output_completed_events(
-                            inner,
-                            sender,
-                            token,
-                            turn_id,
-                            text.clone(),
-                        )
-                        .await
-                        {
-                            cancel_model_turn(inner, sender, turn_id).await;
-                        }
-                        return;
-                    }
-                    FinishReason::ToolCalls => {
-                        match pending_tool_calls_from_outputs(
-                            response.outputs(),
-                            &streamed_tool_calls,
-                        ) {
-                            Ok(calls) => {
-                                if calls.len() > 1
-                                    && final_output_contract.as_ref().is_some_and(|contract| {
-                                        calls.iter().any(|call| call.name() == contract.tool_name())
-                                    })
-                                {
-                                    let diagnostic = diagnostic_from_text(
-                                        "final_output_tool_batch_mixed",
-                                        "final-output tool calls must be the only call in their model batch",
-                                    );
-                                    fail_model_turn(inner, sender, token, turn_id, diagnostic)
-                                        .await;
-                                    return;
-                                }
-                                let commentary =
-                                    tool_call_commentary_text(response.outputs(), &commentary_text);
-                                let sent = send_model_tool_call_response_events(
-                                    inner, sender, token, turn_id, commentary, calls,
-                                )
-                                .await;
-                                if !sent {
-                                    cancel_model_turn(inner, sender, turn_id).await;
-                                }
-                            }
-                            Err(diagnostic) => {
-                                fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
-                            }
-                        }
-                        return;
-                    }
-                    FinishReason::Length => {
-                        let diagnostic = diagnostic_from_text(
-                            "model_length",
-                            "model output stopped because it reached a length limit",
-                        );
-                        fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
-                        return;
-                    }
-                    FinishReason::Blocked => {
-                        let diagnostic = diagnostic_from_text(
-                            "model_blocked",
-                            "model output was blocked by provider safety or content policy",
-                        );
-                        fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
-                        return;
-                    }
-                    FinishReason::Cancelled => {
-                        cancel_model_turn(inner, sender, turn_id).await;
-                        return;
-                    }
-                    FinishReason::Error => {
-                        let diagnostic = diagnostic_from_text(
-                            "model_finish_error",
-                            "model output stopped because the provider reported a finish error",
-                        );
-                        fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
-                        return;
-                    }
-                }
-            }
-            Some(Ok(ModelEvent::ToolCallRequested { call })) => {
-                tracing::debug!(
-                    category = "tool_call_requested",
-                    "runtime model stream event received"
-                );
-                match pending_tool_call_from_model(&call)
-                    .and_then(|call| record_streamed_tool_call(&mut streamed_tool_calls, call))
-                {
-                    Ok(()) => {}
-                    Err(diagnostic) => {
-                        fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
-                        return;
-                    }
-                }
-            }
-            Some(Err(error)) => {
-                let error_kind = error.kind();
-                tracing::debug!(
-                    category = "provider_error",
-                    error_kind = ?error_kind,
-                    "runtime model stream event received"
-                );
-                if is_cancelled_model_error(&error) {
-                    cancel_model_turn(inner, sender, turn_id).await;
-                    return;
-                }
-
-                let diagnostic = diagnostic_from_model_error(error);
-                fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
-                return;
-            }
-            None => {
-                tracing::debug!(category = "eof", "runtime model stream ended");
-                let diagnostic = diagnostic_from_text(
-                    "model_stream_eof",
-                    "model stream ended before completion",
-                );
-                fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
-                return;
-            }
-        }
-    }
+    consume::consume_model_stream(
+        inner,
+        sender,
+        rate_sender,
+        token,
+        consume::ModelStreamRun {
+            stream,
+            retry_event_receiver,
+            turn_id,
+            usage_context_snapshot,
+            request_token_observation,
+            final_output_contract,
+        },
+    )
+    .await;
 }

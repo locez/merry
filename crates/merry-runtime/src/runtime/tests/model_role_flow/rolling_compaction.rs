@@ -368,6 +368,7 @@ async fn assert_one_shot_reduction(
         primary.capabilities(),
         final_request,
         Some(window_tokens),
+        Default::default(),
     )
     .expect("primary budget");
     assert!(

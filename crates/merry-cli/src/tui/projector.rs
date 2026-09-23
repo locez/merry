@@ -83,6 +83,7 @@ impl TuiProjector {
     }
 
     pub(crate) fn apply(&mut self, event: RuntimeEvent, state: &mut TuiState) {
+        state.observe_output_rate(&event);
         match event {
             RuntimeEvent::AssistantMessage { text, .. } => {
                 if let Some(index) = self.streaming_assistant_index.take() {

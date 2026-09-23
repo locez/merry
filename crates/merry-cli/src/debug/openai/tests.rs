@@ -68,10 +68,12 @@ async fn tool_helper_executes_one_pending_call_and_continues() {
         [
             "session_started",
             "step_started",
+            "model_output_rate_updated",
             "tool_call_pending",
             "artifact_recorded",
             "tool_call_resolved",
             "step_started",
+            "model_output_rate_updated",
             "assistant_output_recorded",
             "step_completed",
         ]
@@ -259,6 +261,7 @@ async fn tool_helper_errors_when_first_step_does_not_call_debug_echo() {
         [
             "session_started",
             "step_started",
+            "model_output_rate_updated",
             "assistant_output_recorded",
             "step_completed",
         ]

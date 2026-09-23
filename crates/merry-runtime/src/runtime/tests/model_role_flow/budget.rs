@@ -33,8 +33,8 @@ fn request_context_budget_uses_dynamic_estimate_watermarks() {
     )
     .expect("valid request");
 
-    let budget =
-        request_context_budget(&capabilities, &request, None).expect("budget should calculate");
+    let budget = request_context_budget(&capabilities, &request, None, Default::default())
+        .expect("budget should calculate");
 
     assert_eq!(
         budget.window.source(),
@@ -52,6 +52,70 @@ fn request_context_budget_uses_dynamic_estimate_watermarks() {
             .expect("compaction usage should be available")
             .dynamic_body_estimated_tokens,
         Some(budget.dynamic_body_estimated_tokens)
+    );
+}
+
+#[test]
+fn calibrated_budget_counts_fixed_input_and_body_without_scaling_output_reserve() {
+    let capabilities = ModelCapabilities::new(true, true, false, true, Some(100_000), Some(10_000))
+        .expect("capabilities");
+    let provider = merry_core::ProviderName::new("calibrated-provider").expect("provider");
+    let request = ModelRequest::new_with_continuations_and_stable_prefix(
+        named_model("calibrated-model"),
+        vec![
+            ModelMessage::new(
+                ModelMessageRole::System,
+                ModelContent::text(&"rules ".repeat(8_000)).expect("text"),
+            )
+            .expect("message"),
+            ModelMessage::new(
+                ModelMessageRole::User,
+                ModelContent::text(&"body ".repeat(40_000)).expect("text"),
+            )
+            .expect("message"),
+        ],
+        Vec::new(),
+        Vec::new(),
+        GenerationConfig::default(),
+        1,
+    )
+    .expect("request");
+    let calibration = crate::token_estimate::RequestTokenCalibration::observe(
+        None,
+        crate::token_estimate::RequestTokenObservation::new(&provider, &request),
+        crate::token_estimate::estimate_request_input_tokens(&request) * 2,
+    )
+    .expect("calibration");
+    let baseline = request_context_budget(&capabilities, &request, None, Default::default())
+        .expect("baseline budget");
+    let corrected = request_context_budget(
+        &capabilities,
+        &request,
+        None,
+        calibration.scale_for(&provider, &request),
+    )
+    .expect("corrected budget");
+    assert_eq!(baseline.decision, CheckpointDecision::Continue);
+    assert_eq!(corrected.decision, CheckpointDecision::RequireCheckpoint);
+    assert_eq!(
+        corrected.budget.stable_prefix_tokens(),
+        baseline.budget.stable_prefix_tokens() * 2
+    );
+    assert_eq!(
+        corrected.dynamic_body_estimated_tokens,
+        baseline.dynamic_body_estimated_tokens * 2
+    );
+    assert_eq!(
+        corrected.budget.effective_window_tokens(),
+        baseline.budget.effective_window_tokens()
+    );
+    assert_eq!(
+        corrected.budget.output_reserve_tokens(),
+        baseline.budget.output_reserve_tokens()
+    );
+    assert_eq!(
+        corrected.budget.hard_water_tokens(),
+        baseline.budget.hard_water_tokens() - baseline.budget.stable_prefix_tokens()
     );
 }
 
@@ -84,8 +148,8 @@ fn request_context_budget_derives_default_output_reserve_from_window() {
     ] {
         let capabilities = ModelCapabilities::new(true, true, false, true, Some(window), None)
             .expect("valid capabilities");
-        let budget =
-            request_context_budget(&capabilities, &request, None).expect("budget should calculate");
+        let budget = request_context_budget(&capabilities, &request, None, Default::default())
+            .expect("budget should calculate");
 
         assert_eq!(
             budget.budget.output_reserve_tokens(),
@@ -114,8 +178,8 @@ fn request_context_budget_uses_codex_style_fallback_for_unknown_models() {
     )
     .expect("valid request");
 
-    let budget =
-        request_context_budget(&capabilities, &request, None).expect("budget should calculate");
+    let budget = request_context_budget(&capabilities, &request, None, Default::default())
+        .expect("budget should calculate");
 
     assert_eq!(budget.window.tokens(), 272_000);
     assert_eq!(budget.window.source(), crate::ContextWindowSource::Fallback);
@@ -142,7 +206,7 @@ fn request_context_budget_prefers_an_explicit_window_override() {
     )
     .expect("valid request");
 
-    let budget = request_context_budget(&capabilities, &request, Some(128_000))
+    let budget = request_context_budget(&capabilities, &request, Some(128_000), Default::default())
         .expect("budget should calculate");
 
     assert_eq!(budget.window.tokens(), 128_000);

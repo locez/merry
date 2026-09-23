@@ -33,6 +33,11 @@ pub enum RuntimeEvent {
         usage: SessionUsage,
         source: RuntimeEventSource,
     },
+    /// Live or usage-corrected throughput; None clears the active observation.
+    ModelOutputRateUpdated {
+        rate: Option<crate::ModelOutputRate>,
+        source: RuntimeEventSource,
+    },
     /// The assistant produced user-facing text.
     AssistantMessage {
         text: String,
@@ -219,6 +224,17 @@ pub enum RuntimeEvent {
     QueuedInputsChanged { inputs: QueuedInputsView },
     /// A public runtime stream closed.
     Closed,
+}
+
+impl RuntimeEvent {
+    /// Whether this live-only observation is excluded from retained run results.
+    #[must_use]
+    pub const fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::ModelOutputRateUpdated { .. } | Self::AssistantMessageDelta { .. }
+        )
+    }
 }
 
 /// Pointer from a public event back to the journal position that produced it.

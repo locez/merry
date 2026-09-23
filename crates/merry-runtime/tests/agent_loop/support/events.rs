@@ -39,6 +39,12 @@ pub(crate) fn assert_sanitized_policy_denial_json(value: &Value, tool_name: &str
 pub(crate) fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
     events
         .iter()
+        .filter(|event| {
+            !matches!(
+                event.payload,
+                RuntimeJournalPayload::ModelOutputRateUpdated { .. }
+            )
+        })
         .map(|event| match event.payload {
             RuntimeJournalPayload::SessionStarted => "SessionStarted",
             RuntimeJournalPayload::StepStarted => "StepStarted",
@@ -66,6 +72,7 @@ pub(crate) fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static s
 pub(crate) fn public_event_kind_names(events: &[RuntimeEvent]) -> Vec<&'static str> {
     events
         .iter()
+        .filter(|event| !matches!(event, RuntimeEvent::ModelOutputRateUpdated { .. }))
         .map(|event| match event {
             RuntimeEvent::SessionStarted { .. } => "SessionStarted",
             RuntimeEvent::StepStarted { .. } => "StepStarted",
