@@ -83,5 +83,7 @@ def parse_output_rate(value: JsonValue) -> ModelOutputRate | None:
         _required_int(rate, "output_tokens"),
         _required_int(rate, "elapsed_nanos"),
         _enum_value(OutputTokenSource, rate["token_source"], "output token source"),
-        _enum_value(OutputTimingQuality, rate["timing_quality"], "output timing quality"),
+        _enum_value(
+            OutputTimingQuality, rate["timing_quality"], "output timing quality"
+        ),
     )

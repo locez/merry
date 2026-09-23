@@ -130,7 +130,9 @@ def _parse_payload(
         case EventType.USAGE_UPDATED:
             return UsageUpdatedPayload(_parse_usage(data["usage"]), _source(data))
         case EventType.MODEL_OUTPUT_RATE_UPDATED:
-            return ModelOutputRateUpdatedPayload(parse_output_rate(data["rate"]), _source(data))
+            return ModelOutputRateUpdatedPayload(
+                parse_output_rate(data["rate"]), _source(data)
+            )
         case EventType.ASSISTANT_MESSAGE:
             return AssistantMessagePayload(
                 _event_text(data, "text"),

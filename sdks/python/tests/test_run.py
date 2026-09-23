@@ -369,7 +369,9 @@ def test_direct_next_cancellation_persists_a_terminal_result() -> None:
         native = pending_native_agent("direct-next-cancel")
         run = merry.Agent._from_native(native).stream("Wait for cancellation.")
         for expected_type in (
-            "session_started", "step_started", "model_output_rate_updated"
+            "session_started",
+            "step_started",
+            "model_output_rate_updated",
         ):
             message = await run.next()
             assert isinstance(message, merry.Event)
@@ -394,7 +396,9 @@ def test_concurrent_next_is_rejected_without_disrupting_active_run() -> None:
         native = pending_native_agent("concurrent-next")
         run = merry.Agent._from_native(native).stream("Wait for cancellation.")
         for expected_type in (
-            "session_started", "step_started", "model_output_rate_updated"
+            "session_started",
+            "step_started",
+            "model_output_rate_updated",
         ):
             message = await run.next()
             assert isinstance(message, merry.Event)
