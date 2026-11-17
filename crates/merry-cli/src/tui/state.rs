@@ -41,6 +41,8 @@ pub(crate) struct TuiState {
     keymap: Keymap,
     theme: TuiTheme,
     input: TextInput,
+    /// Inner composer width from the last layout. Zero means keys use logical lines.
+    composer_columns: usize,
     completion_sources: CompletionSources,
     completion_menu: Option<CompletionMenu>,
     input_history: InputHistory,
@@ -100,12 +102,13 @@ impl TuiState {
             keymap,
             theme,
             input: TextInput::default(),
+            composer_columns: 0,
             completion_sources: CompletionSources::new(workspace_root.clone(), Vec::new()),
             completion_menu: None,
             input_history: InputHistory::default(),
             queue_preview: QueuePreviewState::from_preview(QueuePreview::empty()),
             timeline: Vec::new(),
-            show_successful_command_output: false,
+            show_successful_command_output: true,
             command_details_generation: 0,
             timeline_scroll_offset: 0,
             timeline_review_user_index: None,
@@ -181,15 +184,6 @@ impl TuiState {
         self.input.viewport_rows(max_width, max_rows)
     }
 
-    pub(crate) fn input_visible_rows(&self, max_rows: usize) -> usize {
-        self.input
-            .text()
-            .split('\n')
-            .count()
-            .max(1)
-            .min(max_rows.max(1))
-    }
-
     pub(crate) fn take_input_for_submit(&mut self) -> Option<TuiSubmission> {
         self.completion_menu = None;
         self.pending_empty_input_quit = false;
@@ -234,6 +228,27 @@ impl TuiState {
         self.pending_empty_input_quit = false;
         self.input.handle_key(key);
         self.refresh_completion_menu();
+    }
+
+    pub(crate) fn set_composer_columns(&mut self, columns: usize) {
+        self.composer_columns = columns;
+    }
+
+    /// Moves within the draft. False means the caret is already on the first or last visual row.
+    pub(crate) fn move_input_line(&mut self, forward: bool) -> bool {
+        let width = if self.composer_columns == 0 {
+            10_000
+        } else {
+            self.composer_columns
+        };
+        let moved = self
+            .input
+            .move_vertical(if forward { 1 } else { -1 }, width);
+        if moved {
+            self.pending_empty_input_quit = false;
+            self.refresh_completion_menu();
+        }
+        moved
     }
 
     #[cfg(test)]
@@ -287,6 +302,12 @@ impl TuiState {
         };
         menu.select_previous();
         true
+    }
+
+    pub(crate) fn select_completion(&mut self, index: usize) -> bool {
+        self.completion_menu
+            .as_mut()
+            .is_some_and(|menu| menu.select_index(index))
     }
 
     pub(crate) fn accept_completion(&mut self) -> bool {
@@ -416,6 +437,66 @@ impl TuiState {
         self.note_timeline_update();
         if let Some(slot) = self.timeline.get_mut(index) {
             *slot = item;
+        }
+    }
+
+    /// Appends reasoning text to the open thinking block, or starts one.
+    pub(crate) fn append_reasoning_delta(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        self.note_timeline_update();
+        if let Some(TimelineItem::Thinking {
+            text,
+            elapsed: None,
+            ..
+        }) = self.timeline.last_mut()
+        {
+            text.push_str(delta);
+            return;
+        }
+        self.timeline.push(TimelineItem::Thinking {
+            text: delta.to_owned(),
+            started_at: tokio::time::Instant::now(),
+            elapsed: None,
+            expanded: false,
+        });
+    }
+
+    /// Closes the current thinking block so it can collapse to a duration header.
+    pub(crate) fn finish_reasoning(&mut self) {
+        let Some(TimelineItem::Thinking {
+            started_at,
+            elapsed,
+            ..
+        }) = self.timeline.last_mut()
+        else {
+            return;
+        };
+        if elapsed.is_none() {
+            *elapsed = Some(started_at.elapsed());
+            self.note_timeline_update();
+        }
+    }
+
+    /// Opens or closes a finished thinking block.
+    pub(crate) fn toggle_thinking_expanded(&mut self, index: usize) {
+        if let Some(TimelineItem::Thinking {
+            expanded, elapsed, ..
+        }) = self.timeline.get_mut(index)
+            && elapsed.is_some()
+        {
+            *expanded = !*expanded;
+        }
+    }
+
+    /// Opens or closes a finished command header. Running commands stay visible.
+    pub(crate) fn toggle_command_expanded(&mut self, index: usize) {
+        if let Some(TimelineItem::Command {
+            view: CommandView::Finished { expanded, .. },
+        }) = self.timeline.get_mut(index)
+        {
+            *expanded = !*expanded;
         }
     }
 

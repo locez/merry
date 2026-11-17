@@ -68,6 +68,7 @@ fn projector_renders_process_calls_as_ran_with_preview() {
     );
 
     assert_eq!(state.timeline().len(), 1);
+    state.toggle_command_expanded(0);
     let rendered = render_to_text(&state, 120, 24);
     assert!(rendered.contains("Ran python3 hello_world.py (.)"));
     assert!(rendered.contains("  hello world"));
@@ -112,6 +113,7 @@ fn projector_renders_nonzero_process_exit_as_command_result() {
     );
 
     assert_eq!(state.timeline().len(), 1);
+    state.toggle_command_expanded(0);
     let rendered = render_to_text(&state, 120, 24);
     assert!(rendered.contains("Ran cargo test -p merry-cli (.) -> 101"));
     assert!(rendered.contains("  error: test failed"));
@@ -156,6 +158,7 @@ fn projector_keeps_process_start_failure_as_diagnostic() {
         &mut state,
     );
 
+    state.toggle_command_expanded(0);
     let rendered = render_to_text(&state, 120, 24);
     assert!(rendered.contains("Ran missing-command (.) -> failed"));
     assert!(rendered.contains("process_action_failed"));

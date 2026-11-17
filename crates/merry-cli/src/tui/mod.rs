@@ -24,6 +24,7 @@ use theme::TuiTheme;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+mod click_target;
 #[cfg(target_os = "linux")]
 mod clipboard_image;
 mod command;
@@ -36,6 +37,7 @@ mod copy_controls;
 mod highlight;
 mod input;
 mod input_history_store;
+mod input_layout;
 pub(crate) mod keymap;
 mod layout;
 mod markdown;

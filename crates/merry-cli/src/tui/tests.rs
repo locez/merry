@@ -96,6 +96,7 @@ fn find_cell_style(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<ratat
     None
 }
 
+mod click_targets;
 mod command_palette;
 
 mod command_details;
@@ -126,10 +127,13 @@ mod provider_interactions;
 mod settings;
 
 mod status_usage;
+mod sticky_user;
 
 mod submission;
 
 mod text_rendering;
+
+mod thinking_display;
 
 mod reading_position;
 mod timeline_navigation;

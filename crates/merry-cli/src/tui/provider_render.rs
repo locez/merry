@@ -11,7 +11,7 @@ use crate::config::{ConfiguredProviderKind, ManagedProviderKind, ProviderConfigS
 use merry_provider_openai::OpenAiProtocol;
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Position},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::Modifier,
     text::{Line, Span},
     widgets::Paragraph,
@@ -245,16 +245,7 @@ pub(super) fn render_model_picker(
 ) {
     let region = centered_rect(frame.area(), PROVIDER_OVERLAY_WIDTH, 22);
     render_surface(frame, state, region, " M  Models ");
-    let inner = inset(region, 2, 1);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(2),
-        ])
-        .split(inner);
+    let rows = model_picker_rows(frame.area());
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -370,15 +361,7 @@ pub(super) fn render_reasoning_picker(
 ) {
     let region = centered_rect(frame.area(), PROVIDER_OVERLAY_WIDTH, 20);
     render_surface(frame, state, region, " M  Thinking mode ");
-    let inner = inset(region, 2, 1);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(3),
-        ])
-        .split(inner);
+    let rows = reasoning_rows(frame.area());
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
@@ -502,4 +485,108 @@ fn form_field_index(field: ProviderFormField) -> usize {
         .iter()
         .position(|candidate| *candidate == field)
         .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModelPointer {
+    Row(usize),
+    Manual,
+}
+
+pub(crate) fn provider_manager_row(
+    area: Rect,
+    manager: &ProviderManagerOverlay,
+    position: ratatui::layout::Position,
+) -> Option<usize> {
+    let height = (manager.items().len() as u16 + 7).clamp(12, 22);
+    let region = centered_rect(area, PROVIDER_OVERLAY_WIDTH, height);
+    let inner = inset(region, 2, 1);
+    if !inner.contains(position) {
+        return None;
+    }
+    let visible_height = usize::from(inner.height.saturating_sub(2)).max(1);
+    let offset = manager
+        .selected()
+        .saturating_sub(visible_height.saturating_sub(1));
+    let shown = manager
+        .items()
+        .len()
+        .saturating_sub(offset)
+        .min(visible_height);
+    let local = usize::from(position.y.saturating_sub(inner.y));
+    if local == 0 || local > shown {
+        return None;
+    }
+    Some(offset + local - 1)
+}
+
+pub(crate) fn model_picker_pointer(
+    area: Rect,
+    picker: &ModelPickerOverlay,
+    position: ratatui::layout::Position,
+) -> Option<ModelPointer> {
+    let rows = model_picker_rows(area);
+    if !rows[2].contains(position) {
+        return None;
+    }
+    let visible = picker.visible_models();
+    let list_height = usize::from(rows[2].height).max(1);
+    let offset = picker
+        .selected()
+        .saturating_sub(list_height.saturating_sub(1));
+    let local = usize::from(position.y.saturating_sub(rows[2].y));
+    if local >= list_height {
+        return None;
+    }
+    if visible.is_empty() {
+        return picker
+            .manual_model()
+            .filter(|_| local == 0)
+            .map(|_| ModelPointer::Manual);
+    }
+    let index = offset + local;
+    (index < visible.len()).then_some(ModelPointer::Row(index))
+}
+
+pub(crate) fn reasoning_row(
+    area: Rect,
+    picker: &ReasoningPickerOverlay,
+    position: ratatui::layout::Position,
+) -> Option<usize> {
+    if picker.custom_editor().is_some() {
+        return None;
+    }
+    let rows = reasoning_rows(area);
+    if !rows[1].contains(position) {
+        return None;
+    }
+    let index = usize::from(position.y.saturating_sub(rows[1].y));
+    (index < picker.option_count()).then_some(index)
+}
+
+fn model_picker_rows(area: Rect) -> std::rc::Rc<[Rect]> {
+    let region = centered_rect(area, PROVIDER_OVERLAY_WIDTH, 22);
+    let inner = inset(region, 2, 1);
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
+        .split(inner)
+}
+
+fn reasoning_rows(area: Rect) -> std::rc::Rc<[Rect]> {
+    let region = centered_rect(area, PROVIDER_OVERLAY_WIDTH, 20);
+    let inner = inset(region, 2, 1);
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(3),
+        ])
+        .split(inner)
 }

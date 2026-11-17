@@ -279,6 +279,7 @@ pub(crate) async fn run_controller(
                         InteractiveRunMessage::Event(event) => {
                             let stream_progress = matches!(event,
                                 merry_core::RuntimeEvent::AssistantMessageDelta { .. }
+                                | merry_core::RuntimeEvent::ReasoningDelta { .. }
                                 | merry_core::RuntimeEvent::ModelOutputRateUpdated { .. });
                             projector.apply(event, &mut state);
                             if !stream_progress || !state.is_active_run() {
@@ -400,7 +401,7 @@ fn needs_refresh(state: &TuiState) -> bool {
 fn refresh_interactions(state: &mut TuiState, size: Size) {
     state.expire_clipboard_feedback();
     let rects = cockpit_rects(size, state);
-    state.validate_text_selection_area(render::timeline_content_region(rects.timeline));
+    state.validate_text_selection_area(render::timeline_text_area(state, rects.timeline));
     state.autoscroll_text_selection();
 }
 

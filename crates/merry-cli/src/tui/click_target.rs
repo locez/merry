@@ -1,0 +1,267 @@
+//! Pointer targets for the cockpit.
+//!
+//! Hit rectangles come from the same layout functions as the renderers, so a
+//! click lands on the control the current state would draw.
+
+use crate::tui::{
+    layout::{BottomPaneHeights, TimelineRects, cockpit_layout},
+    overlay_render::overlay_pointer,
+    plan_render::{PlanPointer, plan_pointer_target},
+    render::{self, STATUS_HEIGHT},
+    state::TuiState,
+};
+use ratatui::{
+    layout::{Position, Rect, Size},
+    style::Modifier,
+    text::{Line, Span},
+};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use super::{text_wrap::semantic_style, theme::SemanticColor};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StatusAction {
+    Commands,
+    Plan,
+    Follow,
+    Stop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OverlayPointer {
+    Palette(usize),
+    Setting(crate::tui::overlay::SettingItem),
+    PlanApprove,
+    PlanBack,
+    PermissionAllow,
+    PermissionReject,
+    DialogClose,
+    Provider(usize),
+    Model(usize),
+    ManualModel,
+    Reasoning(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PointerTarget {
+    Passthrough,
+    Consumed,
+    Model,
+    Status(StatusAction),
+    Composer,
+    Plan(PlanPointer),
+    Completion(usize),
+    Overlay(OverlayPointer),
+}
+
+pub(crate) fn pointer_target(state: &TuiState, size: Size, position: Position) -> PointerTarget {
+    if state.overlay().is_some() {
+        let area = Rect::new(0, 0, size.width, size.height);
+        return match overlay_pointer(state, area, position) {
+            Some(pointer) => PointerTarget::Overlay(pointer),
+            None => PointerTarget::Consumed,
+        };
+    }
+
+    let rects = cockpit_rects(size, state);
+    if let Some(action) = status_action_at(state, rects.status, position) {
+        return PointerTarget::Status(action);
+    }
+    if header_model_rect(rects.header, &state.header_status_parts(rects.header.width))
+        .is_some_and(|model| model.contains(position))
+    {
+        return PointerTarget::Model;
+    }
+    if let Some(plan) = rects.plan
+        && plan.contains(position)
+    {
+        return match plan_pointer_target(state, plan, position) {
+            Some(pointer) => PointerTarget::Plan(pointer),
+            None => PointerTarget::Consumed,
+        };
+    }
+    if rects.completion.contains(position) {
+        return completion_index(state, rects.completion, position)
+            .map(PointerTarget::Completion)
+            .unwrap_or(PointerTarget::Consumed);
+    }
+    if rects.input.contains(position) {
+        return PointerTarget::Composer;
+    }
+    PointerTarget::Passthrough
+}
+
+fn cockpit_rects(size: Size, state: &TuiState) -> TimelineRects {
+    let area = Rect::new(0, 0, size.width, size.height);
+    let pane_heights = render::pane_heights_for_area(state, area);
+    cockpit_layout(
+        area,
+        BottomPaneHeights {
+            queue: pane_heights.queue,
+            completion: pane_heights.completion,
+            input: pane_heights.input,
+            status: STATUS_HEIGHT,
+        },
+        state.plan().is_open(),
+        state.plan().is_focused(),
+    )
+}
+
+pub(crate) fn status_actions(state: &TuiState) -> Vec<StatusAction> {
+    let mut actions = vec![StatusAction::Commands];
+    if state.plan().snapshot().is_some() {
+        actions.push(StatusAction::Plan);
+    }
+    if state.is_timeline_reviewing() {
+        actions.push(StatusAction::Follow);
+    }
+    if state.can_interrupt_run() {
+        actions.push(StatusAction::Stop);
+    }
+    actions
+}
+
+pub(crate) fn status_action_label(action: &StatusAction) -> &'static str {
+    match action {
+        StatusAction::Commands => "commands",
+        StatusAction::Plan => "plan",
+        StatusAction::Follow => "follow",
+        StatusAction::Stop => "stop",
+    }
+}
+
+pub(crate) fn status_chips(region: Rect, actions: &[StatusAction]) -> Vec<(StatusAction, Rect)> {
+    if region.height == 0 || region.width == 0 {
+        return Vec::new();
+    }
+    let mut shown = actions.to_vec();
+    while !shown.is_empty() && chip_row_width(&chip_labels(&shown)) > usize::from(region.width) {
+        shown.remove(0);
+    }
+    let labels = chip_labels(&shown);
+    let width = chip_row_width(&labels);
+    let origin_x = region.x.saturating_add(
+        region
+            .width
+            .saturating_sub(u16::try_from(width).unwrap_or(region.width)),
+    );
+    chip_rects(origin_x, region.y, &labels)
+        .into_iter()
+        .zip(shown)
+        .map(|(rect, action)| (action, rect))
+        .collect()
+}
+
+pub(crate) fn status_action_at(
+    state: &TuiState,
+    region: Rect,
+    position: Position,
+) -> Option<StatusAction> {
+    if state.clipboard_feedback().is_some() {
+        return None;
+    }
+    status_chips(region, &status_actions(state))
+        .into_iter()
+        .find(|(_, rect)| rect.contains(position))
+        .map(|(action, _)| action)
+}
+
+pub(crate) fn header_model_rect(region: Rect, parts: &[String; 3]) -> Option<Rect> {
+    let model = parts[1].as_str();
+    if model.is_empty() || region.height == 0 {
+        return None;
+    }
+    let prefix =
+        UnicodeWidthStr::width("merry") + 2 + UnicodeWidthStr::width(parts[0].as_str()) + 2;
+    if prefix >= usize::from(region.width) {
+        return None;
+    }
+    let width = UnicodeWidthStr::width(model).min(usize::from(region.width) - prefix);
+    if width == 0 {
+        return None;
+    }
+    Some(Rect::new(
+        region
+            .x
+            .saturating_add(u16::try_from(prefix).unwrap_or(u16::MAX)),
+        region.y,
+        u16::try_from(width).unwrap_or(0),
+        1,
+    ))
+}
+
+pub(crate) fn chip_line(state: &TuiState, labels: &[&str]) -> Line<'static> {
+    let style = semantic_style(state, SemanticColor::Focus)
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(Modifier::UNDERLINED);
+    let mut spans = Vec::new();
+    for (index, label) in labels.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(format!("[{label}]"), style));
+    }
+    Line::from(spans)
+}
+
+pub(crate) fn chip_hit(origin: Position, labels: &[&str], position: Position) -> Option<usize> {
+    chip_rects(origin.x, origin.y, labels)
+        .into_iter()
+        .position(|rect| rect.contains(position))
+}
+
+pub(crate) fn truncate_columns(value: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= max_width {
+        return value.to_owned();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let limit = max_width.saturating_sub(1);
+    let mut width = 0;
+    let mut end = 0;
+    for (index, character) in value.char_indices() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width + character_width > limit {
+            break;
+        }
+        width += character_width;
+        end = index + character.len_utf8();
+    }
+    let mut truncated = value[..end].to_owned();
+    truncated.push('…');
+    truncated
+}
+
+fn chip_labels(actions: &[StatusAction]) -> Vec<&str> {
+    actions.iter().map(status_action_label).collect()
+}
+
+fn chip_rects(origin_x: u16, y: u16, labels: &[&str]) -> Vec<Rect> {
+    let mut x = origin_x;
+    let mut rects = Vec::with_capacity(labels.len());
+    for (index, label) in labels.iter().enumerate() {
+        if index > 0 {
+            x = x.saturating_add(2);
+        }
+        let width = u16::try_from(UnicodeWidthStr::width(format!("[{label}]").as_str()))
+            .unwrap_or(u16::MAX);
+        rects.push(Rect::new(x, y, width, 1));
+        x = x.saturating_add(width);
+    }
+    rects
+}
+
+fn chip_row_width(labels: &[&str]) -> usize {
+    labels
+        .iter()
+        .map(|label| UnicodeWidthStr::width(format!("[{label}]").as_str()))
+        .sum::<usize>()
+        .saturating_add(labels.len().saturating_sub(1).saturating_mul(2))
+}
+
+fn completion_index(state: &TuiState, region: Rect, position: Position) -> Option<usize> {
+    let menu = state.completion_menu()?;
+    let index = usize::from(position.y.saturating_sub(region.y));
+    (index < usize::from(region.height) && index < menu.items().len()).then_some(index)
+}

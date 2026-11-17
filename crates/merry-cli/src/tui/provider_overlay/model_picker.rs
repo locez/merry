@@ -110,6 +110,13 @@ impl ModelPickerOverlay {
         self.selected
     }
 
+    pub(crate) fn select(&mut self, index: usize) {
+        let count = self.visible_models().len();
+        if count > 0 {
+            self.selected = index.min(count - 1);
+        }
+    }
+
     pub(crate) fn is_loading(&self) -> bool {
         self.loading
     }

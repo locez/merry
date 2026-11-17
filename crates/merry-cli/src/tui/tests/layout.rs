@@ -253,8 +253,9 @@ fn renderer_preserves_user_message_newlines() {
 
     let text = render_to_text(&state, 80, 16);
 
-    assert!(text.contains("▌ 1234"));
-    assert!(text.contains("▌ 换 行 测 试"));
+    assert!(text.contains("❯ 1234"));
+    assert!(text.contains("换 行 测 试"));
+    assert!(!text.contains("❯ 换"));
     assert!(!text.contains("user:"));
 }
 
@@ -313,14 +314,19 @@ fn renderer_shows_user_input_in_timeline() {
     let buffer = render_to_buffer(&state, 80, 16);
     let text = rendered_buffer_text(&buffer);
 
-    assert!(text.contains("▌ 查"));
+    assert!(text.contains("❯ 查"));
     assert!(!text.contains("user:"));
     assert!(text.contains("baidu.com"));
-    let accent_style = find_cell_style(&buffer, "▌").expect("user accent should render");
+    let accent_style = find_cell_style(&buffer, "❯").expect("user accent should render");
     let body_style = find_cell_style(&buffer, "baidu.com").expect("user body should render");
     assert_eq!(accent_style.fg, Some(Color::LightMagenta));
     assert!(accent_style.add_modifier.contains(Modifier::BOLD));
     assert_eq!(body_style.fg, Some(Color::White));
+    assert!(body_style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(
+        body_style.bg,
+        Some(crate::tui::theme::dim_color(Color::LightMagenta))
+    );
 }
 
 #[test]
@@ -419,12 +425,12 @@ fn renderer_review_user_input_starts_viewport_at_selected_user_turn() {
 
     state.jump_to_previous_user_input();
     let second = render_to_text(&state, 80, 18);
-    assert!(second.contains("▌ second request"));
+    assert!(second.contains("❯ second request"));
     assert!(!second.contains("first request"));
 
     state.jump_to_previous_user_input();
     let first = render_to_text(&state, 80, 18);
-    assert!(first.contains("▌ first request"));
+    assert!(first.contains("❯ first request"));
     assert!(first.contains("first answer"));
 
     state.exit_timeline_review();

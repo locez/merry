@@ -88,6 +88,14 @@ impl ProviderManagerOverlay {
         self.selected
     }
 
+    pub(crate) fn select(&mut self, index: usize) {
+        if self.items.is_empty() {
+            return;
+        }
+        self.selected = index.min(self.items.len() - 1);
+        self.pending_delete_alias = None;
+    }
+
     pub(crate) fn current_alias(&self) -> Option<&str> {
         self.current_alias.as_deref()
     }

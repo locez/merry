@@ -3,7 +3,7 @@ use merry_runtime::{
     MAX_USER_IMAGES, RuntimeError, UserImageInput, UserMessageInput, user_image_label,
 };
 use std::{ops::Range, sync::Arc};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 pub(crate) const MAX_INPUT_HISTORY: usize = 200;
 const PASTE_PLACEHOLDER_THRESHOLD_CHARS: usize = 256;
@@ -23,6 +23,8 @@ pub(crate) struct TextInputViewport {
 pub(crate) struct TextInput {
     text: String,
     cursor: usize,
+    /// Display column retained while moving across shorter visual rows.
+    preferred_column: Option<usize>,
     elements: Vec<InputElement>,
 }
 
@@ -130,25 +132,24 @@ impl TextInput {
             };
         }
 
-        if self.text.contains('\n') {
-            return self.multiline_viewport(max_width, max_rows.max(1));
-        }
-
-        let full_cursor_column = self.cursor_column();
-        let (start, cursor_column) = if full_cursor_column < max_width {
-            (0, full_cursor_column)
-        } else {
-            self.viewport_start_before_cursor(max_width.saturating_sub(1))
-        };
-        let end = visible_text_end(&self.text, start, max_width);
-
-        let text = self.text[start..end].to_owned();
+        let max_rows = max_rows.max(1);
+        let atoms = self.atom_ranges();
+        let rows = crate::tui::input_layout::visual_rows(&self.text, max_width, &atoms);
+        let (row, column) = crate::tui::input_layout::locate_cursor(&self.text, self.cursor, &rows);
+        let column = crate::tui::input_layout::display_column(column, max_width);
+        let start = row.saturating_add(1).saturating_sub(max_rows);
+        let end = start.saturating_add(max_rows).min(rows.len());
+        let lines = rows[start..end]
+            .iter()
+            .map(|visual| self.text[visual.start..visual.end].to_owned())
+            .collect::<Vec<_>>();
+        let text = lines.join("\n");
         TextInputViewport {
             image_placeholders: self.image_placeholders_in(&text),
             text,
-            cursor_column,
-            cursor_row: 0,
-            visible_rows: 1,
+            cursor_column: column,
+            cursor_row: row.saturating_sub(start),
+            visible_rows: lines.len().max(1),
         }
     }
 
@@ -208,6 +209,7 @@ impl TextInput {
 
     pub(crate) fn replace_text(&mut self, value: String) {
         self.cursor = value.len();
+        self.preferred_column = None;
         self.text = value;
         self.elements.clear();
     }
@@ -244,11 +246,11 @@ impl TextInput {
     }
 
     pub(crate) fn delete_before_cursor(&mut self) {
-        self.replace_range_atomic(0..self.cursor, "");
+        self.replace_range_atomic(self.logical_line_start()..self.cursor, "");
     }
 
     pub(crate) fn delete_after_cursor(&mut self) {
-        self.replace_range_atomic(self.cursor..self.text.len(), "");
+        self.replace_range_atomic(self.cursor..self.logical_line_end(), "");
     }
 
     pub(crate) fn delete_previous_word(&mut self) {
@@ -272,7 +274,27 @@ impl TextInput {
         self.replace_range_atomic(start..self.cursor, "");
     }
 
+    /// Moves to the previous or next visual row, keeping the preferred column.
+    /// Returns false on the first or last row so the caller can recall history.
+    pub(crate) fn move_vertical(&mut self, delta: isize, max_width: usize) -> bool {
+        let max_width = if max_width == 0 { 10_000 } else { max_width };
+        let atoms = self.atom_ranges();
+        let rows = crate::tui::input_layout::visual_rows(&self.text, max_width, &atoms);
+        let (row, column) = crate::tui::input_layout::locate_cursor(&self.text, self.cursor, &rows);
+        let Some(target) = row.checked_add_signed(delta) else {
+            return false;
+        };
+        if target >= rows.len() {
+            return false;
+        }
+        let preferred = *self.preferred_column.get_or_insert(column);
+        self.cursor =
+            crate::tui::input_layout::byte_at_column(&self.text, &rows[target], preferred, &atoms);
+        true
+    }
+
     pub(crate) fn move_left(&mut self) {
+        self.preferred_column = None;
         if self.cursor == 0 {
             return;
         }
@@ -284,6 +306,7 @@ impl TextInput {
     }
 
     pub(crate) fn move_right(&mut self) {
+        self.preferred_column = None;
         if self.cursor >= self.text.len() {
             return;
         }
@@ -295,16 +318,19 @@ impl TextInput {
     }
 
     pub(crate) fn move_home(&mut self) {
-        self.cursor = 0;
+        self.preferred_column = None;
+        self.cursor = self.logical_line_start();
     }
 
     pub(crate) fn move_end(&mut self) {
-        self.cursor = self.text.len();
+        self.preferred_column = None;
+        self.cursor = self.logical_line_end();
     }
 
     pub(crate) fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.preferred_column = None;
         self.elements.clear();
     }
 
@@ -391,6 +417,7 @@ impl TextInput {
     }
 
     fn replace_range_atomic(&mut self, range: Range<usize>, value: &str) {
+        self.preferred_column = None;
         let range = self.expanded_edit_range(range);
         let old_end = range.end;
         let old_len = range.end - range.start;
@@ -514,56 +541,25 @@ impl TextInput {
         }
     }
 
-    fn viewport_start_before_cursor(&self, max_width_before_cursor: usize) -> (usize, usize) {
-        let mut start = self.cursor;
-        let mut width = 0;
-        for (index, value) in self.text[..self.cursor].char_indices().rev() {
-            let value_width = char_width(value);
-            if width + value_width > max_width_before_cursor {
-                break;
-            }
-            width += value_width;
-            start = index;
-        }
-        (start, width)
-    }
-
-    fn multiline_viewport(&self, max_width: usize, max_rows: usize) -> TextInputViewport {
-        let cursor_line_index = self.text[..self.cursor]
-            .bytes()
-            .filter(|value| *value == b'\n')
-            .count();
-        let cursor_line_start = self.text[..self.cursor]
+    fn logical_line_start(&self) -> usize {
+        self.text[..self.cursor]
             .rfind('\n')
             .map(|index| index + 1)
-            .unwrap_or(0);
-        let cursor_line_end = self.text[self.cursor..]
+            .unwrap_or(0)
+    }
+
+    fn logical_line_end(&self) -> usize {
+        self.text[self.cursor..]
             .find('\n')
             .map(|offset| self.cursor + offset)
-            .unwrap_or(self.text.len());
-        let cursor_line = &self.text[cursor_line_start..cursor_line_end];
-        let cursor_byte_index = self.cursor - cursor_line_start;
-        let (cursor_line_text, cursor_column) =
-            visible_line_around_cursor(cursor_line, cursor_byte_index, max_width);
+            .unwrap_or(self.text.len())
+    }
 
-        let mut visible_lines = self
-            .text
-            .split('\n')
-            .map(|line| visible_line_prefix(line, max_width))
-            .collect::<Vec<_>>();
-        visible_lines[cursor_line_index] = cursor_line_text;
-        let start = cursor_line_index.saturating_add(1).saturating_sub(max_rows);
-        let end = start.saturating_add(max_rows).min(visible_lines.len());
-        let visible_lines = visible_lines[start..end].to_vec();
-
-        let text = visible_lines.join("\n");
-        TextInputViewport {
-            image_placeholders: self.image_placeholders_in(&text),
-            text,
-            cursor_column,
-            cursor_row: cursor_line_index.saturating_sub(start),
-            visible_rows: visible_lines.len().max(1),
-        }
+    fn atom_ranges(&self) -> Vec<Range<usize>> {
+        self.elements
+            .iter()
+            .map(|element| element.range.clone())
+            .collect()
     }
 }
 
@@ -678,58 +674,6 @@ fn next_char_boundary(text: &str, cursor: usize) -> usize {
         .nth(1)
         .map(|(index, _)| cursor + index)
         .unwrap_or(text.len())
-}
-
-fn visible_text_end(text: &str, start: usize, max_width: usize) -> usize {
-    let mut width = 0;
-    let mut end = start;
-    for (offset, value) in text[start..].char_indices() {
-        let value_width = char_width(value);
-        if width + value_width > max_width {
-            break;
-        }
-        width += value_width;
-        end = start + offset + value.len_utf8();
-    }
-    end
-}
-
-fn visible_line_prefix(text: &str, max_width: usize) -> String {
-    text[..visible_text_end(text, 0, max_width)].to_owned()
-}
-
-fn visible_line_around_cursor(
-    line: &str,
-    cursor_byte_index: usize,
-    max_width: usize,
-) -> (String, usize) {
-    let cursor_column = UnicodeWidthStr::width(&line[..cursor_byte_index]);
-    if cursor_column < max_width {
-        return (visible_line_prefix(line, max_width), cursor_column);
-    }
-
-    let (start, visible_cursor_column) =
-        viewport_start_before_text_cursor(&line[..cursor_byte_index], max_width.saturating_sub(1));
-    let end = visible_text_end(line, start, max_width);
-    (line[start..end].to_owned(), visible_cursor_column)
-}
-
-fn viewport_start_before_text_cursor(text: &str, max_width_before_cursor: usize) -> (usize, usize) {
-    let mut start = text.len();
-    let mut width = 0;
-    for (index, value) in text.char_indices().rev() {
-        let value_width = char_width(value);
-        if width + value_width > max_width_before_cursor {
-            break;
-        }
-        width += value_width;
-        start = index;
-    }
-    (start, width)
-}
-
-fn char_width(value: char) -> usize {
-    UnicodeWidthChar::width(value).unwrap_or(0)
 }
 
 #[cfg(test)]

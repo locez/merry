@@ -1,8 +1,11 @@
 //! Builds the transcript layout shared by drawing, hit testing, and selection.
 
-use super::timeline::{
-    assistant_lines, command_lines, compact_patch_lines, diagnostic_lines, expanded_timeline_lines,
-    local_command_lines, muted_lines, read_output_lines, user_lines,
+use super::{
+    activity::thinking_lines,
+    timeline::{
+        assistant_lines, command_lines, compact_patch_lines, diagnostic_lines,
+        expanded_timeline_lines, local_command_lines, muted_lines, read_output_lines, user_lines,
+    },
 };
 use crate::tui::{
     copy_controls::CopyTarget,
@@ -50,7 +53,7 @@ pub(super) fn timeline_layout(state: &TuiState, region: Rect) -> TimelineLayout 
         }
         let mut item_targets = Vec::new();
         let item_rows = match item {
-            TimelineItem::User { text, lane } => user_lines(state, text, *lane)
+            TimelineItem::User { text, lane } => user_lines(state, text, *lane, region.width)
                 .into_iter()
                 .map(|line| TranscriptRow::new(line, SelectionPolicy::StripPrefix(2)))
                 .collect::<Vec<_>>(),
@@ -59,6 +62,15 @@ pub(super) fn timeline_layout(state: &TuiState, region: Rect) -> TimelineLayout 
                 item_targets = rendered.copy_targets;
                 rendered.rows
             }
+            TimelineItem::Thinking {
+                text,
+                elapsed,
+                expanded,
+                ..
+            } => thinking_lines(state, text, *elapsed, *expanded, region.width)
+                .into_iter()
+                .map(|line| TranscriptRow::new(line, SelectionPolicy::Keep))
+                .collect(),
             TimelineItem::Muted { title, detail } => muted_lines(state, title, detail)
                 .into_iter()
                 .map(|line| TranscriptRow::new(line, SelectionPolicy::Keep))
@@ -142,12 +154,7 @@ pub(super) fn timeline_layout(state: &TuiState, region: Rect) -> TimelineLayout 
     }
 }
 
-pub(super) fn timeline_viewport(
-    state: &TuiState,
-    timeline: TimelineLayout,
-    region: Rect,
-) -> TimelineViewport {
-    let mut scroll = timeline_scroll_start(state, &timeline, region);
+pub(super) fn timeline_viewport(timeline: TimelineLayout, mut scroll: usize) -> TimelineViewport {
     let mut rows = timeline.rows;
     let row_starts = timeline.row_starts;
     let max_scroll = usize::from(u16::MAX);

@@ -1,15 +1,17 @@
 use crate::tui::{
-    controller::handle_key_event,
+    controller::{ControllerEffect, handle_key_event, handle_mouse_input},
     overlay::{Overlay, PaletteCommand},
     plan_tests::{add_live_attempt, key, node_id, plan_commands, plan_event, snapshot, tui_state},
     projector::TuiProjector,
-    render::render_to_text,
+    render::{prepare_viewport, render_to_buffer, render_to_text},
+    text_interaction::MouseInput,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use merry_core::{
     PlanApprovalRequirementId, PlanApprovalRequirementKind, PlanApprovalRequirementSnapshot,
     PlanApprovalRequirementStatus, PlanNodeStatus, PlanPhase, ToolName,
 };
+use ratatui::{buffer::Buffer, layout::Position, layout::Size};
 
 #[test]
 fn plan_palette_commands_follow_runtime_phase() {
@@ -95,6 +97,40 @@ fn approve_plan_command_previews_exact_capability_scope_before_dispatch() {
         confirmed,
         crate::tui::controller::ControllerEffect::ApprovePlan(_)
     ));
+}
+
+#[test]
+fn approve_button_click_confirms_the_same_plan_approval() {
+    let mut state = tui_state();
+    let mut awaiting = snapshot(2, PlanNodeStatus::Pending);
+    awaiting.phase = PlanPhase::AwaitingApproval;
+    state.plan_mut().update_snapshot(awaiting);
+    state.open_plan_approval();
+    assert!(matches!(state.overlay(), Some(Overlay::PlanApproval(_))));
+
+    let size = Size::new(80, 24);
+    prepare_viewport(&mut state, size);
+    let buffer = render_to_buffer(&state, size.width, size.height);
+    let position = point(&buffer, "[Approve]");
+    let effect = handle_mouse_input(MouseInput::Down(position), size, &mut state);
+
+    assert!(matches!(effect, ControllerEffect::ApprovePlan(_)));
+    assert!(state.overlay().is_none());
+}
+
+fn point(buffer: &Buffer, text: &str) -> Position {
+    let area = buffer.area;
+    for y in area.y..area.bottom() {
+        let mut row = String::new();
+        for x in area.x..area.right() {
+            row.push_str(buffer[(x, y)].symbol());
+        }
+        if let Some(byte_index) = row.find(text) {
+            let x = row[..byte_index].chars().count();
+            return Position::new(u16::try_from(x).unwrap(), y);
+        }
+    }
+    panic!("missing {text}");
 }
 
 #[test]

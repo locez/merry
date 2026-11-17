@@ -83,13 +83,13 @@ pub(super) async fn dispatch_effect(
             Ok(false)
         }
         ControllerEffect::CopyText(text) => {
-            let (feedback, failed) = match terminal.copy_text(&text) {
-                Ok(()) => (
-                    "Copy requested via OSC 52; terminal support required".to_owned(),
-                    false,
-                ),
-                Err(error) => (format!("Copy failed: {error}"), true),
-            };
+            let system = write_system_clipboard(&text).await;
+            let terminal_result = terminal.copy_text(&text);
+            let (feedback, failed) = crate::tui::copy_controls::copy_result_feedback(
+                system.is_ok(),
+                terminal_result.is_ok(),
+                system.as_ref().err().map(String::as_str).unwrap_or(""),
+            );
             show_copy_feedback(state, feedback, failed);
             Ok(false)
         }
@@ -253,6 +253,31 @@ pub(super) async fn dispatch_effect(
             Ok(true)
         }
         _ => unreachable!("provider effect handled by the provider dispatcher"),
+    }
+}
+
+async fn write_system_clipboard(text: &str) -> Result<(), String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = text;
+        Err("system clipboard is unavailable".to_owned())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let text = text.to_owned();
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            tokio::task::spawn_blocking(move || {
+                let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+                clipboard.set_text(text).map_err(|error| error.to_string())
+            }),
+        )
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(format!("clipboard task failed: {error}")),
+            Err(_) => Err("clipboard timed out".to_owned()),
+        }
     }
 }
 

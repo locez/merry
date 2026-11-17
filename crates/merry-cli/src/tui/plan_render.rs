@@ -11,7 +11,7 @@ use merry_core::{
 };
 use ratatui::{
     Frame,
-    layout::Rect,
+    layout::{Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Wrap},
@@ -572,6 +572,75 @@ fn directive_lines(
     text(lines, state, &format!("  {}", directive.reason));
     if let Some(instruction) = directive.instruction.as_deref() {
         muted(lines, state, &format!("  {instruction}"));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlanPointer {
+    Fold(merry_core::PlanNodeId),
+    Row(merry_core::PlanNodeId),
+}
+
+/// Maps a click inside the plan pane to a tree row. The fold glyph is the
+/// column after the depth indent; the rest of the row selects that node.
+pub(crate) fn plan_pointer_target(
+    state: &TuiState,
+    region: Rect,
+    position: Position,
+) -> Option<PlanPointer> {
+    if region.width < 2 || region.height < 2 || !region.contains(position) {
+        return None;
+    }
+    if state.plan().is_inspector_open() {
+        return None;
+    }
+    let inner = Rect {
+        x: region.x.saturating_add(1),
+        y: region.y.saturating_add(1),
+        width: region.width.saturating_sub(2),
+        height: region.height.saturating_sub(2),
+    };
+    if inner.width == 0 || inner.height == 0 || !inner.contains(position) {
+        return None;
+    }
+    let inner_height = usize::from(inner.height);
+    let local_y = usize::from(position.y.saturating_sub(inner.y));
+    if local_y == 0 {
+        return None;
+    }
+    let rows = state.plan().visible_rows();
+    let start = visible_start(
+        &rows,
+        state.plan().selected_node_id(),
+        state.plan().scroll_offset(),
+        inner_height.saturating_sub(1),
+    );
+    let local_x = usize::from(position.x.saturating_sub(inner.x));
+    let mut line = 1;
+    for row in rows.iter().skip(start) {
+        if line >= inner_height {
+            break;
+        }
+        if local_y == line {
+            return Some(row_pointer(row, local_x));
+        }
+        line += 1;
+        if row.activity.is_some() && line < inner_height {
+            if local_y == line {
+                return Some(PlanPointer::Row(row.node_id.clone()));
+            }
+            line += 1;
+        }
+    }
+    None
+}
+
+fn row_pointer(row: &PlanTreeRow, local_x: usize) -> PlanPointer {
+    let fold_column = row.depth.saturating_mul(2);
+    if row.has_children && local_x == fold_column {
+        PlanPointer::Fold(row.node_id.clone())
+    } else {
+        PlanPointer::Row(row.node_id.clone())
     }
 }
 

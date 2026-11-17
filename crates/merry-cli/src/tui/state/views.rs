@@ -59,6 +59,8 @@ pub(crate) enum CommandView {
         cwd: String,
         artifact: ArtifactRef,
         elapsed: Option<Duration>,
+        /// Presentation fold. Finished commands start closed and open on click.
+        expanded: bool,
     },
 }
 
@@ -215,6 +217,13 @@ pub(crate) enum TimelineItem {
     },
     Assistant {
         text: String,
+    },
+    /// Live model reasoning. `elapsed` is set when the turn leaves thinking.
+    Thinking {
+        text: String,
+        started_at: Instant,
+        elapsed: Option<Duration>,
+        expanded: bool,
     },
     Muted {
         title: String,

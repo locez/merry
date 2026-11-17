@@ -101,6 +101,14 @@ impl CompletionMenu {
         }
     }
 
+    pub(crate) fn select_index(&mut self, index: usize) -> bool {
+        if index >= self.items.len() {
+            return false;
+        }
+        self.selected = index;
+        true
+    }
+
     pub(crate) fn replacement_range(&self) -> std::ops::Range<usize> {
         self.token_start..self.token_end
     }

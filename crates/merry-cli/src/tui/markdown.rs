@@ -444,7 +444,7 @@ impl<'state> MarkdownRenderer<'state> {
 
     fn flush_code_block(&mut self, block: CodeBlockState) {
         let copy_target = if !block.text.is_empty()
-            && let Some((header, width)) = copy_header(self.state, "[Copy code]", self.region_width)
+            && let Some((header, width)) = copy_header(self.state, self.region_width)
         {
             let line_index = self.rows.len();
             self.push_row(TranscriptRow::new(header, SelectionPolicy::Skip));

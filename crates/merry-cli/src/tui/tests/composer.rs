@@ -332,7 +332,8 @@ fn text_input_viewport_uses_terminal_width_for_wide_chars() {
 
     let viewport = input.viewport(4);
 
-    assert_eq!(viewport.text, "好b");
+    assert_eq!(viewport.text, "a你\n好b");
+    assert_eq!(viewport.cursor_row, 1);
     assert_eq!(viewport.cursor_column, 2);
 }
 
@@ -364,4 +365,66 @@ fn text_input_multiline_viewport_keeps_cursor_line_visible() {
     assert_eq!(viewport.cursor_row, 2);
     assert_eq!(viewport.cursor_column, 3);
     assert_eq!(viewport.visible_rows, 3);
+}
+
+#[test]
+fn multiline_input_moves_by_visual_row_and_keeps_home_on_the_line() {
+    let mut input = TextInput::default();
+    input.insert_str("abcdef\nab\nabcdef");
+    assert!(input.move_vertical(-1, 20));
+    assert_eq!(&input.text()[..input.cursor_byte_index()], "abcdef\nab");
+    assert!(input.move_vertical(-1, 20));
+    assert_eq!(&input.text()[..input.cursor_byte_index()], "abcdef");
+    assert!(!input.move_vertical(-1, 20));
+
+    input.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    assert_eq!(input.cursor_byte_index(), 0);
+    input.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    assert_eq!(input.cursor_byte_index(), "abcdef".len());
+    input.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    assert_eq!(input.text(), "abcdef\nab\nabcdef");
+    input.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    input.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+    assert_eq!(input.text(), "abcde\nab\nabcdef");
+}
+
+#[test]
+fn wrapped_input_up_down_follows_the_visible_rows() {
+    let mut input = TextInput::default();
+    input.insert_str("abcdefghij");
+    let viewport = input.viewport_rows(4, 5);
+    assert_eq!(viewport.text, "abcd\nefgh\nij");
+    assert_eq!(viewport.cursor_row, 2);
+    assert_eq!(viewport.cursor_column, 2);
+
+    assert!(input.move_vertical(-1, 4));
+    assert_eq!(&input.text()[..input.cursor_byte_index()], "abcdef");
+    assert!(input.move_vertical(-1, 4));
+    assert_eq!(&input.text()[..input.cursor_byte_index()], "ab");
+}
+
+#[test]
+fn up_on_the_first_input_row_recalls_history() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "model".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.record_input_history("earlier");
+    state.insert_input_str("alpha\nbeta");
+    state.set_composer_columns(40);
+
+    assert_eq!(
+        handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "alpha\nbeta");
+    assert!(state.input_mut().cursor_byte_index() <= "alpha".len());
+
+    assert_eq!(
+        handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "earlier");
 }

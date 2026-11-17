@@ -38,6 +38,12 @@ impl ReasoningPickerOverlay {
         self.selected
     }
 
+    pub(crate) fn select(&mut self, index: usize) {
+        if index < self.option_count() {
+            self.selected = index;
+        }
+    }
+
     pub(crate) fn custom_editor(&self) -> Option<&TextInput> {
         self.custom_editor.as_ref()
     }

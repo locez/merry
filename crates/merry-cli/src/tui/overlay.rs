@@ -239,6 +239,13 @@ impl CommandPalette {
         self.selected
     }
 
+    pub(crate) fn select(&mut self, index: usize) {
+        let count = self.visible_commands().len();
+        if count > 0 {
+            self.selected = index.min(count - 1);
+        }
+    }
+
     pub(crate) fn visible_commands(&self) -> Vec<&'static CommandSpec> {
         let query = self.query.text().trim().to_ascii_lowercase();
         let slash_query = query.strip_prefix('/').unwrap_or(&query);
@@ -294,6 +301,16 @@ impl CommandPalette {
 impl SettingsOverlay {
     pub(crate) fn selected_item(&self) -> SettingItem {
         SettingItem::ALL[self.selected.min(SettingItem::ALL.len() - 1)]
+    }
+
+    pub(crate) fn select_item(&mut self, item: SettingItem) {
+        if let Some(index) = SettingItem::ALL
+            .iter()
+            .position(|candidate| *candidate == item)
+        {
+            self.selected = index;
+            self.notice = None;
+        }
     }
 
     pub(crate) fn model_editor(&self) -> Option<&TextInput> {

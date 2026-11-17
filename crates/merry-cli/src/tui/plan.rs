@@ -352,6 +352,12 @@ impl PlanUiState {
         self.inspector_scroll_offset = 0;
     }
 
+    pub(crate) fn focus(&mut self) {
+        if self.open {
+            self.focused = true;
+        }
+    }
+
     pub(crate) fn leave_focus(&mut self) {
         self.focused = false;
         self.inspector_open = false;

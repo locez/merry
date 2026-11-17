@@ -197,7 +197,7 @@ fn command_details_shortcut_does_not_dismiss_unrelated_dialogs() {
 
 #[test]
 fn hidden_success_output_is_inspectable_and_copy_preserves_the_actual_command() {
-    let mut state = state();
+    let mut state = state().with_successful_command_output(false);
     let command = "printf '%s' 'line one'\nprintf 'line two'";
     let artifact = completed_command(&mut state, "first", command, 0, "secret preview");
     state.insert_input_str("unfinished draft");

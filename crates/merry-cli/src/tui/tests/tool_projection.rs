@@ -67,7 +67,7 @@ fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
     assert_eq!(state.timeline().len(), 2);
     let rendered = render_to_text(&state, 120, 24);
     assert!(rendered.contains("Read read_text"));
-    assert!(!rendered.contains("file contents"));
+    assert!(rendered.contains("file contents"));
     assert!(matches!(state.timeline()[1], TimelineItem::Expanded { .. }));
 }
 

@@ -85,7 +85,12 @@ impl TuiProjector {
     pub(crate) fn apply(&mut self, event: RuntimeEvent, state: &mut TuiState) {
         state.observe_output_rate(&event);
         match event {
+            RuntimeEvent::ReasoningDelta { delta, .. } if !delta.is_empty() => {
+                state.append_reasoning_delta(&delta);
+            }
+            RuntimeEvent::ReasoningDelta { .. } => {}
             RuntimeEvent::AssistantMessage { text, .. } => {
+                state.finish_reasoning();
                 if let Some(index) = self.streaming_assistant_index.take() {
                     state.replace_timeline_item(index, TimelineItem::Assistant { text });
                 } else {
@@ -93,6 +98,7 @@ impl TuiProjector {
                 }
             }
             RuntimeEvent::AssistantMessageDelta { delta, .. } if !delta.is_empty() => {
+                state.finish_reasoning();
                 self.streaming_assistant_index =
                     Some(state.append_assistant_delta(self.streaming_assistant_index, &delta));
             }
@@ -140,8 +146,12 @@ impl TuiProjector {
             RuntimeEvent::UsageUpdated { usage, .. } => {
                 state.set_usage(usage);
             }
-            RuntimeEvent::ToolCallStarted { call, .. } => self.start_tool(call, state),
+            RuntimeEvent::ToolCallStarted { call, .. } => {
+                state.finish_reasoning();
+                self.start_tool(call, state);
+            }
             RuntimeEvent::ToolCallBatchStarted { batch, .. } => {
+                state.finish_reasoning();
                 for call in batch.calls() {
                     self.start_tool(call.clone(), state);
                 }
@@ -348,7 +358,11 @@ impl TuiProjector {
                         .unwrap_or_else(|| attempt.node_id.as_str().to_owned()),
                 });
             }
+            RuntimeEvent::StepCompleted { .. } => {
+                state.finish_reasoning();
+            }
             RuntimeEvent::RunFailed { diagnostic, .. } => {
+                state.finish_reasoning();
                 self.finish_pending_commands(state, "failed");
                 self.streaming_assistant_index = None;
                 let item = TimelineItem::Diagnostic {
@@ -366,6 +380,7 @@ impl TuiProjector {
                 }
             }
             RuntimeEvent::RunCancelled { diagnostic, .. } => {
+                state.finish_reasoning();
                 self.finish_pending_commands(state, "cancelled");
                 self.streaming_assistant_index = None;
                 let had_compaction = if let Some(index) = self.compaction_timeline_index.take() {
@@ -389,6 +404,7 @@ impl TuiProjector {
                 }
             }
             RuntimeEvent::Closed => {
+                state.finish_reasoning();
                 self.finish_pending_commands(state, "interrupted");
                 self.streaming_assistant_index = None;
                 state.push_timeline_item(TimelineItem::Muted {

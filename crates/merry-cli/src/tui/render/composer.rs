@@ -25,7 +25,7 @@ pub(super) const MIN_TIMELINE_HEIGHT: u16 = 3;
 pub(super) const MIN_INPUT_HEIGHT: u16 = 3;
 
 pub(crate) fn pane_heights_for_area(state: &TuiState, area: Rect) -> PaneHeights {
-    pane_heights(state, area.height)
+    pane_heights(state, area.height, area.width)
 }
 
 pub(super) fn render_input(
@@ -139,10 +139,15 @@ pub(crate) struct PaneHeights {
     pub(crate) input: u16,
 }
 
-pub(super) fn pane_heights(state: &TuiState, total_height: u16) -> PaneHeights {
+pub(super) fn pane_heights(
+    state: &TuiState,
+    total_height: u16,
+    terminal_width: u16,
+) -> PaneHeights {
     let desired_queue = desired_queue_preview_height(state);
     let desired_completion = desired_completion_preview_height(state);
-    let desired_input = desired_input_region_height(state, MAX_INPUT_VISIBLE_ROWS);
+    let inner_width = usize::from(terminal_width.saturating_sub(2).max(1));
+    let desired_input = desired_input_region_height(state, MAX_INPUT_VISIBLE_ROWS, inner_width);
     let desired_bottom = desired_queue
         .saturating_add(desired_completion)
         .saturating_add(desired_input)
@@ -196,8 +201,14 @@ pub(super) fn desired_completion_preview_height(state: &TuiState) -> u16 {
         .unwrap_or(0)
 }
 
-pub(super) fn desired_input_region_height(state: &TuiState, max_rows: usize) -> u16 {
-    let visible_rows = state.input_visible_rows(max_rows);
+pub(super) fn desired_input_region_height(
+    state: &TuiState,
+    max_rows: usize,
+    inner_width: usize,
+) -> u16 {
+    let visible_rows = state
+        .input_viewport_rows(inner_width, max_rows)
+        .visible_rows;
     u16::try_from(visible_rows)
         .unwrap_or(u16::MAX)
         .saturating_add(2)

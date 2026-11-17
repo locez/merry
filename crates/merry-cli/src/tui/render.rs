@@ -1,6 +1,9 @@
 //! Coordinates focused renderers over the single TUI state snapshot.
 
 use crate::tui::{
+    click_target::{
+        chip_line, status_action_label, status_actions, status_chips, truncate_columns,
+    },
     layout::{BottomPaneHeights, cockpit_layout},
     overlay_render, plan_render,
     render::{
@@ -21,14 +24,19 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Paragraph},
 };
-pub(crate) use timeline::{TimelineMouseDown, timeline_content_region, timeline_mouse_down};
+#[cfg(test)]
+pub(crate) use timeline_layout::timeline_content_region;
+pub(crate) use timeline_pointer::{TimelineMouseDown, timeline_mouse_down, timeline_text_area};
 
+mod activity;
 mod command_style;
+mod sticky;
 
 mod composer;
 
 mod timeline;
 mod timeline_layout;
+mod timeline_pointer;
 
 pub(crate) const STATUS_HEIGHT: u16 = 1;
 
@@ -36,6 +44,7 @@ const HEADER_HEIGHT: u16 = 1;
 
 /// Captures the visible timeline anchor before drawing or processing subsequent updates.
 pub(crate) fn prepare_viewport(state: &mut TuiState, size: ratatui::layout::Size) {
+    state.set_composer_columns(usize::from(size.width.saturating_sub(2)));
     let area = Rect::new(0, 0, size.width, size.height);
     super::command_details::prepare_viewport(state, area);
     let heights = pane_heights_for_area(state, area);
@@ -50,14 +59,14 @@ pub(crate) fn prepare_viewport(state: &mut TuiState, size: ratatui::layout::Size
         state.plan().is_open(),
         state.plan().is_focused(),
     );
-    state.validate_text_selection_area(timeline::timeline_content_region(rects.timeline));
+    state.validate_text_selection_area(timeline_pointer::timeline_text_area(state, rects.timeline));
     if state.text_selection().is_none() {
         timeline::prepare_timeline_viewport(state, rects.timeline);
     }
 }
 
 pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
-    let pane_heights = pane_heights(state, frame.area().height);
+    let pane_heights = pane_heights(state, frame.area().height, frame.area().width);
     let rects = cockpit_layout(
         frame.area(),
         BottomPaneHeights {
@@ -168,7 +177,8 @@ fn render_header(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
             Span::styled("  ", Style::default()),
             Span::styled(
                 model,
-                semantic_style(state, SemanticColor::ToolKeyword).add_modifier(Modifier::BOLD),
+                semantic_style(state, SemanticColor::ToolKeyword)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             ),
             Span::styled("  ", Style::default()),
             Span::styled(
@@ -207,8 +217,39 @@ fn render_status(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
     } else {
         semantic_style(state, SemanticColor::Muted)
     };
-    frame.render_widget(
-        Paragraph::new(state.interaction_status_text()).style(interaction_style),
-        region,
-    );
+    let chips = status_chips(region, &status_actions(state));
+    let text_limit = chips
+        .first()
+        .map_or(usize::from(region.width), |(_, chip)| {
+            usize::from(chip.x.saturating_sub(region.x).saturating_sub(1))
+        });
+    let text_width = u16::try_from(text_limit).unwrap_or(0).min(region.width);
+    if text_width > 0 {
+        frame.render_widget(
+            Paragraph::new(truncate_columns(
+                &state.interaction_status_text(),
+                usize::from(text_width),
+            ))
+            .style(interaction_style),
+            Rect {
+                width: text_width,
+                ..region
+            },
+        );
+    }
+    if let Some((_, first)) = chips.first() {
+        let labels = chips
+            .iter()
+            .map(|(action, _)| status_action_label(action))
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(chip_line(state, &labels)),
+            Rect {
+                x: first.x,
+                y: region.y,
+                width: region.right().saturating_sub(first.x),
+                height: 1,
+            },
+        );
+    }
 }

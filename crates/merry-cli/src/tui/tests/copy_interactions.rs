@@ -82,20 +82,20 @@ fn copy_buttons_preserve_markdown_and_each_code_blocks_undecorated_text() {
     state.insert_input_str("unfinished draft");
     let size = Size::new(90, 36);
     let buffer = draw(&mut state, size);
-    assert_eq!(
-        click(&state, size, point(&buffer, "[Copy reply]")),
-        ControllerEffect::CopyText(markdown.into())
-    );
-    let targets = buttons(&buffer, "[Copy code]");
-    assert_eq!(targets.len(), 2);
+    let targets = buttons(&buffer, "⧉ Copy");
+    assert_eq!(targets.len(), 3);
     assert_eq!(
         click(&state, size, targets[0]),
+        ControllerEffect::CopyText(markdown.into())
+    );
+    assert_eq!(
+        click(&state, size, targets[1]),
         ControllerEffect::CopyText(
             "printf 'one'\n  printf 'two'\n\n\tprintf '三🙂e\u{301}'\n".into()
         )
     );
     assert_eq!(
-        click(&state, size, targets[1]),
+        click(&state, size, targets[2]),
         ControllerEffect::CopyText("  final  \n".into())
     );
     assert!(rendered_buffer_text(&draw(&mut state, size)).contains("unfinished draft"));
@@ -111,7 +111,7 @@ fn copy_targets_follow_wrapping_scrolling_and_local_markdown_indentation() {
     for width in [20, 80, 32] {
         let size = Size::new(width, 24);
         let buffer = draw(&mut state, size);
-        let button = point(&buffer, "[Copy code]");
+        let button = *buttons(&buffer, "⧉ Copy").last().unwrap();
         assert_eq!(
             click(&state, size, button),
             ControllerEffect::CopyText(code.into())
@@ -123,7 +123,7 @@ fn copy_targets_follow_wrapping_scrolling_and_local_markdown_indentation() {
     });
     let size = Size::new(80, 24);
     let buffer = draw(&mut state, size);
-    let target = *buttons(&buffer, "[Copy code]").last().unwrap();
+    let target = *buttons(&buffer, "⧉ Copy").last().unwrap();
     assert_eq!(
         click(&state, size, target),
         ControllerEffect::CopyText("  local text\n".into())
@@ -136,7 +136,7 @@ fn copy_target_survives_timeline_offsets_beyond_u16() {
     let size = Size::new(32, 16);
     let buffer = draw(&mut state, size);
     assert_eq!(
-        click(&state, size, point(&buffer, "[Copy code]")),
+        click(&state, size, *buttons(&buffer, "⧉ Copy").last().unwrap(),),
         ControllerEffect::CopyText("TAIL\n".into())
     );
 }
@@ -147,13 +147,14 @@ fn literal_copy_labels_and_hidden_controls_are_not_click_targets() {
     let size = Size::new(80, 24);
     let buffer = draw(&mut state, size);
     let labels = buttons(&buffer, "[Copy code]");
-    assert_eq!(labels.len(), 2);
+    assert_eq!(labels.len(), 1);
     assert_eq!(click(&state, size, labels[0]), ControllerEffect::None);
+    let control = point(&buffer, "⧉ Copy");
     state.show_info_dialog("Modal", "Do not copy behind this dialog".into());
-    assert_eq!(click(&state, size, labels[1]), ControllerEffect::None);
+    assert_eq!(click(&state, size, control), ControllerEffect::None);
     state.close_overlay();
     let narrow = draw(&mut state, Size::new(5, 24));
-    assert!(buttons(&narrow, "[Copy]").is_empty());
+    assert!(buttons(&narrow, "⧉").is_empty());
 }
 
 #[test]
@@ -162,13 +163,13 @@ fn streamed_code_copy_uses_current_source_without_rendered_wrapping() {
     let size = Size::new(80, 24);
     let buffer = draw(&mut state, size);
     assert_eq!(
-        click(&state, size, point(&buffer, "[Copy code]")),
+        click(&state, size, *buttons(&buffer, "⧉ Copy").last().unwrap(),),
         ControllerEffect::CopyText("first\n".into())
     );
     state.append_assistant_delta(Some(0), "  second\n```\n");
     let buffer = draw(&mut state, size);
     assert_eq!(
-        click(&state, size, point(&buffer, "[Copy code]")),
+        click(&state, size, *buttons(&buffer, "⧉ Copy").last().unwrap(),),
         ControllerEffect::CopyText("first\n  second\n".into())
     );
 }
@@ -258,7 +259,7 @@ fn dragging_strips_timeline_decoration_from_markdown_output() {
     };
     assert!(copied.contains("Title"));
     assert_eq!(copied, "Request\n\nTitle\nprintf 'hello'\n\nnext");
-    assert!(!copied.contains('▌'));
+    assert!(!copied.contains('❯'));
     assert!(!copied.contains('▎'));
     assert!(!copied.contains("[Copy"));
 }
@@ -315,7 +316,7 @@ fn reply_copy_preserves_source_indentation() {
     let size = Size::new(80, 20);
     let buffer = draw(&mut state, size);
     assert_eq!(
-        click(&state, size, point(&buffer, "[Copy reply]")),
+        click(&state, size, point(&buffer, "⧉ Copy")),
         ControllerEffect::CopyText(markdown.into())
     );
 }
@@ -340,7 +341,7 @@ fn plain_click_does_not_freeze_streaming_or_intercept_copy_buttons() {
     assert!(rendered.contains("new text"));
     assert!(!rendered.contains("alpha"));
     assert_eq!(
-        click(&state, size, point(&buffer, "[Copy code]")),
+        click(&state, size, *buttons(&buffer, "⧉ Copy").last().unwrap(),),
         ControllerEffect::CopyText("new code\n".into())
     );
 }

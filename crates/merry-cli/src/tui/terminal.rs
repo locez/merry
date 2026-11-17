@@ -87,7 +87,7 @@ impl TerminalSession {
         self.terminal.size()
     }
 
-    /// Requests a clipboard write through the terminal; OSC 52 support is terminal-owned.
+    /// Asks the terminal to copy. The system clipboard is tried first; this remains the remote fallback.
     pub(crate) fn copy_text(&mut self, text: &str) -> io::Result<()> {
         write_clipboard_request(self.terminal.backend_mut(), text)
     }

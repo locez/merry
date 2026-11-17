@@ -1,16 +1,21 @@
 use crate::tui::{
+    controller::{ControllerEffect, handle_mouse_input},
     keymap::Keymap,
     projector::TuiProjector,
     render::{render_to_buffer, render_to_text},
     state::{TimelineItem, TuiState},
     tests::{find_cell_color, find_text_position, pending_call_with_args, source, text_artifact},
+    text_interaction::MouseInput,
     theme::TuiTheme,
 };
 use merry_core::{
     ErrorInfo, RuntimeEvent, TOOL_CANCELLED_BY_USER_CODE, ToolCallId, ToolCallResult, ToolOutput,
 };
 use merry_runtime::SessionTranscriptItem;
-use ratatui::style::Color;
+use ratatui::{
+    layout::{Position, Size},
+    style::Color,
+};
 use serde_json::json;
 use std::time::Duration;
 
@@ -92,16 +97,21 @@ fn finish_command(
 
 fn rendered_preview(state: &TuiState, title: &str) -> Vec<String> {
     let rendered = render_to_text(state, 120, 24);
-    let rows = rendered.lines().map(str::trim_end).collect::<Vec<_>>();
+    let rows = rendered.lines().map(command_row_text).collect::<Vec<_>>();
     let title_index = rows
         .iter()
-        .position(|row| row.strip_prefix(' ') == Some(title))
+        .position(|row| *row == title)
         .expect("command title should render");
     rows[title_index + 1..]
         .iter()
-        .take_while(|row| row.starts_with("   "))
+        .take_while(|row| row.starts_with("  "))
         .map(|row| row.trim().to_owned())
         .collect()
+}
+
+fn command_row_text(row: &str) -> &str {
+    let row = without_activity_gutter(row.trim_end());
+    row.strip_prefix(' ').unwrap_or(row)
 }
 
 #[tokio::test(start_paused = true)]
@@ -146,9 +156,13 @@ fn wrapped_command_continuations_align_with_the_command_body() {
                 0,
                 process_output(0, "", "", false, false),
             );
+            state.toggle_command_expanded(0);
         }
         let rendered = render_to_text(&state, 36, 32);
-        let rows = rendered.lines().collect::<Vec<_>>();
+        let rows = rendered
+            .lines()
+            .map(without_activity_gutter)
+            .collect::<Vec<_>>();
         let start = rows.iter().position(|row| row.contains("printf")).unwrap();
         let byte_column = rows[start].find("printf").unwrap();
         let column = unicode_width::UnicodeWidthStr::width(&rows[start][..byte_column]);
@@ -207,8 +221,31 @@ async fn running_command_animates_and_completion_stops_the_animation() {
 }
 
 #[test]
-fn successful_commands_hide_output_by_default_and_form_a_compact_list() {
-    let mut state = state();
+fn successful_commands_show_output_by_default_and_stay_compact_when_hidden() {
+    let mut shown = state();
+    assert!(shown.show_successful_command_output());
+    let mut projector = TuiProjector::default();
+    start_command(&mut projector, &mut shown, "cmd", "cmd");
+    finish_command(
+        &mut projector,
+        &mut shown,
+        "cmd",
+        0,
+        process_output(0, "visible-stdout", "", false, false),
+    );
+    let collapsed = render_to_text(&shown, 120, 24);
+    assert!(collapsed.contains('▸'), "{collapsed}");
+    assert!(
+        !collapsed.contains("visible-stdout"),
+        "finished output stays folded: {collapsed}"
+    );
+    shown.toggle_command_expanded(0);
+    assert_eq!(
+        rendered_preview(&shown, "Ran cmd (.)"),
+        ["visible-stdout".to_owned()]
+    );
+
+    let mut state = state().with_successful_command_output(false);
     let mut projector = TuiProjector::default();
     for id in ["cmd1", "cmd2"] {
         start_command(&mut projector, &mut state, id, id);
@@ -247,6 +284,7 @@ fn timeline_gutter_insets_commands_outputs_and_assistant_text() {
         text: "assistant message".to_owned(),
     });
 
+    state.toggle_command_expanded(0);
     let buffer = render_to_buffer(&state, 60, 20);
     let (command_column, command_row) =
         find_text_position(&buffer, "Ran printf value").expect("command should be visible");
@@ -258,7 +296,8 @@ fn timeline_gutter_insets_commands_outputs_and_assistant_text() {
         let (column, _) = find_text_position(&buffer, output).expect("output should be visible");
         assert_eq!(column, 3);
     }
-    for row in command_row..=assistant_row {
+    assert_eq!(buffer[(0, command_row)].symbol(), "▾");
+    for row in command_row + 1..=assistant_row {
         assert_eq!(buffer[(0, row)].symbol(), " ");
     }
 }
@@ -278,8 +317,8 @@ fn timeline_gutter_stays_empty_on_wrapped_command_rows() {
     for row in first_row..=last_row {
         assert_eq!(
             buffer[(0, row)].symbol(),
-            " ",
-            "wrapped row {row} should keep the gutter"
+            "┃",
+            "wrapped row {row} should show the running activity rail"
         );
     }
 }
@@ -297,6 +336,7 @@ fn padded_timeline_keeps_wrapped_command_tail_visible_after_scrolling() {
         0,
         process_output(0, "", "", false, false),
     );
+    state.toggle_command_expanded(0);
 
     let bottom = render_to_text(&state, 20, 12);
     assert!(bottom.contains("TAIL_SENTINEL"));
@@ -368,6 +408,7 @@ fn command_previews_respect_the_output_toggle_and_both_truncation_boundaries() {
                     ),
                 );
 
+                state.toggle_command_expanded(0);
                 let title = if exit_code == 0 {
                     "Ran cmd (.)"
                 } else {
@@ -422,12 +463,17 @@ fn long_commands_wrap_without_losing_arguments_or_the_working_directory() {
                 0,
                 process_output(0, "", "", false, false),
             );
+            let collapsed = render_to_text(&state, 40, 64);
+            assert!(collapsed.contains('▸'), "{collapsed}");
+            let collapsed_compact = compact_command_text(&collapsed);
+            assert!(
+                !collapsed_compact.contains(&expected),
+                "finished command should collapse until opened: {collapsed}"
+            );
+            state.toggle_command_expanded(0);
         }
         let rendered = render_to_text(&state, 40, 64);
-        let compact = rendered
-            .chars()
-            .filter(|character| !character.is_whitespace())
-            .collect::<String>();
+        let compact = compact_command_text(&rendered);
         assert!(
             compact.contains(&expected),
             "complete command should wrap while running={running}"
@@ -520,11 +566,106 @@ fn resumed_commands_use_the_same_completion_and_output_policy() {
             &mut state,
         );
 
+        state.toggle_command_expanded(0);
         if exit_code == 0 {
-            assert!(rendered_preview(&state, "Ran cmd (.)").is_empty());
+            assert_eq!(rendered_preview(&state, "Ran cmd (.)"), ["output"]);
         } else {
             assert_eq!(rendered_preview(&state, "Ran cmd (.) -> 128"), ["output"]);
         }
         assert!(!render_to_text(&state, 120, 24).contains("Running "));
     }
+}
+
+#[test]
+fn finished_long_commands_collapse_until_clicked_open() {
+    let mut state = state().with_successful_command_output(true);
+    let mut projector = TuiProjector::default();
+    let command = format!("printf {} TAIL_TOKEN", "0123456789".repeat(12));
+    start_command(&mut projector, &mut state, "process", &command);
+
+    let size = Size::new(36, 32);
+    let running = render_to_text(&state, size.width, size.height);
+    assert!(running.contains("TAIL_TOKEN"), "{running}");
+    assert!(!running.contains('▸'), "{running}");
+    assert!(!running.contains('▾'), "{running}");
+
+    finish_command(
+        &mut projector,
+        &mut state,
+        "process",
+        0,
+        process_output(0, "VISIBLE_OUTPUT", "", false, false),
+    );
+    let collapsed = render_to_buffer(&state, size.width, size.height);
+    let collapsed_text = buffer_text(&collapsed);
+    assert!(collapsed_text.contains('▸'), "{collapsed_text}");
+    assert!(collapsed_text.contains('…'), "{collapsed_text}");
+    assert!(!collapsed_text.contains("TAIL_TOKEN"), "{collapsed_text}");
+    assert!(
+        !collapsed_text.contains("VISIBLE_OUTPUT"),
+        "{collapsed_text}"
+    );
+
+    click(&mut state, size, point(&collapsed, "Ran"));
+    let opened = render_to_buffer(&state, size.width, size.height);
+    let opened_text = buffer_text(&opened);
+    assert!(opened_text.contains("TAIL_TOKEN"), "{opened_text}");
+    assert!(opened_text.contains("VISIBLE_OUTPUT"), "{opened_text}");
+    assert!(opened_text.contains('▾'), "{opened_text}");
+    assert!(state.text_selection().is_none());
+
+    click(&mut state, size, point(&opened, "▾"));
+    let closed_again = render_to_text(&state, size.width, size.height);
+    assert!(!closed_again.contains("TAIL_TOKEN"), "{closed_again}");
+    assert!(!closed_again.contains("VISIBLE_OUTPUT"), "{closed_again}");
+    assert!(closed_again.contains('▸'), "{closed_again}");
+
+    let closed_buffer = render_to_buffer(&state, size.width, size.height);
+    click(&mut state, size, point(&closed_buffer, "▸"));
+    assert!(render_to_text(&state, size.width, size.height).contains("TAIL_TOKEN"));
+}
+
+fn without_activity_gutter(row: &str) -> &str {
+    let mut chars = row.chars();
+    if matches!(chars.next(), Some('┃' | '▸' | '▾')) {
+        chars.as_str()
+    } else {
+        row
+    }
+}
+
+fn compact_command_text(rendered: &str) -> String {
+    rendered
+        .chars()
+        .filter(|character| !character.is_whitespace() && !matches!(character, '┃' | '▸' | '▾'))
+        .collect()
+}
+
+fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+    let area = buffer.area;
+    let mut text = String::new();
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            text.push_str(buffer[(x, y)].symbol());
+        }
+        text.push('\n');
+    }
+    text
+}
+
+fn point(buffer: &ratatui::buffer::Buffer, text: &str) -> Position {
+    let (column, row) =
+        find_text_position(buffer, text).unwrap_or_else(|| panic!("missing {text}"));
+    Position::new(column, row)
+}
+
+fn click(state: &mut TuiState, size: Size, position: Position) {
+    assert_eq!(
+        handle_mouse_input(MouseInput::Down(position), size, state),
+        ControllerEffect::None
+    );
+    assert_eq!(
+        handle_mouse_input(MouseInput::Up(position), size, state),
+        ControllerEffect::None
+    );
 }

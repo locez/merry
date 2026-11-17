@@ -1,9 +1,10 @@
 use super::{
+    click_target::{OverlayPointer, chip_hit, chip_line},
     keymap::KeyAction,
     overlay::SettingItem,
     overlay::{
-        CommandSpec, MessageDialogKind, MessageDialogOverlay, Overlay, PermissionReviewOverlay,
-        PlanApprovalOverlay,
+        CommandPalette, CommandSpec, MessageDialogKind, MessageDialogOverlay, Overlay,
+        PermissionReviewOverlay, PlanApprovalOverlay,
     },
     state::TuiState,
     theme::{SemanticColor, dim_color},
@@ -130,13 +131,8 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
 }
 
 fn render_plan_approval(frame: &mut Frame<'_>, state: &TuiState, approval: &PlanApprovalOverlay) {
-    let desired_width = frame.area().width.saturating_sub(4).min(MAX_OVERLAY_WIDTH);
-    let content_width = usize::from(desired_width.saturating_sub(4)).max(1);
-    let body_lines = estimated_wrapped_lines(approval.message(), content_width);
-    let desired_height = u16::try_from(body_lines.saturating_add(6))
-        .unwrap_or(24)
-        .clamp(10, frame.area().height.saturating_sub(2).min(24));
-    let region = centered_rect(frame.area(), desired_width, desired_height);
+    let split = approval_split(frame.area(), approval.message());
+    let region = split.region;
     frame.render_widget(Clear, region);
     frame.render_widget(
         Block::default()
@@ -149,27 +145,15 @@ fn render_plan_approval(frame: &mut Frame<'_>, state: &TuiState, approval: &Plan
             .style(code_surface_style(state)),
         region,
     );
-    let inner = inset(region, 2, 1);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(inner);
     frame.render_widget(
         Paragraph::new(approval.message().to_owned())
             .style(semantic_style(state, SemanticColor::Assistant))
             .wrap(Wrap { trim: false }),
-        rows[0],
+        split.body,
     );
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "Enter",
-                semantic_style(state, SemanticColor::Warning).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  Approve", semantic_style(state, SemanticColor::Assistant)),
-            Span::styled("    Esc  Back", semantic_style(state, SemanticColor::Muted)),
-        ])),
-        rows[1],
+        Paragraph::new(chip_line(state, &["Approve", "Back"])),
+        split.footer,
     );
 }
 
@@ -178,19 +162,8 @@ fn render_permission_review(
     state: &TuiState,
     review: &PermissionReviewOverlay,
 ) {
-    let desired_width = frame.area().width.saturating_sub(4).min(MAX_OVERLAY_WIDTH);
-    let content_width = usize::from(desired_width.saturating_sub(4)).max(1);
-    let body_lines = estimated_wrapped_lines(review.body(), content_width);
-    let available_height = frame.area().height.saturating_sub(2);
-    let max_height = if available_height < 12 {
-        12
-    } else {
-        available_height.min(28)
-    };
-    let desired_height = u16::try_from(body_lines.saturating_add(7))
-        .unwrap_or(26)
-        .clamp(12, max_height);
-    let region = centered_rect(frame.area(), desired_width, desired_height);
+    let split = permission_split(frame.area(), review.body());
+    let region = split.region;
     frame.render_widget(Clear, region);
     frame.render_widget(
         Block::default()
@@ -203,30 +176,15 @@ fn render_permission_review(
             .style(code_surface_style(state)),
         region,
     );
-    let inner = inset(region, 2, 1);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(2)])
-        .split(inner);
     frame.render_widget(
         Paragraph::new(review.body().to_owned())
             .style(semantic_style(state, SemanticColor::Assistant))
             .wrap(Wrap { trim: false }),
-        rows[0],
+        split.body,
     );
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "Enter/Y",
-                semantic_style(state, SemanticColor::Success).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  Allow", semantic_style(state, SemanticColor::Assistant)),
-            Span::styled(
-                "    Esc/N  Reject",
-                semantic_style(state, SemanticColor::Warning),
-            ),
-        ])),
-        rows[1],
+        Paragraph::new(chip_line(state, &["Allow", "Reject"])),
+        split.footer,
     );
 }
 
@@ -330,11 +288,10 @@ fn render_settings(frame: &mut Frame<'_>, state: &TuiState) {
             semantic_style(state, SemanticColor::Muted),
         )),
     ];
+    debug_assert_eq!(lines.len(), SETTINGS_LINE_COUNT);
     let selected_line = selected.map(setting_line_index).unwrap_or(0);
     let visible_height = usize::from(inner.height).max(1);
-    let scroll_offset = selected_line
-        .saturating_sub(visible_height.saturating_sub(1))
-        .min(lines.len().saturating_sub(visible_height));
+    let scroll_offset = settings_scroll(selected_line, visible_height);
     frame.render_widget(
         Paragraph::new(lines).scroll((scroll_offset as u16, 0)),
         inner,
@@ -439,13 +396,8 @@ pub(super) fn render_surface(frame: &mut Frame<'_>, state: &TuiState, region: Re
 }
 
 fn render_message_dialog(frame: &mut Frame<'_>, state: &TuiState, dialog: &MessageDialogOverlay) {
-    let desired_width = frame.area().width.clamp(8, 72);
-    let content_width = usize::from(desired_width.saturating_sub(6).max(1));
-    let body_lines = estimated_wrapped_lines(dialog.message(), content_width);
-    let desired_height = u16::try_from(body_lines.saturating_add(6))
-        .unwrap_or(20)
-        .clamp(8, 20);
-    let region = centered_rect(frame.area(), desired_width, desired_height);
+    let split = dialog_split(frame.area(), dialog.message());
+    let region = split.region;
     let border_color = match dialog.kind() {
         MessageDialogKind::Info => SemanticColor::Focus,
         MessageDialogKind::Error => SemanticColor::Error,
@@ -460,27 +412,13 @@ fn render_message_dialog(frame: &mut Frame<'_>, state: &TuiState, dialog: &Messa
             .style(code_surface_style(state)),
         region,
     );
-    let inner = inset(region, 2, 1);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(inner);
     frame.render_widget(
         Paragraph::new(dialog.message().to_owned())
             .style(semantic_style(state, SemanticColor::Assistant))
             .wrap(Wrap { trim: false }),
-        rows[0],
+        split.body,
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "Enter / Esc",
-                semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  Close", semantic_style(state, SemanticColor::Muted)),
-        ])),
-        rows[1],
-    );
+    frame.render_widget(Paragraph::new(chip_line(state, &["Close"])), split.footer);
 }
 
 fn estimated_wrapped_lines(message: &str, width: usize) -> usize {
@@ -642,4 +580,189 @@ pub(super) fn semantic_style(state: &TuiState, slot: SemanticColor) -> Style {
         .theme()
         .color(slot)
         .map_or_else(Style::default, |color| Style::default().fg(color))
+}
+
+const SETTINGS_LINE_COUNT: usize = 19;
+
+struct OverlaySplit {
+    region: Rect,
+    body: Rect,
+    footer: Rect,
+}
+
+pub(crate) fn overlay_pointer(
+    state: &TuiState,
+    area: Rect,
+    position: Position,
+) -> Option<OverlayPointer> {
+    match state.overlay()? {
+        Overlay::CommandPalette(palette) => {
+            palette_command_at(area, palette, position).map(OverlayPointer::Palette)
+        }
+        Overlay::Settings(_) => {
+            settings_item_at(state, area, position).map(OverlayPointer::Setting)
+        }
+        Overlay::PlanApproval(approval) => {
+            let footer = approval_split(area, approval.message()).footer;
+            match chip_hit(
+                Position::new(footer.x, footer.y),
+                &["Approve", "Back"],
+                position,
+            ) {
+                Some(0) => Some(OverlayPointer::PlanApprove),
+                Some(1) => Some(OverlayPointer::PlanBack),
+                _ => None,
+            }
+        }
+        Overlay::PermissionReview(review) => {
+            let footer = permission_split(area, review.body()).footer;
+            match chip_hit(
+                Position::new(footer.x, footer.y),
+                &["Allow", "Reject"],
+                position,
+            ) {
+                Some(0) => Some(OverlayPointer::PermissionAllow),
+                Some(1) => Some(OverlayPointer::PermissionReject),
+                _ => None,
+            }
+        }
+        Overlay::Dialog(dialog) => {
+            let footer = dialog_split(area, dialog.message()).footer;
+            chip_hit(Position::new(footer.x, footer.y), &["Close"], position)
+                .map(|_| OverlayPointer::DialogClose)
+        }
+        Overlay::ProviderManager(manager) => {
+            super::provider_render::provider_manager_row(area, manager, position)
+                .map(OverlayPointer::Provider)
+        }
+        Overlay::ModelPicker(picker) => {
+            match super::provider_render::model_picker_pointer(area, picker, position) {
+                Some(super::provider_render::ModelPointer::Row(index)) => {
+                    Some(OverlayPointer::Model(index))
+                }
+                Some(super::provider_render::ModelPointer::Manual) => {
+                    Some(OverlayPointer::ManualModel)
+                }
+                None => None,
+            }
+        }
+        Overlay::ReasoningPicker(picker) => {
+            super::provider_render::reasoning_row(area, picker, position)
+                .map(OverlayPointer::Reasoning)
+        }
+        Overlay::ProviderForm(_) | Overlay::CommandDetails(_) | Overlay::Shortcuts(_) => None,
+    }
+}
+
+fn approval_split(area: Rect, message: &str) -> OverlaySplit {
+    let desired_width = area.width.saturating_sub(4).min(MAX_OVERLAY_WIDTH);
+    let content_width = usize::from(desired_width.saturating_sub(4)).max(1);
+    let body_lines = estimated_wrapped_lines(message, content_width);
+    let desired_height = u16::try_from(body_lines.saturating_add(6))
+        .unwrap_or(24)
+        .clamp(10, area.height.saturating_sub(2).min(24));
+    split_overlay(area, desired_width, desired_height, 1)
+}
+
+fn permission_split(area: Rect, body: &str) -> OverlaySplit {
+    let desired_width = area.width.saturating_sub(4).min(MAX_OVERLAY_WIDTH);
+    let content_width = usize::from(desired_width.saturating_sub(4)).max(1);
+    let body_lines = estimated_wrapped_lines(body, content_width);
+    let available_height = area.height.saturating_sub(2);
+    let max_height = if available_height < 12 {
+        12
+    } else {
+        available_height.min(28)
+    };
+    let desired_height = u16::try_from(body_lines.saturating_add(7))
+        .unwrap_or(26)
+        .clamp(12, max_height);
+    split_overlay(area, desired_width, desired_height, 2)
+}
+
+fn dialog_split(area: Rect, message: &str) -> OverlaySplit {
+    let desired_width = area.width.clamp(8, 72);
+    let content_width = usize::from(desired_width.saturating_sub(6).max(1));
+    let body_lines = estimated_wrapped_lines(message, content_width);
+    let desired_height = u16::try_from(body_lines.saturating_add(6))
+        .unwrap_or(20)
+        .clamp(8, 20);
+    split_overlay(area, desired_width, desired_height, 1)
+}
+
+fn split_overlay(area: Rect, width: u16, height: u16, footer_height: u16) -> OverlaySplit {
+    let region = centered_rect(area, width, height);
+    let inner = inset(region, 2, 1);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(footer_height)])
+        .split(inner);
+    OverlaySplit {
+        region,
+        body: rows[0],
+        footer: rows[1],
+    }
+}
+
+fn palette_command_at(area: Rect, palette: &CommandPalette, position: Position) -> Option<usize> {
+    let visible = palette.visible_commands();
+    let command_rows = command_palette_rows(&visible);
+    let height = (command_rows.len() as u16 + 5).clamp(8, 22);
+    let region = centered_rect(area, MAX_OVERLAY_WIDTH, height);
+    let inner = inset(region, 2, 1);
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .split(inner);
+    if !rows[1].contains(position) {
+        return None;
+    }
+    let visible_height = usize::from(rows[1].height).max(1);
+    let selected_row = command_rows
+        .iter()
+        .position(|row| {
+            matches!(row, CommandPaletteRow::Command { index, .. } if *index == palette.selected())
+        })
+        .unwrap_or(0);
+    let scroll_offset = selected_row
+        .saturating_sub(visible_height.saturating_sub(1))
+        .min(command_rows.len().saturating_sub(visible_height));
+    let local = usize::from(position.y.saturating_sub(rows[1].y));
+    match command_rows.get(scroll_offset + local)? {
+        CommandPaletteRow::Command { index, .. } => Some(*index),
+        CommandPaletteRow::Category(_) => None,
+    }
+}
+
+fn settings_item_at(state: &TuiState, area: Rect, position: Position) -> Option<SettingItem> {
+    if state.settings_model_editor().is_some()
+        || state.settings_reasoning_editor().is_some()
+        || state.settings_context_window_editor().is_some()
+    {
+        return None;
+    }
+    let region = centered_rect(area, MAX_OVERLAY_WIDTH, 22);
+    let inner = inset(region, 2, 1);
+    if !inner.contains(position) {
+        return None;
+    }
+    let selected_line = state
+        .selected_setting()
+        .map(setting_line_index)
+        .unwrap_or(0);
+    let visible_height = usize::from(inner.height).max(1);
+    let scroll = settings_scroll(selected_line, visible_height);
+    let line = scroll + usize::from(position.y.saturating_sub(inner.y));
+    SettingItem::ALL
+        .into_iter()
+        .find(|item| setting_line_index(*item) == line)
+}
+
+fn settings_scroll(selected_line: usize, visible_height: usize) -> usize {
+    selected_line
+        .saturating_sub(visible_height.saturating_sub(1))
+        .min(SETTINGS_LINE_COUNT.saturating_sub(visible_height))
 }

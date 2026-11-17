@@ -1,7 +1,9 @@
 //! Timeline content, wrapping, and bounded viewport projection.
 
+use super::activity::{ActivityLayout, paint_activity};
+use super::sticky::{paint_sticky_header, split_timeline_content, timeline_scroll_split};
 use crate::tui::{
-    copy_controls::{CopyContent, CopyTarget, CopyTextError, copy_header, validate_copy_text},
+    copy_controls::{CopyContent, CopyTarget, copy_header},
     keymap::KeyAction,
     markdown::{RenderedMarkdown, markdown_lines},
     render::command_style::command_spans,
@@ -9,12 +11,11 @@ use crate::tui::{
         CommandFailure, CommandView, PatchChangeView, PatchOperationView, TimelineItem,
         ToolOutputPreview, TuiState,
     },
-    text_interaction::TextSelection,
     text_wrap::{
         StyledTextPart, inline_code_spans, semantic_style, truncate_chars, wrap_styled_parts,
         wrap_styled_parts_preserving_leading_whitespace,
     },
-    theme::SemanticColor,
+    theme::{SemanticColor, dim_color},
     transcript::{SelectionPolicy, TranscriptRow},
 };
 use merry_core::QueuedInputLane;
@@ -25,9 +26,9 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthChar;
 
 pub(super) use super::timeline_layout::prepare_timeline_viewport;
-pub(crate) use super::timeline_layout::timeline_content_region;
 use super::timeline_layout::{
     TimelineLayout, timeline_layout, timeline_scroll_start, timeline_viewport,
 };
@@ -77,20 +78,58 @@ pub(super) fn render_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, regi
     if content_region.is_empty() {
         return;
     }
+    let timeline = timeline_layout(state, content_region);
+    let scroll = timeline_scroll_start(state, &timeline, content_region);
+    let split = timeline_scroll_split(
+        state,
+        &timeline.item_starts,
+        &timeline.row_starts,
+        &timeline.rows,
+        content_region.height,
+        scroll,
+    );
+    let (header, body) = split_timeline_content(content_region, split.header_rows);
+    paint_sticky_header(frame, header, &split);
+    if body.is_empty() {
+        return;
+    }
     if let Some(selection) = state.text_selection()
-        && selection.area() == content_region
+        && selection.area() == body
     {
         selection.render(frame.buffer_mut());
         return;
     }
-    let timeline = timeline_layout(state, content_region);
-    let viewport = timeline_viewport(state, timeline, content_region);
+    let folds = command_fold_marks(state, &timeline, body, split.body_scroll);
+    let item_starts = timeline.item_starts.clone();
+    let row_starts = timeline.row_starts.clone();
+    let blank_lines = blank_logical_lines(&timeline);
+    let viewport = timeline_viewport(timeline, split.body_scroll);
     frame.render_widget(
         Paragraph::new(viewport.lines)
             .wrap(Wrap { trim: false })
             .scroll((viewport.scroll, 0)),
-        content_region,
+        body,
     );
+    paint_activity(
+        frame,
+        state,
+        body,
+        ActivityLayout {
+            item_starts: &item_starts,
+            row_starts: &row_starts,
+            blank_lines: &blank_lines,
+        },
+        split.body_scroll,
+    );
+    paint_command_folds(frame, state, body, &folds);
+}
+
+pub(super) fn blank_logical_lines(timeline: &TimelineLayout) -> Vec<bool> {
+    timeline
+        .rows
+        .iter()
+        .map(|row| row.display.spans.iter().all(|span| span.content.is_empty()))
+        .collect()
 }
 
 pub(super) fn assistant_lines(
@@ -100,7 +139,7 @@ pub(super) fn assistant_lines(
     region_width: u16,
 ) -> RenderedMarkdown {
     let mut rendered = markdown_lines(state, text, region_width);
-    if let Some((header, width)) = copy_header(state, "[Copy reply]", region_width) {
+    if let Some((header, width)) = copy_header(state, region_width) {
         rendered
             .rows
             .insert(0, TranscriptRow::new(header, SelectionPolicy::Skip));
@@ -247,91 +286,6 @@ pub(super) fn local_command_lines(
     rendered
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum TimelineMouseDown {
-    None,
-    Copy(String),
-    CopyTooLarge,
-    Select(TextSelection),
-}
-
-/// Resolves a timeline press from one layout snapshot.
-pub(crate) fn timeline_mouse_down(
-    state: &TuiState,
-    region: Rect,
-    position: Position,
-) -> TimelineMouseDown {
-    let content = timeline_content_region(region);
-    if !region.contains(position) || content.is_empty() {
-        return TimelineMouseDown::None;
-    }
-    let timeline = timeline_layout(state, content);
-    if content.contains(position) {
-        match copy_target_text(state, &timeline, content, position) {
-            Ok(Some(text)) => return TimelineMouseDown::Copy(text),
-            Ok(None) => {}
-            Err(CopyTextError::TooLarge) => return TimelineMouseDown::CopyTooLarge,
-        }
-    }
-    let position = Position::new(
-        position
-            .x
-            .clamp(content.x, content.right().saturating_sub(1)),
-        position
-            .y
-            .clamp(content.y, content.bottom().saturating_sub(1)),
-    );
-    let scroll = timeline_scroll_start(state, &timeline, content);
-    match TextSelection::new(
-        timeline.rows,
-        timeline.item_starts,
-        timeline.row_starts,
-        content,
-        scroll,
-        position,
-    ) {
-        Some(selection) => TimelineMouseDown::Select(selection),
-        None => TimelineMouseDown::None,
-    }
-}
-
-fn copy_target_text(
-    state: &TuiState,
-    timeline: &TimelineLayout,
-    content: Rect,
-    position: Position,
-) -> Result<Option<String>, CopyTextError> {
-    let clicked_row = timeline_scroll_start(state, timeline, content)
-        .saturating_add(usize::from(position.y - content.y));
-    let column = position.x - content.x;
-    for target in &timeline.copy_targets {
-        let Some(&target_row) = timeline.row_starts.get(target.line_index) else {
-            continue;
-        };
-        if target_row > clicked_row {
-            break;
-        }
-        if target_row == clicked_row
-            && (target.column..target.column.saturating_add(target.width)).contains(&column)
-        {
-            return match &target.content {
-                CopyContent::Text(text) => validate_copy_text(text.clone()).map(Some),
-                CopyContent::AssistantMessage(index) => match state.timeline().get(*index) {
-                    Some(TimelineItem::Assistant { text }) => {
-                        if text.len() > crate::tui::copy_controls::MAX_CLIPBOARD_BYTES {
-                            Err(CopyTextError::TooLarge)
-                        } else {
-                            Ok(Some(text.clone()))
-                        }
-                    }
-                    _ => Ok(None),
-                },
-            };
-        }
-    }
-    Ok(None)
-}
-
 pub(super) fn expanded_timeline_lines(
     state: &TuiState,
     title: &str,
@@ -374,6 +328,7 @@ fn output_preview_lines(
         return lines;
     }
     let body_width = usize::from(region_width).saturating_sub(2).max(4);
+    let style = output_panel_style(state);
     for line in &preview.lines {
         let clean = crate::text::without_control_chars(line);
         let clean = clean.trim();
@@ -382,16 +337,21 @@ fn output_preview_lines(
         }
         lines.push(Line::from(Span::styled(
             format!("  {}", truncate_chars(clean, body_width)),
-            semantic_style(state, SemanticColor::Muted),
+            style,
         )));
     }
     if preview.truncated {
-        lines.push(Line::from(Span::styled(
-            "  ...",
-            semantic_style(state, SemanticColor::Muted),
-        )));
+        lines.push(Line::from(Span::styled("  ...", style)));
     }
     lines
+}
+
+fn output_panel_style(state: &TuiState) -> ratatui::style::Style {
+    let mut style = semantic_style(state, SemanticColor::Assistant);
+    if let Some(background) = state.theme().color(SemanticColor::CodeBackground) {
+        style = style.bg(background);
+    }
+    style
 }
 
 pub(super) fn command_lines(
@@ -422,27 +382,17 @@ pub(super) fn command_lines(
             failure,
             preview,
             elapsed,
+            expanded,
             ..
         } => {
-            let mut title = command_title_line(state, "Ran", detail);
             let failed =
                 exit_code.is_some_and(|code| code != 0) || *failure == Some(CommandFailure::Failed);
-            if let Some(failure) = failure {
-                let (label, color) = match failure {
-                    CommandFailure::Cancelled => ("cancelled", SemanticColor::Warning),
-                    CommandFailure::Failed => ("failed", SemanticColor::Error),
-                };
-                title.spans.push(Span::styled(
-                    format!(" -> {label}"),
-                    semantic_style(state, color).add_modifier(Modifier::BOLD),
-                ));
-            } else if let Some(code) = exit_code.filter(|_| failed) {
-                title.spans.push(Span::styled(
-                    format!(" -> {code}"),
-                    semantic_style(state, SemanticColor::Error).add_modifier(Modifier::BOLD),
-                ));
+            let title = finished_command_title(state, detail, *exit_code, *failure, *elapsed);
+            // Finished commands close to one line. The gutter chevron opens the
+            // command and its output again.
+            if !expanded {
+                return vec![collapsed_command_title(state, title, region_width)];
             }
-            append_command_elapsed(state, &mut title, *elapsed);
             let mut lines = wrap_command_title(title, region_width);
             if failed || failure.is_none() {
                 lines.extend(output_preview_lines(state, preview, failed, region_width));
@@ -450,6 +400,273 @@ pub(super) fn command_lines(
             lines
         }
     }
+}
+
+fn finished_command_title(
+    state: &TuiState,
+    detail: &str,
+    exit_code: Option<i64>,
+    failure: Option<CommandFailure>,
+    elapsed: Option<std::time::Duration>,
+) -> Line<'static> {
+    let mut title = command_title_line(state, "Ran", detail);
+    let failed = exit_code.is_some_and(|code| code != 0) || failure == Some(CommandFailure::Failed);
+    if let Some(failure) = failure {
+        let (label, color) = match failure {
+            CommandFailure::Cancelled => ("cancelled", SemanticColor::Warning),
+            CommandFailure::Failed => ("failed", SemanticColor::Error),
+        };
+        title.spans.push(Span::styled(
+            format!(" -> {label}"),
+            semantic_style(state, color).add_modifier(Modifier::BOLD),
+        ));
+    } else if let Some(code) = exit_code.filter(|_| failed) {
+        title.spans.push(Span::styled(
+            format!(" -> {code}"),
+            semantic_style(state, SemanticColor::Error).add_modifier(Modifier::BOLD),
+        ));
+    }
+    append_command_elapsed(state, &mut title, elapsed);
+    title
+}
+
+fn command_title_wraps(title: &Line<'_>, region_width: u16) -> bool {
+    line_display_width(title) > usize::from(region_width).max(1)
+}
+
+/// `Some(true)` is an open fold, `Some(false)` is a closed one.
+fn command_fold(state: &TuiState, view: &CommandView, region_width: u16) -> Option<bool> {
+    let CommandView::Finished { expanded, .. } = view else {
+        return None;
+    };
+    finished_command_reveals_body(state, view, region_width).then_some(*expanded)
+}
+
+/// Opening the row shows either the rest of a wrapped command or its output.
+fn finished_command_reveals_body(state: &TuiState, view: &CommandView, region_width: u16) -> bool {
+    let CommandView::Finished {
+        detail,
+        exit_code,
+        failure,
+        preview,
+        elapsed,
+        ..
+    } = view
+    else {
+        return false;
+    };
+    let title = finished_command_title(state, detail, *exit_code, *failure, *elapsed);
+    if command_title_wraps(&title, region_width) {
+        return true;
+    }
+    let failed =
+        exit_code.is_some_and(|code| code != 0) || *failure == Some(CommandFailure::Failed);
+    let has_preview = preview.truncated || preview.lines.iter().any(|line| !line.trim().is_empty());
+    has_preview && (failed || failure.is_none() && state.show_successful_command_output())
+}
+
+fn collapsed_command_title(state: &TuiState, title: Line<'static>, width: u16) -> Line<'static> {
+    let max_width = usize::from(width);
+    if max_width == 0 {
+        return Line::from("");
+    }
+    if line_display_width(&title) <= max_width {
+        return title;
+    }
+
+    let mut spans = title.spans;
+    let prefix_len = spans.len().min(2);
+    let mut command = spans.split_off(prefix_len);
+    let prefix = spans;
+    let prefix_width = span_width(&prefix);
+
+    let mut tail_start = command.len();
+    for index in (0..command.len()).rev() {
+        let text = command[index].content.as_ref();
+        if text.starts_with(" (") || text.starts_with(" ->") || text.starts_with("  ") {
+            tail_start = index;
+        } else {
+            break;
+        }
+    }
+    let mut tail = command.split_off(tail_start);
+    let ellipsis_width = 1;
+    while !tail.is_empty()
+        && prefix_width
+            .saturating_add(ellipsis_width)
+            .saturating_add(span_width(&tail))
+            > max_width
+    {
+        tail.pop();
+    }
+
+    let command_budget = max_width
+        .saturating_sub(prefix_width)
+        .saturating_sub(ellipsis_width)
+        .saturating_sub(span_width(&tail));
+    let mut fitted = prefix;
+    fitted.extend(truncate_spans(&command, command_budget));
+    fitted.push(Span::styled(
+        "…".to_owned(),
+        semantic_style(state, SemanticColor::Muted),
+    ));
+    fitted.extend(tail);
+    let line = Line::from(fitted);
+    if line_display_width(&line) <= max_width {
+        line
+    } else {
+        Line::from(truncate_spans(&line.spans, max_width))
+    }
+}
+
+fn line_display_width(line: &Line<'_>) -> usize {
+    span_width(&line.spans)
+}
+
+fn span_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(Span::width).sum()
+}
+
+fn truncate_spans(spans: &[Span<'static>], max_width: usize) -> Vec<Span<'static>> {
+    let mut kept = Vec::new();
+    let mut used = 0_usize;
+    for span in spans {
+        let width = span.width();
+        if used.saturating_add(width) <= max_width {
+            kept.push(span.clone());
+            used = used.saturating_add(width);
+            continue;
+        }
+        let room = max_width.saturating_sub(used);
+        let text = truncate_to_width(span.content.as_ref(), room);
+        if !text.is_empty() {
+            kept.push(Span::styled(text, span.style));
+        }
+        break;
+    }
+    kept
+}
+
+fn truncate_to_width(text: &str, max_width: usize) -> String {
+    let mut width = 0_usize;
+    let mut end = 0_usize;
+    for (index, character) in text.char_indices() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if width.saturating_add(character_width) > max_width {
+            break;
+        }
+        width = width.saturating_add(character_width);
+        end = index.saturating_add(character.len_utf8());
+    }
+    text[..end].to_owned()
+}
+
+struct CommandFoldMark {
+    local_y: u16,
+    open: bool,
+}
+
+fn command_fold_marks(
+    state: &TuiState,
+    timeline: &TimelineLayout,
+    content: Rect,
+    scroll: usize,
+) -> Vec<CommandFoldMark> {
+    if content.x == 0 || content.height == 0 {
+        return Vec::new();
+    }
+    let mut marks = Vec::new();
+    for (index, item) in state.timeline().iter().enumerate() {
+        let TimelineItem::Command { view } = item else {
+            continue;
+        };
+        let Some(open) = command_fold(state, view, content.width) else {
+            continue;
+        };
+        let Some(&logical) = timeline.item_starts.get(index) else {
+            continue;
+        };
+        let Some(&visual) = timeline.row_starts.get(logical) else {
+            continue;
+        };
+        if visual < scroll {
+            continue;
+        }
+        let local = visual - scroll;
+        if local >= usize::from(content.height) {
+            continue;
+        }
+        let Ok(local_y) = u16::try_from(local) else {
+            continue;
+        };
+        marks.push(CommandFoldMark { local_y, open });
+    }
+    marks
+}
+
+fn paint_command_folds(
+    frame: &mut Frame<'_>,
+    state: &TuiState,
+    content: Rect,
+    folds: &[CommandFoldMark],
+) {
+    if content.x == 0 {
+        return;
+    }
+    let style = semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD);
+    for fold in folds {
+        let y = content.y.saturating_add(fold.local_y);
+        let cell = &mut frame.buffer_mut()[(content.x - 1, y)];
+        cell.set_symbol(if fold.open { "▾" } else { "▸" });
+        cell.set_style(style);
+    }
+}
+
+pub(super) fn command_fold_hit(
+    state: &TuiState,
+    content: Rect,
+    timeline: &TimelineLayout,
+    scroll: usize,
+    position: Position,
+) -> Option<usize> {
+    if content.height == 0 || position.y < content.y || position.y >= content.bottom() {
+        return None;
+    }
+    let in_gutter = content.x > 0 && position.x + 1 == content.x;
+    let in_content = content.contains(position);
+    if !in_gutter && !in_content {
+        return None;
+    }
+    let visual = scroll.saturating_add(usize::from(position.y - content.y));
+    let logical = logical_line_at_visual(&timeline.row_starts, visual)?;
+    let index = item_index_at_logical(&timeline.item_starts, logical)?;
+    if timeline.item_starts.get(index).copied() != Some(logical) {
+        return None;
+    }
+    let TimelineItem::Command { view } = state.timeline().get(index)? else {
+        return None;
+    };
+    let open = command_fold(state, view, content.width)?;
+    let first_visual = timeline.row_starts.get(logical).copied()?;
+    if visual != first_visual || (open && !in_gutter) {
+        return None;
+    }
+    Some(index)
+}
+
+fn logical_line_at_visual(row_starts: &[usize], visual: usize) -> Option<usize> {
+    let end = *row_starts.last()?;
+    if visual >= end {
+        return None;
+    }
+    Some(row_starts.partition_point(|start| *start <= visual) - 1)
+}
+
+fn item_index_at_logical(item_starts: &[usize], logical: usize) -> Option<usize> {
+    if item_starts.is_empty() || logical < item_starts[0] {
+        return None;
+    }
+    Some(item_starts.partition_point(|start| *start <= logical) - 1)
 }
 
 fn append_command_elapsed(
@@ -641,36 +858,64 @@ pub(super) fn split_command_suffix(detail: &str) -> (&str, &str) {
     (&detail[..index], suffix)
 }
 
+const USER_PROMPT_MARK: &str = "\u{276F} ";
+const USER_PROMPT_INDENT: &str = "  ";
+
 pub(super) fn user_lines(
     state: &TuiState,
     text: &str,
     lane: QueuedInputLane,
+    width: u16,
 ) -> Vec<Line<'static>> {
     let lane_label = match lane {
         QueuedInputLane::Next => None,
         QueuedInputLane::Suspended => Some(("suspended", SemanticColor::Warning)),
         QueuedInputLane::Backlog => Some(("backlog", SemanticColor::Muted)),
     };
-    let mut lines = Vec::new();
-    for (index, segment) in text.split('\n').enumerate() {
-        let mut spans = vec![Span::styled(
-            "▌ ",
-            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-        )];
-        if index == 0
-            && let Some((label, color)) = lane_label
-        {
-            spans.push(Span::styled(
-                format!("{label}  "),
-                semantic_style(state, color).add_modifier(Modifier::BOLD),
-            ));
-        }
-        spans.extend(inline_code_spans(
-            state,
-            segment,
-            semantic_style(state, SemanticColor::Assistant),
-        ));
-        lines.push(Line::from(spans));
+    let band = state.theme().color(SemanticColor::Focus).map(dim_color);
+    let mark_style = semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD);
+    let body_style = semantic_style(state, SemanticColor::Assistant).add_modifier(Modifier::BOLD);
+    let segments: Vec<&str> = if text.is_empty() {
+        vec![""]
+    } else {
+        text.split('\n').collect()
+    };
+    segments
+        .into_iter()
+        .enumerate()
+        .map(|(index, segment)| {
+            let mut spans = vec![Span::styled(
+                if index == 0 {
+                    USER_PROMPT_MARK
+                } else {
+                    USER_PROMPT_INDENT
+                }
+                .to_owned(),
+                mark_style,
+            )];
+            if index == 0
+                && let Some((label, color)) = lane_label
+            {
+                spans.push(Span::styled(
+                    format!("{label}  "),
+                    semantic_style(state, color).add_modifier(Modifier::BOLD),
+                ));
+            }
+            spans.extend(inline_code_spans(state, segment, body_style));
+            let mut line = Line::from(spans);
+            if let Some(color) = band {
+                line.style.bg = Some(color);
+            }
+            pad_user_line(&mut line, width);
+            line
+        })
+        .collect()
+}
+
+fn pad_user_line(line: &mut Line<'static>, width: u16) {
+    let columns = usize::from(width);
+    let current = line.width();
+    if columns > current {
+        line.push_span(" ".repeat(columns - current));
     }
-    lines
 }

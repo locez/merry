@@ -1,11 +1,13 @@
 use crate::tui::{
-    controller::handle_key_event,
+    controller::{ControllerEffect, handle_key_event, handle_mouse_input},
     plan_tests::{add_live_attempt, key, key_ctrl, node, node_id, snapshot, tui_state},
-    render::render_to_text,
-    state::TimelineItem,
+    render::{prepare_viewport, render_to_buffer, render_to_text},
+    state::{TimelineItem, TuiState},
+    text_interaction::MouseInput,
 };
 use crossterm::event::KeyCode;
 use merry_core::PlanNodeStatus;
+use ratatui::{buffer::Buffer, layout::Position, layout::Size};
 
 #[test]
 fn wide_tui_renders_timeline_and_recursive_plan_without_overlap() {
@@ -156,4 +158,97 @@ fn plan_header_shows_toggle_shortcut() {
         .update_snapshot(snapshot(1, PlanNodeStatus::InProgress));
 
     assert!(render_to_text(&state, 140, 40).contains("Ctrl+O"));
+}
+
+#[test]
+fn plan_rows_fold_and_status_chip_are_clickable() {
+    let mut state = tui_state();
+    state
+        .plan_mut()
+        .update_snapshot(snapshot(2, PlanNodeStatus::InProgress));
+    let size = Size::new(140, 40);
+    let buffer = draw(&mut state, size);
+
+    assert_eq!(
+        click(&mut state, size, point(&buffer, "Objective active-leaf")),
+        ControllerEffect::None
+    );
+    assert_eq!(
+        state.plan().selected_node_id(),
+        Some(&node_id("active-leaf"))
+    );
+    assert!(state.plan().is_focused());
+    assert!(!state.plan().is_inspector_open());
+
+    let buffer = draw(&mut state, size);
+    click(&mut state, size, point(&buffer, "Objective active-leaf"));
+    assert!(state.plan().is_inspector_open());
+
+    state.plan_mut().close_inspector();
+    let buffer = draw(&mut state, size);
+    click(&mut state, size, point(&buffer, "▾"));
+    assert!(state.plan().is_collapsed(&node_id("root")));
+    assert!(!render_to_text(&state, size.width, size.height).contains("Objective active-leaf"));
+
+    let buffer = draw(&mut state, size);
+    click(&mut state, size, point(&buffer, "[plan]"));
+    assert!(!state.plan().is_open());
+}
+
+#[test]
+fn clicking_the_composer_returns_focus_from_the_plan() {
+    let mut state = tui_state();
+    state
+        .plan_mut()
+        .update_snapshot(snapshot(2, PlanNodeStatus::Pending));
+    state.plan_mut().open_and_focus();
+    let size = Size::new(140, 40);
+
+    assert_eq!(
+        click(&mut state, size, Position::new(4, size.height - 2)),
+        ControllerEffect::None
+    );
+    assert!(!state.plan().is_focused());
+    assert!(state.plan().is_open());
+}
+
+fn draw(state: &mut TuiState, size: Size) -> Buffer {
+    prepare_viewport(state, size);
+    render_to_buffer(state, size.width, size.height)
+}
+
+fn point(buffer: &Buffer, text: &str) -> Position {
+    let area = buffer.area;
+    for y in area.y..area.bottom() {
+        let mut row = String::new();
+        for x in area.x..area.right() {
+            row.push_str(buffer[(x, y)].symbol());
+        }
+        if let Some(byte_index) = row.find(text) {
+            let x = row[..byte_index].chars().count();
+            return Position::new(u16::try_from(x).unwrap(), y);
+        }
+    }
+    panic!("missing {text}:\n{}", buffer_text(buffer));
+}
+
+fn buffer_text(buffer: &Buffer) -> String {
+    let area = buffer.area;
+    let mut text = String::new();
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            text.push_str(buffer[(x, y)].symbol());
+        }
+        text.push('\n');
+    }
+    text
+}
+
+fn click(state: &mut TuiState, size: Size, position: Position) -> ControllerEffect {
+    let effect = handle_mouse_input(MouseInput::Down(position), size, state);
+    assert_eq!(
+        handle_mouse_input(MouseInput::Up(position), size, state),
+        ControllerEffect::None
+    );
+    effect
 }

@@ -533,11 +533,21 @@ pub(crate) struct TuiKeymapToml {
     pub(crate) discard_suspended: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TuiConfig {
     pub(crate) show_successful_command_output: bool,
     pub(crate) theme: TuiThemeToml,
     pub(crate) keymap: TuiKeymapToml,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self {
+            show_successful_command_output: true,
+            theme: TuiThemeToml::default(),
+            keymap: TuiKeymapToml::default(),
+        }
+    }
 }
 
 impl MerryConfig {
@@ -546,7 +556,7 @@ impl MerryConfig {
             return Ok(TuiConfig::default());
         };
         let config = TuiConfig {
-            show_successful_command_output: tui.show_successful_command_output.unwrap_or(false),
+            show_successful_command_output: tui.show_successful_command_output.unwrap_or(true),
             theme: tui.theme.clone().unwrap_or_default(),
             keymap: tui.keymap.clone().unwrap_or_default(),
         };

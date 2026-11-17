@@ -5,7 +5,7 @@ use crate::tui::{
         PatchChangeView, PatchLineView, PatchOperationView, QueuePreview, TimelineItem, TuiState,
     },
     tests::{find_cell_color, find_cell_style, find_text_position, rendered_buffer_text},
-    theme::{SemanticColor, TuiTheme},
+    theme::{SemanticColor, TuiTheme, dim_color},
 };
 use merry_core::{QueuedInputLane, QueuedInputView};
 use ratatui::style::{Color, Modifier};
@@ -208,7 +208,13 @@ fn renderer_preserves_historical_emphasis_across_user_and_assistant_text() {
         });
 
         let buffer = render_to_buffer(&state, 120, 24);
-        for text in ["user_keyword", "important", "assistant_keyword"] {
+        let user_style =
+            find_cell_style(&buffer, "user_keyword").expect("user keyword should render");
+        assert_eq!(user_style.fg, Some(expected_color));
+        assert_eq!(user_style.bg, Some(dim_color(expected_color)));
+        assert!(user_style.add_modifier.contains(Modifier::BOLD));
+        assert!(!user_style.add_modifier.contains(Modifier::DIM));
+        for text in ["important", "assistant_keyword"] {
             let style = find_cell_style(&buffer, text).expect("emphasized text should render");
             assert_eq!(style.fg, Some(expected_color), "{text}");
             assert_eq!(style.bg, Some(Color::Reset), "{text}");

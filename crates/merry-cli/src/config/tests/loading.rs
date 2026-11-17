@@ -219,7 +219,7 @@ discard_suspended = "ctrl+d"
     .expect("config should be present");
 
     let tui = config.tui_config().expect("tui config should validate");
-    assert!(!tui.show_successful_command_output);
+    assert!(tui.show_successful_command_output);
     assert_eq!(tui.theme.status.as_deref(), Some("cyan"));
     assert_eq!(tui.theme.assistant.as_deref(), Some("white"));
     assert_eq!(tui.theme.tool_keyword.as_deref(), Some("light_cyan"));
@@ -252,11 +252,11 @@ fn rejects_selection_copy_keymap_config() {
 }
 
 #[test]
-fn successful_command_output_is_an_opt_in_boolean() {
+fn successful_command_output_defaults_to_visible() {
     let paths = XdgPaths::from_parts(home(), None, None);
     for (text, expected) in [
-        ("[global]\nprofile = 'default'", false),
-        ("[tui]", false),
+        ("[global]\nprofile = 'default'", true),
+        ("[tui]", true),
         ("[tui]\nshow_successful_command_output = false", false),
         ("[tui]\nshow_successful_command_output = true", true),
     ] {
@@ -360,7 +360,7 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
     let tui = config
         .tui_config()
         .expect("example TUI config should validate");
-    assert!(!tui.show_successful_command_output);
+    assert!(tui.show_successful_command_output);
     assert_eq!(tui.theme.status.as_deref(), Some("light_magenta"));
     assert_eq!(tui.theme.assistant.as_deref(), Some("white"));
     assert_eq!(tui.theme.tool_keyword.as_deref(), Some("light_cyan"));
