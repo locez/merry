@@ -340,7 +340,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
         ))],
     ])
     .with_capabilities(
-        ModelCapabilities::new(true, true, false, true, Some(8_000), Some(16))
+        ModelCapabilities::new(true, true, false, true, Some(10_000), Some(16))
             .expect("valid capabilities"),
     );
     let compactor = ScriptedModelProvider::new(vec![

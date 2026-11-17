@@ -64,7 +64,16 @@ async fn coding_projects_root_agents_in_the_stable_prefix() {
         .map(|message| message.content().as_text())
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(request.stable_prefix_message_count(), 4);
+    assert_eq!(request.stable_prefix_message_count(), 5);
+    assert!(
+        request
+            .stable_prefix_messages()
+            .last()
+            .expect("reasoning language rule")
+            .content()
+            .as_text()
+            .contains("the whole thinking channel is Chinese")
+    );
     assert!(stable_text.contains("project-rules-source:AGENTS.md"));
     assert!(
         stable_text

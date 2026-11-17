@@ -153,9 +153,9 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
             .as_text()
             .contains("You are Merry, a software engineering agent")
     );
-    assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::User);
+    assert_eq!(requests[0].messages()[2].role(), ModelMessageRole::User);
     assert_eq!(
-        requests[0].messages()[1].content().as_text(),
+        requests[0].messages()[2].content().as_text(),
         "Search notes."
     );
     assert!(requests[0].continuations().is_empty());

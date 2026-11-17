@@ -260,6 +260,11 @@ fn coding_agent_profile_owns_the_coding_prompt_and_hashes_its_exact_text() {
             .text()
             .contains("preferring the installed modern search tools")
     );
+    assert!(
+        prompt.stable_blocks()[0]
+            .text()
+            .contains("Do not delete coverage, weaken an assertion")
+    );
 }
 
 #[test]

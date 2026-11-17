@@ -211,8 +211,8 @@ async fn ordinary_user_and_assistant_messages_remain_ordered_without_task_anchor
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].stable_prefix_message_count(), 1);
-    assert_eq!(requests[1].stable_prefix_message_count(), 1);
+    assert_eq!(requests[0].stable_prefix_message_count(), 2);
+    assert_eq!(requests[1].stable_prefix_message_count(), 2);
     assert_eq!(
         requests[0].stable_prefix_hash(),
         requests[1].stable_prefix_hash(),
@@ -262,7 +262,7 @@ async fn task_anchor_is_dynamic_control_segment_before_transcript_body() {
     assert_eq!(requests.len(), 2);
     assert_eq!(
         requests[0].stable_prefix_message_count(),
-        1,
+        2,
         "task anchor is dynamic control context, not stable prefix"
     );
     assert_eq!(
@@ -311,8 +311,8 @@ async fn task_anchor_does_not_join_project_rules_stable_prefix() {
     let request = &requests[0];
     assert_eq!(
         request.stable_prefix_message_count(),
-        2,
-        "only base instructions and project rules belong to the stable prefix"
+        3,
+        "stable prefix is base instructions, project rules, and the reasoning-language rule"
     );
     assert!(
         request.stable_prefix_messages()[1]

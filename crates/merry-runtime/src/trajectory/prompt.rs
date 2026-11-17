@@ -49,6 +49,7 @@ impl RuntimeObservability {
                 &project_rules.to_stable_prefix_message_text(),
             ));
         }
+        blocks.push(crate::prompt::REASONING_LANGUAGE_INSTRUCTIONS.to_owned());
         self.seed_stable_prompt(&blocks);
     }
 

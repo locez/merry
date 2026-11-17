@@ -257,8 +257,8 @@ async fn project_rules_enter_stable_prefix_and_affect_stable_hash() {
     collect_step(&changed_runtime, "Inspect project.").await;
     let changed_request = changed_provider.recorded_requests()[0].clone();
 
-    assert_eq!(first_request.stable_prefix_message_count(), 2);
-    assert_eq!(first_request.stable_prefix_messages().len(), 2);
+    assert_eq!(first_request.stable_prefix_message_count(), 3);
+    assert_eq!(first_request.stable_prefix_messages().len(), 3);
     assert_eq!(
         first_request.stable_prefix_messages()[1].role(),
         ModelMessageRole::System
@@ -312,8 +312,8 @@ async fn compiled_provider_request_skill_metadata_enters_stable_prefix_before_pr
     collect_step(&runtime, "Use the skill list.").await;
     let request = provider.recorded_requests()[0].clone();
 
-    assert_eq!(request.stable_prefix_message_count(), 3);
-    assert_eq!(request.stable_prefix_messages().len(), 3);
+    assert_eq!(request.stable_prefix_message_count(), 4);
+    assert_eq!(request.stable_prefix_messages().len(), 4);
     assert!(
         request.stable_prefix_messages()[0]
             .content()
@@ -466,8 +466,8 @@ async fn ledger_and_artifact_changes_do_not_change_project_rules_stable_hash() {
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].stable_prefix_message_count(), 2);
-    assert_eq!(requests[1].stable_prefix_message_count(), 2);
+    assert_eq!(requests[0].stable_prefix_message_count(), 3);
+    assert_eq!(requests[1].stable_prefix_message_count(), 3);
     assert_eq!(requests[1].stable_prefix_hash(), &first_hash);
     assert_ne!(
         requests[0].dynamic_context_hash(),

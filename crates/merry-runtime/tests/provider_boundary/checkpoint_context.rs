@@ -27,8 +27,8 @@ async fn empty_checkpoint_slot_renders_no_prompt_text() {
     collect_step(&runtime, "No saved state yet.").await;
 
     let request = provider.recorded_requests()[0].clone();
-    assert_eq!(request.messages().len(), 2);
-    assert_eq!(request.stable_prefix_message_count(), 1);
+    assert_eq!(request.messages().len(), 3);
+    assert_eq!(request.stable_prefix_message_count(), 2);
     assert!(
         request
             .messages()
@@ -184,8 +184,8 @@ async fn dynamic_context_projection_keeps_checkpoint_tail_and_current_input_outs
 
     let before_compaction = &requests[2];
     let after_compaction = requests.last().expect("request exists");
-    assert_eq!(before_compaction.stable_prefix_message_count(), 2);
-    assert_eq!(after_compaction.stable_prefix_message_count(), 2);
+    assert_eq!(before_compaction.stable_prefix_message_count(), 3);
+    assert_eq!(after_compaction.stable_prefix_message_count(), 3);
     assert_eq!(
         before_compaction.stable_prefix_hash(),
         after_compaction.stable_prefix_hash(),
@@ -356,7 +356,7 @@ async fn compacted_checkpoint_renders_before_task_anchor_and_transcript_body() {
         .position(|text| text.contains("current user sentinel"))
         .expect("current user input should render");
 
-    assert_eq!(requests[1].stable_prefix_message_count(), 1);
+    assert_eq!(requests[1].stable_prefix_message_count(), 2);
     assert!(checkpoint_index < task_anchor_index);
     assert!(checkpoint_index < append_user_index);
     assert!(append_user_index < append_assistant_index);
@@ -435,7 +435,7 @@ async fn ledger_observations_do_not_enter_prompt_context_by_default() {
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].stable_prefix_message_count(), 1);
+    assert_eq!(requests[1].stable_prefix_message_count(), 2);
     assert!(
         requests[1].messages().iter().all(|message| {
             let text = message.content().as_text();
@@ -464,7 +464,7 @@ async fn artifact_payloads_do_not_enter_prompt_context_by_default() {
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].stable_prefix_message_count(), 1);
+    assert_eq!(requests[0].stable_prefix_message_count(), 2);
     assert!(
         requests[0]
             .messages()

@@ -6,6 +6,7 @@ fn compaction_directive_is_the_full_replace_prompt() {
 
     assert!(prompt.contains("faithful, concise summary"));
     assert!(prompt.contains("do NOT emit a separate analysis block"));
+    assert!(prompt.contains("language of the latest user message"));
     assert!(prompt.contains("<summary>"));
     assert!(prompt.contains("</summary>"));
     assert!(

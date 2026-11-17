@@ -130,8 +130,10 @@ pub(crate) struct StablePrefixParts<'a> {
 ///
 /// The order is part of the provider-visible cache contract: base runtime
 /// instructions, optional progress commentary instructions, profile stable
-/// blocks, available skill metadata, then project rules. Callers that append
-/// further items must not rewrite or reorder these messages.
+/// blocks, available skill metadata, project rules, then the reasoning-language
+/// rule. Callers that append further items must not rewrite or reorder these
+/// messages. The language rule stays last so later English policy text does
+/// not reopen another thinking language.
 pub(crate) fn compile_stable_prefix_items(
     parts: StablePrefixParts<'_>,
 ) -> Result<Vec<ModelInputItem>, merry_llm::ModelError> {
@@ -142,7 +144,7 @@ pub(crate) fn compile_stable_prefix_items(
         project_rules,
     } = parts;
     let mut items = Vec::with_capacity(
-        2 + prompt_profile.stable_blocks().len() + usize::from(project_rules.is_some()),
+        3 + prompt_profile.stable_blocks().len() + usize::from(project_rules.is_some()),
     );
 
     items.push(ModelInputItem::Message(ModelMessage::new(
@@ -183,6 +185,11 @@ pub(crate) fn compile_stable_prefix_items(
             ModelContent::text(&project_rules_text)?,
         )?));
     }
+
+    items.push(ModelInputItem::Message(ModelMessage::new(
+        ModelMessageRole::System,
+        ModelContent::text(crate::prompt::REASONING_LANGUAGE_INSTRUCTIONS)?,
+    )?));
 
     Ok(items)
 }
@@ -375,12 +382,18 @@ mod tests {
         for required in [
             "You are Merry, a software engineering agent",
             "Use the user's current input language",
+            "visible reasoning while a turn is thinking",
+            "merry_reasoning_language",
             "Interpret the request before acting:",
             "Work from evidence.",
             "Choose the right scope.",
             "Do not stop after a fixed number of attempts.",
             "Tool declarations describe direct callable interfaces",
             "Verify claims in proportion to risk.",
+            "Say that something is done, fixed, or tested only when tool output shows it.",
+            "ask the user to confirm unless they already approved that action",
+            "Fix the cause of a problem.",
+            "without contrast framing",
             "Finish with the outcome that matters to the user",
         ] {
             assert!(

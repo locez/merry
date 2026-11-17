@@ -96,8 +96,8 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
     assert_eq!(request.model(), &model_name());
-    assert_eq!(request.messages().len(), 2);
-    assert_eq!(request.stable_prefix_message_count(), 1);
+    assert_eq!(request.messages().len(), 3);
+    assert_eq!(request.stable_prefix_message_count(), 2);
     assert_eq!(request.messages()[0].role(), ModelMessageRole::System);
     assert!(
         request.messages()[0]
@@ -124,9 +124,15 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
             .contains("Do not add a progress note before routine"),
         "plain runtime requests must not induce tool-progress commentary by default"
     );
-    assert_eq!(request.messages()[1].role(), ModelMessageRole::User);
+    assert!(
+        request.messages()[1]
+            .content()
+            .as_text()
+            .contains("<merry_reasoning_language>")
+    );
+    assert_eq!(request.messages()[2].role(), ModelMessageRole::User);
     assert_eq!(
-        request.messages()[1].content().as_text(),
+        request.messages()[2].content().as_text(),
         "Explain the runtime boundary."
     );
     assert_default_checkpoint_ref_tool(request.tools());
@@ -305,8 +311,8 @@ async fn runtime_step_with_provider_includes_compiled_context_as_system_message(
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
-    assert_eq!(request.messages().len(), 3);
-    assert_eq!(request.stable_prefix_message_count(), 1);
+    assert_eq!(request.messages().len(), 4);
+    assert_eq!(request.stable_prefix_message_count(), 2);
     assert_eq!(request.messages()[0].role(), ModelMessageRole::System);
     assert!(
         request.messages()[0]
@@ -314,14 +320,20 @@ async fn runtime_step_with_provider_includes_compiled_context_as_system_message(
             .as_text()
             .contains("You are Merry, a software engineering agent")
     );
-    assert_eq!(request.messages()[1].role(), ModelMessageRole::System);
-    assert_eq!(
-        request.messages()[1].content().as_text(),
-        format!("<merry_compiled_context>\n{expected_snapshot}\n</merry_compiled_context>")
+    assert!(
+        request.messages()[1]
+            .content()
+            .as_text()
+            .contains("<merry_reasoning_language>")
     );
-    assert_eq!(request.messages()[2].role(), ModelMessageRole::User);
+    assert_eq!(request.messages()[2].role(), ModelMessageRole::System);
     assert_eq!(
         request.messages()[2].content().as_text(),
+        format!("<merry_compiled_context>\n{expected_snapshot}\n</merry_compiled_context>")
+    );
+    assert_eq!(request.messages()[3].role(), ModelMessageRole::User);
+    assert_eq!(
+        request.messages()[3].content().as_text(),
         "Use the stored context."
     );
     assert_default_checkpoint_ref_tool(request.tools());
@@ -337,7 +349,7 @@ async fn runtime_step_with_provider_includes_compiled_context_as_system_message(
             .iter()
             .all(|record| record.lane() != TrajectoryLane::System)
     );
-    assert_eq!(trajectory.prompt().stable_blocks().len(), 1);
+    assert_eq!(trajectory.prompt().stable_blocks().len(), 2);
     assert!(
         trajectory.prompt().stable_blocks()[0]
             .content()
@@ -431,7 +443,7 @@ async fn second_provider_step_continues_sequences_and_replays_transcript() {
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].messages().len(), 4);
+    assert_eq!(requests[1].messages().len(), 5);
     assert_eq!(requests[1].messages()[0].role(), ModelMessageRole::System);
     assert!(
         requests[1].messages()[0]
@@ -439,22 +451,28 @@ async fn second_provider_step_continues_sequences_and_replays_transcript() {
             .as_text()
             .contains("You are Merry, a software engineering agent")
     );
-    assert_eq!(requests[1].messages()[1].role(), ModelMessageRole::User);
+    assert!(
+        requests[1].messages()[1]
+            .content()
+            .as_text()
+            .contains("<merry_reasoning_language>")
+    );
+    assert_eq!(requests[1].messages()[2].role(), ModelMessageRole::User);
     assert_eq!(
-        requests[1].messages()[1].content().as_text(),
+        requests[1].messages()[2].content().as_text(),
         "First request."
     );
     assert_eq!(
-        requests[1].messages()[2].role(),
+        requests[1].messages()[3].role(),
         ModelMessageRole::Assistant
     );
     assert_eq!(
-        requests[1].messages()[2].content().as_text(),
+        requests[1].messages()[3].content().as_text(),
         "model result"
     );
-    assert_eq!(requests[1].messages()[3].role(), ModelMessageRole::User);
+    assert_eq!(requests[1].messages()[4].role(), ModelMessageRole::User);
     assert_eq!(
-        requests[1].messages()[3].content().as_text(),
+        requests[1].messages()[4].content().as_text(),
         "Second request."
     );
 }

@@ -82,8 +82,8 @@ async fn default_stored_source_projects_session_memory_before_user_message() {
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].messages().len(), 3);
-    assert_eq!(requests[0].stable_prefix_message_count(), 1);
+    assert_eq!(requests[0].messages().len(), 4);
+    assert_eq!(requests[0].stable_prefix_message_count(), 2);
     assert_eq!(requests[0].messages()[0].role(), ModelMessageRole::System);
     assert!(
         requests[0].messages()[0]
@@ -92,21 +92,22 @@ async fn default_stored_source_projects_session_memory_before_user_message() {
             .contains("You are Merry, a software engineering agent")
     );
     assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::System);
-    assert_eq!(requests[0].messages()[2].role(), ModelMessageRole::User);
+    assert_eq!(requests[0].messages()[2].role(), ModelMessageRole::System);
+    assert_eq!(requests[0].messages()[3].role(), ModelMessageRole::User);
     assert!(
-        requests[0].messages()[1]
+        requests[0].messages()[2]
             .content()
             .as_text()
             .contains("memory:memory-topic")
     );
     assert!(
-        requests[0].messages()[1]
+        requests[0].messages()[2]
             .content()
             .as_text()
             .contains("memory-text:Remember that topic answers should mention runtime timing.")
     );
     assert_eq!(
-        requests[0].messages()[2].content().as_text(),
+        requests[0].messages()[3].content().as_text(),
         "Topic request."
     );
 }
@@ -146,8 +147,8 @@ async fn unmatched_stored_memory_does_not_add_system_message() {
     );
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].messages().len(), 2);
-    assert_eq!(requests[0].stable_prefix_message_count(), 1);
+    assert_eq!(requests[0].messages().len(), 3);
+    assert_eq!(requests[0].stable_prefix_message_count(), 2);
     assert_eq!(requests[0].messages()[0].role(), ModelMessageRole::System);
     assert!(
         requests[0].messages()[0]
@@ -155,9 +156,9 @@ async fn unmatched_stored_memory_does_not_add_system_message() {
             .as_text()
             .contains("You are Merry, a software engineering agent")
     );
-    assert_eq!(requests[0].messages()[1].role(), ModelMessageRole::User);
+    assert_eq!(requests[0].messages()[2].role(), ModelMessageRole::User);
     assert_eq!(
-        requests[0].messages()[1].content().as_text(),
+        requests[0].messages()[2].content().as_text(),
         "Topic request."
     );
     assert_eq!(compiled_context_snapshot(&runtime).await, "");
@@ -247,16 +248,16 @@ async fn provider_step_replaces_activated_memories_between_requests() {
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].messages().len(), 3);
-    assert_eq!(requests[0].stable_prefix_message_count(), 1);
+    assert_eq!(requests[0].messages().len(), 4);
+    assert_eq!(requests[0].stable_prefix_message_count(), 2);
     assert!(
-        requests[0].messages()[1]
+        requests[0].messages()[2]
             .content()
             .as_text()
             .contains("memory:memory-stale")
     );
-    assert_eq!(requests[1].messages().len(), 4);
-    assert_eq!(requests[1].stable_prefix_message_count(), 1);
+    assert_eq!(requests[1].messages().len(), 5);
+    assert_eq!(requests[1].stable_prefix_message_count(), 2);
     assert_eq!(requests[1].messages()[0].role(), ModelMessageRole::System);
     assert!(
         requests[1].messages()[0]
@@ -264,22 +265,22 @@ async fn provider_step_replaces_activated_memories_between_requests() {
             .as_text()
             .contains("You are Merry, a software engineering agent")
     );
-    assert_eq!(requests[1].messages()[1].role(), ModelMessageRole::User);
+    assert_eq!(requests[1].messages()[2].role(), ModelMessageRole::User);
     assert_eq!(
-        requests[1].messages()[1].content().as_text(),
+        requests[1].messages()[2].content().as_text(),
         "First topic request."
     );
     assert_eq!(
-        requests[1].messages()[2].role(),
+        requests[1].messages()[3].role(),
         ModelMessageRole::Assistant
     );
     assert_eq!(
-        requests[1].messages()[2].content().as_text(),
+        requests[1].messages()[3].content().as_text(),
         "model result"
     );
-    assert_eq!(requests[1].messages()[3].role(), ModelMessageRole::User);
+    assert_eq!(requests[1].messages()[4].role(), ModelMessageRole::User);
     assert_eq!(
-        requests[1].messages()[3].content().as_text(),
+        requests[1].messages()[4].content().as_text(),
         "Second topic request."
     );
     assert!(

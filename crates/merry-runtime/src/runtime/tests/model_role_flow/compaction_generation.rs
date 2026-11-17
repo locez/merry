@@ -637,7 +637,7 @@ async fn smaller_compactor_window_is_rejected_before_provider_call() {
 async fn actual_compactor_payload_too_large_is_rejected_before_provider_call() {
     let compactor = RecordingModelProvider::with_script_and_capabilities(
         vec![completed_candidate(VALID_CANDIDATE)],
-        ModelCapabilities::new(true, true, false, true, Some(2_048), None)
+        ModelCapabilities::new(true, true, false, true, Some(4_096), None)
             .expect("valid capabilities"),
     );
     let primary = RecordingModelProvider::with_script_and_capabilities(
@@ -647,10 +647,10 @@ async fn actual_compactor_payload_too_large_is_rejected_before_provider_call() {
             true,
             false,
             true,
-            Some(2_048),
+            Some(4_096),
             Some(super::TIGHT_WINDOW_OUTPUT_CAP_TOKENS),
         )
-        .expect("tight primary capabilities"),
+        .expect("primary window fits the stable prefix"),
     );
     let runtime = Runtime::builder(session_id("compaction-payload-too-large"))
         .model_provider(Arc::new(primary), model_name())
@@ -708,8 +708,8 @@ async fn actual_compactor_payload_too_large_is_rejected_before_provider_call() {
             RuntimeError::CompactionModelRequestTooLarge {
                 estimated_input_tokens,
                 max_output_tokens,
-                compactor_window_tokens: 2_048,
-            } if estimated_input_tokens + max_output_tokens > 2_048
+                compactor_window_tokens: 4_096,
+            } if estimated_input_tokens + max_output_tokens > 4_096
         ),
         "unexpected error: {error:?}"
     );

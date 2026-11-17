@@ -47,8 +47,8 @@ async fn runtime_profile_progress_commentary_adds_stable_prefix_guidance() {
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
-    assert_eq!(request.messages().len(), 3);
-    assert_eq!(request.stable_prefix_message_count(), 2);
+    assert_eq!(request.messages().len(), 4);
+    assert_eq!(request.stable_prefix_message_count(), 3);
     assert_eq!(request.messages()[1].role(), ModelMessageRole::System);
     assert!(
         request.messages()[1]
