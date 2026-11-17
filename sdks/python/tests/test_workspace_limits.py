@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -55,7 +55,7 @@ class ReadOutput(BaseModel):
 @contextmanager
 def capture_model_request(
     tool_response: bytes | None = None,
-) -> Iterator[tuple[str, Queue[bytes]]]:
+) -> Generator[tuple[str, Queue[bytes]]]:
     final_response = (
         b'data: {"choices":[{"index":0,"delta":{"content":"done"},'
         b'"finish_reason":"stop"}]}\n\n'

@@ -45,9 +45,31 @@ jobs:
       - name: Enable unprivileged sandbox namespaces
         run: |
           set -euo pipefail
+          # Ubuntu 26 ships /etc/apparmor.d/bwrap-userns-restrict with the
+          # apparmor package. One bwrap still starts, but children are stacked
+          # into unpriv_bwrap, so the inner action sandbox cannot create its
+          # user namespace. The local override is the host fix in SANDBOX.md.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
-          bwrap --unshare-user --die-with-parent --ro-bind / / -- /usr/bin/true
+          profile=/etc/apparmor.d/bwrap-userns-restrict
+          if [[ -f "$profile" ]]; then
+            sudo mkdir -p /etc/apparmor.d/local
+            sudo tee /etc/apparmor.d/local/bwrap-userns-restrict /etc/apparmor.d/local/unpriv_bwrap >/dev/null <<'RULE'
+          # Allow bubblewrap inside bubblewrap: when a sandboxed process executes bwrap,
+          # attach the full bwrap profile again instead of the capability-stripped stack.
+          priority=1 allow px /usr/bin/bwrap -> bwrap,
+          RULE
+            if ! sudo apparmor_parser -r "$profile"; then
+              # AppArmor before 4.1 rejects rule priority. Unload the profile
+              # only after the sysctl is off; unloading it alone breaks even
+              # a single bubblewrap layer.
+              sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+              sudo apparmor_parser -R "$profile"
+            fi
+          fi
+          bwrap --unshare-user --die-with-parent --ro-bind / / --proc /proc --dev /dev -- /usr/bin/true
+          bwrap --unshare-user --die-with-parent --ro-bind / / --proc /proc --dev /dev -- \
+            bwrap --unshare-user --die-with-parent --ro-bind / / --proc /proc --dev /dev -- /usr/bin/true
 
       - name: Check formatting
         run: cargo fmt --all --check

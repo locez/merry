@@ -16,6 +16,9 @@ from typing import (
     get_type_hints,
 )
 
+if TYPE_CHECKING:
+    from typing_extensions import TypeIs
+
 from pydantic import BaseModel, ValidationError
 
 from ._errors import (
@@ -44,6 +47,9 @@ if TYPE_CHECKING:
 InputT = TypeVar("InputT", bound=BaseModel)
 OutputT = TypeVar("OutputT", bound=BaseModel)
 RunOutputT = TypeVar("RunOutputT", bound=BaseModel)
+BuildInputT = TypeVar("BuildInputT", bound=BaseModel)
+BuildOutputT = TypeVar("BuildOutputT", bound=BaseModel)
+ModelT = TypeVar("ModelT", bound=BaseModel)
 HandlerInputT_contra = TypeVar(
     "HandlerInputT_contra", bound=BaseModel, contravariant=True
 )
@@ -105,13 +111,13 @@ class Tool(Generic[InputT, OutputT]):
     @classmethod
     def from_function(
         cls,
-        handler: ToolHandler[InputT, OutputT],
+        handler: ToolHandler[BuildInputT, BuildOutputT],
         *,
         name: str | None = None,
         description: str | None = None,
-        input_model: type[InputT] | None = None,
-        output_model: type[OutputT] | None = None,
-    ) -> Tool[InputT, OutputT]:
+        input_model: type[BuildInputT] | None = None,
+        output_model: type[BuildOutputT] | None = None,
+    ) -> Tool[BuildInputT, BuildOutputT]:
         _validate_async_handler(handler)
         handler_name = _callable_name(handler)
         resolved_name = handler_name if name is None else name
@@ -128,7 +134,7 @@ class Tool(Generic[InputT, OutputT]):
             resolved_input.model_json_schema(),
             "tool input schema",
         )
-        return cls(
+        return Tool[BuildInputT, BuildOutputT](
             name=resolved_name,
             description=resolved_description,
             input_model=resolved_input,
@@ -277,7 +283,9 @@ def _type_hints(handler: Callable[..., object]) -> Mapping[str, object]:
     return {key: value for key, value in hints.items()}
 
 
-def _infer_input_model(handler: Callable[..., object]) -> type[BaseModel]:
+def _infer_input_model(
+    handler: ToolHandler[BuildInputT, BuildOutputT],
+) -> type[BuildInputT]:
     handler_name = _callable_name(handler)
     parameters = [
         parameter
@@ -300,7 +308,9 @@ def _infer_input_model(handler: Callable[..., object]) -> type[BaseModel]:
     return _model_from_annotation(annotation, f"{handler_name}.{parameter.name}")
 
 
-def _infer_output_model(handler: Callable[..., object]) -> type[BaseModel]:
+def _infer_output_model(
+    handler: ToolHandler[BuildInputT, BuildOutputT],
+) -> type[BuildOutputT]:
     handler_name = _callable_name(handler)
     annotation = _type_hints(handler).get("return")
     if annotation is None:
@@ -308,8 +318,12 @@ def _infer_output_model(handler: Callable[..., object]) -> type[BaseModel]:
     return _model_from_annotation(annotation, f"{handler_name}.return")
 
 
-def _model_from_annotation(annotation: object, label: str) -> type[BaseModel]:
-    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+def _is_model_type(annotation: object) -> TypeIs[type[ModelT]]:
+    return isinstance(annotation, type) and issubclass(annotation, BaseModel)
+
+
+def _model_from_annotation(annotation: object, label: str) -> type[ModelT]:
+    if _is_model_type(annotation):
         return annotation
     raise TypeError(f"{label} must be a Pydantic BaseModel subclass.")
 

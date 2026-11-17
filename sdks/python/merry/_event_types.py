@@ -321,9 +321,16 @@ class EventPayload:
 
 
 class SourcedEventPayload(EventPayload):
-    """Base for event payloads anchored to a durable journal position."""
+    """Base for event payloads anchored to a durable journal position.
 
-    source: EventSource
+    Subclasses declare ``source`` as a frozen dataclass field. The property
+    keeps that field read-only in the type checker; a bare annotation here
+    would be writable and reject the frozen override.
+    """
+
+    @property
+    def source(self) -> EventSource:
+        raise NotImplementedError
 
     def __post_init__(self) -> None:
         _validate_event_source(self.source)
