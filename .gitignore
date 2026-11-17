@@ -34,13 +34,6 @@ __pycache__/
 dist/
 build/
 
-# Harbor benchmark outputs and local credentials.
-benchmark/jobs/
-benchmark/secrets/
-benchmark/.env
-benchmark/.env.*
-!benchmark/.env.example
-
 # Editor and OS noise.
 .DS_Store
 *.swp

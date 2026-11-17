@@ -19,16 +19,15 @@ Two commitments shape the design:
 Merry is under active development and has no released version yet. T0 through T8
 and the T10 architecture split are complete: the runtime, CLI, TUI, Rust facade,
 and Python SDK run end to end, backed by an offline deterministic test suite and
-CI gates; live provider checks are opt-in. Two milestones remain open:
+CI gates; live provider checks are opt-in. One milestone remains open:
 
 | Milestone | State |
 |---|---|
-| T9 external coding-agent evaluation | Harbor adapter and smoke workflow implemented; end-to-end Terminal-Bench and Rust SWE evidence pending |
 | T11 release gates and Definition of Done | open |
 
-The current focus is release readiness and external evaluation evidence, not new
-runtime surface. [ROADMAP.md](ROADMAP.md) keeps the delivery sequence, its
-dependencies, and links to the tracking issues.
+The current focus is release readiness, not new runtime surface.
+[ROADMAP.md](ROADMAP.md) keeps the delivery sequence, its dependencies, and
+links to the tracking issues.
 
 ## What Works
 
@@ -555,8 +554,7 @@ cargo test --all
 ```
 
 CI runs the same Rust checks through the Deterministic Reliability Gate, together
-with the Web contract check, the Python SDK workflow, and the benchmark smoke
-workflow.
+with the Web contract check and the Python SDK workflow.
 
 ## Documentation
 
@@ -568,6 +566,5 @@ workflow.
   verification.
 - [`sdks/python/CAPABILITY_MATRIX.md`](sdks/python/CAPABILITY_MATRIX.md) — Rust
   and Python capability parity.
-- [`benchmark/README.md`](benchmark/README.md) — Harbor benchmark integration.
 - [`examples/config.toml`](examples/config.toml) — annotated configuration
   starting point.

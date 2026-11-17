@@ -111,7 +111,7 @@ jobs:
             echo "## Deterministic reliability/security gate"
             echo "- revision: \`${GITHUB_SHA}\`"
             echo "- named evidence scenario: \`t6_failure_evidence\`"
-            echo "- live provider and Harbor: not used"
+            echo "- live provider: not used"
             echo "- runtime event, artifact, ledger, trajectory, and test-result links are asserted by the named scenario"
           } >> "$GITHUB_STEP_SUMMARY"
 

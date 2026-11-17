@@ -1639,18 +1639,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "merry-eval"
-version = "0.1.0"
-dependencies = [
- "jsonschema",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "toml",
-]
-
-[[package]]
 name = "merry-llm"
 version = "0.1.0"
 dependencies = [
