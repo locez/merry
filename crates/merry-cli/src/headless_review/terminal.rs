@@ -59,14 +59,22 @@ mod unix {
 
     impl ReviewTerminal {
         /// Opens `path`; fails when it is missing or cannot be read.
+        ///
+        /// `AsyncFd::register_with_interest` is unsafe because Tokio cannot
+        /// check that the descriptor stays open and stable. This `File` is
+        /// the sole owner of the descriptor it just opened.
+        #[allow(unsafe_code)]
         pub(crate) fn open(path: &Path) -> io::Result<Self> {
             let file = OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
                 .open(path)?;
-            Ok(Self {
-                inner: AsyncFd::with_interest(file, Interest::READABLE)?,
-            })
+            // SAFETY: `file` owns the descriptor created above. `File::as_raw_fd`
+            // returns that same open descriptor until the `File` is dropped, and
+            // `ReviewTerminal` never replaces the file or the descriptor. The
+            // descriptor therefore stays valid for the whole `AsyncFd` lifetime.
+            let inner = unsafe { AsyncFd::register_with_interest(file, Interest::READABLE) }?;
+            Ok(Self { inner })
         }
     }
 

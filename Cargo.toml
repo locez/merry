@@ -88,4 +88,7 @@ unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` so one reviewed call can use `allow`. Tokio 1.54 deprecated the safe
+# `AsyncFd::with_interest` wrapper; the replacement is unsafe, and
+# `ReviewTerminal::open` is the only allowed site.
+unsafe_code = "deny"
