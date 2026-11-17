@@ -66,7 +66,11 @@ impl TerminalSession {
             };
 
             match event {
-                Event::Key(key) => return Ok(Some(TerminalEvent::Key(key))),
+                Event::Key(key) => {
+                    return Ok(Some(TerminalEvent::Key(
+                        crate::tui::keymap::normalize_command_key(key),
+                    )));
+                }
                 Event::Mouse(mouse) => {
                     if let Some(event) = mouse_event(mouse) {
                         return Ok(Some(event));

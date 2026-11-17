@@ -171,12 +171,12 @@ max_model_turns = 2048
 [tui]
 # Show up to five output lines for process commands and read_text calls.
 # Timeline previews retain at most 180 Unicode characters per line; captured
-# process output remains available in full through Alt+T.
+# process output remains available in full through Alt+T (Option+T on macOS).
 # Finished commands stay on one line until that row is opened. Set this to
 # false to keep successful command output hidden even after opening. Failed
 # commands show their output preview once opened; failed reads show diagnostics.
 # An extra ... line indicates omitted output.
-# Alt+T inspects captured process output independently of this setting. In the
+# Alt+T (Option+T on macOS) inspects captured process output independently of this setting. In the
 # viewer, Left/Right selects a command, C copies its command, Y copies captured output,
 # and Esc closes. Copy writes the system clipboard when the desktop provides
 # one, so local tmux does not need set-clipboard. A terminal copy request is
@@ -209,8 +209,9 @@ success = "light_green"
 # Ctrl+N stays when the key is still free.
 # Ctrl+R searches history. While searching, type to narrow, Ctrl+R steps older,
 # Ctrl+S steps newer, Enter keeps the line, and Esc cancels.
-# Merry commands use Alt, so they do not take those keys. Alt+X opens the
-# command palette; that chord is fixed and is not a config key.
+# Merry commands use Alt. On macOS that key is Option, and the on-screen
+# prefix says Option. Config accepts alt+ and option+ as the same chord.
+# Alt+X opens the command palette; that chord is fixed and is not a config key.
 submit_next = "enter"
 submit_backlog = "alt+enter"
 cancel_input_or_quit = "ctrl+c"

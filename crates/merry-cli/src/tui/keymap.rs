@@ -265,6 +265,57 @@ impl Keymap {
     }
 }
 
+/// Name of the Alt chord on this platform.
+///
+/// The binding stores [`KeyModifiers::ALT`]. macOS keyboards call that key
+/// Option, and crossterm reports Option as Alt when the terminal sends the
+/// modifier.
+pub(crate) fn alt_modifier_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Option"
+    } else {
+        "Alt"
+    }
+}
+
+pub(crate) fn alt_chord(key: &str) -> String {
+    format!("{}+{key}", alt_modifier_name())
+}
+
+/// macOS ABC layout types these glyphs for Option+letter when the terminal
+/// does not report Option as Alt. Dead keys such as Option+N and Option+U
+/// produce no character until the next key, so those chords still need the
+/// terminal to send the modifier.
+fn macos_option_letter(glyph: char) -> Option<char> {
+    Some(match glyph {
+        'ç' => 'c',
+        '∂' => 'd',
+        '©' => 'g',
+        'π' => 'p',
+        '†' => 't',
+        '≈' => 'x',
+        _ => return None,
+    })
+}
+
+pub(crate) fn command_key_from_option_glyph(key: KeyEvent) -> Option<KeyEvent> {
+    if !key.modifiers.is_empty() {
+        return None;
+    }
+    let KeyCode::Char(glyph) = key.code else {
+        return None;
+    };
+    macos_option_letter(glyph).map(|letter| KeyEvent::new(KeyCode::Char(letter), KeyModifiers::ALT))
+}
+
+pub(crate) fn normalize_command_key(key: KeyEvent) -> KeyEvent {
+    if cfg!(target_os = "macos") {
+        command_key_from_option_glyph(key).unwrap_or(key)
+    } else {
+        key
+    }
+}
+
 impl KeyBinding {
     fn label(self) -> String {
         let mut parts = Vec::new();
@@ -272,7 +323,7 @@ impl KeyBinding {
             parts.push("Ctrl".to_owned());
         }
         if self.modifiers.contains(KeyModifiers::ALT) {
-            parts.push("Alt".to_owned());
+            parts.push(alt_modifier_name().to_owned());
         }
         if self.modifiers.contains(KeyModifiers::SHIFT) {
             parts.push("Shift".to_owned());
@@ -298,7 +349,7 @@ fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> 
         "enter" => Ok(KeyBinding::new(KeyCode::Enter, KeyModifiers::NONE)),
         "esc" => Ok(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
         "ctrl+end" => Ok(KeyBinding::new(KeyCode::End, KeyModifiers::CONTROL)),
-        "alt+enter" => Ok(KeyBinding::new(KeyCode::Enter, KeyModifiers::ALT)),
+        "alt+enter" | "option+enter" => Ok(KeyBinding::new(KeyCode::Enter, KeyModifiers::ALT)),
         "up" => Ok(KeyBinding::new(KeyCode::Up, KeyModifiers::NONE)),
         "down" => Ok(KeyBinding::new(KeyCode::Down, KeyModifiers::NONE)),
         "pageup" | "page_up" | "pgup" => Ok(KeyBinding::new(KeyCode::PageUp, KeyModifiers::NONE)),
@@ -312,7 +363,10 @@ fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> 
 fn parse_modified_letter(value: &str) -> Result<KeyBinding, crate::config::ConfigError> {
     let (modifiers, letter) = if let Some(letter) = value.strip_prefix("ctrl+") {
         (KeyModifiers::CONTROL, letter)
-    } else if let Some(letter) = value.strip_prefix("alt+") {
+    } else if let Some(letter) = value
+        .strip_prefix("alt+")
+        .or_else(|| value.strip_prefix("option+"))
+    {
         (KeyModifiers::ALT, letter)
     } else {
         return Err(crate::config::ConfigError::Invalid(format!(
@@ -359,7 +413,50 @@ mod tests {
             keymap
                 .binding_label_for(KeyAction::OpenCommandDetails)
                 .as_deref(),
-            Some("Alt+T")
+            Some(alt_chord("T").as_str())
+        );
+    }
+
+    #[test]
+    fn macos_option_glyphs_match_the_default_alt_chords() {
+        let details =
+            command_key_from_option_glyph(KeyEvent::new(KeyCode::Char('†'), KeyModifiers::NONE))
+                .expect("option+t on the ABC layout");
+        assert_eq!(details.code, KeyCode::Char('t'));
+        assert!(details.modifiers.contains(KeyModifiers::ALT));
+
+        assert!(
+            command_key_from_option_glyph(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+                .is_none()
+        );
+        assert!(
+            command_key_from_option_glyph(KeyEvent::new(KeyCode::Char('†'), KeyModifiers::CONTROL))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn option_prefix_is_the_alt_modifier() {
+        let keymap = Keymap::from_config(&TuiKeymapToml {
+            open_command_details: Some("option+t".to_owned()),
+            submit_backlog: Some("option+enter".to_owned()),
+            ..TuiKeymapToml::default()
+        })
+        .expect("option+ is the macOS spelling of an alt chord");
+
+        assert_eq!(
+            keymap.action_for(KeyBinding::new(KeyCode::Char('t'), KeyModifiers::ALT)),
+            Some(KeyAction::OpenCommandDetails)
+        );
+        assert_eq!(
+            keymap.action_for(KeyBinding::new(KeyCode::Enter, KeyModifiers::ALT)),
+            Some(KeyAction::SubmitBacklog)
+        );
+        assert_eq!(
+            keymap
+                .binding_label_for(KeyAction::OpenCommandDetails)
+                .as_deref(),
+            Some(alt_chord("T").as_str())
         );
     }
 
@@ -383,7 +480,7 @@ mod tests {
             keymap
                 .binding_label_for(KeyAction::OpenCommandDetails)
                 .as_deref(),
-            Some("Alt+O")
+            Some(alt_chord("O").as_str())
         );
     }
 

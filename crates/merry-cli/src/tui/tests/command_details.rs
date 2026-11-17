@@ -18,6 +18,14 @@ use merry_runtime::{ArtifactContent, Runtime};
 use ratatui::layout::Size;
 use serde_json::json;
 
+fn output_hint() -> String {
+    format!("{} output", crate::tui::keymap::alt_chord("T"))
+}
+
+fn close_hint() -> String {
+    format!("{} / Esc close", crate::tui::keymap::alt_chord("T"))
+}
+
 fn state() -> TuiState {
     TuiState::new(
         "/repo".into(),
@@ -123,7 +131,7 @@ fn command_details_shortcut_toggles_without_changing_the_draft_or_reading_positi
 #[test]
 fn command_output_hint_appears_only_when_completed_output_is_available() {
     let mut state = state();
-    assert!(!draw(&mut state, 80, 24).contains("Alt+T output"));
+    assert!(!draw(&mut state, 80, 24).contains(&output_hint()));
     TuiProjector::default().apply(
         RuntimeEvent::ToolCallStarted {
             call: pending_call_with_args("pending", "run_process", json!({"command": "pwd"})),
@@ -131,10 +139,10 @@ fn command_output_hint_appears_only_when_completed_output_is_available() {
         },
         &mut state,
     );
-    assert!(!draw(&mut state, 80, 24).contains("Alt+T output"));
+    assert!(!draw(&mut state, 80, 24).contains(&output_hint()));
     completed_command(&mut state, "ready", "pwd", 0, "");
     for width in [24, 80] {
-        assert!(draw(&mut state, width, 24).contains("Alt+T output"));
+        assert!(draw(&mut state, width, 24).contains(&output_hint()));
     }
 }
 
@@ -150,11 +158,11 @@ fn command_output_hint_does_not_overwrite_new_content_navigation() {
     let wide = draw(&mut state, 80, 24);
     assert!(wide.contains("New content"));
     assert!(wide.contains("Ctrl+End latest"));
-    assert!(wide.contains("Alt+T output"));
+    assert!(wide.contains(&output_hint()));
     let narrow = draw(&mut state, 40, 24);
     assert!(narrow.contains("New content"));
     assert!(narrow.contains("Ctrl+End latest"));
-    assert!(!narrow.contains("Alt+T output"));
+    assert!(!narrow.contains(&output_hint()));
 }
 
 #[test]
@@ -165,7 +173,7 @@ fn command_details_close_hint_and_feedback_fit_narrow_terminals() {
     key(&mut state, KeyCode::Char('y'));
     for width in [24, 40, 80, 120] {
         let rendered = draw(&mut state, width, 24);
-        assert!(rendered.contains("Alt+T / Esc close"), "{rendered}");
+        assert!(rendered.contains(&close_hint()), "{rendered}");
         assert!(rendered.contains("↑/↓"), "{rendered}");
         assert!(
             rendered.contains("C/Y copy") || rendered.contains("C copy command"),
@@ -388,7 +396,7 @@ fn inspection_toggle_and_follow_shortcuts_respect_configured_bindings() {
     let artifact = completed_command(&mut state, "configured", "pwd", 0, "");
     let collapsed = draw(&mut state, 80, 24);
     assert!(collapsed.contains("Ctrl+F output"));
-    assert!(!collapsed.contains("Alt+T output"));
+    assert!(!collapsed.contains(&output_hint()));
     assert_eq!(
         handle_key_event(
             KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),

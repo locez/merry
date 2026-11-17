@@ -157,7 +157,7 @@ fn plan_header_shows_toggle_shortcut() {
         .plan_mut()
         .update_snapshot(snapshot(1, PlanNodeStatus::InProgress));
 
-    assert!(render_to_text(&state, 140, 40).contains("Alt+P"));
+    assert!(render_to_text(&state, 140, 40).contains(&crate::tui::keymap::alt_chord("P")));
 }
 
 #[test]

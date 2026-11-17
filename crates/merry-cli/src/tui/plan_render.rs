@@ -104,7 +104,7 @@ fn plan_block<'a>(state: &TuiState, snapshot: &PlanSnapshot, title: &'a str) -> 
                     state
                         .keymap()
                         .binding_label_for(KeyAction::TogglePlan)
-                        .unwrap_or_else(|| "Alt+P".to_owned())
+                        .unwrap_or_else(|| crate::tui::keymap::alt_chord("P"))
                 ),
                 style(state, SemanticColor::Muted),
             ),

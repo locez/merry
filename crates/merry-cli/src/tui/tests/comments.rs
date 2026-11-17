@@ -82,7 +82,10 @@ fn comment_mode_collects_quotes_and_sends_them_together() {
 
     let buffer = draw(&mut state, size);
     let rendered = rendered_buffer_text(&buffer);
-    assert!(rendered.contains("[Alt+C commenting]"));
+    assert!(rendered.contains(&format!(
+        "[{} commenting]",
+        crate::tui::keymap::alt_chord("C")
+    )));
     assert!(rendered.contains("Comment · select text"));
     let start = point(&buffer, "alpha");
     assert_eq!(
@@ -149,7 +152,10 @@ fn status_comment_chip_enters_the_mode_and_send_submits() {
     let buffer = draw(&mut state, size);
     assert_eq!(
         handle_mouse_input(
-            MouseInput::Down(point(&buffer, "[Alt+C comment]")),
+            MouseInput::Down(point(
+                &buffer,
+                &format!("[{} comment]", crate::tui::keymap::alt_chord("C")),
+            )),
             size,
             &mut state
         ),
