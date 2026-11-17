@@ -107,7 +107,7 @@ fn controller_suspended_actions_emit_runtime_effects() {
 }
 
 #[test]
-fn cockpit_ctrl_u_review_still_jumps_between_user_turns() {
+fn cockpit_review_still_jumps_between_user_turns() {
     let mut state = TuiState::new(
         "/repo/merry".into(),
         "gpt-test".to_owned(),

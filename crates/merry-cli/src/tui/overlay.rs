@@ -487,8 +487,8 @@ impl Overlay {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
-        if key.code == KeyCode::Char('p')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
+        if key.code == KeyCode::Char('x')
+            && key.modifiers.contains(KeyModifiers::ALT)
             && !matches!(self, Self::PermissionReview(_))
         {
             return OverlayKeyResult::Close;

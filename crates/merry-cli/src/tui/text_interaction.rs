@@ -119,6 +119,15 @@ impl SelectionSnapshot {
     }
 }
 
+/// Plain text captured from a drag, plus where in the timeline it starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CapturedText {
+    pub(crate) text: String,
+    pub(crate) item_index: usize,
+    pub(crate) visual_row: usize,
+    pub(crate) column: u16,
+}
+
 /// Tracks a drag in document rows rather than screen coordinates, including off-screen text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TextSelection {
@@ -202,9 +211,26 @@ impl TextSelection {
             })
     }
 
-    pub(crate) fn release(mut self, position: Position) -> Result<Option<String>, CopyTextError> {
+    pub(crate) fn release(
+        mut self,
+        position: Position,
+    ) -> Result<Option<CapturedText>, CopyTextError> {
         self.cursor = self.document_position(position);
-        self.text()
+        let Some(text) = self.text()? else {
+            return Ok(None);
+        };
+        let (start, _) = self.ordered_positions();
+        let item_index = self
+            .snapshot
+            .anchor_at(start.row)
+            .map(|anchor| anchor.item_index)
+            .unwrap_or(0);
+        Ok(Some(CapturedText {
+            text,
+            item_index,
+            visual_row: start.row,
+            column: start.column,
+        }))
     }
 
     fn text(&self) -> Result<Option<String>, CopyTextError> {

@@ -24,10 +24,12 @@ pub(super) const PLAN_SCROLL_STEP: usize = 5;
 
 pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> ControllerEffect {
     match action {
-        KeyAction::SubmitNext => submit_input(state, ControllerEffect::SubmitNext),
-        KeyAction::SubmitBacklog => submit_input(state, ControllerEffect::SubmitBacklog),
+        KeyAction::SubmitNext => dispatch_submit(state, ControllerEffect::SubmitNext),
+        KeyAction::SubmitBacklog => dispatch_submit(state, ControllerEffect::SubmitBacklog),
         KeyAction::CancelInputOrQuit => {
-            if state.cancel_input_or_mark_quit() {
+            if state.discard_comment_draft() {
+                ControllerEffect::None
+            } else if state.cancel_input_or_mark_quit() {
                 ControllerEffect::Quit
             } else {
                 ControllerEffect::None
@@ -67,6 +69,7 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
                 state.exit_timeline_review();
                 ControllerEffect::None
             } else {
+                state.escape_comment_mode();
                 ControllerEffect::None
             }
         }
@@ -95,10 +98,52 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             state.next_input_history();
             ControllerEffect::None
         }
+        KeyAction::HistorySearch => {
+            state.begin_or_older_history_search();
+            ControllerEffect::None
+        }
         KeyAction::ResumeSuspended => ControllerEffect::ResumeSuspended,
         KeyAction::DiscardSuspended => ControllerEffect::DiscardSuspended,
-        _ => ControllerEffect::None,
+        KeyAction::ToggleComment => {
+            state.toggle_comment_mode();
+            ControllerEffect::None
+        }
+        KeyAction::SendComments => send_comments(state, ControllerEffect::SubmitNext),
+        KeyAction::CloseOverlay => ControllerEffect::None,
     }
+}
+
+fn dispatch_submit(
+    state: &mut TuiState,
+    submit: impl FnOnce(TuiSubmission) -> ControllerEffect,
+) -> ControllerEffect {
+    if !state.is_commenting() {
+        return submit_input(state, submit);
+    }
+    if let Some(effect) = crate::tui::command_controller::slash_input_effect(state) {
+        exit_review_if_active(state);
+        return effect;
+    }
+    if exit_review_if_active(state) {
+        return ControllerEffect::None;
+    }
+    if state.pending_comment_quote().is_some() {
+        state.pin_pending_comment();
+        return ControllerEffect::None;
+    }
+    if state.comment_count() > 0 {
+        return send_comments(state, submit);
+    }
+    submit_input(state, submit)
+}
+
+fn send_comments(
+    state: &mut TuiState,
+    submit: impl FnOnce(TuiSubmission) -> ControllerEffect,
+) -> ControllerEffect {
+    state
+        .take_comment_submission()
+        .map_or(ControllerEffect::None, submit)
 }
 
 pub(super) fn submit_input(
@@ -117,9 +162,51 @@ pub(super) fn submit_input(
         .map_or(ControllerEffect::None, submit)
 }
 
+fn history_search_key(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Char('r') if control && !alt => {
+            state.begin_or_older_history_search();
+            ControllerEffect::None
+        }
+        KeyCode::Char('s') if control && !alt => {
+            state.newer_history_search();
+            ControllerEffect::None
+        }
+        KeyCode::Char('g' | 'c') if control && !alt => {
+            state.cancel_history_search();
+            ControllerEffect::None
+        }
+        KeyCode::Esc => {
+            state.cancel_history_search();
+            ControllerEffect::None
+        }
+        KeyCode::Enter => {
+            state.accept_history_search();
+            ControllerEffect::None
+        }
+        KeyCode::Backspace if !control && !alt => {
+            state.history_search_backspace();
+            ControllerEffect::None
+        }
+        KeyCode::Char(character) if !control && !alt => {
+            state.history_search_push(character);
+            ControllerEffect::None
+        }
+        _ => {
+            state.accept_history_search();
+            handle_key_event(key, state)
+        }
+    }
+}
+
 pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
     if state.overlay().is_none() && state.clear_text_selection() && key.code == KeyCode::Esc {
         return ControllerEffect::None;
+    }
+    if state.overlay().is_none() && state.history_search_active() {
+        return history_search_key(key, state);
     }
     if matches!(state.overlay(), Some(Overlay::CommandDetails(_)))
         && state.keymap().action_for(key.into()) == Some(KeyAction::OpenCommandDetails)
@@ -174,12 +261,18 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
                     | KeyAction::OpenCommandDetails
                     | KeyAction::FollowLatest
                     | KeyAction::TogglePlan
+                    | KeyAction::ToggleComment
+                    | KeyAction::HistorySearch
                     | KeyAction::Interrupt
                     | KeyAction::Quit
             )
         {
             return handle_key_action(action, state);
         }
+        return ControllerEffect::None;
+    }
+
+    if key.code == KeyCode::Backspace && key.modifiers.is_empty() && state.restore_last_comment() {
         return ControllerEffect::None;
     }
 
@@ -392,6 +485,8 @@ fn status_click(action: StatusAction, state: &mut TuiState) -> ControllerEffect 
         StatusAction::Plan => KeyAction::TogglePlan,
         StatusAction::Follow => KeyAction::FollowLatest,
         StatusAction::Stop => KeyAction::Interrupt,
+        StatusAction::Comment => KeyAction::ToggleComment,
+        StatusAction::SendComments => KeyAction::SendComments,
     };
     handle_key_action(key_action, state)
 }
@@ -502,11 +597,34 @@ pub(crate) fn handle_mouse_input(
             state.drag_text_selection(position);
             ControllerEffect::None
         }
-        MouseInput::Up(position) => match state.finish_text_selection(position) {
-            Ok(Some(text)) => ControllerEffect::CopyText(text),
-            Ok(None) => ControllerEffect::None,
-            Err(CopyTextError::TooLarge) => ControllerEffect::CopyTextTooLarge,
-        },
+        MouseInput::Up(position) => {
+            let had_selection = state.text_selection().is_some();
+            match state.finish_text_selection(position) {
+                Ok(Some(captured)) if state.is_commenting() => {
+                    let occurrence = crate::tui::render::quote_occurrence(
+                        state,
+                        rects.timeline,
+                        captured.item_index,
+                        &captured.text,
+                        captured.visual_row,
+                        captured.column,
+                    );
+                    state.capture_comment_selection(captured.text, captured.item_index, occurrence);
+                    ControllerEffect::None
+                }
+                Ok(Some(captured)) => ControllerEffect::CopyText(captured.text),
+                Ok(None) => {
+                    if let Some(hit) =
+                        crate::tui::render::comment_mark_at(state, rects.timeline, position)
+                        && (had_selection || hit.in_sticky_header)
+                    {
+                        state.edit_comment(hit.index);
+                    }
+                    ControllerEffect::None
+                }
+                Err(CopyTextError::TooLarge) => ControllerEffect::CopyTextTooLarge,
+            }
+        }
     }
 }
 

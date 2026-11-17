@@ -207,12 +207,12 @@ max_model_turns = 2048
 [tui]
 # Show up to five output lines for process commands and read_text calls.
 # Timeline previews retain at most 180 Unicode characters per line; captured
-# process output remains available in full through Ctrl+T.
+# process output remains available in full through Alt+T.
 # Finished commands stay on one line until that row is opened. Set this to
 # false to keep successful command output hidden even after opening. Failed
 # commands show their output preview once opened; failed reads show diagnostics.
 # An extra ... line indicates omitted output.
-# Ctrl+T inspects captured process output independently of this setting. In the
+# Alt+T inspects captured process output independently of this setting. In the
 # viewer, Left/Right selects a command, C copies its command, Y copies captured output,
 # and Esc closes. Copy writes the system clipboard when the desktop provides
 # one, so local tmux does not need set-clipboard. A terminal copy request is
@@ -237,12 +237,22 @@ risk = "magenta"
 success = "light_green"
 
 [tui.keymap]
+# Composer editing stays on the readline keys and is not listed here:
+# Ctrl+A/E jump to the line ends, Ctrl+B/F move by character, Ctrl+D deletes
+# the character under the cursor, and Ctrl+U/K/W kill text.
+# Up and Ctrl+P recall older input. Down and Ctrl+N move toward newer input.
+# Setting history_previous or history_next replaces that arrow, and Ctrl+P or
+# Ctrl+N stays when the key is still free.
+# Ctrl+R searches history. While searching, type to narrow, Ctrl+R steps older,
+# Ctrl+S steps newer, Enter keeps the line, and Esc cancels.
+# Merry commands use Alt, so they do not take those keys. Alt+X opens the
+# command palette; that chord is fixed and is not a config key.
 submit_next = "enter"
-submit_backlog = "ctrl+b"
+submit_backlog = "alt+enter"
 cancel_input_or_quit = "ctrl+c"
 insert_newline = "ctrl+j"
 paste_image = "ctrl+v"
-toggle_plan = "ctrl+o"
+toggle_plan = "alt+p"
 interrupt = "esc"
 quit = "ctrl+q"
 scroll_up = "pageup"
@@ -250,13 +260,21 @@ scroll_down = "pagedown"
 # Manual scrolling pauses following; return explicitly when ready for new output.
 follow_latest = "ctrl+end"
 # Toggle command output details; pressing the same shortcut again or Esc closes them.
-open_command_details = "ctrl+t"
-review_previous_user_input = "ctrl+u"
-open_session_in_browser = "ctrl+g"
+open_command_details = "alt+t"
+review_previous_user_input = "alt+u"
+open_session_in_browser = "alt+g"
 history_previous = "up"
 history_next = "down"
-resume_suspended = "ctrl+n"
-discard_suspended = "ctrl+d"
+history_search = "ctrl+r"
+resume_suspended = "alt+n"
+discard_suspended = "alt+d"
+# Quote timeline text and attach comments, then send them as one message.
+# The same key is shown on the status chip. Select text, type a note, and
+# Enter saves it. The quote stays highlighted; click that highlight to edit
+# the note. Enter again, or the send chip, sends every saved comment.
+# Esc drops the note you are typing, then leaves the mode. Saved comments
+# stay until they are sent or cleared.
+toggle_comment = "alt+c"
 
 [observability.log]
 # Enable this for smoke/debug runs that should write structured JSON logs.

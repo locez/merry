@@ -316,6 +316,14 @@ fn text_input_supports_common_shell_line_editing_keys() {
 
     assert_eq!(input.text(), "");
     assert_eq!(input.cursor_byte_index(), 0);
+
+    input.insert_str("ab");
+    input.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    assert_eq!(input.cursor_byte_index(), 1);
+    input.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert_eq!(input.text(), "a");
+    input.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+    assert_eq!(input.cursor_byte_index(), 1);
 }
 
 #[test]

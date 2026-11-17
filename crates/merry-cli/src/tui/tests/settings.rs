@@ -21,7 +21,7 @@ fn settings_cycles_code_theme_without_leaking_keys_to_chat_input() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
     for character in "settings".chars() {
@@ -66,7 +66,7 @@ fn settings_reasoning_change_applies_to_the_current_runtime() {
         },
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
     for character in "settings".chars() {
@@ -269,7 +269,7 @@ fn settings_compaction_change_applies_to_the_current_runtime() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
     for character in "settings".chars() {
@@ -308,7 +308,7 @@ fn settings_do_not_describe_runtime_changes_as_next_session() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
     for character in "settings".chars() {
@@ -339,7 +339,7 @@ fn code_theme_setting_applies_to_existing_code_blocks_immediately() {
         text: "```python\ndef greet():\n    return 'hello'\n```".to_owned(),
     });
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
     for character in "settings".chars() {
@@ -357,7 +357,7 @@ fn code_theme_setting_applies_to_existing_code_blocks_immediately() {
         &mut state,
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
 
@@ -376,7 +376,7 @@ fn shortcuts_opened_from_settings_return_to_settings() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
     for character in "settings".chars() {
@@ -414,7 +414,7 @@ fn settings_model_editor_owns_the_visible_cursor() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
     for character in "settings".chars() {
@@ -458,7 +458,7 @@ fn settings_keep_the_selected_row_visible_in_a_short_terminal() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
     for character in "settings".chars() {

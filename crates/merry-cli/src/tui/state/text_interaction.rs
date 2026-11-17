@@ -1,7 +1,7 @@
 use crate::tui::{
     copy_controls::CopyTextError,
     state::TuiState,
-    text_interaction::{SelectionViewport, TextSelection},
+    text_interaction::{CapturedText, SelectionViewport, TextSelection},
 };
 use ratatui::layout::{Position, Rect};
 
@@ -24,7 +24,7 @@ impl TuiState {
     pub(crate) fn finish_text_selection(
         &mut self,
         position: Position,
-    ) -> Result<Option<String>, CopyTextError> {
+    ) -> Result<Option<CapturedText>, CopyTextError> {
         self.text_selection
             .take()
             .map_or(Ok(None), |selection| selection.release(position))

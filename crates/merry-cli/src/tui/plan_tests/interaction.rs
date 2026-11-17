@@ -1,6 +1,6 @@
 use crate::tui::{
     controller::{ControllerEffect, handle_key_event, handle_mouse_input},
-    plan_tests::{add_live_attempt, key, key_ctrl, node, node_id, snapshot, tui_state},
+    plan_tests::{add_live_attempt, key, key_alt, node, node_id, snapshot, tui_state},
     render::{prepare_viewport, render_to_buffer, render_to_text},
     state::{TimelineItem, TuiState},
     text_interaction::MouseInput,
@@ -131,7 +131,7 @@ fn focused_plan_navigation_does_not_edit_chat_input() {
 }
 
 #[test]
-fn ctrl_o_toggles_plan_visibility_and_focus() {
+fn alt_p_toggles_plan_visibility_and_focus() {
     let mut state = tui_state();
     state
         .plan_mut()
@@ -139,14 +139,14 @@ fn ctrl_o_toggles_plan_visibility_and_focus() {
     assert!(state.plan().is_open());
     assert!(!state.plan().is_focused());
 
-    handle_key_event(key_ctrl('o'), &mut state);
+    handle_key_event(key_alt('p'), &mut state);
     assert!(!state.plan().is_open());
 
-    handle_key_event(key_ctrl('o'), &mut state);
+    handle_key_event(key_alt('p'), &mut state);
     assert!(state.plan().is_open());
     assert!(state.plan().is_focused());
 
-    handle_key_event(key_ctrl('o'), &mut state);
+    handle_key_event(key_alt('p'), &mut state);
     assert!(!state.plan().is_open());
 }
 
@@ -157,7 +157,7 @@ fn plan_header_shows_toggle_shortcut() {
         .plan_mut()
         .update_snapshot(snapshot(1, PlanNodeStatus::InProgress));
 
-    assert!(render_to_text(&state, 140, 40).contains("Ctrl+O"));
+    assert!(render_to_text(&state, 140, 40).contains("Alt+P"));
 }
 
 #[test]

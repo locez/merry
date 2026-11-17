@@ -1,6 +1,7 @@
 //! Timeline content, wrapping, and bounded viewport projection.
 
 use super::activity::{ActivityLayout, paint_activity};
+use super::comment_marks::{comment_overlay, paint_comment_overlay};
 use super::sticky::{paint_sticky_header, split_timeline_content, timeline_scroll_split};
 use crate::tui::{
     copy_controls::{CopyContent, CopyTarget, copy_header},
@@ -89,8 +90,10 @@ pub(super) fn render_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, regi
         scroll,
     );
     let (header, body) = split_timeline_content(content_region, split.header_rows);
+    let comments = comment_overlay(state, &timeline, content_region.width);
     paint_sticky_header(frame, header, &split);
     if body.is_empty() {
+        paint_comment_overlay(frame, state, &comments, &split, header, body);
         return;
     }
     if let Some(selection) = state.text_selection()
@@ -122,6 +125,7 @@ pub(super) fn render_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, regi
         split.body_scroll,
     );
     paint_command_folds(frame, state, body, &folds);
+    paint_comment_overlay(frame, state, &comments, &split, header, body);
 }
 
 pub(super) fn blank_logical_lines(timeline: &TimelineLayout) -> Vec<bool> {

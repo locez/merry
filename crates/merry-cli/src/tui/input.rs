@@ -109,6 +109,22 @@ impl TextInput {
         self.elements.is_empty().then_some(&self.text)
     }
 
+    pub(crate) fn contains_image(&self) -> bool {
+        self.elements
+            .iter()
+            .any(|element| matches!(element.payload, InputElementPayload::Image { .. }))
+    }
+
+    /// Composer text for a comment, with large pastes expanded and images omitted.
+    pub(crate) fn note_text(&self) -> String {
+        self.history_text().trim().to_owned()
+    }
+
+    /// Text stored in input history. Large pastes expand; image placeholders stay out.
+    pub(crate) fn history_text(&self) -> String {
+        self.rendered_text(false)
+    }
+
     pub(crate) fn cursor_byte_index(&self) -> usize {
         self.cursor
     }
@@ -519,6 +535,15 @@ impl TextInput {
             KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_end();
             }
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_left();
+            }
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_right();
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete();
+            }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.delete_before_cursor();
             }
@@ -619,6 +644,108 @@ impl InputHistory {
 
         self.navigation = None;
         *input = std::mem::take(&mut self.draft);
+    }
+
+    /// Remembers where a history search landed so Down can restore the draft.
+    pub(crate) fn adopt_match(&mut self, index: usize, draft: String) {
+        self.draft.replace_text(draft);
+        self.navigation = Some(index);
+    }
+}
+
+/// Incremental history search. Ctrl+R walks older matches, like a shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HistorySearch {
+    query: String,
+    /// The next reverse step looks strictly before this entry.
+    before: usize,
+    draft: String,
+    matched: Option<usize>,
+    failed: bool,
+}
+
+impl HistorySearch {
+    pub(crate) fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub(crate) fn failed(&self) -> bool {
+        self.failed
+    }
+
+    pub(crate) fn matched(&self) -> Option<usize> {
+        self.matched
+    }
+
+    pub(crate) fn into_draft(self) -> String {
+        self.draft
+    }
+
+    pub(crate) fn start(entries: &[String], draft: String) -> (Self, Option<String>) {
+        let mut search = Self {
+            query: String::new(),
+            before: entries.len(),
+            draft,
+            matched: None,
+            failed: false,
+        };
+        let text = search.search_older(entries);
+        (search, text)
+    }
+
+    pub(crate) fn older(&mut self, entries: &[String]) -> Option<String> {
+        self.before = self.matched.unwrap_or(entries.len());
+        self.search_older(entries)
+    }
+
+    pub(crate) fn newer(&mut self, entries: &[String]) -> Option<String> {
+        let start = self
+            .matched
+            .map(|index| index.saturating_add(1))
+            .unwrap_or(0);
+        let found = entries.get(start..).and_then(|rest| {
+            rest.iter()
+                .position(|entry| entry.contains(&self.query))
+                .map(|offset| start.saturating_add(offset))
+        });
+        self.apply_match(entries, found)
+    }
+
+    pub(crate) fn push_char(&mut self, character: char, entries: &[String]) -> Option<String> {
+        self.query.push(character);
+        self.before = self
+            .matched
+            .map(|index| index.saturating_add(1))
+            .unwrap_or(entries.len());
+        self.search_older(entries)
+    }
+
+    /// Removes one query character. `None` means the query was already empty.
+    pub(crate) fn pop_char(&mut self, entries: &[String]) -> Option<Option<String>> {
+        self.query.pop()?;
+        self.matched = None;
+        self.before = entries.len();
+        Some(self.search_older(entries))
+    }
+
+    fn search_older(&mut self, entries: &[String]) -> Option<String> {
+        let end = self.before.min(entries.len());
+        let found = entries[..end]
+            .iter()
+            .rposition(|entry| entry.contains(&self.query));
+        self.apply_match(entries, found)
+    }
+
+    fn apply_match(&mut self, entries: &[String], found: Option<usize>) -> Option<String> {
+        if let Some(index) = found {
+            self.matched = Some(index);
+            self.before = index;
+            self.failed = false;
+            entries.get(index).cloned()
+        } else {
+            self.failed = true;
+            None
+        }
     }
 }
 

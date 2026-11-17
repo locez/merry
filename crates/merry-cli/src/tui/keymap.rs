@@ -21,8 +21,11 @@ pub(crate) enum KeyAction {
     ReviewPreviousUserInput,
     HistoryPrevious,
     HistoryNext,
+    HistorySearch,
     ResumeSuspended,
     DiscardSuspended,
+    ToggleComment,
+    SendComments,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,7 +66,7 @@ impl Default for Keymap {
                     KeyAction::SubmitNext,
                 ),
                 (
-                    KeyBinding::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+                    KeyBinding::new(KeyCode::Enter, KeyModifiers::ALT),
                     KeyAction::SubmitBacklog,
                 ),
                 (
@@ -79,15 +82,15 @@ impl Default for Keymap {
                     KeyAction::PasteImage,
                 ),
                 (
-                    KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+                    KeyBinding::new(KeyCode::Char('x'), KeyModifiers::ALT),
                     KeyAction::OpenCommandPanel,
                 ),
                 (
-                    KeyBinding::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+                    KeyBinding::new(KeyCode::Char('t'), KeyModifiers::ALT),
                     KeyAction::OpenCommandDetails,
                 ),
                 (
-                    KeyBinding::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+                    KeyBinding::new(KeyCode::Char('p'), KeyModifiers::ALT),
                     KeyAction::TogglePlan,
                 ),
                 (
@@ -111,11 +114,15 @@ impl Default for Keymap {
                     KeyAction::FollowLatest,
                 ),
                 (
-                    KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                    KeyBinding::new(KeyCode::Char('u'), KeyModifiers::ALT),
                     KeyAction::ReviewPreviousUserInput,
                 ),
                 (
-                    KeyBinding::new(KeyCode::Char('g'), KeyModifiers::CONTROL),
+                    KeyBinding::new(KeyCode::Char('c'), KeyModifiers::ALT),
+                    KeyAction::ToggleComment,
+                ),
+                (
+                    KeyBinding::new(KeyCode::Char('g'), KeyModifiers::ALT),
                     KeyAction::OpenSessionInBrowser,
                 ),
                 (
@@ -123,8 +130,28 @@ impl Default for Keymap {
                     KeyAction::HistoryPrevious,
                 ),
                 (
+                    KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+                    KeyAction::HistoryPrevious,
+                ),
+                (
                     KeyBinding::new(KeyCode::Down, KeyModifiers::NONE),
                     KeyAction::HistoryNext,
+                ),
+                (
+                    KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+                    KeyAction::HistoryNext,
+                ),
+                (
+                    KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                    KeyAction::HistorySearch,
+                ),
+                (
+                    KeyBinding::new(KeyCode::Char('n'), KeyModifiers::ALT),
+                    KeyAction::ResumeSuspended,
+                ),
+                (
+                    KeyBinding::new(KeyCode::Char('d'), KeyModifiers::ALT),
+                    KeyAction::DiscardSuspended,
                 ),
             ],
         }
@@ -185,13 +212,34 @@ impl Keymap {
         if let Some(binding) = config.history_next.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::HistoryNext);
         }
+        if let Some(binding) = config.history_search.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::HistorySearch);
+        }
         if let Some(binding) = config.resume_suspended.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::ResumeSuspended);
         }
         if let Some(binding) = config.discard_suspended.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::DiscardSuspended);
         }
+        if let Some(binding) = config.toggle_comment.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::ToggleComment);
+        }
+        // Readline aliases survive a config that only names Up and Down.
+        keymap.bind_if_free(
+            KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            KeyAction::HistoryPrevious,
+        );
+        keymap.bind_if_free(
+            KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            KeyAction::HistoryNext,
+        );
         Ok(keymap)
+    }
+
+    fn bind_if_free(&mut self, binding: KeyBinding, action: KeyAction) {
+        if self.action_for(binding).is_none() {
+            self.bindings.push((binding, action));
+        }
     }
 
     pub(crate) fn action_for(&self, binding: KeyBinding) -> Option<KeyAction> {
@@ -250,29 +298,34 @@ fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> 
         "enter" => Ok(KeyBinding::new(KeyCode::Enter, KeyModifiers::NONE)),
         "esc" => Ok(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
         "ctrl+end" => Ok(KeyBinding::new(KeyCode::End, KeyModifiers::CONTROL)),
-        "alt+o" => Ok(KeyBinding::new(KeyCode::Char('o'), KeyModifiers::ALT)),
+        "alt+enter" => Ok(KeyBinding::new(KeyCode::Enter, KeyModifiers::ALT)),
         "up" => Ok(KeyBinding::new(KeyCode::Up, KeyModifiers::NONE)),
         "down" => Ok(KeyBinding::new(KeyCode::Down, KeyModifiers::NONE)),
         "pageup" | "page_up" | "pgup" => Ok(KeyBinding::new(KeyCode::PageUp, KeyModifiers::NONE)),
         "pagedown" | "page_down" | "pgdown" => {
             Ok(KeyBinding::new(KeyCode::PageDown, KeyModifiers::NONE))
         }
-        "ctrl+b" => Ok(KeyBinding::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
-        "ctrl+c" => Ok(KeyBinding::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-        "ctrl+d" => Ok(KeyBinding::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
-        "ctrl+f" => Ok(KeyBinding::new(KeyCode::Char('f'), KeyModifiers::CONTROL)),
-        "ctrl+g" => Ok(KeyBinding::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
-        "ctrl+j" => Ok(KeyBinding::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
-        "ctrl+n" => Ok(KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
-        "ctrl+o" => Ok(KeyBinding::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
-        "ctrl+p" => Ok(KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
-        "ctrl+q" => Ok(KeyBinding::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
-        "ctrl+r" => Ok(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
-        "ctrl+t" => Ok(KeyBinding::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
-        "ctrl+u" => Ok(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
-        "ctrl+v" => Ok(KeyBinding::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
-        other => Err(crate::config::ConfigError::Invalid(format!(
-            "unsupported TUI key binding {other:?}"
+        other => parse_modified_letter(other),
+    }
+}
+
+fn parse_modified_letter(value: &str) -> Result<KeyBinding, crate::config::ConfigError> {
+    let (modifiers, letter) = if let Some(letter) = value.strip_prefix("ctrl+") {
+        (KeyModifiers::CONTROL, letter)
+    } else if let Some(letter) = value.strip_prefix("alt+") {
+        (KeyModifiers::ALT, letter)
+    } else {
+        return Err(crate::config::ConfigError::Invalid(format!(
+            "unsupported TUI key binding {value:?}"
+        )));
+    };
+    let mut letters = letter.chars();
+    match (letters.next(), letters.next()) {
+        (Some(letter), None) if letter.is_ascii_lowercase() => {
+            Ok(KeyBinding::new(KeyCode::Char(letter), modifiers))
+        }
+        _ => Err(crate::config::ConfigError::Invalid(format!(
+            "unsupported TUI key binding {value:?}"
         ))),
     }
 }
@@ -283,26 +336,30 @@ mod tests {
     use crate::config::TuiKeymapToml;
 
     #[test]
-    fn command_details_defaults_to_ctrl_t_without_retaining_alt_o() {
+    fn command_details_defaults_to_alt_t() {
         let keymap = Keymap::default();
 
         assert_eq!(
-            keymap.action_for(KeyBinding::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            keymap.action_for(KeyBinding::new(KeyCode::Char('t'), KeyModifiers::ALT)),
             Some(KeyAction::OpenCommandDetails)
         );
         assert_eq!(
-            keymap.action_for(KeyBinding::new(KeyCode::Char('o'), KeyModifiers::ALT)),
+            keymap.action_for(KeyBinding::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
             None
         );
         assert_eq!(
-            keymap.action_for(KeyBinding::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            keymap.action_for(KeyBinding::new(KeyCode::Char('p'), KeyModifiers::ALT)),
             Some(KeyAction::TogglePlan)
+        );
+        assert_eq!(
+            keymap.action_for(KeyBinding::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
+            None
         );
         assert_eq!(
             keymap
                 .binding_label_for(KeyAction::OpenCommandDetails)
                 .as_deref(),
-            Some("Ctrl+T")
+            Some("Alt+T")
         );
     }
 
@@ -319,7 +376,7 @@ mod tests {
             Some(KeyAction::OpenCommandDetails)
         );
         assert_eq!(
-            keymap.action_for(KeyBinding::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            keymap.action_for(KeyBinding::new(KeyCode::Char('t'), KeyModifiers::ALT)),
             None
         );
         assert_eq!(
@@ -341,6 +398,33 @@ mod tests {
         assert_eq!(
             keymap.action_for(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
             Some(KeyAction::SubmitNext)
+        );
+    }
+
+    #[test]
+    fn arrow_history_config_keeps_ctrl_p_and_ctrl_n_when_free() {
+        let keymap = Keymap::from_config(&TuiKeymapToml {
+            history_previous: Some("up".to_owned()),
+            history_next: Some("down".to_owned()),
+            ..TuiKeymapToml::default()
+        })
+        .expect("keymap config should validate");
+
+        assert_eq!(
+            keymap.action_for(KeyBinding::new(KeyCode::Up, KeyModifiers::NONE)),
+            Some(KeyAction::HistoryPrevious)
+        );
+        assert_eq!(
+            keymap.action_for(KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            Some(KeyAction::HistoryPrevious)
+        );
+        assert_eq!(
+            keymap.action_for(KeyBinding::new(KeyCode::Down, KeyModifiers::NONE)),
+            Some(KeyAction::HistoryNext)
+        );
+        assert_eq!(
+            keymap.action_for(KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+            Some(KeyAction::HistoryNext)
         );
     }
 

@@ -23,6 +23,8 @@ pub(super) struct TimelineScrollSplit {
     pub(super) header_rows: u16,
     /// Wrapped rows of the pinned message. The gap is the remainder of `header_rows`.
     pub(super) content_rows: u16,
+    /// Document row of the first pinned line. Absent when nothing is pinned.
+    pub(super) pinned_origin: Option<usize>,
     pub(super) body_scroll: usize,
     pub(super) lines: Vec<Line<'static>>,
 }
@@ -46,6 +48,7 @@ pub(super) fn timeline_scroll_split(
         return TimelineScrollSplit {
             header_rows: 0,
             content_rows: 0,
+            pinned_origin: None,
             body_scroll: scroll_start,
             lines: Vec::new(),
         };
@@ -53,6 +56,7 @@ pub(super) fn timeline_scroll_split(
     TimelineScrollSplit {
         header_rows: pin.header_rows,
         content_rows: pin.content_rows,
+        pinned_origin: Some(pin.origin),
         body_scroll: scroll_start.saturating_add(usize::from(pin.header_rows)),
         lines: pin.lines,
     }
@@ -98,6 +102,7 @@ pub(super) fn paint_sticky_header(
 struct PinnedUser {
     header_rows: u16,
     content_rows: u16,
+    origin: usize,
     lines: Vec<Line<'static>>,
 }
 
@@ -147,6 +152,7 @@ fn pin_user(
     Some(PinnedUser {
         header_rows,
         content_rows,
+        origin: section.y,
         lines: section.lines.clone(),
     })
 }
@@ -244,6 +250,7 @@ mod tests {
         let split = timeline_scroll_split(&state, &[0, 2], &[0, 1, 2, 3], &rows, 10, 0);
         assert_eq!(split.header_rows, 0);
         assert_eq!(split.body_scroll, 0);
+        assert_eq!(split.pinned_origin, None);
         assert!(split.lines.is_empty());
     }
 
@@ -260,6 +267,7 @@ mod tests {
         let split = timeline_scroll_split(&state, &[0, 2, 4], &[0, 1, 2, 3, 4, 5], &rows, 10, 4);
         assert_eq!(split.content_rows, 1);
         assert_eq!(split.header_rows, 2);
+        assert_eq!(split.pinned_origin, Some(2));
         assert_eq!(split.body_scroll, 6);
         assert_eq!(split.lines.len(), 1);
     }

@@ -369,16 +369,15 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
     assert_eq!(tui.keymap.cancel_input_or_quit.as_deref(), Some("ctrl+c"));
     assert_eq!(tui.keymap.insert_newline.as_deref(), Some("ctrl+j"));
     assert_eq!(tui.keymap.scroll_up.as_deref(), Some("pageup"));
-    assert_eq!(tui.keymap.open_command_details.as_deref(), Some("ctrl+t"));
-    assert_eq!(
-        tui.keymap.open_session_in_browser.as_deref(),
-        Some("ctrl+g")
-    );
+    assert_eq!(tui.keymap.open_command_details.as_deref(), Some("alt+t"));
+    assert_eq!(tui.keymap.open_session_in_browser.as_deref(), Some("alt+g"));
     assert_eq!(
         tui.keymap.review_previous_user_input.as_deref(),
-        Some("ctrl+u")
+        Some("alt+u")
     );
     assert_eq!(tui.keymap.history_previous.as_deref(), Some("up"));
+    assert_eq!(tui.keymap.history_search.as_deref(), Some("ctrl+r"));
+    assert_eq!(tui.keymap.toggle_comment.as_deref(), Some("alt+c"));
 
     let provider = config
         .openai_compatible_provider()

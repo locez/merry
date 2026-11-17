@@ -45,7 +45,7 @@ fn permission_review_overlay_exposes_allow_and_reject_actions_with_exact_id() {
     state.open_permission_review("approval-3".to_owned(), "action: cargo test".to_owned());
     assert_eq!(
         handle_key_event(
-            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
             &mut state,
         ),
         ControllerEffect::None

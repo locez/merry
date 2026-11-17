@@ -4,6 +4,7 @@
 //! click lands on the control the current state would draw.
 
 use crate::tui::{
+    keymap::KeyAction,
     layout::{BottomPaneHeights, TimelineRects, cockpit_layout},
     overlay_render::overlay_pointer,
     plan_render::{PlanPointer, plan_pointer_target},
@@ -25,6 +26,8 @@ pub(crate) enum StatusAction {
     Plan,
     Follow,
     Stop,
+    Comment,
+    SendComments,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +111,7 @@ fn cockpit_rects(size: Size, state: &TuiState) -> TimelineRects {
 }
 
 pub(crate) fn status_actions(state: &TuiState) -> Vec<StatusAction> {
-    let mut actions = vec![StatusAction::Commands];
+    let mut actions = vec![StatusAction::Commands, StatusAction::Comment];
     if state.plan().snapshot().is_some() {
         actions.push(StatusAction::Plan);
     }
@@ -118,27 +121,50 @@ pub(crate) fn status_actions(state: &TuiState) -> Vec<StatusAction> {
     if state.can_interrupt_run() {
         actions.push(StatusAction::Stop);
     }
+    if state.can_send_comments() {
+        actions.push(StatusAction::SendComments);
+    }
     actions
 }
 
-pub(crate) fn status_action_label(action: &StatusAction) -> &'static str {
+pub(crate) fn status_action_label(state: &TuiState, action: &StatusAction) -> String {
     match action {
-        StatusAction::Commands => "commands",
-        StatusAction::Plan => "plan",
-        StatusAction::Follow => "follow",
-        StatusAction::Stop => "stop",
+        StatusAction::Commands => "commands".to_owned(),
+        StatusAction::Plan => "plan".to_owned(),
+        StatusAction::Follow => "follow".to_owned(),
+        StatusAction::Stop => "stop".to_owned(),
+        StatusAction::Comment => comment_chip_label(state),
+        StatusAction::SendComments => "send".to_owned(),
     }
 }
 
-pub(crate) fn status_chips(region: Rect, actions: &[StatusAction]) -> Vec<(StatusAction, Rect)> {
+fn comment_chip_label(state: &TuiState) -> String {
+    let verb = if state.is_commenting() {
+        "commenting"
+    } else {
+        "comment"
+    };
+    match state.keymap().binding_label_for(KeyAction::ToggleComment) {
+        Some(key) => format!("{key} {verb}"),
+        None => verb.to_owned(),
+    }
+}
+
+pub(crate) fn status_chips(
+    state: &TuiState,
+    region: Rect,
+    actions: &[StatusAction],
+) -> Vec<(StatusAction, Rect)> {
     if region.height == 0 || region.width == 0 {
         return Vec::new();
     }
     let mut shown = actions.to_vec();
-    while !shown.is_empty() && chip_row_width(&chip_labels(&shown)) > usize::from(region.width) {
+    while !shown.is_empty()
+        && chip_row_width(&chip_labels(state, &shown)) > usize::from(region.width)
+    {
         shown.remove(0);
     }
-    let labels = chip_labels(&shown);
+    let labels = chip_labels(state, &shown);
     let width = chip_row_width(&labels);
     let origin_x = region.x.saturating_add(
         region
@@ -160,7 +186,7 @@ pub(crate) fn status_action_at(
     if state.clipboard_feedback().is_some() {
         return None;
     }
-    status_chips(region, &status_actions(state))
+    status_chips(state, region, &status_actions(state))
         .into_iter()
         .find(|(_, rect)| rect.contains(position))
         .map(|(action, _)| action)
@@ -190,7 +216,7 @@ pub(crate) fn header_model_rect(region: Rect, parts: &[String; 3]) -> Option<Rec
     ))
 }
 
-pub(crate) fn chip_line(state: &TuiState, labels: &[&str]) -> Line<'static> {
+pub(crate) fn chip_line(state: &TuiState, labels: &[impl AsRef<str>]) -> Line<'static> {
     let style = semantic_style(state, SemanticColor::Focus)
         .add_modifier(Modifier::BOLD)
         .add_modifier(Modifier::UNDERLINED);
@@ -199,12 +225,16 @@ pub(crate) fn chip_line(state: &TuiState, labels: &[&str]) -> Line<'static> {
         if index > 0 {
             spans.push(Span::raw("  "));
         }
-        spans.push(Span::styled(format!("[{label}]"), style));
+        spans.push(Span::styled(format!("[{}]", label.as_ref()), style));
     }
     Line::from(spans)
 }
 
-pub(crate) fn chip_hit(origin: Position, labels: &[&str], position: Position) -> Option<usize> {
+pub(crate) fn chip_hit(
+    origin: Position,
+    labels: &[impl AsRef<str>],
+    position: Position,
+) -> Option<usize> {
     chip_rects(origin.x, origin.y, labels)
         .into_iter()
         .position(|rect| rect.contains(position))
@@ -233,29 +263,34 @@ pub(crate) fn truncate_columns(value: &str, max_width: usize) -> String {
     truncated
 }
 
-fn chip_labels(actions: &[StatusAction]) -> Vec<&str> {
-    actions.iter().map(status_action_label).collect()
+fn chip_labels(state: &TuiState, actions: &[StatusAction]) -> Vec<String> {
+    actions
+        .iter()
+        .map(|action| status_action_label(state, action))
+        .collect()
 }
 
-fn chip_rects(origin_x: u16, y: u16, labels: &[&str]) -> Vec<Rect> {
+fn chip_rects(origin_x: u16, y: u16, labels: &[impl AsRef<str>]) -> Vec<Rect> {
     let mut x = origin_x;
     let mut rects = Vec::with_capacity(labels.len());
     for (index, label) in labels.iter().enumerate() {
         if index > 0 {
             x = x.saturating_add(2);
         }
-        let width = u16::try_from(UnicodeWidthStr::width(format!("[{label}]").as_str()))
-            .unwrap_or(u16::MAX);
+        let width = u16::try_from(UnicodeWidthStr::width(
+            format!("[{}]", label.as_ref()).as_str(),
+        ))
+        .unwrap_or(u16::MAX);
         rects.push(Rect::new(x, y, width, 1));
         x = x.saturating_add(width);
     }
     rects
 }
 
-fn chip_row_width(labels: &[&str]) -> usize {
+fn chip_row_width(labels: &[impl AsRef<str>]) -> usize {
     labels
         .iter()
-        .map(|label| UnicodeWidthStr::width(format!("[{label}]").as_str()))
+        .map(|label| UnicodeWidthStr::width(format!("[{}]", label.as_ref()).as_str()))
         .sum::<usize>()
         .saturating_add(labels.len().saturating_sub(1).saturating_mul(2))
 }

@@ -23,6 +23,9 @@ pub(crate) use views::{
     QueuePreview, QueuePreviewItem, QueuePreviewState, TimelineItem, ToolOutputPreview,
 };
 
+mod comments;
+pub(crate) use comments::CommentHighlight;
+mod history_search;
 mod overlays;
 
 mod views;
@@ -46,6 +49,7 @@ pub(crate) struct TuiState {
     completion_sources: CompletionSources,
     completion_menu: Option<CompletionMenu>,
     input_history: InputHistory,
+    history_search: Option<crate::tui::input::HistorySearch>,
     queue_preview: QueuePreviewState,
     timeline: Vec<TimelineItem>,
     show_successful_command_output: bool,
@@ -69,6 +73,7 @@ pub(crate) struct TuiState {
     preferences: TuiPreferences,
     settings_defaults: TuiSettingsDefaults,
     plan: PlanUiState,
+    comments: comments::CommentSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +111,7 @@ impl TuiState {
             completion_sources: CompletionSources::new(workspace_root.clone(), Vec::new()),
             completion_menu: None,
             input_history: InputHistory::default(),
+            history_search: None,
             queue_preview: QueuePreviewState::from_preview(QueuePreview::empty()),
             timeline: Vec::new(),
             show_successful_command_output: true,
@@ -129,6 +135,7 @@ impl TuiState {
             preferences: TuiPreferences::default(),
             settings_defaults: TuiSettingsDefaults::default(),
             plan: PlanUiState::default(),
+            comments: comments::CommentSession::default(),
         }
     }
 
@@ -785,8 +792,13 @@ impl TuiState {
     }
 
     pub(crate) fn interaction_status_text_at(&self, now: Instant) -> String {
+        if let Some(status) = self.history_search_status() {
+            return status;
+        }
         match self.run_state {
-            InteractiveRunState::WaitingForInput => self.ready_status_text(),
+            InteractiveRunState::WaitingForInput => self
+                .comment_status_text()
+                .unwrap_or_else(|| self.ready_status_text()),
             InteractiveRunState::RunningModel => self.active_status_text("Running model", now),
             InteractiveRunState::RunningTool => self.active_status_text("Running tool", now),
             InteractiveRunState::Interrupting => self.active_status_text("Interrupting", now),

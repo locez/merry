@@ -98,6 +98,7 @@ fn find_cell_style(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<ratat
 
 mod click_targets;
 mod command_palette;
+mod comments;
 
 mod command_details;
 mod command_display;

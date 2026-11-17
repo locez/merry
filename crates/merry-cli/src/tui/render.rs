@@ -14,6 +14,7 @@ use crate::tui::{
     text_wrap::semantic_style,
     theme::{SemanticColor, dim_color},
 };
+pub(crate) use comment_marks::{comment_mark_at, quote_occurrence};
 pub(crate) use composer::pane_heights_for_area;
 #[cfg(test)]
 use ratatui::layout::Position;
@@ -30,6 +31,7 @@ pub(crate) use timeline_pointer::{TimelineMouseDown, timeline_mouse_down, timeli
 
 mod activity;
 mod command_style;
+mod comment_marks;
 mod sticky;
 
 mod composer;
@@ -217,7 +219,7 @@ fn render_status(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
     } else {
         semantic_style(state, SemanticColor::Muted)
     };
-    let chips = status_chips(region, &status_actions(state));
+    let chips = status_chips(state, region, &status_actions(state));
     let text_limit = chips
         .first()
         .map_or(usize::from(region.width), |(_, chip)| {
@@ -240,7 +242,7 @@ fn render_status(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
     if let Some((_, first)) = chips.first() {
         let labels = chips
             .iter()
-            .map(|(action, _)| status_action_label(action))
+            .map(|(action, _)| status_action_label(state, action))
             .collect::<Vec<_>>();
         frame.render_widget(
             Paragraph::new(chip_line(state, &labels)),

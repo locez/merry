@@ -51,7 +51,7 @@ pub(super) fn render_input(
                     .borders(Borders::ALL)
                     .border_type(BorderType::Plain)
                     .title(Line::from(Span::styled(
-                        " M ",
+                        state.composer_title(region.width),
                         semantic_style(state, SemanticColor::Status).add_modifier(Modifier::BOLD),
                     )))
                     .border_style(semantic_style(state, SemanticColor::Focus)),

@@ -19,7 +19,7 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
         Some(KeyAction::SubmitNext)
     );
     assert_eq!(
-        keymap.action_for(KeyBinding::new(KeyCode::Char('b'), KeyModifiers::CONTROL,)),
+        keymap.action_for(KeyBinding::new(KeyCode::Enter, KeyModifiers::ALT,)),
         Some(KeyAction::SubmitBacklog)
     );
     assert_eq!(
@@ -35,7 +35,11 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
         Some(KeyAction::PasteImage)
     );
     assert_eq!(
-        keymap.action_for(KeyBinding::new(KeyCode::Char('o'), KeyModifiers::CONTROL,)),
+        keymap.action_for(KeyBinding::new(KeyCode::Char('x'), KeyModifiers::ALT,)),
+        Some(KeyAction::OpenCommandPanel)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('p'), KeyModifiers::ALT,)),
         Some(KeyAction::TogglePlan)
     );
     assert_eq!(
@@ -47,7 +51,15 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
         Some(KeyAction::HistoryPrevious)
     );
     assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+        Some(KeyAction::HistoryPrevious)
+    );
+    assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Down, KeyModifiers::NONE)),
+        Some(KeyAction::HistoryNext)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
         Some(KeyAction::HistoryNext)
     );
     assert_eq!(
@@ -59,19 +71,35 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
         Some(KeyAction::ScrollDown)
     );
     assert_eq!(
-        keymap.action_for(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+        keymap.action_for(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::ALT)),
         Some(KeyAction::ReviewPreviousUserInput)
     );
     assert_eq!(
-        keymap.action_for(KeyBinding::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+        keymap.action_for(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+        None
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('g'), KeyModifiers::ALT)),
         Some(KeyAction::OpenSessionInBrowser)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('c'), KeyModifiers::ALT)),
+        Some(KeyAction::ToggleComment)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+        Some(KeyAction::HistorySearch)
+    );
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('b'), KeyModifiers::CONTROL)),
+        None
     );
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Char('f'), KeyModifiers::CONTROL)),
         None
     );
     assert_eq!(
-        keymap.action_for(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+        keymap.action_for(KeyBinding::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
         None
     );
 }
@@ -317,4 +345,111 @@ fn configured_navigation_bindings_take_precedence() {
         keymap.action_for(KeyBinding::new(KeyCode::Char('d'), KeyModifiers::CONTROL,)),
         Some(KeyAction::DiscardSuspended)
     );
+}
+
+#[test]
+fn ctrl_r_searches_history_and_enter_keeps_the_line() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.record_input_history("older cargo");
+    state.record_input_history("newer cargo test");
+    state.insert_input_str("keep me");
+
+    let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert_eq!(handle_key_event(ctrl_r, &mut state), ControllerEffect::None);
+    assert_eq!(state.input_text(), "newer cargo test");
+    assert!(state.interaction_status_text().contains("Ctrl+R older"));
+
+    assert_eq!(handle_key_event(ctrl_r, &mut state), ControllerEffect::None);
+    assert_eq!(state.input_text(), "older cargo");
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            &mut state
+        ),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "newer cargo test");
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+            &mut state
+        ),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "newer cargo test");
+    assert!(state.interaction_status_text().contains("No history match"));
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut state
+        ),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "newer cargo test");
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+            &mut state
+        ),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "newer cargo test");
+    assert!(state.interaction_status_text().contains("History · t"));
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state
+        ),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "newer cargo test");
+    assert!(!state.interaction_status_text().contains("History"));
+
+    assert_eq!(
+        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "keep me");
+}
+
+#[test]
+fn esc_and_empty_backspace_cancel_history_search() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.record_input_history("alpha");
+    state.insert_input_str("draft");
+
+    let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    handle_key_event(ctrl_r, &mut state);
+    assert_eq!(state.input_text(), "alpha");
+    handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+    assert_eq!(state.input_text(), "draft");
+
+    handle_key_event(ctrl_r, &mut state);
+    handle_key_event(
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        &mut state,
+    );
+    assert_eq!(state.input_text(), "draft");
+
+    handle_key_event(ctrl_r, &mut state);
+    assert_eq!(handle_key_event(ctrl_c, &mut state), ControllerEffect::None);
+    assert_eq!(state.input_text(), "draft");
+    assert_eq!(handle_key_event(ctrl_c, &mut state), ControllerEffect::None);
+    assert_eq!(state.input_text(), "");
 }

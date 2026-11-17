@@ -356,7 +356,7 @@ fn setting_line_index(item: SettingItem) -> usize {
 }
 
 fn render_shortcuts(frame: &mut Frame<'_>, state: &TuiState) {
-    let region = centered_rect(frame.area(), MAX_OVERLAY_WIDTH, 16);
+    let region = centered_rect(frame.area(), MAX_OVERLAY_WIDTH, 20);
     render_surface(frame, state, region, " M  Keyboard shortcuts ");
     let inner = inset(region, 2, 1);
     let lines = vec![
@@ -376,6 +376,10 @@ fn render_shortcuts(frame: &mut Frame<'_>, state: &TuiState) {
             "Previous user input",
             KeyAction::ReviewPreviousUserInput,
         ),
+        shortcut_line_for_action(state, "Search history", KeyAction::HistorySearch),
+        shortcut_line_for_action(state, "Comment mode", KeyAction::ToggleComment),
+        shortcut_line_for_action(state, "Resume suspended", KeyAction::ResumeSuspended),
+        shortcut_line_for_action(state, "Discard suspended", KeyAction::DiscardSuspended),
         shortcut_line_for_action(state, "Interrupt", KeyAction::Interrupt),
         shortcut_line_for_action(state, "Quit", KeyAction::Quit),
     ];

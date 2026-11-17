@@ -126,8 +126,8 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
-fn key_ctrl(code: char) -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL)
+fn key_alt(code: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(code), KeyModifiers::ALT)
 }
 
 fn tui_state() -> TuiState {

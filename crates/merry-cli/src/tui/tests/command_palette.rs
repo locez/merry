@@ -20,7 +20,7 @@ use ratatui::{
 };
 
 #[test]
-fn controller_ctrl_p_opens_searchable_command_palette_and_settings() {
+fn controller_alt_x_opens_searchable_command_palette_and_settings() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -29,7 +29,7 @@ fn controller_ctrl_p_opens_searchable_command_palette_and_settings() {
     );
 
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
 
@@ -64,7 +64,7 @@ fn command_palette_renders_categories_as_single_group_headers() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
 
@@ -84,7 +84,7 @@ fn command_palette_search_has_no_redundant_brand_and_commands_are_indented() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
 
@@ -135,7 +135,7 @@ fn command_palette_uses_a_magenta_selection_surface() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
 
@@ -160,7 +160,7 @@ fn command_palette_displays_configured_shortcuts_instead_of_stale_defaults() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
 
@@ -183,7 +183,7 @@ fn command_palette_exposes_open_trajectory_action() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
     for character in "open trajectory".chars() {
@@ -211,7 +211,7 @@ fn command_palette_and_cursor_fit_a_narrow_terminal() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
     handle_key_event(
@@ -237,7 +237,7 @@ fn command_palette_keeps_the_selected_command_visible_in_a_short_terminal() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
     let mut selected_quit = false;
@@ -274,7 +274,7 @@ fn paste_is_routed_to_the_command_palette_instead_of_chat_input() {
         TuiTheme::default(),
     );
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
 
@@ -301,7 +301,7 @@ fn command_palette_blocks_mouse_scroll_from_mutating_the_hidden_timeline() {
             .join("\n"),
     });
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
         &mut state,
     );
 

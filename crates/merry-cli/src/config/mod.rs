@@ -529,8 +529,10 @@ pub(crate) struct TuiKeymapToml {
     pub(crate) review_previous_user_input: Option<String>,
     pub(crate) history_previous: Option<String>,
     pub(crate) history_next: Option<String>,
+    pub(crate) history_search: Option<String>,
     pub(crate) resume_suspended: Option<String>,
     pub(crate) discard_suspended: Option<String>,
+    pub(crate) toggle_comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
