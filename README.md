@@ -55,8 +55,8 @@ links to the tracking issues.
 Requirements:
 
 - Stable Rust with Rust 2024 edition support.
-- Linux and `bubblewrap` for the default TUI and `merry run` sandbox; see
-  [SANDBOX.md](SANDBOX.md) when the host blocks nested bubblewrap.
+- Linux 5.13 or newer for the default workspace sandbox (Landlock). Pass
+  `--sandbox off` on a host that cannot enforce it. See [SANDBOX.md](SANDBOX.md).
 - Node.js and npm when building the local Web trajectory application.
 
 Build:
@@ -262,126 +262,93 @@ Reading the task from stdin consumes that stream, so `merry run -` answers
 permission review on the controlling terminal rather than on stdin; piping
 approval answers alongside the task does not work. When the process has no
 controlling terminal at all, each request is denied with that reason on stderr,
-so grant the capabilities up front, pass the task on argv, or pick `model_only`
-or `deny` for that run. [SANDBOX.md](SANDBOX.md) documents the review terminal
-bind and its limits.
+so grant the capabilities up front, pass the task on argv, or pick
+`--auto-fallback deny` or `--permission-mode deny` for that run.
 
 ## Sandbox And Permissions
 
-Every process action runs inside the sandbox mode you choose, under a permission
-ceiling that approval cannot widen. The `[cli]` table in `config.toml` sets the
-mode and the approval policy as defaults for every `merry` invocation, so neither
-has to be passed as a flag each time:
+Each process action runs in the sandbox mode you choose. Merry itself stays on
+the host, so model and MCP connections are not part of that switch. The `[cli]`
+table sets the defaults:
 
 ```toml
 [cli]
-sandbox = "no-sandbox"
-approval_policy = "none"
+# sandbox = "workspace" or "off". Omitted means workspace.
+permission_mode = "auto"
+auto_fallback = "ask"
 ```
 
 ### Sandbox Mode
 
-`sandbox` takes `with-sandbox` (outer+inner bubblewrap, the built-in default for
-the TUI and `run`), `inner-sandbox` (the Codex-compatible single action sandbox,
-without the outer layer), or `no-sandbox` (explicit unrestricted host execution:
-process actions inherit the host filesystem, environment, and permissions
-without any bubblewrap namespace), matching the root flags; a sandbox mode given
-on the command line replaces the configured one.
+`--sandbox workspace` (the default) confines each action with Landlock on Linux.
+Network stays closed until that action is approved. `--sandbox off` runs the
+action on the host. A flag replaces the configured value. If the kernel cannot
+enforce the workspace sandbox, startup stops and tells you to pass
+`--sandbox off`. See [SANDBOX.md](SANDBOX.md).
 
-### Approval Policy
+### Permission Mode
 
-`approval_policy` is the config equivalent of `--approval-policy` and names who
-reviews permission requests before a command runs:
+`--permission-mode` names who reviews a request. A denial comes back to the
+working model as a failed tool result. It does not end the turn by itself.
 
 | Value | Reviewer |
 |---|---|
-| `none` | nobody: configured actions run without an approval round |
-| `deny` | nobody: every permission request is rejected without asking |
-| `model_only` | the `[models.approval_review]` model decides; no human fallback |
-| `model_then_human` (default) | the model decides first; when it denies or cannot decide, you are asked in the TUI dialog or on the `merry run` prompt |
-| `human_only` | you decide, in the TUI dialog or on the `merry run` prompt |
+| `auto` (default) | the `[models.approval_review]` model decides first |
+| `ask` | you decide |
+| `always-approve` | no review round |
+| `deny` | the request is refused and returned to the model |
 
-`sandbox` and `approval_policy` are independent dimensions: the sandbox sets
-the execution boundary and the approval policy sets who reviews permission
-requests inside it. Any policy combines with any sandbox mode, in config and on
-the command line alike, and a flag for one dimension replaces only that
-dimension's configured default: `--with-sandbox` keeps a configured
-`approval_policy`, and `--approval-policy` keeps a configured `sandbox`.
+`auto_fallback` applies only when the mode is `auto`. `ask` (the default) asks
+you when the review model denies or cannot decide. `deny` returns that denial
+to the working model. `--always-approve` is the same as
+`--permission-mode always-approve` and conflicts with `--permission-mode`.
+
+`sandbox` and `permission_mode` are independent. `--sandbox off` with
+`--always-approve` is the unsandboxed, no-prompt mode, and it is not the default.
 
 ### Permissions
 
-`[permissions] network` is the inner sandbox's network capability ceiling and
-defaults to `true`. It does not preauthorize network access: ordinary actions
-remain network-isolated, and each action must request and obtain its own network
-approval. With `network = false`, network requests are rejected before review or
-execution, including under the `none` approval policy, and approval cannot
-override the ceiling. The setting is inherited by new process sessions and does
-not restrict model-provider or configured MCP connections. Explicit
-`--no-sandbox` host execution remains outside this network-isolation boundary.
+`[permissions] network` defaults to on. A sandboxed action may request network,
+and the request still goes through `permission_mode`. `network = false` rejects
+the request before review, and approval cannot open it. The setting does not
+restrict model-provider or configured MCP connections. `--sandbox off` does not
+use this limit.
 
-`--approval-policy none` skips model and host permission review for configured
-actions in the TUI and `merry run`; `[cli] approval_policy = "none"` applies it
-to every session, under whichever sandbox mode is in effect. `--approval-policy deny` is the
-opposite end: actions that need no approval still run, but every permission
-request and high-risk action review is denied without consulting a reviewer.
-Neither policy changes any access ceiling: `deny_paths`, `review_paths`
-masking, and `network = false` still apply.
+`readonly_paths`, `readwrite_paths`, and `deny_paths` are the same kind of
+option for filesystem access. Trusted paths are available to ordinary actions
+at the declared level. `review_paths` asks again for each action. `deny_paths`
+is never reopened by an approval. A deny or review path inside an allowed
+directory cannot be subtracted, so that action fails closed instead of running
+unsandboxed.
 
-Trusted `readonly_paths` and `readwrite_paths` are preauthorized in the inner
-sandbox at their declared access level. `review_paths` marks existing subtrees
-within these grants for **per-action** review, without adding a new grant or
-raising the access ceiling, and `deny_paths` is never reopened by an approval.
-For example:
-
-```toml
-[permissions]
-readonly_paths = ["~/.config"]
-review_paths = ["~/.config"]
-```
-
-`[permissions].environment` applies only inside Merry-managed action processes:
-values are injected after the inner sandbox defaults, so they may intentionally
-override them, and they never change the outer bootstrap or provider environment.
+`[permissions].environment` applies only to Merry-managed action processes.
 
 ### Host Integrations
 
-`ssh_agent`, `gpg_agent`, and `dbus` independently enable outer-sandbox
-forwarding and preauthorize the matching inner capability: when the validated
-endpoint exists, ordinary actions use the forwarded socket and automatically
-imported client files without a separate request. `review_paths` still mask a
-configured endpoint until its exact path is approved for that action, and
-`deny_paths` always mask it. An integration that trusted configuration did not
-enable can still be requested for one permissioned action when its endpoint is
-visible; a missing agent does not prevent ordinary actions from starting.
+`ssh_agent`, `gpg_agent`, and `dbus` preauthorize the matching socket when the
+endpoint exists. SSH also grants existing `known_hosts` files read-only. GnuPG
+also grants existing public keyrings read-only. Private keys stay off the list.
+An integration that trusted configuration did not enable can still be requested
+for one action when its endpoint is visible.
 
 ### How The Boundary Works
 
-TUI and `run` default to outer+inner bubblewrap. Before the outer sandbox starts,
-Merry probes whether bubblewrap can run inside bubblewrap on this host; when it
-cannot, startup stops with a warning that quotes the bubblewrap error and points
-to [SANDBOX.md](SANDBOX.md) instead of silently downgrading to a weaker mode. The
-usual cause is the AppArmor profile shipped by Ubuntu 24.04 and newer, and
-SANDBOX.md describes the host change that allows nesting.
+The workspace is writable after you accept it on first open. No keeps that
+directory read-only and still sandboxed. System directories such as `/usr` and
+`/bin`, a small set of `/etc` files, and the existing Git user files
+(`~/.gitconfig` and `~/.config/git/{config,ignore,attributes}`) are readable.
+`/tmp`, `/var/tmp`, the Cargo registry and git database, and the XDG cache are
+writable. The rest of the home directory is traverse-only, so secrets such as
+`~/.ssh` private keys, `~/.gnupg` private material, `~/.aws`, and
+`~/.git-credentials` are not readable. Merry's own config and state directories
+are denied to actions. The first-open choice is saved under Merry's state
+directory.
 
-In both inner modes an action starts from a read-only view of its parent
-filesystem, so ordinary commands can see host configuration and toolchains, and
-the action policy controls workspace writes, network access, path review, and
-modeled host integrations (SSH agent, native GPG agent, and D-Bus session bus).
-It masks known unapproved socket endpoints rather than hiding their whole parent
-directory, and it is not a general IPC filter: unmodeled Unix sockets visible
-through the inherited filesystem may remain reachable. In the default
-outer+inner mode, the outer sandbox limits which host paths are visible before
-the inner action starts.
-
-Enforcement uses mount namespaces rather than shell-path parsing, so scripts
-receive the same restricted view, and missing or unprotectable review and deny
-targets fail closed during preflight. Merry's configuration, state directories,
-and configured provider credential files are product-private and are not exposed
-to task processes merely because Merry itself needs them.
-
-Endpoint reachability, SSH configuration snapshots, GPG public-key availability,
-mount-plan precedence, path masking, scanning bounds, and capability retention
-are in [SANDBOX.md](SANDBOX.md).
+Until an action is approved for network, its IPv4, IPv6, and packet sockets are
+rejected. Filesystem policy is an allow list. A `deny_paths` or `review_paths`
+entry inside an allowed directory does not start the action; the error names
+both entries. Landlock also does not hide names or cover every metadata
+operation. Details are in [SANDBOX.md](SANDBOX.md).
 
 ## Multi-Tool Execution
 

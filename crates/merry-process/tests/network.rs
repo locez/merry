@@ -2,8 +2,8 @@
 
 use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
 use merry_process::{
-    BwrapPermissionedProcessRunnerFactory, LocalProcessBackend, ProcessBackend, ProcessBackendMode,
-    ProcessBackendOptions,
+    LocalProcessBackend, ProcessBackend, ProcessBackendMode, ProcessBackendOptions,
+    WorkspaceProcessRunnerFactory,
 };
 use merry_runtime::{
     PermissionRequest, PermissionedAction, PermissionedProcessRunnerFactory, ProcessRunner,
@@ -40,7 +40,7 @@ async fn disabled_network_ceiling_rejects_every_grant_entrypoint_and_child_sessi
     )
     .unwrap();
     let standalone: Arc<dyn PermissionedProcessRunnerFactory> = Arc::new(
-        BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(&workspace)
+        WorkspaceProcessRunnerFactory::new_at_workspace_root(&workspace)
             .with_network_requests_allowed(false),
     );
     let network_only = request(
@@ -84,11 +84,9 @@ async fn disabled_network_ceiling_rejects_every_grant_entrypoint_and_child_sessi
 }
 
 #[tokio::test]
-async fn network_ceiling_never_enables_baseline_network_or_retains_an_action_grant() {
+async fn network_ceiling_blocks_baseline_sockets_until_an_action_is_approved() {
     let fixture = tempfile::tempdir().unwrap();
-    let parent_namespace = fs::read_link("/proc/self/ns/net").unwrap();
-    let parent_namespace = parent_namespace.to_str().unwrap();
-    let request = request(json!({"network": true}), "readlink /proc/self/ns/net");
+    let request = request(json!({"network": true}), SOCKET_PROBE);
     for options in [
         ProcessBackendOptions::new(),
         ProcessBackendOptions::new().with_network_requests_allowed(true),
@@ -101,7 +99,7 @@ async fn network_ceiling_never_enables_baseline_network_or_retains_an_action_gra
         for _ in 0..2 {
             let session = backend.new_session();
             let baseline = session.runner();
-            assert_ne!(namespace(&*baseline, &request).await, parent_namespace);
+            assert_eq!(socket_probe(&*baseline, &request).await, "denied");
             let factory = session.permissioned_factory();
             if allowed {
                 factory.validate_request(&request).unwrap();
@@ -111,7 +109,7 @@ async fn network_ceiling_never_enables_baseline_network_or_retains_an_action_gra
                         .unwrap()
                 );
                 let approved = factory.runner_for(&request);
-                assert_eq!(namespace(&*approved, &request).await, parent_namespace);
+                assert_eq!(socket_probe(&*approved, &request).await, "allowed");
                 assert!(
                     !factory
                         .request_capabilities_are_satisfied(&request)
@@ -120,12 +118,14 @@ async fn network_ceiling_never_enables_baseline_network_or_retains_an_action_gra
             } else {
                 assert!(factory.validate_request(&request).is_err());
             }
-            assert_ne!(namespace(&*baseline, &request).await, parent_namespace);
+            assert_eq!(socket_probe(&*baseline, &request).await, "denied");
         }
     }
 }
 
-async fn namespace(runner: &dyn ProcessRunner, request: &PermissionRequest) -> String {
+const SOCKET_PROBE: &str = "python3 -c 'import socket\ntry:\n socket.socket(socket.AF_INET, socket.SOCK_STREAM)\nexcept OSError:\n print(\"denied\")\nelse:\n print(\"allowed\")'";
+
+async fn socket_probe(runner: &dyn ProcessRunner, request: &PermissionRequest) -> String {
     let PermissionedAction::Process(intent) = request.action();
     let output = runner
         .run(

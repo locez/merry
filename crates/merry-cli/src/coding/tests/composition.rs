@@ -1,7 +1,7 @@
 use crate::{
     coding::{
-        CodingSubagentsConfig, HeadlessCodingRuntimeInput, ProcessExecutionMode,
-        build_headless_coding, coding_agent_process_admission, fixed_process_backend,
+        CodingSubagentsConfig, HeadlessCodingRuntimeInput, SandboxMode, build_headless_coding,
+        coding_agent_process_admission, fixed_process_backend,
     },
     runtime_events::collect_runtime_step_events,
     testing::{FakeProcessRunner, ScriptedProvider, model_name},
@@ -16,11 +16,9 @@ use merry_runtime::{
 };
 use std::sync::Arc;
 
-#[tokio::test(flavor = "current_thread")]
-async fn unrestricted_mode_admits_the_host_process_profile() {
-    let admission = coding_agent_process_admission(None, ProcessExecutionMode::Unrestricted)
-        .await
-        .expect("unrestricted mode should admit the host process profile");
+#[test]
+fn off_mode_admits_the_host_process_profile() {
+    let admission = coding_agent_process_admission(SandboxMode::Off);
 
     assert_eq!(
         admission.sandbox_profile(),
@@ -28,11 +26,9 @@ async fn unrestricted_mode_admits_the_host_process_profile() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn inner_only_mode_admits_the_inner_local_workspace_process_profile() {
-    let admission = coding_agent_process_admission(None, ProcessExecutionMode::InnerOnly)
-        .await
-        .expect("inner-only mode should admit the inner process profile");
+#[test]
+fn workspace_mode_admits_the_local_workspace_process_profile() {
+    let admission = coding_agent_process_admission(SandboxMode::Workspace);
 
     assert_eq!(
         admission.sandbox_profile(),
@@ -83,6 +79,7 @@ async fn headless_runtime_uses_coding_agent_profile() {
         skill_roots: Vec::new(),
         subagents: CodingSubagentsConfig::default(),
         workspace_tool_limits: None,
+        workspace_writable: true,
     })
     .expect("headless coding runtime should build");
 
@@ -156,6 +153,7 @@ async fn headless_runtime_registers_extra_tools() {
         skill_roots: Vec::new(),
         subagents: CodingSubagentsConfig::default(),
         workspace_tool_limits: None,
+        workspace_writable: true,
         extra_tools: vec![RegisteredTool::read_only(spec, Arc::new(StaticOkExecutor))],
     })
     .expect("headless coding runtime should build");

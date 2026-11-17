@@ -1,13 +1,8 @@
-use super::{
-    ApprovalPolicy, Cli, CliCommand, ProcessExecutionMode, cmd_usage, debug_openai_usage,
-    shell_usage,
-};
+use super::{Cli, CliCommand, cmd_usage, debug_openai_usage, shell_usage};
+use crate::coding::{AutoFallback, PermissionMode, SandboxMode};
 use crate::config::CliDefaults;
 use crate::debug::{Command as DebugCommand, DEFAULT_INPUT, DEFAULT_SESSION_ID};
-use crate::sandbox::{
-    ChildHandoff as SandboxChildHandoff, ClipboardAccess, SANDBOX_CHILD_HANDOFF_ARG,
-    SANDBOX_CHILD_HANDOFF_CLI_BWRAP,
-};
+use crate::workspace_trust::TrustWorkspace;
 use clap::Parser;
 
 #[test]
@@ -15,303 +10,105 @@ fn parses_no_subcommand_as_tui_entrypoint() {
     let cli = Cli::try_parse_from(["merry"]).expect("root args should parse");
 
     assert!(cli.command.is_none());
-    assert!(cli.should_bootstrap_sandbox());
+    assert_eq!(cli.sandbox_mode(), SandboxMode::Workspace);
+    assert_eq!(cli.permission_mode(), PermissionMode::Auto);
+    assert_eq!(cli.auto_fallback(), AutoFallback::Ask);
 }
 
 #[test]
-fn only_tui_routes_request_clipboard_access() {
-    let root = Cli::try_parse_from(["merry"]).expect("root args should parse");
-    let resume = Cli::try_parse_from(["merry", "resume"]).expect("resume should parse");
-    let run = Cli::try_parse_from(["merry", "run", "task"]).expect("run should parse");
-    let debug = Cli::try_parse_from(["merry", "debug"]).expect("debug should parse");
+fn trust_workspace_flag_parses_yes_and_no() {
+    let yes = Cli::try_parse_from(["merry", "--trust-workspace", "yes"]).expect("yes parses");
+    let no = Cli::try_parse_from(["merry", "--trust-workspace", "no", "run", "task"])
+        .expect("no parses");
 
-    assert_eq!(root.clipboard_access(), ClipboardAccess::Tui);
-    assert_eq!(resume.clipboard_access(), ClipboardAccess::Tui);
-    assert_eq!(run.clipboard_access(), ClipboardAccess::Disabled);
-    assert_eq!(debug.clipboard_access(), ClipboardAccess::Disabled);
+    assert_eq!(yes.trust_workspace(), Some(TrustWorkspace::Yes));
+    assert_eq!(no.trust_workspace(), Some(TrustWorkspace::No));
+    assert!(Cli::try_parse_from(["merry", "--trust-workspace", "maybe"]).is_err());
 }
 
 #[test]
-fn no_sandbox_selects_unrestricted_host_mode() {
-    let tui = Cli::try_parse_from(["merry", "--no-sandbox"]).expect("root args parse");
-    let run = Cli::try_parse_from(["merry", "--no-sandbox", "run", "task"]).expect("run parses");
+fn sandbox_off_selects_host_execution() {
+    let tui = Cli::try_parse_from(["merry", "--sandbox", "off"]).expect("root args parse");
+    let run =
+        Cli::try_parse_from(["merry", "--sandbox", "off", "run", "task"]).expect("run parses");
 
-    assert!(!tui.should_bootstrap_sandbox());
-    assert!(!run.should_bootstrap_sandbox());
-    assert_eq!(
-        tui.process_execution_mode(),
-        ProcessExecutionMode::Unrestricted
-    );
-    assert_eq!(
-        run.process_execution_mode(),
-        ProcessExecutionMode::Unrestricted
-    );
-    assert_eq!(tui.approval_policy(), ApprovalPolicy::ModelThenHuman);
-    assert_eq!(run.approval_policy(), ApprovalPolicy::ModelThenHuman);
+    assert_eq!(tui.sandbox_mode(), SandboxMode::Off);
+    assert_eq!(run.sandbox_mode(), SandboxMode::Off);
+    assert_eq!(tui.permission_mode(), PermissionMode::Auto);
+    assert_eq!(run.permission_mode(), PermissionMode::Auto);
 }
 
 #[test]
-fn approval_policy_flag_parses_every_reviewer_name() {
-    for (value, policy) in [
-        ("none", ApprovalPolicy::NoApproval),
-        ("deny", ApprovalPolicy::Deny),
-        ("model_only", ApprovalPolicy::ModelOnly),
-        ("model_then_human", ApprovalPolicy::ModelThenHuman),
-        ("human_only", ApprovalPolicy::HumanOnly),
+fn permission_mode_flag_parses_every_mode() {
+    for (value, mode) in [
+        ("auto", PermissionMode::Auto),
+        ("ask", PermissionMode::Ask),
+        ("always-approve", PermissionMode::AlwaysApprove),
+        ("deny", PermissionMode::Deny),
     ] {
-        let cli = Cli::try_parse_from(["merry", "--approval-policy", value, "run", "task"])
-            .unwrap_or_else(|error| panic!("--approval-policy {value} should parse: {error}"));
-        assert_eq!(cli.approval_policy(), policy, "{value}");
+        let cli = Cli::try_parse_from(["merry", "--permission-mode", value, "run", "task"])
+            .unwrap_or_else(|error| panic!("--permission-mode {value} should parse: {error}"));
+        assert_eq!(cli.permission_mode(), mode, "{value}");
     }
-
-    for value in [
-        "auto",
-        "trusted",
-        "model",
-        "human",
-        "model-then-human",
-        "fully-trusted",
-        "--approval-policy",
-        "yes",
-    ] {
-        assert!(
-            Cli::try_parse_from(["merry", "--approval-policy", value]).is_err(),
-            "{value} should be rejected"
-        );
-    }
-    assert!(
-        Cli::try_parse_from(["merry", "--fully-trusted"]).is_err(),
-        "the old --fully-trusted flag should no longer parse"
-    );
+    assert!(Cli::try_parse_from(["merry", "--permission-mode", "model_then_human"]).is_err());
+    assert!(Cli::try_parse_from(["merry", "--approval-policy", "none"]).is_err());
+    assert!(Cli::try_parse_from(["merry", "--no-sandbox"]).is_err());
 }
 
 #[test]
-fn none_policy_is_explicit_and_independent_from_host_execution_mode() {
+fn always_approve_is_independent_from_sandbox_off() {
     let cli = Cli::try_parse_from([
         "merry",
-        "--approval-policy",
-        "none",
-        "--no-sandbox",
+        "--sandbox",
+        "off",
+        "--always-approve",
         "run",
         "task",
     ])
-    .expect("no-approval run parses");
+    .expect("open run parses");
 
-    assert_eq!(
-        cli.process_execution_mode(),
-        ProcessExecutionMode::Unrestricted
-    );
-    assert_eq!(cli.approval_policy(), ApprovalPolicy::NoApproval);
-}
-
-fn defaults(
-    mode: Option<ProcessExecutionMode>,
-    approval_policy: Option<ApprovalPolicy>,
-) -> CliDefaults {
-    CliDefaults::new(mode, approval_policy)
+    assert_eq!(cli.sandbox_mode(), SandboxMode::Off);
+    assert_eq!(cli.permission_mode(), PermissionMode::AlwaysApprove);
 }
 
 #[test]
-fn config_sandbox_selects_mode_when_command_line_omits_one() {
-    let mut unrestricted = Cli::try_parse_from(["merry", "run", "task"]).expect("run parses");
-    unrestricted.apply_defaults(defaults(Some(ProcessExecutionMode::Unrestricted), None));
-    assert_eq!(
-        unrestricted.process_execution_mode(),
-        ProcessExecutionMode::Unrestricted
-    );
-    assert!(!unrestricted.should_bootstrap_sandbox());
-    assert_eq!(
-        unrestricted.approval_policy(),
-        ApprovalPolicy::ModelThenHuman
-    );
-
-    let mut inner = Cli::try_parse_from(["merry"]).expect("root parses");
-    inner.apply_defaults(defaults(Some(ProcessExecutionMode::InnerOnly), None));
-    assert_eq!(
-        inner.process_execution_mode(),
-        ProcessExecutionMode::InnerOnly
-    );
-    assert!(!inner.should_bootstrap_sandbox());
-
-    let mut debug = Cli::try_parse_from(["merry", "debug"]).expect("debug parses");
-    debug.apply_defaults(defaults(Some(ProcessExecutionMode::OuterAndInner), None));
-    assert!(debug.with_sandbox);
-    assert!(debug.should_bootstrap_sandbox());
+fn auto_fallback_flag_is_rejected_outside_auto() {
+    let error = Cli::try_parse_from([
+        "merry",
+        "--permission-mode",
+        "ask",
+        "--auto-fallback",
+        "deny",
+    ])
+    .expect("flags parse before defaults");
+    let mut cli = error;
+    let failure = cli
+        .apply_defaults(CliDefaults::default())
+        .expect_err("fallback does not apply to ask");
+    assert!(failure.contains("auto_fallback"), "{failure}");
 }
 
 #[test]
-fn command_line_sandbox_mode_replaces_configured_default() {
-    let mut with_sandbox =
-        Cli::try_parse_from(["merry", "--with-sandbox", "run", "task"]).expect("run parses");
-    with_sandbox.apply_defaults(defaults(Some(ProcessExecutionMode::Unrestricted), None));
-    assert_eq!(
-        with_sandbox.process_execution_mode(),
-        ProcessExecutionMode::OuterAndInner
-    );
-    assert!(with_sandbox.should_bootstrap_sandbox());
-    assert!(!with_sandbox.no_sandbox);
-
-    let mut no_sandbox = Cli::try_parse_from(["merry", "--no-sandbox"]).expect("root parses");
-    no_sandbox.apply_defaults(defaults(Some(ProcessExecutionMode::InnerOnly), None));
-    assert_eq!(
-        no_sandbox.process_execution_mode(),
-        ProcessExecutionMode::Unrestricted
-    );
-    assert!(!no_sandbox.inner_sandbox);
+fn configured_sandbox_applies_when_the_command_line_omits_one() {
+    let mut cli = Cli::try_parse_from(["merry", "run", "task"]).expect("run parses");
+    cli.apply_defaults(CliDefaults::new(
+        Some(SandboxMode::Off),
+        Some(PermissionMode::Ask),
+        None,
+    ))
+    .expect("defaults apply");
+    assert_eq!(cli.sandbox_mode(), SandboxMode::Off);
+    assert_eq!(cli.permission_mode(), PermissionMode::Ask);
 }
 
-const SANDBOX_FLAGS: [(&str, ProcessExecutionMode); 3] = [
-    ("--with-sandbox", ProcessExecutionMode::OuterAndInner),
-    ("--no-sandbox", ProcessExecutionMode::Unrestricted),
-    ("--inner-sandbox", ProcessExecutionMode::InnerOnly),
-];
-
-const POLICIES: [ApprovalPolicy; 5] = [
-    ApprovalPolicy::NoApproval,
-    ApprovalPolicy::Deny,
-    ApprovalPolicy::ModelOnly,
-    ApprovalPolicy::ModelThenHuman,
-    ApprovalPolicy::HumanOnly,
-];
-
-/// Every approval policy combines with every sandbox mode, and a
-/// combination resolves the same whether it comes from `[cli]` or from the
-/// matching flags.
 #[test]
-fn config_and_flags_resolve_every_sandbox_and_approval_policy_combination_alike() {
-    for (flag, mode) in SANDBOX_FLAGS {
-        for policy in POLICIES {
-            let mut configured = Cli::try_parse_from(["merry", "run", "task"]).expect("run parses");
-            configured.apply_defaults(defaults(Some(mode), Some(policy)));
-
-            let mut flagged = Cli::try_parse_from([
-                "merry",
-                flag,
-                "--approval-policy",
-                policy.name(),
-                "run",
-                "task",
-            ])
-            .expect("flags parse");
-            flagged.apply_defaults(CliDefaults::default());
-
-            for (label, cli) in [("configured", &configured), ("flagged", &flagged)] {
-                assert_eq!(
-                    cli.process_execution_mode(),
-                    mode,
-                    "{label} {flag} {policy:?}"
-                );
-                assert_eq!(cli.approval_policy(), policy, "{label} {flag} {policy:?}");
-                assert_eq!(
-                    cli.should_bootstrap_sandbox(),
-                    mode == ProcessExecutionMode::OuterAndInner,
-                    "{label} {flag} {policy:?}"
-                );
-            }
-        }
-    }
-}
-
-/// A command-line sandbox flag replaces only the configured sandbox; the
-/// configured approval policy still applies, `none` included.
-#[test]
-fn command_line_sandbox_flag_leaves_the_configured_approval_policy_alone() {
-    for (flag, mode) in SANDBOX_FLAGS {
-        for policy in POLICIES {
-            for configured_mode in [
-                None,
-                Some(ProcessExecutionMode::OuterAndInner),
-                Some(ProcessExecutionMode::Unrestricted),
-                Some(ProcessExecutionMode::InnerOnly),
-            ] {
-                let mut cli =
-                    Cli::try_parse_from(["merry", flag, "run", "task"]).expect("flags parse");
-                cli.apply_defaults(defaults(configured_mode, Some(policy)));
-                assert_eq!(
-                    cli.process_execution_mode(),
-                    mode,
-                    "{flag} {policy:?} {configured_mode:?}"
-                );
-                assert_eq!(
-                    cli.approval_policy(),
-                    policy,
-                    "{flag} {policy:?} {configured_mode:?}"
-                );
-            }
-        }
-    }
-}
-
-/// An explicit `--approval-policy` replaces only the configured approval
-/// policy; the configured sandbox still applies.
-#[test]
-fn explicit_approval_policy_flag_leaves_the_configured_sandbox_alone() {
-    for flagged_policy in POLICIES {
-        for configured_policy in [
-            None,
-            Some(ApprovalPolicy::Deny),
-            Some(ApprovalPolicy::NoApproval),
-        ] {
-            for (_, configured_mode) in SANDBOX_FLAGS {
-                let mut cli = Cli::try_parse_from([
-                    "merry",
-                    "--approval-policy",
-                    flagged_policy.name(),
-                    "run",
-                    "task",
-                ])
-                .expect("flags parse");
-                cli.apply_defaults(defaults(Some(configured_mode), configured_policy));
-                assert_eq!(
-                    cli.approval_policy(),
-                    flagged_policy,
-                    "{flagged_policy:?} {configured_policy:?} {configured_mode:?}"
-                );
-                assert_eq!(
-                    cli.process_execution_mode(),
-                    configured_mode,
-                    "{flagged_policy:?} {configured_policy:?} {configured_mode:?}"
-                );
-            }
-        }
-    }
-}
-
-/// Only a sandboxed `run -` under a policy that may ask a person gets the
-/// parent's terminal bound into the sandbox.
-#[test]
-fn review_terminal_handoff_is_limited_to_a_sandboxed_stdin_task_with_a_human_reviewer() {
-    for policy in POLICIES {
-        for (args, expected) in [
-            (vec!["merry", "run", "-"], policy.may_ask_a_human()),
-            (
-                vec!["merry", "--with-sandbox", "run", "-"],
-                policy.may_ask_a_human(),
-            ),
-            (vec!["merry", "--inner-sandbox", "run", "-"], false),
-            (vec!["merry", "--no-sandbox", "run", "-"], false),
-            (vec!["merry", "run", "fix the failing test"], false),
-            (vec!["merry"], false),
-            (vec!["merry", "resume"], false),
-        ] {
-            let mut cli = Cli::try_parse_from(args.clone()).expect("args parse");
-            cli.apply_defaults(defaults(None, Some(policy)));
-            assert_eq!(
-                cli.hands_off_review_terminal(),
-                expected,
-                "{policy:?} {args:?}"
-            );
-        }
-    }
-    assert!(
-        ApprovalPolicy::ModelThenHuman.may_ask_a_human()
-            && ApprovalPolicy::HumanOnly.may_ask_a_human()
-    );
-    assert!(
-        !ApprovalPolicy::NoApproval.may_ask_a_human()
-            && !ApprovalPolicy::Deny.may_ask_a_human()
-            && !ApprovalPolicy::ModelOnly.may_ask_a_human()
-    );
+fn command_line_sandbox_replaces_the_configured_mode() {
+    let mut cli =
+        Cli::try_parse_from(["merry", "--sandbox", "workspace", "run", "task"]).expect("parses");
+    cli.apply_defaults(CliDefaults::new(Some(SandboxMode::Off), None, None))
+        .expect("defaults apply");
+    assert_eq!(cli.sandbox_mode(), SandboxMode::Workspace);
+    assert_eq!(cli.permission_mode(), PermissionMode::Auto);
 }
 
 #[test]
@@ -324,33 +121,10 @@ fn completions_subcommand_parses_every_shell_without_touching_the_sandbox() {
             "{shell}"
         );
         assert!(!cli.is_product_surface(), "{shell}");
-        assert!(!cli.should_bootstrap_sandbox(), "{shell}");
-        assert_eq!(cli.clipboard_access(), ClipboardAccess::Disabled, "{shell}");
     }
 
     assert!(Cli::try_parse_from(["merry", "completions"]).is_err());
     assert!(Cli::try_parse_from(["merry", "completions", "tcsh"]).is_err());
-}
-
-#[test]
-fn inner_sandbox_selects_codex_compatible_single_sandbox_mode() {
-    let cli = Cli::try_parse_from(["merry", "--inner-sandbox"]).expect("inner sandbox args parse");
-
-    assert!(!cli.should_bootstrap_sandbox());
-    assert_eq!(
-        cli.process_execution_mode(),
-        ProcessExecutionMode::InnerOnly
-    );
-}
-
-#[test]
-fn debug_sandbox_remains_explicit() {
-    let plain = Cli::try_parse_from(["merry", "debug"]).expect("debug args parse");
-    let sandboxed =
-        Cli::try_parse_from(["merry", "--with-sandbox", "debug"]).expect("debug parses");
-
-    assert!(!plain.should_bootstrap_sandbox());
-    assert!(sandboxed.should_bootstrap_sandbox());
 }
 
 #[test]
@@ -444,10 +218,10 @@ fn cmd_usage_renders_cmd_help() {
 #[test]
 fn parses_debug_defaults() {
     let cli = Cli::try_parse_from(["merry", "debug"]).expect("debug args should parse");
+    assert_eq!(cli.sandbox_mode(), SandboxMode::Workspace);
 
     match cli.command.expect("command should be present") {
         CliCommand::Debug(debug) => {
-            assert!(!cli.with_sandbox);
             assert_eq!(debug.session_id, DEFAULT_SESSION_ID);
             assert_eq!(debug.input, DEFAULT_INPUT);
             assert!(debug.command.is_none());
@@ -533,26 +307,6 @@ fn parses_shell_local_workspace_process_risk_acceptance() {
 }
 
 #[test]
-fn parses_hidden_sandbox_child_handoff() {
-    let cli = Cli::try_parse_from([
-        "merry",
-        SANDBOX_CHILD_HANDOFF_ARG,
-        SANDBOX_CHILD_HANDOFF_CLI_BWRAP,
-        "debug",
-        "shell",
-        "--",
-        "rustc",
-        "--version",
-    ])
-    .expect("hidden sandbox handoff args should parse");
-
-    assert_eq!(
-        cli.sandbox_child_handoff,
-        Some(SandboxChildHandoff::CliBwrap)
-    );
-}
-
-#[test]
 fn rejects_shell_argv_without_separator() {
     let error = Cli::try_parse_from(["merry", "debug", "shell", "rustc", "--version"])
         .expect_err("shell argv should require `--` separator");
@@ -566,10 +320,10 @@ fn shell_usage_contains_shell_usage() {
 }
 
 #[test]
-fn parses_root_with_sandbox_flag() {
-    let cli = Cli::try_parse_from(["merry", "--with-sandbox", "debug"]).expect("args should parse");
+fn parses_root_sandbox_flag() {
+    let cli = Cli::try_parse_from(["merry", "--sandbox", "off", "debug"]).expect("args parse");
 
-    assert!(cli.with_sandbox);
+    assert_eq!(cli.sandbox_mode(), SandboxMode::Off);
 }
 
 #[test]

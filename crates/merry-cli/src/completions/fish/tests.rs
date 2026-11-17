@@ -6,7 +6,7 @@
 //! clap definition instead of a second hand-written list.
 
 use super::escape;
-use crate::coding::ApprovalPolicy;
+use crate::coding::PermissionMode;
 use crate::completions::{BIN_NAME, write_completions};
 use clap::ValueEnum;
 use clap_complete::Shell;
@@ -123,9 +123,9 @@ fn sorted(mut candidates: Vec<String>) -> Vec<String> {
 
 #[test]
 fn values_are_offered_while_an_option_waits_for_its_value() {
-    let candidates = fish_candidates!("merry --approval-policy ");
+    let candidates = fish_candidates!("merry --permission-mode ");
 
-    assert_eq!(sorted(candidates), declared_values::<ApprovalPolicy>());
+    assert_eq!(sorted(candidates), declared_values::<PermissionMode>());
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn subcommands_and_their_flags_keep_completing() {
         "run candidates should include --session-id: {flags:?}"
     );
 
-    let after_value = fish_candidates!("merry --approval-policy none ");
+    let after_value = fish_candidates!("merry --permission-mode auto ");
     assert!(
         after_value.contains(&"run".to_owned()),
         "a complete option should leave the root candidates available: {after_value:?}"

@@ -1,12 +1,13 @@
-use super::{permissions::BwrapProcessRunner, sandbox::BwrapProcessPlan};
+use super::permissions::WorkspaceProcessRunner;
+use crate::confinement::{self, SandboxLaunch};
 use merry_runtime::{
     ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
     ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
 };
-use std::{io, process::Stdio};
+use std::{fs, io, process::Stdio};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-impl ProcessRunner for BwrapProcessRunner {
+impl ProcessRunner for WorkspaceProcessRunner {
     fn run<'a>(
         &'a self,
         intent: ProcessActionIntent,
@@ -18,37 +19,38 @@ impl ProcessRunner for BwrapProcessRunner {
             }
             let runner = self.clone();
             let plan_intent = intent.clone();
-            let plan = tokio::task::spawn_blocking(move || runner.plan_for(&plan_intent))
+            let launch = tokio::task::spawn_blocking(move || runner.plan_for(&plan_intent))
                 .await
                 .map_err(|error| {
                     ProcessRunnerError::infrastructure(format!("sandbox planning failed: {error}"))
                 })??;
-            run_process_plan(plan, intent, context).await
+            run_sandbox_launch(launch, intent, context).await
         })
     }
 }
-async fn run_process_plan(
-    plan: BwrapProcessPlan,
+
+async fn run_sandbox_launch(
+    launch: SandboxLaunch,
     intent: ProcessActionIntent,
     context: ProcessRunnerContext,
 ) -> Result<ProcessRunnerOutput, ProcessRunnerError> {
     if context.cancellation_token().is_cancelled() {
         return Err(ProcessRunnerError::Cancelled);
     }
-
-    let mut command = tokio::process::Command::new(&plan.program);
-    #[cfg(target_os = "linux")]
-    plan.ssh_config.configure_command(command.as_std_mut())?;
+    let policy = confinement::write_policy(&launch)?;
+    let helper = confinement::helper_program();
+    let mut command = tokio::process::Command::new(&helper);
     command
-        .args(&plan.args)
-        .current_dir(&plan.cwd)
+        .env(confinement::helper_env_name(), "1")
+        .env(confinement::policy_env_name(), &policy)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-
-    let backend_program = plan.program.to_string_lossy().into_owned();
-    run_spawned_process(command, intent, context, backend_program).await
+    let backend_program = helper.to_string_lossy().into_owned();
+    let result = run_spawned_process(command, intent, context, backend_program).await;
+    let _ = fs::remove_file(policy);
+    result
 }
 
 pub(super) async fn run_spawned_process(
@@ -103,11 +105,8 @@ pub(super) async fn run_spawned_process(
         .map(ProcessExitStatus::Exited)
         .unwrap_or(ProcessExitStatus::DomainFailed);
 
-    if is_bwrap_initialization_failure(&program_for_error, &stderr.bytes) {
-        return Err(ProcessRunnerError::infrastructure(format!(
-            "bubblewrap could not initialize the action sandbox: {}",
-            String::from_utf8_lossy(&stderr.bytes).trim()
-        )));
+    if let Some(message) = confinement::setup_failure(&stderr.bytes) {
+        return Err(ProcessRunnerError::infrastructure(message));
     }
 
     ProcessRunnerOutput::from_bytes(
@@ -121,18 +120,6 @@ pub(super) async fn run_spawned_process(
     .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))
 }
 
-fn is_bwrap_initialization_failure(program: &str, stderr: &[u8]) -> bool {
-    if !program.ends_with("bwrap") {
-        return false;
-    }
-    let stderr = String::from_utf8_lossy(stderr);
-    stderr.lines().any(|line| {
-        line.starts_with("bwrap:")
-            && (line.contains("No permissions to create new namespace")
-                || line.contains("Creating new namespace failed")
-                || line.contains("setting up namespace"))
-    })
-}
 async fn join_bounded_output(
     task: tokio::task::JoinHandle<Result<BoundedOutput, ProcessRunnerError>>,
     stream_name: &'static str,
@@ -179,47 +166,4 @@ where
     }
 
     Ok(BoundedOutput { bytes, truncated })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_bwrap_initialization_failure;
-
-    const NAMESPACE_DENIED: &[u8] = b"bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces.\n";
-
-    #[test]
-    fn bwrap_namespace_failures_are_infrastructure_errors() {
-        assert!(is_bwrap_initialization_failure(
-            "/usr/bin/bwrap",
-            NAMESPACE_DENIED
-        ));
-        assert!(is_bwrap_initialization_failure(
-            "bwrap",
-            b"bwrap: Creating new namespace failed: Operation not permitted\n"
-        ));
-        assert!(is_bwrap_initialization_failure(
-            "bwrap",
-            b"other output\nbwrap: setting up namespace: Permission denied\n"
-        ));
-    }
-
-    #[test]
-    fn ordinary_command_failures_inside_bwrap_are_not_infrastructure_errors() {
-        assert!(!is_bwrap_initialization_failure(
-            "/usr/bin/bwrap",
-            b"cargo: could not find `Cargo.toml`\n"
-        ));
-        assert!(!is_bwrap_initialization_failure(
-            "/usr/bin/bwrap",
-            b"error: No permissions to create new namespace\n"
-        ));
-    }
-
-    #[test]
-    fn non_bwrap_programs_never_match_even_with_bwrap_style_output() {
-        assert!(!is_bwrap_initialization_failure(
-            "/usr/bin/cargo",
-            NAMESPACE_DENIED
-        ));
-    }
 }

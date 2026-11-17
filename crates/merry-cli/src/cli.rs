@@ -1,7 +1,7 @@
-use crate::coding::{ApprovalPolicy, ProcessExecutionMode};
+use crate::coding::{AutoFallback, PermissionMode, SandboxMode};
 use crate::config::CliDefaults;
 use crate::debug::{Args as DebugArgs, OpenAiArgs as DebugOpenAiArgs};
-use crate::sandbox::ChildHandoff as SandboxChildHandoff;
+use crate::workspace_trust::TrustWorkspace;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 pub(crate) const OPENAI_ENV_HELP: &str = "\
@@ -25,40 +25,42 @@ For sandboxed model debugging, prefer config-relative `api_key_file =
 pub(crate) struct Cli {
     #[arg(
         long,
-        conflicts_with_all = ["no_sandbox", "inner_sandbox"],
-        help = "Run TUI/run inside Merry's outer and inner bubblewrap sandboxes"
+        value_enum,
+        value_name = "MODE",
+        help = "Workspace sandbox or host execution [default: workspace]"
     )]
-    pub(crate) with_sandbox: bool,
+    pub(crate) sandbox: Option<SandboxMode>,
 
     #[arg(
         long,
-        conflicts_with_all = ["with_sandbox", "inner_sandbox"],
-        help = "Run TUI/run directly with the host filesystem, environment, and permissions"
+        conflicts_with = "permission_mode",
+        help = "Run configured actions without a permission review round"
     )]
-    pub(crate) no_sandbox: bool,
-
-    #[arg(
-        long,
-        conflicts_with_all = ["with_sandbox", "no_sandbox"],
-        help = "Run TUI/run with the inner action sandbox and without Merry's outer sandbox"
-    )]
-    pub(crate) inner_sandbox: bool,
+    pub(crate) always_approve: bool,
 
     #[arg(
         long,
         value_enum,
-        value_name = "POLICY",
-        help = "Who reviews permission requests before a command runs [default: model_then_human]"
+        value_name = "MODE",
+        help = "Who reviews permission requests [default: auto]"
     )]
-    pub(crate) approval_policy: Option<ApprovalPolicy>,
+    pub(crate) permission_mode: Option<PermissionMode>,
 
     #[arg(
-        long = "merry-sandbox-child-handoff",
-        hide = true,
+        long,
         value_enum,
-        value_name = "PROFILE"
+        value_name = "FALLBACK",
+        help = "After auto denies or cannot decide: ask the person, or return the denial to the model [default: ask]"
     )]
-    pub(crate) sandbox_child_handoff: Option<SandboxChildHandoff>,
+    pub(crate) auto_fallback: Option<AutoFallback>,
+
+    #[arg(
+        long,
+        value_enum,
+        value_name = "CHOICE",
+        help = "Remember whether the workspace sandbox may write this directory: yes or no. Ignored with --sandbox off"
+    )]
+    pub(crate) trust_workspace: Option<TrustWorkspace>,
 
     #[command(subcommand)]
     pub(crate) command: Option<CliCommand>,
@@ -72,79 +74,48 @@ impl Cli {
         )
     }
 
-    pub(crate) fn should_bootstrap_sandbox(&self) -> bool {
-        matches!(
-            self.process_execution_mode(),
-            ProcessExecutionMode::OuterAndInner
-        ) && (self.with_sandbox || self.is_product_surface())
+    pub(crate) fn sandbox_mode(&self) -> SandboxMode {
+        self.sandbox.unwrap_or_default()
     }
 
-    pub(crate) fn process_execution_mode(&self) -> ProcessExecutionMode {
-        if self.no_sandbox {
-            ProcessExecutionMode::Unrestricted
-        } else if self.inner_sandbox {
-            ProcessExecutionMode::InnerOnly
+    pub(crate) fn permission_mode(&self) -> PermissionMode {
+        if self.always_approve {
+            PermissionMode::AlwaysApprove
         } else {
-            ProcessExecutionMode::OuterAndInner
+            self.permission_mode.unwrap_or_default()
         }
     }
 
-    /// The effective approval policy; `model_then_human` when no flag or
-    /// configured default set one.
-    pub(crate) fn approval_policy(&self) -> ApprovalPolicy {
-        self.approval_policy.unwrap_or_default()
+    pub(crate) fn auto_fallback(&self) -> AutoFallback {
+        self.auto_fallback.unwrap_or_default()
     }
 
-    /// Whether the outer-sandbox parent should bind its controlling terminal
-    /// into the child for permission review answers.
-    ///
-    /// Only a sandboxed `run -` needs it: the task consumes stdin, and
-    /// `--new-session` leaves the child unable to open `/dev/tty`. Policies
-    /// that never ask a person get nothing extra.
-    pub(crate) fn hands_off_review_terminal(&self) -> bool {
-        let reads_task_from_stdin = match &self.command {
-            Some(CliCommand::Run(args)) => args.task == crate::run::STDIN_TASK,
-            _ => false,
-        };
-        self.should_bootstrap_sandbox()
-            && reads_task_from_stdin
-            && self.approval_policy().may_ask_a_human()
+    pub(crate) fn trust_workspace(&self) -> Option<TrustWorkspace> {
+        self.trust_workspace
     }
 
-    pub(crate) fn clipboard_access(&self) -> crate::sandbox::ClipboardAccess {
-        match &self.command {
-            None | Some(CliCommand::Resume) => crate::sandbox::ClipboardAccess::Tui,
-            Some(
-                CliCommand::Run(_)
-                | CliCommand::Cmd(_)
-                | CliCommand::Debug(_)
-                | CliCommand::Completions(_),
-            ) => crate::sandbox::ClipboardAccess::Disabled,
+    /// Applies `[cli]` defaults. Explicit flags win. `auto_fallback` applies
+    /// only when the effective permission mode is `auto`.
+    pub(crate) fn apply_defaults(&mut self, defaults: CliDefaults) -> Result<(), String> {
+        if self.sandbox.is_none() {
+            self.sandbox = defaults.sandbox();
         }
-    }
-
-    /// Applies `[cli]` defaults as if the matching flags preceded the
-    /// subcommand.
-    ///
-    /// Explicit command-line flags win, and each key stands in for its own
-    /// flag only. The three sandbox modes are mutually exclusive, so a mode
-    /// given on the command line keeps a configured `sandbox` from applying,
-    /// and an explicit `--approval-policy` keeps a configured
-    /// `approval_policy` from applying. The two never affect each other: the
-    /// sandbox sets the execution boundary and the approval policy sets who
-    /// reviews permission requests inside it.
-    pub(crate) fn apply_defaults(&mut self, defaults: CliDefaults) {
-        if !(self.with_sandbox || self.no_sandbox || self.inner_sandbox) {
-            match defaults.process_execution_mode() {
-                Some(ProcessExecutionMode::OuterAndInner) => self.with_sandbox = true,
-                Some(ProcessExecutionMode::Unrestricted) => self.no_sandbox = true,
-                Some(ProcessExecutionMode::InnerOnly) => self.inner_sandbox = true,
-                None => {}
+        if !self.always_approve && self.permission_mode.is_none() {
+            self.permission_mode = defaults.permission_mode();
+        }
+        let fallback_on_command_line = self.auto_fallback.is_some();
+        if self.auto_fallback.is_none() {
+            self.auto_fallback = defaults.auto_fallback();
+        }
+        if self.permission_mode() != PermissionMode::Auto {
+            if fallback_on_command_line {
+                return Err(
+                    "auto_fallback is only valid when permission_mode is \"auto\"".to_owned(),
+                );
             }
+            self.auto_fallback = None;
         }
-        if self.approval_policy.is_none() {
-            self.approval_policy = defaults.approval_policy();
-        }
+        Ok(())
     }
 }
 

@@ -7,13 +7,6 @@ use crate::runtime_events::{
     collect_runtime_step_events, first_pending_tool_call, write_runtime_events,
     write_runtime_step_events_to,
 };
-#[cfg(test)]
-use crate::sandbox::RuntimeProfile as SandboxRuntimeProfile;
-use crate::sandbox::{
-    ChildHandoff as SandboxChildHandoff, MERRY_SANDBOX_ENV, MERRY_SANDBOX_VERSION_ENV,
-    local_workspace_process_admission, read_proc_self_mountinfo,
-    runtime_profile_from_evidence as sandbox_runtime_profile_from_evidence,
-};
 use futures_util::stream;
 use merry_core::{ProviderName, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolName};
 use merry_llm::{
@@ -39,47 +32,28 @@ const STEP_INPUT: &str = "run shell command through Merry process protocol";
 
 pub(crate) async fn run(
     args: ShellArgs,
-    sandbox_child_handoff: Option<SandboxChildHandoff>,
     merry_config: Option<&MerryConfig>,
 ) -> Result<(), CliError> {
-    let sandbox_marker = env::var_os(MERRY_SANDBOX_ENV);
-    let sandbox_version = env::var_os(MERRY_SANDBOX_VERSION_ENV);
-    let home = env::var_os("HOME");
-    let tmpdir = env::var_os("TMPDIR");
-    let mountinfo = read_proc_self_mountinfo().await;
-    let sandbox_runtime_profile = sandbox_runtime_profile_from_evidence(
-        home.as_deref(),
-        tmpdir.as_deref(),
-        mountinfo.as_deref(),
-    );
-    let admission = local_workspace_process_admission(
-        args.accept_local_workspace_process_risk,
-        sandbox_child_handoff,
-        sandbox_runtime_profile,
-        sandbox_marker.as_deref(),
-        sandbox_version.as_deref(),
-    );
+    let admission = args
+        .accept_local_workspace_process_risk
+        .then(|| AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace());
     let intent = process_action_intent(args.argv)?;
     let current_dir = env::current_dir().map_err(|source| {
         CliError::Unexpected(format!(
-            "failed to resolve current directory for shell action sandbox: {source}"
+            "failed to resolve current directory for the shell action: {source}"
         ))
     })?;
-    let runner: Arc<dyn ProcessRunner> = if sandbox_child_handoff.is_some() {
-        if admission.is_some() {
-            action_process_runner(
-                &current_dir,
-                prepared_action_process_backend_options(
-                    merry_config,
-                    crate::coding::ProcessExecutionMode::OuterAndInner,
-                )
-                .await?,
-            )?
-            .new_session()
-            .runner()
-        } else {
-            Arc::new(TokioProcessRunner::new_at_workspace_root(&current_dir))
-        }
+    let runner: Arc<dyn ProcessRunner> = if admission.is_some() {
+        action_process_runner(
+            &current_dir,
+            prepared_action_process_backend_options(
+                merry_config,
+                crate::coding::SandboxMode::Workspace,
+            )
+            .await?,
+        )?
+        .new_session()
+        .runner()
     } else {
         Arc::new(TokioProcessRunner::new_at_workspace_root(&current_dir))
     };

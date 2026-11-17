@@ -1,4 +1,4 @@
-use super::action_process_backend_options;
+use super::{action_process_backend_options, temp_home_outside_baseline_writes};
 use crate::{
     config::{MerryConfig, XdgPaths},
     runtime_events::{collect_runtime_step_events, first_pending_tool_call},
@@ -72,10 +72,11 @@ async fn network_config_is_a_ceiling_not_preauthorization() {
             PermissionReviewMode::FullyTrusted,
         ),
     ] {
-        let fixture = tempfile::tempdir().unwrap();
-        let workspace = fixture.path().join("workspace");
+        let home = temp_home_outside_baseline_writes();
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let workspace = workspace_dir.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
-        let paths = XdgPaths::from_parts(fixture.path().join("home"), None, None);
+        let paths = XdgPaths::from_parts(home.path().to_path_buf(), None, None);
         let config = MerryConfig::load_optional_from_text(config_text, &paths).unwrap();
         let options = action_process_backend_options(config.as_ref()).unwrap();
         assert_eq!(options.network_requests_allowed(), allowed);

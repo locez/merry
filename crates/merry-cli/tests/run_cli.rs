@@ -28,7 +28,8 @@ fn mcp_outage_warns_on_stderr_but_reaches_the_runtime_and_preserves_jsonl_output
     );
     let output = merry_without_openai_env_and_xdg(&temp)
         .args([
-            "--no-sandbox",
+            "--sandbox",
+            "off",
             "run",
             "--events-jsonl",
             "--session-id",
@@ -60,7 +61,7 @@ fn run_refuses_a_whitespace_only_stdin_task_before_emitting_events() {
     write_xdg_config(&temp, OFFLINE_PROVIDER_CONFIG);
 
     let mut child = merry_without_openai_env_and_xdg(&temp)
-        .args(["--no-sandbox", "run", "-"])
+        .args(["--sandbox", "off", "run", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -96,7 +97,14 @@ fn run_refuses_a_session_id_that_would_escape_the_session_store() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
 
     let output = merry_without_openai_env_and_xdg(&temp)
-        .args(["--no-sandbox", "run", "--session-id", "../escape", "a task"])
+        .args([
+            "--sandbox",
+            "off",
+            "run",
+            "--session-id",
+            "../escape",
+            "a task",
+        ])
         .output()
         .expect("merry run should run");
 
@@ -118,7 +126,8 @@ fn run_refuses_to_both_start_and_resume_a_session() {
 
     let output = merry_without_openai_env_and_xdg(&temp)
         .args([
-            "--no-sandbox",
+            "--sandbox",
+            "off",
             "run",
             "--session-id",
             "one",
@@ -146,7 +155,14 @@ fn run_reports_an_unknown_resume_id_without_starting_a_session() {
     write_xdg_config(&temp, OFFLINE_PROVIDER_CONFIG);
 
     let output = merry_without_openai_env_and_xdg(&temp)
-        .args(["--no-sandbox", "run", "--resume", "never-existed", "a task"])
+        .args([
+            "--sandbox",
+            "off",
+            "run",
+            "--resume",
+            "never-existed",
+            "a task",
+        ])
         .output()
         .expect("merry run should run");
 
@@ -187,7 +203,8 @@ fn a_headless_run_writes_picker_metadata_with_headless_origin() {
 
     let output = merry_without_openai_env_and_xdg(&temp)
         .args([
-            "--no-sandbox",
+            "--sandbox",
+            "off",
             "run",
             "--session-id",
             "picker-visible",
@@ -219,7 +236,7 @@ fn run_refuses_a_session_id_that_already_has_saved_state() {
     std::fs::write(&state_path, b"existing state").expect("existing state should be written");
 
     let output = merry_without_openai_env_and_xdg(&temp)
-        .args(["--no-sandbox", "run", "--session-id", "taken", "a task"])
+        .args(["--sandbox", "off", "run", "--session-id", "taken", "a task"])
         .output()
         .expect("merry run should run");
 
@@ -251,7 +268,8 @@ fn a_saved_run_blocks_reusing_its_session_id_but_not_resuming_it() {
 
     let first = merry_without_openai_env_and_xdg(&temp)
         .args([
-            "--no-sandbox",
+            "--sandbox",
+            "off",
             "run",
             "--session-id",
             "saved-once",
@@ -272,7 +290,8 @@ fn a_saved_run_blocks_reusing_its_session_id_but_not_resuming_it() {
 
     let reused = merry_without_openai_env_and_xdg(&temp)
         .args([
-            "--no-sandbox",
+            "--sandbox",
+            "off",
             "run",
             "--session-id",
             "saved-once",
@@ -293,7 +312,8 @@ fn a_saved_run_blocks_reusing_its_session_id_but_not_resuming_it() {
 
     let resumed = merry_without_openai_env_and_xdg(&temp)
         .args([
-            "--no-sandbox",
+            "--sandbox",
+            "off",
             "run",
             "--resume",
             "saved-once",

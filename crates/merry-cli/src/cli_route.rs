@@ -10,18 +10,20 @@ use crate::run as run_command;
 use crate::tui;
 
 pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
-    let sandbox_child_handoff = cli.sandbox_child_handoff;
-    let process_execution_mode = cli.process_execution_mode();
-    let approval_policy = cli.approval_policy();
+    let sandbox_mode = cli.sandbox_mode();
+    let permission_mode = cli.permission_mode();
+    let auto_fallback = cli.auto_fallback();
+    let trust_workspace = cli.trust_workspace();
 
     match cli.command {
         None => map_result(
             tui::run(
-                sandbox_child_handoff,
                 merry_config.as_ref(),
                 tui::LaunchMode::New,
-                process_execution_mode,
-                approval_policy,
+                sandbox_mode,
+                permission_mode,
+                auto_fallback,
+                trust_workspace,
             )
             .await,
             cli::root_usage,
@@ -29,11 +31,12 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
         ),
         Some(CliCommand::Resume) => map_result(
             tui::run(
-                sandbox_child_handoff,
                 merry_config.as_ref(),
                 tui::LaunchMode::ResumePicker,
-                process_execution_mode,
-                approval_policy,
+                sandbox_mode,
+                permission_mode,
+                auto_fallback,
+                trust_workspace,
             )
             .await,
             cli::root_usage,
@@ -42,10 +45,11 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
         Some(CliCommand::Run(args)) => map_run_result(
             run_command::run(
                 &args,
-                sandbox_child_handoff,
                 merry_config.as_ref(),
-                process_execution_mode,
-                approval_policy,
+                sandbox_mode,
+                permission_mode,
+                auto_fallback,
+                trust_workspace,
             )
             .await,
         ),
@@ -85,9 +89,7 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
         Some(CliCommand::Debug(DebugArgs {
             command: Some(DebugCommand::Shell(args)),
             ..
-        })) => map_shell_result(
-            debug::shell::run(args, sandbox_child_handoff, merry_config.as_ref()).await,
-        ),
+        })) => map_shell_result(debug::shell::run(args, merry_config.as_ref()).await),
         // `main` answers this before loading config; kept here so the route
         // stays total if that short-circuit ever moves.
         Some(CliCommand::Completions(args)) => crate::completions::print_completions(args.shell),

@@ -51,9 +51,9 @@ impl ProcessEnvPolicy {
 /// caller has selected Merry's local-workspace process profile and accepted
 /// the process risk for that profile; it is not proof that any process is
 /// actually confined. A host adapter may materialize this profile with a
-/// platform-native mechanism such as bubblewrap, a different platform
-/// mechanism, or an explicitly unavailable capability. Runtime code treats it
-/// as construction-time admission for the configured process runner boundary;
+/// platform-native mechanism, or report that isolation is unavailable. Runtime
+/// code treats it as construction-time admission for the configured process
+/// runner boundary;
 /// argv classification remains a risk signal rather than an executable
 /// allowlist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

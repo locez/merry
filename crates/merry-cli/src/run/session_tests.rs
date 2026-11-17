@@ -83,6 +83,7 @@ fn headless_input<'a>(
         skill_roots: Vec::new(),
         subagents: CodingSubagentsConfig::default(),
         workspace_tool_limits: None,
+        workspace_writable: true,
     }
 }
 

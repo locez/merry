@@ -1,6 +1,6 @@
 use crate::cli_error::{CliError, debug_openai_usage_error, unexpected};
 use crate::coding::{
-    ApprovalPolicy, CodingPermissionPolicy, HeadlessCodingRuntimeInput, ProcessExecutionMode,
+    AutoFallback, CodingPermissionPolicy, HeadlessCodingRuntimeInput, PermissionMode, SandboxMode,
     action_process_runner_for_mode, build_headless_coding_with_policy_composition,
     coding_agent_process_admission, resume_headless_coding_composition_with_loaded_session,
 };
@@ -15,7 +15,6 @@ use crate::runtime_config::{
     automatic_compaction_config, main_reasoning_effort, prepared_action_process_backend_options,
     subagents_config,
 };
-use crate::sandbox::ChildHandoff as SandboxChildHandoff;
 use crate::tui::preferences::{CompactionStrategy, TuiPreferences};
 use crate::tui::session_list::{TuiSessionMetadata, TuiSessionStore, now_unix_ms};
 use crate::tui::session_picker::SessionPickerSelection;
@@ -29,7 +28,7 @@ use merry_runtime::{
     SessionReservation, SessionTranscriptItem, SkillMetadata, StepContext,
     SubagentActivityReceiver,
 };
-use std::{collections::VecDeque, env, num::NonZeroU64, path::PathBuf, sync::Arc};
+use std::{collections::VecDeque, num::NonZeroU64, path::PathBuf, sync::Arc};
 use tokio::sync::mpsc;
 
 pub(crate) struct TuiRuntimeSession {
@@ -52,22 +51,29 @@ pub(crate) struct TuiRuntimeSession {
     _session_reservation: SessionReservation,
 }
 
+pub(crate) struct TuiSessionLaunch {
+    pub(crate) sandbox_mode: SandboxMode,
+    pub(crate) permission_mode: PermissionMode,
+    pub(crate) auto_fallback: AutoFallback,
+    pub(crate) workspace_root: PathBuf,
+    pub(crate) workspace_writable: bool,
+}
+
 pub(crate) async fn start_tui_runtime_session(
-    sandbox_child_handoff: Option<SandboxChildHandoff>,
     merry_config: Option<&MerryConfig>,
     session_store: TuiSessionStore,
     selection: SessionPickerSelection,
-    process_execution_mode: ProcessExecutionMode,
-    approval_policy: ApprovalPolicy,
     preferences: &TuiPreferences,
+    launch: TuiSessionLaunch,
 ) -> Result<TuiRuntimeSession, CliError> {
-    let Some(_admission) =
-        coding_agent_process_admission(sandbox_child_handoff, process_execution_mode).await
-    else {
-        return Err(CliError::DebugUsage(
-            "merry TUI requires the configured outer sandbox".to_owned(),
-        ));
-    };
+    let TuiSessionLaunch {
+        sandbox_mode,
+        permission_mode,
+        auto_fallback,
+        workspace_root,
+        workspace_writable,
+    } = launch;
+    let _admission = coding_agent_process_admission(sandbox_mode);
     let owned_config = merry_config.cloned().ok_or_else(|| {
         debug_openai_usage_error("Merry XDG provider config is required for runtime".to_owned())
     })?;
@@ -90,7 +96,6 @@ pub(crate) async fn start_tui_runtime_session(
     let reasoning_effort_label = generation
         .reasoning_effort()
         .map(|effort| effort.as_str().to_owned());
-    let workspace_root = env::current_dir().map_err(unexpected)?;
     let (session_id, mut metadata, should_resume) = session_start(selection, &workspace_root);
     let session_reservation = session_store
         .session_state_store()
@@ -99,11 +104,12 @@ pub(crate) async fn start_tui_runtime_session(
         .map_err(unexpected)?;
     metadata.model = Some(model_label.clone());
     metadata.reasoning_effort = reasoning_effort_label.clone();
-    let backend = action_process_runner_for_mode(
-        &workspace_root,
-        prepared_action_process_backend_options(merry_config, process_execution_mode).await?,
-        process_execution_mode,
-    )?;
+    let mut backend_options =
+        prepared_action_process_backend_options(merry_config, sandbox_mode).await?;
+    if !workspace_writable {
+        backend_options = backend_options.read_only_workspace();
+    }
+    let backend = action_process_runner_for_mode(&workspace_root, backend_options, sandbox_mode)?;
     let (permission_source, permission_requests) = ChannelPermissionAdmissionSource::channel(8);
     let permission_source = Arc::new(permission_source);
     let state_store = session_store.session_state_store();
@@ -156,9 +162,11 @@ pub(crate) async fn start_tui_runtime_session(
             subagents.limits(),
         ),
         workspace_tool_limits: None,
+        workspace_writable,
     };
-    let permission_policy = CodingPermissionPolicy::for_approval_policy(
-        approval_policy.into(),
+    let permission_policy = CodingPermissionPolicy::for_permission_mode(
+        permission_mode.coding_mode(),
+        auto_fallback.coding_fallback(),
         Some(permission_source),
     )
     .map_err(unexpected)?;

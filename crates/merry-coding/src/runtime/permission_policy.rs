@@ -1,40 +1,44 @@
-//! Approval policy selection and its mapping onto runtime permission review.
+//! Permission mode selection and its mapping onto runtime permission review.
 //!
-//! The product surface names a reviewer through [`CodingApprovalPolicy`]; this
-//! module turns that choice into the [`CodingPermissionPolicy`] both parent and
-//! child coding runtimes apply, and owns the typed error for policies that need
-//! a host admission source the surface did not supply.
+//! The product surface names [`CodingPermissionMode`]. This module turns that
+//! choice into the [`CodingPermissionPolicy`] both parent and child coding
+//! runtimes apply. A denial is a tool result for the working model; it does
+//! not end the turn.
 
 use merry_runtime::{PermissionAdmissionSource, PermissionReviewMode, RuntimeBuilder};
 use std::sync::Arc;
 use thiserror::Error;
 
-/// Who reviews permission requests, as selected by the product surface.
-///
-/// This is the coding-layer form of the user-facing `approval_policy`
-/// setting; each variant names the reviewer rather than a runtime mode.
+/// What happens when `auto` review denies an action or cannot decide.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum CodingApprovalPolicy {
-    /// No approval round: configured actions run without model or host review.
-    NoApproval,
-    /// Reject every permission request without consulting a reviewer.
-    Deny,
-    /// The approval-review model decides; no human fallback.
-    ModelOnly,
-    /// The model reviews first; the host decides when the model denies or
-    /// cannot decide.
+pub enum CodingAutoFallback {
+    /// Ask the person at the terminal.
     #[default]
-    ModelThenHuman,
-    /// The host admission source (the person at the terminal) decides.
-    HumanOnly,
+    Ask,
+    /// Return the denial to the working model and let that model end the turn.
+    Deny,
 }
 
-/// Failure to construct a permission policy for an approval policy.
+/// Who reviews permission requests, as selected by the product surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CodingPermissionMode {
+    /// The approval-review model decides first.
+    #[default]
+    Auto,
+    /// The person at the terminal decides.
+    Ask,
+    /// Configured actions run without a review round.
+    AlwaysApprove,
+    /// Refuse every permission request without consulting a reviewer.
+    Deny,
+}
+
+/// Failure to construct a permission policy for a permission mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum CodingPermissionPolicyError {
-    /// A selected policy needs a host admission source, but the surface did not provide one.
-    #[error("{policy:?} permission review requires a host admission source")]
-    HostAdmissionUnavailable { policy: CodingApprovalPolicy },
+    /// A selected mode needs a host admission source, but the surface did not provide one.
+    #[error("{mode:?} permission review requires a host admission source")]
+    HostAdmissionUnavailable { mode: CodingPermissionMode },
 }
 
 /// Permission configuration shared by parent and child coding runtimes.
@@ -48,9 +52,6 @@ pub enum CodingPermissionPolicy {
     #[default]
     Default,
     /// Route permission requests through model-backed review without a host fallback.
-    ///
-    /// The variant name is retained for public API compatibility; use
-    /// [`CodingPermissionPolicy::model_only`] in new code.
     Required,
     /// Route permission requests through the supplied host admission source.
     HostDecisionOnly {
@@ -73,12 +74,6 @@ impl CodingPermissionPolicy {
     #[must_use]
     pub const fn model_only() -> Self {
         Self::Required
-    }
-
-    /// Route permission requests through model-backed review without a host fallback.
-    #[must_use]
-    pub const fn required() -> Self {
-        Self::model_only()
     }
 
     /// Route permission requests through the supplied host admission source.
@@ -105,26 +100,29 @@ impl CodingPermissionPolicy {
         Self::DenyAll
     }
 
-    /// Selects the product policy for one approval policy.
+    /// Selects the runtime policy for one product permission mode.
     ///
-    /// A host-reviewed policy is only constructed when the caller supplies a
-    /// host admission source. Callers that need host review must handle the
-    /// typed error instead of silently degrading to another policy.
-    pub fn for_approval_policy(
-        policy: CodingApprovalPolicy,
+    /// `fallback` is read only for [`CodingPermissionMode::Auto`]. A mode that
+    /// asks a person is constructed only when the caller supplies a host
+    /// admission source.
+    pub fn for_permission_mode(
+        mode: CodingPermissionMode,
+        fallback: CodingAutoFallback,
         host_source: Option<Arc<dyn PermissionAdmissionSource>>,
     ) -> Result<Self, CodingPermissionPolicyError> {
         let host_reviewed = |reviewed: fn(Arc<dyn PermissionAdmissionSource>) -> Self| {
             host_source
                 .map(reviewed)
-                .ok_or(CodingPermissionPolicyError::HostAdmissionUnavailable { policy })
+                .ok_or(CodingPermissionPolicyError::HostAdmissionUnavailable { mode })
         };
-        match policy {
-            CodingApprovalPolicy::NoApproval => Ok(Self::fully_trusted()),
-            CodingApprovalPolicy::Deny => Ok(Self::deny_all()),
-            CodingApprovalPolicy::ModelOnly => Ok(Self::model_only()),
-            CodingApprovalPolicy::ModelThenHuman => host_reviewed(Self::model_then_host_fallback),
-            CodingApprovalPolicy::HumanOnly => host_reviewed(Self::host_decision_only),
+        match mode {
+            CodingPermissionMode::AlwaysApprove => Ok(Self::fully_trusted()),
+            CodingPermissionMode::Deny => Ok(Self::deny_all()),
+            CodingPermissionMode::Ask => host_reviewed(Self::host_decision_only),
+            CodingPermissionMode::Auto => match fallback {
+                CodingAutoFallback::Deny => Ok(Self::model_only()),
+                CodingAutoFallback::Ask => host_reviewed(Self::model_then_host_fallback),
+            },
         }
     }
 

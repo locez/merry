@@ -18,16 +18,16 @@ mod provider_management;
 mod run;
 mod runtime_config;
 mod runtime_events;
-mod sandbox;
 mod session_id;
 mod testing;
 mod text;
 mod tool_display;
 mod tui;
 mod web;
+mod workspace_trust;
 
 use clap::Parser;
-use coding::ProcessExecutionMode;
+use coding::SandboxMode;
 use config::{MerryConfig, XdgPaths};
 use std::env;
 
@@ -36,6 +36,10 @@ use cli_exit::CliExit;
 use runtime_config::{effective_log_settings, validate_loaded_config};
 
 fn main() -> CliExit {
+    if merry_process::sandbox_helper_requested() {
+        merry_process::sandbox_helper_main();
+    }
+
     let argv = env::args_os().collect::<Vec<_>>();
     let mut cli = match Cli::try_parse_from(argv.clone()) {
         Ok(cli) => cli,
@@ -60,55 +64,27 @@ fn main() -> CliExit {
         return CliExit::Unexpected(error.to_string());
     }
     if let Some(config) = _config.as_ref() {
-        cli.apply_defaults(config.cli_defaults());
+        let defaults = match config.cli_defaults() {
+            Ok(defaults) => defaults,
+            Err(error) => return CliExit::Unexpected(error.to_string()),
+        };
+        if let Err(error) = cli.apply_defaults(defaults) {
+            return CliExit::Unexpected(error);
+        }
     }
     let log_settings = match effective_log_settings(_config.as_ref(), &config_paths) {
         Ok(settings) => settings,
         Err(error) => return CliExit::Unexpected(error.to_string()),
     };
 
-    let process_execution_mode = cli.process_execution_mode();
-    if process_execution_mode.uses_inner_sandbox()
+    let sandbox_mode = cli.sandbox_mode();
+    if sandbox_mode == SandboxMode::Workspace
         && cli.is_product_surface()
-        && let Err(error) = sandbox::ensure_bubblewrap_available()
+        && let Err(error) = merry_process::probe_workspace_sandbox()
     {
-        return CliExit::Unexpected(error.to_string());
-    }
-
-    // Probe nested bubblewrap before the outer re-exec. Merry never downgrades
-    // the sandbox mode on its own: when the host cannot nest, startup stops
-    // with a diagnostic that explains the host setup and the explicit flags.
-    let inside_sandbox =
-        env::var_os(sandbox::MERRY_SANDBOX_ENV).as_deref() == Some(std::ffi::OsStr::new("1"));
-    if cli.should_bootstrap_sandbox()
-        && !inside_sandbox
-        && let Err(error) = sandbox::ensure_nested_sandbox_available()
-    {
-        return CliExit::Unexpected(error.to_string());
-    }
-
-    // Resolved on the host, after the probe has settled that this invocation
-    // really re-execs: the sandboxed child cannot open /dev/tty itself.
-    let review_terminal = if cli.hands_off_review_terminal() {
-        sandbox::ReviewTerminalHandoff::resolve_controlling_terminal()
-    } else {
-        None
-    };
-    if let Err(error) = sandbox::maybe_reexec(
-        cli.should_bootstrap_sandbox(),
-        cli.clipboard_access(),
-        review_terminal,
-        argv.iter().skip(1).cloned().collect(),
-    ) {
-        return CliExit::Unexpected(error.to_string());
-    }
-
-    if process_execution_mode.uses_inner_sandbox()
-        && cli.is_product_surface()
-        && (process_execution_mode == ProcessExecutionMode::InnerOnly || inside_sandbox)
-        && let Err(error) = sandbox::ensure_inner_sandbox_available()
-    {
-        return CliExit::Unexpected(error.to_string());
+        return CliExit::Unexpected(format!(
+            "{error}\nSee SANDBOX.md (https://github.com/locez/merry/blob/main/SANDBOX.md)."
+        ));
     }
 
     let _observability_guard = match observability::init_observability(log_settings.as_ref()) {

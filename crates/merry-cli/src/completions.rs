@@ -38,7 +38,7 @@ pub(crate) fn print_completions(shell: Shell) -> CliExit {
 ///
 /// The script is derived from the same clap definition that parses `merry`
 /// arguments, so subcommands, flags, and enum values such as
-/// `--approval-policy` stay in sync without a separate list. Fish gets the
+/// `--permission-mode` stay in sync without a separate list. Fish gets the
 /// value-completion repairs described in [`fish`].
 ///
 /// # Errors
@@ -70,8 +70,8 @@ mod tests {
             let script = script_for(*shell);
             assert!(script.contains(BIN_NAME), "{shell}: {script}");
             assert!(
-                script.contains("approval-policy"),
-                "{shell} script should list --approval-policy"
+                script.contains("permission-mode"),
+                "{shell} script should list --permission-mode"
             );
             assert!(
                 script.contains("completions"),
@@ -81,16 +81,10 @@ mod tests {
     }
 
     #[test]
-    fn bash_zsh_and_fish_scripts_list_approval_policy_values() {
+    fn bash_zsh_and_fish_scripts_list_permission_mode_values() {
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
             let script = script_for(shell);
-            for value in [
-                "none",
-                "deny",
-                "model_only",
-                "model_then_human",
-                "human_only",
-            ] {
+            for value in ["auto", "ask", "always-approve", "deny", "workspace", "off"] {
                 assert!(
                     script.contains(value),
                     "{shell} script should offer {value}"

@@ -1,5 +1,5 @@
 use crate::{
-    CodingApprovalPolicy, CodingModelRoleConfig, CodingPermissionPolicy,
+    CodingAutoFallback, CodingModelRoleConfig, CodingPermissionMode, CodingPermissionPolicy,
     CodingPermissionPolicyError, CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig,
     tests::process_backend,
 };
@@ -299,30 +299,32 @@ async fn parent_builder_passes_policy_to_a_real_child_runtime() {
 }
 
 #[test]
-fn host_reviewed_policies_reject_missing_host_admission() {
-    for policy in [
-        CodingApprovalPolicy::ModelThenHuman,
-        CodingApprovalPolicy::HumanOnly,
-    ] {
-        let error = match CodingPermissionPolicy::for_approval_policy(policy, None) {
-            Ok(_) => panic!("{policy:?} needs a host source"),
+fn host_reviewed_modes_reject_missing_host_admission() {
+    for mode in [CodingPermissionMode::Auto, CodingPermissionMode::Ask] {
+        let error = match CodingPermissionPolicy::for_permission_mode(
+            mode,
+            CodingAutoFallback::Ask,
+            None,
+        ) {
+            Ok(_) => panic!("{mode:?} needs a host source"),
             Err(error) => error,
         };
         assert!(
             matches!(
                 error,
-                CodingPermissionPolicyError::HostAdmissionUnavailable { policy: found }
-                    if found == policy
+                CodingPermissionPolicyError::HostAdmissionUnavailable { mode: found }
+                    if found == mode
             ),
-            "{policy:?}"
+            "{mode:?}"
         );
     }
 }
 
 #[test]
-fn model_then_human_policy_uses_host_fallback() {
-    let policy = CodingPermissionPolicy::for_approval_policy(
-        CodingApprovalPolicy::ModelThenHuman,
+fn auto_ask_fallback_uses_host_fallback() {
+    let policy = CodingPermissionPolicy::for_permission_mode(
+        CodingPermissionMode::Auto,
+        CodingAutoFallback::Ask,
         Some(Arc::new(CountingAdmission::approving())),
     )
     .expect("host fallback policy should build");
@@ -334,9 +336,10 @@ fn model_then_human_policy_uses_host_fallback() {
 }
 
 #[test]
-fn human_only_policy_uses_host_decision() {
-    let policy = CodingPermissionPolicy::for_approval_policy(
-        CodingApprovalPolicy::HumanOnly,
+fn ask_mode_uses_host_decision() {
+    let policy = CodingPermissionPolicy::for_permission_mode(
+        CodingPermissionMode::Ask,
+        CodingAutoFallback::Ask,
         Some(Arc::new(CountingAdmission::approving())),
     )
     .expect("host review policy should build");
@@ -348,26 +351,36 @@ fn human_only_policy_uses_host_decision() {
 }
 
 #[test]
-fn reviewer_free_policies_do_not_need_a_host_admission_source() {
-    let model = CodingPermissionPolicy::for_approval_policy(CodingApprovalPolicy::ModelOnly, None)
-        .expect("model-only should not need a reviewer");
-    assert!(matches!(model, CodingPermissionPolicy::Required));
+fn reviewer_free_modes_do_not_need_a_host_admission_source() {
+    let auto_deny = CodingPermissionPolicy::for_permission_mode(
+        CodingPermissionMode::Auto,
+        CodingAutoFallback::Deny,
+        None,
+    )
+    .expect("auto deny fallback should not need a host");
+    assert!(matches!(auto_deny, CodingPermissionPolicy::Required));
 
-    let none = CodingPermissionPolicy::for_approval_policy(CodingApprovalPolicy::NoApproval, None)
-        .expect("no-approval should not need a reviewer");
-    assert!(matches!(none, CodingPermissionPolicy::FullyTrusted));
+    let always = CodingPermissionPolicy::for_permission_mode(
+        CodingPermissionMode::AlwaysApprove,
+        CodingAutoFallback::Ask,
+        None,
+    )
+    .expect("always-approve should not need a host");
+    assert!(matches!(always, CodingPermissionPolicy::FullyTrusted));
 
-    let deny = CodingPermissionPolicy::for_approval_policy(CodingApprovalPolicy::Deny, None)
-        .expect("deny should not need a reviewer");
+    let deny = CodingPermissionPolicy::for_permission_mode(
+        CodingPermissionMode::Deny,
+        CodingAutoFallback::Ask,
+        None,
+    )
+    .expect("deny should not need a host");
     assert!(matches!(deny, CodingPermissionPolicy::DenyAll));
 }
 
 #[test]
-fn default_approval_policy_is_model_then_human() {
-    assert_eq!(
-        CodingApprovalPolicy::default(),
-        CodingApprovalPolicy::ModelThenHuman
-    );
+fn default_permission_mode_is_auto_with_ask_fallback() {
+    assert_eq!(CodingPermissionMode::default(), CodingPermissionMode::Auto);
+    assert_eq!(CodingAutoFallback::default(), CodingAutoFallback::Ask);
 }
 
 #[tokio::test(flavor = "current_thread")]

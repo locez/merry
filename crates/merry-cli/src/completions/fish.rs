@@ -4,7 +4,7 @@
 //! every root-level candidate behind a guard that fails while a value-taking
 //! option is still waiting for its value. Both gaps send fish to file
 //! completion instead of the value being typed: without the repairs below,
-//! `merry --approval-policy <TAB>` lists directories and `merry completions
+//! `merry --permission-mode <TAB>` lists directories and `merry completions
 //! <TAB>` lists files. The repairs read the same clap definition and reuse the
 //! guard functions the generated script already defines.
 //!

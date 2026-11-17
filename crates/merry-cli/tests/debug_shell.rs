@@ -273,7 +273,7 @@ fn shell_spoofed_sandbox_markers_do_not_enable_local_workspace_effect() {
 }
 
 #[test]
-fn shell_spoofed_sandbox_markers_with_explicit_accept_do_not_enable_local_workspace_effect() {
+fn shell_accept_runs_the_command_in_the_workspace_sandbox() {
     let output = merry()
         .args([
             "debug",
@@ -281,99 +281,43 @@ fn shell_spoofed_sandbox_markers_with_explicit_accept_do_not_enable_local_worksp
             "--accept-local-workspace-process-risk",
             "--events-jsonl",
             "--",
-            "cargo",
-            "test",
-            "-p",
-            "merry-runtime",
+            "printf",
+            "merry-sandbox-ok",
         ])
-        .env("MERRY_SANDBOX", "1")
-        .env("MERRY_SANDBOX_VERSION", "1")
         .output()
         .expect("merry debug shell should run");
 
     assert!(
         output.status.success(),
-        "policy denial is a recorded runtime outcome"
+        "accepted shell command should exit successfully: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stderr.is_empty(), "shell should not write stderr");
-
-    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
-    assert!(
-        !stdout.contains("running "),
-        "raw cargo test output should not appear in CLI stdout"
-    );
-    assert!(
-        !stdout.contains("test result:"),
-        "raw cargo test output should not appear in CLI stdout"
-    );
-
     let events = parse_jsonl(&output.stdout);
     let resolved = events
         .iter()
         .find(|event| event["payload"]["type"] == "tool_call_resolved")
         .expect("shell tool call should resolve");
-    assert_eq!(
-        resolved["payload"]["result"]["call_id"],
-        "call-shell-command"
-    );
-    assert_eq!(resolved["payload"]["result"]["status"], "failed");
-    assert_eq!(
-        resolved["payload"]["result"]["diagnostic"]["code"],
-        "action_policy_denied"
-    );
+    assert_eq!(resolved["payload"]["result"]["status"], "succeeded");
 }
 
 #[test]
-fn shell_forged_hidden_handoff_markers_and_accept_do_not_enable_local_workspace_effect() {
+fn shell_rejects_removed_sandbox_child_handoff_flag() {
     let output = merry()
         .args([
             "--merry-sandbox-child-handoff",
             "cli-bwrap",
             "debug",
             "shell",
-            "--accept-local-workspace-process-risk",
-            "--events-jsonl",
             "--",
-            "cargo",
-            "test",
-            "-p",
-            "merry-runtime",
+            "true",
         ])
-        .env("MERRY_SANDBOX", "1")
-        .env("MERRY_SANDBOX_VERSION", "1")
-        .env("HOME", "/home/merry")
-        .env("TMPDIR", "/tmp")
         .output()
-        .expect("merry debug shell should run");
+        .expect("merry should run");
 
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
     assert!(
-        output.status.success(),
-        "policy denial is a recorded runtime outcome"
-    );
-    assert!(output.stderr.is_empty(), "shell should not write stderr");
-
-    let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
-    assert!(
-        !stdout.contains("running "),
-        "raw cargo test output should not appear in CLI stdout"
-    );
-    assert!(
-        !stdout.contains("test result:"),
-        "raw cargo test output should not appear in CLI stdout"
-    );
-
-    let events = parse_jsonl(&output.stdout);
-    let resolved = events
-        .iter()
-        .find(|event| event["payload"]["type"] == "tool_call_resolved")
-        .expect("shell tool call should resolve");
-    assert_eq!(
-        resolved["payload"]["result"]["call_id"],
-        "call-shell-command"
-    );
-    assert_eq!(resolved["payload"]["result"]["status"], "failed");
-    assert_eq!(
-        resolved["payload"]["result"]["diagnostic"]["code"],
-        "action_policy_denied"
+        stderr.contains("unexpected argument") || stderr.contains("merry-sandbox-child-handoff"),
+        "{stderr}"
     );
 }

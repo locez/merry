@@ -11,13 +11,34 @@ use std::{
 pub fn merry() -> Command {
     static COMMAND_COUNTER: AtomicUsize = AtomicUsize::new(0);
     let sequence = COMMAND_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let xdg_root =
-        std::env::temp_dir().join(format!("merry-cli-test-{}-{sequence}", std::process::id()));
+    let xdg_root = xdg_root_outside_baseline_writes(sequence);
     let mut command = Command::new(env!("CARGO_BIN_EXE_merry"));
     command
         .env("XDG_CONFIG_HOME", xdg_root.join("config"))
         .env("XDG_STATE_HOME", xdg_root.join("state"));
     command
+}
+
+/// Product deny paths cannot sit inside `/tmp` or `/var/tmp`: Landlock cannot
+/// subtract them from those baseline write grants, and workspace mode then
+/// refuses to launch. Runtime and home directories are outside that list.
+fn xdg_root_outside_baseline_writes(sequence: usize) -> PathBuf {
+    let parent = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir() && !is_baseline_write_path(path))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir() && !is_baseline_write_path(path))
+        })
+        .unwrap_or_else(std::env::temp_dir);
+    parent.join(format!("merry-cli-test-{}-{sequence}", std::process::id()))
+}
+
+fn is_baseline_write_path(path: &std::path::Path) -> bool {
+    ["/tmp", "/var/tmp", "/dev", "/dev/shm", "/dev/pts"]
+        .iter()
+        .any(|root| path == std::path::Path::new(root) || path.starts_with(root))
 }
 
 pub fn merry_without_openai_env() -> Command {

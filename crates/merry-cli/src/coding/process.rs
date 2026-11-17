@@ -1,34 +1,37 @@
 use super::CodingRuntimeError;
+use clap::ValueEnum;
 #[cfg(test)]
 use merry_process::ProcessSession;
 use merry_process::{
     LocalProcessBackend, ProcessBackend, ProcessBackendMode, ProcessBackendOptions,
 };
+use serde::Deserialize;
 use std::{path::Path, sync::Arc};
 
 pub(crate) type ActionProcessBackend = Arc<dyn ProcessBackend>;
 pub(crate) type ActionProcessBackendOptions = ProcessBackendOptions;
 
-/// Selects the process and outer-sandbox boundary for the coding product.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProcessExecutionMode {
-    /// Run validated actions directly in the host process environment.
-    Unrestricted,
-    /// Keep the per-action process boundary without Merry's outer re-exec.
-    InnerOnly,
-    /// Run the per-action process boundary inside Merry's outer sandbox.
-    OuterAndInner,
+/// Selects whether process actions run in the workspace sandbox or on the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[value(rename_all = "kebab-case")]
+pub(crate) enum SandboxMode {
+    /// Confine each action to the workspace sandbox.
+    #[default]
+    Workspace,
+    /// Run actions in the host process environment.
+    Off,
 }
 
-impl ProcessExecutionMode {
-    pub(crate) const fn uses_inner_sandbox(self) -> bool {
-        !matches!(self, Self::Unrestricted)
+impl SandboxMode {
+    pub(crate) const fn uses_action_sandbox(self) -> bool {
+        matches!(self, Self::Workspace)
     }
 
     pub(crate) const fn backend_mode(self) -> ProcessBackendMode {
         match self {
-            Self::Unrestricted => ProcessBackendMode::Host,
-            Self::InnerOnly | Self::OuterAndInner => ProcessBackendMode::Isolated,
+            Self::Off => ProcessBackendMode::Host,
+            Self::Workspace => ProcessBackendMode::Isolated,
         }
     }
 }
@@ -37,13 +40,13 @@ pub(crate) fn action_process_runner(
     workspace_root: &Path,
     options: ActionProcessBackendOptions,
 ) -> Result<ActionProcessBackend, CodingRuntimeError> {
-    action_process_runner_for_mode(workspace_root, options, ProcessExecutionMode::InnerOnly)
+    action_process_runner_for_mode(workspace_root, options, SandboxMode::Workspace)
 }
 
 pub(crate) fn action_process_runner_for_mode(
     workspace_root: &Path,
     options: ActionProcessBackendOptions,
-    mode: ProcessExecutionMode,
+    mode: SandboxMode,
 ) -> Result<ActionProcessBackend, CodingRuntimeError> {
     let backend = LocalProcessBackend::new(workspace_root, mode.backend_mode(), options)?;
     Ok(Arc::new(backend))

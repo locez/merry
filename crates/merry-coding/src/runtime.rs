@@ -21,7 +21,7 @@ use merry_runtime::{
 };
 use merry_tools::WorkspaceToolLimits;
 pub use permission_policy::{
-    CodingApprovalPolicy, CodingPermissionPolicy, CodingPermissionPolicyError,
+    CodingAutoFallback, CodingPermissionMode, CodingPermissionPolicy, CodingPermissionPolicyError,
 };
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 use thiserror::Error;
@@ -188,6 +188,9 @@ pub struct CodingRuntimeInput {
     skill_roots: Vec<PathBuf>,
     subagents: CodingSubagentsConfig,
     workspace_tool_limits: WorkspaceToolLimits,
+    /// When false, the workspace is read-only: `AGENTS.md` stays unloaded and
+    /// `apply_patch` cannot write.
+    workspace_writable: bool,
 }
 
 impl CodingRuntimeInput {
@@ -213,7 +216,18 @@ impl CodingRuntimeInput {
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
             workspace_tool_limits: WorkspaceToolLimits::default(),
+            workspace_writable: true,
         }
+    }
+
+    /// Keeps the workspace read-only and does not load `AGENTS.md`.
+    ///
+    /// Used when the person declined read-write access on first open. The
+    /// sandbox stays in place; this does not switch to host execution.
+    #[must_use]
+    pub fn read_only_workspace(mut self) -> Self {
+        self.workspace_writable = false;
+        self
     }
 
     /// Creates read-only command-generation inputs without a process backend.
@@ -237,6 +251,7 @@ impl CodingRuntimeInput {
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
             workspace_tool_limits: WorkspaceToolLimits::default(),
+            workspace_writable: true,
         }
     }
 
@@ -420,11 +435,16 @@ impl CodingRuntimeBuilder {
             skill_roots,
             subagents,
             workspace_tool_limits,
+            workspace_writable,
         } = input;
 
         let policy = CodingRuntimePolicy::try_new(model_roles, permission)?;
 
-        let project_rules = load_root_project_rules(&root)?;
+        let project_rules = if workspace_writable {
+            load_root_project_rules(&root)?
+        } else {
+            None
+        };
         let skill_catalog = if skill_roots.is_empty() {
             None
         } else {
@@ -460,6 +480,9 @@ impl CodingRuntimeBuilder {
             .readonly_resource_roots(skill_roots.clone())
             .limits(workspace_tool_limits)
             .register_tools(extra_tools);
+        if !workspace_writable {
+            profile_builder = profile_builder.read_only_patch_scope();
+        }
         if let Some(project_rules) = project_rules {
             profile_builder = profile_builder.project_rules(project_rules);
         }

@@ -144,7 +144,7 @@ fn permission_resolution_payload(
 fn permission_denied_guidance() -> Value {
     json!({
         "kind": "permission_request_denied",
-        "message": "Do not repeat the same permission request. Either continue with an already-authorized method, ask for a narrower exact capability only if it is genuinely required, or report that the requested action is blocked by policy. The current Plan remains in its existing phase; if it is executing, do not call update_plan with use_current_plan after this denial.",
+        "message": "This denial is the result for the refused action. The turn continues; decide whether another already-authorized approach can finish the task, or end the turn and report the block. Do not repeat the same permission request. The current Plan remains in its existing phase; if it is executing, do not call update_plan with use_current_plan after this denial.",
     })
 }
 

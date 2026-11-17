@@ -25,7 +25,7 @@ pub use project_rules::{
     load_root_project_rules,
 };
 pub use runtime::{
-    CodingApprovalPolicy, CodingModelRoleConfig, CodingModelRoleConfigError,
+    CodingAutoFallback, CodingModelRoleConfig, CodingModelRoleConfigError, CodingPermissionMode,
     CodingPermissionPolicy, CodingPermissionPolicyError, CodingRuntime, CodingRuntimeBuildError,
     CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig,
 };

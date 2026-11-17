@@ -1,8 +1,7 @@
 use super::*;
-use crate::sandbox::os;
 use crate::testing::FakeProcessRunner;
 use merry_core::ToolCallResultStatus;
-use std::{ffi::OsStr, sync::Arc};
+use std::sync::Arc;
 
 #[test]
 fn process_action_intent_uses_exact_cli_argv_and_empty_env() {
@@ -19,106 +18,6 @@ fn process_action_intent_uses_exact_cli_argv_and_empty_env() {
     assert_eq!(intent.stderr_limit_bytes(), MAX_PROCESS_OUTPUT_LIMIT_BYTES);
 }
 
-#[test]
-fn runtime_admission_requires_accept_handoff_and_exact_sandbox_markers() {
-    assert_eq!(
-        local_workspace_process_admission(
-            true,
-            Some(SandboxChildHandoff::CliBwrap),
-            Some(SandboxRuntimeProfile::CliBwrap),
-            Some(OsStr::new("1")),
-            Some(OsStr::new("1")),
-        ),
-        Some(AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace())
-    );
-
-    for (accept, handoff, profile, sandbox, version) in [
-        (
-            false,
-            Some(SandboxChildHandoff::CliBwrap),
-            Some(SandboxRuntimeProfile::CliBwrap),
-            Some(os("1")),
-            Some(os("1")),
-        ),
-        (
-            true,
-            Some(SandboxChildHandoff::CliBwrap),
-            None,
-            Some(os("1")),
-            Some(os("1")),
-        ),
-        (true, None, None, None, None),
-        (false, Some(SandboxChildHandoff::CliBwrap), None, None, None),
-        (
-            true,
-            None,
-            Some(SandboxRuntimeProfile::CliBwrap),
-            Some(os("1")),
-            Some(os("1")),
-        ),
-        (
-            false,
-            None,
-            Some(SandboxRuntimeProfile::CliBwrap),
-            Some(os("1")),
-            Some(os("1")),
-        ),
-        (
-            true,
-            Some(SandboxChildHandoff::CliBwrap),
-            Some(SandboxRuntimeProfile::CliBwrap),
-            None,
-            Some(os("1")),
-        ),
-        (
-            true,
-            Some(SandboxChildHandoff::CliBwrap),
-            Some(SandboxRuntimeProfile::CliBwrap),
-            Some(os("1")),
-            None,
-        ),
-        (
-            true,
-            Some(SandboxChildHandoff::CliBwrap),
-            Some(SandboxRuntimeProfile::CliBwrap),
-            Some(os("0")),
-            Some(os("1")),
-        ),
-        (
-            true,
-            Some(SandboxChildHandoff::CliBwrap),
-            Some(SandboxRuntimeProfile::CliBwrap),
-            Some(os("1")),
-            Some(os("2")),
-        ),
-        (
-            true,
-            Some(SandboxChildHandoff::CliBwrap),
-            Some(SandboxRuntimeProfile::CliBwrap),
-            Some(os("true")),
-            Some(os("1")),
-        ),
-        (
-            true,
-            Some(SandboxChildHandoff::CliBwrap),
-            Some(SandboxRuntimeProfile::CliBwrap),
-            Some(os("1")),
-            Some(os("")),
-        ),
-    ] {
-        assert_eq!(
-            local_workspace_process_admission(
-                accept,
-                handoff,
-                profile,
-                sandbox.as_deref(),
-                version.as_deref(),
-            ),
-            None
-        );
-    }
-}
-
 #[tokio::test]
 async fn helper_simulated_sandbox_runs_local_workspace_effect_with_fake_runner() {
     let intent = process_action_intent(vec![
@@ -128,13 +27,7 @@ async fn helper_simulated_sandbox_runs_local_workspace_effect_with_fake_runner()
         "merry-runtime".to_owned(),
     ])
     .unwrap_or_else(|_| panic!("shell process intent should be valid"));
-    let admission = local_workspace_process_admission(
-        true,
-        Some(SandboxChildHandoff::CliBwrap),
-        Some(SandboxRuntimeProfile::CliBwrap),
-        Some(OsStr::new("1")),
-        Some(OsStr::new("1")),
-    );
+    let admission = Some(AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace());
     let runner = FakeProcessRunner::succeeding("simulated cargo success\n");
     let mut output = Vec::new();
 
@@ -165,13 +58,7 @@ async fn helper_simulated_sandbox_marker_reviews_forbidden_command() {
         "echo bad".to_owned(),
     ])
     .unwrap_or_else(|_| panic!("shell process intent should be valid"));
-    let admission = local_workspace_process_admission(
-        true,
-        Some(SandboxChildHandoff::CliBwrap),
-        Some(SandboxRuntimeProfile::CliBwrap),
-        Some(OsStr::new("1")),
-        Some(OsStr::new("1")),
-    );
+    let admission = Some(AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace());
     let runner = FakeProcessRunner::succeeding("bad\n");
     let mut output = Vec::new();
 

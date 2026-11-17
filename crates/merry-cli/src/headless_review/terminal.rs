@@ -111,10 +111,34 @@ mod unix {
 }
 
 #[cfg(all(test, target_os = "linux"))]
-mod tests {
+pub(crate) mod tests {
     use super::{ReviewTerminal, open_review_terminal};
-    use crate::sandbox::review_terminal::tests::open_pseudo_terminal;
-    use std::{io::Write, path::PathBuf};
+    use std::{fs::File, io::Write, path::PathBuf};
+
+    /// A pseudo-terminal pair: the master end and the slave's device path.
+    pub(crate) struct PseudoTerminal {
+        pub(crate) master: File,
+        pub(crate) slave_path: PathBuf,
+    }
+
+    /// Allocates a pseudo-terminal the way a terminal emulator does.
+    pub(crate) fn open_pseudo_terminal() -> PseudoTerminal {
+        let master = rustix::pty::openpt(
+            rustix::pty::OpenptFlags::RDWR
+                | rustix::pty::OpenptFlags::NOCTTY
+                | rustix::pty::OpenptFlags::CLOEXEC,
+        )
+        .expect("pseudo-terminal master");
+        rustix::pty::unlockpt(&master).expect("unlock pseudo-terminal slave");
+        let slave_path = rustix::pty::ptsname(&master, Vec::new())
+            .expect("pseudo-terminal slave name")
+            .into_string()
+            .expect("slave path should be UTF-8");
+        PseudoTerminal {
+            master: File::from(master),
+            slave_path: PathBuf::from(slave_path),
+        }
+    }
     use tokio::io::{AsyncBufReadExt, BufReader};
 
     #[tokio::test]

@@ -1,20 +1,6 @@
 use super::home;
-use crate::coding::{ApprovalPolicy, ProcessExecutionMode};
+use crate::coding::{AutoFallback, PermissionMode, SandboxMode};
 use crate::config::{CliDefaults, ConfigError, MerryConfig, XdgPaths};
-
-const SANDBOXES: [(&str, ProcessExecutionMode); 3] = [
-    ("with-sandbox", ProcessExecutionMode::OuterAndInner),
-    ("no-sandbox", ProcessExecutionMode::Unrestricted),
-    ("inner-sandbox", ProcessExecutionMode::InnerOnly),
-];
-
-const POLICIES: [(&str, ApprovalPolicy); 5] = [
-    ("none", ApprovalPolicy::NoApproval),
-    ("deny", ApprovalPolicy::Deny),
-    ("model_only", ApprovalPolicy::ModelOnly),
-    ("model_then_human", ApprovalPolicy::ModelThenHuman),
-    ("human_only", ApprovalPolicy::HumanOnly),
-];
 
 fn load(text: &str) -> MerryConfig {
     MerryConfig::load_optional_from_text(Some(text), &XdgPaths::from_parts(home(), None, None))
@@ -23,7 +9,9 @@ fn load(text: &str) -> MerryConfig {
 }
 
 fn cli_defaults(text: &str) -> CliDefaults {
-    load(text).cli_defaults()
+    load(text)
+        .cli_defaults()
+        .expect("cli defaults should resolve")
 }
 
 fn parse_error(text: &str) -> String {
@@ -36,95 +24,91 @@ fn parse_error(text: &str) -> String {
 }
 
 #[test]
-fn cli_defaults_to_no_sandbox_mode_and_no_approval_policy() {
+fn cli_defaults_to_unset_sandbox_and_permission_mode() {
     for text in ["", "[cli]\n"] {
         let defaults = cli_defaults(text);
-        assert_eq!(defaults, CliDefaults::default(), "{text:?}");
-        assert_eq!(defaults.process_execution_mode(), None, "{text:?}");
-        assert_eq!(defaults.approval_policy(), None, "{text:?}");
+        assert_eq!(defaults.sandbox(), None, "{text:?}");
+        assert_eq!(defaults.permission_mode(), None, "{text:?}");
+        assert_eq!(defaults.auto_fallback(), None, "{text:?}");
     }
 }
 
 #[test]
-fn cli_sandbox_and_approval_policy_each_resolve_alone() {
-    for (name, mode) in SANDBOXES {
-        let defaults = cli_defaults(&format!("[cli]\nsandbox = \"{name}\"\n"));
-        assert_eq!(defaults.process_execution_mode(), Some(mode), "{name}");
-        assert_eq!(defaults.approval_policy(), None, "{name}");
-    }
-    for (name, policy) in POLICIES {
-        let defaults = cli_defaults(&format!("[cli]\napproval_policy = \"{name}\"\n"));
-        assert_eq!(defaults.process_execution_mode(), None, "{name}");
-        assert_eq!(defaults.approval_policy(), Some(policy), "{name}");
-    }
-}
-
-/// The sandbox decides the execution boundary and the approval policy
-/// decides who reviews requests inside it, so every combination is valid,
-/// including `none` next to a sandbox and a human reviewer without one.
-#[test]
-fn cli_accepts_every_sandbox_and_approval_policy_combination() {
-    for (sandbox, mode) in SANDBOXES {
-        for (policy_name, policy) in POLICIES {
-            let text =
-                format!("[cli]\nsandbox = \"{sandbox}\"\napproval_policy = \"{policy_name}\"\n");
-            let defaults = cli_defaults(&text);
-            assert_eq!(defaults.process_execution_mode(), Some(mode), "{text:?}");
-            assert_eq!(defaults.approval_policy(), Some(policy), "{text:?}");
-        }
-    }
-}
-
-#[test]
-fn cli_sandbox_rejects_raw_flags_and_unknown_names() {
-    let message = parse_error("[cli]\nsandbox = \"--no-sandbox\"\n");
-    assert!(
-        message.contains("unknown variant `--no-sandbox`"),
-        "{message}"
+fn cli_sandbox_and_permission_mode_each_resolve_alone() {
+    assert_eq!(
+        cli_defaults("[cli]\nsandbox = \"workspace\"\n").sandbox(),
+        Some(SandboxMode::Workspace)
     );
-    assert!(
-        message.contains("`with-sandbox`, `no-sandbox`, `inner-sandbox`"),
-        "{message}"
+    assert_eq!(
+        cli_defaults("[cli]\nsandbox = \"off\"\n").sandbox(),
+        Some(SandboxMode::Off)
     );
-
-    let message = parse_error("[cli]\nsandbox = \"none\"\n");
-    assert!(message.contains("unknown variant `none`"), "{message}");
+    assert_eq!(
+        cli_defaults("[cli]\npermission_mode = \"auto\"\n").permission_mode(),
+        Some(PermissionMode::Auto)
+    );
+    assert_eq!(
+        cli_defaults("[cli]\npermission_mode = \"ask\"\n").permission_mode(),
+        Some(PermissionMode::Ask)
+    );
+    assert_eq!(
+        cli_defaults("[cli]\npermission_mode = \"always-approve\"\n").permission_mode(),
+        Some(PermissionMode::AlwaysApprove)
+    );
+    assert_eq!(
+        cli_defaults("[cli]\npermission_mode = \"deny\"\n").permission_mode(),
+        Some(PermissionMode::Deny)
+    );
+    assert_eq!(
+        cli_defaults("[cli]\nauto_fallback = \"deny\"\n").auto_fallback(),
+        Some(AutoFallback::Deny)
+    );
 }
 
 #[test]
-fn cli_approval_policy_rejects_old_and_unknown_names() {
-    for value in [
-        "auto",
-        "trusted",
-        "model",
-        "human",
-        "model-then-human",
-        "fully-trusted",
-        "--approval-policy",
-        "yes",
+fn cli_accepts_auto_with_either_fallback() {
+    for fallback in [AutoFallback::Ask, AutoFallback::Deny] {
+        let name = match fallback {
+            AutoFallback::Ask => "ask",
+            AutoFallback::Deny => "deny",
+        };
+        let defaults = cli_defaults(&format!(
+            "[cli]\npermission_mode = \"auto\"\nauto_fallback = \"{name}\"\n"
+        ));
+        assert_eq!(defaults.permission_mode(), Some(PermissionMode::Auto));
+        assert_eq!(defaults.auto_fallback(), Some(fallback));
+    }
+}
+
+#[test]
+fn cli_rejects_auto_fallback_on_a_non_auto_mode() {
+    let error = load("[cli]\npermission_mode = \"ask\"\nauto_fallback = \"deny\"\n")
+        .cli_defaults()
+        .expect_err("fallback does not apply to ask");
+    assert!(error.to_string().contains("auto_fallback"), "{error}");
+}
+
+#[test]
+fn cli_rejects_removed_sandbox_and_approval_names() {
+    for text in [
+        "[cli]\nsandbox = \"with-sandbox\"\n",
+        "[cli]\nsandbox = \"no-sandbox\"\n",
+        "[cli]\nsandbox = \"inner-sandbox\"\n",
+        "[cli]\napproval_policy = \"model_then_human\"\n",
+        "[cli]\npermission_mode = \"model_then_human\"\n",
+        "[cli]\npermission_mode = \"human_only\"\n",
     ] {
-        let message = parse_error(&format!("[cli]\napproval_policy = \"{value}\"\n"));
-        assert!(
-            message.contains(&format!("unknown variant `{value}`")),
-            "{value}: {message}"
-        );
-        assert!(
-            message.contains("`none`, `deny`, `model_only`, `model_then_human`, `human_only`"),
-            "{value}: {message}"
-        );
+        let message = parse_error(text);
+        assert!(!message.is_empty(), "{text:?}: {message}");
     }
 }
 
 #[test]
 fn cli_table_rejects_unknown_keys_and_wrong_types() {
     for text in [
-        "[cli]\ndefault_options = [\"no-sandbox\"]\n",
-        "[cli]\nsandbox_mode = \"no-sandbox\"\n",
-        "[cli]\nfully_trusted = true\n",
-        "[cli]\nsandbox = [\"no-sandbox\"]\n",
         "[cli]\nsandbox = true\n",
-        "[cli]\napproval_policy = true\n",
-        "[cli]\napproval_policy = [\"none\"]\n",
+        "[cli]\npermission_mode = true\n",
+        "[cli]\nauto_fallback = [\"ask\"]\n",
     ] {
         let message = parse_error(text);
         assert!(!message.is_empty(), "{text:?}");

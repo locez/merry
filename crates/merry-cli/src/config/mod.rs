@@ -173,8 +173,8 @@ impl MerryConfig {
 
     /// Returns preauthorized path access and action-scoped review restrictions.
     ///
-    /// Outer sandboxes enforce the access ceiling. Inner sandboxes withhold
-    /// only paths marked for review and product-owned private resources.
+    /// The workspace sandbox enforces the access ceiling. Paths marked for
+    /// review and product-owned private resources stay out of ordinary actions.
     pub fn trusted_global_path_rules(&self) -> Result<Vec<PathAccessRule>, ConfigError> {
         let Some(permissions) = self.raw.permissions.as_ref() else {
             return Ok(Vec::new());
@@ -221,10 +221,12 @@ impl MerryConfig {
         Ok(rules)
     }
 
-    /// Returns whether inner process actions may request network capability.
+    /// Returns whether sandboxed actions may request network.
     ///
-    /// Defaults to true. This is a capability ceiling, not preauthorization:
-    /// enabled requests still require approval for each action.
+    /// Defaults to true so a new install can fetch dependencies after review.
+    /// `network = false` closes that sandbox option. Each action still has to
+    /// request network and pass permission review. Merry's own model and MCP
+    /// connections are outside this switch.
     pub fn network_requests_allowed(&self) -> bool {
         self.raw
             .permissions
@@ -236,11 +238,10 @@ impl MerryConfig {
     /// Returns host IPC integrations explicitly enabled by trusted global
     /// configuration.
     ///
-    /// The same flags are the outer sandbox capability ceiling and the inner
-    /// action preauthorization: when a validated endpoint exists, ordinary
-    /// inner actions use it without another permission request. `deny_paths`
-    /// and `review_paths` still mask a configured endpoint until the exact
-    /// path is approved for that action.
+    /// When a validated endpoint exists, ordinary sandboxed actions use it
+    /// without another permission request. `deny_paths` and `review_paths`
+    /// still mask a configured endpoint until the exact path is approved for
+    /// that action.
     pub fn host_integrations(&self) -> Vec<HostIntegration> {
         let Some(permissions) = self.raw.permissions.as_ref() else {
             return Vec::new();

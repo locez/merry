@@ -1,5 +1,5 @@
 use super::home;
-use crate::coding::ApprovalPolicy;
+use crate::coding::{AutoFallback, PermissionMode};
 use crate::config::provider::{EffectiveOpenAiApiKeySource, ProviderConfigSource};
 use crate::config::{
     CliDefaults, EffectiveProviderConfig, LogFormat, LogLevel, MerryConfig, XdgPaths,
@@ -344,10 +344,10 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
 
     assert_eq!(config.profile(), Some("default"));
     assert_eq!(
-        config.cli_defaults(),
-        CliDefaults::new(None, Some(ApprovalPolicy::ModelThenHuman)),
+        config.cli_defaults().expect("example cli defaults"),
+        CliDefaults::new(None, Some(PermissionMode::Auto), Some(AutoFallback::Ask),),
         "the user-facing example should not preselect a sandbox mode and should \
-         spell out the default approval policy"
+         spell out auto review with a human fallback"
     );
     assert!(
         config

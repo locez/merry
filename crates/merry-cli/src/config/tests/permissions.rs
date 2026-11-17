@@ -4,7 +4,7 @@ use merry_runtime::{PathAccess, PathAccessRuleSource};
 use std::path::{Path, PathBuf};
 
 #[test]
-fn network_capability_ceiling_defaults_to_enabled_and_preserves_false() {
+fn network_option_defaults_to_open_and_preserves_false() {
     let paths = XdgPaths::from_parts(home(), None, None);
     for (text, allowed) in [
         ("", true),

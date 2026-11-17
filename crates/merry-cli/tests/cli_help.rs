@@ -97,10 +97,10 @@ fn root_help_writes_usage_to_stdout() {
 #[test]
 fn root_with_sandbox_help_writes_usage_to_stdout_without_reexec() {
     let output = merry()
-        .args(["--with-sandbox", "--help"])
+        .args(["--sandbox", "workspace", "--help"])
         .env("PATH", "")
         .output()
-        .expect("merry --with-sandbox --help should run");
+        .expect("merry --sandbox workspace --help should run");
 
     assert!(output.status.success(), "help should exit successfully");
     assert!(output.stderr.is_empty(), "help should not write stderr");

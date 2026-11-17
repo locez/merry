@@ -6,14 +6,20 @@ rust-version.workspace = true
 
 [dependencies]
 merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-command-fds.workspace = true
-glob.workspace = true
-rustix.workspace = true
+landlock = "0.4.7"
+libc.workspace = true
+seccompiler = "0.5.0"
+
+[[bin]]
+name = "merry-sandbox-helper"
+path = "src/bin/merry-sandbox-helper.rs"
 
 [dev-dependencies]
 merry-core = { path = "../merry-core", version = "0.1.0" }

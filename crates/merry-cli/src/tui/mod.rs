@@ -1,11 +1,12 @@
 use crate::cli_error::CliError;
-use crate::coding::{ApprovalPolicy, ProcessExecutionMode};
+use crate::coding::{AutoFallback, PermissionMode, SandboxMode};
 use crate::config::{MerryConfig, XdgPaths};
 use crate::config::{ProviderAlias, derive_provider_alias};
 use crate::provider_management::{
     ProviderDiscoveryDraft, ProviderManagementError, ProviderManagementService,
 };
-use crate::sandbox::ChildHandoff as SandboxChildHandoff;
+use crate::workspace_trust::{self, TrustWorkspace};
+
 use crossterm::event::KeyCode;
 use input_history_store::InputHistoryStore;
 use keymap::Keymap;
@@ -88,11 +89,12 @@ pub(crate) enum LaunchMode {
 }
 
 pub(crate) async fn run(
-    sandbox_child_handoff: Option<SandboxChildHandoff>,
     merry_config: Option<&MerryConfig>,
     launch_mode: LaunchMode,
-    process_execution_mode: ProcessExecutionMode,
-    approval_policy: ApprovalPolicy,
+    sandbox_mode: SandboxMode,
+    permission_mode: PermissionMode,
+    auto_fallback: AutoFallback,
+    trust_workspace: Option<TrustWorkspace>,
 ) -> Result<(), CliError> {
     let tui_config = merry_config
         .map(MerryConfig::tui_config)
@@ -115,7 +117,9 @@ pub(crate) async fn run(
         .load_with_default_provider(settings_defaults.provider.as_deref())
         .await
         .map_err(crate::cli_error::unexpected)?;
-    let workspace_root = std::env::current_dir().map_err(crate::cli_error::unexpected)?;
+    let workspace =
+        workspace_trust::resolve_product_workspace(sandbox_mode, trust_workspace, &paths)?;
+    let workspace_root = workspace.root;
     let session_store = TuiSessionStore::new(
         merry_runtime::FileSessionStore::default_sessions_dir()
             .map_err(crate::cli_error::unexpected)?,
@@ -155,13 +159,17 @@ pub(crate) async fn run(
         return Ok(());
     }
     let session = runtime::start_tui_runtime_session(
-        sandbox_child_handoff,
         active_config.as_ref(),
         session_store,
         selection,
-        process_execution_mode,
-        approval_policy,
         &preferences,
+        runtime::TuiSessionLaunch {
+            sandbox_mode,
+            permission_mode,
+            auto_fallback,
+            workspace_root,
+            workspace_writable: workspace.writable,
+        },
     )
     .await?;
     let mut state = TuiState::new(

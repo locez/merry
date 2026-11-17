@@ -1,5 +1,5 @@
 use super::{ConfigError, resolve_path_access_rule_path};
-use merry_process::resolve_bwrap_path;
+use merry_process::resolve_host_path;
 use merry_runtime::{PathAccess, PathAccessRule, PathAccessRuleSource};
 use std::path::Path;
 
@@ -11,11 +11,11 @@ pub(super) fn append_review_rules(
 ) -> Result<(), ConfigError> {
     for input in paths {
         let path = resolve_path_access_rule_path(input, config_dir, home)?;
-        let resolved = resolve_bwrap_path(&path);
+        let resolved = resolve_host_path(&path);
         let ancestors = rules
             .iter()
             .filter(|rule| !rule.review_required())
-            .filter(|rule| resolved.starts_with(resolve_bwrap_path(rule.path())))
+            .filter(|rule| resolved.starts_with(resolve_host_path(rule.path())))
             .collect::<Vec<_>>();
         if ancestors
             .iter()

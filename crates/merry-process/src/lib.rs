@@ -6,34 +6,23 @@
 //! platform can replace the concrete backend without changing coding
 //! composition or runtime call sites.
 
-mod bwrap_path;
+mod confinement;
 mod gpg;
+mod host_path;
 mod host_resources;
 mod process_runner;
-mod sandbox_fs;
-mod sandbox_mounts;
-mod sandbox_path;
-#[cfg(target_os = "linux")]
-mod ssh_config;
 
-pub use bwrap_path::resolve_bwrap_path;
+pub use confinement::{probe_workspace_sandbox, sandbox_helper_main, sandbox_helper_requested};
 pub use gpg::GpgAgentSockets;
+pub use host_path::resolve_host_path;
 pub use host_resources::{HostPathKind, HostPathMetadata, ssh_known_hosts};
-pub use sandbox_fs::BwrapMaskKind;
-pub use sandbox_mounts::{
-    PreparedSandboxMountPlan, SandboxLinkIssue, SandboxMountError, SandboxMountPlan,
-    SandboxPathSource,
-};
-pub use sandbox_path::{SandboxPathError, resolve_sandbox_path};
-#[cfg(target_os = "linux")]
-pub use ssh_config::BwrapSshConfigFiles;
 
 pub use process_runner::{TokioProcessRunner, action_process_path};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use process_runner::{
-    BwrapPermissionedProcessRunnerFactory, BwrapProcessEnvironment, BwrapProcessRunner,
-    BwrapSessionPermissions,
+    ProcessSessionPermissions, WorkspaceProcessEnvironment, WorkspaceProcessRunner,
+    WorkspaceProcessRunnerFactory,
 };
 
 use merry_runtime::{
@@ -52,7 +41,7 @@ use thiserror::Error;
 /// The selected behavior is intentionally independent of the operating system.
 /// A platform backend may implement [`Isolated`](Self::Isolated) with its
 /// native mechanism or report that the behavior is unavailable; callers do not
-/// need to name bubblewrap or another concrete sandbox.
+/// need to name Landlock, seccomp, or another concrete mechanism.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessBackendMode {
     /// Run actions in the host process environment, subject to runtime policy.
@@ -146,9 +135,9 @@ impl ProcessSession {
 /// Stable host-process backend boundary consumed by coding composition.
 ///
 /// The trait deliberately says nothing about how a platform enforces the
-/// selected behavior. Linux may use bubblewrap, another Unix platform may use
-/// its native process sandbox, and Windows may choose a host or isolated
-/// process implementation without changing this contract.
+/// selected behavior. Linux confines each action with Landlock and seccomp.
+/// Other targets report that isolation is unavailable instead of silently
+/// running on the host.
 pub trait ProcessBackend: Send + Sync {
     /// Creates the process session for one runtime owner.
     ///
@@ -165,6 +154,8 @@ pub struct ProcessBackendOptions {
     path_rules: Vec<PathAccessRule>,
     /// Isolated-session capability ceiling, not a grant to an ordinary runner.
     network_requests_allowed: bool,
+    /// When false, the workspace itself is readable and not writable.
+    workspace_writable: bool,
     /// Host integrations the embedding application authorizes for isolated actions.
     host_integrations: Vec<HostIntegration>,
     gpg_agent_sockets: Option<GpgAgentSockets>,
@@ -177,6 +168,7 @@ impl Default for ProcessBackendOptions {
         Self {
             path_rules: Vec::new(),
             network_requests_allowed: true,
+            workspace_writable: true,
             host_integrations: Vec::new(),
             gpg_agent_sockets: None,
             environment_overrides: Vec::new(),
@@ -206,6 +198,15 @@ impl ProcessBackendOptions {
     #[must_use]
     pub fn with_network_requests_allowed(mut self, allowed: bool) -> Self {
         self.network_requests_allowed = allowed;
+        self
+    }
+
+    /// Keeps the workspace readable and not writable for isolated actions.
+    ///
+    /// Baseline paths such as `/tmp` stay writable. Host execution ignores this.
+    #[must_use]
+    pub fn read_only_workspace(mut self) -> Self {
+        self.workspace_writable = false;
         self
     }
 
@@ -349,21 +350,22 @@ impl LocalProcessBackend {
 
     /// Creates the current isolated local-process implementation.
     ///
-    /// On Linux, the concrete implementation currently uses bubblewrap. On
-    /// other targets it returns [`ProcessBackendError::UnsupportedIsolation`]
-    /// until that platform supplies its own backend.
+    /// On Linux, each action is confined with Landlock and, unless that action
+    /// was granted network, a seccomp filter. On macOS, each action is confined
+    /// with a Seatbelt profile. Other targets return
+    /// [`ProcessBackendError::UnsupportedIsolation`].
     ///
     /// # Errors
     ///
     /// Returns a [`ProcessBackendError`] when the workspace or sandbox
     /// environment is invalid, or when this target has no isolated backend.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn sandboxed(
         workspace_root: impl Into<PathBuf>,
         options: ProcessBackendOptions,
     ) -> Result<Self, ProcessBackendError> {
         let workspace_root = workspace_root.into();
-        let mut environment = BwrapProcessEnvironment::from_current_process()
+        let mut environment = WorkspaceProcessEnvironment::from_current_process()
             .with_host_integrations(options.host_integrations)
             .with_overrides(options.environment_overrides)?
             .validate_for_workspace(&workspace_root)?;
@@ -375,10 +377,11 @@ impl LocalProcessBackend {
             environment,
             options.path_rules,
             options.network_requests_allowed,
+            options.workspace_writable,
         ))
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub fn sandboxed(
         workspace_root: impl Into<PathBuf>,
         options: ProcessBackendOptions,
@@ -389,12 +392,13 @@ impl LocalProcessBackend {
         })
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn from_sandboxed_parts(
         workspace_root: PathBuf,
-        environment: BwrapProcessEnvironment,
+        environment: WorkspaceProcessEnvironment,
         path_rules: Vec<PathAccessRule>,
         network_requests_allowed: bool,
+        workspace_writable: bool,
     ) -> Self {
         let child_workspace_root = workspace_root.clone();
         let child_environment = environment;
@@ -406,29 +410,36 @@ impl LocalProcessBackend {
                     &child_environment,
                     &child_path_rules,
                     network_requests_allowed,
+                    workspace_writable,
                 )
             }),
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn sandboxed_session(
         workspace_root: &Path,
-        environment: &BwrapProcessEnvironment,
+        environment: &WorkspaceProcessEnvironment,
         path_rules: &[PathAccessRule],
         network_requests_allowed: bool,
+        workspace_writable: bool,
     ) -> ProcessSession {
-        let session_permissions = BwrapSessionPermissions::new();
-        let runner = BwrapProcessRunner::new_at_workspace_root(workspace_root)
+        let session_permissions = ProcessSessionPermissions::new();
+        let mut runner = WorkspaceProcessRunner::new_at_workspace_root(workspace_root)
             .with_environment(environment.clone())
-            .with_path_rules(path_rules.iter().cloned())
-            .with_session_permissions(session_permissions.clone());
-        let permissioned_factory =
-            BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(workspace_root)
+            .with_path_rules(path_rules.iter().cloned());
+        let mut permissioned_factory =
+            WorkspaceProcessRunnerFactory::new_at_workspace_root(workspace_root)
                 .with_environment(environment.clone())
                 .with_path_rules(path_rules.iter().cloned())
-                .with_network_requests_allowed(network_requests_allowed)
-                .with_session_permissions(session_permissions);
+                .with_network_requests_allowed(network_requests_allowed);
+        if !workspace_writable {
+            runner = runner.read_only_workspace();
+            permissioned_factory = permissioned_factory.read_only_workspace();
+        }
+        let runner = runner.with_session_permissions(session_permissions.clone());
+        let permissioned_factory =
+            permissioned_factory.with_session_permissions(session_permissions);
         ProcessSession::from_parts(
             AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
             Arc::new(runner),
@@ -469,7 +480,7 @@ impl PermissionedProcessRunnerFactory for UnrestrictedPermissionedProcessRunnerF
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     use super::ProcessBackendError;
     use super::{
         LocalProcessBackend, ProcessBackend, ProcessBackendMode, ProcessBackendOptions,
@@ -498,7 +509,7 @@ mod tests {
         assert_ne!(ProcessBackendMode::Host, ProcessBackendMode::Isolated);
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn backend_selection_binds_admission_to_the_selected_behavior() {
         let temp = tempfile::tempdir().expect("temporary workspace should be created");
@@ -529,7 +540,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn isolated_backend_reports_unavailable_platform() {
         let temp = tempfile::tempdir().expect("temporary workspace should be created");
@@ -552,5 +563,6 @@ mod tests {
         assert!(options.path_rules().is_empty());
         assert!(options.host_integrations().is_empty());
         assert!(options.environment_overrides().is_empty());
+        assert!(options.workspace_writable);
     }
 }

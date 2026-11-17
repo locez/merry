@@ -510,9 +510,9 @@ impl RuntimeBuilder {
 
     /// Opts in to constructing a process runner per approved permission request.
     ///
-    /// This is the preferred path for sandbox backends such as bubblewrap where
-    /// approved capabilities must be materialized into each new action
-    /// sandbox while remaining active for the current runtime session.
+    /// This is the preferred path when approved capabilities must be
+    /// materialized into each new action while remaining active for the
+    /// current runtime session.
     #[must_use]
     pub fn permissioned_process_runner_factory(
         mut self,

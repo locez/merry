@@ -6,7 +6,6 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-pub(super) const BWRAP_PROGRAM: &str = "bwrap";
 pub(super) const ACTION_SANDBOX_HOME_FALLBACK: &str = "/home/merry";
 pub(super) const ACTION_SANDBOX_TMPDIR: &str = "/tmp";
 pub(super) const ACTION_SANDBOX_PATH_FALLBACK: &str = "/usr/local/bin:/usr/bin:/bin";
@@ -14,8 +13,8 @@ pub(super) const ACTION_SANDBOX_PATH_FALLBACK: &str = "/usr/local/bin:/usr/bin:/
 /// PATH value that Merry passes to sandboxed action commands.
 ///
 /// The value is the current process `PATH` when it is set and non-empty,
-/// otherwise the action sandbox fallback used when a bubblewrap action
-/// environment is built. Callers that describe the action environment, such as
+/// otherwise the fallback used when an action environment is built. Callers
+/// that describe the action environment, such as
 /// a prompt naming the command-line tools a sandboxed command may use, resolve
 /// the value through here so the description follows the PATH the sandbox
 /// actually passes instead of guessing.
@@ -28,15 +27,11 @@ pub fn action_process_path() -> OsString {
 
 /// Host-derived paths used to construct one action sandbox.
 ///
-/// The HOME, PATH, and non-policy environment variables preserve the caller's
-/// process environment. The action namespace starts from a read-only view of
-/// its parent filesystem; workspace, approved path, and host-integration mounts
-/// then overlay the specific writable or temporarily exposed locations. The
-/// source temporary directory is mounted at `/tmp` for every action, so an
-/// outer session tmpfs remains shared while per-action bubblewrap namespaces
-/// stay isolated.
+/// HOME, PATH, and the rest of the caller's environment reach the child. The
+/// confinement layer then grants the workspace, baseline directories, and any
+/// enabled host-integration endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BwrapProcessEnvironment {
+pub struct WorkspaceProcessEnvironment {
     pub(super) path: OsString,
     pub(super) home: PathBuf,
     pub(super) tmp_source: PathBuf,
@@ -60,7 +55,7 @@ pub(super) struct HostIntegrationBinding {
     pub(super) environment_value: Option<OsString>,
 }
 
-impl BwrapProcessEnvironment {
+impl WorkspaceProcessEnvironment {
     /// Builds an environment layout from the current process environment.
     ///
     /// The resulting action plan intentionally does not use `--clearenv`; the
@@ -140,10 +135,78 @@ impl BwrapProcessEnvironment {
         self
     }
 
-    pub(super) fn gpg_client(&self) -> Option<&crate::GpgAgentSockets> {
+    pub(crate) fn gpg_client(&self) -> Option<&crate::GpgAgentSockets> {
         self.gpg_agent_sockets
             .as_ref()
             .filter(|_| self.host_integrations.contains(&HostIntegration::GpgAgent))
+    }
+
+    pub(crate) fn path_value(&self) -> &OsStr {
+        &self.path
+    }
+
+    pub(crate) fn home_path(&self) -> &Path {
+        &self.home
+    }
+
+    pub(crate) fn temporary_directory(&self) -> &Path {
+        &self.tmp_source
+    }
+
+    pub(crate) fn environment_overrides(&self) -> &[(OsString, OsString)] {
+        &self.overrides
+    }
+
+    pub(crate) fn integration_enabled(&self, integration: HostIntegration) -> bool {
+        self.host_integrations.contains(&integration)
+    }
+
+    /// Socket and public client files an enabled integration may open.
+    pub(crate) fn sandbox_socket_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self
+            .host_integration_bindings()
+            .into_iter()
+            .map(|binding| binding.socket)
+            .collect::<Vec<_>>();
+        if let Some(sockets) = self.gpg_client() {
+            paths.extend(sockets.paths().map(Path::to_path_buf));
+        }
+        paths
+    }
+
+    /// Existing SSH trust files for an enabled agent. Private keys stay out.
+    pub(crate) fn ssh_known_hosts_paths(&self) -> Vec<PathBuf> {
+        if !self.integration_enabled(HostIntegration::SshAgent) {
+            return Vec::new();
+        }
+        crate::ssh_known_hosts(&self.home)
+            .into_iter()
+            .filter(|path| path.exists())
+            .collect()
+    }
+
+    /// Public keyring files for an enabled GnuPG agent.
+    pub(crate) fn gpg_public_keyrings(&self) -> Vec<PathBuf> {
+        self.gpg_client()
+            .map(|sockets| {
+                sockets
+                    .public_keyrings()
+                    .filter(|path| path.exists())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Environment assignments for integrations this action enabled.
+    pub(crate) fn integration_environment(&self) -> Vec<(String, String)> {
+        let mut pairs = Vec::new();
+        for binding in self.host_integration_bindings() {
+            let Some(value) = integration_environment_value(&binding) else {
+                continue;
+            };
+            pairs.push(value);
+        }
+        pairs
     }
 
     /// Selects a validated SSH socket path without granting access to it.
@@ -169,10 +232,9 @@ impl BwrapProcessEnvironment {
         self
     }
 
-    /// Validates the host paths before constructing one action namespace.
+    /// Validates the host paths before constructing one action environment.
     ///
-    /// The temporary source remains the caller-selected host `TMPDIR` in
-    /// `--no-sandbox` mode, but it must resolve to a real temporary directory.
+    /// The temporary directory must resolve to a real temporary directory.
     /// The returned environment uses its resolved path so a symlink cannot
     /// change the source after validation into a non-temporary tree.
     pub fn validate_for_workspace(
@@ -284,32 +346,6 @@ impl BwrapProcessEnvironment {
         candidates
     }
 
-    /// Returns the masked paths for candidates this action did not enable.
-    ///
-    /// `bindings` is the result of [`Self::host_integration_bindings`] for the
-    /// same action, so one plan validates each endpoint exactly once.
-    pub(super) fn host_integration_hidden_paths(
-        &self,
-        bindings: &[HostIntegrationBinding],
-    ) -> Vec<PathBuf> {
-        let allowed = bindings
-            .iter()
-            .map(|binding| crate::resolve_bwrap_path(&binding.socket))
-            .collect::<Vec<_>>();
-        let mut hidden = self
-            .host_integration_candidates()
-            .into_iter()
-            .map(|binding| binding.socket)
-            .collect::<Vec<_>>();
-        if let Some(sockets) = &self.gpg_agent_sockets {
-            hidden.extend(sockets.paths().map(Path::to_path_buf));
-        }
-        hidden.retain(|path| !allowed.contains(&crate::resolve_bwrap_path(path)));
-        hidden.sort();
-        hidden.dedup();
-        hidden
-    }
-
     /// Returns the enabled integrations whose endpoints validated, in a stable
     /// order. One plan resolves this once and shares it between mounts and the
     /// client environment.
@@ -321,6 +357,25 @@ impl BwrapProcessEnvironment {
                     && validate_host_socket(&binding.socket).is_ok()
             })
             .collect()
+    }
+}
+
+fn integration_environment_value(binding: &HostIntegrationBinding) -> Option<(String, String)> {
+    match binding.integration {
+        HostIntegration::SshAgent => binding
+            .socket
+            .to_str()
+            .map(|path| ("SSH_AUTH_SOCK".to_owned(), path.to_owned())),
+        HostIntegration::SessionBus => binding
+            .environment_value
+            .as_ref()
+            .and_then(|value| value.to_str())
+            .map(|value| ("DBUS_SESSION_BUS_ADDRESS".to_owned(), value.to_owned())),
+        HostIntegration::GpgAgent => binding
+            .environment_value
+            .as_ref()
+            .and_then(|value| value.to_str())
+            .map(|value| ("GNUPGHOME".to_owned(), value.to_owned())),
     }
 }
 

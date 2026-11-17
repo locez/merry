@@ -43,6 +43,8 @@ pub(crate) struct HeadlessCodingRuntimeInput<'a> {
     pub(crate) skill_roots: Vec<PathBuf>,
     pub(crate) subagents: super::CodingSubagentsConfig,
     pub(crate) workspace_tool_limits: Option<merry_tools::WorkspaceToolLimits>,
+    /// When false, `AGENTS.md` stays unloaded and `apply_patch` cannot write.
+    pub(crate) workspace_writable: bool,
 }
 
 #[cfg(test)]
@@ -133,6 +135,7 @@ pub(crate) fn build_coding_runtime(
         skill_roots: options.skill_roots,
         subagents: options.subagents,
         workspace_tool_limits: options.workspace_tool_limits,
+        workspace_writable: true,
     })
 }
 
@@ -163,6 +166,9 @@ fn build_coding_runtime_from_headless_input(
     }
     if let Some(role) = input.approval_review {
         coding_input = coding_input.with_model_role(role);
+    }
+    if !input.workspace_writable {
+        coding_input = coding_input.read_only_workspace();
     }
     Ok(CodingRuntimeBuilder::new(coding_input).permission_policy(permission))
 }

@@ -3,7 +3,7 @@
 
 use crate::UnrestrictedPermissionedProcessRunnerFactory;
 use crate::process_runner::tests::permission_request;
-use crate::process_runner::{BwrapProcessRunner, TokioProcessRunner};
+use crate::process_runner::{TokioProcessRunner, WorkspaceProcessRunner};
 use merry_runtime::{
     PermissionedProcessRunnerFactory, ProcessRunner, StaticPermissionedProcessRunnerFactory,
 };
@@ -13,7 +13,7 @@ use std::sync::Arc;
 #[test]
 fn static_permissioned_factory_rejects_requested_path_capabilities() {
     let factory = StaticPermissionedProcessRunnerFactory::new(Arc::new(
-        BwrapProcessRunner::new_at_workspace_root("/workspace/merry"),
+        WorkspaceProcessRunner::new_at_workspace_root("/workspace/merry"),
     ));
     let request = permission_request(json!({
         "requested": {

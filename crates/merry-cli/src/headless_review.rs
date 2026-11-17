@@ -17,8 +17,7 @@ mod terminal;
 /// `merry run -` reads the task from stdin to end-of-file, so stdin can no
 /// longer carry answers: reusing it would read that end-of-file and silently
 /// deny every request. Those runs answer on the controlling terminal instead,
-/// or on the terminal device the outer sandbox parent bound into the sandbox,
-/// and deny with an explicit reason when the process has neither.
+/// and deny with an explicit reason when the process has none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReviewInputChannel {
     Stdin,
@@ -27,14 +26,9 @@ pub(crate) enum ReviewInputChannel {
 
 /// Terminal paths tried, in order, for a run whose task came from stdin.
 ///
-/// `/dev/tty` is the controlling terminal. Under the outer sandbox on Linux,
-/// `--new-session` makes it unopenable, and the parent binds its terminal
-/// device at a second path instead; see `sandbox::review_terminal`.
+/// `/dev/tty` is the controlling terminal.
 fn review_terminal_paths() -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from("/dev/tty")];
-    #[cfg(target_os = "linux")]
-    paths.push(PathBuf::from(crate::sandbox::SANDBOX_REVIEW_TERMINAL_PATH));
-    paths
+    vec![PathBuf::from("/dev/tty")]
 }
 
 /// Reason recorded when a run has no channel to answer permission review on.
@@ -45,7 +39,7 @@ const NO_REVIEW_INPUT_REASON: &str =
 const NO_REVIEW_INPUT_NOTICE: &str = concat!(
     "\nNo input channel for permission review: the task was read from stdin and ",
     "no terminal is available to answer on. Denying. Pass the task on the command ",
-    "line, or use --approval-policy model_only or deny, for runs without a terminal.\n"
+    "line, or use --auto-fallback deny, --permission-mode deny, or --always-approve, for runs without a terminal.\n"
 );
 
 pub(crate) struct HeadlessPermissionReviewer {
@@ -477,7 +471,7 @@ mod tests {
     #[test]
     fn cancelling_an_unanswered_terminal_review_denies_it_and_lets_the_runtime_stop() {
         use super::{HeadlessPermissionReviewer, ReviewInputChannel};
-        use crate::sandbox::review_terminal::tests::open_pseudo_terminal;
+        use crate::headless_review::terminal::tests::open_pseudo_terminal;
         use std::time::Duration;
 
         let terminal = open_pseudo_terminal();

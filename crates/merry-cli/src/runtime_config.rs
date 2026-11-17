@@ -1,13 +1,16 @@
 use crate::cli_error::{CliError, unexpected};
 use crate::coding::ActionProcessBackendOptions;
 use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
-use crate::sandbox::default_inner_development_path_rules;
 use merry_core::SessionId;
 use merry_llm::{GenerationConfig, ReasoningEffort, ServiceTier};
 use merry_runtime::{
     CompactionConfig, PathAccess, PathAccessRule, PathAccessRuleSource, Runtime, RuntimeBuilder,
 };
-use std::{env, ffi::OsString, path::PathBuf};
+use std::{
+    env,
+    ffi::OsString,
+    path::{Component, Path, PathBuf},
+};
 
 pub(crate) fn validate_loaded_config(
     config: Option<&MerryConfig>,
@@ -25,7 +28,7 @@ pub(crate) fn validate_loaded_config(
     let _ = config.skill_roots()?;
     let _ = config.runtime_models()?;
     let _ = config.profile();
-    let _ = config.cli_defaults();
+    let _ = config.cli_defaults()?;
     let tui_config = config.tui_config()?;
     crate::config::validate_tui_config(&tui_config)?;
     config.validate_provider_settings_if_present()?;
@@ -90,13 +93,58 @@ pub(crate) fn main_reasoning_effort(
         .and_then(|provider| provider.reasoning_effort))
 }
 
+/// Paths ordinary local development commands can use without another grant.
+///
+/// Cargo's registry and git database, and the XDG cache, are writable. Binaries
+/// and rustup toolchains stay read-only. Credentials under the home directory
+/// are not included.
+fn default_development_path_rules(home: &Path) -> Vec<PathAccessRule> {
+    let cargo_home = env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".cargo"));
+    let rustup_home = env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".rustup"));
+    let cache_home = env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".cache"));
+
+    [
+        (home.join(".local/bin"), PathAccess::ReadOnly),
+        (cargo_home.join("bin"), PathAccess::ReadOnly),
+        (cargo_home.join("registry"), PathAccess::ReadWrite),
+        (cargo_home.join("git"), PathAccess::ReadWrite),
+        (rustup_home.join("toolchains"), PathAccess::ReadOnly),
+        (cache_home, PathAccess::ReadWrite),
+    ]
+    .into_iter()
+    .filter(|(path, _)| is_clean_absolute_path(path))
+    .map(|(path, access)| {
+        PathAccessRule::new(
+            path,
+            access,
+            PathAccessRuleSource::DefaultDevelopmentBaseline,
+        )
+    })
+    .collect()
+}
+
+fn is_clean_absolute_path(path: &Path) -> bool {
+    path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+}
+
 /// Builds the action backend inputs that need no asynchronous discovery.
 ///
 /// GnuPG socket discovery has to run on the async runtime, so this is the
 /// synchronous base for [`prepared_action_process_backend_options`], which every
-/// product surface uses. Trusted global configuration preauthorizes the inner
-/// action sandbox here; the per-action endpoint checks still happen in the
-/// process backend.
+/// product surface uses. Trusted global configuration preauthorizes those
+/// paths here; the per-action endpoint checks still happen in the process backend.
 fn action_process_backend_options(
     config: Option<&MerryConfig>,
 ) -> Result<ActionProcessBackendOptions, config::ConfigError> {
@@ -104,7 +152,7 @@ fn action_process_backend_options(
         .map(|config| config.home().to_path_buf())
         .or_else(|| env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/home/merry"));
-    let mut path_rules = default_inner_development_path_rules(&home);
+    let mut path_rules = default_development_path_rules(&home);
     if let Some(config) = config {
         path_rules.extend(config.trusted_global_path_rules()?);
     }
@@ -150,10 +198,10 @@ pub(crate) fn configured_runtime_builder(
 
 pub(crate) async fn prepared_action_process_backend_options(
     config: Option<&MerryConfig>,
-    mode: crate::coding::ProcessExecutionMode,
+    mode: crate::coding::SandboxMode,
 ) -> Result<ActionProcessBackendOptions, CliError> {
     let options = action_process_backend_options(config).map_err(unexpected)?;
-    if !mode.uses_inner_sandbox() {
+    if !mode.uses_action_sandbox() {
         return Ok(options);
     }
     let paths = XdgPaths::from_env().map_err(unexpected)?;
@@ -186,10 +234,31 @@ pub(crate) async fn prepared_action_process_backend_options(
 mod network_tests;
 
 #[cfg(test)]
+fn temp_home_outside_baseline_writes() -> tempfile::TempDir {
+    let parent = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir() && !is_baseline_write_path(path))
+        .or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir() && !is_baseline_write_path(path))
+        })
+        .expect("a writable directory outside /tmp, /var/tmp, and /dev");
+    tempfile::tempdir_in(parent).expect("fixture home outside the baseline write allow list")
+}
+
+#[cfg(test)]
+fn is_baseline_write_path(path: &Path) -> bool {
+    ["/tmp", "/var/tmp", "/dev", "/dev/shm", "/dev/pts"]
+        .iter()
+        .any(|root| path == Path::new(root) || path.starts_with(root))
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         action_process_backend_options, configured_runtime_builder, generation_config,
-        validate_loaded_config,
+        temp_home_outside_baseline_writes, validate_loaded_config,
     };
     use crate::config::{MerryConfig, XdgPaths};
     use crate::runtime_events::collect_runtime_step_events;
@@ -270,7 +339,8 @@ readwrite_paths = ["/srv/trusted-writable"]
         assert_eq!(writable.source(), PathAccessRuleSource::TrustedGlobalConfig);
         assert!(options.path_rules().iter().any(|rule| {
             rule.source() == PathAccessRuleSource::DefaultDevelopmentBaseline
-                && rule.access() == merry_runtime::PathAccess::ReadOnly
+                && rule.access() == merry_runtime::PathAccess::ReadWrite
+                && rule.path().ends_with("registry")
         }));
     }
 
@@ -315,7 +385,7 @@ api_key_file = "managed/secrets/opencode.key"
     async fn product_private_paths_are_not_inherited_as_task_grants() {
         use merry_process::{LocalProcessBackend, ProcessBackend, ProcessBackendMode};
         use merry_runtime::{ProcessActionIntent, ProcessEnvPolicy, ProcessRunnerContext};
-        let fixture = tempfile::tempdir().unwrap();
+        let fixture = temp_home_outside_baseline_writes();
         let paths = XdgPaths::from_parts(
             fixture.path().to_path_buf(),
             Some(fixture.path().join("config")),
@@ -697,9 +767,14 @@ retained_model_turns = 2
         )
         .await
         .expect("tail two step should run");
+        // The 12_000-token window leaves about 7_500 tokens under the hard
+        // watermark. The old turn is already near that line, so this message
+        // crosses it. It also has to leave room for the checkpoint ceiling and
+        // the two retained turns; a larger message makes that tail not fit, and
+        // the runtime then never calls the compaction model.
         collect_runtime_step_events(
             &runtime,
-            StepInput::user_text(&"current user from configured builder ".repeat(600))
+            StepInput::user_text(&"current user from configured builder ".repeat(200))
                 .expect("valid input"),
             context,
         )

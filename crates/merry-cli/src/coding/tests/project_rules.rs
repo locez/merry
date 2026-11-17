@@ -83,6 +83,52 @@ async fn coding_projects_root_agents_in_the_stable_prefix() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn read_only_workspace_does_not_load_agents_md() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+    std::fs::write(
+        workspace.join("AGENTS.md"),
+        "Read only workspace must hide this sentinel.\n",
+    )
+    .expect("write root project rules");
+    let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
+        response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
+    })]]);
+    let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
+    let factory = Arc::new(merry_runtime::StaticPermissionedProcessRunnerFactory::new(
+        Arc::clone(&runner),
+    ));
+    let mut input = headless_input(
+        "read-only-workspace-skips-agents",
+        &workspace,
+        Arc::new(provider.clone()),
+        runner,
+        factory,
+    );
+    input.workspace_writable = false;
+    let runtime = build_headless_coding(input).expect("runtime should build");
+
+    collect_runtime_step_events(
+        &runtime,
+        StepInput::user_text("Inspect project rules.").expect("valid input"),
+        StepContext::default(),
+    )
+    .await
+    .expect("runtime step should complete");
+
+    let request = &provider.recorded_requests()[0];
+    let text = request
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!text.contains("Read only workspace must hide this sentinel."));
+    assert!(!text.contains("project-rules-source:AGENTS.md"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn coding_omits_project_rules_when_root_agents_is_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");

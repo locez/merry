@@ -104,6 +104,7 @@ async fn runtime_process_stays_running_and_animates_until_the_backend_completes(
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
             workspace_tool_limits: None,
+            workspace_writable: true,
         })
         .expect("coding runtime should build");
         let run = runtime

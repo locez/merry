@@ -3,12 +3,11 @@
 use crate::{
     cli_error::{CliError, debug_openai_usage_error, unexpected, usage_error},
     coding::{
-        ApprovalPolicy, CodingPermissionPolicy, HeadlessCodingRuntimeInput, ProcessExecutionMode,
-        action_process_runner_for_mode, build_headless_coding_with_policy_composition,
-        coding_agent_process_admission, coding_agent_requires_sandbox_error,
-        resume_headless_coding_composition_with_loaded_session,
+        AutoFallback, CodingPermissionPolicy, HeadlessCodingRuntimeInput, PermissionMode,
+        SandboxMode, action_process_runner_for_mode, build_headless_coding_with_policy_composition,
+        coding_agent_process_admission, resume_headless_coding_composition_with_loaded_session,
     },
-    config::MerryConfig,
+    config::{MerryConfig, XdgPaths},
     headless_review::{HeadlessPermissionReviewer, ReviewInputChannel},
     mcp_tools::{McpSession, discover_configured_mcp_tools, write_startup_warnings},
     provider_config::{
@@ -21,14 +20,13 @@ use crate::{
         automatic_compaction_config, generation_config, prepared_action_process_backend_options,
         subagents_config,
     },
-    sandbox::ChildHandoff as SandboxChildHandoff,
+    workspace_trust::{self, TrustWorkspace},
 };
 use merry_core::SessionId;
 use merry_runtime::{
     AgentLoopResult, AgentLoopStatus, FileSessionStore, LoadedSession, SessionReservation,
     StepContext, StepInput,
 };
-use std::env;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 mod output;
@@ -185,20 +183,20 @@ fn review_input_channel_for_task(task: &str) -> ReviewInputChannel {
 
 pub(crate) async fn run(
     args: &Args,
-    sandbox_child_handoff: Option<SandboxChildHandoff>,
     merry_config: Option<&MerryConfig>,
-    process_execution_mode: ProcessExecutionMode,
-    approval_policy: ApprovalPolicy,
+    sandbox_mode: SandboxMode,
+    permission_mode: PermissionMode,
+    auto_fallback: AutoFallback,
+    trust_workspace: Option<TrustWorkspace>,
 ) -> Result<RunExitStatus, CliError> {
+    let paths = XdgPaths::from_env().map_err(unexpected)?;
+    let workspace =
+        workspace_trust::resolve_product_workspace(sandbox_mode, trust_workspace, &paths)?;
     let session = RunSession::from_args(args)?;
     let session_store = FileSessionStore::default_store().map_err(unexpected)?;
     let _session_reservation = reserve_run_session(&session, &session_store).await?;
     let task = resolve_task(&args.task, tokio::io::stdin()).await?;
-    let Some(_admission) =
-        coding_agent_process_admission(sandbox_child_handoff, process_execution_mode).await
-    else {
-        return Err(coding_agent_requires_sandbox_error("run"));
-    };
+    let _admission = coding_agent_process_admission(sandbox_mode);
 
     let RuntimeProviderBundle {
         primary,
@@ -207,12 +205,13 @@ pub(crate) async fn run(
         retry_policy,
     } = runtime_provider_bundle_from_config(merry_config, debug_openai_usage_error)?;
     let RuntimePrimaryProviderConfig { provider, model } = primary;
-    let root = env::current_dir().map_err(unexpected)?;
-    let backend = action_process_runner_for_mode(
-        &root,
-        prepared_action_process_backend_options(merry_config, process_execution_mode).await?,
-        process_execution_mode,
-    )?;
+    let root = workspace.root;
+    let mut backend_options =
+        prepared_action_process_backend_options(merry_config, sandbox_mode).await?;
+    if !workspace.writable {
+        backend_options = backend_options.read_only_workspace();
+    }
+    let backend = action_process_runner_for_mode(&root, backend_options, sandbox_mode)?;
     let headless_metadata = headless_session_metadata(&session_store, &session, &root).await?;
     let loaded_session = match &session {
         RunSession::New(_) => None,
@@ -250,10 +249,12 @@ pub(crate) async fn run(
             .unwrap_or_default(),
         subagents: subagents_config(merry_config).map_err(unexpected)?.into(),
         workspace_tool_limits: None,
+        workspace_writable: workspace.writable,
     };
     let headless_reviewer = HeadlessPermissionReviewer::new();
-    let permission_policy = CodingPermissionPolicy::for_approval_policy(
-        approval_policy.into(),
+    let permission_policy = CodingPermissionPolicy::for_permission_mode(
+        permission_mode.coding_mode(),
+        auto_fallback.coding_fallback(),
         Some(headless_reviewer.source()),
     )
     .map_err(unexpected)?;

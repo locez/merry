@@ -1,18 +1,9 @@
 use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
 use merry_runtime::{PermissionRequest, PermissionedAction, ProcessActionIntent, ProcessEnvPolicy};
-use std::ffi::OsString;
 
-#[cfg(target_os = "linux")]
-mod agents;
 mod execution;
-#[cfg(target_os = "linux")]
-mod mount_initialization;
-#[cfg(target_os = "linux")]
 mod path_review;
-#[cfg(target_os = "linux")]
-mod path_review_aliases;
 mod permissions;
-mod sandbox;
 
 fn intent(cwd: Option<&str>) -> ProcessActionIntent {
     ProcessActionIntent::new(
@@ -38,30 +29,4 @@ fn permission_request(arguments: serde_json::Value) -> PermissionRequest {
 fn request_process_intent(request: &PermissionRequest) -> &ProcessActionIntent {
     let PermissionedAction::Process(intent) = request.action();
     intent
-}
-
-fn os_args(args: &[OsString]) -> Vec<String> {
-    args.iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect()
-}
-
-fn contains_sequence(args: &[String], expected: &[&str]) -> bool {
-    args.windows(expected.len()).any(|window| {
-        window
-            .iter()
-            .map(String::as_str)
-            .eq(expected.iter().copied())
-    })
-}
-
-fn count_sequence(args: &[String], expected: &[&str]) -> usize {
-    args.windows(expected.len())
-        .filter(|window| {
-            window
-                .iter()
-                .map(String::as_str)
-                .eq(expected.iter().copied())
-        })
-        .count()
 }

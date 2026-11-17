@@ -1,11 +1,12 @@
-use super::{contains_sequence, os_args, permission_request, request_process_intent};
+use super::{permission_request, request_process_intent};
 use crate::process_runner::{
-    BwrapPermissionedProcessRunnerFactory, BwrapProcessRunner, BwrapSessionPermissions,
-    TokioProcessRunner,
+    TokioProcessRunner, WorkspaceProcessEnvironment, WorkspaceProcessRunner,
+    WorkspaceProcessRunnerFactory,
 };
 use merry_runtime::{
     PathAccess, PathAccessRule, PathAccessRuleSource, PermissionedProcessRunnerFactory,
     ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
+    ProcessRunnerOutput,
 };
 use serde_json::json;
 use std::ffi::OsString;
@@ -13,8 +14,8 @@ use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
-async fn bwrap_permissioned_factory_runner_for_invalid_request_fails_closed() {
-    let factory = BwrapPermissionedProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
+async fn permissioned_factory_runner_for_invalid_request_fails_closed() {
+    let factory = WorkspaceProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
         .with_path_rules([PathAccessRule::new(
             PathBuf::from("/workspace/merry/secrets"),
             PathAccess::Deny,
@@ -133,14 +134,10 @@ async fn tokio_process_runner_preserves_non_utf8_output() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn bwrap_process_runner_reuses_tmp_and_writes_workspace() {
+async fn workspace_process_runner_reuses_tmp_and_writes_workspace() {
     let workspace = tempfile::tempdir().expect("workspace tempdir should be created");
     let marker = format!("merry-process-runner-{}", std::process::id());
-    // This container cannot create a network namespace; filesystem and
-    // temporary-directory behavior are independent of that capability.
-    let runner = BwrapProcessRunner::new_at_workspace_root(workspace.path())
-        .allow_network()
-        .with_bwrap_program("/usr/bin/bwrap");
+    let runner = WorkspaceProcessRunner::new_at_workspace_root(workspace.path()).allow_network();
 
     let write_tmp = ProcessActionIntent::new(
         vec![
@@ -161,8 +158,8 @@ async fn bwrap_process_runner_reuses_tmp_and_writes_workspace() {
             ProcessRunnerContext::new(CancellationToken::new()),
         )
         .await
-        .expect("first bwrap action should run");
-    assert!(first.ok(), "first bwrap action failed: {first:?}");
+        .expect("first workspace action should run");
+    assert!(first.ok(), "first workspace action failed: {first:?}");
 
     let read_tmp = ProcessActionIntent::new(
         vec![
@@ -183,8 +180,8 @@ async fn bwrap_process_runner_reuses_tmp_and_writes_workspace() {
             ProcessRunnerContext::new(CancellationToken::new()),
         )
         .await
-        .expect("second bwrap action should run");
-    assert!(second.ok(), "second bwrap action failed: {second:?}");
+        .expect("second workspace action should run");
+    assert!(second.ok(), "second workspace action failed: {second:?}");
     assert_eq!(second.stdout_text(), "tmp-ok");
 
     let write_workspace = ProcessActionIntent::new(
@@ -219,11 +216,9 @@ async fn bwrap_process_runner_reuses_tmp_and_writes_workspace() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn bwrap_git_init_allows_unreviewed_initialization_and_requires_later_git_write_grant() {
+async fn workspace_git_init_and_local_config_need_no_extra_grant() {
     let workspace = tempfile::tempdir().expect("workspace tempdir should be created");
-    let runner = BwrapProcessRunner::new_at_workspace_root(workspace.path())
-        .allow_network()
-        .with_bwrap_program("/usr/bin/bwrap");
+    let runner = WorkspaceProcessRunner::new_at_workspace_root(workspace.path()).allow_network();
     let init_intent = ProcessActionIntent::new(
         vec!["git".to_owned(), "init".to_owned(), ".".to_owned()],
         None,
@@ -241,14 +236,8 @@ async fn bwrap_git_init_allows_unreviewed_initialization_and_requires_later_git_
         )
         .await
         .expect("git init should return process output");
-    assert!(
-        initialized.ok(),
-        "unreviewed git init should succeed: {initialized:?}"
-    );
-    assert!(
-        workspace.path().join(".git").is_dir(),
-        "unreviewed git init should persist host metadata"
-    );
+    assert!(initialized.ok(), "git init should succeed: {initialized:?}");
+    assert!(workspace.path().join(".git").is_dir());
 
     let modify_intent = ProcessActionIntent::new(
         vec![
@@ -265,79 +254,130 @@ async fn bwrap_git_init_allows_unreviewed_initialization_and_requires_later_git_
         4096,
     )
     .expect("git config intent should be valid");
-    let denied_plan = runner
-        .plan_for(&modify_intent)
-        .expect("later git plan should build");
-    let git_path = workspace.path().join(".git");
-    let git_path = git_path.to_str().expect("git path should be utf-8");
-    let denied_args = os_args(&denied_plan.args);
-    assert!(contains_sequence(
-        &denied_args,
-        &["--ro-bind", git_path, git_path]
-    ));
-    let denied = runner
-        .run(
-            modify_intent.clone(),
-            ProcessRunnerContext::new(CancellationToken::new()),
-        )
-        .await
-        .expect("blocked git modification should still return process output");
-    assert!(
-        !denied.ok(),
-        "unreviewed git modification should fail: {denied:?}"
-    );
-
-    let session_permissions = BwrapSessionPermissions::new();
-    let factory = BwrapPermissionedProcessRunnerFactory::new_at_workspace_root(workspace.path())
-        .with_bwrap_program("/usr/bin/bwrap")
-        .with_session_permissions(session_permissions.clone());
-    let request = permission_request(json!({
-        "requested": {
-            "network": true,
-            "paths": [{ "path": ".git", "access": "rw" }]
-        },
-        "for_action": {
-            "command": "git config --local user.name Merry",
-            "cwd": null
-        }
-    }));
-    factory
-        .validate_request(&request)
-        .expect("reviewed git modification request should validate");
-    let reviewed = factory.runner_for(&request);
-    let approved = reviewed
-        .run(
-            request_process_intent(&request).clone(),
-            ProcessRunnerContext::new(CancellationToken::new()),
-        )
-        .await
-        .expect("reviewed git modification should return process output");
-    assert!(
-        approved.ok(),
-        "reviewed git modification failed: {approved:?}"
-    );
-
-    let later = BwrapProcessRunner::new_at_workspace_root(workspace.path())
-        .allow_network()
-        .with_bwrap_program("/usr/bin/bwrap")
-        .with_session_permissions(session_permissions);
-    let later_plan = later
-        .plan_for(&modify_intent)
-        .expect("later process plan should build");
-    let later_args = os_args(&later_plan.args);
-    assert!(contains_sequence(
-        &later_args,
-        &["--ro-bind", git_path, git_path]
-    ));
-    let later_denied = later
+    let configured = runner
         .run(
             modify_intent,
             ProcessRunnerContext::new(CancellationToken::new()),
         )
         .await
-        .expect("later unreviewed git modification should return process output");
+        .expect("git config should return process output");
     assert!(
-        !later_denied.ok(),
-        "later git modification should require another review: {later_denied:?}"
+        configured.ok(),
+        "workspace git metadata should stay writable: {configured:?}"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn read_only_workspace_can_read_and_cannot_write() {
+    let workspace =
+        tempfile::tempdir_in(fixture_root()).expect("workspace outside baseline writes");
+    std::fs::write(workspace.path().join("note.txt"), "hello").expect("note");
+    let runner =
+        WorkspaceProcessRunner::new_at_workspace_root(workspace.path()).read_only_workspace();
+    let context = ProcessRunnerContext::new(CancellationToken::new());
+
+    let read = run_shell(&runner, "cat note.txt", &context).await;
+    assert!(read.ok(), "read should succeed: {}", read.stderr_text());
+    assert_eq!(read.stdout_text(), "hello");
+
+    let write = run_shell(&runner, "touch denied.txt", &context).await;
+    assert!(
+        !write.ok(),
+        "a read-only workspace must reject writes: {}",
+        write.stderr_text()
+    );
+    assert!(!workspace.path().join("denied.txt").exists());
+
+    let temporary = run_shell(
+        &runner,
+        "touch /tmp/merry-readonly-workspace-marker",
+        &context,
+    )
+    .await;
+    assert!(
+        temporary.ok(),
+        "/tmp stays writable: {}",
+        temporary.stderr_text()
+    );
+    let _ = std::fs::remove_file("/tmp/merry-readonly-workspace-marker");
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn sandboxed_git_status_reads_the_user_ignore_file() {
+    let root = tempfile::tempdir_in(fixture_root()).expect("fixture root");
+    let home = root.path().join("home");
+    let workspace = root.path().join("repo");
+    std::fs::create_dir_all(home.join(".config/git")).expect("git config dir");
+    std::fs::write(home.join(".config/git/ignore"), "*.log\n").expect("ignore");
+    std::fs::write(home.join(".git-credentials"), "secret\n").expect("credentials");
+    std::fs::create_dir_all(&workspace).expect("repo");
+    let init = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&workspace)
+        .env("HOME", &home)
+        .status()
+        .expect("git init");
+    assert!(init.success(), "host git init failed");
+
+    let environment =
+        WorkspaceProcessEnvironment::new("/usr/bin:/bin", &home, "/tmp").expect("environment");
+    let runner =
+        WorkspaceProcessRunner::new_at_workspace_root(&workspace).with_environment(environment);
+    let context = ProcessRunnerContext::new(CancellationToken::new());
+    let status = run_shell(&runner, "git status --short --branch", &context).await;
+    assert!(
+        status.ok(),
+        "git status should read the user ignore file: {}",
+        status.stderr_text()
+    );
+
+    let secret = run_shell(&runner, "cat \"$HOME/.git-credentials\"", &context).await;
+    assert!(
+        !secret.ok(),
+        "git credentials stay unreadable: {}",
+        secret.stdout_text()
+    );
+}
+
+#[cfg(target_os = "linux")]
+async fn run_shell(
+    runner: &WorkspaceProcessRunner,
+    command: &str,
+    context: &ProcessRunnerContext,
+) -> ProcessRunnerOutput {
+    let intent = ProcessActionIntent::new(
+        vec!["/bin/sh".to_owned(), "-c".to_owned(), command.to_owned()],
+        None,
+        ProcessEnvPolicy::empty(),
+        None,
+        4096,
+        4096,
+    )
+    .expect("shell intent");
+    runner
+        .run(intent, context.clone())
+        .await
+        .expect("sandboxed command should return output")
+}
+
+#[cfg(target_os = "linux")]
+fn fixture_root() -> PathBuf {
+    for candidate in [
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::var_os("HOME"),
+    ] {
+        let Some(value) = candidate else {
+            continue;
+        };
+        let path = PathBuf::from(value);
+        let baseline = ["/tmp", "/var/tmp", "/dev", "/dev/shm", "/dev/pts"]
+            .iter()
+            .any(|root| path == Path::new(root) || path.starts_with(root));
+        if path.is_dir() && !baseline {
+            return path;
+        }
+    }
+    panic!("need a directory outside /tmp, /var/tmp, and /dev");
 }
