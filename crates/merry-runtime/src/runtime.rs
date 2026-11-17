@@ -56,7 +56,7 @@ mod tool_execution;
 
 use self::auto_compaction::{
     compact_context_once_inner, compaction_input_for_policy,
-    install_citation_compaction_candidate_transactionally,
+    install_summary_compaction_transactionally,
 };
 pub use self::builder::RuntimeBuilder;
 #[cfg(test)]
@@ -572,20 +572,20 @@ impl Runtime {
         compaction_input_for_policy(&self.inner, policy).await
     }
 
-    /// Installs a validated citation compaction candidate and removes the covered history prefix.
-    pub async fn install_citation_compaction_candidate(
+    /// Installs a prose compaction summary and drops the covered history from the prompt.
+    pub async fn install_summary_compaction(
         &self,
         input: CitationCompactionInput,
-        candidate_json: &str,
+        summary: &str,
     ) -> Result<CompactionOutcome, RuntimeError> {
         let active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
                 session_id: self.inner.session_id.clone(),
             })?;
-        install_citation_compaction_candidate_transactionally(
+        install_summary_compaction_transactionally(
             Arc::clone(&self.inner),
             input,
-            candidate_json,
+            summary,
             CancellationToken::new(),
             active_permit,
         )

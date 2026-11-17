@@ -9,9 +9,8 @@ use crate::{
     },
     compaction::{
         CitationCompactionInput, CitationCompactionInputParts, CitationCompactionInputPolicy,
-        CitationCompactionModelTurn, CitationCompactionPolicy,
-        CitationCompactionPreviousCheckpointInput, CitationCompactionWindowBundle, CompactionError,
-        CompactionWindowPlan, ResolvedCitationCompactionBudget, previous_checkpoint_payload,
+        CitationCompactionModelTurn, CitationCompactionPolicy, CitationCompactionWindowBundle,
+        CompactionError, CompactionWindowPlan, ResolvedCitationCompactionBudget,
     },
     session::{
         ModelTurn, ModelTurnId, ModelTurnStatus, PromptHistoryProjection, SessionState, Transcript,
@@ -339,26 +338,7 @@ impl SessionState {
             sanitize_checkpoint_component(self.session_id.as_str()),
             self.transcript.next_id().as_u64()
         ))?;
-        let previous_checkpoint_input = self.compacted_checkpoint.as_ref().map(|checkpoint| {
-            match checkpoint.citation_backed() {
-                Some(citation) => {
-                    CitationCompactionPreviousCheckpointInput::CitationBacked(citation)
-                }
-                None => CitationCompactionPreviousCheckpointInput::PlainText {
-                    text: checkpoint.text(),
-                },
-            }
-        });
-        let prior_refs = match previous_checkpoint_input.as_ref() {
-            Some(CitationCompactionPreviousCheckpointInput::CitationBacked(checkpoint)) => {
-                checkpoint.manifest().refs().to_vec()
-            }
-            Some(CitationCompactionPreviousCheckpointInput::PlainText { .. }) | None => Vec::new(),
-        };
         let mut refs_by_id = BTreeMap::new();
-        for reference in prior_refs {
-            refs_by_id.insert(reference.id().clone(), reference);
-        }
         let mut window = Vec::with_capacity(covered.len());
 
         for turn in covered {
@@ -367,11 +347,10 @@ impl SessionState {
                 // A dropped exchange is still covered history: the plan marks it
                 // compacted, it just does not travel through the payload.
                 covered_history_ids.insert(record.item.history_id);
-                // Only tool exchanges are ever omitted: the conversation text is what
-                // the checkpoint summarizes, and a ref that leaves the payload cannot
-                // be cited. Omission is whole, never half a pair, because a tool call
-                // and its result are one history item and a window that carried only
-                // one of them would be rejected as stale.
+                // Only tool exchanges are ever omitted. The conversation text stays,
+                // because that is what the summary describes. An exchange is dropped
+                // whole: a tool call and its result are one history item, and a window
+                // that carried only one of them would be rejected as stale.
                 if record.item.is_tool_exchange()
                     && retained_exchanges
                         .as_ref()
@@ -403,20 +382,12 @@ impl SessionState {
 
         let manifest =
             crate::CheckpointRefManifest::new(checkpoint_id, refs_by_id.into_values().collect())?;
-        let previous_checkpoint_snapshot = self
-            .compacted_checkpoint
-            .as_ref()
-            .and_then(crate::CompactedCheckpoint::citation_backed)
-            .cloned();
-        let previous_checkpoint = previous_checkpoint_input.map(previous_checkpoint_payload);
 
         Ok(CitationCompactionInput::new(
             CitationCompactionInputParts {
                 input_policy: CitationCompactionInputPolicy::new(policy, resolved_budget),
                 task_anchor_snapshot: self.task_anchor.clone(),
                 manifest,
-                previous_checkpoint,
-                previous_checkpoint_snapshot,
             },
             CitationCompactionWindowBundle {
                 covered_history_ids,

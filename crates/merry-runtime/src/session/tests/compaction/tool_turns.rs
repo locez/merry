@@ -100,10 +100,8 @@ fn compaction_groups_user_commentary_and_two_tool_pairs_in_one_turn() {
         )
         .expect("input builds")
         .expect("tool turn is compressible");
-    let payload: serde_json::Value =
-        serde_json::from_str(&input.to_model_payload_json().expect("payload serializes"))
-            .expect("payload parses");
-    let window = payload["window"].as_array().expect("window is an array");
+    let window = serde_json::to_value(input.covered_window()).expect("window serializes");
+    let window = window.as_array().expect("window is an array");
     assert_eq!(window.len(), 1);
     let roles = window[0]["items"]
         .as_array()
@@ -116,10 +114,10 @@ fn compaction_groups_user_commentary_and_two_tool_pairs_in_one_turn() {
         roles,
         ["user", "assistant", "tool_exchange", "tool_exchange"]
     );
-    let payload = payload.to_string();
-    assert!(payload.contains("result a"));
-    assert!(payload.contains("result b"));
-    assert!(!payload.contains("retained user"));
+    let covered = input.render_covered_segment();
+    assert!(covered.contains("result a"));
+    assert!(covered.contains("result b"));
+    assert!(!covered.contains("retained user"));
 }
 
 #[test]
@@ -196,54 +194,35 @@ fn artifact_notice_reaches_the_compaction_payload_instead_of_the_archived_body()
         )
         .expect("input builds")
         .expect("tool turn is compressible");
-    let payload = input.to_model_payload_json().expect("payload serializes");
-    // The payload carries the same notice the request shows, not the archived body.
-    // Reading the body sent a real session 916,710 payload tokens against a 360,847
-    // token request body, so no retention choice could host the compaction request;
-    // honoring the notice keeps the payload proportional to what the conversation
-    // held. The notice still names the artifact, so a checkpoint entry can cite the
-    // ref and read the body on demand.
-    let payload_json: serde_json::Value = serde_json::from_str(&payload).expect("payload parses");
-    let result = payload_json["window"][0]["items"]
+    let covered = input.render_covered_segment();
+    // The covered segment carries the same notice the request shows, not the archived body.
+    // Reading the body sent a real session 916,710 tokens against a 360,847 token request
+    // body, so no retention choice could host the compaction request; honoring the notice
+    // keeps the segment proportional to what the conversation held.
+    let window = serde_json::to_value(input.covered_window()).expect("window serializes");
+    let result = window[0]["items"]
         .as_array()
         .expect("turn items are an array")
         .iter()
         .find(|item| item["role"] == "tool_exchange")
         .map(|item| item["result"].clone())
-        .expect("covered tool exchange is in the payload");
+        .expect("covered tool exchange is in the window");
     let notice: serde_json::Value =
         serde_json::from_str(result["content"].as_str().expect("result content is text"))
             .expect("notice parses");
     assert_eq!(notice["merry_archived"], true);
     assert_eq!(notice["artifact_id"], "artifact-notice-result");
     assert_eq!(result["artifact_id"], "artifact-notice-result");
-    assert!(!payload.contains("archived ballast"));
+    assert!(!covered.contains("archived ballast"));
     assert!(
-        payload.len() * 10 < exact_content.len(),
-        "payload of {} bytes must stay far below the archived body of {} bytes",
-        payload.len(),
+        covered.len() * 10 < exact_content.len(),
+        "covered segment of {} bytes must stay far below the archived body of {} bytes",
+        covered.len(),
         exact_content.len()
     );
 
     session
-        .install_citation_compaction_candidate(
-            input,
-            r#"{
-              "confirmed_decisions": [],
-              "rejected_approaches": [],
-              "constraints_preferences_boundaries": [],
-              "corrected_misunderstandings": [],
-              "durable_conclusions": [{
-                "id": "c1",
-                "text": "The exact tool exchange was compacted.",
-                "refs": ["h1"]
-              }],
-              "open_questions": [],
-              "current_progress_and_next_steps": [],
-              "exact_details": [],
-              "handoffs": []
-            }"#,
-        )
+        .install_summary_compaction(input, "The exact tool exchange was compacted.")
         .expect("checkpoint installs");
 
     assert_eq!(
@@ -307,11 +286,8 @@ fn compaction_accepts_resolved_multi_tool_batches() {
         )
         .expect("resolved batch must not look stale")
         .expect("old history is compressible");
-    let payload = serde_json::from_str::<serde_json::Value>(
-        &input.to_model_payload_json().expect("payload serializes"),
-    )
-    .expect("payload parses");
-    let window = payload["window"].as_array().expect("window");
+    let window = serde_json::to_value(input.covered_window()).expect("window serializes");
+    let window = window.as_array().expect("window");
     assert_eq!(window.len(), 2);
     let tool_items = window[1]["items"].as_array().expect("tool turn items");
     assert_eq!(tool_items.len(), 2);
@@ -319,26 +295,7 @@ fn compaction_accepts_resolved_multi_tool_batches() {
     assert_eq!(tool_items[1]["role"], "tool_exchange");
 
     let outcome = session
-        .install_citation_compaction_candidate(
-            input,
-            r#"{
-              "confirmed_decisions": [],
-              "rejected_approaches": [],
-              "constraints_preferences_boundaries": [],
-              "corrected_misunderstandings": [],
-              "durable_conclusions": [
-                {
-                  "id": "c1",
-                  "text": "The older context and tool batch were compacted.",
-                  "refs": ["h0", "h4", "h3"]
-                }
-              ],
-              "open_questions": [],
-              "current_progress_and_next_steps": [],
-              "exact_details": [],
-              "handoffs": []
-            }"#,
-        )
+        .install_summary_compaction(input, "The older context and tool batch were compacted.")
         .expect("resolved batch checkpoint installs");
 
     assert_eq!(outcome.covered_model_turn_count(), 2);
@@ -400,17 +357,14 @@ fn compaction_uses_full_hidden_exchange_while_provider_projection_skips_it() {
         )
         .expect("compaction input builds")
         .expect("old visible context should be compressible");
-    let payload = serde_json::from_str::<serde_json::Value>(
-        &input.to_model_payload_json().expect("payload serializes"),
-    )
-    .expect("payload parses");
-    let window = payload["window"].as_array().expect("window is an array");
+    let window = serde_json::to_value(input.covered_window()).expect("window serializes");
+    let window = window.as_array().expect("window is an array");
     assert_eq!(window.len(), 2);
     assert_eq!(window[0]["items"][0]["role"], "user");
     assert_eq!(window[1]["items"][0]["role"], "tool_exchange");
     assert!(
-        payload
-            .to_string()
+        input
+            .render_covered_segment()
             .contains("must-not-reenter-model-context")
     );
 
@@ -467,26 +421,7 @@ async fn installing_compaction_preserves_hidden_final_output_in_full_and_stored_
         .expect("compaction input builds")
         .expect("old visible context should be compressible");
     session
-        .install_citation_compaction_candidate(
-            input,
-            r#"{
-              "confirmed_decisions": [],
-              "rejected_approaches": [],
-              "constraints_preferences_boundaries": [],
-              "corrected_misunderstandings": [],
-              "durable_conclusions": [
-                {
-                  "id": "c1",
-                  "text": "The old visible context was compacted.",
-                  "refs": ["h0"]
-                }
-              ],
-              "open_questions": [],
-              "current_progress_and_next_steps": [],
-              "exact_details": [],
-              "handoffs": []
-            }"#,
-        )
+        .install_summary_compaction(input, "The old visible context was compacted.")
         .expect("checkpoint installs");
 
     let full = session

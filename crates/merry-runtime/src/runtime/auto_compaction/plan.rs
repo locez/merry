@@ -95,7 +95,7 @@ pub(super) async fn fit_compaction_plan(
     let mut smallest_rejected_request: Option<(u64, u64)> = None;
     loop {
         attempt += 1;
-        let mut input = match preparation {
+        let input = match preparation {
             CompactionPreparation::ArchiveToolResults(input) => {
                 let reason = if tightened_coverage {
                     let Some((estimated_input_tokens, max_output_tokens)) =
@@ -126,9 +126,6 @@ pub(super) async fn fit_compaction_plan(
             }
             CompactionPreparation::ReplaceCheckpoint(input) => *input,
         };
-        if mode == CompactionRequestMode::Append {
-            budget.source.retain_visible_refs(&mut input);
-        }
         let request = match compile_fitted_compaction_request(
             &input,
             provider_config.model(),

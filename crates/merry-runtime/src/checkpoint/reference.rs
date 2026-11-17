@@ -26,16 +26,6 @@ impl CheckpointSourceKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PersistedCheckpointRef {
-    id: String,
-    source_kind: CheckpointSourceKind,
-    sequence_start: u64,
-    sequence_end: u64,
-    evidence: EvidenceRef,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointRef {
     id: CheckpointRefId,
@@ -81,31 +71,6 @@ impl CheckpointRef {
     }
 }
 
-impl From<&CheckpointRef> for PersistedCheckpointRef {
-    fn from(value: &CheckpointRef) -> Self {
-        Self {
-            id: value.id().as_str().to_owned(),
-            source_kind: value.source_kind(),
-            sequence_start: value.sequence_range().start(),
-            sequence_end: value.sequence_range().end(),
-            evidence: value.evidence().clone(),
-        }
-    }
-}
-
-impl TryFrom<PersistedCheckpointRef> for CheckpointRef {
-    type Error = CheckpointError;
-
-    fn try_from(value: PersistedCheckpointRef) -> Result<Self, Self::Error> {
-        Ok(Self::new(
-            CheckpointRefId::new(&value.id)?,
-            value.source_kind,
-            CheckpointSequenceRange::new(value.sequence_start, value.sequence_end)?,
-            value.evidence,
-        ))
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointRefManifest {
     checkpoint_id: CheckpointId,
@@ -140,24 +105,5 @@ impl CheckpointRefManifest {
     #[must_use]
     pub fn refs(&self) -> &[CheckpointRef] {
         &self.refs
-    }
-
-    pub(super) fn get(&self, id: &CheckpointRefId) -> Option<&CheckpointRef> {
-        self.refs.iter().find(|item| item.id() == id)
-    }
-
-    pub(super) fn filtered_for_checkpoint(
-        &self,
-        checkpoint_id: CheckpointId,
-        used_refs: &BTreeSet<CheckpointRefId>,
-    ) -> Result<Self, CheckpointError> {
-        Self::new(
-            checkpoint_id,
-            self.refs
-                .iter()
-                .filter(|item| used_refs.contains(item.id()))
-                .cloned()
-                .collect(),
-        )
     }
 }

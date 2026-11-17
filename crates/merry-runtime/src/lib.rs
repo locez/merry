@@ -82,15 +82,12 @@ pub use artifact::{
     ArtifactRegistry, ImageArtifactMetadata, TextEvidencePage,
 };
 pub use checkpoint::{
-    CheckpointEntry, CheckpointEntryId, CheckpointError, CheckpointHandoff,
-    CheckpointHandoffAction, CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
-    CheckpointSection, CheckpointSections, CheckpointSequenceRange, CheckpointSourceKind,
-    CheckpointValidationPolicy, CitationBackedCheckpoint, CompactedCheckpointCandidate,
+    CheckpointError, CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
+    CheckpointSequenceRange, CheckpointSourceKind,
 };
 pub use compaction::{
-    COMPACTION_PAYLOAD_TAG, CitationCompactionInput, CitationCompactionPolicy, CompactionError,
-    CompactionOutcome, ResolvedCitationCompactionBudget, citation_compaction_response_schema,
-    citation_compaction_tail_directive, compaction_payload_block,
+    CitationCompactionInput, CitationCompactionPolicy, CompactionError, CompactionOutcome,
+    ResolvedCitationCompactionBudget, citation_compaction_tail_directive,
 };
 pub use context::{
     CheckpointDecision, CompactedCheckpoint, CompactedCheckpointSummary, CompiledContext,

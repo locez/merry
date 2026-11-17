@@ -200,21 +200,14 @@ async fn rebuilt_request_keeps_four_tool_exchanges_when_five_do_not_fit() {
             .expect("directive")
             .content()
             .as_text();
-        let payload = text
-            .split_once("<merry_compaction_payload>\n")
-            .expect("payload start")
+        let history = text
+            .split_once("<merry_covered_history>\n")
+            .expect("covered history")
             .1
-            .split_once("\n</merry_compaction_payload>")
-            .expect("payload end")
+            .split_once("\n</merry_covered_history>")
+            .expect("covered history end")
             .0;
-        let payload: serde_json::Value = serde_json::from_str(payload).expect("payload");
-        let exchanges = payload["window"]
-            .as_array()
-            .expect("window")
-            .iter()
-            .flat_map(|turn| turn["items"].as_array().expect("turn items"))
-            .filter(|item| item["role"] == "tool_exchange")
-            .count();
+        let exchanges = history.matches("### Tool ").count();
         assert_eq!(
             exchanges, 4,
             "keep the largest affordable number, not a halved count"

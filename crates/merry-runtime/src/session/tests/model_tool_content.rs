@@ -172,7 +172,7 @@ async fn missing_model_artifact_is_rejected_instead_of_silently_using_full_conte
 }
 
 #[tokio::test]
-async fn compaction_uses_model_body_but_checkpoint_reads_full_artifact() {
+async fn compaction_window_uses_model_body_and_keeps_full_artifact() {
     let full = "full original evidence\n".repeat(200);
     let (mut session, result) = completed_result(&full, Some(MODEL_BODY));
     session
@@ -184,9 +184,8 @@ async fn compaction_uses_model_body_but_checkpoint_reads_full_artifact() {
         )
         .expect("input")
         .expect("covered turn");
-    let payload: serde_json::Value =
-        serde_json::from_str(&input.to_model_payload_json().expect("payload")).expect("JSON");
-    let exchange = payload["window"][0]["items"]
+    let window = serde_json::to_value(input.covered_window()).expect("window serializes");
+    let exchange = window[0]["items"]
         .as_array()
         .expect("items")
         .iter()
@@ -197,17 +196,8 @@ async fn compaction_uses_model_body_but_checkpoint_reads_full_artifact() {
         exchange["result"]["artifact_id"],
         result.artifact().id().as_str()
     );
-    let reference = input
-        .manifest()
-        .refs()
-        .iter()
-        .find(|reference| reference.evidence().artifact_id == *result.artifact().id())
-        .expect("full evidence ref")
-        .id()
-        .clone();
-    let candidate = super::rolling_compaction::checkpoint_candidate(reference.as_str());
     session
-        .install_citation_compaction_candidate(input, &candidate)
+        .install_summary_compaction(input, "Covered history was compacted.")
         .expect("install");
     let dir = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(dir.path());
@@ -217,10 +207,9 @@ async fn compaction_uses_model_body_but_checkpoint_reads_full_artifact() {
         .expect("load");
     assert_eq!(
         loaded
-            .read_checkpoint_ref_page(&reference, 0, 8192)
-            .expect("exact page")
-            .content(),
-        full
+            .read_artifact_content(result.artifact().id())
+            .expect("full evidence"),
+        ArtifactContent::text(&full)
     );
 }
 

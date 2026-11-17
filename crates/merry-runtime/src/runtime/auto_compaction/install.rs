@@ -10,18 +10,19 @@ use crate::{
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-pub(in crate::runtime) async fn install_citation_compaction_candidate_transactionally(
+pub(in crate::runtime) async fn install_summary_compaction_transactionally(
     inner: Arc<RuntimeInner>,
     input: CitationCompactionInput,
-    candidate_json: &str,
+    summary: &str,
     token: CancellationToken,
     active_permit: ActiveStepPermit,
 ) -> Result<CompactionOutcome, RuntimeError> {
+    let summary = summary.to_owned();
     let outcome = install_compaction_transaction(inner, &token, active_permit, move |session| {
-        session.prepare_citation_compaction_install(input, candidate_json)
+        session.prepare_summary_compaction_install(input, &summary)
     })
     .await?;
-    Ok(outcome.expect("prepared checkpoint replacement must carry an outcome"))
+    Ok(outcome.expect("prepared summary replacement must carry an outcome"))
 }
 
 pub(in crate::runtime) async fn install_archive_only_compaction_transactionally(

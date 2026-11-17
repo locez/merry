@@ -9,11 +9,6 @@ use crate::{
     action_audit::{ActionAuditPolicy, ActionAuditStatus},
     action_policy::{ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy},
     artifact::{ArtifactContent, ArtifactError},
-    checkpoint::{
-        CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
-        CheckpointSequenceRange, CheckpointSourceKind, CheckpointValidationPolicy,
-        CitationBackedCheckpoint, CompactedCheckpointCandidate,
-    },
     context::ContextCompiler,
     ledger::{LedgerFactKind, LedgerProjection, LedgerScope},
     memory::{
@@ -29,7 +24,6 @@ use merry_core::{
 };
 use serde_json::json;
 
-mod checkpoint_ref_persistence;
 mod checkpoint_refs;
 mod compaction;
 mod context_memory;
@@ -135,55 +129,6 @@ impl SessionStateTestExt for SessionState {
 fn test_turn_diagnostic(error: RuntimeError) -> ErrorInfo {
     ErrorInfo::new("test_model_turn", &error.to_string())
         .expect("test model turn diagnostic should be valid")
-}
-
-fn citation_plain_runtime_checkpoint_for_tests(
-    checkpoint_id: &str,
-    text: &str,
-) -> crate::CompactedCheckpoint {
-    let manifest = CheckpointRefManifest::new(
-        CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
-        vec![CheckpointRef::new(
-            CheckpointRefId::new("r1").expect("valid ref id"),
-            CheckpointSourceKind::UserMessage,
-            CheckpointSequenceRange::new(1, 1).expect("valid range"),
-            EvidenceRef::new(
-                artifact_id("checkpoint-test-source"),
-                EvidenceLocator::whole_artifact(),
-            ),
-        )],
-    )
-    .expect("valid manifest");
-    let candidate = CompactedCheckpointCandidate::from_json(&format!(
-        r#"{{
-              "confirmed_decisions": [],
-              "rejected_approaches": [],
-              "constraints_preferences_boundaries": [
-                {{
-                  "id": "c1",
-                  "text": {text_json},
-                  "refs": ["r1"]
-                }}
-              ],
-              "corrected_misunderstandings": [],
-              "durable_conclusions": [],
-              "open_questions": [],
-              "current_progress_and_next_steps": [],
-              "exact_details": [],
-              "handoffs": []
-            }}"#,
-        text_json = serde_json::to_string(text).expect("text serializes"),
-    ))
-    .expect("candidate parses");
-    let checkpoint = CitationBackedCheckpoint::from_candidate(
-        CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
-        candidate,
-        manifest,
-        CheckpointValidationPolicy::default(),
-    )
-    .expect("citation checkpoint builds");
-    crate::CompactedCheckpoint::from_citation_backed(checkpoint)
-        .expect("compacted checkpoint builds")
 }
 
 fn memory_id(value: &str) -> MemoryId {

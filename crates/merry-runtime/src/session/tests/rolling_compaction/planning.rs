@@ -53,10 +53,8 @@ fn one_shot_covers_everything_and_shortens_all_but_the_newest_tool_exchanges() {
     assert_eq!(input.window_plan().covered_turn_ids_u64(), vec![1, 2, 3]);
     assert_eq!(input.window_plan().retained_turn_ids_u64(), vec![4]);
 
-    let payload: serde_json::Value =
-        serde_json::from_str(&input.to_model_payload_json().expect("payload serializes"))
-            .expect("payload parses");
-    let covered_exchanges = payload["window"]
+    let window = serde_json::to_value(input.covered_window()).expect("window serializes");
+    let covered_exchanges = window
         .as_array()
         .expect("window is an array")
         .iter()
@@ -86,7 +84,7 @@ fn one_shot_covers_everything_and_shortens_all_but_the_newest_tool_exchanges() {
     // 225,800 tokens against a 190,400 token input budget, and a minimal marker per
     // exchange still cost about 95,000 tokens across 1,324 exchanges, so the payload
     // could not fit while any per-exchange content remained.
-    let payload_text = input.to_model_payload_json().expect("payload serializes");
+    let payload_text = input.render_covered_segment();
     for omitted in 1..=2 {
         assert!(
             !payload_text.contains(&format!("one-shot-result-{omitted}")),
@@ -416,12 +414,7 @@ fn compaction_input_contains_fact_after_1200_bytes() {
         .expect("input builds")
         .expect("old prefix is compressible");
 
-    assert!(
-        input
-            .to_model_payload_json()
-            .expect("payload serializes")
-            .contains("EXACT-END")
-    );
+    assert!(input.render_covered_segment().contains("EXACT-END"));
 }
 
 #[test]

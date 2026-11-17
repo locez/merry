@@ -18,21 +18,7 @@ fn prepared_checkpoint_install_is_read_only_until_infallible_commit() {
         session
     };
     let policy = CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy");
-    let candidate_json = r#"{
-      "confirmed_decisions": [],
-      "rejected_approaches": [],
-      "constraints_preferences_boundaries": [],
-      "corrected_misunderstandings": [],
-      "durable_conclusions": [{
-        "id": "c1",
-        "text": "The old user turn was compacted.",
-        "refs": ["h0"]
-      }],
-      "open_questions": [],
-      "current_progress_and_next_steps": [],
-      "exact_details": [],
-      "handoffs": []
-    }"#;
+    let summary = "The old user turn was compacted.";
 
     let mut expected = new_session();
     let expected_input = expected
@@ -40,8 +26,8 @@ fn prepared_checkpoint_install_is_read_only_until_infallible_commit() {
         .expect("expected input builds")
         .expect("expected input exists");
     let expected_outcome = expected
-        .install_citation_compaction_candidate(expected_input, candidate_json)
-        .expect("compatibility install succeeds");
+        .install_summary_compaction(expected_input, summary)
+        .expect("summary install succeeds");
 
     let mut session = new_session();
     let input = session
@@ -61,7 +47,7 @@ fn prepared_checkpoint_install_is_read_only_until_infallible_commit() {
         .expect("fingerprint builds before prepare");
 
     let prepared = session
-        .prepare_citation_compaction_install(input, candidate_json)
+        .prepare_summary_compaction_install(input, summary)
         .expect("checkpoint install prepares");
 
     assert_eq!(session.transcript.persisted(), transcript_before);
@@ -130,24 +116,7 @@ fn prepared_checkpoint_install_revalidation_rejects_changed_fingerprint() {
         .expect("input builds")
         .expect("input exists");
     let prepared = session
-        .prepare_citation_compaction_install(
-            input,
-            r#"{
-              "confirmed_decisions": [],
-              "rejected_approaches": [],
-              "constraints_preferences_boundaries": [],
-              "corrected_misunderstandings": [],
-              "durable_conclusions": [{
-                "id": "c1",
-                "text": "The old user turn was compacted.",
-                "refs": ["h0"]
-              }],
-              "open_questions": [],
-              "current_progress_and_next_steps": [],
-              "exact_details": [],
-              "handoffs": []
-            }"#,
-        )
+        .prepare_summary_compaction_install(input, "The old user turn was compacted.")
         .expect("install prepares");
     session.set_task_anchor(TaskAnchor::new("changed objective").expect("valid anchor"));
 
@@ -179,24 +148,7 @@ fn prepared_checkpoint_install_revalidation_rejects_pending_tool_calls() {
         .expect("input builds")
         .expect("input exists");
     let prepared = session
-        .prepare_citation_compaction_install(
-            input,
-            r#"{
-              "confirmed_decisions": [],
-              "rejected_approaches": [],
-              "constraints_preferences_boundaries": [],
-              "corrected_misunderstandings": [],
-              "durable_conclusions": [{
-                "id": "c1",
-                "text": "The old user turn was compacted.",
-                "refs": ["h0"]
-              }],
-              "open_questions": [],
-              "current_progress_and_next_steps": [],
-              "exact_details": [],
-              "handoffs": []
-            }"#,
-        )
+        .prepare_summary_compaction_install(input, "The old user turn was compacted.")
         .expect("install prepares");
     session
         .pending_tool_calls

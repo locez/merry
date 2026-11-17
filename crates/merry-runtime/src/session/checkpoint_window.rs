@@ -1,12 +1,12 @@
 use crate::{
     RuntimeError,
-    artifact::{ArtifactError, TextEvidencePage},
+    artifact::TextEvidencePage,
     checkpoint::{CheckpointError, CheckpointRef, CheckpointRefId, CheckpointSourceKind},
     compaction::{
         ArchiveOnlyCompactionInput, CitationCompactionInput, CitationCompactionPolicy,
         CompactionCoverageBudget, CompactionError, CompactionOutcome, CompactionPreparation,
         CompactionShape, CompactionWindowBudget, CompactionWindowFingerprint, CompactionWindowPlan,
-        ResolvedCitationCompactionBudget, checkpoint_from_candidate_json,
+        ResolvedCitationCompactionBudget,
     },
     context::{CompactedCheckpoint, CompactedCheckpointSummary},
     permission::PermissionReviewContextEntry,
@@ -146,20 +146,6 @@ impl SessionState {
             .map(CompactedCheckpoint::summary)
     }
 
-    pub(crate) fn validate_compacted_checkpoint_evidence(
-        &self,
-        checkpoint: &CompactedCheckpoint,
-    ) -> Result<(), ArtifactError> {
-        let Some(checkpoint) = checkpoint.citation_backed() else {
-            return Ok(());
-        };
-        for reference in checkpoint.manifest().refs() {
-            self.artifacts
-                .validate_text_evidence(reference.evidence())?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn read_checkpoint_ref_page(
         &self,
         ref_id: &CheckpointRefId,
@@ -176,22 +162,9 @@ impl SessionState {
         offset: usize,
         max_bytes: usize,
     ) -> Result<(CheckpointSourceKind, TextEvidencePage), RuntimeError> {
-        let checkpoint_reference = self
-            .compacted_checkpoint
-            .as_ref()
-            .and_then(CompactedCheckpoint::citation_backed)
-            .and_then(|checkpoint| {
-                checkpoint
-                    .manifest()
-                    .refs()
-                    .iter()
-                    .find(|reference| reference.id() == ref_id)
-            });
-        let Some(reference) =
-            checkpoint_reference.or_else(|| self.archived_ref_manifest.get(ref_id))
-        else {
+        let Some(reference) = self.archived_ref_manifest.get(ref_id) else {
             return Err(CheckpointError::RefNotFound {
-                checkpoint_id: "current-or-archive".to_owned(),
+                checkpoint_id: "archive".to_owned(),
                 ref_id: ref_id.as_str().to_owned(),
             }
             .into());
@@ -367,22 +340,30 @@ impl SessionState {
     }
 
     #[cfg(test)]
-    pub(crate) fn install_citation_compaction_candidate(
+    pub(crate) fn install_summary_compaction(
         &mut self,
         input: CitationCompactionInput,
-        candidate_json: &str,
+        summary: &str,
     ) -> Result<CompactionOutcome, RuntimeError> {
-        let prepared = self.prepare_citation_compaction_install(input, candidate_json)?;
+        let prepared = self.prepare_summary_compaction_install(input, summary)?;
         self.revalidate_prepared_compaction_install(&prepared)?;
         Ok(self
             .commit_prepared_compaction_install(prepared)
             .expect("prepared checkpoint replacement must carry an outcome"))
     }
 
-    pub(crate) fn prepare_citation_compaction_install(
+    pub(crate) fn prepare_summary_compaction_install(
         &self,
         input: CitationCompactionInput,
-        candidate_json: &str,
+        summary: &str,
+    ) -> Result<PreparedCompactionInstall, RuntimeError> {
+        self.prepare_compaction_install(input, summary)
+    }
+
+    fn prepare_compaction_install(
+        &self,
+        input: CitationCompactionInput,
+        summary: &str,
     ) -> Result<PreparedCompactionInstall, RuntimeError> {
         if !self.pending_tool_calls.is_empty() {
             return Err(CompactionError::PendingToolCalls.into());
@@ -392,9 +373,7 @@ impl SessionState {
         let next_archive_manifest = ArchivedRefManifest::new(input.archived_refs().to_vec())?;
 
         let checkpoint_id = input.manifest().checkpoint_id().clone();
-        let citation =
-            checkpoint_from_candidate_json(checkpoint_id.clone(), &input, candidate_json)?;
-        let compacted = CompactedCheckpoint::from_citation_backed(citation)?;
+        let compacted = CompactedCheckpoint::new(summary)?;
 
         let covered_count = input.covered_history_ids().len();
         let mut transcript = self.transcript.clone();

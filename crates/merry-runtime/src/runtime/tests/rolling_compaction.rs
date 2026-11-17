@@ -1,6 +1,6 @@
 use crate::{
-    CheckpointHandoffAction, CheckpointId, CheckpointSection, CitationCompactionPolicy,
-    ContextCompiler, FileSessionStore, RuntimeModelRole, SessionTranscriptItem, StepContext,
+    CheckpointId, CitationCompactionPolicy, ContextCompiler, FileSessionStore, RuntimeModelRole,
+    SessionTranscriptItem, StepContext,
     runtime::{
         CompactionConfig, Runtime,
         tests::support::{
@@ -10,7 +10,7 @@ use crate::{
     },
     session::{ModelTurnId, TranscriptItemSnapshot},
 };
-use merry_core::{ArtifactId, RuntimeJournalEvent, RuntimeJournalPayload, SessionId};
+use merry_core::{RuntimeJournalEvent, RuntimeJournalPayload, SessionId};
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelContent, ModelInputItem, ModelMessage, ModelMessageRole,
     ModelOutput, ModelRequest,
@@ -23,8 +23,6 @@ const FIXTURE_JSON: &str =
     include_str!("../../../tests/fixtures/citation_compaction_design_fixture.json");
 
 const DEEP_SOURCE_SENTINEL: &str = "SOURCE_SENTINEL_AFTER_BYTE_1200";
-
-const EXPECTED_ENTRY_COUNT: usize = 12;
 
 #[derive(Debug, Deserialize)]
 struct RollingCompactionFixture {
@@ -171,13 +169,10 @@ async fn run_three_cycle_case(window_tokens: u64) {
         }
         let checkpoint_id =
             CheckpointId::new(&checkpoint_id).expect("event checkpoint id is valid");
-        assert_eq!(
-            runtime
-                .compacted_checkpoint_summary()
-                .await
-                .and_then(|summary| summary.checkpoint_id().cloned()),
-            Some(checkpoint_id.clone())
-        );
+        runtime
+            .compacted_checkpoint_summary()
+            .await
+            .expect("prose checkpoint installs");
 
         let primary_requests = primary.recorded_requests();
         let trigger_request = primary_requests.last().expect("trigger request records");
@@ -215,7 +210,10 @@ async fn run_three_cycle_case(window_tokens: u64) {
         if cycle == 1 {
             assert!(compactor_input.contains(DEEP_SOURCE_SENTINEL));
         } else {
-            assert!(compactor_input.contains("previous_checkpoint"));
+            assert!(
+                compactor_input.contains("This session is being continued"),
+                "the next compaction must see the previous continuation summary"
+            );
         }
 
         let checkpoint_item = checkpoint_item(trigger_request);
@@ -394,20 +392,15 @@ async fn run_resume_probe(
     assert_eq!(transcript, resumed_transcript);
     assert_eq!(prompt_boundary(runtime).await, installed_cycle.boundary);
     assert_eq!(prompt_boundary(&resumed).await, installed_cycle.boundary);
-    assert_eq!(
-        runtime
-            .compacted_checkpoint_summary()
-            .await
-            .and_then(|summary| summary.checkpoint_id().cloned()),
-        Some(installed_cycle.checkpoint_id.clone())
-    );
-    assert_eq!(
-        resumed
-            .compacted_checkpoint_summary()
-            .await
-            .and_then(|summary| summary.checkpoint_id().cloned()),
-        Some(installed_cycle.checkpoint_id.clone())
-    );
+    let original_summary = runtime
+        .compacted_checkpoint_summary()
+        .await
+        .expect("original prose checkpoint");
+    let resumed_summary = resumed
+        .compacted_checkpoint_summary()
+        .await
+        .expect("resumed prose checkpoint");
+    assert_eq!(original_summary, resumed_summary);
     assert_current_refs_read_original_source(&resumed, original_source).await;
 
     CycleState {
@@ -596,71 +589,11 @@ async fn assert_checkpoint_meaning(
     let checkpoint = snapshot
         .compacted_checkpoint_for_tests()
         .expect("checkpoint exists");
-    let citation = checkpoint
-        .citation_backed()
-        .expect("automatic checkpoint is citation backed");
-    assert_eq!(citation.sections().entry_count(), EXPECTED_ENTRY_COUNT);
-    for section in CheckpointSection::ALL {
-        assert!(
-            !citation.sections().entries(section).is_empty(),
-            "checkpoint section {} must not be empty",
-            section.as_str()
-        );
-    }
-
-    assert_section_entry_with_rationale(
-        citation.sections(),
-        CheckpointSection::ConfirmedDecision,
-        &expected.confirmed_decision,
-        &expected.decision_reason,
-    );
-    assert_section_entry_with_rationale(
-        citation.sections(),
-        CheckpointSection::RejectedApproach,
-        &expected.rejected_approach,
-        &expected.rejection_reason,
-    );
-    for (section, exact) in [
-        (
-            CheckpointSection::ConstraintPreferenceBoundary,
-            expected.constraint.as_str(),
-        ),
-        (
-            CheckpointSection::CorrectedMisunderstanding,
-            expected.correction.as_str(),
-        ),
-        (
-            CheckpointSection::DurableConclusion,
-            expected.durable_conclusion.as_str(),
-        ),
-        (
-            CheckpointSection::DurableConclusion,
-            expected.loss_conclusion.as_str(),
-        ),
-        (
-            CheckpointSection::OpenQuestion,
-            expected.open_question.as_str(),
-        ),
-        (
-            CheckpointSection::CurrentProgressAndNextStep,
-            expected.progress_generations[cycle - 1].as_str(),
-        ),
-        (
-            CheckpointSection::CurrentProgressAndNextStep,
-            expected.next_step.as_str(),
-        ),
-        (CheckpointSection::ExactDetail, expected.exact_path.as_str()),
-        (
-            CheckpointSection::ExactDetail,
-            expected.exact_interface.as_str(),
-        ),
-    ] {
-        assert_section_entry(citation.sections(), section, exact);
-    }
-    assert_section_entry(
-        citation.sections(),
-        CheckpointSection::ExactDetail,
-        &expected.exact_number.to_string(),
+    assert!(
+        checkpoint
+            .text()
+            .contains("This session is being continued"),
+        "the installed handoff uses the continuation preamble"
     );
 
     let text = ContextCompiler::new()
@@ -685,97 +618,21 @@ async fn assert_checkpoint_meaning(
         assert!(text.contains(exact), "checkpoint lost exact value: {exact}");
     }
     assert!(text.contains(&expected.exact_number.to_string()));
-
-    if cycle == 1 {
-        assert!(citation.handoffs().is_empty());
-    } else {
-        assert_eq!(citation.handoffs().len(), EXPECTED_ENTRY_COUNT);
-        assert_eq!(
-            citation
-                .handoffs()
-                .iter()
-                .filter(|handoff| handoff.action() == CheckpointHandoffAction::Replace)
-                .count(),
-            1
-        );
-        assert_eq!(
-            citation
-                .handoffs()
-                .iter()
-                .filter(|handoff| handoff.action() == CheckpointHandoffAction::Keep)
-                .count(),
-            EXPECTED_ENTRY_COUNT - 1
-        );
-    }
-}
-
-fn assert_section_entry(
-    sections: &crate::CheckpointSections,
-    section: CheckpointSection,
-    expected: &str,
-) {
-    assert!(
-        sections
-            .entries(section)
-            .iter()
-            .any(|entry| entry.text() == expected),
-        "checkpoint section {} lost exact value: {expected}",
-        section.as_str()
-    );
-}
-
-fn assert_section_entry_with_rationale(
-    sections: &crate::CheckpointSections,
-    section: CheckpointSection,
-    expected_text: &str,
-    expected_rationale: &str,
-) {
-    assert!(
-        sections.entries(section).iter().any(|entry| {
-            entry.text() == expected_text && entry.rationale() == Some(expected_rationale)
-        }),
-        "checkpoint section {} lost exact value or rationale: {expected_text}",
-        section.as_str()
-    );
 }
 
 async fn assert_current_refs_read_original_source(runtime: &Runtime, original: &str) {
-    let snapshot = runtime.context_snapshot().await;
-    let checkpoint = snapshot
-        .compacted_checkpoint_for_tests()
-        .and_then(crate::CompactedCheckpoint::citation_backed)
-        .expect("citation checkpoint exists");
-    assert_eq!(checkpoint.manifest().refs().len(), 1);
-    let reference = &checkpoint.manifest().refs()[0];
-    assert_eq!(reference.id().as_str(), "h0");
-    let (artifact_id, content) = read_full_ref(runtime, reference.id()).await;
-    assert!(artifact_id.as_str().starts_with("user-message-"));
-    assert_eq!(content, original);
-    assert!(content.contains(DEEP_SOURCE_SENTINEL));
-}
-
-async fn read_full_ref(runtime: &Runtime, ref_id: &crate::CheckpointRefId) -> (ArtifactId, String) {
-    let mut offset = 0usize;
-    let mut artifact_id = None;
-    let mut content = String::new();
-    loop {
-        let page = runtime
-            .read_checkpoint_ref_page(ref_id, offset, 4096)
-            .await
-            .expect("checkpoint ref page reads");
-        match &artifact_id {
-            Some(existing) => assert_eq!(existing, page.artifact_id()),
-            None => artifact_id = Some(page.artifact_id().clone()),
-        }
-        assert_eq!(page.offset(), offset);
-        content.push_str(page.content());
-        match page.next_offset() {
-            Some(next) => offset = next,
-            None => {
-                assert_eq!(content.len(), page.total_bytes());
-                break;
-            }
-        }
-    }
-    (artifact_id.expect("ref has at least one page"), content)
+    let transcript = runtime
+        .session_transcript()
+        .await
+        .expect("full transcript keeps covered history");
+    assert!(
+        transcript.iter().any(|item| {
+            matches!(
+                item,
+                SessionTranscriptItem::UserMessage { text, .. } if text == original
+            )
+        }),
+        "the verbatim covered turn stays in the session transcript"
+    );
+    assert!(original.contains(DEEP_SOURCE_SENTINEL));
 }

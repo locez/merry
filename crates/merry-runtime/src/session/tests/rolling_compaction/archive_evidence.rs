@@ -1,18 +1,13 @@
 use crate::{
-    CheckpointError, FileSessionStore,
-    compaction::{CompactionCoverageBudget, CompactionPreparation, checkpoint_from_candidate_json},
-    session::{
-        tests::{
-            ArtifactContent, ArtifactKind, ArtifactRef, ErrorInfo, PendingToolCallBatch,
-            RuntimeError, SessionId, SessionState, ToolCallBatchId, ToolCallResult, TranscriptItem,
-            artifact_id, pending_tool_call,
-            rolling_compaction::{
-                checkpoint_candidate, policy, record_completed_tool_turn,
-                record_completed_user_turn, rolling_keep_candidate, window_budget,
-            },
-            tool_call_id,
+    FileSessionStore,
+    compaction::{CompactionCoverageBudget, CompactionPreparation},
+    session::tests::{
+        ArtifactContent, ArtifactKind, ArtifactRef, ErrorInfo, PendingToolCallBatch, SessionId,
+        SessionState, ToolCallBatchId, ToolCallResult, TranscriptItem, artifact_id,
+        pending_tool_call,
+        rolling_compaction::{
+            policy, record_completed_tool_turn, record_completed_user_turn, window_budget,
         },
-        transcript::ToolResultPromptProjection,
     },
 };
 
@@ -98,7 +93,7 @@ fn reverse_tool_results_archive_by_result_arrival_and_keep_pairs_valid() {
     );
 
     session
-        .install_citation_compaction_candidate(input, &checkpoint_candidate("h0"))
+        .install_summary_compaction(input, "The covered prefix was compacted.")
         .expect("checkpoint installs");
     let provider = session
         .provider_transcript_snapshot()
@@ -136,153 +131,6 @@ fn reverse_tool_results_archive_by_result_arrival_and_keep_pairs_valid() {
         })
         .expect("result A remains visible");
     assert_eq!(result_a, "a".repeat(1_000));
-}
-
-#[test]
-fn retained_archive_ref_stays_pinned_but_hidden_across_rolling_compactions() {
-    let mut session =
-        SessionState::new(SessionId::new("rolling-existing-notice").expect("valid id"));
-    record_completed_user_turn(&mut session, "old prefix");
-    record_completed_user_turn(&mut session, "older retained turn");
-    record_completed_tool_turn(
-        &mut session,
-        "existing-notice-call",
-        "existing-notice-result",
-        &"x".repeat(1_000),
-    );
-    for turn in 4..=6 {
-        record_completed_user_turn(&mut session, &format!("small retained {turn}"));
-    }
-    let (result_ref, result_projection) = session
-        .transcript
-        .items
-        .iter_mut()
-        .find_map(|item| match item {
-            TranscriptItem::ToolResult {
-                id,
-                call_id,
-                prompt_projection,
-                ..
-            } if call_id.as_str() == "existing-notice-call" => {
-                Some((format!("h{}", id.as_u64()), prompt_projection))
-            }
-            _ => None,
-        })
-        .expect("existing notice result exists");
-    *result_projection = ToolResultPromptProjection::ArtifactNotice;
-
-    let input = session
-        .build_citation_compaction_input_with_window_budget(
-            policy(5),
-            policy(5).resolve(64_000).expect("budget resolves"),
-            window_budget(10_000),
-            CompactionCoverageBudget::unbounded(),
-        )
-        .expect("input builds")
-        .expect("old prefix is compressible");
-    assert_eq!(
-        input.window_plan().archived_tool_call_ids_for_tests(),
-        vec![tool_call_id("existing-notice-call")]
-    );
-    assert!(
-        input
-            .pinned_refs()
-            .iter()
-            .any(|id| id.as_str() == result_ref)
-    );
-
-    let error = checkpoint_from_candidate_json(
-        input.manifest().checkpoint_id().clone(),
-        &input,
-        &checkpoint_candidate(&result_ref),
-    )
-    .expect_err("a retained-tail ref hidden from the compactor must be rejected");
-    assert!(matches!(
-        error,
-        RuntimeError::Checkpoint {
-            source: CheckpointError::UnknownRef { ref ref_id, .. },
-        } if ref_id == &result_ref
-    ));
-
-    session
-        .install_citation_compaction_candidate(input, &checkpoint_candidate("h0"))
-        .expect("checkpoint installs");
-    let checkpoint = session
-        .compacted_checkpoint
-        .as_ref()
-        .and_then(crate::CompactedCheckpoint::citation_backed)
-        .expect("citation checkpoint installed");
-    assert!(
-        checkpoint
-            .manifest()
-            .refs()
-            .iter()
-            .any(|reference| reference.id().as_str() == result_ref)
-    );
-
-    record_completed_user_turn(&mut session, "new turn after first compaction");
-    let second_input = session
-        .build_citation_compaction_input_with_window_budget(
-            policy(5),
-            policy(5).resolve(64_000).expect("budget resolves"),
-            window_budget(10_000),
-            CompactionCoverageBudget::unbounded(),
-        )
-        .expect("second input builds")
-        .expect("the next oldest turn is compressible");
-    assert!(
-        second_input
-            .pinned_refs()
-            .iter()
-            .any(|id| id.as_str() == result_ref)
-    );
-    let payload: serde_json::Value = serde_json::from_str(
-        &second_input
-            .to_model_payload_json()
-            .expect("second payload serializes"),
-    )
-    .expect("second payload parses");
-    let previous_ref_ids = payload["previous_checkpoint"]["original_ref_manifest"]["refs"]
-        .as_array()
-        .expect("previous original refs")
-        .iter()
-        .map(|reference| reference["id"].as_str().expect("ref id"))
-        .collect::<Vec<_>>();
-    assert!(previous_ref_ids.contains(&"h0"));
-    assert!(
-        !previous_ref_ids.contains(&result_ref.as_str()),
-        "a pinned-only retained ref must not become previous-checkpoint evidence"
-    );
-    let available_ref_ids = payload["available_ref_ids"]
-        .as_array()
-        .expect("available refs")
-        .iter()
-        .map(|ref_id| ref_id.as_str().expect("available ref id"))
-        .collect::<Vec<_>>();
-    assert!(available_ref_ids.contains(&"h0"));
-    assert!(
-        !available_ref_ids.contains(&result_ref.as_str()),
-        "a pinned-only retained ref must not become an available model ref"
-    );
-
-    let error = checkpoint_from_candidate_json(
-        second_input.manifest().checkpoint_id().clone(),
-        &second_input,
-        &checkpoint_candidate(&result_ref),
-    )
-    .expect_err("the hidden ref must remain invalid on the next rolling compaction");
-    assert!(matches!(
-        error,
-        RuntimeError::Checkpoint {
-            source: CheckpointError::UnknownRef { ref ref_id, .. },
-        } if ref_id == &result_ref
-    ));
-    checkpoint_from_candidate_json(
-        second_input.manifest().checkpoint_id().clone(),
-        &second_input,
-        &rolling_keep_candidate("h0"),
-    )
-    .expect("a previous entry's supplied original ref remains valid");
 }
 
 #[test]

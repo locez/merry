@@ -9,7 +9,7 @@
 //! accepts snapshots rather than arbitrary caller-paired entries and registries
 //! so evidence validation is tied to the owning session.
 
-use crate::{artifact::ArtifactError, checkpoint::CheckpointError};
+use crate::artifact::ArtifactError;
 use merry_core::ArtifactId;
 use thiserror::Error;
 
@@ -124,14 +124,6 @@ pub enum ContextError {
         /// Artifact registry read error.
         #[source]
         source: ArtifactError,
-    },
-
-    /// Citation-backed checkpoint state failed validation.
-    #[error("checkpoint state error: {source}")]
-    Checkpoint {
-        /// Checkpoint validation source error.
-        #[from]
-        source: CheckpointError,
     },
 }
 

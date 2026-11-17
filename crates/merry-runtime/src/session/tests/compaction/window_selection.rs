@@ -44,11 +44,8 @@ fn compaction_window_retains_complete_model_turns_without_splitting() {
         )
         .expect("input builds")
         .expect("covered turn is compressible");
-    let payload: serde_json::Value =
-        serde_json::from_str(&input.to_model_payload_json().expect("payload serializes"))
-            .expect("payload parses");
-
-    let window = payload["window"].as_array().expect("window is an array");
+    let window = serde_json::to_value(input.covered_window()).expect("window serializes");
+    let window = window.as_array().expect("window is an array");
     assert_eq!(window.len(), 1);
     assert_eq!(
         window[0]["items"]
@@ -57,11 +54,11 @@ fn compaction_window_retains_complete_model_turns_without_splitting() {
             .len(),
         2
     );
-    let payload = payload.to_string();
-    assert!(payload.contains("covered user"));
-    assert!(payload.contains("covered assistant"));
-    assert!(!payload.contains("retained user"));
-    assert!(!payload.contains("retained assistant"));
+    let covered = input.render_covered_segment();
+    assert!(covered.contains("covered user"));
+    assert!(covered.contains("covered assistant"));
+    assert!(!covered.contains("retained user"));
+    assert!(!covered.contains("retained assistant"));
 }
 
 #[test]
@@ -98,17 +95,14 @@ fn compaction_window_never_covers_in_progress_model_turn() {
         )
         .expect("input builds")
         .expect("completed prefix remains compressible");
-    let payload: serde_json::Value =
-        serde_json::from_str(&input.to_model_payload_json().expect("payload serializes"))
-            .expect("payload parses");
-
-    let window = payload["window"].as_array().expect("window is an array");
+    let window = serde_json::to_value(input.covered_window()).expect("window serializes");
+    let window = window.as_array().expect("window is an array");
     assert_eq!(window.len(), 1);
-    let payload = payload.to_string();
-    assert!(payload.contains("covered completed user"));
-    assert!(!payload.contains("retained completed user"));
-    assert!(!payload.contains("open user"));
-    assert!(!payload.contains("open partial assistant"));
+    let covered = input.render_covered_segment();
+    assert!(covered.contains("covered completed user"));
+    assert!(!covered.contains("retained completed user"));
+    assert!(!covered.contains("open user"));
+    assert!(!covered.contains("open partial assistant"));
 }
 
 #[test]
@@ -244,13 +238,12 @@ fn compaction_input_excludes_retained_raw_tail() {
         .build_test_citation_compaction_input(policy)
         .expect("input builds")
         .expect("old prefix should be compressible");
-    let payload = input.to_model_payload_json().expect("payload serializes");
+    let covered = input.render_covered_segment();
 
-    assert!(payload.contains("old user message to compact"));
-    assert!(payload.contains("old assistant message to compact"));
-    assert!(!payload.contains("retained raw tail user sentinel"));
-    assert!(!payload.contains("retained raw tail assistant sentinel"));
-    assert!(payload.contains("\"current_user_input_excluded\":true"));
+    assert!(covered.contains("old user message to compact"));
+    assert!(covered.contains("old assistant message to compact"));
+    assert!(!covered.contains("retained raw tail user sentinel"));
+    assert!(!covered.contains("retained raw tail assistant sentinel"));
 }
 
 #[test]
@@ -282,14 +275,14 @@ fn compaction_retained_raw_tail_is_policy_driven() {
         )
         .expect("input builds")
         .expect("old prefix should be compressible");
-    let payload = input.to_model_payload_json().expect("payload serializes");
+    let covered = input.render_covered_segment();
 
-    assert!(payload.contains("covered user sentinel"));
-    assert!(payload.contains("covered assistant sentinel"));
-    assert!(!payload.contains("tail user one sentinel"));
-    assert!(!payload.contains("tail assistant one sentinel"));
-    assert!(!payload.contains("tail user two sentinel"));
-    assert!(!payload.contains("tail assistant two sentinel"));
+    assert!(covered.contains("covered user sentinel"));
+    assert!(covered.contains("covered assistant sentinel"));
+    assert!(!covered.contains("tail user one sentinel"));
+    assert!(!covered.contains("tail assistant one sentinel"));
+    assert!(!covered.contains("tail user two sentinel"));
+    assert!(!covered.contains("tail assistant two sentinel"));
 }
 
 #[test]
@@ -335,14 +328,14 @@ fn compaction_retains_recent_completed_turns_and_later_aborted_turns() {
         )
         .expect("input builds")
         .expect("older closed turns are compressible");
-    let payload = input.to_model_payload_json().expect("payload serializes");
+    let covered = input.render_covered_segment();
 
-    assert!(payload.contains("covered aborted sentinel"));
-    assert!(payload.contains("covered completed sentinel"));
-    assert!(!payload.contains("retained completed boundary sentinel"));
-    assert!(!payload.contains("retained aborted sentinel"));
-    assert!(!payload.contains("retained latest completed sentinel"));
-    assert!(!payload.contains("open turn sentinel"));
+    assert!(covered.contains("covered aborted sentinel"));
+    assert!(covered.contains("covered completed sentinel"));
+    assert!(!covered.contains("retained completed boundary sentinel"));
+    assert!(!covered.contains("retained aborted sentinel"));
+    assert!(!covered.contains("retained latest completed sentinel"));
+    assert!(!covered.contains("open turn sentinel"));
 }
 
 #[test]
@@ -404,9 +397,9 @@ fn compaction_retains_an_entire_multi_item_tool_turn() {
         )
         .expect("input builds")
         .expect("old turn is compressible");
-    let payload = input.to_model_payload_json().expect("payload serializes");
+    let covered = input.render_covered_segment();
 
-    assert!(payload.contains("covered old turn sentinel"));
+    assert!(covered.contains("covered old turn sentinel"));
     for retained in [
         "retained tool user sentinel",
         "retained tool commentary sentinel",
@@ -414,7 +407,7 @@ fn compaction_retains_an_entire_multi_item_tool_turn() {
         "retained tool result b sentinel",
     ] {
         assert!(
-            !payload.contains(retained),
+            !covered.contains(retained),
             "retained complete turn leaked: {retained}"
         );
     }

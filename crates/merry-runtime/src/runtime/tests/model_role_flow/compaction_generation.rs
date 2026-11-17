@@ -165,9 +165,9 @@ impl ModelProvider for CancelOnCompletedCompactor {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn invalid_json_first_attempt_then_valid_second_attempt_succeeds() {
+async fn empty_summary_retries_then_a_usable_summary_installs() {
     let compactor = RecordingModelProvider::with_script(vec![
-        completed_candidate("not valid JSON"),
+        completed_candidate("   "),
         completed_candidate(VALID_CANDIDATE),
     ]);
     let runtime =
@@ -177,7 +177,7 @@ async fn invalid_json_first_attempt_then_valid_second_attempt_succeeds() {
     let outcome = runtime
         .compact_context_once(compaction_policy(), StepContext::default())
         .await
-        .expect("second candidate should succeed")
+        .expect("second sample should succeed")
         .expect("history should compact");
 
     assert_eq!(outcome.covered_history_item_count(), 2);
@@ -191,15 +191,14 @@ async fn invalid_json_first_attempt_then_valid_second_attempt_succeeds() {
         requests[0].stable_prefix_hash(),
         requests[1].stable_prefix_hash()
     );
-    assert!(
-        requests[1]
-            .messages()
-            .last()
-            .expect("repair message")
-            .content()
-            .as_text()
-            .contains("COMPACTION REPAIR")
-    );
+    let second = requests[1]
+        .messages()
+        .last()
+        .expect("summary instruction")
+        .content()
+        .as_text();
+    assert!(second.contains("1. Primary Request and Intent:"));
+    assert!(!second.contains("COMPACTION REPAIR"));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -226,31 +225,32 @@ async fn text_delta_then_stream_error_retries_compactor_attempt() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn compactor_makes_at_most_two_total_provider_attempts() {
+async fn compactor_makes_at_most_three_total_provider_attempts() {
     let compactor = RecordingModelProvider::with_script(vec![
-        completed_candidate("not valid JSON"),
+        ScriptedModelProviderResponse::SetupError(unavailable("first setup failure")),
         ScriptedModelProviderResponse::SetupError(unavailable("second setup failure")),
-        ScriptedModelProviderResponse::SetupError(unavailable("third failure must remain")),
+        ScriptedModelProviderResponse::SetupError(unavailable("third setup failure")),
+        ScriptedModelProviderResponse::SetupError(unavailable("fourth failure must remain")),
     ]);
     let runtime =
-        runtime_with_compactor("compaction-two-total-attempts", compactor.clone(), 64_000);
+        runtime_with_compactor("compaction-three-total-attempts", compactor.clone(), 64_000);
     seed_two_history_items_for_compaction(&runtime).await;
 
     let error = runtime
         .compact_context_once(compaction_policy(), StepContext::default())
         .await
-        .expect_err("two failed attempts should return the second error");
+        .expect_err("three failed attempts should return the third error");
 
     assert!(matches!(
         error,
         RuntimeError::CompactionModelSetup { ref message }
-            if message.contains("second setup failure")
+            if message.contains("third setup failure")
     ));
-    assert_eq!(compactor.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(compactor.calls.load(Ordering::SeqCst), 3);
     assert_eq!(
         compactor.responses.lock().expect("response mutex").len(),
         1,
-        "the third scripted failure must not be consumed"
+        "the fourth scripted failure must not be consumed"
     );
 }
 
@@ -295,15 +295,16 @@ fn repeated_failure(kind: &str) -> ScriptedModelProviderResponse {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn compactor_failure_kinds_share_two_attempt_total_limit() {
+async fn compactor_failure_kinds_share_three_attempt_total_limit() {
     for kind in ["setup", "stream", "eof", "tool_output"] {
         let compactor = RecordingModelProvider::with_script(vec![
+            repeated_failure(kind),
             repeated_failure(kind),
             repeated_failure(kind),
             completed_candidate(VALID_CANDIDATE),
         ]);
         let runtime = runtime_with_compactor(
-            &format!("compaction-two-attempts-{kind}"),
+            &format!("compaction-three-attempts-{kind}"),
             compactor.clone(),
             64_000,
         );
@@ -312,17 +313,17 @@ async fn compactor_failure_kinds_share_two_attempt_total_limit() {
         runtime
             .compact_context_once(compaction_policy(), StepContext::default())
             .await
-            .expect_err("two repeated failures should exhaust compaction attempts");
+            .expect_err("three repeated failures should exhaust compaction attempts");
 
         assert_eq!(
             compactor.calls.load(Ordering::SeqCst),
-            2,
+            3,
             "failure kind {kind} must use the shared attempt budget"
         );
         assert_eq!(
             compactor.responses.lock().expect("response mutex").len(),
             1,
-            "failure kind {kind} must leave the third response untouched"
+            "failure kind {kind} must leave the fourth response untouched"
         );
     }
 }
@@ -473,7 +474,7 @@ async fn compaction_fits_each_rolling_request_before_installing_the_final_tail()
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn invalid_candidate_classes_retry_before_install() {
+async fn non_empty_prose_installs_without_a_schema_retry() {
     let invalid_candidates = [
         (
             "schema",
@@ -533,15 +534,15 @@ async fn invalid_candidate_classes_retry_before_install() {
         runtime
             .compact_context_once(compaction_policy(), StepContext::default())
             .await
-            .unwrap_or_else(|error| panic!("{kind} candidate should retry: {error}"))
+            .unwrap_or_else(|error| panic!("{kind} prose should install: {error}"))
             .expect("history should compact");
 
-        assert_eq!(compactor.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(compactor.calls.load(Ordering::SeqCst), 1);
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn oversized_candidate_classes_retry_before_install() {
+async fn oversized_prose_installs_without_retry() {
     let oversized_bytes = format!(
         r#"{{
           "confirmed_decisions": [],
@@ -567,14 +568,14 @@ async fn oversized_candidate_classes_retry_before_install() {
     runtime
         .compact_context_once(policy, StepContext::default())
         .await
-        .expect("oversized first candidate should retry")
+        .expect("oversized prose should install")
         .expect("history should compact");
 
-    assert_eq!(compactor.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(compactor.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn rendered_checkpoint_too_large_retries_before_install() {
+async fn long_prose_installs_without_a_rendered_size_retry() {
     let rendered_too_large = format!(
         r#"{{
           "confirmed_decisions": [],
@@ -601,10 +602,10 @@ async fn rendered_checkpoint_too_large_retries_before_install() {
     runtime
         .compact_context_once(policy, StepContext::default())
         .await
-        .expect("rendered oversized first candidate should retry")
+        .expect("long prose should install")
         .expect("history should compact");
 
-    assert_eq!(compactor.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(compactor.calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]

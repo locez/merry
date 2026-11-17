@@ -1,6 +1,8 @@
-use crate::session::tests::{
-    CitationCompactionPolicy, RuntimeError, SessionId, SessionState, SessionStateTestExt,
-    citation_plain_runtime_checkpoint_for_tests,
+use crate::{
+    CompactedCheckpoint,
+    session::tests::{
+        CitationCompactionPolicy, RuntimeError, SessionId, SessionState, SessionStateTestExt,
+    },
 };
 
 #[test]
@@ -32,24 +34,7 @@ fn compaction_install_advances_prompt_boundary_without_deleting_full_transcript(
         .expect("input builds")
         .expect("covered turn is compressible");
     session
-        .install_citation_compaction_candidate(
-            input,
-            r#"{
-              "confirmed_decisions": [],
-              "rejected_approaches": [],
-              "constraints_preferences_boundaries": [],
-              "corrected_misunderstandings": [],
-              "durable_conclusions": [{
-                "id": "c1",
-                "text": "The first complete turn was compacted.",
-                "refs": ["h0", "h1"]
-              }],
-              "open_questions": [],
-              "current_progress_and_next_steps": [],
-              "exact_details": [],
-              "handoffs": []
-            }"#,
-        )
+        .install_summary_compaction(input, "The first complete turn was compacted.")
         .expect("checkpoint installs");
 
     assert_eq!(
@@ -103,24 +88,7 @@ fn compaction_install_advances_boundary_through_trailing_empty_aborted_turn() {
         .expect("input builds")
         .expect("covered prefix is compressible");
     session
-        .install_citation_compaction_candidate(
-            input,
-            r#"{
-              "confirmed_decisions": [],
-              "rejected_approaches": [],
-              "constraints_preferences_boundaries": [],
-              "corrected_misunderstandings": [],
-              "durable_conclusions": [{
-                "id": "c1",
-                "text": "The prefix before the retained turn was compacted.",
-                "refs": ["h0"]
-              }],
-              "open_questions": [],
-              "current_progress_and_next_steps": [],
-              "exact_details": [],
-              "handoffs": []
-            }"#,
-        )
+        .install_summary_compaction(input, "The prefix before the retained turn was compacted.")
         .expect("checkpoint installs");
 
     assert_eq!(
@@ -155,27 +123,13 @@ fn rolling_compaction_rejects_old_input_and_starts_after_current_boundary() {
         .expect("first input builds")
         .expect("first prefix is compressible");
     let stale_input = input.clone();
-    let candidate = r#"{
-      "confirmed_decisions": [],
-      "rejected_approaches": [],
-      "constraints_preferences_boundaries": [],
-      "corrected_misunderstandings": [],
-      "durable_conclusions": [{
-        "id": "c1",
-        "text": "The first user turn was compacted.",
-        "refs": ["h0"]
-      }],
-      "open_questions": [],
-      "current_progress_and_next_steps": [],
-      "exact_details": [],
-      "handoffs": []
-    }"#;
+    let summary = "The first user turn was compacted.";
     session
-        .install_citation_compaction_candidate(input, candidate)
+        .install_summary_compaction(input, summary)
         .expect("first checkpoint installs");
 
     let error = session
-        .install_citation_compaction_candidate(stale_input, candidate)
+        .install_summary_compaction(stale_input, summary)
         .expect_err("the old input cannot cover the same turn twice");
     assert!(matches!(
         error,
@@ -191,21 +145,17 @@ fn rolling_compaction_rejects_old_input_and_starts_after_current_boundary() {
         .build_test_citation_compaction_input(policy)
         .expect("next input builds")
         .expect("the former tail is now compressible");
-    let next_payload = next_input
-        .to_model_payload_json()
-        .expect("next payload serializes");
-    assert!(next_payload.contains("first retained user"));
-    assert!(!next_payload.contains("first covered user"));
-    assert!(!next_payload.contains("second retained user"));
+    let covered = next_input.render_covered_segment();
+    assert!(covered.contains("first retained user"));
+    assert!(!covered.contains("first covered user"));
+    assert!(!covered.contains("second retained user"));
 }
 
 #[test]
-fn compaction_input_includes_previous_checkpoint_without_old_raw_body() {
+fn compaction_window_covers_new_history_without_the_retained_tail() {
     let mut session = SessionState::new(SessionId::new("rolling-input").expect("valid session id"));
-    let checkpoint = citation_plain_runtime_checkpoint_for_tests(
-        "checkpoint-existing",
-        "The prior direction rejected resource timelines.",
-    );
+    let checkpoint = CompactedCheckpoint::new("The prior direction rejected resource timelines.")
+        .expect("valid checkpoint");
     session.set_compacted_checkpoint(checkpoint);
     session
         .record_test_user_message_body("new user message to compact")
@@ -220,12 +170,11 @@ fn compaction_input_includes_previous_checkpoint_without_old_raw_body() {
         )
         .expect("input builds")
         .expect("input exists");
-    let payload = input.to_model_payload_json().expect("payload serializes");
+    let covered = input.render_covered_segment();
 
-    assert!(payload.contains("previous_checkpoint"));
-    assert!(payload.contains("The prior direction rejected resource timelines."));
-    assert!(payload.contains("new user message to compact"));
-    assert!(!payload.contains("retained tail"));
+    assert!(covered.contains("new user message to compact"));
+    assert!(!covered.contains("retained tail"));
+    assert!(!covered.contains("The prior direction rejected resource timelines."));
 }
 
 #[test]
@@ -247,26 +196,11 @@ fn installing_valid_checkpoint_hides_only_covered_history_from_provider() {
         .build_test_citation_compaction_input(policy)
         .expect("input builds")
         .expect("input exists");
-    let candidate_json = r#"{
-          "confirmed_decisions": [],
-          "rejected_approaches": [],
-          "constraints_preferences_boundaries": [],
-          "corrected_misunderstandings": [],
-          "durable_conclusions": [
-            {
-              "id": "c1",
-              "text": "The older user and assistant messages were covered by compaction.",
-              "refs": ["h0", "h1"]
-            }
-          ],
-          "open_questions": [],
-          "current_progress_and_next_steps": [],
-          "exact_details": [],
-          "handoffs": []
-        }"#;
-
     let outcome = session
-        .install_citation_compaction_candidate(input, candidate_json)
+        .install_summary_compaction(
+            input,
+            "The older user and assistant messages were covered by compaction.",
+        )
         .expect("install succeeds");
 
     assert_eq!(outcome.covered_history_item_count(), 2);
@@ -289,50 +223,5 @@ fn installing_valid_checkpoint_hides_only_covered_history_from_provider() {
             .context_snapshot()
             .compacted_checkpoint_for_tests()
             .is_some()
-    );
-}
-
-#[test]
-fn failed_checkpoint_install_keeps_history_unchanged() {
-    let mut session =
-        SessionState::new(SessionId::new("install-checkpoint-rollback").expect("valid session id"));
-    session
-        .record_test_user_message_body("old user")
-        .expect("user records");
-    session
-        .record_test_user_message_body("tail user")
-        .expect("user records");
-
-    let policy = CitationCompactionPolicy::new(Some(128), Some(4096), 1).expect("valid policy");
-    let input = session
-        .build_test_citation_compaction_input(policy)
-        .expect("input builds")
-        .expect("input exists");
-    let bad_candidate_json = r#"{
-          "confirmed_decisions": [],
-          "rejected_approaches": [],
-          "constraints_preferences_boundaries": [
-            {
-              "id": "c1",
-              "text": "This cites a missing ref.",
-              "refs": ["r-missing"]
-            }
-          ],
-          "corrected_misunderstandings": [],
-          "durable_conclusions": [],
-          "open_questions": [],
-          "current_progress_and_next_steps": [],
-          "exact_details": [],
-          "handoffs": []
-        }"#;
-
-    let error = session
-        .install_citation_compaction_candidate(input, bad_candidate_json)
-        .expect_err("bad candidate must fail");
-
-    assert!(matches!(error, RuntimeError::Checkpoint { .. }));
-    assert_eq!(
-        session.transcript_items_for_tests(),
-        vec!["user:old user", "user:tail user"]
     );
 }

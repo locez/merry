@@ -268,7 +268,6 @@ impl SessionState {
             view.resolved_tool_calls,
         )?;
         self.validate_persisted_context_entries_with_checkpoint(view.compacted_checkpoint)?;
-        self.validate_persisted_checkpoint_evidence_for(view.compacted_checkpoint)?;
         self.validate_archived_ref_manifest_for(
             view.transcript,
             view.prompt_history_projection,
@@ -442,8 +441,6 @@ impl SessionState {
             session.compacted_checkpoint.as_ref(),
         )?;
         session
-            .validate_persisted_checkpoint_evidence_for(session.compacted_checkpoint.as_ref())?;
-        session
             .validate_archived_ref_manifest()
             .map_err(runtime_error_to_invalid_document)?;
         if let Some(active_plan) = session.active_plan.as_ref() {
@@ -473,17 +470,6 @@ impl SessionState {
             .compile(&snapshot)
             .map(|_| ())
             .map_err(|_| invalid_document("stored context evidence is invalid"))
-    }
-
-    fn validate_persisted_checkpoint_evidence_for(
-        &self,
-        compacted_checkpoint: Option<&CompactedCheckpoint>,
-    ) -> Result<(), SessionStoreError> {
-        let Some(checkpoint) = compacted_checkpoint else {
-            return Ok(());
-        };
-        self.validate_compacted_checkpoint_evidence(checkpoint)
-            .map_err(|_| invalid_document("stored checkpoint evidence is invalid"))
     }
 
     fn validate_persisted_transcript_for(

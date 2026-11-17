@@ -1,10 +1,7 @@
 use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, SessionId};
 use merry_runtime::{
-    ArtifactContent, CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
-    CheckpointSequenceRange, CheckpointSourceKind, CheckpointValidationPolicy,
-    CitationBackedCheckpoint, CompactedCheckpoint, CompactedCheckpointCandidate,
-    CompiledContextSection, ContextCompiler, ContextEntry, ContextEvidence, ContextSummary,
-    Runtime,
+    ArtifactContent, CompactedCheckpoint, CompiledContextSection, ContextCompiler, ContextEntry,
+    ContextEvidence, ContextSummary, Runtime,
 };
 
 fn session_id(value: &str) -> SessionId {
@@ -34,52 +31,6 @@ fn runtime(value: &str) -> Runtime {
     Runtime::builder(session_id(value))
         .build()
         .expect("runtime should build")
-}
-
-fn citation_checkpoint_for_tests(checkpoint_id: &str, text: &str) -> CompactedCheckpoint {
-    let manifest = CheckpointRefManifest::new(
-        CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
-        vec![CheckpointRef::new(
-            CheckpointRefId::new("r1").expect("valid ref id"),
-            CheckpointSourceKind::UserMessage,
-            CheckpointSequenceRange::new(1, 1).expect("valid range"),
-            EvidenceRef::new(
-                artifact_id("checkpoint-context-source"),
-                EvidenceLocator::whole_artifact(),
-            ),
-        )],
-    )
-    .expect("valid manifest");
-    let escaped_text = serde_json::to_string(text).expect("test text serializes");
-    let candidate = CompactedCheckpointCandidate::from_json(&format!(
-        r#"{{
-          "confirmed_decisions": [],
-          "rejected_approaches": [],
-          "constraints_preferences_boundaries": [],
-          "corrected_misunderstandings": [],
-          "durable_conclusions": [
-            {{
-              "id": "c1",
-              "text": {escaped_text},
-              "refs": ["r1"]
-            }}
-          ],
-          "open_questions": [],
-          "current_progress_and_next_steps": [],
-          "exact_details": [],
-          "handoffs": []
-        }}"#
-    ))
-    .expect("parseable candidate");
-    let citation = CitationBackedCheckpoint::from_candidate(
-        CheckpointId::new(checkpoint_id).expect("valid checkpoint id"),
-        candidate,
-        manifest,
-        CheckpointValidationPolicy::default(),
-    )
-    .expect("citation checkpoint builds");
-
-    CompactedCheckpoint::from_citation_backed(citation).expect("checkpoint renders")
 }
 
 async fn record_text_artifact(runtime: &Runtime, id: &str, content: &str) {
@@ -242,16 +193,11 @@ async fn direct_record_context_summary_rejects_missing_evidence_at_record_time()
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn citation_backed_checkpoint_renders_before_summary_and_memory() {
-    let checkpoint = citation_checkpoint_for_tests(
-        "checkpoint-render-order",
-        "Citation-backed checkpointing is the current direction.",
-    );
-    let runtime = Runtime::builder(session_id("citation-context-render-order"))
-        .compacted_checkpoint(checkpoint)
-        .compacted_checkpoint_evidence(
-            ArtifactRef::new(artifact_id("checkpoint-context-source"), ArtifactKind::Text),
-            ArtifactContent::text("Citation-backed checkpointing is the current direction."),
+async fn prose_checkpoint_renders_before_summary_and_memory() {
+    let runtime = Runtime::builder(session_id("prose-context-render-order"))
+        .compacted_checkpoint(
+            CompactedCheckpoint::new("Prose checkpointing is the current direction.")
+                .expect("valid checkpoint"),
         )
         .initial_context_summary(
             "summary-a",
@@ -266,13 +212,17 @@ async fn citation_backed_checkpoint_renders_before_summary_and_memory() {
         .to_snapshot();
 
     assert!(snapshot.starts_with(
-        "compacted-checkpoint:\nguidance:Compacted checkpoint text is navigation, not exact evidence."
+        "compacted-checkpoint:\nguidance:This summary is the record of the turns that were removed."
     ));
-    assert!(snapshot.contains("\ntext:confirmed_decisions:\n"));
-    assert!(snapshot.contains(
-        "durable_conclusions:\n- [c1] Citation-backed checkpointing is the current direction.\n  refs: [r1]"
-    ));
+    assert!(snapshot.contains("\ntext:Prose checkpointing is the current direction."));
     assert!(snapshot.contains("\nsummary:summary-a"));
+    let checkpoint_at = snapshot
+        .find("text:Prose checkpointing is the current direction.")
+        .expect("checkpoint text renders");
+    let summary_at = snapshot
+        .find("\nsummary:summary-a")
+        .expect("summary renders");
+    assert!(checkpoint_at < summary_at);
 }
 
 #[tokio::test(flavor = "current_thread")]

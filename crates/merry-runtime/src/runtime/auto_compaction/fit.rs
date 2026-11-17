@@ -10,7 +10,7 @@ use super::CompactionRequestBudget;
 use crate::{
     CitationCompactionInput, RuntimeError,
     compaction::{
-        CompactionReasoningReserve, CompactionRequestProjection, compaction_repair_reserve_tokens,
+        CompactionReasoningReserve, CompactionRequestProjection,
         compaction_request_required_tokens, compaction_window_safety_tokens,
         compile_citation_compaction_model_request,
     },
@@ -107,7 +107,9 @@ pub(super) fn compile_fitted_compaction_request(
     let available_output_tokens = limits.window_tokens.saturating_sub(estimated_input_tokens);
     let safety_tokens = compaction_window_safety_tokens(available_output_tokens);
     let room_tokens = available_output_tokens.saturating_sub(safety_tokens);
-    let repair_tokens = compaction_repair_reserve_tokens()?;
+    // Prose compaction installs the first usable summary. It does not spend a
+    // second turn on repair, so that room stays available for the summary.
+    let repair_tokens = 0;
     let output_ceiling_tokens = output_ceiling_tokens(
         policy,
         text_budget_tokens,

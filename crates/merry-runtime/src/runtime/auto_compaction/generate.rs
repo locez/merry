@@ -1,7 +1,7 @@
 //! Generating and installing one compaction candidate.
 
 use super::fit::ReservePolicy;
-use super::install::install_citation_compaction_candidate_transactionally;
+use super::install::install_summary_compaction_transactionally;
 use super::plan::{MAX_COMPACTION_TRUNCATION_REFITS, fit_compaction_plan};
 use super::{
     CompactionAttempt, CompactionPlan, CompactionRequestBudget, RuntimeInner,
@@ -9,7 +9,10 @@ use super::{
 };
 use crate::{
     CompactionOutcome, RuntimeError, RuntimeModelRole,
-    compaction::{CompactionCoverageBudget, generate_validated_compaction_candidate},
+    compaction::{
+        CompactionCoverageBudget, format_continuation, generate_validated_compaction_candidate,
+        persist_covered_segment,
+    },
     events::ActiveStepPermit,
 };
 use merry_llm::{ModelStreamContext, ReasoningEffort};
@@ -50,11 +53,23 @@ pub(in crate::runtime) async fn generate_and_install_compaction(
         )
         .await
         {
-            Ok(candidate_json) => {
-                return install_citation_compaction_candidate_transactionally(
+            Ok(cleaned_summary) => {
+                let segment_hint = match &inner.session_store {
+                    Some(store) => {
+                        persist_covered_segment(
+                            store,
+                            &inner.session_id,
+                            &plan.input.render_covered_segment(),
+                        )
+                        .await
+                    }
+                    None => None,
+                };
+                let continuation = format_continuation(&cleaned_summary, segment_hint.as_deref());
+                return install_summary_compaction_transactionally(
                     Arc::clone(inner),
                     *plan.input,
-                    &candidate_json,
+                    &continuation,
                     token,
                     active_permit.clone(),
                 )

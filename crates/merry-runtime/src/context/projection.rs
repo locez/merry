@@ -281,7 +281,7 @@ struct ContextCheckpointSegment {
 }
 
 const COMPACTED_CHECKPOINT_HEADER: &str = "compacted-checkpoint:";
-const COMPACTED_CHECKPOINT_GUIDANCE: &str = "guidance:Compacted checkpoint text is navigation, not exact evidence. Re-read cited artifacts or current workspace files before editing, verifying, or relying on summarized details.";
+const COMPACTED_CHECKPOINT_GUIDANCE: &str = "guidance:This summary is the record of the turns that were removed. Continue from it, and carry it into the next compaction. Re-read workspace files before editing code. A compaction segment named in the summary is the verbatim transcript.";
 const COMPACTED_CHECKPOINT_TEXT_PREFIX: &str = "text:";
 
 pub(crate) fn compacted_checkpoint_wrapper_token_ceiling() -> u64 {

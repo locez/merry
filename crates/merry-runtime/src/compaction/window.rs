@@ -366,8 +366,12 @@ impl CitationCompactionModelTurn {
             .count()
     }
 
-    pub(crate) fn ref_ids(&self) -> impl Iterator<Item = &str> {
-        self.items.iter().map(CitationCompactionTurnItem::ref_id)
+    pub(crate) fn render_markdown(&self) -> String {
+        let mut lines = vec![format!("## Turn {} ({:?})", self.turn_id, self.status)];
+        for item in &self.items {
+            lines.push(item.render_markdown());
+        }
+        lines.join("\n\n")
     }
 }
 
@@ -402,14 +406,6 @@ pub(crate) enum CitationCompactionTurnItem {
 }
 
 impl CitationCompactionTurnItem {
-    fn ref_id(&self) -> &str {
-        match self {
-            Self::User { ref_id, .. }
-            | Self::Assistant { ref_id, .. }
-            | Self::ToolExchange { ref_id, .. } => ref_id,
-        }
-    }
-
     pub(crate) fn user(history_id: u64, ref_id: String, text: String) -> Self {
         Self::User {
             history_id,
@@ -423,6 +419,23 @@ impl CitationCompactionTurnItem {
             history_id,
             ref_id,
             text,
+        }
+    }
+
+    fn render_markdown(&self) -> String {
+        match self {
+            Self::User { text, .. } => format!("### User\n\n{text}"),
+            Self::Assistant { text, .. } => format!("### Assistant\n\n{text}"),
+            Self::ToolExchange {
+                name,
+                call_id,
+                arguments,
+                result,
+                ..
+            } => format!(
+                "### Tool {name} ({call_id})\n\nArguments:\n{arguments}\n\nResult ({}, {}):\n{}",
+                result.status, result.artifact_id, result.content
+            ),
         }
     }
 

@@ -1,8 +1,8 @@
 //! Model-backed checkpoint compaction for the runtime.
 //!
 //! Compaction is a summarization turn outside the agent loop: the runtime reads
-//! the session's own history, asks the compaction model for one structured
-//! checkpoint, and installs it transactionally. The work is split by
+//! the session's own history, asks the compaction model for one prose handoff,
+//! and installs it transactionally. The work is split by
 //! responsibility:
 //!
 //! - this module owns the shared request types and the session preparation that
@@ -48,8 +48,7 @@ pub(super) use phase::{
 
 pub(super) use generate::generate_and_install_compaction;
 pub(super) use install::{
-    install_archive_only_compaction_transactionally,
-    install_citation_compaction_candidate_transactionally,
+    install_archive_only_compaction_transactionally, install_summary_compaction_transactionally,
 };
 pub(super) use manual::compact_context_once_inner;
 pub(super) use plan::plan_compaction_attempt;

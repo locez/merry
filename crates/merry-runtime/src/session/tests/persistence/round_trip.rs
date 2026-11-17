@@ -1,13 +1,12 @@
 use crate::{
-    ContextCompiler, ContextEntry, ContextEvidence, ContextSummary, FileSessionStore, ProjectRules,
-    SkillCatalog, TaskAnchor,
+    CompactedCheckpoint, ContextCompiler, ContextEntry, ContextEvidence, ContextSummary,
+    FileSessionStore, ProjectRules, SkillCatalog, TaskAnchor,
     artifact::ArtifactContent,
     session::tests::{
         ActionAuditPolicy, ActionAuditStatus, ActionExecutionEvidence, ActionPolicyDisposition,
         ActionProposal, ActionProposalEvidence, ActionRiskTier, ArtifactId, DefaultActionPolicy,
         ErrorInfo, ModelTurnStatus, SessionState, SessionStateTestExt,
-        WorkspacePatchExecutionEvidence, WorkspacePatchProposal, artifact_id,
-        citation_plain_runtime_checkpoint_for_tests, pending_tool_call,
+        WorkspacePatchExecutionEvidence, WorkspacePatchProposal, artifact_id, pending_tool_call,
         persistence::persisted_image_message, session_id, tool_call_id,
     },
 };
@@ -176,16 +175,9 @@ async fn session_state_save_load_round_trips_next_reasoning_state() {
             .expect("summary"),
         ))
         .expect("context records");
-    session
-        .record_artifact_events(
-            ArtifactRef::new(artifact_id("checkpoint-test-source"), ArtifactKind::Text),
-            ArtifactContent::text("resume checkpoint exact source"),
-        )
-        .expect("checkpoint source records");
-    session.set_compacted_checkpoint(citation_plain_runtime_checkpoint_for_tests(
-        "resume-checkpoint",
-        "resume checkpoint text",
-    ));
+    session.set_compacted_checkpoint(
+        CompactedCheckpoint::new("resume checkpoint text").expect("valid checkpoint"),
+    );
     session
         .record_test_tool_call_pending(pending_tool_call("call-resume"))
         .expect("pending call records");

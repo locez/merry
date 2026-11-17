@@ -57,44 +57,6 @@ fn record_completed_tool_turn(
         .expect("tool result records");
 }
 
-pub(super) fn checkpoint_candidate(ref_id: &str) -> String {
-    serde_json::json!({
-        "confirmed_decisions": [],
-        "rejected_approaches": [],
-        "constraints_preferences_boundaries": [],
-        "corrected_misunderstandings": [],
-        "durable_conclusions": [{
-            "id": "c1",
-            "text": "The covered prefix was compacted.",
-            "refs": [ref_id],
-        }],
-        "open_questions": [],
-        "current_progress_and_next_steps": [],
-        "exact_details": [],
-        "handoffs": [],
-    })
-    .to_string()
-}
-
-fn rolling_keep_candidate(ref_id: &str) -> String {
-    serde_json::json!({
-        "confirmed_decisions": [],
-        "rejected_approaches": [],
-        "constraints_preferences_boundaries": [],
-        "corrected_misunderstandings": [],
-        "durable_conclusions": [{
-            "id": "c1",
-            "text": "The covered prefix was compacted.",
-            "refs": [ref_id],
-        }],
-        "open_questions": [],
-        "current_progress_and_next_steps": [],
-        "exact_details": [],
-        "handoffs": [{"action": "keep", "old_id": "c1"}],
-    })
-    .to_string()
-}
-
 mod archive_evidence;
 
 mod installation;

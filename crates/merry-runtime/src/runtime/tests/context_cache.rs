@@ -406,11 +406,13 @@ async fn compaction_request_reuses_the_step_stable_prefix_and_appends_the_direct
         primary_request.stable_prefix_hash()
     );
     let directive = message_text(compaction_request.input().last().expect("tail directive"));
-    assert!(directive.contains("COMPACTION REQUEST: Update the session checkpoint"));
-    assert!(directive.contains(
-        "Summary soft target: at most 512 estimated tokens; hard rendered-summary limit: 512 estimated tokens"
-    ));
-    assert!(directive.contains("covered_history_references"));
+    assert!(directive.contains("1. Primary Request and Intent:"));
+    assert!(directive.contains("9. Optional Next Step:"));
+    assert!(directive.contains("Aim for at most 512 tokens."));
+    assert!(
+        !directive.contains("<merry_covered_history>"),
+        "append mode summarizes the conversation already in the request"
+    );
     assert!(
         !directive.contains("old turn before prefix reuse"),
         "history must not be duplicated into the directive"
@@ -525,32 +527,11 @@ async fn compaction_preserves_native_tool_items_and_indexes_only_covered_evidenc
         2
     );
     let directive = message_text(request.input().last().expect("directive"));
+    assert!(directive.contains("1. Primary Request and Intent:"));
     assert!(!directive.contains("verbatim result"));
     assert!(!directive.contains("retained current user"));
-    let payload_json = directive
-        .split_once("<merry_compaction_payload>\n")
-        .expect("payload start")
-        .1
-        .split_once("\n</merry_compaction_payload>")
-        .expect("payload end")
-        .0;
-    let payload: serde_json::Value = serde_json::from_str(payload_json).expect("payload json");
-    let references = payload["covered_history_references"]
-        .as_array()
-        .expect("ref index");
-    assert_eq!(references.len(), 4);
-    for reference in references {
-        let index = usize::try_from(reference["input_item_index"].as_u64().expect("input index"))
-            .expect("index fits");
-        match reference["ref_id"].as_str().expect("ref id") {
-            "h2" | "h5" => assert!(matches!(
-                &request.input()[index],
-                ModelInputItem::ToolResult(_)
-            )),
-            "h0" | "h3" => assert!(
-                matches!(&request.input()[index], ModelInputItem::Message(message) if message.role() == merry_llm::ModelMessageRole::User)
-            ),
-            other => panic!("uncovered ref {other}"),
-        }
-    }
+    assert!(
+        !directive.contains("<merry_covered_history>"),
+        "the live tool items stay in the request; the directive does not copy them"
+    );
 }

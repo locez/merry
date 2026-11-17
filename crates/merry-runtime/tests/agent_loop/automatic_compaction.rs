@@ -542,15 +542,19 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
     );
     assert!(!dynamic_text.contains("covered tool result sentinel"));
 
-    let ref_page = runtime
-        .read_checkpoint_ref_page(
-            &merry_runtime::CheckpointRefId::new("h6").expect("valid ref id"),
-            0,
-            4096,
-        )
+    let transcript = runtime
+        .session_transcript()
         .await
-        .expect("checkpoint ref resolves");
-    assert!(ref_page.content().contains("covered tool result sentinel"));
+        .expect("covered history stays in the transcript");
+    assert!(transcript.iter().any(|item| {
+        matches!(
+            item,
+            merry_runtime::SessionTranscriptItem::ToolResult {
+                output: Some(merry_core::ToolOutput::Text { text }),
+                ..
+            } if text.contains("covered tool result sentinel")
+        )
+    }));
 }
 
 #[tokio::test(flavor = "current_thread")]

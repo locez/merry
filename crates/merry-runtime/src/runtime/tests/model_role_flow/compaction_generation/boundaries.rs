@@ -2,7 +2,7 @@ use super::*;
 use crate::compaction::compaction_request_required_tokens;
 
 #[tokio::test(flavor = "current_thread")]
-async fn compaction_reserves_numeric_repair_room_when_the_first_output_fills_the_window() {
+async fn a_full_window_summary_installs_without_a_repair_turn() {
     let oversized = VALID_CANDIDATE.replace("Old history was compacted.", &"x".repeat(6_000));
     let compactor = RecordingModelProvider::with_script(vec![
         completed_candidate(&oversized),
@@ -15,32 +15,21 @@ async fn compaction_reserves_numeric_repair_room_when_the_first_output_fills_the
     runtime
         .compact_context_once(compaction_policy(), StepContext::default())
         .await
-        .expect("the first attempt leaves room for repair")
+        .expect("the first usable summary installs")
         .expect("checkpoint installed");
 
     let requests = compactor.recorded_requests();
-    assert_eq!(requests.len(), 2);
-    assert!(requests[1].input().starts_with(requests[0].input()));
-    assert_eq!(requests[0].generation(), requests[1].generation());
-    assert_eq!(
-        requests[0].tool_profile_hash(),
-        requests[1].tool_profile_hash()
-    );
-    assert!(
-        repair::repair_payload(&requests[1])
-            .get("rejected_candidate")
-            .is_none()
-    );
-    for request in &requests {
-        let (input, output) = compaction_request_required_tokens(request);
-        assert!(input + output < 64_000);
-    }
+    assert_eq!(requests.len(), 1);
+    let (input, output) = compaction_request_required_tokens(&requests[0]);
+    assert!(input + output < 64_000);
     assert!(
         requests[0]
-            .generation()
-            .max_output_tokens()
-            .expect("output limit")
-            < 14_080
+            .messages()
+            .last()
+            .expect("summary instruction")
+            .content()
+            .as_text()
+            .contains("1. Primary Request and Intent:")
     );
 }
 

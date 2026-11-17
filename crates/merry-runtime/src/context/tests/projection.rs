@@ -104,7 +104,7 @@ fn compacted_checkpoint_renders_before_summaries_and_memory() {
         .to_snapshot();
 
     assert!(
-        compiled.starts_with("compacted-checkpoint:\nguidance:Compacted checkpoint text is navigation, not exact evidence."),
+        compiled.starts_with("compacted-checkpoint:\nguidance:This summary is the record of the turns that were removed."),
         "compacted checkpoint should render before summary and memory sections"
     );
     assert!(

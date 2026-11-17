@@ -1,9 +1,5 @@
 use super::{ContextError, evidence::format_locator};
-use crate::{
-    artifact::ArtifactRegistry,
-    checkpoint::{CheckpointId, CitationBackedCheckpoint, PersistedCitationBackedCheckpoint},
-    memory::ActivatedMemory,
-};
+use crate::{artifact::ArtifactRegistry, memory::ActivatedMemory};
 use merry_core::EvidenceRef;
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -273,50 +269,17 @@ impl TaskAnchor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactedCheckpoint {
     text: String,
-    citation_backed: Option<CitationBackedCheckpoint>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PersistedCompactedCheckpoint {
     text: String,
-    citation_backed: Option<PersistedCitationBackedCheckpoint>,
 }
 
-/// Payload-free checkpoint status for diagnostics and smoke reports.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompactedCheckpointSummary {
-    checkpoint_id: Option<CheckpointId>,
-    citation_backed: bool,
-    entry_count: usize,
-    ref_count: usize,
-}
-
-impl CompactedCheckpointSummary {
-    /// Citation-backed checkpoint id, when the checkpoint came from structured compaction.
-    #[must_use]
-    pub fn checkpoint_id(&self) -> Option<&CheckpointId> {
-        self.checkpoint_id.as_ref()
-    }
-
-    /// Whether the installed checkpoint has structured citation metadata.
-    #[must_use]
-    pub fn citation_backed(&self) -> bool {
-        self.citation_backed
-    }
-
-    /// Number of entries in the structured checkpoint, or zero for plain checkpoints.
-    #[must_use]
-    pub fn entry_count(&self) -> usize {
-        self.entry_count
-    }
-
-    /// Number of local refs in the structured checkpoint manifest, or zero for plain checkpoints.
-    #[must_use]
-    pub fn ref_count(&self) -> usize {
-        self.ref_count
-    }
-}
+/// Payload-free notice that a prose checkpoint is installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactedCheckpointSummary;
 
 impl CompactedCheckpoint {
     /// Creates validated compacted checkpoint text.
@@ -325,24 +288,7 @@ impl CompactedCheckpoint {
         validate_non_blank("compacted checkpoint text", &text)?;
         validate_no_control_characters("compacted checkpoint text", &text)?;
 
-        Ok(Self {
-            text,
-            citation_backed: None,
-        })
-    }
-
-    /// Creates compacted checkpoint text from a validated citation-backed checkpoint.
-    pub fn from_citation_backed(
-        checkpoint: CitationBackedCheckpoint,
-    ) -> Result<Self, ContextError> {
-        let text = checkpoint.render_prompt_text();
-        validate_non_blank("compacted checkpoint text", &text)?;
-        validate_no_control_characters("compacted checkpoint text", &text)?;
-
-        Ok(Self {
-            text,
-            citation_backed: Some(checkpoint),
-        })
+        Ok(Self { text })
     }
 
     /// Compacted checkpoint text selected by a checkpoint/compaction boundary.
@@ -351,50 +297,22 @@ impl CompactedCheckpoint {
         &self.text
     }
 
-    /// Structured citation-backed checkpoint state, when this checkpoint came from compaction.
-    #[must_use]
-    pub fn citation_backed(&self) -> Option<&CitationBackedCheckpoint> {
-        self.citation_backed.as_ref()
-    }
-
-    /// Payload-free summary for diagnostics. This excludes entry text and evidence content.
+    /// Payload-free summary for diagnostics. This excludes the checkpoint text.
     #[must_use]
     pub fn summary(&self) -> CompactedCheckpointSummary {
-        match &self.citation_backed {
-            Some(checkpoint) => CompactedCheckpointSummary {
-                checkpoint_id: Some(checkpoint.id().clone()),
-                citation_backed: true,
-                entry_count: checkpoint.sections().entry_count(),
-                ref_count: checkpoint.manifest().refs().len(),
-            },
-            None => CompactedCheckpointSummary {
-                checkpoint_id: None,
-                citation_backed: false,
-                entry_count: 0,
-                ref_count: 0,
-            },
-        }
+        CompactedCheckpointSummary
     }
 
     pub(crate) fn persisted(&self) -> PersistedCompactedCheckpoint {
         PersistedCompactedCheckpoint {
             text: self.text.clone(),
-            citation_backed: self
-                .citation_backed
-                .as_ref()
-                .map(CitationBackedCheckpoint::persisted),
         }
     }
 
     pub(crate) fn from_persisted(
         persisted: PersistedCompactedCheckpoint,
     ) -> Result<Self, ContextError> {
-        match persisted.citation_backed {
-            Some(checkpoint) => {
-                Self::from_citation_backed(CitationBackedCheckpoint::from_persisted(checkpoint)?)
-            }
-            None => Self::new(persisted.text),
-        }
+        Self::new(persisted.text)
     }
 }
 

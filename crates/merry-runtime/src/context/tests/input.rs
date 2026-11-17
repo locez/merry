@@ -1,10 +1,4 @@
-use crate::checkpoint::{
-    CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest, CheckpointSequenceRange,
-    CheckpointSourceKind, CheckpointValidationPolicy, CitationBackedCheckpoint,
-    CompactedCheckpointCandidate,
-};
 use crate::{CompactedCheckpoint, ContextError, ProjectRules, TaskAnchor};
-use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
 
 #[test]
 fn project_rules_validate_fields_and_hash_text() {
@@ -75,54 +69,4 @@ fn compacted_checkpoint_validates_text() {
             field: "compacted checkpoint text"
         })
     ));
-}
-
-#[test]
-fn compacted_checkpoint_can_wrap_citation_backed_checkpoint() {
-    let manifest = CheckpointRefManifest::new(
-        CheckpointId::new("checkpoint-context").expect("valid checkpoint id"),
-        vec![CheckpointRef::new(
-            CheckpointRefId::new("r1").expect("valid ref id"),
-            CheckpointSourceKind::UserMessage,
-            CheckpointSequenceRange::new(1, 1).expect("valid range"),
-            EvidenceRef::new(
-                ArtifactId::new("user-message-1").expect("valid artifact id"),
-                EvidenceLocator::whole_artifact(),
-            ),
-        )],
-    )
-    .expect("valid manifest");
-
-    let candidate = CompactedCheckpointCandidate::from_json(
-        r#"{
-          "confirmed_decisions": [{
-            "id": "d1",
-            "text": "Citation-backed checkpointing is the current direction.",
-            "rationale": "It preserves exact source evidence.",
-            "refs": ["r1"]
-          }],
-          "rejected_approaches": [],
-          "constraints_preferences_boundaries": [],
-          "corrected_misunderstandings": [],
-          "durable_conclusions": [],
-          "open_questions": [],
-          "current_progress_and_next_steps": [],
-          "exact_details": [],
-          "handoffs": []
-        }"#,
-    )
-    .expect("parseable candidate");
-    let citation = CitationBackedCheckpoint::from_candidate(
-        CheckpointId::new("checkpoint-context").expect("valid checkpoint id"),
-        candidate,
-        manifest,
-        CheckpointValidationPolicy::default(),
-    )
-    .expect("valid checkpoint");
-
-    let checkpoint = CompactedCheckpoint::from_citation_backed(citation).expect("valid checkpoint");
-
-    assert!(checkpoint.citation_backed().is_some());
-    assert!(checkpoint.text().contains("confirmed_decisions:"));
-    assert_eq!(checkpoint.summary().entry_count(), 1);
 }

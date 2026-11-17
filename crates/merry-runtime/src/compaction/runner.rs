@@ -1,4 +1,4 @@
-use super::{CitationCompactionInput, repair::repair_request, validation::evaluate_candidate};
+use super::{CitationCompactionInput, format_compact_summary, is_degenerate_summary};
 use crate::{
     RuntimeError,
     model_completion::{ModelCompletionError, complete_single_text},
@@ -12,7 +12,7 @@ use merry_llm::{
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-const MAX_COMPACTION_PROVIDER_ATTEMPTS: usize = 2;
+const MAX_COMPACTION_PROVIDER_ATTEMPTS: usize = 3;
 const COMPACTION_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// Resolves the total token window one compaction request may occupy.
@@ -94,7 +94,7 @@ pub(crate) fn validate_compaction_model_window(
 
 pub(crate) async fn generate_validated_compaction_candidate(
     provider: Arc<dyn ModelProvider>,
-    mut request: ModelRequest,
+    request: ModelRequest,
     stream_context: ModelStreamContext,
     input: &CitationCompactionInput,
     compactor_window_tokens: u64,
@@ -143,29 +143,30 @@ pub(crate) async fn generate_validated_compaction_candidate(
             }
         };
 
-        let evaluation =
-            evaluate_candidate(input.manifest().checkpoint_id().clone(), input, &candidate);
-        evaluation
-            .metrics
-            .trace(session_id, attempt, evaluation.result.is_ok());
-        match evaluation.result {
-            Ok(_) => return Ok(candidate),
-            Err(error) if attempt < MAX_COMPACTION_PROVIDER_ATTEMPTS => {
-                let Some(repaired) = repair_request(
-                    &request,
-                    &candidate,
-                    evaluation.metrics,
-                    compactor_window_tokens,
-                )?
-                else {
-                    return Err(error);
-                };
-                request = repaired;
-                trace_retry(attempt, &error);
-                wait_before_compaction_retry(token).await?;
-            }
-            Err(error) => return Err(error),
+        let cleaned = format_compact_summary(&candidate);
+        let accepted = !is_degenerate_summary(&candidate);
+        tracing::debug!(
+            event = "runtime.compaction.summary_evaluated",
+            session_id = session_id.as_str(),
+            attempt,
+            accepted,
+            summary_chars = cleaned.chars().count(),
+            compactor_window_tokens,
+            "compaction summary cleaned without a schema check"
+        );
+        if accepted {
+            return Ok(cleaned);
         }
+        let error = RuntimeError::Compaction {
+            source: crate::CompactionError::InvalidModelResponseShape {
+                reason: "compaction summary was empty or too short to continue the session",
+            },
+        };
+        if attempt == MAX_COMPACTION_PROVIDER_ATTEMPTS {
+            return Err(error);
+        }
+        trace_retry(attempt, &error);
+        wait_before_compaction_retry(token).await?;
     }
     unreachable!("compaction attempt loop always returns on its final attempt")
 }

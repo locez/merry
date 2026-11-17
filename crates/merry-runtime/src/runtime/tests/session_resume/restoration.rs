@@ -1,6 +1,6 @@
 use crate::{
-    CheckpointRefId, CitationCompactionPolicy, CompiledContextSection, ContextCompiler,
-    ContextEntry, ContextEvidence, ContextSummary, FileSessionStore, ProjectRules, TaskAnchor,
+    CitationCompactionPolicy, CompiledContextSection, ContextCompiler, ContextEntry,
+    ContextEvidence, ContextSummary, FileSessionStore, ProjectRules, TaskAnchor,
     artifact::ArtifactContent,
     runtime::{
         Runtime,
@@ -299,7 +299,7 @@ async fn resumed_runtime_preserves_manual_summary_backed_by_another_seed_refresh
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn resumed_runtime_reads_runtime_generated_checkpoint_ref_evidence() {
+async fn resumed_runtime_keeps_prose_checkpoint_summary() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     let id = session_id("runtime-resume-checkpoint-ref");
@@ -319,38 +319,21 @@ async fn resumed_runtime_reads_runtime_generated_checkpoint_ref_evidence() {
         .expect("compaction input builds")
         .expect("covered user history is compressible");
     session
-        .install_citation_compaction_candidate(
-            input,
-            r#"{
-              "confirmed_decisions": [],
-              "rejected_approaches": [],
-              "constraints_preferences_boundaries": [],
-              "corrected_misunderstandings": [],
-              "durable_conclusions": [{
-                "id": "c1",
-                "text": "Keep the exact persisted user source.",
-                "refs": ["h0"]
-              }],
-              "open_questions": [],
-              "current_progress_and_next_steps": [],
-              "exact_details": [],
-              "handoffs": []
-            }"#,
-        )
+        .install_summary_compaction(input, "The covered turn was compacted.")
         .expect("checkpoint installs");
     session.save_to(&store).await.expect("session saves");
 
     let resumed = Runtime::builder(id)
         .resume_from_store(store)
         .await
-        .expect("runtime resumes with checkpoint evidence");
-    let page = resumed
-        .read_checkpoint_ref_page(&CheckpointRefId::new("h0").expect("valid ref id"), 0, 4096)
-        .await
-        .expect("runtime-generated checkpoint ref reads after resume");
+        .expect("runtime resumes with the prose checkpoint");
+    let snapshot = ContextCompiler::new()
+        .compile(&resumed.context_snapshot().await)
+        .expect("resumed context compiles")
+        .to_snapshot();
 
-    assert_eq!(page.artifact_id().as_str(), "user-message-0");
-    assert_eq!(page.content(), "exact persisted user source");
+    assert!(snapshot.contains("The covered turn was compacted."));
+    assert!(!snapshot.contains("exact persisted user source"));
 }
 
 #[tokio::test(flavor = "current_thread")]

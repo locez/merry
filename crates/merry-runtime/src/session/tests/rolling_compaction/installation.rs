@@ -3,11 +3,9 @@ use crate::{
     compaction::{CompactionCoverageBudget, CompactionPreparation},
     session::{
         tests::{
-            CitationCompactionPolicy, RuntimeError, SessionId, SessionState, TaskAnchor,
-            TranscriptItem,
+            RuntimeError, SessionId, SessionState, TaskAnchor, TranscriptItem,
             rolling_compaction::{
-                checkpoint_candidate, policy, record_completed_tool_turn,
-                record_completed_user_turn, window_budget,
+                policy, record_completed_tool_turn, record_completed_user_turn, window_budget,
             },
         },
         transcript::ToolResultPromptProjection,
@@ -30,7 +28,7 @@ fn task_anchor_change_invalidates_prepared_checkpoint_window() {
     session.set_task_anchor(TaskAnchor::new("new objective").expect("valid anchor"));
 
     let error = session
-        .install_citation_compaction_candidate(input, &checkpoint_candidate("h0"))
+        .install_summary_compaction(input, "The covered prefix was compacted.")
         .expect_err("anchor change makes the window stale");
     assert!(matches!(
         error,
@@ -41,7 +39,7 @@ fn task_anchor_change_invalidates_prepared_checkpoint_window() {
 }
 
 #[test]
-fn invalid_candidate_does_not_apply_planned_tool_archives() {
+fn stale_install_does_not_apply_planned_tool_archives() {
     let mut session =
         SessionState::new(SessionId::new("rolling-invalid-no-archive").expect("valid id"));
     record_completed_user_turn(&mut session, "old prefix");
@@ -64,14 +62,17 @@ fn invalid_candidate_does_not_apply_planned_tool_archives() {
         .expect("input builds")
         .expect("old prefix is compressible");
     assert!(!input.window_plan().archived_tool_call_ids().is_empty());
+    session.set_task_anchor(TaskAnchor::new("changed objective").expect("valid anchor"));
 
     let error = session
-        .install_citation_compaction_candidate(
-            input,
-            &checkpoint_candidate("missing-checkpoint-ref"),
-        )
-        .expect_err("invalid candidate is rejected");
-    assert!(matches!(error, RuntimeError::Checkpoint { .. }));
+        .install_summary_compaction(input, "The covered prefix was compacted.")
+        .expect_err("stale window is rejected");
+    assert!(matches!(
+        error,
+        RuntimeError::Compaction {
+            source: CompactionError::StaleWindow
+        }
+    ));
 
     let first_result = session
         .transcript
@@ -87,42 +88,6 @@ fn invalid_candidate_does_not_apply_planned_tool_archives() {
         })
         .expect("first result exists");
     assert_eq!(first_result, ToolResultPromptProjection::Full);
-}
-
-#[test]
-fn rendered_checkpoint_over_output_limit_rejects_without_state_mutation() {
-    let mut session =
-        SessionState::new(SessionId::new("rolling-rendered-too-large").expect("valid id"));
-    record_completed_user_turn(&mut session, "old prefix");
-    record_completed_user_turn(&mut session, "retained tail");
-    let small_policy =
-        CitationCompactionPolicy::new(Some(5), Some(10_000), 1).expect("valid small output policy");
-    let input = session
-        .build_citation_compaction_input(small_policy, small_policy.resolve(64_000).unwrap())
-        .expect("input builds")
-        .expect("old prefix is compressible");
-
-    let error = session
-        .install_citation_compaction_candidate(input, &checkpoint_candidate("h0"))
-        .expect_err("rendered checkpoint exceeds token limit");
-    assert!(matches!(
-        error,
-        RuntimeError::Compaction {
-            source: CompactionError::RenderedCheckpointTooLarge { max_tokens: 5, .. }
-        }
-    ));
-    assert_eq!(
-        session.prompt_history_projection().compacted_through(),
-        None
-    );
-    assert!(session.compacted_checkpoint.is_none());
-    assert_eq!(
-        session
-            .provider_transcript_snapshot()
-            .expect("provider projection builds")
-            .len(),
-        2
-    );
 }
 
 #[test]

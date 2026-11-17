@@ -6,7 +6,6 @@ use crate::{
     AcceptedLocalWorkspaceProcessAdmission, CompactedCheckpoint, FileSessionStore, LoadedSession,
     ProcessRunner, ProjectRules, PromptProfile, RuntimeCapabilities, RuntimeError,
     RuntimeModelRole, RuntimeProfile, SkillCatalog, TaskAnchor, ToolAdmission,
-    artifact::ArtifactContent,
     memory::{MemoryActivationSource, StoredMemoryActivationSource},
     model_config::RuntimeModelConfigs,
     permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
@@ -27,7 +26,7 @@ use crate::{
     tool::{RegisteredTool, ToolRegistry, ToolRegistryError},
     trajectory::RuntimeObservability,
 };
-use merry_core::{ArtifactRef, SessionId, ToolName};
+use merry_core::{SessionId, ToolName};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use std::{
     collections::BTreeMap,
@@ -66,7 +65,6 @@ pub struct RuntimeBuilder {
     project_rules: Option<ProjectRules>,
     task_anchor: Option<TaskAnchor>,
     compacted_checkpoint: Option<CompactedCheckpoint>,
-    compacted_checkpoint_evidence: Vec<(ArtifactRef, ArtifactContent)>,
     memory_activation_source: Arc<dyn MemoryActivationSource>,
     allow_bridge_tools: bool,
     allow_low_risk_apply_patches: bool,
@@ -109,7 +107,6 @@ impl RuntimeBuilder {
             project_rules: None,
             task_anchor: None,
             compacted_checkpoint: None,
-            compacted_checkpoint_evidence: Vec::new(),
             memory_activation_source: Arc::new(StoredMemoryActivationSource),
             allow_bridge_tools: false,
             allow_low_risk_apply_patches: false,
@@ -396,35 +393,12 @@ impl RuntimeBuilder {
     ///
     /// This is selected by a checkpoint/compaction boundary. It does not
     /// project ordinary ledger facts, artifact payloads, or tool-result
-    /// observations. Citation-backed checkpoints also require every referenced
-    /// artifact to be supplied with [`RuntimeBuilder::compacted_checkpoint_evidence`].
-    ///
-    /// Manual checkpoint construction is intended for deterministic fixtures or
-    /// fresh bootstrap state without transcript history. Resume a real runtime
-    /// checkpoint with [`RuntimeBuilder::resume_from_store`] so its transcript
-    /// artifacts and ids are restored together. Manual refs matching `h<decimal>`
-    /// are rejected because that namespace belongs to runtime transcript history;
-    /// use a distinct prefix such as `bootstrap-` for fresh bootstrap refs.
+    /// observations. The checkpoint is prose. Resume a real runtime checkpoint
+    /// with [`RuntimeBuilder::resume_from_store`] so its transcript and archived
+    /// tool refs are restored together.
     #[must_use]
     pub fn compacted_checkpoint(mut self, checkpoint: CompactedCheckpoint) -> Self {
         self.compacted_checkpoint = Some(checkpoint);
-        self
-    }
-
-    /// Seeds one original artifact used by a manually supplied citation checkpoint.
-    ///
-    /// This method may be called once per referenced artifact. [`RuntimeBuilder::build`]
-    /// records all seeds, validates every checkpoint evidence locator, and only
-    /// then installs the checkpoint. Runtime-reserved artifact ids are rejected.
-    /// Real transcript-backed checkpoints must be restored with
-    /// [`RuntimeBuilder::resume_from_store`] instead of manually seeded here.
-    #[must_use]
-    pub fn compacted_checkpoint_evidence(
-        mut self,
-        artifact: ArtifactRef,
-        content: ArtifactContent,
-    ) -> Self {
-        self.compacted_checkpoint_evidence.push((artifact, content));
         self
     }
 
@@ -687,36 +661,11 @@ impl RuntimeBuilder {
                 session
             }
             None => {
-                if let Some(checkpoint) = self
-                    .compacted_checkpoint
-                    .as_ref()
-                    .and_then(CompactedCheckpoint::citation_backed)
-                {
-                    for reference in checkpoint.manifest().refs() {
-                        if reference.id().is_runtime_history_ref() {
-                            return Err(
-                                crate::CheckpointError::ManualCheckpointHistoryRefReserved {
-                                    ref_id: reference.id().as_str().to_owned(),
-                                }
-                                .into(),
-                            );
-                        }
-                    }
-                }
                 let mut session = SessionState::with_external_tool_catalog(
                     self.session_id.clone(),
                     external_tool_catalog,
                 );
-                for (artifact, content) in self.compacted_checkpoint_evidence {
-                    if crate::session::is_runtime_reserved_artifact_id(artifact.id()) {
-                        return Err(RuntimeError::ReservedArtifactId {
-                            artifact_id: artifact.id().clone(),
-                        });
-                    }
-                    session.record_artifact_state(artifact, content)?;
-                }
                 if let Some(checkpoint) = self.compacted_checkpoint {
-                    session.validate_compacted_checkpoint_evidence(&checkpoint)?;
                     session.set_compacted_checkpoint(checkpoint);
                 }
                 session
