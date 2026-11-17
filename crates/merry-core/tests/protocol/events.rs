@@ -60,6 +60,28 @@ fn public_runtime_event_assistant_message_delta_uses_top_level_type() {
 }
 
 #[test]
+fn public_runtime_event_reasoning_delta_uses_top_level_type() {
+    let source = RuntimeEventSource::new(SessionId::new("session-1").expect("valid session id"), 6);
+    let event = RuntimeEvent::ReasoningDelta {
+        delta: "thinking".to_owned(),
+        source,
+    };
+
+    assert_eq!(
+        serde_json::to_value(&event).expect("event serializes"),
+        json!({
+            "type": "reasoning_delta",
+            "delta": "thinking",
+            "source": {
+                "session_id": "session-1",
+                "sequence": 6
+            }
+        })
+    );
+    assert_json_round_trip(&event);
+}
+
+#[test]
 fn public_queued_inputs_changed_uses_inputs_view() {
     let event = RuntimeEvent::QueuedInputsChanged {
         inputs: QueuedInputsView {

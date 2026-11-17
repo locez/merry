@@ -52,6 +52,15 @@ pub enum RuntimeEvent {
         delta: String,
         source: RuntimeEventSource,
     },
+    /// Incremental model reasoning shown while a turn is thinking.
+    ///
+    /// This is live progress, like [`RuntimeEvent::AssistantMessageDelta`]. The
+    /// following assistant message, tool call, or step completion closes the
+    /// thinking block.
+    ReasoningDelta {
+        delta: String,
+        source: RuntimeEventSource,
+    },
     /// The model requested a tool call.
     ToolCallStarted {
         call: PendingToolCall,
@@ -232,7 +241,9 @@ impl RuntimeEvent {
     pub const fn is_transient(&self) -> bool {
         matches!(
             self,
-            Self::ModelOutputRateUpdated { .. } | Self::AssistantMessageDelta { .. }
+            Self::ModelOutputRateUpdated { .. }
+                | Self::AssistantMessageDelta { .. }
+                | Self::ReasoningDelta { .. }
         )
     }
 }

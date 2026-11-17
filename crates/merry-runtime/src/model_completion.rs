@@ -108,6 +108,7 @@ pub(crate) async fn complete_single_text(
             Some(Ok(
                 ModelEvent::Started
                 | ModelEvent::OutputTextDelta { .. }
+                | ModelEvent::ReasoningTextDelta { .. }
                 | ModelEvent::OutputProgress { .. },
             )) => {}
             Some(Ok(ModelEvent::ToolCallRequested { .. })) => {

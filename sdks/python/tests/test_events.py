@@ -72,6 +72,21 @@ def test_event_parser_accepts_blank_assistant_text_and_delta() -> None:
     assert message.payload.text == ""
 
 
+def test_event_parser_accepts_reasoning_delta() -> None:
+    event = parse_event(
+        {
+            "type": "reasoning_delta",
+            "delta": "thinking\nmore",
+            "source": {"session_id": "session-1", "sequence": 3},
+        }
+    )
+
+    assert event.type is merry.EventType.REASONING_DELTA
+    assert isinstance(event.payload, merry.ReasoningDeltaPayload)
+    assert event.payload.delta == "thinking\nmore"
+    assert event.payload.source.sequence == 3
+
+
 def test_event_parser_retains_unknown_variants_without_string_dispatch() -> None:
     event = parse_event(
         {

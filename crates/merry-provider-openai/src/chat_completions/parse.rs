@@ -121,12 +121,13 @@ impl ChatStreamParser {
         if let Some(reasoning) = choice
             .delta
             .reasoning_content
-            .as_deref()
             .filter(|text| !text.is_empty())
-            .or(choice.delta.reasoning.as_deref())
+            .or(choice.delta.reasoning)
+            .filter(|text| !text.is_empty())
         {
             self.output
-                .observe(StreamOutputKind::Reasoning, reasoning, received_at);
+                .observe(StreamOutputKind::Reasoning, &reasoning, received_at);
+            events.push(ModelEvent::ReasoningTextDelta { delta: reasoning });
         }
         if let Some(content) = choice.delta.content
             && !content.is_empty()

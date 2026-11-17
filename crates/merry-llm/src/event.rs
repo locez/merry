@@ -19,6 +19,11 @@ pub enum ModelEvent {
         /// Delta text.
         delta: String,
     },
+    /// Incremental provider reasoning text. A summary is used only when raw reasoning is absent.
+    ReasoningTextDelta {
+        /// Delta text.
+        delta: String,
+    },
     /// Model requested a tool call.
     ToolCallRequested {
         /// Requested tool call.
@@ -41,6 +46,9 @@ enum ModelEventWire {
     OutputTextDelta {
         delta: String,
     },
+    ReasoningTextDelta {
+        delta: String,
+    },
     ToolCallRequested {
         call: ModelToolCall,
     },
@@ -59,6 +67,7 @@ impl<'de> Deserialize<'de> for ModelEvent {
             ModelEventWire::Started {} => Self::Started,
             ModelEventWire::OutputProgress { progress } => Self::OutputProgress { progress },
             ModelEventWire::OutputTextDelta { delta } => Self::OutputTextDelta { delta },
+            ModelEventWire::ReasoningTextDelta { delta } => Self::ReasoningTextDelta { delta },
             ModelEventWire::ToolCallRequested { call } => Self::ToolCallRequested { call },
             ModelEventWire::Completed { response } => Self::Completed { response },
         })

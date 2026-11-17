@@ -86,10 +86,17 @@ impl AnthropicStreamParser {
     }
 
     /// Thinking text can be a summary rather than a complete token-level trace.
-    fn observe_thinking(&mut self, thinking: &str, received_at: Instant) {
+    fn observe_thinking(&mut self, thinking: &str, received_at: Instant) -> Vec<ModelEvent> {
         self.output.mark_incomplete_reasoning();
         self.output
             .observe(StreamOutputKind::Reasoning, thinking, received_at);
+        if thinking.is_empty() {
+            Vec::new()
+        } else {
+            vec![ModelEvent::ReasoningTextDelta {
+                delta: thinking.to_owned(),
+            }]
+        }
     }
 
     pub(crate) fn finish(&self) -> Result<(), AnthropicProviderError> {
@@ -123,8 +130,7 @@ impl AnthropicStreamParser {
                     Ok(Vec::new())
                 }
                 AnthropicContentBlockStart::Thinking { thinking } => {
-                    self.observe_thinking(&thinking, received_at);
-                    Ok(Vec::new())
+                    Ok(self.observe_thinking(&thinking, received_at))
                 }
                 AnthropicContentBlockStart::Text { text } if !text.is_empty() => {
                     self.output
@@ -171,8 +177,7 @@ impl AnthropicStreamParser {
             },
             AnthropicStreamEvent::ContentBlockDelta { index, delta } => match delta {
                 AnthropicContentBlockDelta::ThinkingDelta { thinking } => {
-                    self.observe_thinking(&thinking, received_at);
-                    Ok(Vec::new())
+                    Ok(self.observe_thinking(&thinking, received_at))
                 }
                 AnthropicContentBlockDelta::TextDelta { text } if !text.is_empty() => {
                     self.output

@@ -91,6 +91,9 @@ impl RuntimeEventProjector {
             RuntimeJournalPayload::AssistantOutputDelta { delta } => {
                 Ok(Some(RuntimeEvent::AssistantMessageDelta { delta, source }))
             }
+            RuntimeJournalPayload::ReasoningOutputDelta { delta } => {
+                Ok(Some(RuntimeEvent::ReasoningDelta { delta, source }))
+            }
             RuntimeJournalPayload::AssistantOutputRecorded { artifact } => {
                 let text = read_text_artifact(runtime, artifact.id()).await?;
                 Ok(Some(RuntimeEvent::AssistantMessage {

@@ -169,6 +169,44 @@ async fn streamed_text_delta_projects_to_public_assistant_message_delta() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn streamed_reasoning_projects_to_public_reasoning_delta() {
+    let provider = FakeModelProvider::new(vec![
+        Ok(ModelEvent::ReasoningTextDelta {
+            delta: String::new(),
+        }),
+        Ok(ModelEvent::ReasoningTextDelta {
+            delta: "plan".to_owned(),
+        }),
+        Ok(ModelEvent::OutputTextDelta {
+            delta: "hi".to_owned(),
+        }),
+        Ok(completed_text_event("hi")),
+    ]);
+    let runtime = Runtime::builder(session_id("public-reasoning-delta"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let events = collect_public_stream(&runtime, "Say hello.").await;
+    assert!(events.iter().all(|event| {
+        !matches!(event, RuntimeEvent::ReasoningDelta { delta, .. } if delta.is_empty())
+    }));
+    let reasoning = events
+        .iter()
+        .position(
+            |event| matches!(event, RuntimeEvent::ReasoningDelta { delta, .. } if delta == "plan"),
+        )
+        .expect("reasoning delta should be public");
+    let assistant = events
+        .iter()
+        .position(
+            |event| matches!(event, RuntimeEvent::AssistantMessage { text, .. } if text == "hi"),
+        )
+        .expect("assistant message should follow reasoning");
+    assert!(reasoning < assistant);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn usage_update_projects_to_public_stream_and_getter() {
     let provider = FakeModelProvider::new(vec![Ok(completed_text_event_with_usage(
         "hello with usage",

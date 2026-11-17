@@ -104,6 +104,8 @@ pub enum RuntimeJournalPayload {
     /// provider-visible; the final assistant output is still recorded through
     /// [`RuntimeJournalPayload::AssistantOutputRecorded`].
     AssistantOutputDelta { delta: String },
+    /// Incremental model reasoning text. Live progress only; it is not durable evidence.
+    ReasoningOutputDelta { delta: String },
     /// An assistant text output artifact was recorded.
     AssistantOutputRecorded { artifact: ArtifactRef },
     /// Exact evidence was referenced.
@@ -218,7 +220,9 @@ impl RuntimeJournalPayload {
     pub const fn is_transient(&self) -> bool {
         matches!(
             self,
-            Self::ModelOutputRateUpdated { .. } | Self::AssistantOutputDelta { .. }
+            Self::ModelOutputRateUpdated { .. }
+                | Self::AssistantOutputDelta { .. }
+                | Self::ReasoningOutputDelta { .. }
         )
     }
 }

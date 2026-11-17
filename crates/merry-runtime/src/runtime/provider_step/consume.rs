@@ -6,6 +6,7 @@ use super::super::{
         RateEventDelivery, send_assistant_text_output_completed_events,
         send_assistant_text_output_delta_event, send_model_output_rate_event,
         send_model_tool_call_response_events, send_model_usage_updated_event,
+        send_reasoning_output_delta_event,
     },
     model_output::{
         DIAGNOSTIC_MODEL_TOOL_CALL_MIXED_OUTPUT, diagnostic_from_model_error,
@@ -88,6 +89,14 @@ pub(super) async fn consume_model_stream(
             }
             Some(Ok(ModelEvent::Started)) => {
                 tracing::debug!(category = "started", "runtime model stream event received");
+            }
+            Some(Ok(ModelEvent::ReasoningTextDelta { delta })) => {
+                if !delta.is_empty()
+                    && !send_reasoning_output_delta_event(inner, sender, token, delta).await
+                {
+                    cancel_model_turn(inner, sender, turn_id).await;
+                    return;
+                }
             }
             Some(Ok(ModelEvent::OutputTextDelta { delta })) => {
                 if !delta.is_empty() {

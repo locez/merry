@@ -30,6 +30,7 @@ from ._event_payloads import (
     PlanUpdatedPayload,
     QueuedInputAcceptedPayload,
     QueuedInputsChangedPayload,
+    ReasoningDeltaPayload,
     RunCancelledPayload,
     RunFailedPayload,
     SessionStartedPayload,
@@ -143,6 +144,8 @@ def _parse_payload(
             return AssistantMessageDeltaPayload(
                 _event_text(data, "delta"), _source(data)
             )
+        case EventType.REASONING_DELTA:
+            return ReasoningDeltaPayload(_event_text(data, "delta"), _source(data))
         case EventType.TOOL_CALL_STARTED:
             return ToolCallStartedPayload(_tool_call(data["call"]), _source(data))
         case EventType.TOOL_CALL_BATCH_STARTED:

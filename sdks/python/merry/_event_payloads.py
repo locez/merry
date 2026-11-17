@@ -82,6 +82,23 @@ class AssistantMessageDeltaPayload(SourcedEventPayload):
 
 
 @dataclass(frozen=True, slots=True)
+class ReasoningDeltaPayload(SourcedEventPayload):
+    event_type: ClassVar[EventType] = EventType.REASONING_DELTA
+    delta: str
+    source: EventSource
+
+    def __post_init__(self) -> None:
+        _validate_event_source(self.source)
+        _validate_text(
+            "reasoning delta",
+            self.delta,
+            1_048_576,
+            allow_blank=True,
+            allow_newline_tab=True,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ToolCallStartedPayload(SourcedEventPayload):
     event_type: ClassVar[EventType] = EventType.TOOL_CALL_STARTED
     call: RuntimeToolCall
@@ -450,6 +467,7 @@ EventPayloadValue: TypeAlias = (
     | ModelOutputRateUpdatedPayload
     | AssistantMessagePayload
     | AssistantMessageDeltaPayload
+    | ReasoningDeltaPayload
     | ToolCallStartedPayload
     | ToolCallBatchStartedPayload
     | ToolCallFinishedPayload

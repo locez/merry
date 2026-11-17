@@ -27,6 +27,7 @@ class EventType(str, Enum):
     MODEL_OUTPUT_RATE_UPDATED = "model_output_rate_updated"
     ASSISTANT_MESSAGE = "assistant_message"
     ASSISTANT_MESSAGE_DELTA = "assistant_message_delta"
+    REASONING_DELTA = "reasoning_delta"
     TOOL_CALL_STARTED = "tool_call_started"
     TOOL_CALL_BATCH_STARTED = "tool_call_batch_started"
     TOOL_CALL_FINISHED = "tool_call_finished"

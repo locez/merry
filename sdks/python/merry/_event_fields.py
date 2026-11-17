@@ -21,6 +21,7 @@ EVENT_FIELDS: dict[EventType, tuple[frozenset[str], frozenset[str]]] = {
     EventType.USAGE_UPDATED: _event_fields("usage", "source"),
     EventType.ASSISTANT_MESSAGE: _event_fields("text", "artifact", "source"),
     EventType.ASSISTANT_MESSAGE_DELTA: _event_fields("delta", "source"),
+    EventType.REASONING_DELTA: _event_fields("delta", "source"),
     EventType.TOOL_CALL_STARTED: _event_fields("call", "source"),
     EventType.TOOL_CALL_BATCH_STARTED: _event_fields("batch", "source"),
     EventType.TOOL_CALL_FINISHED: _event_fields("result", "output", "source"),

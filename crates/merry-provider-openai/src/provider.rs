@@ -483,6 +483,7 @@ fn model_event_category(event: &ModelEvent) -> &'static str {
     match event {
         ModelEvent::Started => "started",
         ModelEvent::OutputTextDelta { .. } => "output_text_delta",
+        ModelEvent::ReasoningTextDelta { .. } => "reasoning_text_delta",
         ModelEvent::OutputProgress { .. } => "output_progress",
         ModelEvent::ToolCallRequested { .. } => "tool_call_requested",
         ModelEvent::Completed { .. } => "completed",

@@ -21,6 +21,14 @@ use std::time::Instant;
 
 const OPENAI_COMPATIBLE_HEARTBEAT_EVENT: &str = "ping";
 
+fn reasoning_delta_event(delta: String) -> Vec<ModelEvent> {
+    if delta.is_empty() {
+        Vec::new()
+    } else {
+        vec![ModelEvent::ReasoningTextDelta { delta }]
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn parse_responses_response(
     fixture: &str,
@@ -64,6 +72,7 @@ pub(crate) struct ResponsesStreamParser {
     tool_calls: Vec<ModelToolCall>,
     completed: bool,
     output: OutputProgressTracker,
+    saw_reasoning: bool,
 }
 
 impl ResponsesStreamParser {
@@ -74,6 +83,7 @@ impl ResponsesStreamParser {
             tool_calls: Vec::new(),
             completed: false,
             output: OutputProgressTracker::default(),
+            saw_reasoning: false,
         }
     }
 
@@ -192,12 +202,17 @@ impl ResponsesStreamParser {
             ResponsesStreamEvent::ReasoningTextDelta { delta } => {
                 self.output
                     .observe(StreamOutputKind::Reasoning, &delta, received_at);
-                Ok(Vec::new())
+                self.saw_reasoning = true;
+                Ok(reasoning_delta_event(delta))
             }
             ResponsesStreamEvent::ReasoningSummaryTextDelta { delta } => {
                 self.output
                     .observe(StreamOutputKind::ReasoningSummary, &delta, received_at);
-                Ok(Vec::new())
+                if self.saw_reasoning {
+                    Ok(Vec::new())
+                } else {
+                    Ok(reasoning_delta_event(delta))
+                }
             }
             ResponsesStreamEvent::OutputTextDelta { delta } => {
                 if delta.is_empty() {

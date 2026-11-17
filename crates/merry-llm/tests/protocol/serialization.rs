@@ -49,6 +49,9 @@ fn protocol_types_round_trip_through_json() {
     assert_json_round_trip(&ModelEvent::OutputTextDelta {
         delta: "partial".to_owned(),
     });
+    assert_json_round_trip(&ModelEvent::ReasoningTextDelta {
+        delta: "thinking".to_owned(),
+    });
     assert_json_round_trip(&ModelEvent::ToolCallRequested {
         call: test_tool_call(),
     });
