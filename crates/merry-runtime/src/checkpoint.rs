@@ -17,12 +17,6 @@ pub enum CheckpointError {
 
     #[error("checkpoint ref {ref_id} is duplicated")]
     DuplicateRef { ref_id: String },
-
-    #[error("checkpoint ref {ref_id} does not exist in checkpoint {checkpoint_id}")]
-    RefNotFound {
-        checkpoint_id: String,
-        ref_id: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

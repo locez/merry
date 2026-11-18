@@ -66,7 +66,6 @@ pub(super) fn tui_tool_title(name: &str) -> &'static str {
         "run_process" => "Ran",
         "read_text" => "Read",
         "request_permissions" => "Permission",
-        "merry_read_checkpoint_ref" => "Retrieved",
         "spawn_subagents" => "Delegated",
         "wait_subagents" => "Waited",
         "cancel_subagents" => "Cancelled",

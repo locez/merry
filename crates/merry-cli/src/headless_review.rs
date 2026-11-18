@@ -1,6 +1,4 @@
-use merry_runtime::{
-    ChannelPermissionAdmissionSource, PermissionReviewRequest, RequestedCapability,
-};
+use merry_runtime::{ChannelPermissionAdmissionSource, PermissionReviewRequest};
 use std::{io, path::PathBuf, sync::Arc};
 use terminal::open_review_terminal;
 use tokio::{
@@ -262,39 +260,7 @@ fn parse_decision(value: &str) -> Option<bool> {
 }
 
 fn format_permission_prompt(request: &PermissionReviewRequest) -> String {
-    let permission_request = request.request();
-    let mut lines = vec![format!(
-        "Permission review required ({})",
-        request.approval_id()
-    )];
-    if let Some(reason) = request.host_fallback_reason() {
-        lines.push(reason.to_string());
-    }
-    if let Some(reason) = permission_request.reason() {
-        lines.push(format!("reason: {reason}"));
-    }
-    if permission_request.is_action_review() {
-        lines.push("review: high-risk process action".to_owned());
-    }
-    lines.push(format!("action: {}", permission_request.action().summary()));
-    for capability in permission_request.requested() {
-        let line = match capability {
-            RequestedCapability::Network => "requested: network".to_owned(),
-            RequestedCapability::Path(path) => {
-                format!(
-                    "requested: path {} ({})",
-                    path.path(),
-                    path.access().as_str()
-                )
-            }
-            RequestedCapability::HostIntegration(integration) => {
-                format!("requested: host integration {}", integration.as_str())
-            }
-        };
-        lines.push(line);
-    }
-    lines.push("Allow? [y/N] ".to_owned());
-    lines.join("\n")
+    crate::permission_prompt::format_permission_prompt(request)
 }
 
 #[cfg(test)]

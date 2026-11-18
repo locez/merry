@@ -90,12 +90,12 @@ async fn tool_helper_executes_one_pending_call_and_continues() {
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
-    assert_debug_echo_and_checkpoint_ref_tools(requests[0].tools());
+    assert_debug_echo_tool(requests[0].tools());
     assert!(requests[0].continuations().is_empty());
     assert_eq!(requests[0].generation().max_output_tokens(), Some(16));
     assert!(!requests[0].generation().allow_parallel_tool_calls());
 
-    assert_debug_echo_and_checkpoint_ref_tools(requests[1].tools());
+    assert_debug_echo_tool(requests[1].tools());
     assert_eq!(requests[1].continuations().len(), 1);
     let continuation = &requests[1].continuations()[0];
     assert_eq!(continuation.call().id().as_str(), "call-debug");
@@ -117,14 +117,12 @@ async fn tool_helper_executes_one_pending_call_and_continues() {
     assert!(!requests[1].generation().allow_parallel_tool_calls());
 }
 
-fn assert_debug_echo_and_checkpoint_ref_tools(tools: &[merry_core::ToolSpec]) {
+fn assert_debug_echo_tool(tools: &[merry_core::ToolSpec]) {
     let names = tools
         .iter()
         .map(|tool| tool.name().as_str())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 2);
-    assert!(names.contains(&DEBUG_TOOL_NAME));
-    assert!(names.contains(&"merry_read_checkpoint_ref"));
+    assert_eq!(names, [DEBUG_TOOL_NAME]);
 }
 
 #[tokio::test]

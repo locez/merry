@@ -1,4 +1,3 @@
-use super::checkpoint_ref_tool::merry_read_checkpoint_ref_tool;
 use super::config::CompactionConfig;
 use super::state::AcceptedLocalWorkspaceProcessRunner;
 use super::{Runtime, RuntimeInner};
@@ -211,10 +210,10 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Sets the runtime policy for automatic hard-watermark compaction.
+    /// Sets the runtime policy for automatic compaction.
     ///
     /// Automatic compaction runs only when a compiled provider request crosses
-    /// the hard context watermark. The current step input is still outside the
+    /// the compaction threshold. The current step input is still outside the
     /// compaction input and is projected raw after any installed checkpoint.
     #[must_use]
     pub fn automatic_compaction(mut self, config: CompactionConfig) -> Self {
@@ -635,14 +634,6 @@ impl RuntimeBuilder {
         if self.plan_subagent_scope.is_some() {
             registered_tools
                 .extend(scoped_child_plan_registered_tools().map_err(RuntimeError::from)?);
-        }
-        if self.automatic_compaction.is_enabled() {
-            // Runtime-owned protocol tools form the stable prefix of the tool
-            // surface; profile-owned tools follow in their declared order.
-            registered_tools.insert(
-                0,
-                merry_read_checkpoint_ref_tool().map_err(RuntimeError::from)?,
-            );
         }
         let tool_registry =
             ToolRegistry::from_registered(registered_tools).map_err(|error| match error {

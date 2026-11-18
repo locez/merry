@@ -18,10 +18,9 @@ fn record_model_usage_accumulates_total_and_replaces_last() {
     });
     let compaction = Some(CompactionUsageWindow {
         auto_compaction_enabled: true,
-        dynamic_body_estimated_tokens: Some(64000),
+        dynamic_body_estimated_tokens: 64000,
         body_budget_tokens: 90000,
-        soft_water_tokens: 70000,
-        hard_water_tokens: 82000,
+        compact_at_tokens: 76500,
     });
 
     let first = session

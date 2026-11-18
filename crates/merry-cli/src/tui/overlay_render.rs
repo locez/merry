@@ -167,7 +167,7 @@ fn render_permission_review(
     frame.render_widget(Clear, region);
     frame.render_widget(
         Block::default()
-            .title(" M  Permission review ")
+            .title(" Allow this command? ")
             .borders(Borders::ALL)
             .border_type(BorderType::Plain)
             .border_style(
@@ -183,7 +183,7 @@ fn render_permission_review(
         split.body,
     );
     frame.render_widget(
-        Paragraph::new(chip_line(state, &["Allow", "Reject"])),
+        Paragraph::new(chip_line(state, &["Allow", "Don't allow"])),
         split.footer,
     );
 }
@@ -622,7 +622,7 @@ pub(crate) fn overlay_pointer(
             let footer = permission_split(area, review.body()).footer;
             match chip_hit(
                 Position::new(footer.x, footer.y),
-                &["Allow", "Reject"],
+                &["Allow", "Don't allow"],
                 position,
             ) {
                 Some(0) => Some(OverlayPointer::PermissionAllow),

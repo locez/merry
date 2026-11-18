@@ -5,10 +5,7 @@ use crate::support::{
         model_tool_call_with_args, model_tool_call_with_id,
     },
     runtime::{artifact_id, collect_step, runtime_with_registered_tool, session_id},
-    tools::{
-        ScriptedToolExecutor, assert_tools_are_default_checkpoint_ref_plus, path_tool_spec,
-        test_tool_spec,
-    },
+    tools::{ScriptedToolExecutor, path_tool_spec, test_tool_spec},
 };
 use merry_core::{
     ArtifactKind, ArtifactRef, EvidenceLocator, RuntimeJournalPayload, ToolCallResultStatus,
@@ -299,15 +296,9 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
-    assert_tools_are_default_checkpoint_ref_plus(
-        requests[0].tools(),
-        &[test_tool_spec("search_notes")],
-    );
+    assert_eq!(requests[0].tools(), &[test_tool_spec("search_notes")]);
     assert!(requests[0].continuations().is_empty());
-    assert_tools_are_default_checkpoint_ref_plus(
-        requests[1].tools(),
-        &[test_tool_spec("search_notes")],
-    );
+    assert_eq!(requests[1].tools(), &[test_tool_spec("search_notes")]);
     let continuation = requests[1]
         .continuations()
         .first()

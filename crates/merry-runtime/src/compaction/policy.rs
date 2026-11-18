@@ -203,7 +203,7 @@ impl Default for CitationCompactionPolicy {
 ///
 /// The install-time body target is not stored here. The runtime builds it from
 /// this hard ceiling plus the retained-history target and the fixed request body,
-/// rather than from half the hard watermark.
+/// rather than from half the body budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedCitationCompactionBudget {
     target_output_tokens: u64,

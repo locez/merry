@@ -51,7 +51,7 @@ fn permission_review_overlay_exposes_allow_and_reject_actions_with_exact_id() {
         ControllerEffect::None
     );
     let rendered = render_to_text(&state, 80, 10);
-    assert!(rendered.contains("Permission review"));
+    assert!(rendered.contains("Allow this command?"));
 }
 
 #[test]

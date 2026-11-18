@@ -26,7 +26,7 @@ use merry_llm::{FinishReason, ModelCapabilities, ModelName, ModelOutput};
 use std::sync::Arc;
 
 #[tokio::test(flavor = "current_thread")]
-async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
+async fn threshold_auto_compaction_emits_lifecycle_events() {
     let primary = RecordingModelProvider::with_script_and_capabilities(
         vec![
             ScriptedModelProviderResponse::Stream(vec![Ok(completed_event())]),
@@ -138,7 +138,10 @@ async fn hard_watermark_auto_compaction_emits_lifecycle_events() {
     assert!(compactor_input.contains("Old compressible ballast."));
     assert!(compactor_input.contains("Retained tail ballast."));
     assert!(compactor_input.contains("Trigger automatic compaction with a small current input."));
-    assert!(!compactor_request.tools().is_empty());
+    assert!(
+        compactor_request.tools().is_empty(),
+        "this fixture registers no tools, so compaction must not add one"
+    );
     assert!(compactor_request.response_format().is_none());
 }
 
@@ -228,7 +231,7 @@ async fn pre_turn_auto_compaction_failure_does_not_consume_model_turn_id() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn fixed_current_input_over_hard_watermark_calls_neither_provider() {
+async fn fixed_current_input_over_body_budget_calls_neither_provider() {
     let primary = RecordingModelProvider::with_script_and_capabilities(
         vec![ScriptedModelProviderResponse::Stream(vec![Ok(
             completed_event(),
@@ -282,7 +285,7 @@ async fn fixed_current_input_over_hard_watermark_calls_neither_provider() {
     assert!(
         diagnostic
             .message()
-            .contains("current input and fixed dynamic context cannot fit")
+            .contains("cannot fit in the context window")
     );
     assert!(
         primary.recorded_requests().is_empty(),
@@ -296,7 +299,7 @@ async fn fixed_current_input_over_hard_watermark_calls_neither_provider() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn hard_watermark_archives_tool_results_without_replacing_five_retained_turns() {
+async fn threshold_compaction_archives_tool_results_without_replacing_five_retained_turns() {
     let primary = RecordingModelProvider::with_script_and_capabilities(
         vec![ScriptedModelProviderResponse::Stream(vec![Ok(
             completed_event(),

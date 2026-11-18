@@ -1,6 +1,5 @@
 mod bridge_tool_flow;
 mod builder_checkpoint;
-mod checkpoint_ref_tool;
 mod compaction_transaction;
 mod context_cache;
 mod event_cancellation;

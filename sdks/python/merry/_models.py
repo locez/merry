@@ -260,20 +260,18 @@ class UsageContextWindow:
 @dataclass(frozen=True, slots=True)
 class CompactionUsageWindow:
     auto_compaction_enabled: bool
-    dynamic_body_estimated_tokens: int | None
+    dynamic_body_estimated_tokens: int
     body_budget_tokens: int
-    soft_water_tokens: int
-    hard_water_tokens: int
+    compact_at_tokens: int
 
     def __post_init__(self) -> None:
         if not isinstance(self.auto_compaction_enabled, bool):
             raise TypeError("auto compaction enabled must be a boolean")
-        _validate_optional_u64(
+        _validate_u64(
             "dynamic body estimated tokens", self.dynamic_body_estimated_tokens
         )
         _validate_u64("body budget tokens", self.body_budget_tokens)
-        _validate_u64("soft water tokens", self.soft_water_tokens)
-        _validate_u64("hard water tokens", self.hard_water_tokens)
+        _validate_u64("compact at tokens", self.compact_at_tokens)
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,18 +533,16 @@ def _parse_compaction_window(value: object) -> CompactionUsageWindow:
             "auto_compaction_enabled",
             "dynamic_body_estimated_tokens",
             "body_budget_tokens",
-            "soft_water_tokens",
-            "hard_water_tokens",
+            "compact_at_tokens",
         },
     )
     return CompactionUsageWindow(
         auto_compaction_enabled=_required_bool(data, "auto_compaction_enabled"),
-        dynamic_body_estimated_tokens=_optional_int(
+        dynamic_body_estimated_tokens=_required_int(
             data, "dynamic_body_estimated_tokens"
         ),
         body_budget_tokens=_required_int(data, "body_budget_tokens"),
-        soft_water_tokens=_required_int(data, "soft_water_tokens"),
-        hard_water_tokens=_required_int(data, "hard_water_tokens"),
+        compact_at_tokens=_required_int(data, "compact_at_tokens"),
     )
 
 

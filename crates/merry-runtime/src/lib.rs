@@ -92,9 +92,9 @@ pub use compaction::{
 };
 pub use context::{
     CheckpointDecision, CompactedCheckpoint, CompactedCheckpointSummary, CompiledContext,
-    CompiledContextSection, ContextBudget, ContextBudgetPolicy, ContextCompiler, ContextEntry,
-    ContextError, ContextEvidence, ContextSummary, DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
-    ProjectRules, ResolvedContextWindow, SessionContextSnapshot, TaskAnchor, decide_checkpoint,
+    CompiledContextSection, ContextBudget, ContextCompiler, ContextEntry, ContextError,
+    ContextEvidence, ContextSummary, DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS, ProjectRules,
+    ResolvedContextWindow, SessionContextSnapshot, TaskAnchor, decide_checkpoint,
     resolve_context_window,
 };
 pub use durable_memory::{DurableMemory, DurableMemoryError, MemoryLayout, MemoryWriteKind};

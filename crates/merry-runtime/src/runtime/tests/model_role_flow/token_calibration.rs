@@ -153,7 +153,7 @@ async fn assert_prediction(runtime: &Runtime, provider: &MeteredProvider, multip
     let compaction = usage.compaction.expect("compaction snapshot");
     assert_eq!(
         compaction.dynamic_body_estimated_tokens,
-        Some(estimate_model_input_tokens(request.dynamic_input()) * multiplier),
+        estimate_model_input_tokens(request.dynamic_input()) * multiplier,
     );
 }
 
@@ -304,7 +304,7 @@ async fn manual_compaction_and_resumed_requests_keep_the_primary_calibration() {
         .expect("usage")
         .compaction
         .expect("budget");
-    assert!(usage.dynamic_body_estimated_tokens.expect("estimate") < usage.hard_water_tokens);
+    assert!(usage.dynamic_body_estimated_tokens < usage.compact_at_tokens);
 
     let switched = Runtime::builder(runtime.session_id().clone())
         .model_provider(primary.clone(), named_model("different-model"))

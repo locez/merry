@@ -1,8 +1,7 @@
 mod consume;
 
 use super::auto_compaction::{
-    CompactionProgress, HardWatermarkCompaction, HardWatermarkOutcome,
-    reduce_context_at_hard_watermark,
+    CompactionPhase, CompactionPhaseOutcome, CompactionProgress, reduce_context_over_threshold,
 };
 use super::journal_emission::{
     send_cancelled_event, send_compaction_completed_event, send_failed_event,
@@ -344,26 +343,23 @@ pub(super) async fn run_provider_step(
     }
     if automatic_compaction_enabled
         && let Ok(initial_budget) = &request_budget
-        && matches!(
-            initial_budget.decision,
-            CheckpointDecision::RequireCheckpoint
-        )
+        && matches!(initial_budget.decision, CheckpointDecision::Compact)
     {
         // Rolling compaction: each pass covers as much history as the compaction
         // window can host, and passes continue until the recompiled request lands
-        // under the destination body target. Crossing the hard watermark starts the
-        // work; finishing it requires the preferred tail, not merely dropping below
-        // the trigger.
+        // under the destination body target. Crossing the compact-at threshold
+        // starts the work; finishing it requires the preferred tail, not merely
+        // dropping below the trigger.
         let mut current_budget = *initial_budget;
         let mut progress = CompactionProgress::new(current_budget.dynamic_body_estimated_tokens);
         loop {
-            let outcome = reduce_context_at_hard_watermark(
+            let outcome = reduce_context_over_threshold(
                 inner,
                 sender,
                 rate_sender,
                 token,
                 active_permit,
-                HardWatermarkCompaction {
+                CompactionPhase {
                     policy: automatic_policy,
                     reasoning_effort: compaction_reasoning_effort.as_ref(),
                     request_budget: &current_budget,
@@ -377,11 +373,11 @@ pub(super) async fn run_provider_step(
             )
             .await;
             let (replacement_outcome, target_dynamic_body_tokens) = match outcome {
-                HardWatermarkOutcome::Continue {
+                CompactionPhaseOutcome::Continue {
                     replacement,
                     target_dynamic_body_tokens,
                 } => (replacement, target_dynamic_body_tokens),
-                HardWatermarkOutcome::Aborted => return,
+                CompactionPhaseOutcome::Aborted => return,
             };
             let installed_replacement = replacement_outcome.is_some();
 
@@ -475,7 +471,7 @@ pub(super) async fn run_provider_step(
             match progress.observe(
                 current_budget.dynamic_body_estimated_tokens,
                 target_dynamic_body_tokens,
-                current_budget.budget.hard_water_tokens(),
+                current_budget.budget.body_budget_tokens(),
                 installed_replacement,
             ) {
                 Ok(true) => break,

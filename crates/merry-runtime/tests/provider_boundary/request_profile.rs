@@ -5,7 +5,7 @@ use crate::support::{
         model_tool_call,
     },
     runtime::{collect_step, record_valid_context, session_id},
-    tools::{ScriptedToolExecutor, assert_tools_are_default_checkpoint_ref_plus, test_tool_spec},
+    tools::{ScriptedToolExecutor, test_tool_spec},
 };
 use merry_llm::{FinishReason, ModelMessageRole, ModelOutput, testing::FakeModelProvider};
 use merry_runtime::{
@@ -40,7 +40,7 @@ async fn registered_tool_specs_are_compiled_into_provider_request() {
     );
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);
-    assert_tools_are_default_checkpoint_ref_plus(requests[0].tools(), &[tool]);
+    assert_eq!(requests[0].tools(), &[tool]);
     assert!(
         requests[0]
             .tool_profile_hash()

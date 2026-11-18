@@ -122,7 +122,7 @@ async fn manual_tail_above_soft_target_keeps_one_pair_instead_of_filling_the_win
     let preview = runtime
         .citation_compaction_input(CitationCompactionPolicy::default())
         .await
-        .expect("one pair fits the hard budget")
+        .expect("one pair fits the body budget")
         .expect("history is compressible");
     assert_eq!(preview.window_plan().retained_turn_ids_u64(), vec![7]);
     runtime
@@ -150,7 +150,7 @@ async fn manual_compaction_rejects_a_tail_that_cannot_fit_before_calling_the_mod
         assert!(matches!(
             result,
             Err(RuntimeError::Compaction {
-                source: CompactionError::MinimumRawTurnCannotFit
+                source: CompactionError::MinimumRawTurnCannotFit { .. }
             })
         ));
     }
@@ -159,7 +159,7 @@ async fn manual_compaction_rejects_a_tail_that_cannot_fit_before_calling_the_mod
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn automatic_compaction_accepts_an_indivisible_tail_below_the_hard_limit() {
+async fn automatic_compaction_accepts_an_indivisible_tail_below_the_body_budget() {
     let (runtime, primary, compactor) = runtime_with_tail_budget("automatic-tail-soft-fallback");
     collect_step(&runtime, &"x".repeat(180_000), StepContext::default()).await;
     let retained = "y".repeat(56_000);

@@ -123,13 +123,10 @@ pub struct UsageContextWindow {
 pub struct CompactionUsageWindow {
     pub auto_compaction_enabled: bool,
     /// Estimated dynamic-body tokens in the request that produced this usage.
-    ///
-    /// This is optional so persisted sessions written before the field existed
-    /// remain loadable.
-    pub dynamic_body_estimated_tokens: Option<u64>,
+    pub dynamic_body_estimated_tokens: u64,
     pub body_budget_tokens: u64,
-    pub soft_water_tokens: u64,
-    pub hard_water_tokens: u64,
+    /// Dynamic-body token count that starts automatic compaction.
+    pub compact_at_tokens: u64,
 }
 
 /// Source used to resolve a model context window.

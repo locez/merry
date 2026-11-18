@@ -182,11 +182,7 @@ fn artifact_notice_reaches_the_compaction_payload_instead_of_the_archived_body()
     assert_eq!(notice["merry_archived"], true);
     assert_eq!(notice["status"], "succeeded");
     assert_eq!(notice["artifact_id"], "artifact-notice-result");
-    assert!(
-        notice["ref"]
-            .as_str()
-            .is_some_and(|value| value.starts_with('h'))
-    );
+    assert!(notice.get("ref").is_none());
 
     let input = session
         .build_test_citation_compaction_input(

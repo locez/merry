@@ -320,7 +320,7 @@ fn preferred_history_target_keeps_a_small_tail_in_a_large_window() {
 }
 
 #[test]
-fn oversized_minimum_turn_falls_back_to_one_turn_not_the_full_hard_budget() {
+fn oversized_minimum_turn_falls_back_to_one_turn_not_the_full_body_budget() {
     let mut session = SessionState::new(SessionId::new("minimum-tail").expect("valid session id"));
     for turn in 1..=8 {
         record_completed_user_turn(&mut session, &format!("turn {turn} {}", "x".repeat(32_000)));
@@ -332,7 +332,7 @@ fn oversized_minimum_turn_falls_back_to_one_turn_not_the_full_hard_budget() {
         .expect("valid history target");
     let plan = session
         .plan_compaction_window(policy(5), budget)
-        .expect("mandatory raw turn still fits the hard budget")
+        .expect("mandatory raw turn still fits the body budget")
         .expect("history is compacted");
     assert_eq!(plan.covered_turn_ids_u64(), vec![1, 2, 3, 4, 5, 6, 7]);
     assert_eq!(plan.retained_turn_ids_u64(), vec![8]);
@@ -433,7 +433,7 @@ fn planner_reports_uncompressible_fixed_input_and_minimum_raw_turn() {
     assert!(matches!(
         fixed_error,
         RuntimeError::Compaction {
-            source: CompactionError::UncompressibleCurrentInput
+            source: CompactionError::UncompressibleCurrentInput { .. }
         }
     ));
 
@@ -443,7 +443,7 @@ fn planner_reports_uncompressible_fixed_input_and_minimum_raw_turn() {
     assert!(matches!(
         minimum_error,
         RuntimeError::Compaction {
-            source: CompactionError::MinimumRawTurnCannotFit
+            source: CompactionError::MinimumRawTurnCannotFit { .. }
         }
     ));
 }
@@ -629,11 +629,11 @@ fn checkpoint_wrapper_tokens_are_part_of_the_fit_boundary() {
     record_completed_user_turn(&mut session, "x");
 
     let output_limit = 128;
-    let hard_watermark = output_limit + 2;
+    let body_budget = output_limit + 2;
     let without_wrapper = session
         .plan_compaction_window(
             policy(1),
-            CompactionWindowBudget::new(64_000, hard_watermark, 0, 0, output_limit)
+            CompactionWindowBudget::new(64_000, body_budget, 0, 0, output_limit)
                 .expect("valid budget"),
         )
         .expect("plan without wrapper computes");
@@ -644,26 +644,26 @@ fn checkpoint_wrapper_tokens_are_part_of_the_fit_boundary() {
             policy(1),
             CompactionWindowBudget::new(
                 64_000,
-                hard_watermark,
+                body_budget,
                 0,
                 0,
                 output_limit + compacted_checkpoint_wrapper_token_ceiling(),
             )
             .expect("valid budget"),
         )
-        .expect_err("wrapper overhead crosses the hard watermark");
+        .expect_err("wrapper overhead crosses the body budget");
     assert!(matches!(
         with_wrapper,
         RuntimeError::Compaction {
-            source: CompactionError::UncompressibleCurrentInput
+            source: CompactionError::UncompressibleCurrentInput { .. }
         }
     ));
 }
 
 #[test]
-fn fit_requires_strictly_less_than_the_hard_watermark() {
+fn fit_requires_strictly_less_than_the_body_budget() {
     let mut session =
-        SessionState::new(SessionId::new("rolling-strict-hard-water").expect("valid id"));
+        SessionState::new(SessionId::new("rolling-strict-body-budget").expect("valid id"));
     record_completed_user_turn(&mut session, "old prefix");
     record_completed_user_turn(&mut session, "x");
 
@@ -672,11 +672,11 @@ fn fit_requires_strictly_less_than_the_hard_watermark() {
             policy(1),
             CompactionWindowBudget::new(64_000, 129, 0, 0, 128).expect("valid equality budget"),
         )
-        .expect_err("equality with the hard watermark is not a fit");
+        .expect_err("equality with the body budget is not a fit");
     assert!(matches!(
         error,
         RuntimeError::Compaction {
-            source: CompactionError::MinimumRawTurnCannotFit
+            source: CompactionError::MinimumRawTurnCannotFit { .. }
         }
     ));
 }

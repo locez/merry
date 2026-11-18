@@ -163,8 +163,8 @@ async fn run_three_cycle_case(window_tokens: u64) {
         assert_eq!(compactor.recorded_requests().len(), cycle);
         if cycle == 1 {
             assert_eq!(
-                large_turn_index, 8,
-                "seven large turns must fit and the eighth must cross the hard watermark"
+                large_turn_index, 7,
+                "six large turns must fit and the seventh must cross the 85% compaction threshold"
             );
         }
         let checkpoint_id =
@@ -266,7 +266,7 @@ async fn run_three_cycle_case(window_tokens: u64) {
             "retain one large raw turn and the current input"
         );
         assert!(
-            budget.dynamic_body_estimated_tokens < budget.budget.hard_water_tokens(),
+            budget.dynamic_body_estimated_tokens < budget.budget.body_budget_tokens(),
             "the minimum raw tail and current input must fit the destination window"
         );
         assert_provider_projection_has_complete_raw_tail(&runtime, &submitted_inputs).await;

@@ -1,5 +1,5 @@
 use crate::{
-    CheckpointDecision, ContextBudgetPolicy,
+    CheckpointDecision,
     runtime::{
         request_context_budget, step_usage_context_snapshot, tests::support::common::named_model,
     },
@@ -9,7 +9,7 @@ use merry_llm::{
 };
 
 #[test]
-fn request_context_budget_uses_dynamic_estimate_watermarks() {
+fn request_context_budget_uses_the_dynamic_body_estimate() {
     let capabilities = ModelCapabilities::new(true, true, false, true, Some(100_000), Some(10_000))
         .expect("valid capabilities");
     let request = ModelRequest::new_with_continuations_and_stable_prefix(
@@ -40,10 +40,9 @@ fn request_context_budget_uses_dynamic_estimate_watermarks() {
         budget.window.source(),
         crate::ContextWindowSource::ProviderCapabilities
     );
-    assert_eq!(budget.policy, ContextBudgetPolicy::Balanced);
-    assert_eq!(budget.decision, CheckpointDecision::PlanCheckpoint);
-    assert!(budget.dynamic_body_estimated_tokens >= budget.budget.soft_water_tokens());
-    assert!(budget.dynamic_body_estimated_tokens < budget.budget.hard_water_tokens());
+    assert_eq!(budget.decision, CheckpointDecision::Compact);
+    assert!(budget.dynamic_body_estimated_tokens >= budget.budget.compact_at_tokens());
+    assert!(budget.dynamic_body_estimated_tokens < budget.budget.body_budget_tokens());
 
     let usage = step_usage_context_snapshot(Some(&budget), true);
     assert_eq!(
@@ -51,7 +50,7 @@ fn request_context_budget_uses_dynamic_estimate_watermarks() {
             .compaction
             .expect("compaction usage should be available")
             .dynamic_body_estimated_tokens,
-        Some(budget.dynamic_body_estimated_tokens)
+        budget.dynamic_body_estimated_tokens
     );
 }
 
@@ -96,7 +95,7 @@ fn calibrated_budget_counts_fixed_input_and_body_without_scaling_output_reserve(
     )
     .expect("corrected budget");
     assert_eq!(baseline.decision, CheckpointDecision::Continue);
-    assert_eq!(corrected.decision, CheckpointDecision::RequireCheckpoint);
+    assert_eq!(corrected.decision, CheckpointDecision::Compact);
     assert_eq!(
         corrected.budget.stable_prefix_tokens(),
         baseline.budget.stable_prefix_tokens() * 2
@@ -114,8 +113,16 @@ fn calibrated_budget_counts_fixed_input_and_body_without_scaling_output_reserve(
         baseline.budget.output_reserve_tokens()
     );
     assert_eq!(
-        corrected.budget.hard_water_tokens(),
-        baseline.budget.hard_water_tokens() - baseline.budget.stable_prefix_tokens()
+        corrected.budget.body_budget_tokens(),
+        baseline.budget.body_budget_tokens() - baseline.budget.stable_prefix_tokens()
+    );
+    assert_eq!(
+        corrected.budget.compact_at_tokens(),
+        corrected
+            .budget
+            .body_budget_tokens()
+            .saturating_mul(85)
+            .div_ceil(100)
     );
 }
 

@@ -797,8 +797,8 @@ retained_model_turns = 2
         )
         .await
         .expect("tail two step should run");
-        // The 12_000-token window leaves about 7_500 tokens under the hard
-        // watermark. The old turn is already near that line, so this message
+        // The 12_000-token window leaves about 7_500 tokens under the compaction
+        // threshold. The old turn is already near that line, so this message
         // crosses it. It also has to leave room for the checkpoint ceiling and
         // the two retained turns; a larger message makes that tail not fit, and
         // the runtime then never calls the compaction model.

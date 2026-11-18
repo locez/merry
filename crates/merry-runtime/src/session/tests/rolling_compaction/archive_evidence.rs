@@ -119,7 +119,7 @@ fn reverse_tool_results_archive_by_result_arrival_and_keep_pairs_valid() {
     assert_eq!(notice["merry_archived"], true);
     assert_eq!(notice["status"], "succeeded");
     assert_eq!(notice["artifact_id"], "reverse-result-b");
-    assert_eq!(notice["ref"], result_b_ref);
+    assert!(notice.get("ref").is_none());
 
     let result_a = provider
         .iter()
@@ -206,21 +206,24 @@ async fn archive_only_manifest_resolves_refs_and_round_trips_through_store() {
     let CompactionPreparation::ArchiveToolResults(input) = preparation else {
         panic!("expected archive-only preparation");
     };
-    let archived_ref = input
+    let archived = input
         .archived_refs()
         .first()
         .expect("one archived ref exists")
-        .id()
         .clone();
     session
         .install_archive_only_compaction(input)
         .expect("archive-only install succeeds");
 
     assert!(session.compacted_checkpoint.is_none());
-    let page = session
-        .read_checkpoint_ref_page(&archived_ref, 0, 2_000)
-        .expect("archive manifest resolves exact source");
-    assert!(page.content().contains("manifest exact body 1"));
+    let stored = session
+        .artifacts
+        .read_evidence(archived.evidence())
+        .expect("archive evidence is stored")
+        .as_text()
+        .expect("archive evidence is text")
+        .to_owned();
+    assert!(stored.contains("manifest exact body 1"));
 
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
@@ -229,14 +232,18 @@ async fn archive_only_manifest_resolves_refs_and_round_trips_through_store() {
         .await
         .expect("session loads");
     assert!(loaded.compacted_checkpoint.is_none());
-    let loaded_page = loaded
-        .read_checkpoint_ref_page(&archived_ref, 0, 2_000)
-        .expect("loaded archive manifest resolves exact source");
-    assert_eq!(loaded_page.content(), page.content());
+    let loaded_text = loaded
+        .artifacts
+        .read_evidence(archived.evidence())
+        .expect("loaded archive evidence is stored")
+        .as_text()
+        .expect("loaded archive evidence is text")
+        .to_owned();
+    assert_eq!(loaded_text, stored);
 }
 
 #[test]
-fn failed_archived_result_notice_has_exact_four_json_fields() {
+fn failed_archived_result_notice_names_the_artifact_without_a_ref() {
     let mut session = SessionState::new(SessionId::new("rolling-failed-notice").expect("valid id"));
     let turn_id = session.begin_model_turn().expect("failed tool turn begins");
     let failed_call = pending_tool_call("failed-notice-call");
@@ -301,13 +308,8 @@ fn failed_archived_result_notice_has_exact_four_json_fields() {
         .expect("failed notice exists");
     let notice: serde_json::Value = serde_json::from_str(&notice).expect("notice parses");
     let object = notice.as_object().expect("notice is an object");
-    assert_eq!(object.len(), 4);
+    assert_eq!(object.len(), 3);
     assert_eq!(notice["merry_archived"], true);
     assert_eq!(notice["status"], "failed");
     assert_eq!(notice["artifact_id"], "failed-notice-result");
-    assert!(
-        notice["ref"]
-            .as_str()
-            .is_some_and(|value| value.starts_with('h'))
-    );
 }

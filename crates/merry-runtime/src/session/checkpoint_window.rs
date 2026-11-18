@@ -1,7 +1,6 @@
 use crate::{
     RuntimeError,
-    artifact::TextEvidencePage,
-    checkpoint::{CheckpointError, CheckpointRef, CheckpointRefId, CheckpointSourceKind},
+    checkpoint::{CheckpointError, CheckpointRef, CheckpointSourceKind},
     compaction::{
         ArchiveOnlyCompactionInput, CitationCompactionInput, CitationCompactionPolicy,
         CompactionCoverageBudget, CompactionError, CompactionOutcome, CompactionPreparation,
@@ -49,10 +48,6 @@ impl ArchivedRefManifest {
 
     pub(crate) fn refs(&self) -> &[CheckpointRef] {
         &self.refs
-    }
-
-    fn get(&self, ref_id: &CheckpointRefId) -> Option<&CheckpointRef> {
-        self.refs.iter().find(|reference| reference.id() == ref_id)
     }
 
     fn fingerprint_material(&self) -> Vec<(String, CheckpointSourceKind, u64, u64, EvidenceRef)> {
@@ -146,35 +141,6 @@ impl SessionState {
             .map(CompactedCheckpoint::summary)
     }
 
-    pub(crate) fn read_checkpoint_ref_page(
-        &self,
-        ref_id: &CheckpointRefId,
-        offset: usize,
-        max_bytes: usize,
-    ) -> Result<TextEvidencePage, RuntimeError> {
-        self.read_checkpoint_ref_page_with_source(ref_id, offset, max_bytes)
-            .map(|(_, page)| page)
-    }
-
-    pub(crate) fn read_checkpoint_ref_page_with_source(
-        &self,
-        ref_id: &CheckpointRefId,
-        offset: usize,
-        max_bytes: usize,
-    ) -> Result<(CheckpointSourceKind, TextEvidencePage), RuntimeError> {
-        let Some(reference) = self.archived_ref_manifest.get(ref_id) else {
-            return Err(CheckpointError::RefNotFound {
-                checkpoint_id: "archive".to_owned(),
-                ref_id: ref_id.as_str().to_owned(),
-            }
-            .into());
-        };
-        let page =
-            self.artifacts
-                .read_text_evidence_page(reference.evidence(), offset, max_bytes)?;
-        Ok((reference.source_kind(), page))
-    }
-
     #[cfg(test)]
     pub(crate) fn build_citation_compaction_input(
         &self,
@@ -230,7 +196,7 @@ impl SessionState {
     ///
     /// Each rolling pass covers as much history as the compaction window can host,
     /// and the runtime repeats until the recompiled request lands back under the
-    /// watermark. This is what lets a session keep compacting after its context
+    /// body budget. This is what lets a session keep compacting after its context
     /// window shrinks, when the retained history alone no longer fits the budget.
     pub(crate) fn build_rolling_compaction_preparation(
         &self,

@@ -97,8 +97,9 @@ roots = [
 ]
 
 [runtime.auto_compaction]
-# Automatic compaction runs at the hard watermark. It first appends a summary
-# directive to the unchanged session request, including its tools and history.
+# Automatic compaction runs when the dynamic body reaches 85% of its budget.
+# It first appends a summary directive to the unchanged session request,
+# including its tools and history.
 # Current input and retained turns remain visible but are excluded from the summary.
 enabled = true
 # Maximum recent completed turns to retain. Choose the largest complete suffix
@@ -114,10 +115,10 @@ retained_model_turns = 5
 # Written into the prompt as guidance. It does not reject a usable summary.
 # After compaction, the installed summary replaces covered turns and the retained
 # raw tail stays verbatim. Raw history targets 10% of the primary window, capped at 32768 tokens;
-# this is not half the hard watermark. The retained turn preference starts at 5
+# this is not half the body budget. The retained turn preference starts at 5
 # complete turns and shrinks to 4, 3, 2, or 1 when that suffix exceeds the token
 # budget. If even one raw turn exceeds the target, keep the minimum raw tail that
-# fits the hard watermark rather than rejecting the step.
+# fits the body budget rather than rejecting the step.
 # The provider output allowance separately includes reasoning room.
 # target_output_tokens sizes the compaction output budget. It does not reject the summary.
 # target_output_tokens = 8192

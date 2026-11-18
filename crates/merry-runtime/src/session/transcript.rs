@@ -31,7 +31,6 @@ pub(crate) enum ToolResultPromptProjection {
 }
 
 pub(super) fn archived_tool_result_notice_json(
-    item_id: TranscriptItemId,
     status: merry_core::ToolCallResultStatus,
     artifact_id: &ArtifactId,
 ) -> String {
@@ -42,7 +41,6 @@ pub(super) fn archived_tool_result_notice_json(
             merry_core::ToolCallResultStatus::Failed => "failed",
         },
         "artifact_id": artifact_id.as_str(),
-        "ref": format!("h{}", item_id.as_u64()),
     })
     .to_string()
 }
@@ -781,7 +779,6 @@ impl SessionState {
                     TranscriptItemSnapshot::ToolCall { call: call.clone() }
                 }
                 TranscriptItem::ToolResult {
-                    id,
                     call_id,
                     result,
                     artifact_id,
@@ -796,7 +793,6 @@ impl SessionState {
                         )?,
                         (true, ToolResultPromptProjection::ArtifactNotice) => {
                             ArtifactContent::json(archived_tool_result_notice_json(
-                                *id,
                                 result.status(),
                                 artifact_id,
                             ))

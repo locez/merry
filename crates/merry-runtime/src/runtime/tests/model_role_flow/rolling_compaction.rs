@@ -44,7 +44,7 @@ const ROLLING_CANDIDATE: &str = r#"{
 /// budget": the history was collected while the context window was wide, then the
 /// window shrank below it. One reduction can only cover what the compaction request
 /// can host, so the step has to run more than one reduction before the recompiled
-/// request fits the new watermark.
+/// request fits the new body budget.
 #[tokio::test(flavor = "current_thread")]
 async fn automatic_compaction_rolls_when_the_window_shrinks_below_the_history() {
     assert_rolling_reaches_retained_tail(false).await;

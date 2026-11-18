@@ -2,7 +2,7 @@ use crate::{
     CheckpointDecision, CitationCompactionPolicy, CompactedCheckpoint, RuntimeModelRole,
     StepContext,
     runtime::{
-        CompactionConfig, Runtime, merry_read_checkpoint_ref_tool_name, request_context_budget,
+        CompactionConfig, Runtime, request_context_budget,
         tests::support::{
             common::{collect_step, completed_event_with, model_name, named_model, session_id},
             memory::{ScriptedMemoryActivationSource, activated_memory, record_memory_artifact},
@@ -88,12 +88,6 @@ async fn requests_append_to_the_actual_provider_input_until_checkpoint_replaceme
     assert_eq!(requests[0].tools(), requests[1].tools());
     assert_eq!(requests[1].tools(), requests[2].tools());
     assert_eq!(requests[0].tools(), requests[2].tools());
-    assert!(
-        requests[0]
-            .tools()
-            .iter()
-            .any(|tool| tool.name() == &merry_read_checkpoint_ref_tool_name())
-    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -145,19 +139,19 @@ async fn checkpoint_prefix_stays_byte_stable_when_activated_memory_changes() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn soft_watermark_does_not_call_the_compaction_provider() {
+async fn below_compact_threshold_does_not_call_the_compaction_provider() {
     let primary = RecordingModelProvider::with_script_and_capabilities(
         Vec::new(),
         ModelCapabilities::new(true, true, false, true, Some(100_000), Some(10_000))
             .expect("valid primary capabilities"),
     );
     let compactor = RecordingModelProvider::new();
-    let runtime = Runtime::builder(session_id("runtime-soft-watermark"))
+    let runtime = Runtime::builder(session_id("runtime-below-threshold"))
         .model_provider(Arc::new(primary.clone()), model_name())
         .model_provider_for_role(
             RuntimeModelRole::ContextCompaction,
             Arc::new(compactor.clone()),
-            named_model("fake/soft-watermark-compactor"),
+            named_model("fake/below-threshold-compactor"),
         )
         .automatic_compaction(CompactionConfig::enabled(
             CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
@@ -168,7 +162,7 @@ async fn soft_watermark_does_not_call_the_compaction_provider() {
 
     let events = collect_step(
         &runtime,
-        &"a".repeat(320_000),
+        &"a".repeat(200_000),
         StepContext::default().with_generation_config(generation),
     )
     .await;
@@ -182,7 +176,7 @@ async fn soft_watermark_does_not_call_the_compaction_provider() {
         Default::default(),
     )
     .expect("request budget should resolve");
-    assert_eq!(budget.decision, CheckpointDecision::PlanCheckpoint);
+    assert_eq!(budget.decision, CheckpointDecision::Continue);
     assert!(
         events
             .iter()

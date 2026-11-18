@@ -9,8 +9,7 @@ use merry_core::{PendingToolCall, ToolCallResult};
 use std::{borrow::Cow, collections::BTreeSet};
 
 use super::transcript::{
-    ToolCallPromptProjection, ToolResultPromptProjection, TranscriptItemId,
-    archived_tool_result_notice_json,
+    ToolCallPromptProjection, ToolResultPromptProjection, archived_tool_result_notice_json,
 };
 
 const PERMISSION_REVIEW_ENTRY_MAX_BYTES: usize = 2048;
@@ -116,12 +115,8 @@ impl<'a> CompactionHistoryItem<'a> {
                 // The request already shortened this result, so the payload carries the
                 // same notice instead of the archived body.
                 let use_notice = *prompt_projection == ToolResultPromptProjection::ArtifactNotice;
-                let (content_kind, content) = compaction_tool_result_text(
-                    self.history_id,
-                    result,
-                    model_content,
-                    use_notice,
-                )?;
+                let (content_kind, content) =
+                    compaction_tool_result_text(result, model_content, use_notice)?;
                 CitationCompactionTurnItem::tool_exchange(
                     self.history_id,
                     ref_id.to_owned(),
@@ -177,7 +172,6 @@ impl<'a> CompactionHistoryItem<'a> {
                         }
                     })?;
                 let (_, result_text) = compaction_tool_result_text(
-                    self.history_id,
                     result,
                     model_content,
                     *prompt_projection == ToolResultPromptProjection::ArtifactNotice
@@ -219,7 +213,6 @@ impl<'a> CompactionHistoryItem<'a> {
                 ..
             } => {
                 let result_text = compaction_tool_result_text(
-                    self.history_id,
                     result,
                     model_content,
                     *prompt_projection == ToolResultPromptProjection::ArtifactNotice,
@@ -310,15 +303,13 @@ pub(super) fn permission_review_context_entry(
 /// replaced an archived result with an artifact notice, the payload carries that
 /// notice: sending the archived body instead would ask the compactor to read
 /// content the model never saw, and the checkpoint only summarizes what the
-/// conversation actually held. The notice still names the artifact, so the
-/// checkpoint can cite the ref and read the body later.
+/// conversation actually held. The notice names the artifact and omits the body.
 ///
 /// Both the payload builder and the sizing estimate go through this one function.
 /// They disagreed once, and the runtime then believed a covered window fit while
 /// the payload it built did not, which ended the step with "no compaction window
 /// fits the compaction request budget".
 fn compaction_tool_result_text<'a>(
-    history_id: u64,
     result: &ToolCallResult,
     content: &'a ArtifactContent,
     use_notice: bool,
@@ -327,7 +318,6 @@ fn compaction_tool_result_text<'a>(
         Ok((
             "json",
             Cow::Owned(archived_tool_result_notice_json(
-                TranscriptItemId::new(history_id),
                 result.status(),
                 result.artifact().id(),
             )),

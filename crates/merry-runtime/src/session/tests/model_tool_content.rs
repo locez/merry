@@ -316,10 +316,14 @@ async fn archived_compact_results_keep_notices_and_full_evidence_after_resume() 
     let loaded = SessionState::load_from(&store, &session_id())
         .await
         .expect("load");
-    let page = loaded
-        .read_checkpoint_ref_page(reference.id(), 0, 4096)
-        .expect("full evidence");
-    assert_eq!(page.content(), full);
+    let stored = loaded
+        .artifacts
+        .read_evidence(reference.evidence())
+        .expect("full evidence")
+        .as_text()
+        .expect("text evidence")
+        .to_owned();
+    assert_eq!(stored, full);
     let snapshot = loaded
         .provider_transcript_snapshot()
         .expect("model history");
@@ -330,5 +334,5 @@ async fn archived_compact_results_keep_notices_and_full_evidence_after_resume() 
         notice["artifact_id"],
         reference.evidence().artifact_id.as_str()
     );
-    assert_eq!(notice["ref"], reference.id().as_str());
+    assert!(notice.get("ref").is_none());
 }

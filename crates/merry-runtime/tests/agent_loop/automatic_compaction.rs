@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_step_auto_compacts_before_hard_watermark_request() {
+async fn provider_step_auto_compacts_before_the_threshold_request() {
     let primary = ScriptedModelProvider::new(vec![
         vec![Ok(completed_text_event("old assistant sentinel"))],
         vec![Ok(completed_text_event(
@@ -49,12 +49,12 @@ async fn provider_step_auto_compacts_before_hard_watermark_request() {
     ))]])
     // The design requires the compaction model's window to cover the primary
     // model's, because one request hosts the whole covered window. The primary
-    // window here is deliberately tiny so the loop crosses the hard watermark.
+    // window here is deliberately tiny so the loop crosses the compaction threshold.
     .with_capabilities(
         ModelCapabilities::new(true, true, false, true, Some(64_000), None)
             .expect("valid compactor capabilities"),
     );
-    let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-hard-watermark"))
+    let runtime = Runtime::builder(session_id("agent-loop-auto-compaction-threshold"))
         .model_provider(Arc::new(primary.clone()), model_name())
         .model_provider_for_role(
             RuntimeModelRole::ContextCompaction,
@@ -77,7 +77,7 @@ async fn provider_step_auto_compacts_before_hard_watermark_request() {
     assert_eq!(
         compactor.recorded_requests().len(),
         1,
-        "runtime should compact before sending the hard-watermark request"
+        "runtime should compact before sending the over-threshold request"
     );
     let compaction_request_text = compactor.recorded_requests()[0]
         .messages()
@@ -558,7 +558,7 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn auto_compaction_config_can_disable_hard_watermark_compaction() {
+async fn auto_compaction_config_can_disable_threshold_compaction() {
     let primary = ScriptedModelProvider::new(vec![
         vec![Ok(completed_text_event("old assistant no auto compaction"))],
         vec![Ok(completed_text_event(

@@ -44,10 +44,9 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
                 }),
                 compaction: Some(CompactionUsageWindow {
                     auto_compaction_enabled: true,
-                    dynamic_body_estimated_tokens: Some(20_200),
+                    dynamic_body_estimated_tokens: 20_200,
                     body_budget_tokens: 56_792,
-                    soft_water_tokens: 46_792,
-                    hard_water_tokens: 54_792,
+                    compact_at_tokens: 48_274,
                 }),
             },
             source: source(),
@@ -71,17 +70,15 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
 fn context_shows_actual_input_over_safe_window_regardless_of_compaction_metadata() {
     let compaction = CompactionUsageWindow {
         auto_compaction_enabled: true,
-        dynamic_body_estimated_tokens: Some(1_700),
+        dynamic_body_estimated_tokens: 1_700,
         body_budget_tokens: 229_820,
-        soft_water_tokens: 218_940,
-        hard_water_tokens: 227_100,
+        compact_at_tokens: 195_347,
     };
     for compaction in [
         None,
         Some(compaction),
         Some(CompactionUsageWindow {
             auto_compaction_enabled: false,
-            dynamic_body_estimated_tokens: None,
             ..compaction
         }),
     ] {
@@ -130,10 +127,9 @@ fn narrow_header_preserves_context_pressure_before_secondary_usage() {
         }),
         compaction: Some(CompactionUsageWindow {
             auto_compaction_enabled: true,
-            dynamic_body_estimated_tokens: Some(20_200),
+            dynamic_body_estimated_tokens: 20_200,
             body_budget_tokens: 56_792,
-            soft_water_tokens: 46_792,
-            hard_water_tokens: 54_792,
+            compact_at_tokens: 48_274,
         }),
     });
 
@@ -161,10 +157,9 @@ fn narrow_header_counts_wide_characters_when_preserving_context() {
         }),
         compaction: Some(CompactionUsageWindow {
             auto_compaction_enabled: true,
-            dynamic_body_estimated_tokens: Some(20_200),
+            dynamic_body_estimated_tokens: 20_200,
             body_budget_tokens: 56_792,
-            soft_water_tokens: 46_792,
-            hard_water_tokens: 54_792,
+            compact_at_tokens: 48_274,
         }),
     });
 

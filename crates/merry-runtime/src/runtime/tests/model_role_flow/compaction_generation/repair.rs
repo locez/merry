@@ -28,7 +28,7 @@ async fn window_128k_accepts_summary_above_soft_target_without_retry() {
     assert_eq!(compactor.recorded_requests().len(), 1);
     assert!(logs.contains("\"event\":\"runtime.compaction.summary_evaluated\""));
     assert!(logs.contains("\"soft_target_tokens\":6400"));
-    assert!(logs.contains("\"hard_limit_tokens\":19200"));
+    assert!(logs.contains("\"output_limit_tokens\":19200"));
     assert!(logs.contains("\"accepted\":true"));
 }
 

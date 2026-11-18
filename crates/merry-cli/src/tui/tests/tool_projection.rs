@@ -162,17 +162,6 @@ fn projector_describes_runtime_control_tools() {
     projector.apply(
         RuntimeEvent::ToolCallStarted {
             call: pending_call_with_args(
-                "call-checkpoint",
-                "merry_read_checkpoint_ref",
-                json!({"ref": "prior-c1"}),
-            ),
-            source: source(),
-        },
-        &mut state,
-    );
-    projector.apply(
-        RuntimeEvent::ToolCallStarted {
-            call: pending_call_with_args(
                 "call-wait",
                 "wait_subagents",
                 json!({"agent_ids": ["a1", "a2"], "mode": "all", "timeout_ms": 30000}),
@@ -199,10 +188,6 @@ fn projector_describes_runtime_control_tools() {
             TimelineItem::Muted {
                 title: "Delegated".to_owned(),
                 detail: "spawn_subagents max_concurrency=2 tasks=[{\"task\":\"inspect runtime\"},{\"task\":\"inspect TUI\"}]".to_owned(),
-            },
-            TimelineItem::Muted {
-                title: "Retrieved".to_owned(),
-                detail: "merry_read_checkpoint_ref ref=prior-c1".to_owned(),
             },
             TimelineItem::Muted {
                 title: "Waited".to_owned(),

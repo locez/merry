@@ -111,7 +111,7 @@ pub(crate) async fn generate_validated_compaction_candidate(
             attempt,
             max_attempts = MAX_COMPACTION_PROVIDER_ATTEMPTS,
             soft_target_tokens = input.resolved_budget().target_output_tokens(),
-            hard_limit_tokens = input.resolved_budget().output_token_limit(),
+            output_limit_tokens = input.resolved_budget().output_token_limit(),
             retained_turn_count = input.window_plan().retained_turn_ids().len(),
             covered_turn_count = input.window_plan().covered_turn_ids().len(),
             archived_tool_count = input.window_plan().archived_tool_call_ids().len(),

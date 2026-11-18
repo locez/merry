@@ -2,6 +2,7 @@ use crate::process::{
     ProcessActionIntent, ProcessEnvPolicy, ProcessIntentClass, ProcessPermissionProfileId,
     classify_process_intent, is_low_risk_process_action_intent, is_safe_cargo_package_token,
     required_process_permission_profile_id, requires_host_process_path_review,
+    requires_process_action_review,
 };
 
 #[test]
@@ -120,6 +121,55 @@ fn safe_cargo_package_token_allows_package_names_without_paths_or_flags() {
         "crate/name",
     ] {
         assert!(!is_safe_cargo_package_token(package));
+    }
+}
+
+#[test]
+fn plain_rm_of_named_files_does_not_require_action_review() {
+    for argv in [
+        vec!["rm", "temp.txt"],
+        vec!["rm", "-f", "/tmp/scratch.txt"],
+        vec!["rm", "--", "-odd-name"],
+        vec!["sh", "-c", "rm temp.txt"],
+    ] {
+        let intent = ProcessActionIntent::new(
+            argv.into_iter().map(str::to_owned).collect(),
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("named-file rm is a valid process intent");
+        assert_ne!(
+            classify_process_intent(&intent),
+            ProcessIntentClass::Forbidden,
+            "plain rm should not be classified forbidden"
+        );
+        assert!(!requires_process_action_review(&intent));
+    }
+
+    for argv in [
+        vec!["rm", "-rf", "target"],
+        vec!["rm", "-r", "temp.txt"],
+        vec!["rm", "."],
+        vec!["rm", "*"],
+        vec!["rm"],
+        vec!["sh", "-c", "rm -rf target"],
+    ] {
+        let intent = ProcessActionIntent::new(
+            argv.into_iter().map(str::to_owned).collect(),
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("broad rm is a valid process intent");
+        assert!(
+            requires_process_action_review(&intent),
+            "broad rm should still be reviewed"
+        );
     }
 }
 

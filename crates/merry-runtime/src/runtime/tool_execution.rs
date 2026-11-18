@@ -13,9 +13,6 @@ use crate::{
     runtime::{
         APPLY_PATCH_TOOL_NAME, DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
         DIAGNOSTIC_TOOL_NOT_REGISTERED, RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE,
-        checkpoint_ref_tool::{
-            execute_merry_read_checkpoint_ref_tool_call, is_merry_read_checkpoint_ref_tool,
-        },
         diagnostic_from_text,
         diagnostics::DIAGNOSTIC_TOOL_NOT_ADMITTED,
         permission_execution::{
@@ -149,10 +146,6 @@ pub(super) async fn execute_tool_call_with_active_permit(
             )?
         };
         return Ok(events);
-    }
-
-    if is_merry_read_checkpoint_ref_tool(pending.name()) {
-        return execute_merry_read_checkpoint_ref_tool_call(inner, &pending, context).await;
     }
 
     if inner.plan_subagent_control.is_some()

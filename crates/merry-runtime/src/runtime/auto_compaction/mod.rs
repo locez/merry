@@ -15,7 +15,7 @@
 //! - [`install`] owns the installation transaction;
 //! - [`manual`] serves an explicit caller request;
 //! - [`progress`] decides when rolling has reached the destination body target;
-//! - [`phase`] drives the automatic hard-watermark path for one provider step.
+//! - [`phase`] drives automatic compaction for one provider step.
 
 use super::{
     RuntimeInner,
@@ -42,9 +42,7 @@ mod source;
 
 pub(super) use progress::CompactionProgress;
 
-pub(super) use phase::{
-    HardWatermarkCompaction, HardWatermarkOutcome, reduce_context_at_hard_watermark,
-};
+pub(super) use phase::{CompactionPhase, CompactionPhaseOutcome, reduce_context_over_threshold};
 
 pub(super) use generate::generate_and_install_compaction;
 pub(super) use install::{
@@ -142,7 +140,7 @@ pub(super) struct CompactionRequestBudget {
 
 impl CompactionRequestBudget {
     /// Reserves the hard accepted summary and a bounded raw-tail target.
-    /// The install-time body is that sum plus fixed context, not half the watermark.
+    /// The install-time body is that sum plus fixed context, not half the body budget.
     /// Both manual and automatic planning account for tools and output.
     pub(super) fn new(
         source: crate::compaction::CompactionRequestSource,
@@ -158,7 +156,7 @@ impl CompactionRequestBudget {
             .ok_or(CompactionError::BudgetOverflow)?;
         let window_budget = CompactionWindowBudget::new(
             primary_window_tokens,
-            request_budget.budget.hard_water_tokens(),
+            request_budget.budget.body_budget_tokens(),
             fixed_dynamic_body_tokens.replacement,
             fixed_dynamic_body_tokens.archive_only,
             checkpoint_output_ceiling_tokens,

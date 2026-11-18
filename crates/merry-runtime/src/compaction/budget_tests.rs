@@ -41,7 +41,7 @@ fn destination_window_bounds_summary_and_retained_history_independently() {
 }
 
 #[test]
-fn hard_acceptance_covers_a_modest_overshoot_without_a_huge_window_percentage() {
+fn output_limit_covers_a_modest_overshoot_without_a_huge_window_percentage() {
     let observed_overshoot = 8_569;
     let compact = CitationCompactionPolicy::default()
         .resolve(128_000)
@@ -59,14 +59,14 @@ fn hard_acceptance_covers_a_modest_overshoot_without_a_huge_window_percentage() 
 }
 
 #[test]
-fn install_target_is_the_window_derived_body_not_half_the_watermark() {
+fn install_target_is_the_window_derived_body_not_half_the_body_budget() {
     let resolved = CitationCompactionPolicy::default()
         .resolve(128_000)
         .expect("128k budget resolves");
-    let hard_watermark = 102_400;
+    let body_budget = 102_400;
     let budget = CompactionWindowBudget::new(
         128_000,
-        hard_watermark,
+        body_budget,
         2_000,
         2_000,
         resolved.output_token_limit(),
@@ -76,8 +76,8 @@ fn install_target_is_the_window_derived_body_not_half_the_watermark() {
     .expect("valid history target");
     let expected = 2_000 + resolved.output_token_limit() + resolved.retained_history_token_target();
     assert_eq!(budget.target_dynamic_body_tokens(), expected);
-    assert_ne!(budget.target_dynamic_body_tokens(), hard_watermark / 2);
-    assert!(budget.target_dynamic_body_tokens() < hard_watermark);
+    assert_ne!(budget.target_dynamic_body_tokens(), body_budget / 2);
+    assert!(budget.target_dynamic_body_tokens() < body_budget);
 }
 
 #[test]

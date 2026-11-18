@@ -313,6 +313,10 @@ fn is_forbidden_direct_process_argv(argv: &[String]) -> bool {
         return false;
     };
 
+    if executable == "rm" {
+        return rm_invocation_requires_review(argv);
+    }
+
     if FORBIDDEN_PROCESS_EXECUTABLES.contains(&executable.as_str()) {
         return true;
     }
@@ -338,7 +342,8 @@ fn shell_script_contains_obvious_forbidden_text(script: &str) -> bool {
     let words = rough_shell_words(script);
     words.iter().enumerate().any(|(index, word)| {
         let executable = executable_name(word);
-        FORBIDDEN_PROCESS_EXECUTABLES.contains(&executable.as_str())
+        executable == "rm"
+            || FORBIDDEN_PROCESS_EXECUTABLES.contains(&executable.as_str())
             || (executable == "git"
                 && words.get(index + 1).is_some_and(|subcommand| {
                     FORBIDDEN_GIT_SUBCOMMANDS.contains(&subcommand.as_str())
@@ -351,7 +356,6 @@ const FORBIDDEN_PROCESS_EXECUTABLES: &[&str] = &[
     "cmd",
     "powershell",
     "pwsh",
-    "rm",
     "sh",
     "su",
     "sudo",
@@ -375,6 +379,57 @@ const FORBIDDEN_GIT_SUBCOMMANDS: &[&str] = &[
     "stash",
     "switch",
 ];
+
+/// A plain `rm` of named files does not need a second review. Recursive deletes
+/// and operands that wipe a tree still do. An unparsed shell mention of `rm`
+/// stays under review because the flags are not reliable there.
+fn rm_invocation_requires_review(argv: &[String]) -> bool {
+    let mut operands = Vec::new();
+    let mut end_of_flags = false;
+    for argument in argv.iter().skip(1) {
+        if !end_of_flags && argument == "--" {
+            end_of_flags = true;
+            continue;
+        }
+        if !end_of_flags && argument.starts_with('-') {
+            if rm_flag_requires_review(argument) {
+                return true;
+            }
+            continue;
+        }
+        operands.push(argument.as_str());
+    }
+    operands.is_empty()
+        || operands
+            .iter()
+            .any(|operand| rm_operand_requires_review(operand))
+}
+
+fn rm_flag_requires_review(flag: &str) -> bool {
+    if flag == "--recursive" || flag == "--dir" {
+        return true;
+    }
+    let Some(cluster) = flag.strip_prefix('-') else {
+        return false;
+    };
+    if cluster.starts_with('-') {
+        return false;
+    }
+    cluster
+        .chars()
+        .any(|character| matches!(character, 'r' | 'R'))
+}
+
+fn rm_operand_requires_review(operand: &str) -> bool {
+    operand.is_empty()
+        || operand == "."
+        || operand == ".."
+        || operand == "/"
+        || operand == "*"
+        || operand == "~"
+        || operand.ends_with("/*")
+        || operand.contains('*')
+}
 
 /// Returns whether a process intent may enter the SP3-A low-risk process lane.
 ///

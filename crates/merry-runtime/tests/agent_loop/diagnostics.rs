@@ -115,11 +115,9 @@ async fn provider_request_trace_includes_checkpoint_budget_diagnostics_without_p
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
     assert!(logs.contains("\"event\":\"runtime.provider.request\""));
     assert!(logs.contains("\"context_window_source\":\"fallback\""));
-    assert!(logs.contains("\"context_budget_policy\":\"balanced\""));
     assert!(logs.contains("\"checkpoint_decision\":\"continue\""));
     assert!(logs.contains("\"dynamic_body_estimated_tokens\":"));
-    assert!(logs.contains("\"soft_water_tokens\":"));
-    assert!(logs.contains("\"hard_water_tokens\":"));
+    assert!(logs.contains("\"compact_at_tokens\":"));
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);

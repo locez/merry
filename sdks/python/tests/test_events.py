@@ -143,3 +143,60 @@ def test_event_value_objects_validate_nested_types_and_json_kind() -> None:
         diagnostic=diagnostic,
     )
     assert result.diagnostic == diagnostic
+
+
+def test_compaction_usage_requires_the_single_threshold() -> None:
+    from merry._models import parse_session_usage
+
+    usage = {
+        "input_tokens": 1,
+        "cached_input_tokens": None,
+        "output_tokens": 1,
+        "reasoning_output_tokens": None,
+        "total_tokens": 2,
+    }
+    current = parse_session_usage(
+        {
+            "total": usage,
+            "last": usage,
+            "context": None,
+            "compaction": {
+                "auto_compaction_enabled": True,
+                "dynamic_body_estimated_tokens": 40,
+                "body_budget_tokens": 100,
+                "compact_at_tokens": 85,
+            },
+        }
+    )
+    assert current.compaction is not None
+    assert current.compaction.dynamic_body_estimated_tokens == 40
+    assert current.compaction.compact_at_tokens == 85
+
+    with pytest.raises(TypeError, match="missing required fields"):
+        parse_session_usage(
+            {
+                "total": usage,
+                "last": usage,
+                "context": None,
+                "compaction": {
+                    "auto_compaction_enabled": True,
+                    "body_budget_tokens": 100,
+                    "compact_at_tokens": 85,
+                },
+            }
+        )
+    with pytest.raises(TypeError, match="unsupported fields"):
+        parse_session_usage(
+            {
+                "total": usage,
+                "last": usage,
+                "context": None,
+                "compaction": {
+                    "auto_compaction_enabled": True,
+                    "dynamic_body_estimated_tokens": 40,
+                    "body_budget_tokens": 100,
+                    "compact_at_tokens": 85,
+                    "extra_tokens": 90,
+                },
+            }
+        )

@@ -85,8 +85,8 @@ impl SessionState {
             {
                 Err(RuntimeError::Compaction {
                     source:
-                        CompactionError::MinimumRawTurnCannotFit
-                        | CompactionError::UncompressibleCurrentInput
+                        CompactionError::MinimumRawTurnCannotFit { .. }
+                        | CompactionError::UncompressibleCurrentInput { .. }
                         | CompactionError::NoWindowFitsCompactionRequest,
                 }) => policy = policy.with_retained_model_turns(1)?,
                 outcome => return outcome,
@@ -190,12 +190,16 @@ impl SessionState {
                                 &existing_open_archives,
                             )?)
                             .ok_or(CompactionError::BudgetOverflow)?;
-                        let error = if window_budget.estimate_body_tokens(current_only_tokens)
-                            >= window_budget.max_dynamic_body_tokens()
-                        {
-                            CompactionError::UncompressibleCurrentInput
+                        let estimated_tokens =
+                            window_budget.estimate_body_tokens(current_only_tokens);
+                        let limit_tokens = window_budget.max_dynamic_body_tokens();
+                        let error = if estimated_tokens >= limit_tokens {
+                            CompactionError::UncompressibleCurrentInput {
+                                estimated_tokens,
+                                limit_tokens,
+                            }
                         } else {
-                            CompactionError::MinimumRawTurnCannotFit
+                            CompactionError::MinimumRawTurnCannotFit { limit_tokens }
                         };
                         last_failure = Some(error);
                     } else if last_failure.is_none() {
@@ -211,17 +215,21 @@ impl SessionState {
                 // Every retention candidate needs one completed turn to retain,
                 // so an empty candidate list means the history holds no completed
                 // turn at all. That case can still be uncompressible when the open
-                // turns alone exceed the hard watermark.
+                // turns alone exceed the body budget.
                 if available_completed == 0 {
                     let existing_open_archives = existing_archived_tool_call_ids(open_turns);
                     let current_only_tokens = window_budget
                         .archive_only_fixed_dynamic_body_tokens()
                         .checked_add(projected_turn_tokens(open_turns, &existing_open_archives)?)
                         .ok_or(CompactionError::BudgetOverflow)?;
-                    if window_budget.estimate_body_tokens(current_only_tokens)
-                        >= window_budget.max_dynamic_body_tokens()
-                    {
-                        return Err(CompactionError::UncompressibleCurrentInput.into());
+                    let estimated_tokens = window_budget.estimate_body_tokens(current_only_tokens);
+                    let limit_tokens = window_budget.max_dynamic_body_tokens();
+                    if estimated_tokens >= limit_tokens {
+                        return Err(CompactionError::UncompressibleCurrentInput {
+                            estimated_tokens,
+                            limit_tokens,
+                        }
+                        .into());
                     }
                 }
                 Ok(None)
@@ -281,8 +289,8 @@ impl SessionState {
 ///
 /// Returns the plan when the split fits, `NothingToDo` when an empty covered set
 /// means there is nothing to summarize, and `DoesNotFit` when neither the split
-/// nor additional tool-result archiving brings the projection below the hard
-/// watermark. `empty_coverage` carries what an empty covered set means for the
+/// nor additional tool-result archiving brings the projection under the body
+/// budget. `empty_coverage` carries what an empty covered set means for the
 /// candidate being evaluated.
 fn plan_retained_window(
     window_budget: CompactionWindowBudget,

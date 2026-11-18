@@ -1,4 +1,4 @@
-//! The automatic hard-watermark compaction phase of one provider step.
+//! The automatic compaction phase of one provider step that crossed the threshold.
 //!
 //! This module owns the whole decision for one step: estimate the fixed dynamic
 //! body, build the window budget, prepare a compaction, fit a request the
@@ -34,12 +34,12 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Everything the compaction phase needs from the step that triggered it.
-pub(in crate::runtime) struct HardWatermarkCompaction<'a> {
+pub(in crate::runtime) struct CompactionPhase<'a> {
     /// Compaction policy for this step.
     pub(crate) policy: CitationCompactionPolicy,
     /// Reasoning level compaction requests use, resolved from the runtime config.
     pub(crate) reasoning_effort: Option<&'a ReasoningEffort>,
-    /// Resolved budget of the request that crossed the hard watermark.
+    /// Resolved budget of the request that crossed the compaction threshold.
     pub(crate) request_budget: &'a RequestContextBudget,
     /// Current step input.
     pub(crate) input: &'a StepInput,
@@ -54,9 +54,9 @@ pub(in crate::runtime) struct HardWatermarkCompaction<'a> {
     pub(crate) request: &'a merry_llm::ModelRequest,
 }
 
-/// Result of the hard-watermark compaction phase for one step.
+/// Result of the automatic compaction phase for one step.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::runtime) enum HardWatermarkOutcome {
+pub(in crate::runtime) enum CompactionPhaseOutcome {
     /// The step continues, carrying the checkpoint replacement to report when there is one.
     Continue {
         /// Installed replacement, when compaction replaced the checkpoint.
@@ -68,16 +68,16 @@ pub(in crate::runtime) enum HardWatermarkOutcome {
     Aborted,
 }
 
-/// Reduces context for one step that crossed the hard watermark.
-pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
+/// Reduces context for one step that crossed the compaction threshold.
+pub(in crate::runtime) async fn reduce_context_over_threshold(
     inner: &Arc<RuntimeInner>,
     sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     rate_sender: &RuntimeRateUpdateSender,
     token: &CancellationToken,
     active_permit: &ActiveStepPermit,
-    parts: HardWatermarkCompaction<'_>,
-) -> HardWatermarkOutcome {
-    let HardWatermarkCompaction {
+    parts: CompactionPhase<'_>,
+) -> CompactionPhaseOutcome {
+    let CompactionPhase {
         policy,
         reasoning_effort,
         request_budget,
@@ -144,7 +144,7 @@ pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
             if request_budget.dynamic_body_estimated_tokens
                 < compaction_budget.window_budget.max_dynamic_body_tokens() =>
         {
-            return HardWatermarkOutcome::Continue {
+            return CompactionPhaseOutcome::Continue {
                 replacement: None,
                 target_dynamic_body_tokens: compaction_budget.target_dynamic_body_tokens(),
             };
@@ -186,16 +186,16 @@ pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
                     if !install_archive_only_reduction(inner, sender, input, token, active_permit)
                         .await
                     {
-                        return HardWatermarkOutcome::Aborted;
+                        return CompactionPhaseOutcome::Aborted;
                     }
-                    HardWatermarkOutcome::Continue {
+                    CompactionPhaseOutcome::Continue {
                         replacement: None,
                         target_dynamic_body_tokens: compaction_budget.target_dynamic_body_tokens(),
                     }
                 }
                 CompactionAttempt::Generate(plan) => {
                     if !send_compaction_started_event(inner, sender, rate_sender, token).await {
-                        return HardWatermarkOutcome::Aborted;
+                        return CompactionPhaseOutcome::Aborted;
                     }
                     match generate_and_install_compaction(
                         inner,
@@ -207,7 +207,7 @@ pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
                     )
                     .await
                     {
-                        Ok(replacement) => HardWatermarkOutcome::Continue {
+                        Ok(replacement) => CompactionPhaseOutcome::Continue {
                             replacement: Some(replacement),
                             target_dynamic_body_tokens: compaction_budget
                                 .target_dynamic_body_tokens(),
@@ -221,9 +221,9 @@ pub(in crate::runtime) async fn reduce_context_at_hard_watermark(
             if !install_archive_only_reduction(inner, sender, archive_input, token, active_permit)
                 .await
             {
-                return HardWatermarkOutcome::Aborted;
+                return CompactionPhaseOutcome::Aborted;
             }
-            HardWatermarkOutcome::Continue {
+            CompactionPhaseOutcome::Continue {
                 replacement: None,
                 target_dynamic_body_tokens: compaction_budget.target_dynamic_body_tokens(),
             }
@@ -293,7 +293,7 @@ async fn abort_with_error(
     sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     error: crate::RuntimeError,
-) -> HardWatermarkOutcome {
+) -> CompactionPhaseOutcome {
     if token.is_cancelled() {
         return abort_cancelled(inner, sender).await;
     }
@@ -312,20 +312,20 @@ async fn abort_with_diagnostic(
     sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     diagnostic: ErrorInfo,
-) -> HardWatermarkOutcome {
+) -> CompactionPhaseOutcome {
     clear_current_activated_memories(inner).await;
     trace_provider_step_failed(&diagnostic);
     let _ = send_failed_event(inner, sender, token, diagnostic).await;
-    HardWatermarkOutcome::Aborted
+    CompactionPhaseOutcome::Aborted
 }
 
 /// Ends the step as cancelled.
 async fn abort_cancelled(
     inner: &Arc<RuntimeInner>,
     sender: &mpsc::Sender<RuntimeJournalEventBatch>,
-) -> HardWatermarkOutcome {
+) -> CompactionPhaseOutcome {
     clear_current_activated_memories(inner).await;
     trace_provider_step_cancelled();
     let _ = send_cancelled_event(inner, sender).await;
-    HardWatermarkOutcome::Aborted
+    CompactionPhaseOutcome::Aborted
 }

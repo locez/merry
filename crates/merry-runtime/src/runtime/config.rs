@@ -7,7 +7,7 @@ fn default_automatic_compaction_policy() -> CitationCompactionPolicy {
 
 /// Runtime-owned policy for checkpoint compaction.
 ///
-/// `enabled` and `policy` drive the pre-provider hard-watermark path. Manual
+/// `enabled` and `policy` drive automatic compaction before a provider request. Manual
 /// [`crate::Runtime::compact_context_once`] calls still take an explicit
 /// [`CitationCompactionPolicy`] so tests and callers can run one-off compaction
 /// passes without mutating runtime construction policy.
@@ -28,7 +28,7 @@ pub struct CompactionConfig {
 }
 
 impl CompactionConfig {
-    /// Enables automatic hard-watermark compaction with the provided policy.
+    /// Enables automatic compaction with the provided policy.
     #[must_use]
     pub fn enabled(policy: CitationCompactionPolicy) -> Self {
         Self {
@@ -38,7 +38,7 @@ impl CompactionConfig {
         }
     }
 
-    /// Disables automatic hard-watermark compaction.
+    /// Disables automatic compaction.
     ///
     /// The policy remains populated with defaults so disabled configs can be
     /// inspected or re-enabled by callers without constructing a dummy policy.

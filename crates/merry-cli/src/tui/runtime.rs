@@ -394,37 +394,10 @@ async fn write_session_metadata(
 }
 
 fn permission_review_view(request: &PermissionReviewRequest) -> (String, String) {
-    let permission_request = request.request();
-    let mut lines = vec![format!("approval_id: {}", request.approval_id())];
-    if let Some(reason) = request.host_fallback_reason() {
-        lines.push(reason.to_string());
-    }
-    if let Some(reason) = permission_request.reason() {
-        lines.push(format!("reason: {reason}"));
-    }
-    if permission_request.is_action_review() {
-        lines.push("review: high-risk process action".to_owned());
-    }
-    lines.push(format!("action: {}", permission_request.action().summary()));
-    lines.push("requested capabilities:".to_owned());
-    for capability in permission_request.requested() {
-        match capability {
-            merry_runtime::RequestedCapability::Network => {
-                lines.push("  - network".to_owned());
-            }
-            merry_runtime::RequestedCapability::Path(path) => {
-                lines.push(format!(
-                    "  - path {} ({})",
-                    path.path(),
-                    path.access().as_str()
-                ));
-            }
-            merry_runtime::RequestedCapability::HostIntegration(integration) => {
-                lines.push(format!("  - host integration {}", integration.as_str()));
-            }
-        }
-    }
-    (request.approval_id(), lines.join("\n"))
+    (
+        request.approval_id(),
+        crate::permission_prompt::permission_review_lines(request).join("\n"),
+    )
 }
 
 fn preference_model_override<'a>(

@@ -1,7 +1,7 @@
 use crate::{
-    CheckpointDecision, ContextBudget, ContextBudgetPolicy, ContextCompiler,
-    DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS, ProjectRules, PromptProfile, ResolvedContextWindow,
-    RuntimeError, SessionContextSnapshot, SkillCatalog, TaskAnchor, decide_checkpoint,
+    CheckpointDecision, ContextBudget, ContextCompiler, DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
+    ProjectRules, PromptProfile, ResolvedContextWindow, RuntimeError, SessionContextSnapshot,
+    SkillCatalog, TaskAnchor, decide_checkpoint,
     plan::projection::{
         coordinator_plan_control_message, coordinator_plan_inactive_control_message,
     },
@@ -43,11 +43,9 @@ pub(super) fn trace_provider_request(
             dynamic_context_hash = request.dynamic_context_hash().as_str(),
             context_window_tokens = request_budget.window.tokens(),
             context_window_source = request_budget.window.source().as_str(),
-            context_budget_policy = request_budget.policy.as_str(),
             dynamic_body_estimated_tokens = request_budget.dynamic_body_estimated_tokens,
             body_budget_tokens = request_budget.budget.body_budget_tokens(),
-            soft_water_tokens = request_budget.budget.soft_water_tokens(),
-            hard_water_tokens = request_budget.budget.hard_water_tokens(),
+            compact_at_tokens = request_budget.budget.compact_at_tokens(),
             checkpoint_decision = request_budget.decision.as_str(),
             max_output_tokens = request.generation().max_output_tokens(),
             allow_parallel_tool_calls = request.generation().allow_parallel_tool_calls(),
@@ -256,7 +254,6 @@ pub(super) fn step_request_compile_diagnostic(error: &StepRequestCompileError) -
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RequestContextBudget {
     pub(super) window: ResolvedContextWindow,
-    pub(super) policy: ContextBudgetPolicy,
     pub(super) budget: ContextBudget,
     pub(super) dynamic_body_estimated_tokens: u64,
     pub(super) token_estimate_scale: TokenEstimateScale,
@@ -294,10 +291,9 @@ pub(super) fn step_usage_context_snapshot(
         }),
         compaction: Some(CompactionUsageWindow {
             auto_compaction_enabled,
-            dynamic_body_estimated_tokens: Some(request_budget.dynamic_body_estimated_tokens),
+            dynamic_body_estimated_tokens: request_budget.dynamic_body_estimated_tokens,
             body_budget_tokens: request_budget.budget.body_budget_tokens(),
-            soft_water_tokens: request_budget.budget.soft_water_tokens(),
-            hard_water_tokens: request_budget.budget.hard_water_tokens(),
+            compact_at_tokens: request_budget.budget.compact_at_tokens(),
         }),
     }
 }
@@ -314,7 +310,6 @@ pub(super) fn request_context_budget(
         .max_output_tokens()
         .or_else(|| capabilities.max_output_tokens())
         .unwrap_or_else(|| default_output_reserve_tokens(window.tokens()));
-    let policy = ContextBudgetPolicy::Balanced;
     let stable_prefix_estimated_tokens = estimate_model_input_tokens(request.stable_prefix_input())
         .saturating_add(crate::token_estimate::estimate_request_contract_tokens(
             request,
@@ -324,7 +319,6 @@ pub(super) fn request_context_budget(
         DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
         token_estimate_scale.estimate(stable_prefix_estimated_tokens),
         output_reserve_tokens,
-        policy,
     )?;
     let dynamic_body_estimated_tokens =
         token_estimate_scale.estimate(estimate_model_input_tokens(request.dynamic_input()));
@@ -332,7 +326,6 @@ pub(super) fn request_context_budget(
 
     Ok(RequestContextBudget {
         window,
-        policy,
         budget,
         dynamic_body_estimated_tokens,
         token_estimate_scale,

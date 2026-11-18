@@ -73,7 +73,7 @@ impl CompactionWindowBudget {
     }
 
     /// Adds a bounded history target to calibrated fixed input and summary ceiling.
-    /// The hard body budget remains authoritative; arithmetic overflow is rejected.
+    /// The body budget remains authoritative; arithmetic overflow is rejected.
     pub(crate) fn with_retained_history_target(
         self,
         retained_history_tokens: u64,
@@ -111,8 +111,9 @@ impl CompactionWindowBudget {
     ///
     /// The preferred budget includes the fixed request body, the accepted
     /// checkpoint ceiling, and the bounded raw-history target. It is distinct
-    /// from the hard watermark: the latter decides when compaction is required,
-    /// while this target decides when repeated compaction has done enough work.
+    /// from the body budget: the body budget is the largest request that can
+    /// still be sent, while this target decides when repeated compaction has
+    /// done enough work.
     pub(crate) const fn target_dynamic_body_tokens(self) -> u64 {
         match self.preferred_dynamic_body_tokens {
             Some(tokens) => tokens,
@@ -218,7 +219,7 @@ pub(crate) enum RetainedFit {
     ///
     /// Rolling compaction uses this. Each pass covers as much history as the
     /// compaction window can host, and the caller repeats while the recompiled
-    /// request still crosses the watermark. Without it, a window that shrank below
+    /// request still crosses the body budget. Without it, a window that shrank below
     /// the retained history could never reduce anything: every candidate would fail
     /// the budget check before anything could be installed, which is why shrinking
     /// the context window reported that no compaction window fit.

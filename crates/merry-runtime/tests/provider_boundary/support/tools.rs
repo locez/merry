@@ -41,20 +41,6 @@ pub(crate) fn test_tool_spec(name: &str) -> ToolSpec {
     .expect("valid tool spec")
 }
 
-pub(crate) fn assert_default_checkpoint_ref_tool(tools: &[ToolSpec]) {
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].name().as_str(), "merry_read_checkpoint_ref");
-}
-
-pub(crate) fn assert_tools_are_default_checkpoint_ref_plus(
-    tools: &[ToolSpec],
-    expected_user_tools: &[ToolSpec],
-) {
-    assert_eq!(tools.len(), expected_user_tools.len() + 1);
-    assert_eq!(tools[0].name().as_str(), "merry_read_checkpoint_ref");
-    assert_eq!(&tools[1..], expected_user_tools);
-}
-
 pub(crate) fn path_tool_spec(name: &str) -> ToolSpec {
     let schema = Schema::try_from(json!({
         "type": "object",

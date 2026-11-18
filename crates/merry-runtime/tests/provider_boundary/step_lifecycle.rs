@@ -7,7 +7,6 @@ use crate::support::{
         artifact_id, collect_step, collect_step_with_context, record_valid_context,
         runtime_with_provider, runtime_with_provider_event_buffer, session_id,
     },
-    tools::assert_default_checkpoint_ref_tool,
 };
 use futures_util::StreamExt;
 use merry_core::{
@@ -135,7 +134,7 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
         request.messages()[2].content().as_text(),
         "Explain the runtime boundary."
     );
-    assert_default_checkpoint_ref_tool(request.tools());
+    assert!(request.tools().is_empty());
     assert_eq!(request.generation().max_output_tokens(), None);
     assert_eq!(request.generation().reasoning_effort(), None);
     assert_eq!(
@@ -336,7 +335,7 @@ async fn runtime_step_with_provider_includes_compiled_context_as_system_message(
         request.messages()[3].content().as_text(),
         "Use the stored context."
     );
-    assert_default_checkpoint_ref_tool(request.tools());
+    assert!(request.tools().is_empty());
     assert!(!request.generation().allow_parallel_tool_calls());
 
     let trajectory = runtime

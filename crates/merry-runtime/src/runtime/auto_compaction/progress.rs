@@ -19,38 +19,38 @@ impl CompactionProgress {
     }
 
     /// Returns whether reduction is complete, rejecting a stalled unsafe request.
-    /// A safe indivisible tail may exceed the preferred target, never the watermark.
+    /// A safe indivisible tail may exceed the preferred target, never the body budget.
     pub(in crate::runtime) fn observe(
         &mut self,
         body_tokens: u64,
         target_tokens: u64,
-        hard_limit_tokens: u64,
+        body_budget_tokens: u64,
         installed_checkpoint: bool,
     ) -> Result<bool, CompactionError> {
         self.passes += 1;
         let shrank = body_tokens < self.previous_body_tokens;
         self.previous_body_tokens = body_tokens;
-        if body_tokens < target_tokens.min(hard_limit_tokens) {
+        if body_tokens < target_tokens.min(body_budget_tokens) {
             return Ok(true);
         }
         if !installed_checkpoint || !shrank || self.passes >= MAX_COMPACTION_PASSES {
-            self.finish(body_tokens, hard_limit_tokens)?;
+            self.finish(body_tokens, body_budget_tokens)?;
             return Ok(true);
         }
         Ok(false)
     }
 
-    /// Validates the hard limit when no further checkpoint can be installed.
+    /// Validates the body budget when no further checkpoint can be installed.
     pub(in crate::runtime) fn finish(
         &self,
         body_tokens: u64,
-        hard_limit_tokens: u64,
+        body_budget_tokens: u64,
     ) -> Result<(), CompactionError> {
-        if body_tokens >= hard_limit_tokens {
+        if body_tokens >= body_budget_tokens {
             return Err(CompactionError::ConvergenceExhausted {
                 passes: self.passes,
                 estimated_tokens: body_tokens,
-                hard_limit_tokens,
+                body_budget_tokens,
             });
         }
         Ok(())
@@ -77,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn indivisible_tail_is_accepted_only_below_the_hard_watermark() {
+    fn indivisible_tail_is_accepted_only_below_the_body_budget() {
         for body_tokens in [10_000, 49_999, 50_000, 60_000] {
             let mut progress = CompactionProgress::new(body_tokens);
             let result = progress.observe(body_tokens, 10_000, 50_000, false);

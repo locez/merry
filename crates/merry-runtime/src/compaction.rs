@@ -34,12 +34,12 @@ pub enum CompactionError {
     NoWindowFitsCompactionRequest,
 
     #[error(
-        "compaction cannot reduce the request below the hard watermark after {passes} passes: estimated {estimated_tokens} tokens, limit {hard_limit_tokens}"
+        "compaction ran {passes} times and the request is still about {estimated_tokens} tokens, above the {body_budget_tokens} token body budget. Raise the context window, or shorten the fixed prompt and the current request"
     )]
     ConvergenceExhausted {
         passes: usize,
         estimated_tokens: u64,
-        hard_limit_tokens: u64,
+        body_budget_tokens: u64,
     },
 
     #[error("compaction payload serialization failed: {message}")]
@@ -48,11 +48,18 @@ pub enum CompactionError {
     #[error("compaction window is stale")]
     StaleWindow,
 
-    #[error("current input and fixed dynamic context cannot fit below the hard watermark")]
-    UncompressibleCurrentInput,
+    #[error(
+        "this turn cannot fit in the context window: it is about {estimated_tokens} tokens and the limit is {limit_tokens}. Compaction cannot shrink the fixed prompt or this turn. Raise the context window, or send a shorter request"
+    )]
+    UncompressibleCurrentInput {
+        estimated_tokens: u64,
+        limit_tokens: u64,
+    },
 
-    #[error("the minimum retained raw completed turn cannot fit below the hard watermark")]
-    MinimumRawTurnCannotFit,
+    #[error(
+        "the newest completed turn cannot fit under the {limit_tokens} token context limit. Compaction cannot keep a smaller raw turn. Raise the context window"
+    )]
+    MinimumRawTurnCannotFit { limit_tokens: u64 },
 
     #[error("compaction model response shape is invalid: {reason}")]
     InvalidModelResponseShape { reason: &'static str },

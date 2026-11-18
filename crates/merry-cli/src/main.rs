@@ -13,6 +13,7 @@ mod debug;
 mod headless_review;
 mod mcp_tools;
 mod observability;
+mod permission_prompt;
 mod provider_config;
 mod provider_management;
 mod run;

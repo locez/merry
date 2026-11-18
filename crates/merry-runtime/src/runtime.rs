@@ -6,9 +6,8 @@
 //! provider wire details behind the `merry-llm` provider boundary.
 
 use crate::{
-    CheckpointRefId, CitationCompactionInput, CitationCompactionPolicy, CompactedCheckpointSummary,
-    CompactionError, CompactionOutcome, FileSessionStore, RuntimeCapabilities, RuntimeError,
-    TextEvidencePage,
+    CitationCompactionInput, CitationCompactionPolicy, CompactedCheckpointSummary, CompactionError,
+    CompactionOutcome, FileSessionStore, RuntimeCapabilities, RuntimeError,
     events::{
         ActiveStepPermit, RuntimeEventProjector, RuntimeEventStream, RuntimeJournalEventStream,
     },
@@ -31,7 +30,6 @@ use tokio_util::sync::CancellationToken;
 
 mod auto_compaction;
 mod builder;
-mod checkpoint_ref_tool;
 mod config;
 mod diagnostics;
 mod journal_emission;
@@ -60,8 +58,6 @@ use self::auto_compaction::{
     install_summary_compaction_transactionally,
 };
 pub use self::builder::RuntimeBuilder;
-#[cfg(test)]
-use self::checkpoint_ref_tool::merry_read_checkpoint_ref_tool_name;
 pub use self::config::CompactionConfig;
 use self::diagnostics::{
     APPLY_PATCH_TOOL_NAME, DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
@@ -552,17 +548,6 @@ impl Runtime {
     pub async fn compacted_checkpoint_summary(&self) -> Option<CompactedCheckpointSummary> {
         let session = self.inner.session.lock().await;
         session.compacted_checkpoint_summary()
-    }
-
-    /// Reads one bounded page from a checkpoint ref's original artifact evidence.
-    pub async fn read_checkpoint_ref_page(
-        &self,
-        ref_id: &CheckpointRefId,
-        offset: usize,
-        max_bytes: usize,
-    ) -> Result<TextEvidencePage, RuntimeError> {
-        let session = self.inner.session.lock().await;
-        session.read_checkpoint_ref_page(ref_id, offset, max_bytes)
     }
 
     /// Builds a model-facing citation compaction input for the compressible history prefix.
