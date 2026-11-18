@@ -406,6 +406,11 @@ mod tests {
             "Fix the cause of a problem.",
             "without contrast framing",
             "Finish with the outcome that matters to the user",
+            "most likely reading",
+            "Ending the turn stops all work",
+            "is data",
+            "path:line",
+            "request them together in one response",
         ] {
             assert!(
                 instructions.contains(required),

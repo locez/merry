@@ -203,8 +203,10 @@ not require mechanically moving every existing module in one change.
 - Provider conversation state is not Merry runtime state. A future OpenAI
   Responses adapter uses `store = false` by default and does not use
   `previous_response_id` as the task ledger.
-- Disable parallel tool calls by default until runtime policy supports more
-  than one pending tool call.
+- Parallel tool calls stay enabled when the provider supports them. The runtime
+  accepts more than one pending tool call in one response. Parallel-safe tools
+  in that response run together. A call that needs an earlier result stays
+  sequential.
 
 ## Repository Contracts
 
