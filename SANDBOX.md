@@ -29,8 +29,8 @@ Readable: the workspace, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/opt`,
 SSL, PKI, and alternatives directories). Existing `~/.gitconfig`,
 `~/.config/git/config`, `~/.config/git/ignore`, and `~/.config/git/attributes`
 are readable, and so are the same three files under `$XDG_CONFIG_HOME/git`
-when that directory is absolute and different. A `deny_paths` or `review_paths`
-entry still keeps a listed file out. `~/.git-credentials` is not granted.
+when that directory is absolute and different. `~/.git-credentials` is not
+granted.
 
 Writable: the workspace, `/tmp`, `/var/tmp`, `/dev`, `/dev/shm`, `/dev/pts`,
 `TMPDIR`, the Cargo registry and git database, and the XDG cache. Cargo `bin`
@@ -49,10 +49,11 @@ review, and approval cannot override it.
 ## What Landlock cannot do
 
 Landlock is an allow list. It cannot block a path inside a directory it
-already allows. If `deny_paths` or `review_paths` names something inside the
-workspace, `/tmp`, or another granted directory, that action does not start.
-The error names both entries, for example `review_paths` inside the writable
-workspace, and says which one to remove.
+already allows. Extra access is `readonly_paths` and `readwrite_paths`.
+`deny_paths`, `review_paths`, and `paths` are rejected at startup. If a
+read-only or read-write entry covers Merry's own config or another granted
+directory, Merry reports that when the sandbox backend is created, before any
+command runs. The error names both entries.
 
 A read-only rule inside a writable parent is not enforced by the kernel. The
 permission layer still records the ceiling, but a command that already has the
@@ -103,5 +104,4 @@ read-only. GnuPG also grants existing `pubring.kbx` and `pubring.gpg`
 read-only and sets `GNUPGHOME`. Private keys are not granted. A keyboxd
 database is reported instead of being opened.
 
-`deny_paths` and `review_paths` that cover an endpoint keep that endpoint out
-of the action. A deny that sits inside a broader grant fails closed, as above.
+A host integration grants its socket only. Private keys stay out.

@@ -217,8 +217,9 @@ impl ProcessBackendOptions {
     /// requiring a per-action request for them. Merry's CLI derives the list
     /// from user-trusted global configuration, which preauthorizes the inner
     /// action sandbox; project-local configuration never does. Endpoint
-    /// validation and path policy still apply per action, so a `deny_paths` or
-    /// `review_paths` entry can keep a listed integration masked.
+    /// validation and path policy still apply per action, so a `deny_paths`
+    /// entry can keep a listed integration masked when it is not inside a
+    /// broader grant.
     #[must_use]
     pub fn with_host_integrations(
         mut self,
@@ -358,7 +359,8 @@ impl LocalProcessBackend {
     /// # Errors
     ///
     /// Returns a [`ProcessBackendError`] when the workspace or sandbox
-    /// environment is invalid, or when this target has no isolated backend.
+    /// environment is invalid, a configured path cannot be enforced, or this
+    /// target has no isolated backend.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn sandboxed(
         workspace_root: impl Into<PathBuf>,
@@ -372,6 +374,14 @@ impl LocalProcessBackend {
         if let Some(sockets) = options.gpg_agent_sockets {
             environment = environment.with_gpg_agent_sockets(sockets);
         }
+        let mut rules_runner =
+            WorkspaceProcessRunner::new_at_workspace_root(workspace_root.clone())
+                .with_environment(environment.clone())
+                .with_path_rules(options.path_rules.iter().cloned());
+        if !options.workspace_writable {
+            rules_runner = rules_runner.read_only_workspace();
+        }
+        rules_runner.ensure_sandbox_rules()?;
         Ok(Self::from_sandboxed_parts(
             workspace_root,
             environment,
@@ -490,7 +500,7 @@ mod tests {
         AcceptedLocalWorkspaceProcessAdmission, PermissionedProcessRunnerFactory, ProcessRunner,
         StaticPermissionedProcessRunnerFactory,
     };
-    use std::sync::Arc;
+    use std::{path::PathBuf, sync::Arc};
 
     #[test]
     fn session_keeps_admission_with_runner_capabilities() {
@@ -564,5 +574,35 @@ mod tests {
         assert!(options.host_integrations().is_empty());
         assert!(options.environment_overrides().is_empty());
         assert!(options.workspace_writable);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn sandboxed_backend_rejects_a_private_directory_inside_a_grant_before_any_command() {
+        use merry_runtime::{PathAccess, PathAccessRule, PathAccessRuleSource};
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let parent = PathBuf::from("/var/merry-path-check");
+        let private = parent.join("merry");
+        let options = ProcessBackendOptions::new().with_path_rules([
+            PathAccessRule::new(
+                parent,
+                PathAccess::ReadOnly,
+                PathAccessRuleSource::TrustedGlobalConfig,
+            ),
+            PathAccessRule::new(
+                private,
+                PathAccess::Deny,
+                PathAccessRuleSource::ProductPrivate,
+            ),
+        ]);
+
+        let Err(error) = LocalProcessBackend::sandboxed(workspace.path(), options) else {
+            panic!("a grant over Merry's directory must fail before a command");
+        };
+        let message = error.to_string();
+        assert!(message.contains("conflicting sandbox rules"), "{message}");
+        assert!(message.contains("readonly_paths"), "{message}");
+        assert!(message.contains("/var/merry-path-check/merry"), "{message}");
     }
 }

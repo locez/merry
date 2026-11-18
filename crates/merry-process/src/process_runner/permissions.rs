@@ -83,6 +83,26 @@ impl WorkspaceProcessRunner {
         self
     }
 
+    /// Rejects allow-list conflicts before a session can run a command.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same conflict `plan_for` would return for these rules when a
+    /// deny, review, or private path sits inside an allowed directory.
+    pub(crate) fn ensure_sandbox_rules(&self) -> Result<(), ProcessRunnerError> {
+        if let Some(message) = self.configuration_error.clone() {
+            return Err(ProcessRunnerError::infrastructure(message));
+        }
+        let environment = self.environment.validate_for_workspace(&self.cwd_root)?;
+        let path_rules = normalize_path_rules(self.path_rules.clone());
+        crate::confinement::check_sandbox_rules(
+            &self.cwd_root,
+            &environment,
+            &path_rules,
+            self.workspace_writable,
+        )
+    }
+
     pub(super) fn plan_for(
         &self,
         intent: &ProcessActionIntent,

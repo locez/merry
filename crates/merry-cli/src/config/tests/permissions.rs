@@ -24,7 +24,7 @@ fn network_option_defaults_to_open_and_preserves_false() {
 }
 
 #[test]
-fn review_paths_restrict_declared_subtrees_without_changing_preauthorization() {
+fn review_paths_are_rejected() {
     let paths = XdgPaths::from_parts(home(), None, None);
     let config = MerryConfig::load_optional_from_text(
         Some(
@@ -39,16 +39,19 @@ review_paths = ["/abc/d", "/shared/private"]
     )
     .unwrap()
     .unwrap();
-    let rules = config.trusted_global_path_rules().unwrap();
-    assert_eq!(rules.len(), 4);
-    assert!(!rules[0].review_required());
-    assert!(!rules[1].review_required());
-    assert_eq!(rules[1].access(), PathAccess::ReadWrite);
-    assert_eq!(rules[2].path(), Path::new("/abc/d"));
-    assert_eq!(rules[2].access(), PathAccess::ReadOnly);
-    assert!(rules[2].review_required());
-    assert_eq!(rules[3].access(), PathAccess::ReadWrite);
-    assert!(rules[3].review_required());
+    let message = config
+        .trusted_global_path_rules()
+        .expect_err("review paths")
+        .to_string();
+    assert!(
+        message.contains("review_paths (/abc/d, /shared/private)"),
+        "{message}"
+    );
+    assert!(
+        message.contains("readonly_paths or readwrite_paths"),
+        "{message}"
+    );
+    assert!(!message.contains("readonly_paths (/abc)"), "{message}");
 }
 
 #[test]
@@ -67,7 +70,7 @@ fn review_paths_cannot_create_grants_or_override_denial() {
 }
 
 #[test]
-fn parses_trusted_global_path_rules() {
+fn every_legacy_path_key_is_named_when_rejected() {
     let paths = XdgPaths::from_parts(home(), None, None);
     let config = MerryConfig::load_optional_from_text(
         Some(
@@ -87,10 +90,35 @@ access = "ro"
     .expect("config should parse")
     .expect("config should be present");
 
+    let message = config
+        .trusted_global_path_rules()
+        .expect_err("removed path keys")
+        .to_string();
+    assert!(message.contains("deny_paths (~/.ssh)"), "{message}");
+    assert!(message.contains("paths (/var/log/foo ro)"), "{message}");
+    assert!(!message.contains("readonly_paths (/etc"), "{message}");
+}
+
+#[test]
+fn readonly_and_readwrite_paths_stay_preauthorized() {
+    let paths = XdgPaths::from_parts(home(), None, None);
+    let config = MerryConfig::load_optional_from_text(
+        Some(
+            r#"
+[permissions]
+readonly_paths = ["/etc", "~/logs", "shared-readonly"]
+readwrite_paths = ["../foo"]
+"#,
+        ),
+        &paths,
+    )
+    .expect("config should parse")
+    .expect("config should be present");
+
     let rules = config
         .trusted_global_path_rules()
-        .expect("trusted path rules should resolve");
-    assert_eq!(rules.len(), 6);
+        .expect("read and write paths should resolve");
+    assert_eq!(rules.len(), 4);
     assert_eq!(rules[0].path(), Path::new("/etc"));
     assert_eq!(rules[0].access(), PathAccess::ReadOnly);
     assert_eq!(rules[1].path(), Path::new("/home/alice/logs"));
@@ -100,10 +128,6 @@ access = "ro"
     );
     assert_eq!(rules[3].path(), Path::new("/home/alice/.config/foo"));
     assert_eq!(rules[3].access(), PathAccess::ReadWrite);
-    assert_eq!(rules[4].path(), Path::new("/home/alice/.ssh"));
-    assert_eq!(rules[4].access(), PathAccess::Deny);
-    assert_eq!(rules[5].path(), Path::new("/var/log/foo"));
-    assert_eq!(rules[5].access(), PathAccess::ReadOnly);
     assert!(
         rules
             .iter()

@@ -314,12 +314,11 @@ the request before review, and approval cannot open it. The setting does not
 restrict model-provider or configured MCP connections. `--sandbox off` does not
 use this limit.
 
-`readonly_paths`, `readwrite_paths`, and `deny_paths` are the same kind of
-option for filesystem access. Trusted paths are available to ordinary actions
-at the declared level. `review_paths` asks again for each action. `deny_paths`
-is never reopened by an approval. A deny or review path inside an allowed
-directory cannot be subtracted, so that action fails closed instead of running
-unsandboxed.
+`readonly_paths` and `readwrite_paths` add trees outside the workspace.
+`deny_paths`, `review_paths`, and `paths` are rejected at startup: the sandbox
+cannot withhold a subdirectory of an allowed path. A grant that covers Merry's
+own config or another allowed directory is reported when the session starts,
+before any command.
 
 `[permissions].environment` applies only to Merry-managed action processes.
 
@@ -347,9 +346,8 @@ are denied to actions. A saved read-write or read-only choice lives under
 Merry's state directory.
 
 Until an action is approved for network, its IPv4, IPv6, and packet sockets are
-rejected. Filesystem policy is an allow list. A `deny_paths` or `review_paths`
-entry inside an allowed directory does not start the action; the error names
-both entries. Landlock also does not hide names or cover every metadata
+rejected. Filesystem policy is an allow list. Landlock also does not hide
+names or cover every metadata
 operation. Details are in [SANDBOX.md](SANDBOX.md).
 
 ## Multi-Tool Execution

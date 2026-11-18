@@ -10,7 +10,6 @@ use thiserror::Error;
 mod cli;
 pub(crate) mod managed_provider;
 mod mcp;
-mod path_review;
 mod paths;
 pub use paths::XdgPaths;
 use paths::{resolve_config_relative_path, resolve_path_access_rule_path, resolve_user_path};
@@ -171,14 +170,44 @@ impl MerryConfig {
         Ok(paths)
     }
 
-    /// Returns preauthorized path access and action-scoped review restrictions.
+    /// Returns extra path grants from trusted global config.
     ///
-    /// The workspace sandbox enforces the access ceiling. Paths marked for
-    /// review and product-owned private resources stay out of ordinary actions.
+    /// `readonly_paths` and `readwrite_paths` add trees. `deny_paths`,
+    /// `review_paths`, and `paths` are rejected because the workspace sandbox
+    /// cannot withhold a subdirectory of an allowed path.
     pub fn trusted_global_path_rules(&self) -> Result<Vec<PathAccessRule>, ConfigError> {
         let Some(permissions) = self.raw.permissions.as_ref() else {
             return Ok(Vec::new());
         };
+        let mut removed = Vec::new();
+        if !permissions.deny_paths.is_empty() {
+            removed.push(format!(
+                "deny_paths ({})",
+                permissions.deny_paths.join(", ")
+            ));
+        }
+        if !permissions.review_paths.is_empty() {
+            removed.push(format!(
+                "review_paths ({})",
+                permissions.review_paths.join(", ")
+            ));
+        }
+        if !permissions.paths.is_empty() {
+            let entries = permissions
+                .paths
+                .iter()
+                .map(|rule| format!("{} {}", rule.path, rule.access.label()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            removed.push(format!("paths ({entries})"));
+        }
+        if !removed.is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "[permissions] {} is not applied by the workspace sandbox. Remove it from {}. Extra trees belong in readonly_paths or readwrite_paths.",
+                removed.join("; "),
+                self.config_dir.join("config.toml").display()
+            )));
+        }
         let mut rules = Vec::new();
         for path in &permissions.readonly_paths {
             let path = resolve_path_access_rule_path(path, &self.config_dir, &self.home)?;
@@ -196,28 +225,6 @@ impl MerryConfig {
                 PathAccessRuleSource::TrustedGlobalConfig,
             ));
         }
-        for path in &permissions.deny_paths {
-            let path = resolve_path_access_rule_path(path, &self.config_dir, &self.home)?;
-            rules.push(PathAccessRule::new(
-                path,
-                PathAccess::Deny,
-                PathAccessRuleSource::TrustedGlobalConfig,
-            ));
-        }
-        for rule in &permissions.paths {
-            let path = resolve_path_access_rule_path(&rule.path, &self.config_dir, &self.home)?;
-            rules.push(PathAccessRule::new(
-                path,
-                rule.access.into(),
-                PathAccessRuleSource::TrustedGlobalConfig,
-            ));
-        }
-        path_review::append_review_rules(
-            &mut rules,
-            &permissions.review_paths,
-            &self.config_dir,
-            &self.home,
-        )?;
         Ok(rules)
     }
 
@@ -239,9 +246,7 @@ impl MerryConfig {
     /// configuration.
     ///
     /// When a validated endpoint exists, ordinary sandboxed actions use it
-    /// without another permission request. `deny_paths` and `review_paths`
-    /// still mask a configured endpoint until the exact path is approved for
-    /// that action.
+    /// without another permission request.
     pub fn host_integrations(&self) -> Vec<HostIntegration> {
         let Some(permissions) = self.raw.permissions.as_ref() else {
             return Vec::new();
@@ -452,12 +457,12 @@ enum PathAccessToml {
     Deny,
 }
 
-impl From<PathAccessToml> for PathAccess {
-    fn from(value: PathAccessToml) -> Self {
-        match value {
-            PathAccessToml::Ro => Self::ReadOnly,
-            PathAccessToml::Rw => Self::ReadWrite,
-            PathAccessToml::Deny => Self::Deny,
+impl PathAccessToml {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Ro => "ro",
+            Self::Rw => "rw",
+            Self::Deny => "deny",
         }
     }
 }

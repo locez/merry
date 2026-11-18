@@ -6,8 +6,9 @@
 //! stays unrestricted; only the helper that execs the command is confined.
 //!
 //! Landlock is an allow list. A deny or review path that sits inside an
-//! allowed directory cannot be subtracted, so preparing a launch fails instead
-//! of silently exposing that path.
+//! allowed directory cannot be subtracted. That conflict is checked when the
+//! sandbox backend is created and again for each launch, instead of exposing
+//! the path.
 
 use merry_runtime::{
     HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource, ProcessActionIntent,
@@ -155,61 +156,8 @@ pub(crate) fn prepare_launch(
         ));
     };
     let cwd = process_current_dir(Some(cwd_root), intent);
-    let mut read_write = Vec::new();
-    let mut read_only = Vec::new();
-    if workspace_writable {
-        push_directory(&mut read_write, cwd_root);
-        push_directory(&mut read_write, &cwd);
-    } else {
-        push_directory(&mut read_only, cwd_root);
-        push_directory(&mut read_only, &cwd);
-    }
-    for path in READ_WRITE_DIRECTORIES {
-        push_directory(&mut read_write, Path::new(path));
-    }
-    push_directory(&mut read_write, environment.temporary_directory());
-    for path in READ_ONLY_DIRECTORIES {
-        push_if_exists(&mut read_only, Path::new(path));
-    }
-    for path in READ_ONLY_FILES {
-        push_if_exists(&mut read_only, Path::new(path));
-    }
-    let xdg_config_home = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
-    push_git_user_files(
-        &mut read_only,
-        environment.home_path(),
-        xdg_config_home.as_deref(),
-        path_rules,
-    );
-
-    for rule in path_rules {
-        if rule.review_required() || rule.access() == PathAccess::Deny {
-            continue;
-        }
-        let path = resolve_host_path(rule.path());
-        match rule.access() {
-            PathAccess::ReadWrite => push_path(&mut read_write, &path),
-            PathAccess::ReadOnly => push_path(&mut read_only, &path),
-            PathAccess::Deny => {}
-        }
-    }
-    for path in environment.sandbox_socket_paths() {
-        let path = resolve_host_path(&path);
-        if !blocked_by_policy(&path, path_rules) {
-            push_path(&mut read_write, &path);
-        }
-    }
-    for path in environment.ssh_known_hosts_paths() {
-        if !blocked_by_policy(&path, path_rules) {
-            push_if_exists(&mut read_only, &path);
-        }
-    }
-    for path in environment.gpg_public_keyrings() {
-        if !blocked_by_policy(&path, path_rules) {
-            push_if_exists(&mut read_only, &path);
-        }
-    }
-
+    let (read_only, read_write) =
+        filesystem_grants(cwd_root, &cwd, environment, path_rules, workspace_writable);
     ensure_exclusions_are_enforceable(
         cwd_root,
         environment.temporary_directory(),
@@ -357,6 +305,97 @@ fn apply_confinement(launch: &SandboxLaunch) -> Result<(), String> {
             std::env::consts::OS
         ))
     }
+}
+
+/// Checks configured and built-in grants before a session accepts commands.
+///
+/// The command cwd is the workspace root. A later launch repeats the check
+/// with that command's cwd and any paths approved during the session.
+pub(crate) fn check_sandbox_rules(
+    cwd_root: &Path,
+    environment: &WorkspaceProcessEnvironment,
+    path_rules: &[PathAccessRule],
+    workspace_writable: bool,
+) -> Result<(), ProcessRunnerError> {
+    let (read_only, read_write) = filesystem_grants(
+        cwd_root,
+        cwd_root,
+        environment,
+        path_rules,
+        workspace_writable,
+    );
+    ensure_exclusions_are_enforceable(
+        cwd_root,
+        environment.temporary_directory(),
+        &read_only,
+        &read_write,
+        path_rules,
+        workspace_writable,
+    )
+}
+
+fn filesystem_grants(
+    cwd_root: &Path,
+    cwd: &Path,
+    environment: &WorkspaceProcessEnvironment,
+    path_rules: &[PathAccessRule],
+    workspace_writable: bool,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut read_write = Vec::new();
+    let mut read_only = Vec::new();
+    if workspace_writable {
+        push_directory(&mut read_write, cwd_root);
+        push_directory(&mut read_write, cwd);
+    } else {
+        push_directory(&mut read_only, cwd_root);
+        push_directory(&mut read_only, cwd);
+    }
+    for path in READ_WRITE_DIRECTORIES {
+        push_directory(&mut read_write, Path::new(path));
+    }
+    push_directory(&mut read_write, environment.temporary_directory());
+    for path in READ_ONLY_DIRECTORIES {
+        push_if_exists(&mut read_only, Path::new(path));
+    }
+    for path in READ_ONLY_FILES {
+        push_if_exists(&mut read_only, Path::new(path));
+    }
+    let xdg_config_home = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+    push_git_user_files(
+        &mut read_only,
+        environment.home_path(),
+        xdg_config_home.as_deref(),
+        path_rules,
+    );
+
+    for rule in path_rules {
+        if rule.review_required() || rule.access() == PathAccess::Deny {
+            continue;
+        }
+        let path = resolve_host_path(rule.path());
+        match rule.access() {
+            PathAccess::ReadWrite => push_path(&mut read_write, &path),
+            PathAccess::ReadOnly => push_path(&mut read_only, &path),
+            PathAccess::Deny => {}
+        }
+    }
+    for path in environment.sandbox_socket_paths() {
+        let path = resolve_host_path(&path);
+        if !blocked_by_policy(&path, path_rules) {
+            push_path(&mut read_write, &path);
+        }
+    }
+    for path in environment.ssh_known_hosts_paths() {
+        if !blocked_by_policy(&path, path_rules) {
+            push_if_exists(&mut read_only, &path);
+        }
+    }
+    for path in environment.gpg_public_keyrings() {
+        if !blocked_by_policy(&path, path_rules) {
+            push_if_exists(&mut read_only, &path);
+        }
+    }
+    (read_only, read_write)
 }
 
 fn blocked_by_policy(path: &Path, rules: &[PathAccessRule]) -> bool {

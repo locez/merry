@@ -426,7 +426,7 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
     let trusted_path_rules = config
         .trusted_global_path_rules()
         .expect("example trusted path rules should validate");
-    assert_eq!(trusted_path_rules.len(), 5);
+    assert_eq!(trusted_path_rules.len(), 4);
     assert_eq!(trusted_path_rules[0].path(), Path::new("/etc"));
     assert_eq!(trusted_path_rules[0].access(), PathAccess::ReadOnly);
     assert_eq!(trusted_path_rules[1].path(), Path::new("/var/log"));
@@ -441,8 +441,6 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
         Path::new("/home/alice/.config/merry/company-work")
     );
     assert_eq!(trusted_path_rules[3].access(), PathAccess::ReadWrite);
-    assert_eq!(trusted_path_rules[4].path(), Path::new("/home/alice/.ssh"));
-    assert_eq!(trusted_path_rules[4].access(), PathAccess::Deny);
 
     let models = config
         .runtime_models()

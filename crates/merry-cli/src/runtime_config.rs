@@ -337,11 +337,6 @@ readwrite_paths = ["/srv/trusted-writable"]
             .expect("configured writable ceiling should remain visible to the inner runner");
         assert_eq!(writable.access(), merry_runtime::PathAccess::ReadWrite);
         assert_eq!(writable.source(), PathAccessRuleSource::TrustedGlobalConfig);
-        assert!(options.path_rules().iter().any(|rule| {
-            rule.source() == PathAccessRuleSource::DefaultDevelopmentBaseline
-                && rule.access() == merry_runtime::PathAccess::ReadWrite
-                && rule.path().ends_with("registry")
-        }));
     }
 
     #[test]

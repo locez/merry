@@ -44,32 +44,28 @@ permission_mode = "auto"
 auto_fallback = "ask"
 
 [permissions]
-# Global config is user-trusted. readonly_paths and readwrite_paths preauthorize
-# those trees for sandboxed actions. review_paths asks again for each action
-# that touches a declared subtree, without raising its access ceiling.
-# deny_paths always wins. Project-local config must not silently authorize
-# host-wide access.
+# Global config is user-trusted. readonly_paths and readwrite_paths add trees
+# outside the workspace, on top of the built-in baseline. deny_paths,
+# review_paths, and paths are rejected: the sandbox cannot withhold a
+# subdirectory of an allowed path. Project-local config must not silently
+# authorize host-wide access.
 #
 # Omitted network is on. A sandboxed action can request network, and that
 # request still goes through permission_mode. network = false rejects the
-# request before review, and approval cannot open it. Paths below add readable
-# or writable trees on top of the workspace baseline. This does not restrict
-# Merry's model or MCP connections, and --sandbox off does not use these limits.
+# request before review, and approval cannot open it. This does not restrict
+# Merry's model or MCP connections, and --sandbox off does not use this limit.
 # network = true
 
 # Optional host integrations. When the endpoint exists, ordinary sandboxed
-# actions use the socket without another request, the same way readonly_paths
-# and readwrite_paths work. An integration that is not enabled here can still
-# be requested for one action when its endpoint is visible.
+# actions use the socket without another request. An integration that is not
+# enabled here can still be requested for one action when its endpoint is visible.
 #
 # ssh_agent grants the agent socket and, when they exist, ~/.ssh/known_hosts
 # and known_hosts2 read-only. It does not grant private keys, ~/.ssh/config, or
 # network. gpg_agent grants the agent socket and existing pubring.kbx /
 # pubring.gpg read-only, and sets GNUPGHOME. Private keys, trustdb, and gpg.conf
 # stay off the list. A keyboxd database is reported instead of being granted.
-# dbus is the session bus, including Secret Service. deny_paths is never
-# reopened by an approval. A deny or review path inside an allowed directory
-# does not start the action; the error names both entries.
+# dbus is the session bus, including Secret Service.
 # ssh_agent = true
 # gpg_agent = true
 # dbus = true
@@ -84,21 +80,10 @@ readwrite_paths = [
   "company-work",
 ]
 
-# These entries must be outside the workspace and outside other allowed
-# directories such as /tmp, /var/tmp, and readwrite_paths. A nested entry does
-# not start the action. The error names the nested entry and the allowed
-# parent, and says which setting to remove.
-review_paths = []
-
-# ~/.ssh is outside the workspace, so sandboxed commands are not granted it.
-deny_paths = [
-  "~/.ssh",
-]
-
 # Optional environment assignments for Merry-managed process actions. Values
 # are injected after the inner action sandbox defaults, so they may override
 # PATH, HOME, TMPDIR, or PWD. They do not change the outer bootstrap or provider
-# environment; filesystem access is still governed by the path rules above.
+# environment. Extra filesystem access is the path lists above.
 # environment = [
 #   { name = "RUSTUP_TOOLCHAIN", value = "stable" },
 # ]
