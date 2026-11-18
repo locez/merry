@@ -148,7 +148,7 @@ impl MessageDialogOverlay {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ShortcutsBack {
     CommandPalette,
-    Settings(SettingsOverlay),
+    Settings(Box<SettingsOverlay>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

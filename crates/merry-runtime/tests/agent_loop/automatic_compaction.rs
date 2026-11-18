@@ -321,11 +321,11 @@ async fn auto_compacted_agent_loop_continuation_keeps_checkpoint_refs_and_stable
     let primary = ScriptedModelProvider::new(vec![
         vec![Ok(completed_text_event(&format!(
             "prelude assistant sentinel {}",
-            "prelude ballast ".repeat(700)
+            "prelude ballast ".repeat(900)
         )))],
         vec![Ok(completed_text_event(&format!(
             "retained prelude assistant {}",
-            "retained prelude ballast ".repeat(450)
+            "retained prelude ballast ".repeat(580)
         )))],
         vec![Ok(completed_tool_call_event(model_tool_call(
             "call-covered-search",

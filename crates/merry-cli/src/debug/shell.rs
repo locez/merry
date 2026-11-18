@@ -36,7 +36,7 @@ pub(crate) async fn run(
 ) -> Result<(), CliError> {
     let admission = args
         .accept_local_workspace_process_risk
-        .then(|| AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace());
+        .then(AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace);
     let intent = process_action_intent(args.argv)?;
     let current_dir = env::current_dir().map_err(|source| {
         CliError::Unexpected(format!(

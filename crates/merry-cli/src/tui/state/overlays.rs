@@ -25,7 +25,7 @@ pub(super) struct OverlayState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProviderOverlayBack {
     CommandPalette,
-    Settings(SettingsOverlay),
+    Settings(Box<SettingsOverlay>),
 }
 
 impl TuiState {
@@ -80,7 +80,8 @@ impl TuiState {
                 self.overlays.provider_overlay_back = Some(ProviderOverlayBack::CommandPalette);
             }
             Some(Overlay::Settings(settings)) => {
-                self.overlays.provider_overlay_back = Some(ProviderOverlayBack::Settings(settings));
+                self.overlays.provider_overlay_back =
+                    Some(ProviderOverlayBack::Settings(Box::new(settings)));
             }
             Some(
                 Overlay::ProviderManager(_)
@@ -302,7 +303,7 @@ impl TuiState {
 
     pub(crate) fn open_shortcuts(&mut self) {
         let back = match self.overlays.overlay.take() {
-            Some(Overlay::Settings(settings)) => ShortcutsBack::Settings(settings),
+            Some(Overlay::Settings(settings)) => ShortcutsBack::Settings(Box::new(settings)),
             _ => ShortcutsBack::CommandPalette,
         };
         self.overlays.overlay = Some(Overlay::Shortcuts(back));
@@ -320,12 +321,12 @@ impl TuiState {
         let command_palette = self.command_palette_overlay();
         self.overlays.overlay = match self.overlays.overlay.take() {
             Some(Overlay::Shortcuts(ShortcutsBack::Settings(settings))) => {
-                Some(Overlay::Settings(settings))
+                Some(Overlay::Settings(*settings))
             }
             Some(Overlay::Shortcuts(ShortcutsBack::CommandPalette))
             | Some(Overlay::Settings(_)) => Some(command_palette.clone()),
             Some(Overlay::ProviderManager(_)) => match self.overlays.provider_overlay_back.take() {
-                Some(ProviderOverlayBack::Settings(settings)) => Some(Overlay::Settings(settings)),
+                Some(ProviderOverlayBack::Settings(settings)) => Some(Overlay::Settings(*settings)),
                 Some(ProviderOverlayBack::CommandPalette) | None => Some(command_palette),
             },
             Some(Overlay::PlanApproval(_) | Overlay::PermissionReview(_) | Overlay::Dialog(_)) => {
