@@ -78,16 +78,20 @@ without a review round. That combination is available and is not the default.
 
 ## First open
 
-The first time workspace mode opens a directory, Merry asks whether that
-directory may be read-write. Yes also loads `AGENTS.md`. No keeps the directory
-read-only and leaves the sandbox on. `/tmp`, toolchains, the Cargo registry,
-and the cache stay available either way. Network is not part of this question.
+The first time workspace mode opens a directory, Merry shows a centered
+dialog. The notice asks you to trust the directory. Read-write loads
+`AGENTS.md`. Read-only does not load it and leaves the directory read-only.
+"Don't ask again" saves that choice; leaving it at no asks again next time. Exit
+closes Merry without opening the directory. `/tmp`, toolchains, the Cargo
+registry, and the cache stay available either way. Network is not part of
+this question.
 
-The choice is saved in `$XDG_STATE_HOME/merry/workspace-trust.json`. Opening the
-same directory again reuses it. Inside a Git checkout the saved directory is
-the repository root, so a later launch from a subdirectory does not ask again
-and commands run with that root as the workspace. `--trust-workspace yes` or
-`no` sets the choice without a prompt. With no saved choice and no terminal,
+A saved choice lives in `$XDG_STATE_HOME/merry/workspace-trust.json`, which
+defaults to `~/.local/state/merry/workspace-trust.json`. Opening the same
+directory again reuses it. Inside a Git checkout the saved directory
+is the repository root, so a later launch from a subdirectory does not ask
+again and commands run with that root as the workspace. `--trust-workspace yes`
+or `no` sets the choice without a prompt. With no saved choice and no terminal,
 Merry stops and tells you to pass that flag. `--sandbox off` does not ask,
 because the process can already write anywhere, and it still loads `AGENTS.md`.
 

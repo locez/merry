@@ -333,16 +333,18 @@ for one action when its endpoint is visible.
 
 ### How The Boundary Works
 
-The workspace is writable after you accept it on first open. No keeps that
-directory read-only and still sandboxed. System directories such as `/usr` and
+Read-write on first open makes the workspace writable and loads `AGENTS.md`.
+Read-only leaves that directory read-only and does not load `AGENTS.md`. The
+dialog can save the choice or ask again next time, and exit leaves without
+opening it. System directories such as `/usr` and
 `/bin`, a small set of `/etc` files, and the existing Git user files
 (`~/.gitconfig` and `~/.config/git/{config,ignore,attributes}`) are readable.
 `/tmp`, `/var/tmp`, the Cargo registry and git database, and the XDG cache are
 writable. The rest of the home directory is traverse-only, so secrets such as
 `~/.ssh` private keys, `~/.gnupg` private material, `~/.aws`, and
 `~/.git-credentials` are not readable. Merry's own config and state directories
-are denied to actions. The first-open choice is saved under Merry's state
-directory.
+are denied to actions. A saved read-write or read-only choice lives under
+Merry's state directory.
 
 Until an action is approved for network, its IPv4, IPv6, and packet sockets are
 rejected. Filesystem policy is an allow list. A `deny_paths` or `review_paths`

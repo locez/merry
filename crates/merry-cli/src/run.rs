@@ -37,6 +37,8 @@ mod persistence;
 pub(crate) enum RunExitStatus {
     Completed,
     Incomplete,
+    /// The workspace dialog was closed before the task started.
+    Declined,
 }
 
 impl RunExitStatus {
@@ -191,7 +193,16 @@ pub(crate) async fn run(
 ) -> Result<RunExitStatus, CliError> {
     let paths = XdgPaths::from_env().map_err(unexpected)?;
     let workspace =
-        workspace_trust::resolve_product_workspace(sandbox_mode, trust_workspace, &paths)?;
+        match workspace_trust::prepare_product_workspace(sandbox_mode, trust_workspace, &paths)? {
+            workspace_trust::WorkspaceLaunch::Ready(workspace) => workspace,
+            workspace_trust::WorkspaceLaunch::Ask(pending) => {
+                let choice = crate::tui::trust_dialog::prompt_owned(pending.root()).await?;
+                let Some(workspace) = pending.complete(choice)? else {
+                    return Ok(RunExitStatus::Declined);
+                };
+                workspace
+            }
+        };
     let session = RunSession::from_args(args)?;
     let session_store = FileSessionStore::default_store().map_err(unexpected)?;
     let _session_reservation = reserve_run_session(&session, &session_store).await?;

@@ -5,7 +5,7 @@ use crate::config::{ProviderAlias, derive_provider_alias};
 use crate::provider_management::{
     ProviderDiscoveryDraft, ProviderManagementError, ProviderManagementService,
 };
-use crate::workspace_trust::{self, TrustWorkspace};
+use crate::workspace_trust::{self, TrustWorkspace, WorkspaceLaunch};
 
 use crossterm::event::KeyCode;
 use input_history_store::InputHistoryStore;
@@ -68,6 +68,7 @@ mod text_wrap;
 pub(crate) mod theme;
 mod tool_error;
 mod transcript;
+pub(crate) mod trust_dialog;
 
 #[cfg(test)]
 mod history_tests;
@@ -86,6 +87,19 @@ mod tests;
 pub(crate) enum LaunchMode {
     New,
     ResumePicker,
+}
+
+async fn open_workspace(
+    terminal: &mut TerminalSession,
+    launch: WorkspaceLaunch,
+) -> Result<Option<workspace_trust::ResolvedWorkspace>, CliError> {
+    match launch {
+        WorkspaceLaunch::Ready(workspace) => Ok(Some(workspace)),
+        WorkspaceLaunch::Ask(pending) => {
+            let choice = trust_dialog::ask(terminal, pending.root()).await?;
+            pending.complete(choice)
+        }
+    }
 }
 
 pub(crate) async fn run(
@@ -117,14 +131,26 @@ pub(crate) async fn run(
         .load_with_default_provider(settings_defaults.provider.as_deref())
         .await
         .map_err(crate::cli_error::unexpected)?;
-    let workspace =
-        workspace_trust::resolve_product_workspace(sandbox_mode, trust_workspace, &paths)?;
+    let launch = workspace_trust::prepare_product_workspace(sandbox_mode, trust_workspace, &paths)?;
+    let mut terminal = match TerminalSession::enter() {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            return Err(match &launch {
+                WorkspaceLaunch::Ask(pending) => {
+                    workspace_trust::prompt_unavailable(pending.root())
+                }
+                WorkspaceLaunch::Ready(_) => crate::cli_error::unexpected(error),
+            });
+        }
+    };
+    let Some(workspace) = open_workspace(&mut terminal, launch).await? else {
+        return Ok(());
+    };
     let workspace_root = workspace.root;
     let session_store = TuiSessionStore::new(
         merry_runtime::FileSessionStore::default_sessions_dir()
             .map_err(crate::cli_error::unexpected)?,
     );
-    let mut terminal = TerminalSession::enter().map_err(crate::cli_error::unexpected)?;
     if !has_runtime_selection(active_config.as_ref(), &preferences) {
         let mut setup_state = TuiState::new(
             workspace_root.clone(),

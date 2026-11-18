@@ -121,7 +121,8 @@ fn map_result(
 
 fn map_run_result(result: Result<run_command::RunExitStatus, CliError>) -> CliExit {
     match result {
-        Ok(run_command::RunExitStatus::Completed) | Err(CliError::BrokenPipe) => CliExit::Success,
+        Ok(run_command::RunExitStatus::Completed | run_command::RunExitStatus::Declined)
+        | Err(CliError::BrokenPipe) => CliExit::Success,
         Ok(run_command::RunExitStatus::Incomplete) => CliExit::Failure,
         Err(CliError::DebugUsage(message)) => CliExit::Usage {
             message,
@@ -195,6 +196,14 @@ mod tests {
     fn run_completed_maps_to_success_exit() {
         assert!(matches!(
             map_run_result(Ok(RunExitStatus::Completed)),
+            CliExit::Success
+        ));
+    }
+
+    #[test]
+    fn run_declined_maps_to_success_exit() {
+        assert!(matches!(
+            map_run_result(Ok(RunExitStatus::Declined)),
             CliExit::Success
         ));
     }

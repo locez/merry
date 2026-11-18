@@ -25,10 +25,11 @@ profile = "default"
 # sandbox = "workspace" or "off". Omitted means workspace: each action runs in
 # the workspace sandbox. "off" runs actions on the host. --sandbox on the
 # command line replaces this.
-# The first time workspace mode opens a directory, Merry asks whether it may
-# be read-write. Yes also loads AGENTS.md. No keeps it read-only. The choice
-# is saved in $XDG_STATE_HOME/merry/workspace-trust.json. --trust-workspace
-# yes or no sets it without a prompt. --sandbox off does not ask.
+# The first time workspace mode opens a directory, a dialog asks you to trust
+# it, then offers read-write, read-only, whether to save that choice, and exit.
+# Read-write loads AGENTS.md. Read-only does not.
+# A saved choice lives in $XDG_STATE_HOME/merry/workspace-trust.json.
+# --trust-workspace yes or no sets it without a prompt. --sandbox off does not ask.
 # Who reviews permission requests:
 #   "auto"             the [models.approval_review] model decides first
 #   "ask"              you decide
