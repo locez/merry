@@ -24,7 +24,7 @@ const TRUST_FILE_NAME: &str = "workspace-trust.json";
 /// Command-line choice for [`resolve_workspace`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum TrustWorkspace {
-    /// The directory is readable and writable, and `AGENTS.md` is loaded.
+    /// The directory is readable and writable.
     Yes,
     /// The directory is read-only. The sandbox stays on.
     No,

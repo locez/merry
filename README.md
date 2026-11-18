@@ -332,8 +332,8 @@ for one action when its endpoint is visible.
 
 ### How The Boundary Works
 
-Read-write on first open makes the workspace writable and loads `AGENTS.md`.
-Read-only leaves that directory read-only and does not load `AGENTS.md`. The
+Read-write on first open lets commands edit files in the directory.
+Read-only leaves that directory read-only. The
 dialog can save the choice or ask again next time, and exit leaves without
 opening it. System directories such as `/usr` and
 `/bin`, a small set of `/etc` files, and the existing Git user files

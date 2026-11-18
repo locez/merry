@@ -84,8 +84,8 @@ without a review round. That combination is available and is not the default.
 ## First open
 
 The first time workspace mode opens a directory, Merry shows a centered
-dialog. The notice asks you to trust the directory. Read-write loads
-`AGENTS.md`. Read-only does not load it and leaves the directory read-only.
+dialog. The notice asks you to trust the directory. Read-write lets commands
+edit files there. Read-only leaves the directory read-only.
 "Don't ask again" saves that choice; leaving it at no asks again next time. Exit
 closes Merry without opening the directory. `/tmp`, toolchains, the Cargo
 registry, and the cache stay available either way. Network is not part of

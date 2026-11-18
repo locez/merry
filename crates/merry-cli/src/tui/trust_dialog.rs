@@ -126,8 +126,8 @@ impl TrustDialog {
         let width = usize::from(rows[1].width);
         let remember = if self.remember { "yes" } else { "no" };
         let choices = [
-            ("Read-write", "loads AGENTS.md"),
-            ("Read-only", "does not load AGENTS.md"),
+            ("Read-write", "can edit files here"),
+            ("Read-only", "cannot edit files"),
             ("Don't ask again", remember),
             ("Exit", ""),
         ];
@@ -276,8 +276,9 @@ mod tests {
         );
         assert!(text.contains("/work/repo"), "{text}");
         assert!(text.contains("▸ Read-only"), "{text}");
-        assert!(text.contains("loads AGENTS.md"), "{text}");
-        assert!(text.contains("does not load AGENTS.md"), "{text}");
+        assert!(text.contains("can edit files here"), "{text}");
+        assert!(text.contains("cannot edit files"), "{text}");
+        assert!(!text.contains("AGENTS.md"), "{text}");
         assert!(text.contains("Read-write"), "{text}");
         assert!(text.contains("Exit"), "{text}");
         assert!(!text.contains("▸ Read-write"), "{text}");
