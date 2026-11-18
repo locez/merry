@@ -7,10 +7,8 @@ use std::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XdgPaths {
     home: PathBuf,
-    config_base: PathBuf,
     config_dir: PathBuf,
     config_file: PathBuf,
-    state_base: PathBuf,
     state_dir: PathBuf,
     default_log_file: PathBuf,
 }
@@ -42,10 +40,8 @@ impl XdgPaths {
         let default_log_file = state_dir.join("logs/merry.jsonl");
         Self {
             home,
-            config_base,
             config_dir,
             config_file,
-            state_base,
             state_dir,
             default_log_file,
         }
@@ -55,20 +51,12 @@ impl XdgPaths {
         &self.home
     }
 
-    pub fn config_base_dir(&self) -> &Path {
-        &self.config_base
-    }
-
     pub fn config_dir(&self) -> &Path {
         &self.config_dir
     }
 
     pub fn config_file(&self) -> &Path {
         &self.config_file
-    }
-
-    pub fn state_base_dir(&self) -> &Path {
-        &self.state_base
     }
 
     pub fn state_dir(&self) -> &Path {

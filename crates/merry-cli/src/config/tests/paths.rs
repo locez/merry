@@ -55,8 +55,8 @@ fn xdg_paths_normalize_absolute_environment_values() {
     );
 
     assert_eq!(paths.home(), Path::new("/home/alice"));
-    assert_eq!(paths.config_base_dir(), Path::new("/tmp/config"));
-    assert_eq!(paths.state_base_dir(), Path::new("/tmp/state"));
+    assert_eq!(paths.config_dir(), Path::new("/tmp/config/merry"));
+    assert_eq!(paths.state_dir(), Path::new("/tmp/state/merry"));
     assert_eq!(
         paths.managed_config_dir(),
         Path::new("/tmp/config/merry/managed")

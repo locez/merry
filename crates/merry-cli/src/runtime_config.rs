@@ -423,7 +423,11 @@ api_key_file = "managed/secrets/opencode.key"
         fs::create_dir(&workspace).unwrap();
         fs::write(paths.config_file(), "private config fixture").unwrap();
         fs::write(paths.state_dir().join("session"), "private session fixture").unwrap();
-        let credential = paths.config_base_dir().join("provider-key");
+        let credential = paths
+            .config_dir()
+            .parent()
+            .expect("merry config dir has a parent")
+            .join("provider-key");
         fs::write(&credential, "synthetic credential fixture").unwrap();
         let config = MerryConfig::load_optional_from_text(Some("[providers.test]\ntype = 'openai-compatible'\nbase_url = 'https://provider.example.test'\napi_key_file = '../provider-key'\n"), &paths).unwrap().unwrap();
         let options = action_process_backend_options(Some(&config)).unwrap();

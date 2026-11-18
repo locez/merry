@@ -21,7 +21,7 @@ use std::{
 
 const TRUST_FILE_NAME: &str = "workspace-trust.json";
 
-/// Command-line choice for [`resolve_workspace`].
+/// Command-line choice for the workspace sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum TrustWorkspace {
     /// The directory is readable and writable.
@@ -142,29 +142,6 @@ fn prepare_workspace(
         root,
         store_path,
     }))
-}
-
-/// Resolves `cwd` and remembers an explicit choice under `state_dir`.
-///
-/// `prompt` is called only when the sandbox is on, the flag is absent, and
-/// this directory has no saved choice. A choice is written only when it asks
-/// to be remembered. Exit cancels the launch.
-pub(crate) fn resolve_workspace(
-    cwd: PathBuf,
-    sandbox: SandboxMode,
-    explicit: Option<TrustWorkspace>,
-    state_dir: &Path,
-    mut prompt: impl FnMut(&Path) -> Result<PromptedChoice, CliError>,
-) -> Result<ResolvedWorkspace, CliError> {
-    match prepare_workspace(cwd, sandbox, explicit, state_dir)? {
-        WorkspaceLaunch::Ready(workspace) => Ok(workspace),
-        WorkspaceLaunch::Ask(pending) => {
-            let choice = prompt(pending.root())?;
-            pending
-                .complete(choice)?
-                .ok_or_else(|| unexpected("workspace trust prompt cancelled"))
-        }
-    }
 }
 
 fn trust_root(cwd: &Path) -> Result<PathBuf, CliError> {
@@ -305,11 +282,32 @@ enum TrustAccess {
 
 #[cfg(test)]
 mod tests {
-    use super::{PromptedChoice, TrustWorkspace, prompt_unavailable, resolve_workspace};
-    use crate::cli_error::CliError;
+    use super::{
+        PromptedChoice, ResolvedWorkspace, TrustWorkspace, WorkspaceLaunch, prepare_workspace,
+        prompt_unavailable,
+    };
+    use crate::cli_error::{CliError, unexpected};
     use crate::coding::SandboxMode;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+
+    fn resolve_workspace(
+        cwd: PathBuf,
+        sandbox: SandboxMode,
+        explicit: Option<TrustWorkspace>,
+        state_dir: &Path,
+        mut prompt: impl FnMut(&Path) -> Result<PromptedChoice, CliError>,
+    ) -> Result<ResolvedWorkspace, CliError> {
+        match prepare_workspace(cwd, sandbox, explicit, state_dir)? {
+            WorkspaceLaunch::Ready(workspace) => Ok(workspace),
+            WorkspaceLaunch::Ask(pending) => {
+                let choice = prompt(pending.root())?;
+                pending
+                    .complete(choice)?
+                    .ok_or_else(|| unexpected("workspace trust prompt cancelled"))
+            }
+        }
+    }
 
     #[test]
     fn missing_terminal_names_the_flag_and_the_saved_file() {
