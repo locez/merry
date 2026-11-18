@@ -55,6 +55,17 @@ pub(super) fn tool_result_model_id(sequence: u64) -> ArtifactId {
         .expect("model result artifact id uses a valid static prefix and sequence")
 }
 
+pub(super) fn tool_result_image_id(
+    result_artifact_id: &ArtifactId,
+    image_index: usize,
+) -> ArtifactId {
+    ArtifactId::new(&format!(
+        "{}-image-{image_index}",
+        result_artifact_id.as_str()
+    ))
+    .expect("tool result image artifact id uses a valid result artifact id and image index")
+}
+
 pub(super) fn user_message_id(item_id: TranscriptItemId) -> ArtifactId {
     ArtifactId::new(&format!(
         "{USER_MESSAGE_ARTIFACT_PREFIX}{}",

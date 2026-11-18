@@ -481,6 +481,7 @@ struct SkillsToml {
 struct ModelsToml {
     context_compaction: Option<RuntimeModelToml>,
     approval_review: Option<RuntimeModelToml>,
+    browser: Option<RuntimeModelToml>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]

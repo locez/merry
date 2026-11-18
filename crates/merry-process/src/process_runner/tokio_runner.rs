@@ -1,15 +1,17 @@
 use super::{
+    background::BackgroundSupervisor,
     environment::{process_current_dir, validate_environment_name, validate_os_string},
     execution::run_spawned_process,
 };
 use merry_runtime::{
-    ProcessActionIntent, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-    ProcessRunnerFuture,
+    BackgroundProcessControl, ProcessActionIntent, ProcessRunner, ProcessRunnerContext,
+    ProcessRunnerError, ProcessRunnerFuture,
 };
 use std::{
     collections::BTreeSet,
     ffi::OsString,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 /// Host-process runner backed by [`tokio::process::Command`].
@@ -24,15 +26,17 @@ use std::{
 pub struct TokioProcessRunner {
     cwd_root: Option<PathBuf>,
     environment_overrides: Vec<(OsString, OsString)>,
+    background: BackgroundSupervisor,
 }
 
 impl TokioProcessRunner {
     /// Creates a Tokio-backed process runner.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             cwd_root: None,
             environment_overrides: Vec::new(),
+            background: BackgroundSupervisor::new(),
         }
     }
 
@@ -43,6 +47,7 @@ impl TokioProcessRunner {
         Self {
             cwd_root: Some(root.into()),
             environment_overrides: Vec::new(),
+            background: BackgroundSupervisor::new(),
         }
     }
 
@@ -77,9 +82,21 @@ impl ProcessRunner for TokioProcessRunner {
     ) -> ProcessRunnerFuture<'a> {
         let cwd_root = self.cwd_root.clone();
         let environment_overrides = self.environment_overrides.clone();
+        let background = self.background.clone();
         Box::pin(async move {
-            run_tokio_process(intent, context, cwd_root.as_deref(), &environment_overrides).await
+            run_tokio_process(
+                intent,
+                context,
+                cwd_root.as_deref(),
+                &environment_overrides,
+                background,
+            )
+            .await
         })
+    }
+
+    fn background_control(&self) -> Option<Arc<dyn BackgroundProcessControl>> {
+        Some(Arc::new(self.background.clone()))
     }
 }
 
@@ -88,6 +105,7 @@ async fn run_tokio_process(
     context: ProcessRunnerContext,
     cwd_root: Option<&Path>,
     environment_overrides: &[(OsString, OsString)],
+    background: BackgroundSupervisor,
 ) -> Result<merry_runtime::ProcessRunnerOutput, ProcessRunnerError> {
     let Some((program, args)) = intent.argv().split_first() else {
         return Err(ProcessRunnerError::infrastructure(
@@ -116,5 +134,5 @@ async fn run_tokio_process(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    run_spawned_process(command, intent, context, program_for_error).await
+    run_spawned_process(command, intent, context, program_for_error, background).await
 }

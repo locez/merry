@@ -145,9 +145,9 @@ Workspace memory, specific to this workspace:
 
 `topics/` holds durable preferences, conventions, architecture, decisions, recurring workflows, and other facts worth reusing. `observations/_inbox/` holds new observations that may later be consolidated into topics. Paths in the index are relative to the scope root named in its header.
 
-Use `read_text` to read memory files and `apply_patch` to create or edit them. Search with `run_process` when a memory file points at a path you still need to find. Existing files must be read successfully before editing. Writes are allowed only to `.md` files directly under `topics/` or `observations/_inbox/`. Generated indexes, archives, state files, and other internals are protected.
+Use `read_text` to read memory files and `apply_patch` to create or edit them. Search with `run_process` when a memory file points at a path you still need to find. Existing files must be read successfully before editing. Writes are allowed only to `.md` files directly under `topics/` or `observations/_inbox/`. Those memory paths stay writable when the workspace itself is read-only. Generated indexes, archives, state files, and other internals are protected.
 
-Remember information when the user explicitly asks, or when it is stable, specific, useful across sessions, and not already available from the repository or its documentation. Do not store secrets, credentials, transient task state, speculative conclusions, or facts that are likely to become stale. Prefer one focused topic file over duplicating the same fact in several places.
+Remember information when the user explicitly asks, or when it is stable, specific, useful across sessions, and not already available from the repository or its documentation. Do not store secrets, credentials, transient task state, speculative conclusions, or facts that are likely to become stale. A single failed tool call or a guess about the local machine is not an observation. Prefer one focused topic file over duplicating the same fact in several places.
 
 Treat memory as historical context, not current truth. Verify paths, commands, repository state, external facts, and other changeable claims with live tools before relying on them. When live tools and memory disagree, the live tools win."#
         )
@@ -196,6 +196,15 @@ Treat memory as historical context, not current truth. Verify paths, commands, r
             *state.topic_reads.entry(relative).or_insert(0) += 1;
             Ok(())
         })
+    }
+
+    /// Returns whether `path` is inside a durable-memory scope.
+    ///
+    /// Workspace write scope does not authorize these paths. Callers still use
+    /// [`Self::authorize_write`] for the topic and observation rules.
+    #[must_use]
+    pub fn governs_path(&self, path: &Path) -> bool {
+        policy::classify(&self.layout, path).is_some()
     }
 
     /// Allows a patch when `path` is outside memory or the memory write is valid.

@@ -280,6 +280,14 @@ model = "gpt-4.1-mini"
 # reasoning effort, and prefer a small fast model over a deep-reasoning one.
 model = "gpt-4.1-mini"
 
+# [models.browser]
+# Optional model override for browser verification subagents (`spawn_subagents`
+# tasks whose `allowed_tools` use `browser_tab` / `browser_network` without
+# `run_process` or `apply_patch`). Omit this table to run browser subagents on
+# [providers.default] and preserve full KV-cache prefix sharing across tools.
+# provider = "openai-compatible"
+# model = "gpt-4.1-mini"
+
 [providers.openai-compatible]
 display_name = "OpenAI"
 default_model = "gpt-4.1-mini"

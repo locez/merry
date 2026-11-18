@@ -213,6 +213,7 @@ pub(crate) async fn run(
         primary,
         context_compaction,
         approval_review,
+        browser,
         retry_policy,
     } = runtime_provider_bundle_from_config(merry_config, debug_openai_usage_error)?;
     let RuntimePrimaryProviderConfig { provider, model } = primary;
@@ -253,6 +254,7 @@ pub(crate) async fn run(
         retry_policy,
         context_compaction,
         approval_review,
+        browser,
         skill_roots: merry_config
             .map(MerryConfig::skill_roots)
             .transpose()

@@ -69,6 +69,8 @@ pub(super) fn tui_tool_title(name: &str) -> &'static str {
         "spawn_subagents" => "Delegated",
         "wait_subagents" => "Waited",
         "cancel_subagents" => "Cancelled",
+        "read_background_process" => "Process",
+        "stop_background_process" => "Stopped",
         APPLY_PATCH_TOOL => "Patch",
         _ => "Tool",
     }

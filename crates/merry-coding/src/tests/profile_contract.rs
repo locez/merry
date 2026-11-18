@@ -71,6 +71,8 @@ fn coding_agent_profile_owns_process_permission_and_patch_order() {
         vec![
             "run_process",
             "request_permissions",
+            "read_background_process",
+            "stop_background_process",
             "read_text",
             "apply_patch",
         ]
@@ -96,6 +98,18 @@ fn coding_agent_profile_owns_process_permission_and_patch_order() {
             .spec()
             .description()
             .contains("Network is never granted implicitly")
+    );
+    assert!(
+        process
+            .spec()
+            .description()
+            .contains("Set background to true")
+    );
+    assert!(
+        process
+            .spec()
+            .description()
+            .contains("read_background_process")
     );
     let schema = process.spec().input_schema().as_schema().as_value();
     assert_eq!(schema["required"], json!(["command"]));
@@ -280,6 +294,16 @@ fn coding_agent_profile_owns_the_coding_prompt_and_hashes_its_exact_text() {
             .text()
             .contains("Prefer editing an existing file")
     );
+    assert!(
+        prompt.stable_blocks()[0]
+            .text()
+            .contains("Set `background` to true")
+    );
+    assert!(
+        prompt.stable_blocks()[0]
+            .text()
+            .contains("`read_background_process`")
+    );
 }
 
 #[test]
@@ -360,4 +384,33 @@ fn workspace_profile_can_enable_patch_tool() {
             .iter()
             .any(|tool| tool.spec().name().as_str() == "apply_patch")
     );
+}
+
+#[test]
+fn workspace_profile_web_tools_registers_web_and_browser_tools_in_order() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+
+    let bare = coding_agent(temp.path())
+        .build()
+        .expect("bare profile should build");
+    let with_web = coding_agent(temp.path())
+        .web_tools()
+        .build()
+        .expect("web profile should build");
+
+    let names = with_web
+        .tool_names()
+        .into_iter()
+        .map(ToolName::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec!["read_text", "web_fetch", "browser_tab", "browser_network"]
+    );
+    assert_ne!(bare.profile_hash(), with_web.profile_hash());
+    assert!(CODING_AGENT_POLICY_PROMPT.contains("browser_tab"));
+    assert!(CODING_AGENT_POLICY_PROMPT.contains("web_fetch"));
+    assert!(CODING_AGENT_POLICY_PROMPT.contains("data:text/html"));
+    assert!(CODING_AGENT_POLICY_PROMPT.contains("A failed open does not start a session"));
+    assert!(CODING_AGENT_POLICY_PROMPT.contains("policy refusal"));
 }

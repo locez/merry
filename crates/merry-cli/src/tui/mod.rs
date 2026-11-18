@@ -62,6 +62,7 @@ pub(crate) mod session_list;
 mod session_picker;
 mod state;
 mod status;
+mod tasks;
 mod terminal;
 mod text_interaction;
 mod text_wrap;

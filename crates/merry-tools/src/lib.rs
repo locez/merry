@@ -23,6 +23,7 @@
 use merry_core::ToolSpec;
 use merry_runtime::{Tool, ToolBuildError};
 
+pub mod browser;
 mod config;
 mod errors;
 mod file;
@@ -31,15 +32,22 @@ mod path;
 mod read;
 mod registry;
 mod schema;
+pub mod ssrf;
 mod state;
 mod trace;
+pub mod web_fetch;
 
+pub use browser::{
+    BROWSER_NETWORK_TOOL, BROWSER_TAB_TOOL, BrowserConfig, BrowserNetworkTool,
+    BrowserSessionManager, BrowserTabTool,
+};
 pub use config::{WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceToolsConfig};
 pub use patch::envelope::{
     WorkspacePatchOperationKind, WorkspacePatchSuccess, WorkspacePatchSuccessChange,
     WorkspacePatchSuccessLine, WorkspacePatchSuccessLineKind,
 };
 pub use registry::WorkspaceTools;
+pub use web_fetch::{WEB_FETCH_TOOL, WebFetchConfig, WebFetchTool};
 
 /// Registered tool name for bounded read-only text ranges.
 pub const READ_TEXT_TOOL: &str = "read_text";

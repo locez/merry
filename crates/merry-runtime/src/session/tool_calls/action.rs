@@ -84,6 +84,7 @@ impl SessionState {
             result.artifact().id().clone(),
             ToolResultPromptProjection::Full,
             artifacts.model_artifact_id(),
+            artifacts.image_artifact_ids(),
         )?;
 
         let pending = self.pending_tool_calls.remove(pending_index);
@@ -170,6 +171,7 @@ impl SessionState {
             result.artifact().id().clone(),
             ToolResultPromptProjection::Full,
             artifacts.model_artifact_id(),
+            artifacts.image_artifact_ids(),
         )?;
 
         let pending = self.pending_tool_calls.remove(pending_index);

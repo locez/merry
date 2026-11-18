@@ -478,7 +478,15 @@ fn validate_patch_write_boundary(
     // Scope patterns are root-relative, so a target outside the workspace root
     // has no scope spelling and cannot be authorized by a relative pattern.
     // That keeps a child agent inside the scope its parent gave it, which is a
-    // deliberate narrowing rather than sandbox policy.
+    // deliberate narrowing rather than sandbox policy. Durable memory lives
+    // outside that root and is governed by its own write rules.
+    if let Some(memory) = &state.durable_memory {
+        let candidate = Path::new(path.display.as_str());
+        if candidate.is_absolute() && memory.governs_path(candidate) {
+            return Ok(());
+        }
+    }
+
     let scope_path = path.relative_spelling();
 
     if let Some(scope_path) = scope_path
@@ -495,10 +503,14 @@ fn validate_patch_write_boundary(
     };
     match scope_path {
         Some(scope_path) if matches_any_scope_path(scope_path, write_scope) => Ok(()),
-        _ => Err(DomainError::new(
-            ERROR_PATH_DENIED,
-            "workspace patch path is outside the child write scope",
-        )),
+        _ => {
+            let message = if write_scope.is_empty() {
+                "workspace patch path is outside the configured write scope; this write scope allows no workspace files"
+            } else {
+                "workspace patch path is outside the configured write scope"
+            };
+            Err(DomainError::new(ERROR_PATH_DENIED, message))
+        }
     }
 }
 

@@ -394,5 +394,6 @@ fn process_status_label(status: ProcessExitStatus) -> String {
         ProcessExitStatus::Cancelled => "cancelled".to_owned(),
         ProcessExitStatus::FailedToStart => "failed to start".to_owned(),
         ProcessExitStatus::DomainFailed => "domain failed".to_owned(),
+        ProcessExitStatus::Running => "still running".to_owned(),
     }
 }

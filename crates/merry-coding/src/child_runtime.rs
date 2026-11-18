@@ -1,11 +1,14 @@
 use crate::CODING_LOOP_PROCESS_TOOL;
 use crate::{CodingAgentProfileBuilder, runtime::CodingRuntimePolicy};
+use merry_core::ToolName;
 use merry_llm::{ModelName, ModelProvider};
 use merry_process::ProcessBackend;
 use merry_runtime::{
     ChildRuntimeFactory, ChildRuntimeInput, ChildWorkspaceScope, CompactionConfig, Runtime,
-    RuntimeError, SubagentConfig, SubagentManager, ToolAdmission, subagent_registered_tools,
+    RuntimeError, RuntimeModelRole, SubagentConfig, SubagentManager, ToolAdmission,
+    subagent_registered_tools,
 };
+use merry_tools::{BROWSER_NETWORK_TOOL, BROWSER_TAB_TOOL};
 use std::sync::Arc;
 
 /// Coding-owned child runtime factory.
@@ -48,13 +51,20 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
             .allowed_tools
             .iter()
             .any(|tool| tool.as_str() == CODING_LOOP_PROCESS_TOOL);
-        let mut builder = Runtime::builder(input.session_id.clone())
-            .task_anchor(input.task_anchor)
-            .automatic_compaction(self.composition.automatic_compaction.clone())
-            .model_provider(
+        let (child_provider, child_model) = if is_browser_subagent_toolset(&input.allowed_tools)
+            && let Some(browser_role) = self.composition.policy.role(RuntimeModelRole::Browser)
+        {
+            (browser_role.provider(), browser_role.model().clone())
+        } else {
+            (
                 Arc::clone(&self.composition.provider),
                 self.composition.model.clone(),
             )
+        };
+        let mut builder = Runtime::builder(input.session_id.clone())
+            .task_anchor(input.task_anchor)
+            .automatic_compaction(self.composition.automatic_compaction.clone())
+            .model_provider(child_provider, child_model)
             .tool_admission(ToolAdmission::allow_only(input.allowed_tools.clone()));
         if let Some(activity_hub) = input.activity_hub.clone() {
             builder = builder.subagent_activity_hub(activity_hub);
@@ -125,6 +135,16 @@ fn child_has_workspace_boundary(
     write_scope_is_explicit
         || !workspace_scope.write_scope().is_empty()
         || !workspace_scope.forbidden_paths().is_empty()
+}
+
+fn is_browser_subagent_toolset(allowed_tools: &[ToolName]) -> bool {
+    let uses_browser = allowed_tools
+        .iter()
+        .any(|tool| matches!(tool.as_str(), BROWSER_TAB_TOOL | BROWSER_NETWORK_TOOL));
+    let allows_code_mutation_or_process = allowed_tools
+        .iter()
+        .any(|tool| matches!(tool.as_str(), CODING_LOOP_PROCESS_TOOL | "apply_patch"));
+    uses_browser && !allows_code_mutation_or_process
 }
 
 #[cfg(test)]
@@ -474,5 +494,60 @@ mod tests {
             .expect("fully trusted permission request should resolve");
         assert!(resolved_success(&events));
         assert_eq!(fully_trusted_source.calls(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn child_runtime_routes_browser_only_subagents_to_browser_role_when_configured() {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let primary = Arc::new(FakeModelProvider::new(vec![Ok(completed_text(
+            "primary reply",
+        ))]));
+        let browser = Arc::new(FakeModelProvider::new(vec![Ok(completed_text(
+            "browser reply",
+        ))]));
+        let browser_role = CodingModelRoleConfig::new(
+            RuntimeModelRole::Browser,
+            browser.clone(),
+            ModelName::new("browser-vision-model").expect("browser model valid"),
+        )
+        .expect("browser role valid");
+        let policy =
+            CodingRuntimePolicy::try_new(vec![browser_role], CodingPermissionPolicy::default())
+                .expect("policy valid");
+        let factory = build_factory(temp.path(), primary.clone(), policy);
+
+        let browser_child = factory
+            .build_child(child_input(
+                "child-browser-only",
+                vec![
+                    ToolName::new("browser_tab").expect("valid name"),
+                    ToolName::new("browser_network").expect("valid name"),
+                    ToolName::new("read_text").expect("valid name"),
+                ],
+            ))
+            .expect("browser child runtime builds");
+        run_text_step(&browser_child, "Inspect preview page.").await;
+        assert_eq!(browser.recorded_requests().len(), 1);
+        assert_eq!(
+            browser.recorded_requests()[0].model().as_str(),
+            "browser-vision-model"
+        );
+        assert_eq!(primary.recorded_requests().len(), 0);
+
+        let mixed_child = factory
+            .build_child(child_input(
+                "child-mixed",
+                vec![
+                    ToolName::new("browser_tab").expect("valid name"),
+                    ToolName::new("run_process").expect("valid name"),
+                ],
+            ))
+            .expect("mixed child runtime builds");
+        run_text_step(&mixed_child, "Fix bug and check UI.").await;
+        assert_eq!(primary.recorded_requests().len(), 1);
+        assert_eq!(
+            primary.recorded_requests()[0].model().as_str(),
+            "child-primary"
+        );
     }
 }

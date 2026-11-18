@@ -1674,7 +1674,9 @@ name = "merry-mcp"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "futures-util",
+ "image",
  "jsonschema",
  "merry-core",
  "merry-llm",
@@ -1699,6 +1701,7 @@ dependencies = [
  "libc",
  "merry-core",
  "merry-runtime",
+ "rustix",
  "seccompiler",
  "serde",
  "serde_json",
@@ -1794,20 +1797,26 @@ dependencies = [
 name = "merry-tools"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "base64 0.22.1",
  "futures-util",
+ "image",
  "libc",
  "merry-core",
  "merry-llm",
  "merry-runtime",
  "merry-tools-macros",
+ "reqwest",
  "schemars",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

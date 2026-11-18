@@ -137,6 +137,7 @@ pub(crate) enum ControllerEffect {
     RetryPlanNode(merry_core::PlanNodeId),
     CancelPlan,
     SaveSession,
+    ShowTasks,
     Quit,
 }
 

@@ -83,6 +83,7 @@ impl From<TranscriptItemSnapshot> for SessionTranscriptItem {
                 call_id,
                 result,
                 content,
+                images: _,
             } => Self::ToolResult {
                 call_id,
                 result,

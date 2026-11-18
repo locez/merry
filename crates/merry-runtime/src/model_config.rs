@@ -18,6 +18,8 @@ pub enum RuntimeModelRole {
     SummaryMemory,
     /// Model used to compact old dynamic context into citation-backed checkpoints.
     ContextCompaction,
+    /// Optional model used for browser verification subagents.
+    Browser,
 }
 
 impl RuntimeModelRole {
@@ -27,6 +29,7 @@ impl RuntimeModelRole {
             Self::ApprovalReview => "approval_review",
             Self::SummaryMemory => "summary_memory",
             Self::ContextCompaction => "context_compaction",
+            Self::Browser => "browser",
         }
     }
 }

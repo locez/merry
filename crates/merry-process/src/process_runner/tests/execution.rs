@@ -132,6 +132,182 @@ async fn tokio_process_runner_preserves_non_utf8_output() {
     assert!(output.stderr_text().contains('\u{fffd}'));
 }
 
+#[cfg(unix)]
+fn background_intent(argv: Vec<String>) -> ProcessActionIntent {
+    ProcessActionIntent::new(argv, None, ProcessEnvPolicy::empty(), None, 1024, 1024)
+        .expect("process intent should be valid")
+        .with_background(true)
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    rustix::process::Pid::from_raw(pid as rustix::process::RawPid)
+        .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
+}
+
+#[cfg(unix)]
+async fn wait_until_dead(pid: u32) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if !process_alive(pid) {
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("process {pid} was still alive");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn background_command_returns_while_the_process_stays_alive() {
+    let runner = TokioProcessRunner::new();
+    let started = std::time::Instant::now();
+    let output = runner
+        .run(
+            background_intent(vec!["/bin/sleep".to_owned(), "30".to_owned()]),
+            ProcessRunnerContext::new(CancellationToken::new()),
+        )
+        .await
+        .expect("background sleep should be retained");
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(output.status(), ProcessExitStatus::Running);
+    assert!(output.ok());
+    let pid = output.running_pid().expect("retained process has a pid");
+    assert!(process_alive(pid));
+    let id = output
+        .background_process_id()
+        .expect("retained process has an id");
+    assert_eq!(id.as_str(), "bg-1");
+    drop(runner);
+    wait_until_dead(pid).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn background_command_that_exits_immediately_is_not_retained() {
+    let started = std::time::Instant::now();
+    let output = TokioProcessRunner::new()
+        .run(
+            background_intent(vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "echo hi".to_owned(),
+            ]),
+            ProcessRunnerContext::new(CancellationToken::new()),
+        )
+        .await
+        .expect("fast background command should finish");
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(output.status(), ProcessExitStatus::Exited(0));
+    assert_eq!(output.stdout_text(), "hi\n");
+    assert!(output.running_pid().is_none());
+    assert!(output.background_process_id().is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_the_runner_kills_background_children() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pidfile = dir.path().join("child.pid");
+    let script = format!("sleep 300 & echo $! > '{}'; wait", pidfile.display());
+    let runner = TokioProcessRunner::new();
+    let output = runner
+        .run(
+            background_intent(vec!["/bin/sh".to_owned(), "-c".to_owned(), script]),
+            ProcessRunnerContext::new(CancellationToken::new()),
+        )
+        .await
+        .expect("background shell should be retained");
+    let shell_pid = output.running_pid().expect("shell pid");
+    let child_pid = std::fs::read_to_string(&pidfile)
+        .expect("grandchild pid file")
+        .trim()
+        .parse::<u32>()
+        .expect("grandchild pid");
+    assert!(process_alive(shell_pid));
+    assert!(process_alive(child_pid));
+    drop(runner);
+    wait_until_dead(shell_pid).await;
+    wait_until_dead(child_pid).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stop_background_process_kills_the_retained_group() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pidfile = dir.path().join("child.pid");
+    let script = format!(
+        "echo ready; sleep 300 & echo $! > '{}'; wait",
+        pidfile.display()
+    );
+    let runner = TokioProcessRunner::new();
+    let output = runner
+        .run(
+            background_intent(vec!["/bin/sh".to_owned(), "-c".to_owned(), script]),
+            ProcessRunnerContext::new(CancellationToken::new()),
+        )
+        .await
+        .expect("background shell should be retained");
+    let id = output.background_process_id().expect("id").clone();
+    let shell_pid = output.running_pid().expect("shell pid");
+    let child_pid = std::fs::read_to_string(&pidfile)
+        .expect("grandchild pid file")
+        .trim()
+        .parse::<u32>()
+        .expect("grandchild pid");
+    let control = runner.background_control().expect("background control");
+    let read = control.read(&id).expect("read retained output");
+    assert!(read.stdout().contains("ready"));
+    let stopped = control.stop(&id).expect("stop");
+    assert!(stopped.changed());
+    assert_eq!(stopped.summary().id(), &id);
+    wait_until_dead(shell_pid).await;
+    wait_until_dead(child_pid).await;
+    let again = control.stop(&id).expect("second stop");
+    assert!(!again.changed());
+    assert!(
+        control
+            .read(&merry_runtime::BackgroundProcessId::new("bg-9").expect("id"))
+            .is_err()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn background_process_outlives_the_permissioned_runner() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let factory = WorkspaceProcessRunnerFactory::new_at_workspace_root(workspace.path());
+    let request = permission_request(json!({
+        "requested": { "network": true },
+        "for_action": { "command": "sleep 30", "cwd": null }
+    }));
+    let runner = factory.runner_for(&request);
+    let started = std::time::Instant::now();
+    let output = runner
+        .run(
+            background_intent(vec!["/bin/sleep".to_owned(), "30".to_owned()]),
+            ProcessRunnerContext::new(CancellationToken::new()),
+        )
+        .await
+        .expect("sandboxed background sleep should be retained");
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(output.status(), ProcessExitStatus::Running);
+    let pid = output.running_pid().expect("sandboxed pid");
+    assert!(process_alive(pid));
+    drop(runner);
+    assert!(
+        process_alive(pid),
+        "dropping the per-request runner must not kill a background process"
+    );
+    drop(factory);
+    wait_until_dead(pid).await;
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn workspace_process_runner_reuses_tmp_and_writes_workspace() {

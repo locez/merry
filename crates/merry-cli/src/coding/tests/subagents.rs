@@ -31,6 +31,7 @@ async fn hides_subagent_tools_by_default() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
+            browser: None,
             automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
@@ -78,6 +79,7 @@ async fn exposes_subagent_tools_when_enabled() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
+            browser: None,
             automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
@@ -176,6 +178,7 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
+            browser: None,
             automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
@@ -275,6 +278,9 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
             "request_permissions",
             "read_text",
             "apply_patch",
+            "web_fetch",
+            "browser_tab",
+            "browser_network",
             "spawn_subagents",
             "wait_subagents",
             "cancel_subagents",
@@ -286,4 +292,112 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
             .as_str()
             .starts_with("fnv1a64:")
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn browser_model_role_routes_browser_subagents_when_configured() {
+    use merry_llm::ModelName;
+    use merry_runtime::RuntimeModelRole;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+
+    let completion_step = || {
+        vec![Ok::<_, merry_llm::ModelError>(ModelEvent::Completed {
+            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
+        })]
+    };
+    let primary = ScriptedProvider::new(vec![
+        vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::tool_call(ModelToolCall::new(
+                    ModelToolCallId::new("call-spawn-browser").expect("valid call id"),
+                    ToolName::new("spawn_subagents").expect("valid tool name"),
+                    ToolArguments::try_from(Value::Object(Map::from_iter([(
+                        "tasks".to_owned(),
+                        Value::Array(vec![Value::Object(Map::from_iter([
+                            (
+                                "task".to_owned(),
+                                Value::String("Verify the login form UI.".to_owned()),
+                            ),
+                            (
+                                "max_model_turns".to_owned(),
+                                Value::Number(serde_json::Number::from(2048)),
+                            ),
+                            (
+                                "allowed_tools".to_owned(),
+                                Value::Array(vec![
+                                    Value::String("browser_tab".to_owned()),
+                                    Value::String("browser_network".to_owned()),
+                                    Value::String("read_text".to_owned()),
+                                ]),
+                            ),
+                            ("write_scope".to_owned(), Value::Array(Vec::new())),
+                        ]))]),
+                    )])))
+                    .expect("valid spawn args"),
+                ))],
+                FinishReason::ToolCalls,
+                None,
+            ),
+        })],
+        completion_step(),
+        completion_step(),
+        completion_step(),
+        completion_step(),
+        completion_step(),
+        completion_step(),
+        completion_step(),
+    ]);
+    let browser_provider = ScriptedProvider::new(vec![
+        completion_step(),
+        completion_step(),
+        completion_step(),
+    ]);
+    let browser_role = crate::coding::RuntimeRoleProviderConfig::new(
+        RuntimeModelRole::Browser,
+        Arc::new(browser_provider.clone()),
+        ModelName::new("browser-vision-test").expect("valid browser model"),
+    )
+    .expect("valid role");
+
+    let runtime = build_coding_runtime(
+        "coding-loop-browser-role-routing",
+        &workspace,
+        Arc::new(primary.clone()),
+        model_name(),
+        CodingRuntimeOptions {
+            approval_review: None,
+            browser: Some(browser_role),
+            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+            retry_policy: Some(merry_llm::ModelRetryPolicy::disabled()),
+            context_compaction: None,
+            process_backend: test_process_backend(),
+            extra_tools: Vec::new(),
+            skill_roots: Vec::new(),
+            subagents: CodingSubagentsConfig::enabled(
+                SubagentConfig::new(2, 1)
+                    .expect("valid subagent config")
+                    .with_model_turn_bounds(2048, 2048)
+                    .expect("coding subagent bounds should be valid"),
+            ),
+            workspace_tool_limits: None,
+        },
+    )
+    .expect("runtime should build");
+
+    let result = runtime
+        .run_agent_loop(
+            StepInput::user_text("Verify UI.").expect("valid input"),
+            StepContext::default(),
+            AgentLoopConfig::new(3).expect("valid loop config"),
+        )
+        .await
+        .expect("agent loop should run");
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+
+    let browser_requests = browser_provider.recorded_requests();
+    assert!(!browser_requests.is_empty());
+    assert_eq!(browser_requests[0].model().as_str(), "browser-vision-test");
 }

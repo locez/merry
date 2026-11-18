@@ -7,14 +7,16 @@
 pub use crate::user_input::StepInput;
 use crate::{
     CompiledContext, FinalOutputContract, ProjectRules, PromptProfile, SkillCatalog, TaskAnchor,
-    UserMessageInput, artifact::ArtifactContent, prompt::render_prompt_block,
-    session::TranscriptItemSnapshot,
+    UserMessageInput,
+    artifact::ArtifactContent,
+    prompt::render_prompt_block,
+    session::{TranscriptImageSnapshot, TranscriptItemSnapshot},
 };
 use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus, ToolSpec};
 use merry_llm::{
-    GenerationConfig, ModelContent, ModelInputItem, ModelMessage, ModelMessageRole, ModelName,
-    ModelRequest, ModelToolCall, ModelToolCallId, ModelToolResult, ModelToolResultContent,
-    ToolArguments,
+    GenerationConfig, ModelContent, ModelImage, ModelInputItem, ModelMessage, ModelMessageRole,
+    ModelName, ModelRequest, ModelToolCall, ModelToolCallId, ModelToolResult,
+    ModelToolResultContent, ToolArguments,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -322,10 +324,11 @@ fn model_input_from_transcript_snapshot(
             call_id,
             result,
             content,
+            images,
         } => {
             debug_assert_eq!(call_id, result.call_id());
             Ok(ModelInputItem::ToolResult(model_tool_result_from_result(
-                result, content,
+                result, content, images,
             )?))
         }
     }
@@ -344,24 +347,38 @@ fn model_tool_call_from_pending(
 fn model_tool_result_from_result(
     result: &ToolCallResult,
     content: &ArtifactContent,
+    images: &[TranscriptImageSnapshot],
 ) -> Result<ModelToolResult, merry_llm::ModelError> {
     let call_id = ModelToolCallId::new(result.call_id().as_str())?;
     let content = model_tool_result_content(content)?;
+    let model_images = images
+        .iter()
+        .map(|image| {
+            let input = image.input();
+            ModelImage::png(
+                input.label(),
+                input.shared_png_bytes(),
+                input.width(),
+                input.height(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
-    match result.status() {
+    let model_result = match result.status() {
         ToolCallResultStatus::Succeeded => ModelToolResult::new(
             call_id,
             ToolCallResultStatus::Succeeded,
             content,
             result.diagnostic().cloned(),
-        ),
+        )?,
         ToolCallResultStatus::Failed => ModelToolResult::new(
             call_id,
             ToolCallResultStatus::Failed,
             content,
             result.diagnostic().cloned(),
-        ),
-    }
+        )?,
+    };
+    Ok(model_result.with_images(model_images))
 }
 
 fn model_tool_result_content(

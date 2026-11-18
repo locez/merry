@@ -252,6 +252,16 @@ impl Runtime {
         self.save_session_to(store).await
     }
 
+    /// Lists background processes retained by this session.
+    #[must_use]
+    pub fn background_processes(&self) -> Vec<crate::BackgroundProcessSummary> {
+        self.inner
+            .background_process_control
+            .as_ref()
+            .map(|control| control.list())
+            .unwrap_or_default()
+    }
+
     /// Returns a compact snapshot of managed subagent statuses when configured.
     pub async fn subagent_snapshot(&self) -> Option<Vec<crate::SubagentStatusView>> {
         match &self.inner.subagent_manager {

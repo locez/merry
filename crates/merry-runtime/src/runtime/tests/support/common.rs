@@ -142,6 +142,7 @@ pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
         permission_review_mode: PermissionReviewMode::DefaultForTrust,
         permission_admission_source: None,
         permissioned_process_runner_factory: None,
+        background_process_control: None,
         subagent_manager: None,
         coordinator_plan_tools: false,
         plan_controller,

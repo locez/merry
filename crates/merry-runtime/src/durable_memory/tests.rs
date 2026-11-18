@@ -369,6 +369,8 @@ fn instructions_name_the_file_tools_and_protect_the_index() {
     assert!(text.contains("pending observations"));
     assert!(text.contains("topics/"));
     assert!(text.contains("observations/_inbox/"));
+    assert!(text.contains("when the workspace itself is read-only"));
+    assert!(text.contains("A single failed tool call"));
 }
 
 #[test]

@@ -1,6 +1,7 @@
 use schemars::Schema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AnthropicRequest<'a> {
@@ -28,7 +29,7 @@ pub(crate) struct AnthropicMessage<'a> {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum AnthropicContentBlock<'a> {
     Text {
-        text: &'a str,
+        text: Cow<'a, str>,
     },
     Image {
         source: AnthropicImageSource,

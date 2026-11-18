@@ -112,6 +112,10 @@ impl CodingRuntimePolicy {
         })
     }
 
+    pub(crate) fn role(&self, target: RuntimeModelRole) -> Option<&CodingModelRoleConfig> {
+        self.model_roles.iter().find(|role| role.role() == target)
+    }
+
     pub(crate) fn apply_to(&self, mut builder: RuntimeBuilder) -> RuntimeBuilder {
         for role in &self.model_roles {
             builder =
@@ -517,6 +521,7 @@ impl CodingRuntimeBuilder {
             let process_session = process_backend.new_session();
             profile_builder = profile_builder
                 .patch_tool()
+                .web_tools()
                 .accepted_process_session(process_session);
 
             if subagents.is_installed() {

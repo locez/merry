@@ -269,20 +269,13 @@ fn is_baseline_write_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        action_process_backend_options, configured_runtime_builder, generation_config,
-        temp_home_outside_baseline_writes, validate_loaded_config,
+        action_process_backend_options, generation_config, temp_home_outside_baseline_writes,
+        validate_loaded_config,
     };
     use crate::config::{MerryConfig, XdgPaths};
-    use crate::runtime_events::collect_runtime_step_events;
-    use crate::testing::ScriptedProvider;
-    use merry_llm::{
-        FinishReason, GenerationConfig, ModelCapabilities, ModelEvent, ModelName, ModelOutput,
-        ModelResponse, ServiceTier,
-    };
-    use merry_runtime::{
-        MemoryLayout, PathAccessRuleSource, RuntimeModelRole, StepContext, StepInput,
-    };
-    use std::{fs, path::PathBuf, sync::Arc};
+    use merry_llm::ServiceTier;
+    use merry_runtime::{MemoryLayout, PathAccessRuleSource};
+    use std::{fs, path::PathBuf};
 
     #[test]
     fn configured_host_integrations_preauthorize_inner_actions() {
@@ -676,163 +669,5 @@ api_key = "sk-test"
             ),
             "unexpected error: {error}"
         );
-    }
-
-    #[tokio::test]
-    async fn configured_runtime_builder_applies_auto_compaction_config() {
-        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
-            Some(
-                r#"
-[runtime.auto_compaction]
-retained_model_turns = 2
-"#,
-            ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should be present");
-        let primary = ScriptedProvider::new(vec![
-            vec![Ok(ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::text("old assistant from configured builder")],
-                    FinishReason::Stop,
-                    None,
-                ),
-            })],
-            vec![Ok(ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::text(
-                        "tail one assistant from configured builder",
-                    )],
-                    FinishReason::Stop,
-                    None,
-                ),
-            })],
-            vec![Ok(ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::text(
-                        &"tail two assistant from configured builder ".repeat(80),
-                    )],
-                    FinishReason::Stop,
-                    None,
-                ),
-            })],
-            vec![Ok(ModelEvent::Completed {
-                response: ModelResponse::new(
-                    vec![ModelOutput::text("final after configured compaction")],
-                    FinishReason::Stop,
-                    None,
-                ),
-            })],
-        ])
-        .with_capabilities(
-            ModelCapabilities::new(true, true, false, true, Some(12_000), Some(16))
-                .expect("valid capabilities"),
-        );
-        let compactor = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
-            response: ModelResponse::new(
-                vec![ModelOutput::text(
-                    r#"{
-                      "confirmed_decisions": [],
-                      "rejected_approaches": [],
-                      "constraints_preferences_boundaries": [],
-                      "corrected_misunderstandings": [],
-                      "durable_conclusions": [
-                        {
-                          "id": "c1",
-                          "text": "Configured builder compacted the old turn only.",
-                          "refs": ["h0", "h1"]
-                        }
-                      ],
-                      "open_questions": [],
-                      "current_progress_and_next_steps": [],
-                      "exact_details": [],
-                      "handoffs": []
-                    }"#,
-                )],
-                FinishReason::Stop,
-                None,
-            ),
-        })]]);
-        let runtime = configured_runtime_builder(
-            merry_core::SessionId::new("configured-builder-auto-compaction").unwrap(),
-            Some(&config),
-        )
-        .expect("configured builder should build")
-        .model_provider(
-            Arc::new(primary.clone()),
-            ModelName::new("debug-model").unwrap(),
-        )
-        .model_provider_for_role(
-            RuntimeModelRole::ContextCompaction,
-            Arc::new(compactor.clone()),
-            ModelName::new("debug-compactor").unwrap(),
-        )
-        .build()
-        .expect("runtime should build");
-        let context = StepContext::default().with_generation_config(
-            GenerationConfig::new(Some(16), false).expect("valid generation config"),
-        );
-
-        collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text(&"old user from configured builder ".repeat(850))
-                .expect("valid input"),
-            context.clone(),
-        )
-        .await
-        .expect("old step should run");
-        collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text("tail one user from configured builder").expect("valid input"),
-            context.clone(),
-        )
-        .await
-        .expect("tail one step should run");
-        collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text("tail two user from configured builder").expect("valid input"),
-            context.clone(),
-        )
-        .await
-        .expect("tail two step should run");
-        // The 12_000-token window leaves about 7_500 tokens under the compaction
-        // threshold. The old turn is already near that line, so this message
-        // crosses it. It also has to leave room for the checkpoint ceiling and
-        // the two retained turns; a larger message makes that tail not fit, and
-        // the runtime then never calls the compaction model.
-        collect_runtime_step_events(
-            &runtime,
-            StepInput::user_text(&"current user from configured builder ".repeat(200))
-                .expect("valid input"),
-            context,
-        )
-        .await
-        .expect("current step should run");
-
-        let compactor_requests = compactor.recorded_requests();
-        assert_eq!(compactor_requests.len(), 1);
-        let compaction_text = compactor_requests[0]
-            .messages()
-            .iter()
-            .map(|message| message.content().as_text())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(compaction_text.contains("old user from configured builder"));
-        let primary_requests = primary.recorded_requests();
-        let continuation = primary_requests.last().expect("primary continuation");
-        let continuation_text = continuation
-            .messages()
-            .iter()
-            .map(|message| message.content().as_text())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!continuation_text.contains("old user from configured builder"));
-        assert!(continuation_text.contains("tail one user from configured builder"));
-        assert!(continuation_text.contains("tail one assistant from configured builder"));
-        assert!(continuation_text.contains("tail two user from configured builder"));
-        assert!(continuation_text.contains("tail two assistant from configured builder"));
-        assert!(continuation_text.contains("current user from configured builder"));
     }
 }

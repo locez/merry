@@ -10,7 +10,7 @@ use crate::{
 };
 use merry_llm::{
     ModelContentPart, ModelInputItem, ModelMessageRole, ModelRequest, ModelResponseFormat,
-    ModelStructuredOutputFormat, ModelToolCall,
+    ModelStructuredOutputFormat, ModelToolCall, ModelToolResult,
 };
 use serde_json::{Map, Value};
 
@@ -134,11 +134,12 @@ struct RenderedToolContinuation<'a> {
 fn render_input_items<'a>(
     input: &'a [ModelInputItem],
 ) -> Result<Vec<ResponsesInputItem<'a>>, OpenAiProviderError> {
-    input
-        .iter()
-        .map(|item| match item {
+    let mut rendered = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        match &input[index] {
             ModelInputItem::Message(message) if message.content().has_images() => {
-                Ok(ResponsesInputItem::message_content(
+                rendered.push(ResponsesInputItem::message_content(
                     render_role(message.role()),
                     message
                         .content()
@@ -153,26 +154,58 @@ fn render_input_items<'a>(
                             }
                         })
                         .collect(),
-                ))
+                ));
+                index += 1;
             }
-            ModelInputItem::Message(message) => Ok(ResponsesInputItem::message(
-                render_role(message.role()),
-                message.content().as_text(),
-            )),
+            ModelInputItem::Message(message) => {
+                rendered.push(ResponsesInputItem::message(
+                    render_role(message.role()),
+                    message.content().as_text(),
+                ));
+                index += 1;
+            }
             ModelInputItem::ToolCall(call) => {
                 let call = render_tool_call(call)?;
-                Ok(ResponsesInputItem::function_call(
+                rendered.push(ResponsesInputItem::function_call(
                     call.id,
                     call.name,
                     call.arguments,
-                ))
+                ));
+                index += 1;
             }
-            ModelInputItem::ToolResult(result) => Ok(ResponsesInputItem::function_call_output(
-                result.call_id().as_str(),
-                result.content().as_str(),
-            )),
-        })
-        .collect()
+            ModelInputItem::ToolResult(_) => {
+                let mut tool_images = Vec::new();
+                while let Some(ModelInputItem::ToolResult(result)) = input.get(index) {
+                    rendered.push(ResponsesInputItem::function_call_output(
+                        result.call_id().as_str(),
+                        result.content().as_str(),
+                    ));
+                    append_tool_result_images(&mut tool_images, result);
+                    index += 1;
+                }
+                if !tool_images.is_empty() {
+                    rendered.push(ResponsesInputItem::message_content("user", tool_images));
+                }
+            }
+        }
+    }
+    Ok(rendered)
+}
+
+fn append_tool_result_images<'a>(
+    content: &mut Vec<ResponsesInputContent<'a>>,
+    result: &'a ModelToolResult,
+) {
+    for image in result.images() {
+        content.push(ResponsesInputContent::owned_text(format!(
+            "<image name={}>",
+            image.label()
+        )));
+        content.push(ResponsesInputContent::input_image(png_data_url(
+            image.png_bytes(),
+        )));
+        content.push(ResponsesInputContent::input_text("</image>"));
+    }
 }
 
 fn render_tool_call<'a>(
@@ -491,6 +524,62 @@ mod tests {
                 {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgoq"},
                 {"type": "input_text", "text": "</image>"},
                 {"type": "input_text", "text": "inspect [Image #1]"}
+            ])
+        );
+    }
+
+    #[test]
+    fn renders_tool_result_images_after_contiguous_function_call_outputs() {
+        let call_1 = ModelToolCall::new(
+            ModelToolCallId::new("call_1").expect("valid id"),
+            ToolName::new("browser_tab").expect("valid name"),
+            ToolArguments::try_from(json!({"action": "snapshot"})).expect("valid args"),
+        );
+        let call_2 = ModelToolCall::new(
+            ModelToolCallId::new("call_2").expect("valid id"),
+            ToolName::new("browser_tab").expect("valid name"),
+            ToolArguments::try_from(json!({"action": "console"})).expect("valid args"),
+        );
+        let screenshot = ModelImage::png(
+            "browser-snapshot.png",
+            Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10, 42]),
+            1,
+            1,
+        )
+        .expect("valid image");
+        let result_1 = ModelToolResult::succeeded(
+            call_1.id().clone(),
+            ModelToolResultContent::text("snapshot captured").expect("valid content"),
+        )
+        .with_images(vec![screenshot]);
+        let result_2 = ModelToolResult::succeeded(
+            call_2.id().clone(),
+            ModelToolResultContent::text("no console errors").expect("valid content"),
+        );
+        let request = ModelRequest::new_with_input_and_stable_prefix(
+            ModelName::new("gpt-image-test").expect("valid model"),
+            vec![
+                ModelInputItem::ToolCall(call_1),
+                ModelInputItem::ToolCall(call_2),
+                ModelInputItem::ToolResult(result_1),
+                ModelInputItem::ToolResult(result_2),
+            ],
+            Vec::new(),
+            GenerationConfig::default(),
+            0,
+        )
+        .expect("valid request");
+
+        let rendered = super::render_responses_request(&request).expect("request should render");
+        assert_eq!(rendered["input"][2]["type"], "function_call_output");
+        assert_eq!(rendered["input"][3]["type"], "function_call_output");
+        assert_eq!(rendered["input"][4]["role"], "user");
+        assert_eq!(
+            rendered["input"][4]["content"],
+            json!([
+                {"type": "input_text", "text": "<image name=browser-snapshot.png>"},
+                {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgoq"},
+                {"type": "input_text", "text": "</image>"}
             ])
         );
     }

@@ -205,6 +205,15 @@ pub(super) async fn dispatch_effect(
                 .map_err(unexpected)?;
             Ok(false)
         }
+        ControllerEffect::ShowTasks => {
+            let processes = session.runtime().background_processes();
+            let subagents = session.runtime().subagent_snapshot().await;
+            state.push_timeline_item(TimelineItem::LocalCommand {
+                title: "Tasks".to_owned(),
+                body: crate::tui::tasks::tasks_body(&processes, subagents.as_deref()),
+            });
+            Ok(false)
+        }
         ControllerEffect::SaveSession => {
             session.set_title(state.latest_user_input_title());
             match session.save_now().await {

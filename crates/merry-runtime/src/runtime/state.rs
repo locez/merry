@@ -6,7 +6,7 @@ use crate::{
     model_config::{ModelProviderConfig, RuntimeModelConfigs},
     permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
     plan::{PlanController, PlanControllerError, PlanSubagentControl},
-    process::PermissionedProcessRunnerFactory,
+    process::{BackgroundProcessControl, PermissionedProcessRunnerFactory},
     session::SessionState,
     subagent::{PlanSubagentScope, SubagentActivityHub, SubagentManager},
     tool::ToolRegistry,
@@ -48,6 +48,7 @@ pub(super) struct RuntimeInner {
     pub(super) permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     pub(super) permissioned_process_runner_factory:
         Option<Arc<dyn PermissionedProcessRunnerFactory>>,
+    pub(super) background_process_control: Option<Arc<dyn BackgroundProcessControl>>,
     pub(super) subagent_manager: Option<SubagentManager>,
     pub(super) coordinator_plan_tools: bool,
     pub(super) plan_controller: PlanController,

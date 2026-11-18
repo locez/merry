@@ -24,6 +24,7 @@ fn process_envelope_preserves_the_artifact_wire_contract() {
             ProcessExitStatus::DomainFailed,
             json!({"kind": "domain_failed"}),
         ),
+        (ProcessExitStatus::Running, json!({"kind": "running"})),
     ] {
         let output = ProcessRunnerOutput::from_bytes(
             &intent(),
@@ -41,7 +42,10 @@ fn process_envelope_preserves_the_artifact_wire_contract() {
             value,
             json!({
                 "kind": "process_action",
-                "ok": status == ProcessExitStatus::Exited(0),
+                "ok": matches!(
+                    status,
+                    ProcessExitStatus::Exited(0) | ProcessExitStatus::Running
+                ),
                 "permission_profile_id": "process.read_only",
                 "status": wire_status,
                 "stdout": {"text": "\0�A", "bytes": 3, "truncated": true, "utf8": false, "bytes_base64": "AP9B"},

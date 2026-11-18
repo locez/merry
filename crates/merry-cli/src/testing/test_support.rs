@@ -260,11 +260,6 @@ impl ScriptedProvider {
         }
     }
 
-    pub(crate) fn with_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
-        self.capabilities = capabilities;
-        self
-    }
-
     pub(crate) fn recorded_requests(&self) -> Vec<ModelRequest> {
         self.requests
             .lock()

@@ -82,6 +82,7 @@ pub(crate) async fn start_tui_runtime_session(
         primary,
         context_compaction,
         approval_review,
+        browser,
         retry_policy,
     } = runtime_provider_bundle_from_config_with_primary_override(
         merry_config,
@@ -152,6 +153,7 @@ pub(crate) async fn start_tui_runtime_session(
         retry_policy,
         context_compaction,
         approval_review,
+        browser,
         skill_roots: merry_config
             .map(MerryConfig::skill_roots)
             .transpose()

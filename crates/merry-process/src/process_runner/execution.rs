@@ -1,10 +1,13 @@
-use super::permissions::WorkspaceProcessRunner;
+use super::{
+    background::{self, BackgroundSupervisor},
+    permissions::WorkspaceProcessRunner,
+};
 use crate::confinement::{self, SandboxLaunch};
 use merry_runtime::{
-    ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+    BackgroundProcessControl, ProcessActionIntent, ProcessExitStatus, ProcessRunner,
+    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
 };
-use std::{fs, io, process::Stdio};
+use std::{fs, io, process::Stdio, sync::Arc};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 impl ProcessRunner for WorkspaceProcessRunner {
@@ -24,8 +27,13 @@ impl ProcessRunner for WorkspaceProcessRunner {
                 .map_err(|error| {
                     ProcessRunnerError::infrastructure(format!("sandbox planning failed: {error}"))
                 })??;
-            run_sandbox_launch(launch, intent, context).await
+            let background = self.background.clone();
+            run_sandbox_launch(launch, intent, context, background).await
         })
+    }
+
+    fn background_control(&self) -> Option<Arc<dyn BackgroundProcessControl>> {
+        Some(Arc::new(self.background.clone()))
     }
 }
 
@@ -33,6 +41,7 @@ async fn run_sandbox_launch(
     launch: SandboxLaunch,
     intent: ProcessActionIntent,
     context: ProcessRunnerContext,
+    background: BackgroundSupervisor,
 ) -> Result<ProcessRunnerOutput, ProcessRunnerError> {
     if context.cancellation_token().is_cancelled() {
         return Err(ProcessRunnerError::Cancelled);
@@ -48,7 +57,7 @@ async fn run_sandbox_launch(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let backend_program = helper.to_string_lossy().into_owned();
-    let result = run_spawned_process(command, intent, context, backend_program).await;
+    let result = run_spawned_process(command, intent, context, backend_program, background).await;
     let _ = fs::remove_file(policy);
     result
 }
@@ -58,7 +67,12 @@ pub(super) async fn run_spawned_process(
     intent: ProcessActionIntent,
     context: ProcessRunnerContext,
     program_for_error: String,
+    background: BackgroundSupervisor,
 ) -> Result<ProcessRunnerOutput, ProcessRunnerError> {
+    // A new group makes session-end and cancellation kill the command and its
+    // children without signaling Merry's own group.
+    #[cfg(unix)]
+    command.process_group(0);
     let mut child = command.spawn().map_err(|source| {
         if source.kind() == io::ErrorKind::NotFound {
             ProcessRunnerError::infrastructure(format!(
@@ -76,6 +90,18 @@ pub(super) async fn run_spawned_process(
     let stderr = child.stderr.take().ok_or_else(|| {
         ProcessRunnerError::infrastructure("process stderr pipe was not available")
     })?;
+    if intent.background() {
+        return background::finish_background(
+            child,
+            stdout,
+            stderr,
+            intent,
+            context,
+            background,
+            program_for_error,
+        )
+        .await;
+    }
     let stdout_limit = intent.stdout_limit_bytes();
     let stderr_limit = intent.stderr_limit_bytes();
 
@@ -85,10 +111,10 @@ pub(super) async fn run_spawned_process(
     let status = tokio::select! {
         biased;
         () = context.cancellation_token().cancelled() => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
             stdout_task.abort();
             stderr_task.abort();
+            background::kill_child_group(&mut child);
+            let _ = child.wait().await;
             return Err(ProcessRunnerError::Cancelled);
         }
         status = child.wait() => status,

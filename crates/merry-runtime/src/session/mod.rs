@@ -35,7 +35,7 @@ pub(crate) use self::{
     persistence::PersistableSessionBundle,
     plan_tool_commit::PreparedPlanToolCommit,
     tool_result::{ProposedToolExecutionOutcome, ToolResultLedgerObservation},
-    transcript::{Transcript, TranscriptItemSnapshot, UserInputOrigin},
+    transcript::{Transcript, TranscriptImageSnapshot, TranscriptItemSnapshot, UserInputOrigin},
 };
 pub(crate) use crate::session_projection::{SessionTrajectory, SessionTrajectoryItem};
 

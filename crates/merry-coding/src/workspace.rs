@@ -8,11 +8,14 @@ use merry_process::ProcessSession;
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, DurableMemory, PermissionAdmissionError,
     PermissionedProcessRunnerFactory, ProcessCommandToolError, ProcessRunner,
-    RuntimeProfileBuilder, StaticPermissionedProcessRunnerFactory, process_command_tool,
-    request_permissions_tool,
+    RuntimeProfileBuilder, StaticPermissionedProcessRunnerFactory, ToolBuildError,
+    process_command_tool, read_background_process_tool, request_permissions_tool,
+    stop_background_process_tool,
 };
 use merry_tools::{
-    WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceTools, WorkspaceToolsConfig,
+    BrowserConfig, BrowserNetworkTool, BrowserSessionManager, BrowserTabTool, WebFetchConfig,
+    WebFetchTool, WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceTools,
+    WorkspaceToolsConfig,
 };
 use std::{path::PathBuf, sync::Arc};
 use thiserror::Error;
@@ -27,6 +30,13 @@ const CODING_WORKSPACE_CAPABILITY_SUMMARY: &str = concat!(
     "- If a capability is discovered only after a sandboxed failure, call `request_permissions` for that exact action before retrying it. Approved paths and host integrations remain available for later actions in this runtime session; network access must be requested again for every action that needs it.\n",
     "- Linux Unix sockets are filesystem paths. If a host resource is not represented by a named integration, request its exact socket/file path through `requested.paths`; the sandbox must already expose the path.\n",
     "- `request_permissions` must name the exact planned action and request only the minimum needed capability; the runtime may approve, deny, or fail the request.",
+);
+
+const WEB_CAPABILITY_SUMMARY: &str = concat!(
+    "Coding web and browser verification capabilities:\n",
+    "- `web_fetch` fetches static HTTP/HTTPS pages, JSON endpoints, and docs with SSRF protection and extracts bounded Markdown. An SSRF refusal is final for that URL.\n",
+    "- `browser_tab` drives one lazy session-scoped headless Chromium tab (`open` of http(s) or a `data:text/html` / `data:text/plain` document, `click`, `fill`, `press`, `evaluate`, `snapshot` with PNG screenshot, `console`, `resize`, `close`) with SSRF protection. A failed open does not start a session.\n",
+    "- `browser_network` inspects HTTP/XHR/fetch requests captured after a successful `browser_tab` open (`list`, `details`).",
 );
 
 #[derive(Clone)]
@@ -44,6 +54,7 @@ pub(crate) struct WorkspaceCodingProfileBuilder {
     pub(crate) patch_write_scope: Option<Vec<PathBuf>>,
     pub(crate) forbidden_paths: Vec<PathBuf>,
     pub(crate) enable_patch_tool: bool,
+    pub(crate) enable_web_tools: bool,
     pub(crate) process_runner: Option<WorkspaceProcessRunnerConfig>,
     pub(crate) durable_memory: Option<Arc<DurableMemory>>,
 }
@@ -59,6 +70,7 @@ impl WorkspaceCodingProfileBuilder {
             patch_write_scope: None,
             forbidden_paths: Vec::new(),
             enable_patch_tool: false,
+            enable_web_tools: false,
             process_runner: None,
             durable_memory: None,
         }
@@ -91,6 +103,11 @@ impl WorkspaceCodingProfileBuilder {
 
     pub(crate) fn patch_tool(mut self) -> Self {
         self.enable_patch_tool = true;
+        self
+    }
+
+    pub(crate) fn web_tools(mut self) -> Self {
+        self.enable_web_tools = true;
         self
     }
 
@@ -153,6 +170,9 @@ impl WorkspaceCodingProfileBuilder {
         );
         let environment_facts = search_tools.summary_line();
         let mut summary_sections = vec![CODING_WORKSPACE_CAPABILITY_SUMMARY.to_owned()];
+        if self.enable_web_tools {
+            summary_sections.push(WEB_CAPABILITY_SUMMARY.to_owned());
+        }
         if let Some(project_summary) = project_summary {
             summary_sections.push(project_summary);
         }
@@ -187,6 +207,7 @@ impl WorkspaceCodingProfileBuilder {
                 }
             };
 
+            let background_control = runner.background_control();
             builder = builder
                 .allow_low_risk_process_actions(Arc::clone(&runner))
                 .allow_read_only_shell_process_actions(Arc::clone(&runner))
@@ -197,11 +218,17 @@ impl WorkspaceCodingProfileBuilder {
 
             let process_tool = process_command_tool(
                 ToolName::new(CODING_LOOP_PROCESS_TOOL)?,
-                "Run one shell command through Merry's configured process runner. Provide command as one JSON string; omit cwd for the current workspace directory, or use null or a workspace-relative directory such as \".\". Do not add a bash field or pass argv. The runtime validates command and cwd byte/control-character limits. Workspace files and directories are writable in the sandbox. Paths and host integrations enabled by trusted global configuration are already available; .git, network, and anything not configured remain restricted and may require a reviewed capability. Network is never granted implicitly: a command that reaches a remote service, such as one that authenticates, installs, downloads, or publishes, must include network in this call's permissions. If the command needs access that is still missing, include the minimum capabilities in permissions and runtime will review before running this exact command. If the need is discovered only after failure, use request_permissions for the exact same action before retrying it. Network access must be requested again for each action that needs it. Linux Unix sockets can be requested as exact filesystem paths when no named integration applies.",
+                "Run one shell command through Merry's configured process runner. Provide command as one JSON string; omit cwd for the current workspace directory, or use null or a workspace-relative directory such as \".\". Do not add a bash field or pass argv. The runtime validates command and cwd byte/control-character limits. Workspace files and directories are writable in the sandbox. Paths and host integrations enabled by trusted global configuration are already available; .git, network, and anything not configured remain restricted and may require a reviewed capability. Network is never granted implicitly: a command that reaches a remote service, such as one that authenticates, installs, downloads, or publishes, must include network in this call's permissions. If the command needs access that is still missing, include the minimum capabilities in permissions and runtime will review before running this exact command. If the need is discovered only after failure, use request_permissions for the exact same action before retrying it. Network access must be requested again for each action that needs it. Linux Unix sockets can be requested as exact filesystem paths when no named integration applies. Set background to true for a GUI or server that should keep running after this call; Merry retains it until the session ends. The default waits until the command exits, which blocks the turn, and closing the window ends that wait. Do not use `&`, setsid, nohup, or a systemd unit instead of background. A background result includes an id. read_background_process lists retained commands or reads later output, and stop_background_process stops that process group.",
             )?;
             builder = builder
                 .register_tool(process_tool)
                 .register_tool(request_permissions_tool()?);
+            if let Some(control) = background_control {
+                builder = builder.background_process_control(Arc::clone(&control));
+                builder = builder
+                    .register_tool(read_background_process_tool(Arc::clone(&control))?)
+                    .register_tool(stop_background_process_tool(control)?);
+            }
         }
 
         let tools = if self.enable_patch_tool {
@@ -211,6 +238,15 @@ impl WorkspaceCodingProfileBuilder {
         };
         for tool in tools {
             builder = builder.register_tool(tool);
+        }
+        if self.enable_web_tools {
+            let browser_manager = Arc::new(BrowserSessionManager::new(BrowserConfig::default()));
+            builder = builder
+                .register_tool(WebFetchTool::new(WebFetchConfig::default()).into_registered_tool()?)
+                .register_tool(
+                    BrowserTabTool::new(Arc::clone(&browser_manager)).into_registered_tool()?,
+                )
+                .register_tool(BrowserNetworkTool::new(browser_manager).into_registered_tool()?);
         }
 
         Ok(builder)
@@ -235,6 +271,9 @@ impl WorkspaceCodingProfileBuilder {
             "patch-tool",
             if self.enable_patch_tool { "on" } else { "off" },
         );
+        if self.enable_web_tools {
+            append_hash_field(&mut material, "web-tools", "on");
+        }
         match self.patch_write_scope.as_ref() {
             None => append_hash_field(&mut material, "patch-write-scope-state", "unrestricted"),
             Some(paths) => {
@@ -304,4 +343,7 @@ pub(crate) enum WorkspaceCodingProfileBuildError {
     /// A static workspace tool name failed validation.
     #[error(transparent)]
     Core(#[from] merry_core::CoreError),
+    /// A web or browser tool schema failed construction.
+    #[error(transparent)]
+    WebToolBuild(#[from] ToolBuildError),
 }

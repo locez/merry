@@ -37,7 +37,7 @@ use merry_runtime::{
     AgentLoopConfig, DurableMemory, PermissionAdmissionError, ProcessCommandToolError,
     ProcessRunner, ProjectRules, PromptBlock, PromptError, PromptProfile, RegisteredTool,
     RuntimeBuilder, RuntimeError, RuntimeProfile, RuntimeProfileError, SkillCatalog, TaskAnchor,
-    Tool,
+    Tool, ToolBuildError,
 };
 pub use merry_tools::{WorkspaceToolConfigError, WorkspaceToolLimits};
 use serde_json::Error as JsonError;
@@ -279,6 +279,13 @@ impl CodingAgentProfileBuilder {
         self
     }
 
+    /// Enables built-in web and browser verification tools (`web_fetch`, `browser_tab`, `browser_network`).
+    #[must_use]
+    pub fn web_tools(mut self) -> Self {
+        self.workspace = self.workspace.web_tools();
+        self
+    }
+
     /// Sets workspace-relative paths that `apply_patch` may write.
     #[must_use]
     pub fn patch_write_scope<I, P>(mut self, paths: I) -> Self
@@ -449,6 +456,9 @@ impl CodingAgentProfileBuilder {
                 WorkspaceCodingProfileBuildError::Core(source) => {
                     CodingAgentProfileBuildError::Core(source)
                 }
+                WorkspaceCodingProfileBuildError::WebToolBuild(source) => {
+                    CodingAgentProfileBuildError::WebToolBuild(source)
+                }
             })?;
         if allow_bridge_tools {
             builder = builder.allow_bridge_tools();
@@ -506,6 +516,9 @@ pub enum CodingAgentProfileBuildError {
     /// Stable prompt composition was invalid.
     #[error(transparent)]
     Prompt(#[from] PromptError),
+    /// A web or browser tool schema failed validation.
+    #[error(transparent)]
+    WebToolBuild(#[from] ToolBuildError),
 }
 
 /// Coding-profile name for runtime-owned process execution.

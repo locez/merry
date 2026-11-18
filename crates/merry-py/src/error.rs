@@ -166,6 +166,9 @@ pub(crate) fn profile_build_error_to_py(
         merry::profiles::CodingAgentProfileBuildError::Prompt(_) => {
             "workspace profile prompt configuration was rejected"
         }
+        merry::profiles::CodingAgentProfileBuildError::WebToolBuild(_) => {
+            "web tool configuration was rejected"
+        }
     };
     profile_message_to_py(message)
 }

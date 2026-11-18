@@ -1,5 +1,6 @@
 use schemars::Schema;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ChatRequest<'a> {
@@ -54,7 +55,7 @@ pub(crate) enum ChatMessage<'a> {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ChatContentPart<'a> {
-    Text { text: &'a str },
+    Text { text: Cow<'a, str> },
     ImageUrl { image_url: ChatImageUrl },
 }
 

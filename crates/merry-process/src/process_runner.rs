@@ -3,6 +3,7 @@
 //! This module wires the concrete environment, permission, sandbox, and
 //! execution components while keeping host-process details out of runtime.
 
+mod background;
 mod environment;
 mod execution;
 mod permissions;
@@ -15,6 +16,7 @@ pub use permissions::{
 };
 pub use tokio_runner::TokioProcessRunner;
 
+pub(crate) use background::BackgroundSupervisor;
 pub(crate) use environment::process_current_dir;
 
 #[cfg(test)]

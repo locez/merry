@@ -336,3 +336,164 @@ async fn archived_compact_results_keep_notices_and_full_evidence_after_resume() 
     );
     assert!(notice.get("ref").is_none());
 }
+
+#[tokio::test]
+async fn tool_result_images_persist_preserve_failures_and_drop_when_archived() {
+    use crate::compaction::{CompactionCoverageBudget, CompactionPreparation};
+    use crate::context::{ContextCompiler, SessionContextSnapshot};
+    use crate::step::{StepModelRequestParts, compile_step_model_request};
+    use crate::{PromptProfile, StepContext, StepInput, UserImageInput};
+    use merry_core::{ArtifactKind, ErrorInfo};
+    use merry_llm::{GenerationConfig, ModelInputItem, ModelName};
+
+    let png_bytes = std::sync::Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10, 42]);
+    let snapshot = UserImageInput::png("browser-snapshot.png", png_bytes, 1, 1).expect("valid png");
+
+    // 1. Both succeeded and failed outcomes preserve attached screenshots and persist across save/load.
+    let mut session = SessionState::new(session_id());
+    let ok_call = pending_tool_call("shot-ok");
+    let fail_call = pending_tool_call("shot-fail");
+    session
+        .record_test_tool_call_batch_pending(
+            PendingToolCallBatch::new(
+                ToolCallBatchId::new("shot-batch").expect("id"),
+                vec![ok_call.clone(), fail_call.clone()],
+            )
+            .expect("batch"),
+        )
+        .expect("pending batch");
+    let events = session
+        .submit_tool_execution_outcomes(vec![
+            (
+                ok_call.id().clone(),
+                ToolExecutionOutcome::succeeded_text("ok snapshot").with_image(snapshot.clone()),
+            ),
+            (
+                fail_call.id().clone(),
+                ToolExecutionOutcome::failed_text(
+                    "click failed",
+                    ErrorInfo::new("click_failed", "element covered").expect("diagnostic"),
+                )
+                .with_image(snapshot.clone()),
+            ),
+        ])
+        .expect("resolve outcomes with images");
+
+    let image_events = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.payload,
+                RuntimeJournalPayload::ArtifactRecorded { artifact }
+                    if artifact.kind() == &ArtifactKind::Image
+            )
+        })
+        .count();
+    assert_eq!(image_events, 2);
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(dir.path());
+    session.save_to(&store).await.expect("save");
+    let loaded = SessionState::load_from(&store, &session_id())
+        .await
+        .expect("load");
+    let transcript = loaded
+        .provider_transcript_snapshot()
+        .expect("provider transcript");
+    let empty_context = ContextCompiler::new()
+        .compile(&SessionContextSnapshot::new(
+            Vec::new(),
+            loaded.artifacts.clone(),
+            Vec::new(),
+            None,
+        ))
+        .expect("empty context compiles");
+    let compiled = compile_step_model_request(StepModelRequestParts {
+        input: &StepInput::user_text("continue").expect("input"),
+        model: &ModelName::new("test-model").expect("model"),
+        skill_catalog: None,
+        project_rules: None,
+        task_anchor: None,
+        plan_control: None,
+        context: &empty_context,
+        transcript: &transcript,
+        tool_specs: Vec::new(),
+        generation_config: GenerationConfig::default(),
+        prompt_profile: &PromptProfile::default(),
+        progress_commentary: false,
+        memory_context: None,
+    })
+    .expect("compile request");
+
+    let model_results = compiled
+        .input()
+        .iter()
+        .filter_map(|item| match item {
+            ModelInputItem::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(model_results.len(), 2);
+    assert_eq!(model_results[0].images().len(), 1);
+    assert_eq!(model_results[0].images()[0].label(), "browser-snapshot.png");
+    assert_eq!(model_results[1].images().len(), 1);
+    assert_eq!(model_results[1].images()[0].label(), "browser-snapshot.png");
+    let _ = StepContext::default();
+
+    // 2. Archiving older tool results drops screenshots from active provider projection.
+    let mut archive_session = SessionState::new(session_id());
+    for turn in 0..5 {
+        let call = pending_tool_call(&format!("archive-img-{turn}"));
+        archive_session
+            .record_test_tool_call_pending(call.clone())
+            .expect("pending call");
+        archive_session
+            .submit_tool_execution_outcomes(vec![(
+                call.id().clone(),
+                ToolExecutionOutcome::succeeded_text("dom ".repeat(200))
+                    .with_image(snapshot.clone()),
+            )])
+            .expect("resolve");
+    }
+    let policy = super::rolling_compaction::policy(5);
+    let preparation = archive_session
+        .build_compaction_preparation_with_window_budget(
+            policy,
+            policy.resolve(64_000).expect("budget"),
+            super::rolling_compaction::window_budget(800),
+            CompactionCoverageBudget::limited(0),
+        )
+        .expect("preparation")
+        .expect("archive needed");
+    let CompactionPreparation::ArchiveToolResults(input) = preparation else {
+        panic!("archive-only expected");
+    };
+    archive_session
+        .install_archive_only_compaction(input)
+        .expect("archive");
+    let active_snapshot = archive_session
+        .provider_transcript_snapshot()
+        .expect("active transcript");
+    let archived_item = active_snapshot
+        .iter()
+        .find_map(|item| match item {
+            TranscriptItemSnapshot::ToolResult { images, .. } => Some(images),
+            _ => None,
+        })
+        .expect("archived tool result present");
+    assert!(
+        archived_item.is_empty(),
+        "archived tool result must drop attached images from prompt projection"
+    );
+    let full_snapshot = archive_session
+        .full_transcript_snapshot()
+        .expect("full transcript");
+    let full_item = full_snapshot
+        .iter()
+        .find_map(|item| match item {
+            TranscriptItemSnapshot::ToolResult { images, .. } => Some(images),
+            _ => None,
+        })
+        .expect("full tool result present");
+    assert_eq!(full_item.len(), 1);
+}

@@ -7,6 +7,7 @@ pub(crate) enum PaletteCommand {
     ShowShortcuts,
     ShowHelp,
     ShowStatus,
+    ShowTasks,
     #[cfg(feature = "web")]
     OpenSessionInBrowser,
     ReviewPreviousUserInput,
@@ -116,7 +117,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Interrupt current run",
         Some(KeyAction::Interrupt),
     )
-    .with_slash("stop", "Interrupt the active model or tool run"),
+    .with_slash("stop", "Interrupt the active run"),
     CommandSpec::new(
         PaletteCommand::ResumeSuspended,
         "Runtime",
@@ -139,6 +140,8 @@ const COMMANDS: &[CommandSpec] = &[
         "status",
         "Show run, model, usage, plan, and workspace state",
     ),
+    CommandSpec::new(PaletteCommand::ShowTasks, "Session", "Tasks", None)
+        .with_slash("tasks", "Processes and subagents"),
     CommandSpec::new(PaletteCommand::SaveSession, "Session", "Save session", None)
         .with_slash("save", "Save the session at a stable boundary"),
     CommandSpec::new(
@@ -284,7 +287,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["save"]
         );
-        assert_eq!(find_slash_prefix("").len(), 4);
+        assert_eq!(find_slash_prefix("").len(), 5);
+        assert_eq!(
+            find_slash_exact("tasks").map(|command| command.command),
+            Some(PaletteCommand::ShowTasks)
+        );
         assert!(find_slash_exact("unknown").is_none());
     }
 

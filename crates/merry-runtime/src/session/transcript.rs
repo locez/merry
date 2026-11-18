@@ -101,6 +101,7 @@ pub(crate) enum TranscriptItem {
         result: ToolCallResult,
         artifact_id: ArtifactId,
         model_artifact_id: Option<ArtifactId>,
+        image_artifact_ids: Vec<ArtifactId>,
         prompt_projection: ToolResultPromptProjection,
     },
 }
@@ -145,6 +146,8 @@ pub(crate) enum PersistedTranscriptItem {
         artifact_id: ArtifactId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_artifact_id: Option<ArtifactId>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        image_artifact_ids: Vec<ArtifactId>,
         prompt_projection: ToolResultPromptProjection,
     },
 }
@@ -195,6 +198,7 @@ pub(crate) enum TranscriptItemSnapshot {
         call_id: ToolCallId,
         result: ToolCallResult,
         content: ArtifactContent,
+        images: Vec<TranscriptImageSnapshot>,
     },
 }
 
@@ -326,6 +330,7 @@ impl Transcript {
         artifact_id: ArtifactId,
         prompt_projection: ToolResultPromptProjection,
         model_artifact_id: Option<ArtifactId>,
+        image_artifact_ids: Vec<ArtifactId>,
     ) -> Result<TranscriptItemId, RuntimeError> {
         let model_turn_id = self.model_turn_id_for_tool_call(&call_id).ok_or_else(|| {
             RuntimeError::TranscriptToolCallMissing {
@@ -343,6 +348,7 @@ impl Transcript {
             result,
             artifact_id,
             model_artifact_id,
+            image_artifact_ids,
             prompt_projection,
         });
         if self.all_tool_calls_resolved(model_turn_id) {
@@ -528,6 +534,7 @@ impl From<&TranscriptItem> for PersistedTranscriptItem {
                 result,
                 artifact_id,
                 model_artifact_id,
+                image_artifact_ids,
                 prompt_projection,
             } => Self::ToolResult {
                 id: id.as_u64(),
@@ -536,6 +543,7 @@ impl From<&TranscriptItem> for PersistedTranscriptItem {
                 result: result.clone(),
                 artifact_id: artifact_id.clone(),
                 model_artifact_id: model_artifact_id.clone(),
+                image_artifact_ids: image_artifact_ids.clone(),
                 prompt_projection: *prompt_projection,
             },
         }
@@ -587,6 +595,7 @@ impl TryFrom<PersistedTranscriptItem> for TranscriptItem {
                 result,
                 artifact_id,
                 model_artifact_id,
+                image_artifact_ids,
                 prompt_projection,
             } => Self::ToolResult {
                 id: TranscriptItemId::new(id),
@@ -595,6 +604,7 @@ impl TryFrom<PersistedTranscriptItem> for TranscriptItem {
                 result,
                 artifact_id,
                 model_artifact_id,
+                image_artifact_ids,
                 prompt_projection,
             },
         })
@@ -783,6 +793,7 @@ impl SessionState {
                     result,
                     artifact_id,
                     model_artifact_id,
+                    image_artifact_ids,
                     prompt_projection,
                     ..
                 } => {
@@ -801,10 +812,21 @@ impl SessionState {
                             "hidden tool results are filtered before snapshot construction"
                         ),
                     };
+                    let include_images = !apply_prompt_projection
+                        || *prompt_projection == ToolResultPromptProjection::Full;
+                    let images = if include_images {
+                        image_artifact_ids
+                            .iter()
+                            .map(|artifact_id| self.transcript_image_snapshot(artifact_id))
+                            .collect::<Result<Vec<_>, _>>()?
+                    } else {
+                        Vec::new()
+                    };
                     TranscriptItemSnapshot::ToolResult {
                         call_id: call_id.clone(),
                         result: result.clone(),
                         content,
+                        images,
                     }
                 }
             };

@@ -1,9 +1,9 @@
 //! Runtime capability policy and complete runtime profiles.
 
 use crate::{
-    AcceptedLocalWorkspaceProcessAdmission, PermissionAdmissionSource, PermissionReviewMode,
-    PermissionedProcessRunnerFactory, ProcessRunner, ProjectRules, PromptProfile, RegisteredTool,
-    RuntimeTrustLevel, SkillCatalog, SubagentManager, TaskAnchor,
+    AcceptedLocalWorkspaceProcessAdmission, BackgroundProcessControl, PermissionAdmissionSource,
+    PermissionReviewMode, PermissionedProcessRunnerFactory, ProcessRunner, ProjectRules,
+    PromptProfile, RegisteredTool, RuntimeTrustLevel, SkillCatalog, SubagentManager, TaskAnchor,
 };
 use merry_core::ToolName;
 use merry_llm::ModelRetryPolicy;
@@ -266,6 +266,7 @@ pub struct RuntimeProfile {
     permission_review_mode: Option<PermissionReviewMode>,
     permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
+    background_process_control: Option<Arc<dyn BackgroundProcessControl>>,
     skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
     task_anchor: Option<TaskAnchor>,
@@ -422,6 +423,7 @@ impl RuntimeProfile {
             permission_review_mode: self.permission_review_mode,
             permission_admission_source: self.permission_admission_source,
             permissioned_process_runner_factory: self.permissioned_process_runner_factory,
+            background_process_control: self.background_process_control,
             skill_catalog: self.skill_catalog,
             project_rules: self.project_rules,
             task_anchor: self.task_anchor,
@@ -448,6 +450,7 @@ pub(crate) struct RuntimeProfileParts {
     pub(crate) permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     pub(crate) permissioned_process_runner_factory:
         Option<Arc<dyn PermissionedProcessRunnerFactory>>,
+    pub(crate) background_process_control: Option<Arc<dyn BackgroundProcessControl>>,
     pub(crate) skill_catalog: Option<SkillCatalog>,
     pub(crate) project_rules: Option<ProjectRules>,
     pub(crate) task_anchor: Option<TaskAnchor>,
@@ -471,6 +474,7 @@ pub struct RuntimeProfileBuilder {
     permission_review_mode: Option<PermissionReviewMode>,
     permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
+    background_process_control: Option<Arc<dyn BackgroundProcessControl>>,
     skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
     task_anchor: Option<TaskAnchor>,
@@ -497,6 +501,7 @@ impl RuntimeProfileBuilder {
             permission_review_mode: None,
             permission_admission_source: None,
             permissioned_process_runner_factory: None,
+            background_process_control: None,
             skill_catalog: None,
             project_rules: None,
             task_anchor: None,
@@ -616,6 +621,16 @@ impl RuntimeProfileBuilder {
         self
     }
 
+    /// Keeps the board that lists, reads, and stops background processes.
+    #[must_use]
+    pub fn background_process_control(
+        mut self,
+        control: Arc<dyn BackgroundProcessControl>,
+    ) -> Self {
+        self.background_process_control = Some(control);
+        self
+    }
+
     /// Sets the permissioned process runner factory.
     #[must_use]
     pub fn permissioned_process_runner_factory(
@@ -683,6 +698,7 @@ impl RuntimeProfileBuilder {
             permission_review_mode: self.permission_review_mode,
             permission_admission_source: self.permission_admission_source,
             permissioned_process_runner_factory: self.permissioned_process_runner_factory,
+            background_process_control: self.background_process_control,
             skill_catalog: self.skill_catalog,
             project_rules: self.project_rules,
             task_anchor: self.task_anchor,

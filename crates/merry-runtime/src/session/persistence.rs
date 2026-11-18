@@ -605,6 +605,7 @@ impl SessionState {
                     result,
                     artifact_id,
                     model_artifact_id,
+                    image_artifact_ids,
                     prompt_projection,
                     ..
                 } => {
@@ -643,6 +644,16 @@ impl SessionState {
                                 "stored model tool result artifact is not textual",
                             ));
                         }
+                    }
+                    for (offset, image_artifact_id) in image_artifact_ids.iter().enumerate() {
+                        if image_artifact_id
+                            != &super::artifacts::tool_result_image_id(artifact_id, offset + 1)
+                        {
+                            return Err(invalid_document(
+                                "stored tool result image artifact identity is inconsistent",
+                            ));
+                        }
+                        validate_user_image_artifact(image_artifact_id)?;
                     }
                     if !resolved_tool_calls.contains(call_id) {
                         return Err(invalid_document(

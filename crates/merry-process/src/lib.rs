@@ -435,14 +435,17 @@ impl LocalProcessBackend {
         workspace_writable: bool,
     ) -> ProcessSession {
         let session_permissions = ProcessSessionPermissions::new();
+        let background = crate::process_runner::BackgroundSupervisor::new();
         let mut runner = WorkspaceProcessRunner::new_at_workspace_root(workspace_root)
             .with_environment(environment.clone())
-            .with_path_rules(path_rules.iter().cloned());
+            .with_path_rules(path_rules.iter().cloned())
+            .with_background(background.clone());
         let mut permissioned_factory =
             WorkspaceProcessRunnerFactory::new_at_workspace_root(workspace_root)
                 .with_environment(environment.clone())
                 .with_path_rules(path_rules.iter().cloned())
-                .with_network_requests_allowed(network_requests_allowed);
+                .with_network_requests_allowed(network_requests_allowed)
+                .with_background(background);
         if !workspace_writable {
             runner = runner.read_only_workspace();
             permissioned_factory = permissioned_factory.read_only_workspace();

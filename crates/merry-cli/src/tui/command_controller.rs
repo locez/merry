@@ -82,6 +82,10 @@ pub(crate) fn run_palette_command(
             });
             ControllerEffect::None
         }
+        PaletteCommand::ShowTasks => {
+            prepare_timeline_feedback(state);
+            ControllerEffect::ShowTasks
+        }
         #[cfg(feature = "web")]
         PaletteCommand::OpenSessionInBrowser => {
             state.close_overlay();

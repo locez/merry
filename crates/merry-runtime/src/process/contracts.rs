@@ -2,6 +2,7 @@ use super::validation::{
     ProcessActionError, summarize_intent, validate_argv, validate_captured_bytes, validate_cwd,
     validate_output_limit, validate_stdin_text,
 };
+use super::{BackgroundProcessControl, BackgroundProcessId};
 use crate::{PermissionRequest, RequestedCapability};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{fmt, future::Future, pin::Pin, sync::Arc};
@@ -236,6 +237,13 @@ pub trait ProcessRunner: Send + Sync {
         intent: ProcessActionIntent,
         context: ProcessRunnerContext,
     ) -> ProcessRunnerFuture<'a>;
+
+    /// Returns the session board that retains this runner's background processes.
+    ///
+    /// Runners that do not keep processes after `run` returns leave this empty.
+    fn background_control(&self) -> Option<Arc<dyn BackgroundProcessControl>> {
+        None
+    }
 }
 
 /// Factory for runners created from approved permission requests.
@@ -347,6 +355,8 @@ pub struct ProcessActionIntent {
     stdin_text: Option<String>,
     stdout_limit_bytes: usize,
     stderr_limit_bytes: usize,
+    #[serde(default)]
+    background: bool,
 }
 
 impl ProcessActionIntent {
@@ -374,7 +384,18 @@ impl ProcessActionIntent {
             stdin_text,
             stdout_limit_bytes,
             stderr_limit_bytes,
+            background: false,
         })
+    }
+
+    /// Keeps the process after the tool returns when `background` is true.
+    ///
+    /// The default waits until the process exits. A background process stays
+    /// until the owning session ends.
+    #[must_use]
+    pub fn with_background(mut self, background: bool) -> Self {
+        self.background = background;
+        self
     }
 
     /// Returns a compact deterministic summary of the process intent.
@@ -421,7 +442,14 @@ impl ProcessActionIntent {
             stdin_text: None,
             stdout_limit_bytes: self.stdout_limit_bytes,
             stderr_limit_bytes: self.stderr_limit_bytes,
+            background: self.background,
         }
+    }
+
+    /// Returns whether the runner should retain the process after the tool returns.
+    #[must_use]
+    pub const fn background(&self) -> bool {
+        self.background
     }
 
     /// Returns the stdout capture limit in bytes.
@@ -455,6 +483,8 @@ pub struct ProcessRunnerOutput {
     stderr_text: String,
     stderr_bytes: usize,
     stderr_truncated: bool,
+    running_pid: Option<u32>,
+    background_process_id: Option<BackgroundProcessId>,
 }
 
 impl ProcessRunnerOutput {
@@ -507,7 +537,23 @@ impl ProcessRunnerOutput {
             stderr_bytes: stderr_data.len(),
             stderr_data,
             stderr_truncated,
+            running_pid: None,
+            background_process_id: None,
         })
+    }
+
+    /// Records the pid of a process that is still running.
+    #[must_use]
+    pub fn with_running_pid(mut self, pid: u32) -> Self {
+        self.running_pid = Some(pid);
+        self
+    }
+
+    /// Records the id of a process retained after this call returns.
+    #[must_use]
+    pub fn with_background_process_id(mut self, id: BackgroundProcessId) -> Self {
+        self.background_process_id = Some(id);
+        self
     }
 
     /// Returns the provider-neutral completion status.
@@ -576,10 +622,27 @@ impl ProcessRunnerOutput {
         self.stderr_truncated
     }
 
+    /// Returns the pid when the process is still running.
+    #[must_use]
+    pub const fn running_pid(&self) -> Option<u32> {
+        self.running_pid
+    }
+
+    /// Returns the id of a process retained after this call returns.
+    #[must_use]
+    pub fn background_process_id(&self) -> Option<&BackgroundProcessId> {
+        self.background_process_id.as_ref()
+    }
+
     /// Returns whether the process output represents successful completion.
+    ///
+    /// A process that is still running counts as success so the turn can continue.
     #[must_use]
     pub const fn ok(&self) -> bool {
-        matches!(self.status, ProcessExitStatus::Exited(0))
+        matches!(
+            self.status,
+            ProcessExitStatus::Exited(0) | ProcessExitStatus::Running
+        )
     }
 
     /// Builds payload-free internal execution evidence for the given intent.
@@ -612,6 +675,10 @@ pub enum ProcessExitStatus {
     FailedToStart,
     /// The process runner reported a domain failure before normal completion.
     DomainFailed,
+    /// The process was still running when the tool returned.
+    ///
+    /// The runner keeps it until the owning session ends.
+    Running,
 }
 
 impl ProcessExitStatus {
@@ -620,7 +687,7 @@ impl ProcessExitStatus {
     pub const fn exit_code(self) -> Option<i32> {
         match self {
             Self::Exited(code) => Some(code),
-            Self::Cancelled | Self::FailedToStart | Self::DomainFailed => None,
+            Self::Cancelled | Self::FailedToStart | Self::DomainFailed | Self::Running => None,
         }
     }
 }

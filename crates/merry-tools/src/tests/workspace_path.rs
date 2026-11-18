@@ -230,11 +230,55 @@ fn child_write_scope_denies_absolute_paths_outside_the_workspace() {
         json_content(&denied)["error"]["message"]
             .as_str()
             .expect("message should be text")
-            .contains("outside the child write scope"),
+            .contains("outside the configured write scope"),
         "a child agent must not leave its write scope by naming an absolute path"
     );
     assert_eq!(read_text(&outside), "alpha\nold\nomega\n");
     fs::remove_file(&outside).expect("outside file should be removable");
+}
+
+#[test]
+fn read_only_write_scope_still_allows_durable_memory_observations() {
+    let temp = TempWorkspace::new("path-memory-write-scope");
+    let root = canonical_root(&temp);
+    let memory_root = sibling_of(&root, "-memory");
+    fs::create_dir_all(&memory_root).expect("memory root should be created");
+    let memory = merry_runtime::DurableMemory::open(
+        merry_runtime::MemoryLayout::at(&memory_root, temp.path())
+            .expect("memory layout should resolve"),
+    )
+    .expect("memory store should open");
+    let note = memory
+        .layout()
+        .workspace_dir()
+        .join("observations/_inbox/note.md");
+    let tools = WorkspaceTools::new(
+        WorkspaceToolsConfig::new(temp.path().to_path_buf())
+            .with_patch_write_scope(Some(Vec::new()))
+            .with_durable_memory(memory),
+    )
+    .expect("workspace tools should construct");
+    let note_text = note.to_str().expect("memory note path should be utf8");
+
+    let created = patch_text_outcome(&tools, &add_patch(note_text, &["# Note", "", "A fact."]));
+    assert_eq!(created.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(read_text(&note), "# Note\n\nA fact.\n");
+
+    let outside = sibling_of(&root, "-nope.txt");
+    let outside_text = outside.to_str().expect("outside path should be utf8");
+    let denied = patch_text_outcome(&tools, &add_patch(outside_text, &["no"]));
+    assert_eq!(denied.status(), ToolCallResultStatus::Failed);
+    assert!(
+        json_content(&denied)["error"]["message"]
+            .as_str()
+            .expect("message should be text")
+            .contains("this write scope allows no workspace files")
+    );
+    assert!(
+        !outside.exists(),
+        "a read-only scope must not create workspace files"
+    );
+    fs::remove_dir_all(&memory_root).expect("memory root should be removable");
 }
 
 #[cfg(unix)]

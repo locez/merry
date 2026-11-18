@@ -5,20 +5,26 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64.workspace = true
+image.workspace = true
 merry-core = { path = "../merry-core", version = "0.1.0" }
 merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
 merry-tools-macros = { path = "../merry-tools-macros", version = "0.1.0" }
+reqwest.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
 tracing.workspace = true
+url = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 futures-util.workspace = true
 merry-llm = { path = "../merry-llm", version = "0.1.0", features = ["test-utils"] }
 tokio-util.workspace = true

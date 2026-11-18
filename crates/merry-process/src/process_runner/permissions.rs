@@ -1,4 +1,4 @@
-use super::{environment::WorkspaceProcessEnvironment, review};
+use super::{background::BackgroundSupervisor, environment::WorkspaceProcessEnvironment, review};
 use crate::resolve_host_path;
 use merry_runtime::{
     HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource, PermissionRequest,
@@ -28,6 +28,8 @@ pub struct WorkspaceProcessRunner {
     pub(super) session_permissions: Option<ProcessSessionPermissionView>,
     pub(super) configuration_error: Option<String>,
     workspace_writable: bool,
+    /// Keeps background children after `run` returns. Session drop kills them.
+    pub(super) background: BackgroundSupervisor,
 }
 
 impl WorkspaceProcessRunner {
@@ -42,7 +44,13 @@ impl WorkspaceProcessRunner {
             session_permissions: None,
             configuration_error: None,
             workspace_writable: true,
+            background: BackgroundSupervisor::new(),
         }
+    }
+
+    pub(crate) fn with_background(mut self, background: BackgroundSupervisor) -> Self {
+        self.background = background;
+        self
     }
 
     /// Keeps the workspace readable and not writable.
@@ -150,6 +158,10 @@ pub struct WorkspaceProcessRunnerFactory {
     network_requests_allowed: bool,
     pub(super) session_permissions: Option<ProcessSessionPermissionView>,
     workspace_writable: bool,
+    /// Shared by every runner this factory builds. `runner_for` drops its
+    /// runner when the tool call returns, so background children cannot live
+    /// only on that runner.
+    background: BackgroundSupervisor,
 }
 
 impl WorkspaceProcessRunnerFactory {
@@ -163,7 +175,13 @@ impl WorkspaceProcessRunnerFactory {
             network_requests_allowed: true,
             session_permissions: None,
             workspace_writable: true,
+            background: BackgroundSupervisor::new(),
         }
+    }
+
+    pub(crate) fn with_background(mut self, background: BackgroundSupervisor) -> Self {
+        self.background = background;
+        self
     }
 
     /// Keeps the workspace readable and not writable for every child runner.
@@ -262,6 +280,7 @@ impl WorkspaceProcessRunnerFactory {
             Err(error) => {
                 let mut runner = WorkspaceProcessRunner::new_at_workspace_root(&self.cwd_root);
                 runner.configuration_error = Some(error.to_string());
+                runner.background = self.background.clone();
                 runner
             }
         }
@@ -320,6 +339,7 @@ impl WorkspaceProcessRunnerFactory {
             runner = runner.allow_network();
         }
         runner.session_permissions = self.session_permissions.clone();
+        runner.background = self.background.clone();
         Ok((runner, grants))
     }
 

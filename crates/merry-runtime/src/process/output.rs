@@ -179,6 +179,7 @@ enum ProcessExitStatusWire {
     Cancelled,
     FailedToStart,
     DomainFailed,
+    Running,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

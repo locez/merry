@@ -15,7 +15,10 @@ use crate::{
             subagent_plan_registered_tools,
         },
     },
-    process::{PermissionedProcessRunnerFactory, StaticPermissionedProcessRunnerFactory},
+    process::{
+        BackgroundProcessControl, PermissionedProcessRunnerFactory,
+        StaticPermissionedProcessRunnerFactory,
+    },
     session::SessionState,
     subagent::{
         ChildRuntimeFactory, ChildWorkspaceScope, PlanLinkRuntime, PlanSubagentScope,
@@ -74,6 +77,7 @@ pub struct RuntimeBuilder {
     permission_review_mode: PermissionReviewMode,
     permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
+    background_process_control: Option<Arc<dyn BackgroundProcessControl>>,
     subagent_manager: Option<SubagentManager>,
     subagent_parent_scope: Option<ChildWorkspaceScope>,
     subagent_parent_plan_link_runtime: Option<Arc<dyn PlanLinkRuntime>>,
@@ -118,6 +122,7 @@ impl RuntimeBuilder {
             permission_review_mode: PermissionReviewMode::DefaultForTrust,
             permission_admission_source: None,
             permissioned_process_runner_factory: None,
+            background_process_control: None,
             subagent_manager: None,
             subagent_parent_scope: None,
             subagent_parent_plan_link_runtime: None,
@@ -319,6 +324,9 @@ impl RuntimeBuilder {
         }
         if let Some(factory) = parts.permissioned_process_runner_factory {
             self = self.permissioned_process_runner_factory(factory);
+        }
+        if let Some(control) = parts.background_process_control {
+            self = self.background_process_control(control);
         }
         if let Some(catalog) = parts.skill_catalog {
             self = self.skill_catalog(catalog);
@@ -522,6 +530,16 @@ impl RuntimeBuilder {
         factory: Arc<dyn PermissionedProcessRunnerFactory>,
     ) -> Self {
         self.permissioned_process_runner_factory = Some(factory);
+        self
+    }
+
+    /// Installs the board that lists, reads, and stops background processes.
+    #[must_use]
+    pub fn background_process_control(
+        mut self,
+        control: Arc<dyn BackgroundProcessControl>,
+    ) -> Self {
+        self.background_process_control = Some(control);
         self
     }
 
@@ -814,6 +832,7 @@ impl RuntimeBuilder {
                 permission_review_mode: self.permission_review_mode,
                 permission_admission_source: self.permission_admission_source,
                 permissioned_process_runner_factory: self.permissioned_process_runner_factory,
+                background_process_control: self.background_process_control,
                 subagent_manager,
                 coordinator_plan_tools: self.coordinator_plan_tools,
                 plan_controller,

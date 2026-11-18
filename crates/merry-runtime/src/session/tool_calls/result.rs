@@ -59,6 +59,7 @@ impl SessionState {
             artifact.id().clone(),
             ToolResultPromptProjection::Hidden,
             None,
+            Vec::new(),
         )?;
         let recorded = self.artifacts.record_preflighted(artifact, content);
         Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
@@ -124,6 +125,7 @@ impl SessionState {
             result.artifact().id().clone(),
             ToolResultPromptProjection::Full,
             artifacts.model_artifact_id(),
+            artifacts.image_artifact_ids(),
         )?;
         self.transcript = transcript;
         let pending = self.pending_tool_calls.remove(pending_index);
@@ -257,6 +259,7 @@ impl SessionState {
             self.artifacts
                 .ensure_recordable(result.artifact(), outcome.content())?;
             self.validate_model_result_content(outcome.content(), outcome.model_content())?;
+            self.validate_tool_result_images(result.artifact().id(), outcome.images())?;
         }
         Ok(())
     }

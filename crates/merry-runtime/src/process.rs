@@ -4,12 +4,18 @@
 //! evidence, and the narrow runtime policy classifier. It does not execute
 //! commands or spawn subprocesses; host execution belongs to `merry-process`.
 
+mod background;
 mod classification;
 mod contracts;
 mod output;
 mod session_permissions;
 mod validation;
 
+pub use background::{
+    BackgroundProcessControl, BackgroundProcessId, BackgroundProcessLookupError,
+    BackgroundProcessOutput, BackgroundProcessState, BackgroundProcessStop,
+    BackgroundProcessSummary,
+};
 pub use classification::{
     ProcessIntentClass, classify_process_intent, is_low_risk_process_action_intent,
     is_read_only_shell_process_action_intent, shell_command_for_argv,

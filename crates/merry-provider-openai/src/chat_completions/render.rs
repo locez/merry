@@ -5,8 +5,10 @@ use super::wire::{
 use crate::{OpenAiProtocol, OpenAiProviderError, image::png_data_url};
 use merry_llm::{
     ModelContentPart, ModelInputItem, ModelMessageRole, ModelRequest, ModelResponseFormat,
+    ModelToolResult,
 };
 use serde_json::Value;
+use std::borrow::Cow;
 
 pub(crate) fn render_chat_request(request: &ModelRequest) -> Result<Value, OpenAiProviderError> {
     let messages = render_messages(request)?;
@@ -95,7 +97,9 @@ fn render_messages<'a>(
                             .parts()
                             .iter()
                             .map(|part| match part {
-                                ModelContentPart::Text { text } => ChatContentPart::Text { text },
+                                ModelContentPart::Text { text } => ChatContentPart::Text {
+                                    text: Cow::Borrowed(text),
+                                },
                                 ModelContentPart::Image { image } => ChatContentPart::ImageUrl {
                                     image_url: ChatImageUrl {
                                         url: png_data_url(image.png_bytes()),
@@ -136,17 +140,46 @@ fn render_messages<'a>(
                     tool_calls,
                 });
             }
-            ModelInputItem::ToolResult(result) => {
-                messages.push(ChatMessage::ToolResult {
-                    role: "tool",
-                    tool_call_id: result.call_id().as_str(),
-                    content: result.content().as_str(),
-                });
-                index += 1;
+            ModelInputItem::ToolResult(_) => {
+                let mut tool_images = Vec::new();
+                while let Some(ModelInputItem::ToolResult(result)) = request.input().get(index) {
+                    messages.push(ChatMessage::ToolResult {
+                        role: "tool",
+                        tool_call_id: result.call_id().as_str(),
+                        content: result.content().as_str(),
+                    });
+                    append_tool_result_images(&mut tool_images, result);
+                    index += 1;
+                }
+                if !tool_images.is_empty() {
+                    messages.push(ChatMessage::Multimodal {
+                        role: "user",
+                        content: tool_images,
+                    });
+                }
             }
         }
     }
     Ok(messages)
+}
+
+fn append_tool_result_images<'a>(
+    content: &mut Vec<ChatContentPart<'a>>,
+    result: &'a ModelToolResult,
+) {
+    for image in result.images() {
+        content.push(ChatContentPart::Text {
+            text: Cow::Owned(format!("<image name={}>", image.label())),
+        });
+        content.push(ChatContentPart::ImageUrl {
+            image_url: ChatImageUrl {
+                url: png_data_url(image.png_bytes()),
+            },
+        });
+        content.push(ChatContentPart::Text {
+            text: Cow::Borrowed("</image>"),
+        });
+    }
 }
 
 fn render_role(role: ModelMessageRole) -> &'static str {
@@ -259,6 +292,47 @@ mod tests {
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoq"}},
                 {"type": "text", "text": "</image>"},
                 {"type": "text", "text": "inspect [Image #1]"}
+            ])
+        );
+    }
+
+    #[test]
+    fn renders_tool_result_images_after_contiguous_tool_messages() {
+        let call_1 = call("call-1", "alpha");
+        let call_2 = call("call-2", "beta");
+        let screenshot = ModelImage::png(
+            "browser-snapshot.png",
+            Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10, 42]),
+            1,
+            1,
+        )
+        .expect("valid image");
+        let result_1 = result(&call_1, "one").with_images(vec![screenshot]);
+        let result_2 = result(&call_2, "two");
+        let request = ModelRequest::new_with_input_and_stable_prefix(
+            ModelName::new("gpt-chat-image-test").expect("valid model"),
+            vec![
+                ModelInputItem::ToolCall(call_1),
+                ModelInputItem::ToolCall(call_2),
+                ModelInputItem::ToolResult(result_1),
+                ModelInputItem::ToolResult(result_2),
+            ],
+            Vec::new(),
+            GenerationConfig::default(),
+            0,
+        )
+        .expect("valid request");
+
+        let rendered = render_chat_request(&request).expect("request should render");
+        assert_eq!(rendered["messages"][1]["role"], "tool");
+        assert_eq!(rendered["messages"][2]["role"], "tool");
+        assert_eq!(rendered["messages"][3]["role"], "user");
+        assert_eq!(
+            rendered["messages"][3]["content"],
+            json!([
+                {"type": "text", "text": "<image name=browser-snapshot.png>"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoq"}},
+                {"type": "text", "text": "</image>"}
             ])
         );
     }

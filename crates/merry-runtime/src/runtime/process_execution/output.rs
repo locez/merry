@@ -9,6 +9,7 @@ const TRUNCATION_GUIDANCE: &str =
     "Output is incomplete; inspect a narrower range before drawing conclusions.";
 const NON_UTF8_GUIDANCE: &str = "Non-UTF-8 bytes are shown as �; inspect the source with xxd or a format-aware tool for exact bytes.";
 const OUTPUT_RECOVERY_GUIDANCE: &str = "Do not repeat a side-effecting command to recover output.";
+const STILL_RUNNING_GUIDANCE: &str = "The process is still running, so this turn can continue. Ending this tool call does not stop it. Use read_background_process with this id for later output and stop_background_process to stop it. Merry keeps it until the session ends or that stop.";
 
 pub(super) fn result_content(
     intent: &ProcessActionIntent,
@@ -35,6 +36,14 @@ fn model_text(output: &ProcessRunnerOutput) -> String {
         ProcessExitStatus::Cancelled => "cancelled".to_owned(),
         ProcessExitStatus::FailedToStart => "not started".to_owned(),
         ProcessExitStatus::DomainFailed => "failed before normal exit".to_owned(),
+        ProcessExitStatus::Running => {
+            match (output.running_pid(), output.background_process_id()) {
+                (Some(pid), Some(id)) => format!("still running pid {pid} id {id}"),
+                (Some(pid), None) => format!("still running pid {pid}"),
+                (None, Some(id)) => format!("still running id {id}"),
+                (None, None) => "still running".to_owned(),
+            }
+        }
     };
     append_stream(
         &mut text,
@@ -79,6 +88,7 @@ fn recovery_guidance(status: ProcessExitStatus) -> Option<&'static str> {
         ProcessExitStatus::FailedToStart => {
             Some("The command did not start; check the error before retrying.")
         }
+        ProcessExitStatus::Running => Some(STILL_RUNNING_GUIDANCE),
         ProcessExitStatus::Exited(_) => None,
     }
 }
@@ -141,7 +151,9 @@ fn artifact_content(
     }
 
     if output.stdout_truncated() || output.stderr_truncated() {
-        let key = if output.ok() {
+        // A still-running process is successful and also has recovery text.
+        // Keep that text; put the truncation note beside it.
+        let key = if output.ok() && payload.get("guidance").is_none() {
             "guidance"
         } else {
             "output_guidance"
@@ -184,7 +196,7 @@ fn artifact_ref_json(artifact: &ArtifactRef) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ProcessActionIntent, ProcessEnvPolicy};
+    use crate::{BackgroundProcessId, ProcessActionIntent, ProcessEnvPolicy};
 
     fn intent() -> ProcessActionIntent {
         ProcessActionIntent::new(
@@ -285,6 +297,37 @@ mod tests {
     }
 
     #[test]
+    fn running_process_names_its_pid_and_keeps_the_turn_free() {
+        let output = ProcessRunnerOutput::new(
+            &intent(),
+            ProcessExitStatus::Running,
+            "listening\n",
+            false,
+            "",
+            false,
+        )
+        .expect("output")
+        .with_running_pid(42)
+        .with_background_process_id(
+            BackgroundProcessId::new("bg-1").expect("background process id"),
+        );
+        assert!(output.ok());
+        assert_eq!(output.running_pid(), Some(42));
+        assert_eq!(
+            output
+                .background_process_id()
+                .map(BackgroundProcessId::as_str),
+            Some("bg-1")
+        );
+        assert_eq!(
+            model_text(&output),
+            format!(
+                "still running pid 42 id bg-1\nstdout:\nlistening\nguidance:\n{STILL_RUNNING_GUIDANCE}"
+            )
+        );
+    }
+
+    #[test]
     fn exceptional_completion_distinguishes_not_started_from_possible_side_effects() {
         for status in [
             ProcessExitStatus::FailedToStart,
@@ -297,6 +340,10 @@ mod tests {
             assert!(text.contains("stderr:\nerror"));
             match status {
                 ProcessExitStatus::FailedToStart => assert!(text.contains("did not start")),
+                ProcessExitStatus::Running => {
+                    assert!(text.contains("still running"));
+                    assert!(text.contains("does not stop it"));
+                }
                 _ => assert!(text.contains("verify its state before retrying")),
             }
         }

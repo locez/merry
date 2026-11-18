@@ -83,6 +83,20 @@ fn runtime_provider_bundle_from_config_inner(
             )
         })
         .transpose()?;
+    let browser = runtime_models
+        .browser
+        .map(|model| {
+            let provider = merry_config
+                .provider_by_alias(&model.provider)
+                .map_err(|error| map_usage_error(error.to_string()))?;
+            runtime_role_provider(
+                RuntimeModelRole::Browser,
+                provider,
+                model.model,
+                map_usage_error,
+            )
+        })
+        .transpose()?;
     let retry_policy = merry_config
         .provider_retry_policy()
         .map_err(|error| map_usage_error(error.to_string()))?;
@@ -90,6 +104,7 @@ fn runtime_provider_bundle_from_config_inner(
         primary,
         context_compaction,
         approval_review,
+        browser,
         retry_policy,
     })
 }
@@ -301,11 +316,18 @@ pub(crate) fn openai_provider_config_bundle(
             openai_provider_config(&provider_config, &api_key, model.model, map_usage_error)
         })
         .transpose()?;
+    let browser = runtime_models
+        .browser
+        .map(|model| {
+            openai_provider_config(&provider_config, &api_key, model.model, map_usage_error)
+        })
+        .transpose()?;
 
     Ok(OpenAiProviderConfigBundle {
         primary,
         context_compaction,
         approval_review,
+        browser,
         retry_policy,
     })
 }
@@ -393,6 +415,12 @@ pub(crate) fn openai_provider_bundle(
                 )
             })
             .transpose()?,
+        browser: config
+            .browser
+            .map(|config| {
+                openai_role_provider_config(RuntimeModelRole::Browser, config, map_usage_error)
+            })
+            .transpose()?,
         retry_policy: config.retry_policy,
     })
 }
@@ -429,6 +457,7 @@ pub(crate) struct OpenAiProviderConfigBundle {
     pub(crate) primary: OpenAiConfig,
     pub(crate) context_compaction: Option<OpenAiConfig>,
     pub(crate) approval_review: Option<OpenAiConfig>,
+    pub(crate) browser: Option<OpenAiConfig>,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
 }
 
@@ -441,6 +470,7 @@ pub(crate) struct RuntimeProviderBundle {
     pub(crate) primary: RuntimePrimaryProviderConfig,
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
     pub(crate) approval_review: Option<RuntimeRoleProviderConfig>,
+    pub(crate) browser: Option<RuntimeRoleProviderConfig>,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
 }
 

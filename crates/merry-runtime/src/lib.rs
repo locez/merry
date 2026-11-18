@@ -48,6 +48,7 @@ mod model_config;
 mod permission;
 mod plan;
 mod process;
+mod process_background_tool;
 mod process_tool;
 mod profile;
 mod prompt;
@@ -130,7 +131,9 @@ pub use plan::{
     ReportPlanAttemptInput, ReportPlanProgressInput, UpdatePlanInput,
 };
 pub use process::{
-    AcceptedLocalWorkspaceProcessAdmission, LocalWorkspaceProcessSandboxProfile,
+    AcceptedLocalWorkspaceProcessAdmission, BackgroundProcessControl, BackgroundProcessId,
+    BackgroundProcessLookupError, BackgroundProcessOutput, BackgroundProcessState,
+    BackgroundProcessStop, BackgroundProcessSummary, LocalWorkspaceProcessSandboxProfile,
     MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS, MAX_PROCESS_CWD_BYTES,
     MAX_PROCESS_OUTPUT_LIMIT_BYTES, MAX_PROCESS_STDIN_TEXT_BYTES, PermissionedProcessRunnerFactory,
     ProcessActionError, ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence,
@@ -145,6 +148,7 @@ pub use process::{
     ProcessSessionPermissionSnapshot, ProcessSessionPermissionView, ProcessSessionPermissions,
     SessionPermissionedProcessRunnerFactory,
 };
+pub use process_background_tool::{read_background_process_tool, stop_background_process_tool};
 pub use process_tool::{ProcessCommandToolError, process_command_tool};
 pub use profile::{
     AcceptedLocalWorkspaceProcessRunnerProfile, PathAccess, PathAccessRule, PathAccessRuleSource,

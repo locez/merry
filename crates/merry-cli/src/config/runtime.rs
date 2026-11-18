@@ -48,10 +48,16 @@ impl MerryConfig {
             .as_ref()
             .map(|model| self.effective_runtime_model("approval_review", model))
             .transpose()?;
+        let browser = models
+            .browser
+            .as_ref()
+            .map(|model| self.effective_runtime_model("browser", model))
+            .transpose()?;
 
         Ok(EffectiveRuntimeModelsConfig {
             context_compaction,
             approval_review,
+            browser,
         })
     }
 
@@ -106,6 +112,7 @@ pub struct EffectiveRuntimeModelConfig {
 pub struct EffectiveRuntimeModelsConfig {
     pub context_compaction: Option<EffectiveRuntimeModelConfig>,
     pub approval_review: Option<EffectiveRuntimeModelConfig>,
+    pub browser: Option<EffectiveRuntimeModelConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -601,6 +608,39 @@ model = "gpt-review"
 
         assert!(models.context_compaction.is_none());
         assert!(models.approval_review.is_none());
+        assert!(models.browser.is_none());
+    }
+
+    #[test]
+    fn browser_model_role_defaults_to_default_provider() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[providers.default]
+provider = "openai-compatible"
+model = "gpt-primary"
+
+[providers.openai-compatible]
+api_key = "sk-inline-secret"
+
+[models.browser]
+model = "gpt-browser-vision"
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+
+        let models = config
+            .runtime_models()
+            .expect("runtime model role config should validate");
+        let browser = models
+            .browser
+            .expect("browser model role should be configured");
+        assert_eq!(browser.provider, "openai-compatible");
+        assert_eq!(browser.model, "gpt-browser-vision");
     }
 
     #[test]

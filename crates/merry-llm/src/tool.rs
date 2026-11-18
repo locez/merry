@@ -1,6 +1,6 @@
 //! Model tool call protocol.
 
-use crate::ModelError;
+use crate::{ModelError, content::ModelImage};
 use merry_core::{ErrorInfo, ToolCallResultStatus, ToolName};
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -294,6 +294,8 @@ pub struct ModelToolResult {
     status: ToolCallResultStatus,
     content: ModelToolResultContent,
     diagnostic: Option<ErrorInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<ModelImage>,
 }
 
 impl ModelToolResult {
@@ -310,6 +312,7 @@ impl ModelToolResult {
             status,
             content,
             diagnostic,
+            images: Vec::new(),
         })
     }
 
@@ -321,6 +324,7 @@ impl ModelToolResult {
             status: ToolCallResultStatus::Succeeded,
             content,
             diagnostic: None,
+            images: Vec::new(),
         }
     }
 
@@ -336,7 +340,15 @@ impl ModelToolResult {
             status: ToolCallResultStatus::Failed,
             content,
             diagnostic: Some(diagnostic),
+            images: Vec::new(),
         }
+    }
+
+    /// Attaches normalized PNG images observed alongside the tool result.
+    #[must_use]
+    pub fn with_images(mut self, images: Vec<ModelImage>) -> Self {
+        self.images = images;
+        self
     }
 
     /// Borrows the provider-originated call id being resolved.
@@ -362,6 +374,12 @@ impl ModelToolResult {
     pub fn diagnostic(&self) -> Option<&ErrorInfo> {
         self.diagnostic.as_ref()
     }
+
+    /// Borrows normalized PNG images attached to this tool result.
+    #[must_use]
+    pub fn images(&self) -> &[ModelImage] {
+        &self.images
+    }
 }
 
 #[derive(Deserialize)]
@@ -371,6 +389,8 @@ struct ModelToolResultWire {
     status: ToolCallResultStatus,
     content: ModelToolResultContent,
     diagnostic: Option<ErrorInfo>,
+    #[serde(default)]
+    images: Vec<ModelImage>,
 }
 
 impl<'de> Deserialize<'de> for ModelToolResult {
@@ -379,8 +399,11 @@ impl<'de> Deserialize<'de> for ModelToolResult {
         D: Deserializer<'de>,
     {
         let wire = ModelToolResultWire::deserialize(deserializer)?;
-        Self::new(wire.call_id, wire.status, wire.content, wire.diagnostic)
-            .map_err(de::Error::custom)
+        Ok(
+            Self::new(wire.call_id, wire.status, wire.content, wire.diagnostic)
+                .map_err(de::Error::custom)?
+                .with_images(wire.images),
+        )
     }
 }
 
@@ -638,5 +661,35 @@ fn validate_result_diagnostic(
         (ToolCallResultStatus::Failed, None) => Err(ModelError::invalid_request(
             "failed model tool result must include a diagnostic",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn model_tool_result_omits_empty_images_and_round_trips_attached_images() {
+        let call_id = ModelToolCallId::new("call_1").expect("valid call id");
+        let content = ModelToolResultContent::text("ok").expect("valid content");
+        let plain = ModelToolResult::succeeded(call_id.clone(), content.clone());
+        let plain_json = serde_json::to_value(&plain).expect("plain result serializes");
+        assert!(plain_json.get("images").is_none());
+
+        let image = ModelImage::png(
+            "snapshot.png",
+            Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10, 42]),
+            1,
+            1,
+        )
+        .expect("valid png");
+        let with_images = ModelToolResult::succeeded(call_id, content).with_images(vec![image]);
+        assert_eq!(with_images.images().len(), 1);
+
+        let encoded = serde_json::to_string(&with_images).expect("image result serializes");
+        let decoded: ModelToolResult =
+            serde_json::from_str(&encoded).expect("image result deserializes");
+        assert_eq!(decoded, with_images);
     }
 }

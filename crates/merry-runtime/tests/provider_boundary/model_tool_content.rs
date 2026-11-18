@@ -203,6 +203,12 @@ async fn binary_process_results_keep_lossless_artifacts_and_textual_model_bodies
             ProcessExitStatus::FailedToStart,
             Some("The command did not start; check the error before retrying."),
         ),
+        (
+            ProcessExitStatus::Running,
+            Some(
+                "The process is still running, so this turn can continue. Ending this tool call does not stop it. Use read_background_process with this id for later output and stop_background_process to stop it. Merry keeps it until the session ends or that stop.",
+            ),
+        ),
     ];
     let streams: &[(&[u8], &[u8])] = &[
         (b"\xff\0a", b"diagnostic\n"),
@@ -252,6 +258,7 @@ async fn binary_process_results_keep_lossless_artifacts_and_textual_model_bodies
                         ProcessExitStatus::Cancelled => "cancelled\n".to_owned(),
                         ProcessExitStatus::DomainFailed => "failed before normal exit\n".to_owned(),
                         ProcessExitStatus::FailedToStart => "not started\n".to_owned(),
+                        ProcessExitStatus::Running => "still running\n".to_owned(),
                     };
                     assert!(text.starts_with(&status_text));
                     assert!(!text.contains("bytes_base64"));

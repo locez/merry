@@ -9,8 +9,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use merry_core::ToolCallResultStatus;
 use merry_llm::{
     ModelContentPart, ModelInputItem, ModelMessageRole, ModelRequest, ModelResponseFormat,
+    ModelToolResult,
 };
 use serde_json::Value;
+use std::borrow::Cow;
 
 pub(crate) fn render_anthropic_request(
     config: &AnthropicProviderConfig,
@@ -95,7 +97,9 @@ fn render_messages<'a>(request: &'a ModelRequest) -> Vec<AnthropicMessage<'a>> {
                         .parts()
                         .iter()
                         .map(|part| match part {
-                            ModelContentPart::Text { text } => AnthropicContentBlock::Text { text },
+                            ModelContentPart::Text { text } => AnthropicContentBlock::Text {
+                                text: Cow::Borrowed(text),
+                            },
                             ModelContentPart::Image { image } => AnthropicContentBlock::Image {
                                 source: AnthropicImageSource {
                                     kind: "base64",
@@ -107,7 +111,7 @@ fn render_messages<'a>(request: &'a ModelRequest) -> Vec<AnthropicMessage<'a>> {
                         .collect()
                 } else {
                     vec![AnthropicContentBlock::Text {
-                        text: message.content().as_text(),
+                        text: Cow::Borrowed(message.content().as_text()),
                     }]
                 };
                 messages.push(AnthropicMessage {
@@ -137,14 +141,17 @@ fn render_messages<'a>(request: &'a ModelRequest) -> Vec<AnthropicMessage<'a>> {
             }
             ModelInputItem::ToolResult(_) => {
                 let mut content = Vec::new();
+                let mut image_blocks = Vec::new();
                 while let Some(ModelInputItem::ToolResult(result)) = request.input().get(index) {
                     content.push(AnthropicContentBlock::ToolResult {
                         tool_use_id: result.call_id().as_str(),
                         content: result.content().as_str(),
                         is_error: result.status() == ToolCallResultStatus::Failed,
                     });
+                    append_tool_result_images(&mut image_blocks, result);
                     index += 1;
                 }
+                content.extend(image_blocks);
                 messages.push(AnthropicMessage {
                     role: "user",
                     content,
@@ -153,6 +160,27 @@ fn render_messages<'a>(request: &'a ModelRequest) -> Vec<AnthropicMessage<'a>> {
         }
     }
     messages
+}
+
+fn append_tool_result_images<'a>(
+    content: &mut Vec<AnthropicContentBlock<'a>>,
+    result: &'a ModelToolResult,
+) {
+    for image in result.images() {
+        content.push(AnthropicContentBlock::Text {
+            text: Cow::Owned(format!("<image name={}>", image.label())),
+        });
+        content.push(AnthropicContentBlock::Image {
+            source: AnthropicImageSource {
+                kind: "base64",
+                media_type: "image/png",
+                data: STANDARD.encode(image.png_bytes()),
+            },
+        });
+        content.push(AnthropicContentBlock::Text {
+            text: Cow::Borrowed("</image>"),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -242,6 +270,53 @@ mod tests {
                 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoq"}},
                 {"type": "text", "text": "</image>"},
                 {"type": "text", "text": "inspect [Image #1]"}
+            ])
+        );
+    }
+
+    #[test]
+    fn renders_tool_result_images_in_same_user_message_after_tool_results() {
+        let call_1 = call("call-1", "a");
+        let call_2 = call("call-2", "b");
+        let screenshot = ModelImage::png(
+            "browser-snapshot.png",
+            Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10, 42]),
+            1,
+            1,
+        )
+        .expect("valid image");
+        let result_1 = result(&call_1, "one").with_images(vec![screenshot]);
+        let result_2 = result(&call_2, "two");
+        let request = ModelRequest::new_with_input_and_stable_prefix(
+            ModelName::new("claude-image-test").expect("valid model"),
+            vec![
+                ModelInputItem::ToolCall(call_1),
+                ModelInputItem::ToolCall(call_2),
+                ModelInputItem::ToolResult(result_1),
+                ModelInputItem::ToolResult(result_2),
+            ],
+            Vec::new(),
+            GenerationConfig::default(),
+            0,
+        )
+        .expect("valid request");
+
+        let rendered = render_anthropic_request(
+            &AnthropicProviderConfig::new("key").expect("valid config"),
+            &request,
+        )
+        .expect("request should render");
+
+        assert_eq!(rendered["messages"].as_array().expect("messages").len(), 2);
+        assert_eq!(rendered["messages"][1]["role"], "user");
+        assert_eq!(
+            rendered["messages"][1]["content"],
+            json!([
+                {"type": "tool_result", "tool_use_id": "call-1", "content": "one", "is_error": false},
+                {"type": "tool_result", "tool_use_id": "call-2", "content": "two", "is_error": false},
+                {"type": "text", "text": "<image name=browser-snapshot.png>"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoq"}},
+                {"type": "text", "text": "</image>"}
             ])
         );
     }

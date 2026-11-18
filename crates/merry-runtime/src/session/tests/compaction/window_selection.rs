@@ -128,6 +128,7 @@ fn compaction_structure_errors_map_to_stale_window() {
         result: result.clone(),
         artifact_id: result_artifact_id.clone(),
         model_artifact_id: None,
+        image_artifact_ids: Vec::new(),
         prompt_projection: ToolResultPromptProjection::Full,
     };
     let user_item = |id, model_turn_id, artifact| TranscriptItem::UserMessage {

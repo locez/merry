@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ResponsesRequest<'a> {
@@ -99,14 +100,22 @@ pub(crate) struct ResponsesAssistantMessageInputItem<'a> {
 #[serde(tag = "type")]
 pub(crate) enum ResponsesInputContent<'a> {
     #[serde(rename = "input_text")]
-    InputText { text: &'a str },
+    InputText { text: Cow<'a, str> },
     #[serde(rename = "input_image")]
     InputImage { image_url: String },
 }
 
 impl<'a> ResponsesInputContent<'a> {
     pub(crate) fn input_text(text: &'a str) -> Self {
-        Self::InputText { text }
+        Self::InputText {
+            text: Cow::Borrowed(text),
+        }
+    }
+
+    pub(crate) fn owned_text(text: String) -> Self {
+        Self::InputText {
+            text: Cow::Owned(text),
+        }
     }
 
     pub(crate) fn input_image(image_url: String) -> Self {

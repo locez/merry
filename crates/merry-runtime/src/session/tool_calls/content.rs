@@ -1,12 +1,16 @@
 use super::SessionState;
-use crate::{ArtifactContent, RuntimeError, ledger::LedgerFactKind, tool::ToolResultContent};
+use crate::{
+    ArtifactContent, RuntimeError, UserImageInput, ledger::LedgerFactKind, tool::ToolResultContent,
+};
 use merry_core::{
-    ArtifactId, ArtifactRef, RuntimeJournalEvent, RuntimeJournalPayload, ToolCallResult,
+    ArtifactId, ArtifactKind, ArtifactRef, RuntimeJournalEvent, RuntimeJournalPayload,
+    ToolCallResult,
 };
 
 pub(super) struct ToolResultArtifacts {
     full: (ArtifactRef, ArtifactContent),
     model: Option<(ArtifactRef, ArtifactContent)>,
+    images: Vec<(ArtifactRef, ArtifactContent)>,
 }
 
 impl ToolResultArtifacts {
@@ -15,10 +19,17 @@ impl ToolResultArtifacts {
             .as_ref()
             .map(|(artifact, _)| artifact.id().clone())
     }
+
+    pub(super) fn image_artifact_ids(&self) -> Vec<ArtifactId> {
+        self.images
+            .iter()
+            .map(|(artifact, _)| artifact.id().clone())
+            .collect()
+    }
 }
 
 impl SessionState {
-    /// Preflights both artifacts before transcript or pending-call state changes.
+    /// Preflights result body, optional model body, and attached images before state changes.
     pub(super) fn prepare_tool_result_artifacts(
         &self,
         result: &ToolCallResult,
@@ -28,11 +39,39 @@ impl SessionState {
         self.artifacts
             .ensure_recordable(result.artifact(), content.artifact())?;
         let model_ref = self.validate_model_result_content(content.artifact(), content.model())?;
-        let (full, model) = content.into_parts();
+        let image_artifacts =
+            self.validate_tool_result_images(result.artifact().id(), content.images())?;
+        let (full, model, _) = content.into_parts();
         Ok(ToolResultArtifacts {
             full: (result.artifact().clone(), full),
             model: model_ref.zip(model),
+            images: image_artifacts,
         })
+    }
+
+    pub(super) fn validate_tool_result_images(
+        &self,
+        result_artifact_id: &ArtifactId,
+        images: &[UserImageInput],
+    ) -> Result<Vec<(ArtifactRef, ArtifactContent)>, RuntimeError> {
+        images
+            .iter()
+            .enumerate()
+            .map(|(offset, image)| {
+                let artifact = ArtifactRef::new(
+                    super::super::artifacts::tool_result_image_id(result_artifact_id, offset + 1),
+                    ArtifactKind::Image,
+                )
+                .with_label(image.label())?;
+                let content = ArtifactContent::normalized_png(
+                    image.shared_png_bytes(),
+                    image.width(),
+                    image.height(),
+                );
+                self.artifacts.ensure_recordable(&artifact, &content)?;
+                Ok((artifact, content))
+            })
+            .collect()
     }
 
     pub(super) fn validate_model_result_content(
@@ -53,13 +92,14 @@ impl SessionState {
         Ok(Some(artifact))
     }
 
-    /// Records both bodies before creating any artifact lifecycle event.
+    /// Records result bodies and images before creating any artifact lifecycle event.
     pub(super) fn record_tool_result_artifacts(
         &mut self,
         artifacts: ToolResultArtifacts,
     ) -> Vec<RuntimeJournalEvent> {
         let recorded = std::iter::once(artifacts.full)
             .chain(artifacts.model)
+            .chain(artifacts.images)
             .map(|(artifact, content)| {
                 let bytes = content.as_bytes().len();
                 let recorded = self.artifacts.record_preflighted(artifact, content);

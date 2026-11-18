@@ -1,4 +1,4 @@
-use crate::{ArtifactContent, tool::proposal::ActionExecutionEvidence};
+use crate::{ArtifactContent, UserImageInput, tool::proposal::ActionExecutionEvidence};
 use merry_core::{ErrorInfo, ToolCallResultStatus};
 
 /// Domain-level result from a tool execution.
@@ -14,11 +14,12 @@ pub struct ToolExecutionOutcome {
     execution_evidence: Option<ActionExecutionEvidence>,
 }
 
-/// Full evidence and an optional model body, kept together through admission.
+/// Full evidence, optional model body, and optional normalized PNG images, kept together through admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolResultContent {
     artifact: ArtifactContent,
     model: Option<Box<ArtifactContent>>,
+    images: Vec<UserImageInput>,
 }
 
 impl From<ArtifactContent> for ToolResultContent {
@@ -26,6 +27,7 @@ impl From<ArtifactContent> for ToolResultContent {
         Self {
             artifact,
             model: None,
+            images: Vec::new(),
         }
     }
 }
@@ -39,13 +41,40 @@ impl ToolResultContent {
         self.model.as_deref()
     }
 
+    pub(crate) fn images(&self) -> &[UserImageInput] {
+        &self.images
+    }
+
     pub(crate) fn with_model(mut self, model: ArtifactContent) -> Self {
         self.model = Some(Box::new(model));
         self
     }
 
-    pub(crate) fn into_parts(self) -> (ArtifactContent, Option<ArtifactContent>) {
-        (self.artifact, self.model.map(|content| *content))
+    pub(crate) fn with_image(mut self, image: UserImageInput) -> Self {
+        self.images.push(image);
+        self
+    }
+
+    pub(crate) fn with_images<I>(mut self, images: I) -> Self
+    where
+        I: IntoIterator<Item = UserImageInput>,
+    {
+        self.images.extend(images);
+        self
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ArtifactContent,
+        Option<ArtifactContent>,
+        Vec<UserImageInput>,
+    ) {
+        (
+            self.artifact,
+            self.model.map(|content| *content),
+            self.images,
+        )
     }
 }
 
@@ -121,6 +150,29 @@ impl ToolExecutionOutcome {
     pub fn with_model_json(mut self, content: impl Into<String>) -> Self {
         self.content = self.content.with_model(ArtifactContent::json(content));
         self
+    }
+
+    /// Attaches one normalized PNG image observed alongside this tool outcome.
+    #[must_use]
+    pub fn with_image(mut self, image: UserImageInput) -> Self {
+        self.content = self.content.with_image(image);
+        self
+    }
+
+    /// Attaches normalized PNG images observed alongside this tool outcome.
+    #[must_use]
+    pub fn with_images<I>(mut self, images: I) -> Self
+    where
+        I: IntoIterator<Item = UserImageInput>,
+    {
+        self.content = self.content.with_images(images);
+        self
+    }
+
+    /// Borrows normalized PNG images attached to this tool outcome.
+    #[must_use]
+    pub fn images(&self) -> &[UserImageInput] {
+        self.content.images()
     }
 
     /// Borrows the optional failure diagnostic.

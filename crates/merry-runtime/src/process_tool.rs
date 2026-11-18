@@ -55,6 +55,11 @@ struct ProcessCommandInput {
     #[schemars(schema_with = "requested_capabilities_schema_for_schemars")]
     #[serde(default)]
     permissions: Option<RequestedCapabilitiesInput>,
+    #[schemars(
+        description = "When true, return once the command is still running, include its id, and keep it until stop_background_process or this session ends. Use it for a GUI or a server. The default waits until the command exits. Do not background the command in the shell instead."
+    )]
+    #[serde(default)]
+    background: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +73,8 @@ struct ProcessCommandInputWire {
     reason: Option<String>,
     #[serde(default)]
     permissions: Option<RequestedCapabilitiesInput>,
+    #[serde(default)]
+    background: bool,
 }
 
 impl<'de> Deserialize<'de> for ProcessCommandInput {
@@ -81,6 +88,7 @@ impl<'de> Deserialize<'de> for ProcessCommandInput {
             cwd: input.cwd.unwrap_or_default(),
             reason: input.reason,
             permissions: input.permissions,
+            background: input.background,
         })
     }
 }
@@ -211,6 +219,7 @@ fn process_intent_from_call(
         DEFAULT_PROCESS_TOOL_STDOUT_LIMIT_BYTES,
         DEFAULT_PROCESS_TOOL_STDERR_LIMIT_BYTES,
     )
+    .map(|intent| intent.with_background(input.background))
     .map_err(|error| InvalidProcessCommandArguments::new(error.to_string()))
 }
 
@@ -293,6 +302,19 @@ mod tests {
         assert_eq!(intent.argv(), shell_command_argv("rustc --version"));
         assert_eq!(intent.cwd(), Some("crates/merry-runtime"));
         assert!(intent.stdin_text().is_none());
+        assert!(!intent.background());
+    }
+
+    #[test]
+    fn process_intent_from_call_opts_into_background() {
+        let call = pending_call(json!({
+            "command": "sleep 30",
+            "background": true
+        }));
+
+        let intent = process_intent_from_call(&call).expect("process intent should parse");
+
+        assert!(intent.background());
     }
 
     #[test]
@@ -338,6 +360,11 @@ mod tests {
             crate::MAX_PROCESS_ARG_BYTES
         );
         assert_eq!(schema["required"], json!(["command"]));
+        assert!(
+            schema["properties"]["background"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("still running"))
+        );
         assert!(
             schema["properties"]["permissions"]["description"]
                 .as_str()

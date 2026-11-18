@@ -19,6 +19,7 @@ use std::{
 #[cfg(test)]
 pub(crate) struct CodingRuntimeOptions {
     pub(crate) approval_review: Option<RuntimeRoleProviderConfig>,
+    pub(crate) browser: Option<RuntimeRoleProviderConfig>,
     pub(crate) automatic_compaction: CompactionConfig,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
@@ -40,6 +41,7 @@ pub(crate) struct HeadlessCodingRuntimeInput<'a> {
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
     pub(crate) approval_review: Option<RuntimeRoleProviderConfig>,
+    pub(crate) browser: Option<RuntimeRoleProviderConfig>,
     pub(crate) skill_roots: Vec<PathBuf>,
     pub(crate) subagents: super::CodingSubagentsConfig,
     pub(crate) workspace_tool_limits: Option<merry_tools::WorkspaceToolLimits>,
@@ -132,6 +134,7 @@ pub(crate) fn build_coding_runtime(
         retry_policy: options.retry_policy,
         context_compaction: options.context_compaction,
         approval_review: options.approval_review,
+        browser: options.browser,
         skill_roots: options.skill_roots,
         subagents: options.subagents,
         workspace_tool_limits: options.workspace_tool_limits,
@@ -165,6 +168,9 @@ fn build_coding_runtime_from_headless_input(
         coding_input = coding_input.with_model_role(role);
     }
     if let Some(role) = input.approval_review {
+        coding_input = coding_input.with_model_role(role);
+    }
+    if let Some(role) = input.browser {
         coding_input = coding_input.with_model_role(role);
     }
     if !input.workspace_writable {
