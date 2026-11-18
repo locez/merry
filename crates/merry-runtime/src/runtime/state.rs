@@ -57,6 +57,9 @@ pub(super) struct RuntimeInner {
     pub(super) tool_batch_active: AtomicBool,
     pub(super) activity_hub: Arc<SubagentActivityHub>,
     pub(super) trajectory: Arc<RuntimeObservability>,
+    pub(super) durable_memory: Option<Arc<crate::DurableMemory>>,
+    pub(super) memory_maintenance: bool,
+    pub(super) memory_context: Option<Arc<str>>,
 }
 
 impl RuntimeInner {

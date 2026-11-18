@@ -202,7 +202,18 @@ fn read_text_blocking_checked(
         &state.limits,
         is_cancelled,
     ) {
-        Ok(outcome) => Ok(outcome),
+        Ok(outcome) => {
+            if let Some(memory) = &state.durable_memory
+                && let Err(error) = memory.note_read(&resolved)
+            {
+                tracing::debug!(
+                    error = %error,
+                    path = %resolved.display(),
+                    "durable memory read snapshot was not recorded"
+                );
+            }
+            Ok(outcome)
+        }
         Err(BlockingToolError::Cancelled) => Err(ToolExecutionError::Cancelled),
         Err(BlockingToolError::Domain(error)) => Ok(failed_outcome(
             READ_TEXT_TOOL,

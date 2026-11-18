@@ -195,7 +195,7 @@ pub(super) async fn run_provider_step(
         None
     };
 
-    let (mut request_inputs, activation_epoch) = {
+    let (request_inputs, activation_epoch) = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             drop(session);
@@ -229,6 +229,7 @@ pub(super) async fn run_provider_step(
         };
         (request_inputs, activation_epoch)
     };
+    let mut request_inputs = request_inputs.with_memory_context(inner.memory_context.clone());
     let mut projection_guard =
         ActivationProjectionGuard::new(Arc::clone(inner), token.clone(), activation_epoch);
     let provider = provider_config.provider();
@@ -393,7 +394,7 @@ pub(super) async fn run_provider_step(
                 )
             };
             request_inputs = match refreshed {
-                Ok(inputs) => inputs,
+                Ok(inputs) => inputs.with_memory_context(inner.memory_context.clone()),
                 Err(error) => {
                     clear_current_activated_memories(inner).await;
                     let diagnostic =

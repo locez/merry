@@ -6,7 +6,7 @@ use merry_core::ToolName;
 use merry_llm::ModelRetryPolicy;
 use merry_process::ProcessSession;
 use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, PermissionAdmissionError,
+    AcceptedLocalWorkspaceProcessAdmission, DurableMemory, PermissionAdmissionError,
     PermissionedProcessRunnerFactory, ProcessCommandToolError, ProcessRunner,
     RuntimeProfileBuilder, StaticPermissionedProcessRunnerFactory, process_command_tool,
     request_permissions_tool,
@@ -45,6 +45,7 @@ pub(crate) struct WorkspaceCodingProfileBuilder {
     pub(crate) forbidden_paths: Vec<PathBuf>,
     pub(crate) enable_patch_tool: bool,
     pub(crate) process_runner: Option<WorkspaceProcessRunnerConfig>,
+    pub(crate) durable_memory: Option<Arc<DurableMemory>>,
 }
 
 impl WorkspaceCodingProfileBuilder {
@@ -59,7 +60,13 @@ impl WorkspaceCodingProfileBuilder {
             forbidden_paths: Vec::new(),
             enable_patch_tool: false,
             process_runner: None,
+            durable_memory: None,
         }
+    }
+
+    pub(crate) fn durable_memory(mut self, memory: Arc<DurableMemory>) -> Self {
+        self.durable_memory = Some(memory);
+        self
     }
 
     /// Replaces the workspace root.
@@ -124,11 +131,14 @@ impl WorkspaceCodingProfileBuilder {
         self,
         mut builder: RuntimeProfileBuilder,
     ) -> Result<RuntimeProfileBuilder, WorkspaceCodingProfileBuildError> {
-        let config = WorkspaceToolsConfig::new(self.root.clone())
+        let mut config = WorkspaceToolsConfig::new(self.root.clone())
             .with_readonly_resource_roots(self.readonly_resource_roots)
             .with_limits(self.limits)
             .with_patch_write_scope(self.patch_write_scope)
             .with_forbidden_paths(self.forbidden_paths);
+        if let Some(memory) = self.durable_memory.clone() {
+            config = config.with_durable_memory(memory);
+        }
         let project_summary = project_capability_summary_for_root(config.root());
         let workspace_tools = WorkspaceTools::new(config)?;
 

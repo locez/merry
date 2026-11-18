@@ -151,6 +151,9 @@ pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
         tool_batch_active: AtomicBool::new(false),
         activity_hub: Arc::new(crate::SubagentActivityHub::new()),
         trajectory: crate::trajectory::RuntimeObservability::new(session_id.clone(), Vec::new()),
+        durable_memory: None,
+        memory_maintenance: false,
+        memory_context: None,
     }
 }
 

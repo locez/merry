@@ -4,7 +4,8 @@ use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
 use merry_core::SessionId;
 use merry_llm::{GenerationConfig, ReasoningEffort, ServiceTier};
 use merry_runtime::{
-    CompactionConfig, PathAccess, PathAccessRule, PathAccessRuleSource, Runtime, RuntimeBuilder,
+    CompactionConfig, MemoryLayout, PathAccess, PathAccessRule, PathAccessRuleSource, Runtime,
+    RuntimeBuilder,
 };
 use std::{
     env,
@@ -168,6 +169,17 @@ fn action_process_backend_options(
     path_rules.extend(private_paths.into_iter().map(|path| {
         PathAccessRule::new(path, PathAccess::Deny, PathAccessRuleSource::ProductPrivate)
     }));
+    // The memory tree is outside the workspace. Grant only that root, whether
+    // or not the workspace itself is writable. Config and state stay denied.
+    if let Ok(memory_root) = MemoryLayout::memory_root_from_env()
+        && is_clean_absolute_path(&memory_root)
+    {
+        path_rules.push(PathAccessRule::new(
+            memory_root,
+            PathAccess::ReadWrite,
+            PathAccessRuleSource::DurableMemory,
+        ));
+    }
     let environment_overrides: Vec<(OsString, OsString)> = config
         .map(MerryConfig::process_environment_overrides)
         .transpose()?
@@ -267,7 +279,9 @@ mod tests {
         FinishReason, GenerationConfig, ModelCapabilities, ModelEvent, ModelName, ModelOutput,
         ModelResponse, ServiceTier,
     };
-    use merry_runtime::{PathAccessRuleSource, RuntimeModelRole, StepContext, StepInput};
+    use merry_runtime::{
+        MemoryLayout, PathAccessRuleSource, RuntimeModelRole, StepContext, StepInput,
+    };
     use std::{fs, path::PathBuf, sync::Arc};
 
     #[test]
@@ -337,6 +351,23 @@ readwrite_paths = ["/srv/trusted-writable"]
             .expect("configured writable ceiling should remain visible to the inner runner");
         assert_eq!(writable.access(), merry_runtime::PathAccess::ReadWrite);
         assert_eq!(writable.source(), PathAccessRuleSource::TrustedGlobalConfig);
+    }
+
+    #[test]
+    fn action_backend_grants_only_the_memory_root() {
+        let root = MemoryLayout::memory_root_from_env().expect("this process has a home directory");
+        let options =
+            action_process_backend_options(None).expect("action backend options should build");
+        let rule = options
+            .path_rules()
+            .iter()
+            .find(|rule| rule.path() == root)
+            .expect("memory root should be granted");
+        assert_eq!(rule.access(), merry_runtime::PathAccess::ReadWrite);
+        assert_eq!(rule.source(), PathAccessRuleSource::DurableMemory);
+        assert!(options.path_rules().iter().all(|rule| {
+            rule.source() != PathAccessRuleSource::DurableMemory || rule.path() == root
+        }));
     }
 
     #[test]

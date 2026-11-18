@@ -33,12 +33,16 @@ when that directory is absolute and different. `~/.git-credentials` is not
 granted.
 
 Writable: the workspace, `/tmp`, `/var/tmp`, `/dev`, `/dev/shm`, `/dev/pts`,
-`TMPDIR`, the Cargo registry and git database, and the XDG cache. Cargo `bin`
-and rustup toolchains are read-only.
+`TMPDIR`, the Cargo registry and git database, the XDG cache, and durable
+memory at `$XDG_DATA_HOME/merry/memory` (default
+`~/.local/share/merry/memory`). The memory grant stays writable when the
+workspace itself is read-only. Cargo `bin` and rustup toolchains are
+read-only.
 
 The rest of the home directory can be traversed so those granted paths can be
 opened. It is not listed or read. Private keys, `~/.aws`, `~/.config/gh`, and
-Merry's own config and state stay out.
+Merry's own config and state stay out. The memory grant does not include
+those directories.
 
 Network is off for an ordinary action. After permission review approves
 `network: true` for that action, the seccomp filter is not installed. The next

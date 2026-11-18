@@ -34,9 +34,10 @@ use merry_core::{CoreError, ToolName};
 use merry_llm::ModelRetryPolicy;
 use merry_process::ProcessSession;
 use merry_runtime::{
-    AgentLoopConfig, PermissionAdmissionError, ProcessCommandToolError, ProcessRunner,
-    ProjectRules, PromptBlock, PromptError, PromptProfile, RegisteredTool, RuntimeBuilder,
-    RuntimeError, RuntimeProfile, RuntimeProfileError, SkillCatalog, TaskAnchor, Tool,
+    AgentLoopConfig, DurableMemory, PermissionAdmissionError, ProcessCommandToolError,
+    ProcessRunner, ProjectRules, PromptBlock, PromptError, PromptProfile, RegisteredTool,
+    RuntimeBuilder, RuntimeError, RuntimeProfile, RuntimeProfileError, SkillCatalog, TaskAnchor,
+    Tool,
 };
 pub use merry_tools::{WorkspaceToolConfigError, WorkspaceToolLimits};
 use serde_json::Error as JsonError;
@@ -390,6 +391,22 @@ impl CodingAgentProfileBuilder {
         self
     }
 
+    /// Attaches the durable memory store shared by parent and child runtimes.
+    ///
+    /// The store supplies the stable memory instructions and the workspace
+    /// tool policy. The frozen index is attached separately on the runtime.
+    #[must_use]
+    pub fn durable_memory(mut self, memory: Arc<DurableMemory>) -> Self {
+        self.workspace = self.workspace.durable_memory(memory);
+        self
+    }
+
+    /// Returns the attached memory store, when this profile has one.
+    #[must_use]
+    pub fn durable_memory_handle(&self) -> Option<Arc<DurableMemory>> {
+        self.workspace.durable_memory.clone()
+    }
+
     /// Builds the shared coding-agent profile.
     pub fn build(self) -> Result<CodingAgentProfile, CodingAgentProfileBuildError> {
         let Self {
@@ -404,10 +421,18 @@ impl CodingAgentProfileBuilder {
             registered_tools,
         } = self;
         let workspace_hash_material = workspace.hash_material();
-        let prompt_profile = PromptProfile::default().with_stable_block(PromptBlock::new(
+        let memory_instructions = workspace
+            .durable_memory
+            .as_deref()
+            .map(DurableMemory::instructions);
+        let mut prompt_profile = PromptProfile::default().with_stable_block(PromptBlock::new(
             "merry_coding_policy",
             CODING_AGENT_POLICY_PROMPT,
         )?)?;
+        if let Some(instructions) = memory_instructions {
+            prompt_profile = prompt_profile
+                .with_stable_block(PromptBlock::new("merry_memory", instructions)?)?;
+        }
         let mut builder = RuntimeProfile::builder().prompt_profile(prompt_profile);
         builder = workspace
             .apply_to_runtime_profile(builder)

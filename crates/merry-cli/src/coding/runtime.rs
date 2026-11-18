@@ -170,5 +170,30 @@ fn build_coding_runtime_from_headless_input(
     if !input.workspace_writable {
         coding_input = coding_input.read_only_workspace();
     }
+    let coding_input = attach_durable_memory(coding_input, input.root);
     Ok(CodingRuntimeBuilder::new(coding_input).permission_policy(permission))
+}
+
+/// Opens XDG durable memory for a production runtime.
+///
+/// Unit tests leave memory unset so they do not touch the user data directory.
+/// The `merry` binary, including integration tests, always tries to open it.
+#[cfg(not(test))]
+pub(crate) fn attach_durable_memory(input: CodingRuntimeInput, root: &Path) -> CodingRuntimeInput {
+    match merry_runtime::DurableMemory::open_from_env(root) {
+        Ok(memory) => input.durable_memory(memory),
+        Err(error) => {
+            tracing::warn!(
+                event = "memory.open_failed",
+                error = %error,
+                "durable memory is unavailable; continuing without it"
+            );
+            input
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn attach_durable_memory(input: CodingRuntimeInput, _root: &Path) -> CodingRuntimeInput {
+    input
 }

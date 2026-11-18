@@ -110,6 +110,7 @@ pub(crate) struct StepModelRequestParts<'a> {
     pub(crate) generation_config: GenerationConfig,
     pub(crate) prompt_profile: &'a PromptProfile,
     pub(crate) progress_commentary: bool,
+    pub(crate) memory_context: Option<&'a str>,
 }
 
 /// Stable prompt material every request for one session starts with.
@@ -210,14 +211,15 @@ pub(crate) fn compile_step_model_request(
         generation_config,
         prompt_profile,
         progress_commentary,
+        memory_context,
     } = parts;
 
     let checkpoint_snapshot = context.checkpoint_snapshot();
     let context_body_snapshot = context.body_snapshot();
     // Keep provider prompt projection allowlisted and ordered: the shared
-    // stable prefix, the current checkpoint, task anchor control-plane context,
-    // live compiled context, prior ordered transcript, then current user or
-    // loop-control input.
+    // stable prefix, the frozen memory index, the current checkpoint, task
+    // anchor control-plane context, live compiled context, prior ordered
+    // transcript, then current user or loop-control input.
     let mut messages = compile_stable_prefix_items(StablePrefixParts {
         prompt_profile,
         progress_commentary,
@@ -226,13 +228,22 @@ pub(crate) fn compile_step_model_request(
     })?;
     let stable_prefix_message_count = messages.len();
     messages.reserve(
-        usize::from(!checkpoint_snapshot.is_empty())
+        usize::from(memory_context.is_some())
+            + usize::from(!checkpoint_snapshot.is_empty())
             + usize::from(task_anchor.is_some())
             + usize::from(plan_control.is_some())
             + usize::from(!context_body_snapshot.is_empty())
             + transcript.len()
             + input.user_messages_for_request().len(),
     );
+
+    if let Some(memory_context) = memory_context.filter(|text| !text.is_empty()) {
+        let memory_text = render_prompt_block("merry_memory_context", memory_context);
+        messages.push(ModelInputItem::Message(ModelMessage::new(
+            ModelMessageRole::System,
+            ModelContent::text(&memory_text)?,
+        )?));
+    }
 
     if !checkpoint_snapshot.is_empty() {
         let checkpoint_text = render_prompt_block("merry_checkpoint", &checkpoint_snapshot);

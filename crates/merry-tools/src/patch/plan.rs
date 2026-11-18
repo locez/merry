@@ -5,7 +5,7 @@ use std::{
 
 use merry_core::PendingToolCall;
 use merry_runtime::{
-    ActionProposal, ActionProposalError, ActionProposalEvidence, ToolActionKind,
+    ActionProposal, ActionProposalError, ActionProposalEvidence, MemoryWriteKind, ToolActionKind,
     ToolActionPreflight, ToolExecutionError, ToolExecutionOutcome, WorkspacePatchChangeEvidence,
     WorkspacePatchProposal,
 };
@@ -95,7 +95,21 @@ pub(crate) fn apply_patch_blocking_checked(
             {
                 return Ok(proposal_mismatch_outcome(plan.subject()));
             }
-            execute_apply_patch_plan(plan, is_cancelled)
+            let paths = plan
+                .changes
+                .iter()
+                .map(|change| change.path.clone())
+                .collect::<Vec<_>>();
+            let outcome = execute_apply_patch_plan(plan, is_cancelled)?;
+            if let Some(memory) = &state.durable_memory
+                && let Err(error) = memory.refresh_after_writes(&paths)
+            {
+                tracing::warn!(
+                    error = %error,
+                    "durable memory index was not refreshed after a patch"
+                );
+            }
+            Ok(outcome)
         }
         WorkspacePatchPlanOutcome::Failure(outcome) => Ok(outcome),
     }
@@ -517,6 +531,12 @@ fn plan_resolved_apply_patch_file(
         )
         .into());
     }
+    authorize_memory_write(
+        state,
+        MemoryWriteKind::Update,
+        &path,
+        replacement.text.len(),
+    )?;
 
     Ok(WorkspacePatchFilePlan {
         relative,
@@ -553,6 +573,7 @@ fn plan_resolved_apply_patch_delete(
     if is_cancelled() {
         return Err(BlockingToolError::Cancelled);
     }
+    authorize_memory_write(state, MemoryWriteKind::Delete, &path, 0)?;
 
     Ok(WorkspacePatchFilePlan {
         lines_before: count_file_lines(&content),
@@ -592,6 +613,12 @@ fn plan_new_apply_patch_file(
         )
         .into());
     }
+    authorize_memory_write(
+        state,
+        MemoryWriteKind::Create,
+        &path,
+        replacement.text.len(),
+    )?;
 
     Ok(WorkspacePatchFilePlan {
         relative,
@@ -610,6 +637,22 @@ fn plan_new_apply_patch_file(
         max_read_bytes: state.limits.max_read_bytes,
         mode: WorkspacePatchFileMode::CreateNew,
     })
+}
+
+fn authorize_memory_write(
+    state: &WorkspaceToolState,
+    kind: MemoryWriteKind,
+    path: &Path,
+    byte_len: usize,
+) -> Result<(), BlockingToolError> {
+    let Some(memory) = &state.durable_memory else {
+        return Ok(());
+    };
+    memory
+        .authorize_write(kind, path, byte_len)
+        .map_err(|error| {
+            BlockingToolError::Domain(DomainError::new(ERROR_PATH_DENIED, error.to_string()))
+        })
 }
 
 fn read_patch_preimage(

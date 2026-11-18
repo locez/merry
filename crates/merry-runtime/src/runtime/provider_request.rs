@@ -12,6 +12,7 @@ use crate::{
 };
 use merry_core::{CompactionUsageWindow, ErrorInfo, UsageContextWindow};
 use merry_llm::{GenerationConfig, ModelError, ModelName};
+use std::sync::Arc;
 
 use super::diagnostic_from_text;
 
@@ -97,6 +98,7 @@ pub(super) struct StepRequestInputs {
     task_anchor: Option<TaskAnchor>,
     plan_control: Option<String>,
     pub(super) transcript: Vec<TranscriptItemSnapshot>,
+    memory_context: Option<Arc<str>>,
 }
 
 impl StepRequestInputs {
@@ -118,7 +120,13 @@ impl StepRequestInputs {
                 )
             }),
             transcript,
+            memory_context: None,
         }
+    }
+
+    pub(super) fn with_memory_context(mut self, memory_context: Option<Arc<str>>) -> Self {
+        self.memory_context = memory_context;
+        self
     }
 }
 
@@ -174,6 +182,7 @@ pub(super) fn compile_step_request_from_inputs(
         generation_config,
         prompt_profile,
         progress_commentary,
+        memory_context: inputs.memory_context.as_deref(),
     })
     .map_err(StepRequestCompileError::from)
 }
@@ -208,6 +217,7 @@ pub(super) fn estimate_compaction_fixed_dynamic_tokens(
         generation_config: generation_config.clone(),
         prompt_profile,
         progress_commentary,
+        memory_context: inputs.memory_context.as_deref(),
     })?;
     let archive_only_context = ContextCompiler::new().compile(&inputs.snapshot)?;
     let archive_only_request = compile_step_model_request(StepModelRequestParts {
@@ -223,6 +233,7 @@ pub(super) fn estimate_compaction_fixed_dynamic_tokens(
         generation_config,
         prompt_profile,
         progress_commentary,
+        memory_context: inputs.memory_context.as_deref(),
     })?;
 
     Ok(CompactionFixedDynamicTokens {
@@ -418,5 +429,39 @@ mod tests {
         )
         .expect("history estimates build");
         assert_eq!(history_estimates, checkpoint_estimates);
+    }
+
+    #[test]
+    fn memory_context_increases_the_dynamic_compaction_estimate() {
+        let session =
+            SessionState::new(SessionId::new("memory-context-estimate").expect("valid session id"));
+        let input = StepInput::user_text("current input").expect("valid step input");
+        let model = ModelName::new("test/model").expect("valid model name");
+        let without = StepRequestInputs::from_session(&session, Vec::new(), None, false);
+        let baseline = estimate_compaction_fixed_dynamic_tokens(
+            &input,
+            &model,
+            &without,
+            Vec::new(),
+            GenerationConfig::default(),
+            &PromptProfile::default(),
+            false,
+        )
+        .expect("baseline estimate builds");
+        let with_memory = without
+            .with_memory_context(Some(Arc::<str>::from("workspace memory index ".repeat(80))));
+        let raised = estimate_compaction_fixed_dynamic_tokens(
+            &input,
+            &model,
+            &with_memory,
+            Vec::new(),
+            GenerationConfig::default(),
+            &PromptProfile::default(),
+            false,
+        )
+        .expect("memory estimate builds");
+
+        assert!(raised.replacement > baseline.replacement);
+        assert!(raised.archive_only > baseline.archive_only);
     }
 }

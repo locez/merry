@@ -1,8 +1,10 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
+use merry_runtime::DurableMemory;
 use thiserror::Error;
 
 /// Limits applied by workspace tools.
@@ -31,13 +33,14 @@ impl Default for WorkspaceToolLimits {
 }
 
 /// Configuration for workspace tools.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct WorkspaceToolsConfig {
     pub(crate) root: PathBuf,
     pub(crate) readonly_resource_roots: Vec<PathBuf>,
     pub(crate) limits: WorkspaceToolLimits,
     pub(crate) patch_write_scope: Option<Vec<PathBuf>>,
     pub(crate) forbidden_paths: Vec<PathBuf>,
+    pub(crate) durable_memory: Option<Arc<DurableMemory>>,
 }
 
 impl WorkspaceToolsConfig {
@@ -54,7 +57,15 @@ impl WorkspaceToolsConfig {
             limits: WorkspaceToolLimits::default(),
             patch_write_scope: None,
             forbidden_paths: Vec::new(),
+            durable_memory: None,
         }
+    }
+
+    /// Attaches the durable memory store enforced by read and patch tools.
+    #[must_use]
+    pub fn with_durable_memory(mut self, memory: Arc<DurableMemory>) -> Self {
+        self.durable_memory = Some(memory);
+        self
     }
 
     /// Returns the configured, pre-canonical workspace root.

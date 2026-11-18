@@ -37,6 +37,7 @@ mod diagnostics;
 mod journal_emission;
 mod journal_persistence;
 mod memory_activation;
+mod memory_maintenance;
 mod model_output;
 mod model_turn_lifecycle;
 mod output_rate;
@@ -206,6 +207,10 @@ impl Runtime {
 
     pub fn session_id(&self) -> &SessionId {
         &self.inner.session_id
+    }
+
+    pub(crate) fn schedule_memory_maintenance(&self) {
+        self::memory_maintenance::schedule(&self.inner);
     }
 
     fn observe_recorded_journal_events(&self, events: &[RuntimeJournalEvent]) {

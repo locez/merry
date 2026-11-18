@@ -81,6 +81,8 @@ pub struct RuntimeBuilder {
     activity_hub: Arc<SubagentActivityHub>,
     session_store: Option<FileSessionStore>,
     loaded_session: Option<SessionState>,
+    durable_memory: Option<Arc<crate::DurableMemory>>,
+    memory_maintenance: bool,
 }
 
 impl RuntimeBuilder {
@@ -123,6 +125,8 @@ impl RuntimeBuilder {
             activity_hub: Arc::new(SubagentActivityHub::new()),
             session_store: None,
             loaded_session: None,
+            durable_memory: None,
+            memory_maintenance: false,
         }
     }
 
@@ -598,6 +602,17 @@ impl RuntimeBuilder {
         Ok(self)
     }
 
+    /// Attaches durable memory and freezes its index for this runtime.
+    ///
+    /// `maintain` schedules capture and one-shot dream after a completed parent
+    /// turn. Child runtimes keep the same store with maintenance disabled.
+    #[must_use]
+    pub fn durable_memory(mut self, memory: Arc<crate::DurableMemory>, maintain: bool) -> Self {
+        self.durable_memory = Some(memory);
+        self.memory_maintenance = maintain;
+        self
+    }
+
     /// Builds the runtime.
     ///
     /// Duplicate tool names are rejected before the runtime is constructed.
@@ -741,6 +756,19 @@ impl RuntimeBuilder {
             trajectory.seed_from_transcript(&transcript);
         }
 
+        let memory_context = match &self.durable_memory {
+            Some(memory) => match memory.render_context() {
+                Ok(text) => Some(Arc::<str>::from(text)),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "durable memory context was not injected"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
         let session = Arc::new(Mutex::new(session));
         let (plan_controller, _plan_events) = PlanController::start(
             Arc::clone(&session),
@@ -804,6 +832,9 @@ impl RuntimeBuilder {
                 tool_batch_active: AtomicBool::new(false),
                 activity_hub,
                 trajectory,
+                durable_memory: self.durable_memory,
+                memory_maintenance: self.memory_maintenance,
+                memory_context,
             }),
         })
     }

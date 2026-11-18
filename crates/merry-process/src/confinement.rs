@@ -533,6 +533,9 @@ fn allowed_directory_label(
             (PathAccessRuleSource::PermissionReview, PathAccess::ReadOnly) => {
                 format!("the approved readable path `{}`", grant.display())
             }
+            (PathAccessRuleSource::DurableMemory, PathAccess::ReadWrite) => {
+                format!("the writable memory directory `{}`", grant.display())
+            }
             _ => format!("allowed directory `{}`", grant.display()),
         };
     }

@@ -36,6 +36,7 @@ mod bridge;
 mod checkpoint;
 mod compaction;
 mod context;
+mod durable_memory;
 mod error;
 mod events;
 mod final_output;
@@ -96,6 +97,7 @@ pub use context::{
     ProjectRules, ResolvedContextWindow, SessionContextSnapshot, TaskAnchor, decide_checkpoint,
     resolve_context_window,
 };
+pub use durable_memory::{DurableMemory, DurableMemoryError, MemoryLayout, MemoryWriteKind};
 pub use error::RuntimeError;
 pub use events::{RuntimeEventStream, RuntimeJournalEventStream};
 pub use final_output::{

@@ -2,7 +2,10 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Component, PathBuf},
+    sync::Arc,
 };
+
+use merry_runtime::DurableMemory;
 
 use crate::config::{WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceToolsConfig};
 
@@ -13,6 +16,7 @@ pub(crate) struct WorkspaceToolState {
     pub(crate) limits: WorkspaceToolLimits,
     pub(crate) patch_write_scope: Option<Vec<String>>,
     pub(crate) forbidden_paths: Vec<String>,
+    pub(crate) durable_memory: Option<Arc<DurableMemory>>,
 }
 
 impl WorkspaceToolState {
@@ -44,6 +48,7 @@ impl WorkspaceToolState {
             limits: config.limits,
             patch_write_scope,
             forbidden_paths,
+            durable_memory: config.durable_memory,
         })
     }
 

@@ -22,7 +22,8 @@ pub(crate) use runtime::build_headless_coding;
 #[cfg(test)]
 pub(crate) use runtime::{CodingRuntimeOptions, build_coding_runtime, resume_headless_coding};
 pub(crate) use runtime::{
-    HeadlessCodingRuntimeInput, build_headless_coding_with_policy_composition,
+    HeadlessCodingRuntimeInput, attach_durable_memory,
+    build_headless_coding_with_policy_composition,
     resume_headless_coding_composition_with_loaded_session,
 };
 pub(crate) use sandbox::coding_agent_process_admission;

@@ -342,6 +342,67 @@ async fn sandboxed_git_status_reads_the_user_ignore_file() {
 }
 
 #[cfg(target_os = "linux")]
+#[tokio::test]
+async fn sandboxed_command_can_read_and_write_only_the_memory_tree() {
+    let root = tempfile::tempdir_in(fixture_root()).expect("fixture root");
+    let workspace = root.path().join("workspace");
+    let memory = root.path().join("data/merry/memory");
+    let secret = root.path().join("data/merry/secret.txt");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(memory.join("topics")).expect("memory topics");
+    std::fs::write(memory.join("topics/hello.md"), "# 你好\n").expect("note");
+    std::fs::write(&secret, "secret\n").expect("secret");
+
+    let runner = WorkspaceProcessRunner::new_at_workspace_root(&workspace)
+        .read_only_workspace()
+        .with_path_rules([PathAccessRule::new(
+            memory.clone(),
+            PathAccess::ReadWrite,
+            PathAccessRuleSource::DurableMemory,
+        )]);
+    let context = ProcessRunnerContext::new(CancellationToken::new());
+    let memory_display = memory.display();
+    let listed = run_shell(
+        &runner,
+        &format!("ls '{memory_display}/topics' && cat '{memory_display}/topics/hello.md'"),
+        &context,
+    )
+    .await;
+    assert!(
+        listed.ok(),
+        "memory should be readable: {}",
+        listed.stderr_text()
+    );
+    assert!(listed.stdout_text().contains("你好"));
+
+    let write = run_shell(
+        &runner,
+        &format!("printf 'x\\n' > '{memory_display}/topics/written.md'"),
+        &context,
+    )
+    .await;
+    assert!(
+        write.ok(),
+        "memory should be writable: {}",
+        write.stderr_text()
+    );
+    assert_eq!(
+        std::fs::read_to_string(memory.join("topics/written.md")).expect("written note"),
+        "x\n"
+    );
+
+    let workspace_write = run_shell(&runner, "touch denied.txt", &context).await;
+    assert!(
+        !workspace_write.ok(),
+        "a read-only workspace stays read-only"
+    );
+
+    let denied = run_shell(&runner, &format!("cat '{}'", secret.display()), &context).await;
+    assert!(!denied.ok(), "a sibling outside memory stays unreadable");
+    assert!(!denied.stdout_text().contains("secret"));
+}
+
+#[cfg(target_os = "linux")]
 async fn run_shell(
     runner: &WorkspaceProcessRunner,
     command: &str,

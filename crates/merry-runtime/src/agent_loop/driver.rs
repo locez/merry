@@ -143,6 +143,7 @@ impl Runtime {
                         model_turns_run,
                         None,
                     );
+                    self.schedule_memory_maintenance();
                     let session_usage = self.usage().await;
                     return Ok(AgentLoopResult::new(
                         AgentLoopStatus::Completed,

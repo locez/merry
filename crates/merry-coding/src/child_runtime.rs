@@ -85,6 +85,7 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
         if let Some(scope) = input.plan_subagent_scope {
             builder = builder.plan_subagent_scope(scope);
         }
+        let memory = self.composition.profile_builder.durable_memory_handle();
         let write_scope_is_explicit = input.task.write_scope_is_explicit();
         let workspace_scope = input.workspace_scope;
         let has_child_workspace_boundary =
@@ -106,7 +107,10 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
             .map_err(|source| RuntimeError::ChildRuntimeBuild {
                 message: source.to_string(),
             })?;
-        let builder = profile.apply_to(builder)?;
+        let mut builder = profile.apply_to(builder)?;
+        if let Some(memory) = memory {
+            builder = builder.durable_memory(memory, false);
+        }
         self.composition.policy.apply_to(builder).build()
     }
 }

@@ -69,6 +69,11 @@ pub enum PathAccessRuleSource {
     GitMetadataBaseline,
     /// Rule materialized from the current permission admission result.
     PermissionReview,
+    /// Durable memory notes under the XDG data home.
+    ///
+    /// This tree is outside the workspace. Sandboxed commands can read and
+    /// write it so the agent can use the same notes the host maintains.
+    DurableMemory,
 }
 
 /// One platform-neutral path access rule consumed by sandbox backends.

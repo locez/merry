@@ -177,6 +177,7 @@ pub(crate) async fn run_agent_loop_stream_producer(
                     next_input = Some(deferred_user_input);
                     continue;
                 }
+                runtime.schedule_memory_maintenance();
                 let session_usage = runtime.usage().await;
                 return Ok(AgentLoopResult::new(
                     AgentLoopStatus::Completed,

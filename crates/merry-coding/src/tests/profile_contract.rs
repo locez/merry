@@ -6,7 +6,7 @@ use crate::{
 use merry_core::ToolName;
 use merry_llm::ModelRetryPolicy;
 use merry_process::TokioProcessRunner;
-use merry_runtime::AcceptedLocalWorkspaceProcessAdmission;
+use merry_runtime::{AcceptedLocalWorkspaceProcessAdmission, DurableMemory, MemoryLayout};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -265,6 +265,36 @@ fn coding_agent_profile_owns_the_coding_prompt_and_hashes_its_exact_text() {
             .text()
             .contains("Do not delete coverage, weaken an assertion")
     );
+}
+
+#[test]
+fn coding_agent_profile_appends_memory_instructions_after_policy() {
+    let temp = tempfile::tempdir().expect("tempdir should be created");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace dir should be created");
+    let memory = DurableMemory::open(
+        MemoryLayout::at(&temp.path().join("memory"), &workspace)
+            .expect("memory layout should resolve"),
+    )
+    .expect("memory store should open");
+    let without = coding_agent(&workspace)
+        .build()
+        .expect("profile without memory should build");
+    let profile = coding_agent(&workspace)
+        .durable_memory(memory)
+        .build()
+        .expect("profile with memory should build");
+    let runtime_profile = profile.runtime_profile();
+    let blocks = runtime_profile.prompt_profile().stable_blocks();
+
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].tag(), "merry_coding_policy");
+    assert_eq!(blocks[0].text(), CODING_AGENT_POLICY_PROMPT);
+    assert_eq!(blocks[1].tag(), "merry_memory");
+    assert!(blocks[1].text().contains("`read_text`"));
+    assert!(blocks[1].text().contains("`apply_patch`"));
+    assert!(blocks[1].text().contains("never read or edit MEMORY.md"));
+    assert_ne!(without.profile_hash(), profile.profile_hash());
 }
 
 #[test]

@@ -15,7 +15,8 @@ pub fn merry() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_merry"));
     command
         .env("XDG_CONFIG_HOME", xdg_root.join("config"))
-        .env("XDG_STATE_HOME", xdg_root.join("state"));
+        .env("XDG_STATE_HOME", xdg_root.join("state"))
+        .env("XDG_DATA_HOME", xdg_root.join("data"));
     command
 }
 
@@ -58,7 +59,8 @@ pub fn merry_without_openai_env_and_xdg(temp: &tempfile::TempDir) -> Command {
     let mut command = merry_without_openai_env();
     command
         .env("XDG_CONFIG_HOME", temp.path().join("config"))
-        .env("XDG_STATE_HOME", temp.path().join("state"));
+        .env("XDG_STATE_HOME", temp.path().join("state"))
+        .env("XDG_DATA_HOME", temp.path().join("data"));
     command
 }
 

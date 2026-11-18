@@ -14,9 +14,9 @@ use merry_core::{CoreError, SessionId};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_process::ProcessBackend;
 use merry_runtime::{
-    AgentLoopConfig, AgentLoopConfigError, ChildRuntimeFactory, CompactionConfig, FileSessionStore,
-    LoadedSession, RegisteredTool, Runtime, RuntimeBuilder, RuntimeError, RuntimeModelRole,
-    SkillCatalog, SkillError, SubagentConfig, SubagentError, SubagentManager,
+    AgentLoopConfig, AgentLoopConfigError, ChildRuntimeFactory, CompactionConfig, DurableMemory,
+    FileSessionStore, LoadedSession, RegisteredTool, Runtime, RuntimeBuilder, RuntimeError,
+    RuntimeModelRole, SkillCatalog, SkillError, SubagentConfig, SubagentError, SubagentManager,
     subagent_registered_tools,
 };
 use merry_tools::WorkspaceToolLimits;
@@ -191,6 +191,7 @@ pub struct CodingRuntimeInput {
     /// When false, the workspace is read-only: `AGENTS.md` stays unloaded and
     /// `apply_patch` cannot write.
     workspace_writable: bool,
+    durable_memory: Option<Arc<DurableMemory>>,
 }
 
 impl CodingRuntimeInput {
@@ -217,6 +218,7 @@ impl CodingRuntimeInput {
             subagents: CodingSubagentsConfig::default(),
             workspace_tool_limits: WorkspaceToolLimits::default(),
             workspace_writable: true,
+            durable_memory: None,
         }
     }
 
@@ -252,7 +254,18 @@ impl CodingRuntimeInput {
             subagents: CodingSubagentsConfig::default(),
             workspace_tool_limits: WorkspaceToolLimits::default(),
             workspace_writable: true,
+            durable_memory: None,
         }
+    }
+
+    /// Attaches durable memory for this runtime and the children it spawns.
+    ///
+    /// The parent maintains memory after completed user turns. Children see the
+    /// same store with maintenance disabled.
+    #[must_use]
+    pub fn durable_memory(mut self, memory: Arc<DurableMemory>) -> Self {
+        self.durable_memory = Some(memory);
+        self
     }
 
     /// Adds provider-neutral tools owned by the calling surface or adapter.
@@ -436,6 +449,7 @@ impl CodingRuntimeBuilder {
             subagents,
             workspace_tool_limits,
             workspace_writable,
+            durable_memory,
         } = input;
 
         let policy = CodingRuntimePolicy::try_new(model_roles, permission)?;
@@ -492,6 +506,9 @@ impl CodingRuntimeBuilder {
         if let Some(policy) = retry_policy {
             profile_builder = profile_builder.retry_policy(policy);
         }
+        if let Some(memory) = durable_memory.clone() {
+            profile_builder = profile_builder.durable_memory(memory);
+        }
 
         let mut profile_tools = Vec::new();
         if matches!(variant, CodingRuntimeVariant::FullCoding) {
@@ -546,6 +563,9 @@ impl CodingRuntimeBuilder {
             .apply_to(runtime_builder)
             .map_err(|source| CodingRuntimeBuildError::RuntimeProfileApply { source })?;
         runtime_builder = policy.apply_to(runtime_builder);
+        if let Some(memory) = durable_memory {
+            runtime_builder = runtime_builder.durable_memory(memory, true);
+        }
         if let Some(loaded_session) = loaded_session {
             runtime_builder = runtime_builder.with_loaded_session(loaded_session);
         }

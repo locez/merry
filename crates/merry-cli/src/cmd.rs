@@ -274,6 +274,7 @@ pub(crate) fn build_runtime(input: RuntimeInput<'_>) -> Result<Runtime, CliError
     if let Some(policy) = input.retry_policy {
         coding_input = coding_input.with_retry_policy(policy);
     }
+    let coding_input = crate::coding::attach_durable_memory(coding_input, input.root);
     CodingRuntimeBuilder::for_command_generation(coding_input)
         .build()
         .map(CodingRuntime::into_runtime)
