@@ -82,6 +82,7 @@ pub(crate) fn run_palette_command(
             });
             ControllerEffect::None
         }
+        #[cfg(feature = "web")]
         PaletteCommand::OpenSessionInBrowser => {
             state.close_overlay();
             handle_key_action(KeyAction::OpenSessionInBrowser, state)

@@ -40,6 +40,7 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             ControllerEffect::None
         }
         KeyAction::PasteImage => ControllerEffect::PasteImage,
+        #[cfg(feature = "web")]
         KeyAction::OpenSessionInBrowser => ControllerEffect::OpenSessionInBrowser,
         KeyAction::OpenCommandPanel => {
             state.open_command_palette();

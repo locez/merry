@@ -214,6 +214,7 @@ follow_latest = "ctrl+end"
 # Toggle command output details; pressing the same shortcut again or Esc closes them.
 open_command_details = "alt+t"
 review_previous_user_input = "alt+u"
+# Opens the local Web trajectory view when built with `--features web`.
 open_session_in_browser = "alt+g"
 history_previous = "up"
 history_next = "down"

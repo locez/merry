@@ -78,9 +78,15 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
         keymap.action_for(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
         None
     );
+    #[cfg(feature = "web")]
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Char('g'), KeyModifiers::ALT)),
         Some(KeyAction::OpenSessionInBrowser)
+    );
+    #[cfg(not(feature = "web"))]
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('g'), KeyModifiers::ALT)),
+        None
     );
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Char('c'), KeyModifiers::ALT)),
@@ -452,4 +458,25 @@ fn esc_and_empty_backspace_cancel_history_search() {
     assert_eq!(state.input_text(), "draft");
     assert_eq!(handle_key_event(ctrl_c, &mut state), ControllerEffect::None);
     assert_eq!(state.input_text(), "");
+}
+
+#[cfg(not(feature = "web"))]
+#[test]
+fn open_session_in_browser_config_validates_syntax_without_binding_when_web_is_disabled() {
+    let keymap = Keymap::from_config(&crate::config::TuiKeymapToml {
+        open_session_in_browser: Some("ctrl+g".to_owned()),
+        ..crate::config::TuiKeymapToml::default()
+    })
+    .expect("open_session_in_browser should remain accepted by config");
+    assert_eq!(
+        keymap.action_for(KeyBinding::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+        None
+    );
+
+    let error = Keymap::from_config(&crate::config::TuiKeymapToml {
+        open_session_in_browser: Some("invalid+chord".to_owned()),
+        ..crate::config::TuiKeymapToml::default()
+    })
+    .expect_err("invalid key syntax should still fail validation");
+    assert!(error.to_string().contains("unsupported TUI key binding"));
 }

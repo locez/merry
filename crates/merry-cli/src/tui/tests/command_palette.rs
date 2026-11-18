@@ -36,7 +36,10 @@ fn controller_alt_x_opens_searchable_command_palette_and_settings() {
     let palette = render_to_text(&state, 100, 30);
     assert!(palette.contains("Commands"));
     assert!(palette.contains("Settings"));
+    #[cfg(feature = "web")]
     assert!(palette.contains("Open trajectory in browser"));
+    #[cfg(not(feature = "web"))]
+    assert!(!palette.contains("Open trajectory in browser"));
 
     for character in "settings".chars() {
         handle_key_event(
@@ -92,8 +95,7 @@ fn command_palette_search_has_no_redundant_brand_and_commands_are_indented() {
     let (search_x, search_y) =
         find_text_position(&buffer, "Search commands").expect("search placeholder");
     let (group_x, _) = find_text_position(&buffer, "Navigation").expect("group heading");
-    let (command_x, _) =
-        find_text_position(&buffer, "Open trajectory in browser").expect("group command");
+    let (command_x, _) = find_text_position(&buffer, "Previous user input").expect("group command");
 
     assert_ne!(buffer[(search_x.saturating_sub(2), search_y)].symbol(), "M");
     assert!(command_x > group_x);
@@ -149,7 +151,9 @@ fn command_palette_uses_a_magenta_selection_surface() {
 #[test]
 fn command_palette_displays_configured_shortcuts_instead_of_stale_defaults() {
     let keymap = Keymap::from_config(&crate::config::TuiKeymapToml {
-        open_session_in_browser: Some("ctrl+n".to_owned()),
+        review_previous_user_input: Some("ctrl+n".to_owned()),
+        #[cfg(feature = "web")]
+        open_session_in_browser: Some("ctrl+k".to_owned()),
         ..crate::config::TuiKeymapToml::default()
     })
     .expect("configured keymap should validate");
@@ -165,15 +169,28 @@ fn command_palette_displays_configured_shortcuts_instead_of_stale_defaults() {
     );
 
     let palette = render_to_text(&state, 100, 30);
-    let trajectory = palette
+    let previous_input = palette
         .lines()
-        .find(|line| line.contains("Open trajectory in browser"))
-        .expect("trajectory command should render");
+        .find(|line| line.contains("Previous user input"))
+        .expect("previous user input command should render");
 
-    assert!(trajectory.contains("Ctrl+N"));
-    assert!(!trajectory.contains("Ctrl+G"));
+    assert!(previous_input.contains("Ctrl+N"));
+    assert!(!previous_input.contains("Alt+U"));
+    assert!(!previous_input.contains("Option+U"));
+
+    #[cfg(feature = "web")]
+    {
+        let trajectory = palette
+            .lines()
+            .find(|line| line.contains("Open trajectory in browser"))
+            .expect("trajectory command should render");
+
+        assert!(trajectory.contains("Ctrl+K"));
+        assert!(!trajectory.contains("Ctrl+G"));
+    }
 }
 
+#[cfg(feature = "web")]
 #[test]
 fn command_palette_exposes_open_trajectory_action() {
     let mut state = TuiState::new(
@@ -200,6 +217,30 @@ fn command_palette_exposes_open_trajectory_action() {
 
     assert_eq!(effect, ControllerEffect::OpenSessionInBrowser);
     assert!(state.overlay().is_none());
+}
+
+#[cfg(not(feature = "web"))]
+#[test]
+fn command_palette_omits_open_trajectory_when_web_is_disabled() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
+        &mut state,
+    );
+    for character in "open trajectory".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+
+    let palette = render_to_text(&state, 100, 30);
+    assert!(!palette.contains("Open trajectory in browser"));
 }
 
 #[test]

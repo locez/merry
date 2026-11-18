@@ -7,6 +7,7 @@ pub(crate) enum PaletteCommand {
     ShowShortcuts,
     ShowHelp,
     ShowStatus,
+    #[cfg(feature = "web")]
     OpenSessionInBrowser,
     ReviewPreviousUserInput,
     OpenCommandDetails,
@@ -68,7 +69,7 @@ impl CommandSpec {
     }
 }
 
-const COMMANDS: [CommandSpec; 22] = [
+const COMMANDS: &[CommandSpec] = &[
     CommandSpec::new(PaletteCommand::OpenSettings, "Merry", "Settings", None),
     CommandSpec::new(
         PaletteCommand::OpenProviders,
@@ -84,6 +85,7 @@ const COMMANDS: [CommandSpec; 22] = [
     ),
     CommandSpec::new(PaletteCommand::ShowHelp, "Merry", "Command help", None)
         .with_slash("help", "List slash commands and essential keys"),
+    #[cfg(feature = "web")]
     CommandSpec::new(
         PaletteCommand::OpenSessionInBrowser,
         "Web",
@@ -179,7 +181,7 @@ pub(crate) enum SlashCommandMatch<'a> {
 }
 
 pub(crate) fn all_commands() -> &'static [CommandSpec] {
-    &COMMANDS
+    COMMANDS
 }
 
 pub(crate) fn slash_commands() -> Vec<&'static CommandSpec> {

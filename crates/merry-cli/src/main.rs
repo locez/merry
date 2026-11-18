@@ -24,6 +24,7 @@ mod testing;
 mod text;
 mod tool_display;
 mod tui;
+#[cfg(feature = "web")]
 mod web;
 mod workspace_trust;
 

@@ -8,14 +8,20 @@ Merry is in active development and has no release yet. The runtime, CLI, TUI, Ru
 
 ## Quick start
 
-Rust 1.95 or newer. The default sandbox needs Linux 5.13 or newer for Landlock; otherwise pass `--sandbox off`. The binary embeds the local trajectory page, so build those assets before Cargo:
+Rust 1.95 or newer. The default sandbox needs Linux 5.13 or newer for Landlock; otherwise pass `--sandbox off`.
 
 ```bash
-cd web && npm ci && npm test && cd ..
 cargo build --release -p merry-cli
 ```
 
-Cargo does not run npm. A missing file under `web/dist/` stops the build and names that file.
+The local Web trajectory view (`Alt+G`) is optional and requires Node.js/npm to build its frontend assets under `web/dist/` before compiling with `--features web`:
+
+```bash
+cd web && npm ci && npm test && cd ..
+cargo build --release -p merry-cli --features web
+```
+
+Cargo does not run npm. With `--features web`, a missing file under `web/dist/` stops the build and names that file.
 
 Copy [`examples/config.toml`](examples/config.toml) to `$XDG_CONFIG_HOME/merry/config.toml`, or to `~/.config/merry/config.toml`. Keep the API key in a separate file and point `api_key_file` at it.
 

@@ -99,7 +99,9 @@ jobs:
           bash .github/scripts/cargo-test-scenario.sh -p merry-cli --bin merry sandbox_supports_symlinked_product_write_roots
 
       - name: Run deterministic Rust suite
-        run: cargo test --locked --all
+        run: |
+          cargo test --locked --all
+          cargo test --locked -p merry-cli --features web
 
       - name: Run Rust lint gate
         run: cargo clippy --locked --all-targets --all-features -- -D warnings

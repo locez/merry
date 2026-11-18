@@ -1,6 +1,8 @@
 //! TUI event-loop and background-task ownership; input translation and effects are separate.
 
 pub(super) use super::controller_provider::provider_discovery_draft;
+#[cfg(feature = "web")]
+use crate::web::RuntimeWebService;
 use crate::{
     cli_error::{CliError, unexpected},
     provider_management::ProviderManagementService,
@@ -14,10 +16,9 @@ use crate::{
         provider_overlay::{ModelPickerTarget, ProviderFormValues},
         render,
         runtime::TuiRuntimeSession,
-        state::{TimelineItem, TuiState},
+        state::TuiState,
         terminal::{TerminalEvent, TerminalSession},
     },
-    web::RuntimeWebService,
 };
 #[cfg(test)]
 pub(super) use effects::persist_submitted_input_history;
@@ -95,6 +96,7 @@ pub(crate) enum ControllerEffect {
     DiscardSuspended,
     PersistPreferences(TuiPreferences),
     ApplyRuntimePreferences(TuiPreferences),
+    #[cfg(feature = "web")]
     OpenSessionInBrowser,
     OpenProviderManager,
     OpenProviderForm,
@@ -180,14 +182,9 @@ pub(crate) async fn run_controller(
     let mut subagent_activity_open = true;
     let mut permission_requests_open = true;
     let mut input_history_warning_shown = false;
+    #[cfg(feature = "web")]
     let mut web_service = RuntimeWebService::new(session.runtime().clone());
     let run_result: Result<(), CliError> = async {
-        if let Err(error) = web_service.start().await {
-            state.push_timeline_item(TimelineItem::Diagnostic {
-                title: "Web service unavailable".to_owned(),
-                body: error.to_string(),
-            });
-        }
         state
             .plan_mut()
             .update_subagent_activity(session.subagent_activity.borrow().clone());
@@ -262,6 +259,7 @@ pub(crate) async fn run_controller(
                             clipboard_image_tx: &clipboard_image_tx,
                             command_output_tx: &command_output_tx,
                             terminal: &mut terminal,
+                            #[cfg(feature = "web")]
                             web_service: &mut web_service,
                             background_tasks: &mut background_tasks,
                         };
@@ -357,7 +355,10 @@ pub(crate) async fn run_controller(
     command_output_rx.close();
     let session_result = session.stream.wait_until_closed().await.map_err(unexpected);
     let tasks_result = drain_background_tasks(&mut background_tasks).await;
+    #[cfg(feature = "web")]
     let web_result = web_service.shutdown().await.map_err(unexpected);
+    #[cfg(not(feature = "web"))]
+    let web_result = Ok(());
     let mut cleanup_result = Ok(());
     for result in [session_result, tasks_result, web_result] {
         if let Err(error) = result {

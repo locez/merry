@@ -1,5 +1,7 @@
 //! Explicit runtime, persistence, clipboard, and provider effect dispatch.
 
+#[cfg(feature = "web")]
+use crate::web::{RuntimeWebService, open_in_browser};
 use crate::{
     cli_error::{CliError, unexpected},
     tui::{
@@ -11,7 +13,6 @@ use crate::{
         runtime::TuiRuntimeSession,
         state::{TimelineItem, TuiState},
     },
-    web::{RuntimeWebService, open_in_browser},
 };
 use merry_runtime::InterruptReason;
 use tokio::{sync::mpsc, task::JoinSet};
@@ -28,6 +29,7 @@ pub(super) struct ControllerServices<'a> {
     pub(super) clipboard_image_tx: &'a mpsc::Sender<ClipboardImageCompletion>,
     pub(super) command_output_tx: &'a mpsc::Sender<CommandOutputCompletion>,
     pub(super) terminal: &'a mut crate::tui::terminal::TerminalSession,
+    #[cfg(feature = "web")]
     pub(super) web_service: &'a mut RuntimeWebService,
     pub(super) background_tasks: &'a mut JoinSet<()>,
 }
@@ -45,6 +47,7 @@ pub(super) async fn dispatch_effect(
         clipboard_image_tx,
         command_output_tx,
         terminal,
+        #[cfg(feature = "web")]
         web_service,
         background_tasks,
     } = services;
@@ -141,6 +144,7 @@ pub(super) async fn dispatch_effect(
             start_clipboard_image_read(clipboard_image_tx.clone(), background_tasks);
             Ok(false)
         }
+        #[cfg(feature = "web")]
         ControllerEffect::OpenSessionInBrowser => {
             let url = match web_service.session_url(&session.metadata.session_id).await {
                 Ok(url) => url,

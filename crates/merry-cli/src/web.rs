@@ -37,7 +37,7 @@ impl RuntimeWebService {
     }
 
     /// Starts the local service if it is not already running.
-    pub(crate) async fn start(&mut self) -> Result<(), WebServerError> {
+    async fn start(&mut self) -> Result<(), WebServerError> {
         if let Some(server) = self.server.as_ref()
             && !server.is_finished()
         {

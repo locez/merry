@@ -8,6 +8,7 @@ pub(crate) enum KeyAction {
     CancelInputOrQuit,
     InsertNewline,
     PasteImage,
+    #[cfg(feature = "web")]
     OpenSessionInBrowser,
     Interrupt,
     OpenCommandPanel,
@@ -121,6 +122,7 @@ impl Default for Keymap {
                     KeyBinding::new(KeyCode::Char('c'), KeyModifiers::ALT),
                     KeyAction::ToggleComment,
                 ),
+                #[cfg(feature = "web")]
                 (
                     KeyBinding::new(KeyCode::Char('g'), KeyModifiers::ALT),
                     KeyAction::OpenSessionInBrowser,
@@ -180,7 +182,11 @@ impl Keymap {
             keymap.set_binding(parse_binding(binding)?, KeyAction::PasteImage);
         }
         if let Some(binding) = config.open_session_in_browser.as_deref() {
-            keymap.set_binding(parse_binding(binding)?, KeyAction::OpenSessionInBrowser);
+            let binding = parse_binding(binding)?;
+            #[cfg(feature = "web")]
+            keymap.set_binding(binding, KeyAction::OpenSessionInBrowser);
+            #[cfg(not(feature = "web"))]
+            let _ = binding;
         }
         if let Some(binding) = config.toggle_plan.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::TogglePlan);
@@ -290,6 +296,7 @@ fn macos_option_letter(glyph: char) -> Option<char> {
     Some(match glyph {
         'ç' => 'c',
         '∂' => 'd',
+        #[cfg(feature = "web")]
         '©' => 'g',
         'π' => 'p',
         '†' => 't',

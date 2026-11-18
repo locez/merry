@@ -356,9 +356,6 @@ fn setting_line_index(item: SettingItem) -> usize {
 }
 
 fn render_shortcuts(frame: &mut Frame<'_>, state: &TuiState) {
-    let region = centered_rect(frame.area(), MAX_OVERLAY_WIDTH, 20);
-    render_surface(frame, state, region, " M  Keyboard shortcuts ");
-    let inner = inset(region, 2, 1);
     let lines = vec![
         shortcut_line_for_action(state, "Submit next", KeyAction::SubmitNext),
         shortcut_line_for_action(state, "Submit backlog", KeyAction::SubmitBacklog),
@@ -366,6 +363,7 @@ fn render_shortcuts(frame: &mut Frame<'_>, state: &TuiState) {
         shortcut_line_for_action(state, "Toggle plan", KeyAction::TogglePlan),
         shortcut_line_for_action(state, "Command output", KeyAction::OpenCommandDetails),
         shortcut_line_for_action(state, "Follow latest", KeyAction::FollowLatest),
+        #[cfg(feature = "web")]
         shortcut_line_for_action(
             state,
             "Open trajectory in browser",
@@ -383,6 +381,10 @@ fn render_shortcuts(frame: &mut Frame<'_>, state: &TuiState) {
         shortcut_line_for_action(state, "Interrupt", KeyAction::Interrupt),
         shortcut_line_for_action(state, "Quit", KeyAction::Quit),
     ];
+    let height = u16::try_from(lines.len()).unwrap_or(14).saturating_add(6);
+    let region = centered_rect(frame.area(), MAX_OVERLAY_WIDTH, height);
+    render_surface(frame, state, region, " M  Keyboard shortcuts ");
+    let inner = inset(region, 2, 1);
     frame.render_widget(Paragraph::new(lines), inner);
 }
 

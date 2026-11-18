@@ -29,7 +29,6 @@ default-members = [
     "crates/merry-provider-anthropic",
     "crates/merry",
     "crates/merry-cli",
-    "crates/merry-web",
     "crates/merry-py",
 ]
 
