@@ -1,15 +1,6 @@
 # Merry
 
-Merry is a terminal coding agent. A model works in your repository through tools, and a Rust runtime owns the session: the ledger, artifacts, compiled context, checkpoints, and permissions. The chat transcript is not the source of truth.
-
-The TUI, `merry run`, the Rust facade, and the Python SDK all sit on that runtime. OpenAI-compatible and Anthropic wire formats stay in provider crates.
-
-## Focus
-
-- **The session is runtime state.** Tool output becomes artifacts and compact ledger updates. A summary can navigate; the exact evidence stays readable.
-- **Actions have a ceiling.** Process actions run in a workspace sandbox. Approval cannot widen the paths, network, or host integrations you configured.
-- **The model contract stays put.** Tools and their order stay stable for the session. Phase, permission, and UI state are runtime policy, not a rewritten prompt.
-- **Notes outlive the conversation.** Durable memory lives under `$XDG_DATA_HOME/merry/memory` (default `~/.local/share/merry/memory`).
+Merry is a terminal coding agent. One Rust runtime owns the session and also serves the Rust and Python APIs.
 
 ## Status
 
