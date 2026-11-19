@@ -20,6 +20,8 @@ use tokio::{
 const MAX_CONSOLE_ENTRIES: usize = 200;
 const MAX_NETWORK_ENTRIES: usize = 200;
 
+type CdpPending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+
 /// Recorded browser console message or uncaught exception.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ConsoleEntry {
@@ -148,7 +150,7 @@ pub(crate) struct CdpSession {
     next_id: AtomicU64,
     closed: Arc<AtomicBool>,
     outgoing_tx: mpsc::Sender<OutgoingCommand>,
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+    pending: CdpPending,
     telemetry: Arc<Mutex<TelemetryState>>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -161,10 +163,7 @@ impl CdpSession {
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<OutgoingCommand>(64);
-        let pending = Arc::new(Mutex::new(HashMap::<
-            u64,
-            oneshot::Sender<Result<Value, String>>,
-        >::new()));
+        let pending = Arc::new(Mutex::new(HashMap::new()));
         let telemetry = Arc::new(Mutex::new(TelemetryState::default()));
         let closed = Arc::new(AtomicBool::new(false));
 
@@ -351,7 +350,7 @@ struct CdpRpcError {
 
 fn handle_cdp_message(
     raw: &str,
-    pending: &Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>,
+    pending: &CdpPending,
     telemetry: &Arc<Mutex<TelemetryState>>,
 ) {
     let Ok(msg) = serde_json::from_str::<CdpInbound>(raw) else {
