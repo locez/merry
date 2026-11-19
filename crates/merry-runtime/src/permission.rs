@@ -15,9 +15,13 @@ use tokio_util::sync::CancellationToken;
 
 const REQUEST_PERMISSIONS_TOOL_NAME: &str = "request_permissions";
 const MAX_PERMISSION_REASON_BYTES: usize = 2048;
+const MAX_REVIEW_RULES_PER_CATEGORY: usize = 64;
+const MAX_REVIEW_RULE_BYTES: usize = 512;
+pub(crate) const MAX_RECORDED_PERMISSION_DECISIONS: usize = 16;
 const DEFAULT_PERMISSION_STDOUT_LIMIT_BYTES: usize = 64 * 1024;
 const DEFAULT_PERMISSION_STDERR_LIMIT_BYTES: usize = 64 * 1024;
 mod channel;
+pub(crate) mod environment;
 mod input;
 mod payload;
 mod request_json;
@@ -27,6 +31,7 @@ pub use channel::{
     ChannelPermissionAdmissionSource, PermissionReviewRequest, PermissionReviewResponse,
     PermissionReviewResponseError,
 };
+pub(crate) use environment::{PermissionReviewEnvironmentMetadata, probe_environment_metadata};
 pub(crate) use input::{
     RequestedCapabilitiesInput, is_request_permissions_tool, normalize_requested_capabilities,
     normalize_requested_path, permission_reason_schema_for_schemars, permission_request_from_call,
@@ -40,6 +45,162 @@ pub(crate) use payload::{
 };
 pub(crate) use request_json::permission_request_fingerprint_json;
 pub(crate) use review::ModelBackedPermissionAdmissionSource;
+
+/// User-trusted custom rules and environment notes for AI permission review.
+///
+/// Sourced exclusively from trusted global configuration (never project-local
+/// hidden files) so a repository cannot silently relax its own review rules.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PermissionReviewRules {
+    environment: Vec<String>,
+    allow: Vec<String>,
+    soft_deny: Vec<String>,
+    hard_deny: Vec<String>,
+}
+
+impl PermissionReviewRules {
+    /// Constructs validated reviewer rules from global configuration lists.
+    pub fn new(
+        environment: Vec<String>,
+        allow: Vec<String>,
+        soft_deny: Vec<String>,
+        hard_deny: Vec<String>,
+    ) -> Result<Self, PermissionAdmissionError> {
+        Ok(Self {
+            environment: validate_review_rule_list("environment", environment)?,
+            allow: validate_review_rule_list("allow", allow)?,
+            soft_deny: validate_review_rule_list("soft_deny", soft_deny)?,
+            hard_deny: validate_review_rule_list("hard_deny", hard_deny)?,
+        })
+    }
+
+    /// Returns whether all four rule lists are empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.environment.is_empty()
+            && self.allow.is_empty()
+            && self.soft_deny.is_empty()
+            && self.hard_deny.is_empty()
+    }
+
+    /// Returns trusted environment context entries.
+    #[must_use]
+    pub fn environment(&self) -> &[String] {
+        &self.environment
+    }
+
+    /// Returns custom routine-allow carve-outs (never override hard-deny).
+    #[must_use]
+    pub fn allow(&self) -> &[String] {
+        &self.allow
+    }
+
+    /// Returns custom soft-deny rules (clearable by explicit user authorization).
+    #[must_use]
+    pub fn soft_deny(&self) -> &[String] {
+        &self.soft_deny
+    }
+
+    /// Returns custom hard-deny rules (critical; never auto-approved).
+    #[must_use]
+    pub fn hard_deny(&self) -> &[String] {
+        &self.hard_deny
+    }
+}
+
+fn validate_review_rule_list(
+    category: &str,
+    entries: Vec<String>,
+) -> Result<Vec<String>, PermissionAdmissionError> {
+    if entries.len() > MAX_REVIEW_RULES_PER_CATEGORY {
+        return Err(PermissionAdmissionError::InvalidArguments {
+            message: format!(
+                "permissions.review.{category} may contain at most {MAX_REVIEW_RULES_PER_CATEGORY} entries"
+            ),
+        });
+    }
+    let mut normalized = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            return Err(PermissionAdmissionError::InvalidArguments {
+                message: format!("permissions.review.{category} entries must not be blank"),
+            });
+        }
+        if trimmed.len() > MAX_REVIEW_RULE_BYTES {
+            return Err(PermissionAdmissionError::InvalidArguments {
+                message: format!(
+                    "permissions.review.{category} entry exceeds {MAX_REVIEW_RULE_BYTES} bytes"
+                ),
+            });
+        }
+        if trimmed.chars().any(char::is_control) {
+            return Err(PermissionAdmissionError::InvalidArguments {
+                message: format!(
+                    "permissions.review.{category} entries must not contain control characters"
+                ),
+            });
+        }
+        normalized.push(trimmed.to_owned());
+    }
+    Ok(normalized)
+}
+
+/// Harness-recorded summary of one prior permission review outcome in this session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecordedPermissionDecision {
+    source: PermissionAdmissionReviewSource,
+    approved: bool,
+    tool_name: String,
+    command: String,
+    requested_json: String,
+}
+
+impl RecordedPermissionDecision {
+    pub(crate) fn from_request_and_decision(
+        request: &PermissionRequest,
+        decision: &PermissionAdmissionDecision,
+    ) -> Self {
+        let PermissionedAction::Process(intent) = request.action();
+        Self {
+            source: decision.review().source(),
+            approved: decision.is_approved(),
+            tool_name: request.tool_name().as_str().to_owned(),
+            command: crate::shell_command_for_argv(intent.argv()),
+            requested_json: request_json::requested_capabilities_json(request.requested())
+                .to_string(),
+        }
+    }
+
+    pub(crate) fn render_json_line(&self) -> String {
+        serde_json::json!({
+            "source": self.source.as_str(),
+            "decision": if self.approved { "approved" } else { "denied" },
+            "tool": sanitize_recorded_field(&self.tool_name),
+            "command": sanitize_recorded_field(&self.command),
+            "requested": sanitize_recorded_field(&self.requested_json),
+        })
+        .to_string()
+    }
+}
+
+fn sanitize_recorded_field(text: &str) -> String {
+    const MAX_LEN: usize = 320;
+    let flattened: String = text
+        .chars()
+        .map(|ch| {
+            if matches!(
+                ch,
+                '\r' | '\n' | '\u{0085}' | '\u{000B}' | '\u{000C}' | '\u{2028}' | '\u{2029}'
+            ) {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect();
+    crate::compaction::bounded_excerpt(&flattened, MAX_LEN)
+}
 
 /// How much runtime should trust the host/runtime owner for permission gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -422,13 +583,24 @@ impl PermissionAdmissionReview {
         self.user_authorization
     }
 
+    /// Returns whether a model approval is internally consistent with Merry's
+    /// admission thresholds.
+    ///
+    /// - `Low` and `Medium` risk actions may auto-approve when grounded in the
+    ///   user's current task (`Medium` or `High` authorization).
+    /// - `High` risk clearable actions may auto-approve only under explicit
+    ///   user direction (`High` authorization).
+    /// - `Critical` (hard-deny) and `Unknown` risk actions never auto-approve.
     fn can_auto_approve(&self) -> bool {
         matches!(
-            self.risk,
-            PermissionReviewRisk::Low | PermissionReviewRisk::Medium
-        ) && matches!(
-            self.user_authorization,
-            PermissionUserAuthorization::Medium | PermissionUserAuthorization::High
+            (self.risk, self.user_authorization),
+            (
+                PermissionReviewRisk::Low | PermissionReviewRisk::Medium,
+                PermissionUserAuthorization::Medium | PermissionUserAuthorization::High,
+            ) | (
+                PermissionReviewRisk::High,
+                PermissionUserAuthorization::High
+            )
         )
     }
 }

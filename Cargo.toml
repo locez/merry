@@ -79,6 +79,8 @@ tower = "0.5"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json", "env-filter"] }
+tree-sitter = "0.26"
+tree-sitter-bash = "0.25"
 tempfile = "3"
 two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
 unicode-width = "0.2"

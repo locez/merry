@@ -10,7 +10,7 @@ use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::FileSessionStore;
 #[cfg(test)]
 use merry_runtime::Runtime;
-use merry_runtime::{CompactionConfig, LoadedSession, RegisteredTool};
+use merry_runtime::{CompactionConfig, LoadedSession, PermissionReviewRules, RegisteredTool};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -60,14 +60,19 @@ pub(crate) fn build_headless_coding(
 pub(crate) fn build_headless_coding_composition(
     input: HeadlessCodingRuntimeInput<'_>,
 ) -> Result<SharedCodingRuntime, CodingRuntimeError> {
-    build_headless_coding_with_policy_composition(input, CodingPermissionPolicy::default())
+    build_headless_coding_with_policy_composition(
+        input,
+        CodingPermissionPolicy::default(),
+        PermissionReviewRules::default(),
+    )
 }
 
 pub(crate) fn build_headless_coding_with_policy_composition(
     input: HeadlessCodingRuntimeInput<'_>,
     permission: CodingPermissionPolicy,
+    review_rules: PermissionReviewRules,
 ) -> Result<SharedCodingRuntime, CodingRuntimeError> {
-    build_coding_runtime_from_headless_input(input, permission)?
+    build_coding_runtime_from_headless_input(input, permission, review_rules)?
         .build()
         .map_err(CodingRuntimeError::from)
 }
@@ -78,7 +83,7 @@ async fn resume_headless_coding_composition_with_policy(
     store: FileSessionStore,
     permission: CodingPermissionPolicy,
 ) -> Result<SharedCodingRuntime, CodingRuntimeError> {
-    build_coding_runtime_from_headless_input(input, permission)?
+    build_coding_runtime_from_headless_input(input, permission, PermissionReviewRules::default())?
         .resume_from_store_without_automatic_savepoints(store)
         .await
         .map_err(CodingRuntimeError::from)
@@ -88,8 +93,9 @@ pub(crate) fn resume_headless_coding_composition_with_loaded_session(
     input: HeadlessCodingRuntimeInput<'_>,
     loaded: LoadedSession,
     permission: CodingPermissionPolicy,
+    review_rules: PermissionReviewRules,
 ) -> Result<SharedCodingRuntime, CodingRuntimeError> {
-    build_coding_runtime_from_headless_input(input, permission)?
+    build_coding_runtime_from_headless_input(input, permission, review_rules)?
         .with_loaded_session(loaded)
         .build()
         .map_err(CodingRuntimeError::from)
@@ -145,6 +151,7 @@ pub(crate) fn build_coding_runtime(
 fn build_coding_runtime_from_headless_input(
     input: HeadlessCodingRuntimeInput<'_>,
     permission: CodingPermissionPolicy,
+    review_rules: PermissionReviewRules,
 ) -> Result<CodingRuntimeBuilder, CodingRuntimeError> {
     let session_id = merry_core::SessionId::new(input.session_id)?;
     let mut coding_input = CodingRuntimeInput::new(
@@ -157,7 +164,8 @@ fn build_coding_runtime_from_headless_input(
     .with_extra_tools(input.extra_tools)
     .with_automatic_compaction(input.automatic_compaction)
     .with_skill_roots(input.skill_roots)
-    .with_subagents(input.subagents);
+    .with_subagents(input.subagents)
+    .with_permission_review_rules(review_rules);
     if let Some(limits) = input.workspace_tool_limits {
         coding_input = coding_input.with_workspace_tool_limits(limits);
     }

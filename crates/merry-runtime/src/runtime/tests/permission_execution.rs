@@ -529,3 +529,135 @@ async fn request_permissions_review_falls_back_to_primary_model() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].model().as_str(), "fake/primary");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn permission_review_injects_custom_rules_and_prior_host_decisions() {
+    let review_provider = RecordingModelProvider::with_script(vec![
+        ScriptedModelProviderResponse::Stream(vec![Ok(permission_review_completed_event(
+            "deny",
+            "First pass asks host to confirm.",
+        ))]),
+        ScriptedModelProviderResponse::Stream(vec![Ok(permission_review_completed_event(
+            "approve",
+            "Approved using prior host decision and trusted rules.",
+        ))]),
+    ]);
+    let host_admission = StaticPermissionAdmissionSource::approving();
+    struct RepeatingSuccessRunner;
+    impl crate::ProcessRunner for RepeatingSuccessRunner {
+        fn run<'a>(
+            &'a self,
+            intent: crate::ProcessActionIntent,
+            _context: crate::ProcessRunnerContext,
+        ) -> crate::ProcessRunnerFuture<'a> {
+            Box::pin(async move {
+                crate::ProcessRunnerOutput::new(
+                    &intent,
+                    crate::ProcessExitStatus::Exited(0),
+                    "ok\n".to_owned(),
+                    false,
+                    String::new(),
+                    false,
+                )
+                .map_err(|source| crate::ProcessRunnerError::infrastructure(source.to_string()))
+            })
+        }
+    }
+    let custom_rules = crate::PermissionReviewRules::new(
+        vec!["Internal mirror: https://mirror.example.test".to_owned()],
+        vec!["Running cargo test with network against internal mirror".to_owned()],
+        vec!["Publishing crates".to_owned()],
+        vec!["Touching prod cluster".to_owned()],
+    )
+    .expect("valid custom review rules");
+
+    let (runtime, first_pending) = register_permission_pending_tool_with_builder(
+        "runtime-permission-recorded-decisions",
+        "call-permission-recorded-1",
+        |builder| {
+            builder
+                .permission_review_mode(crate::PermissionReviewMode::ModelThenHostFallback)
+                .permission_review_rules(custom_rules.clone())
+                .permission_admission_source(Arc::new(host_admission.clone()))
+                .model_provider_for_role(
+                    RuntimeModelRole::ApprovalReview,
+                    Arc::new(review_provider.clone()),
+                    named_model("fake/approval-review"),
+                )
+                .allow_permissioned_process_actions(Arc::new(RepeatingSuccessRunner))
+                .build()
+        },
+    )
+    .await;
+
+    let first_events = runtime
+        .execute_tool_call(first_pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("first permission call should escalate to host and succeed");
+    assert_eq!(
+        resolved_tool_result(&first_events).status(),
+        ToolCallResultStatus::Succeeded
+    );
+    assert_eq!(host_admission.call_count(), 1);
+
+    let second_pending = PendingToolCall::new(
+        ToolCallId::new("call-permission-recorded-2").expect("valid call id"),
+        ToolName::new("request_permissions").expect("valid tool name"),
+        ToolCallArguments::try_from(serde_json::json!({
+            "reason": "Run cargo test again with network",
+            "requested": { "network": true },
+            "for_action": { "command": "cargo test --lib", "cwd": "." },
+        }))
+        .expect("valid permission arguments"),
+    );
+    {
+        let mut session = runtime.inner.session.lock().await;
+        session
+            .record_test_tool_call_pending(second_pending.clone())
+            .expect("second pending call should record");
+    }
+
+    let second_events = runtime
+        .execute_tool_call(second_pending.id(), ToolExecutionContext::default())
+        .await
+        .expect("second permission call should succeed via model review");
+    assert_eq!(
+        resolved_tool_result(&second_events).status(),
+        ToolCallResultStatus::Succeeded
+    );
+    assert_eq!(host_admission.call_count(), 1);
+
+    let recorded_requests = review_provider.recorded_requests();
+    assert_eq!(recorded_requests.len(), 2);
+    // First review had no prior decisions or workspace git probe: [System(static), User].
+    assert_eq!(recorded_requests[0].messages().len(), 2);
+    // Second review carries prior host decisions in a dedicated second System message:
+    // [System(static), System(harness facts), User(untrusted evidence)].
+    assert_eq!(recorded_requests[1].messages().len(), 3);
+    assert_eq!(
+        recorded_requests[1].messages()[0].role(),
+        merry_llm::ModelMessageRole::System
+    );
+    assert_eq!(
+        recorded_requests[1].messages()[1].role(),
+        merry_llm::ModelMessageRole::System
+    );
+    assert_eq!(
+        recorded_requests[1].messages()[2].role(),
+        merry_llm::ModelMessageRole::User
+    );
+    let system_prompt = recorded_requests[1].messages()[0].content().as_text();
+    let harness_system_prompt = recorded_requests[1].messages()[1].content().as_text();
+    let second_user_prompt = recorded_requests[1].messages()[2].content().as_text();
+    assert!(system_prompt.contains("User-Configured Review Policy"));
+    assert!(system_prompt.contains("Internal mirror: https://mirror.example.test"));
+    assert!(system_prompt.contains("Touching prod cluster"));
+    assert!(harness_system_prompt.contains(">>> HARNESS RECORDED PERMISSION DECISIONS START"));
+    assert!(harness_system_prompt.contains("\"source\":\"host\""));
+    assert!(harness_system_prompt.contains("\"decision\":\"approved\""));
+    assert!(harness_system_prompt.contains("\"command\":\"cargo test\""));
+    assert!(
+        !second_user_prompt.contains("HARNESS RECORDED PERMISSION DECISIONS"),
+        "trusted harness decisions must live in a dedicated System message, not the User message"
+    );
+}

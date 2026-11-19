@@ -91,21 +91,44 @@ pub(crate) struct PlanApprovalOverlay {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PermissionReviewOverlay {
-    approval_id: String,
-    body: String,
+    view: crate::permission_prompt::PermissionReviewView,
+    scroll: u16,
 }
 
 impl PermissionReviewOverlay {
+    #[cfg(test)]
     pub(crate) fn new(approval_id: String, body: String) -> Self {
-        Self { approval_id, body }
+        Self::from_view(
+            crate::permission_prompt::PermissionReviewView::from_plain_text(approval_id, body),
+        )
+    }
+
+    pub(crate) fn from_view(view: crate::permission_prompt::PermissionReviewView) -> Self {
+        Self { view, scroll: 0 }
     }
 
     pub(crate) fn approval_id(&self) -> &str {
-        &self.approval_id
+        &self.view.approval_id
     }
 
-    pub(crate) fn body(&self) -> &str {
-        &self.body
+    pub(crate) fn view(&self) -> &crate::permission_prompt::PermissionReviewView {
+        &self.view
+    }
+
+    pub(crate) const fn scroll(&self) -> u16 {
+        self.scroll
+    }
+
+    pub(crate) fn scroll_up(&mut self, lines: u16) {
+        self.scroll = self.scroll.saturating_sub(lines);
+    }
+
+    pub(crate) fn scroll_down(&mut self, lines: u16) {
+        self.scroll = self.scroll.saturating_add(lines);
+    }
+
+    pub(crate) fn set_queue_total(&mut self, total: usize) {
+        self.view.queue_total = total.max(1);
     }
 }
 
@@ -482,8 +505,15 @@ impl Overlay {
         Self::PlanApproval(PlanApprovalOverlay::new(message, input))
     }
 
+    #[cfg(test)]
     pub(crate) fn permission_review(approval_id: String, body: String) -> Self {
         Self::PermissionReview(PermissionReviewOverlay::new(approval_id, body))
+    }
+
+    pub(crate) fn permission_review_view(
+        view: crate::permission_prompt::PermissionReviewView,
+    ) -> Self {
+        Self::PermissionReview(PermissionReviewOverlay::from_view(view))
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
@@ -546,6 +576,22 @@ impl Overlay {
                 }
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
                     OverlayKeyResult::DenyPermission(review.approval_id().to_owned())
+                }
+                KeyCode::Up => {
+                    review.scroll_up(1);
+                    OverlayKeyResult::Consumed
+                }
+                KeyCode::Down => {
+                    review.scroll_down(1);
+                    OverlayKeyResult::Consumed
+                }
+                KeyCode::PageUp => {
+                    review.scroll_up(5);
+                    OverlayKeyResult::Consumed
+                }
+                KeyCode::PageDown => {
+                    review.scroll_down(5);
+                    OverlayKeyResult::Consumed
                 }
                 _ => OverlayKeyResult::Consumed,
             },

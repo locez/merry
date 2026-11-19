@@ -25,6 +25,7 @@ pub(crate) fn validate_loaded_config(
     let _ = automatic_compaction_config(Some(config))?;
     let _ = subagents_config(Some(config))?;
     let _ = config.trusted_global_path_rules()?;
+    let _ = config.permission_review_rules()?;
     let _ = config.process_environment_overrides()?;
     let _ = config.skill_roots()?;
     let _ = config.runtime_models()?;
@@ -204,8 +205,14 @@ pub(crate) fn configured_runtime_builder(
     session_id: SessionId,
     config: Option<&MerryConfig>,
 ) -> Result<RuntimeBuilder, CliError> {
+    let review_rules = config
+        .map(MerryConfig::permission_review_rules)
+        .transpose()
+        .map_err(unexpected)?
+        .unwrap_or_default();
     Ok(Runtime::builder(session_id)
-        .automatic_compaction(automatic_compaction_config(config).map_err(unexpected)?))
+        .automatic_compaction(automatic_compaction_config(config).map_err(unexpected)?)
+        .permission_review_rules(review_rules))
 }
 
 pub(crate) async fn prepared_action_process_backend_options(

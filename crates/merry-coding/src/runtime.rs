@@ -15,9 +15,9 @@ use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_process::ProcessBackend;
 use merry_runtime::{
     AgentLoopConfig, AgentLoopConfigError, ChildRuntimeFactory, CompactionConfig, DurableMemory,
-    FileSessionStore, LoadedSession, RegisteredTool, Runtime, RuntimeBuilder, RuntimeError,
-    RuntimeModelRole, SkillCatalog, SkillError, SubagentConfig, SubagentError, SubagentManager,
-    subagent_registered_tools,
+    FileSessionStore, LoadedSession, PermissionReviewRules, RegisteredTool, Runtime,
+    RuntimeBuilder, RuntimeError, RuntimeModelRole, SkillCatalog, SkillError, SubagentConfig,
+    SubagentError, SubagentManager, subagent_registered_tools,
 };
 use merry_tools::WorkspaceToolLimits;
 pub use permission_policy::{
@@ -93,6 +93,8 @@ pub enum CodingModelRoleConfigError {
 pub(crate) struct CodingRuntimePolicy {
     model_roles: Vec<CodingModelRoleConfig>,
     permission: CodingPermissionPolicy,
+    permission_review_rules: PermissionReviewRules,
+    permission_review_workspace_root: Option<PathBuf>,
 }
 
 impl CodingRuntimePolicy {
@@ -109,7 +111,22 @@ impl CodingRuntimePolicy {
         Ok(Self {
             model_roles,
             permission,
+            permission_review_rules: PermissionReviewRules::default(),
+            permission_review_workspace_root: None,
         })
+    }
+
+    pub(crate) fn with_permission_review_rules(mut self, rules: PermissionReviewRules) -> Self {
+        self.permission_review_rules = rules;
+        self
+    }
+
+    pub(crate) fn with_permission_review_workspace_root(
+        mut self,
+        root: impl Into<PathBuf>,
+    ) -> Self {
+        self.permission_review_workspace_root = Some(root.into());
+        self
     }
 
     pub(crate) fn role(&self, target: RuntimeModelRole) -> Option<&CodingModelRoleConfig> {
@@ -120,6 +137,12 @@ impl CodingRuntimePolicy {
         for role in &self.model_roles {
             builder =
                 builder.model_provider_for_role(role.role(), role.provider(), role.model().clone());
+        }
+        if !self.permission_review_rules.is_empty() {
+            builder = builder.permission_review_rules(self.permission_review_rules.clone());
+        }
+        if let Some(root) = &self.permission_review_workspace_root {
+            builder = builder.permission_review_workspace_root(root.clone());
         }
         self.permission.apply_to(builder)
     }
@@ -196,6 +219,7 @@ pub struct CodingRuntimeInput {
     /// `apply_patch` cannot write.
     workspace_writable: bool,
     durable_memory: Option<Arc<DurableMemory>>,
+    permission_review_rules: PermissionReviewRules,
 }
 
 impl CodingRuntimeInput {
@@ -223,6 +247,7 @@ impl CodingRuntimeInput {
             workspace_tool_limits: WorkspaceToolLimits::default(),
             workspace_writable: true,
             durable_memory: None,
+            permission_review_rules: PermissionReviewRules::default(),
         }
     }
 
@@ -259,6 +284,7 @@ impl CodingRuntimeInput {
             workspace_tool_limits: WorkspaceToolLimits::default(),
             workspace_writable: true,
             durable_memory: None,
+            permission_review_rules: PermissionReviewRules::default(),
         }
     }
 
@@ -335,6 +361,14 @@ impl CodingRuntimeInput {
     #[must_use]
     pub fn with_workspace_tool_limits(mut self, limits: WorkspaceToolLimits) -> Self {
         self.workspace_tool_limits = limits;
+        self
+    }
+
+    /// Sets user-trusted custom rules for AI permission review, inherited by
+    /// both parent and child coding runtimes.
+    #[must_use]
+    pub fn with_permission_review_rules(mut self, rules: PermissionReviewRules) -> Self {
+        self.permission_review_rules = rules;
         self
     }
 }
@@ -454,9 +488,12 @@ impl CodingRuntimeBuilder {
             workspace_tool_limits,
             workspace_writable,
             durable_memory,
+            permission_review_rules,
         } = input;
 
-        let policy = CodingRuntimePolicy::try_new(model_roles, permission)?;
+        let policy = CodingRuntimePolicy::try_new(model_roles, permission)?
+            .with_permission_review_rules(permission_review_rules)
+            .with_permission_review_workspace_root(root.clone());
 
         let project_rules = if workspace_writable {
             load_root_project_rules(&root)?

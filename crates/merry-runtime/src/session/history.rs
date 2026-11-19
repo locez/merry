@@ -13,6 +13,9 @@ use super::transcript::{
 };
 
 const PERMISSION_REVIEW_ENTRY_MAX_BYTES: usize = 2048;
+const PERMISSION_REVIEW_TOOL_ARGS_MAX_BYTES: usize = 512;
+const PERMISSION_REVIEW_SUCCEEDED_TOOL_CONTENT_MAX_BYTES: usize = 256;
+const PERMISSION_REVIEW_FAILED_TOOL_CONTENT_MAX_BYTES: usize = 1024;
 
 /// Fixed JSON keys, tags, ids, and separators one payload item adds beyond its text.
 ///
@@ -49,6 +52,11 @@ pub(super) enum CompactionHistoryItemKind<'a> {
 }
 
 impl<'a> CompactionHistoryItem<'a> {
+    /// Returns whether this item is one user message.
+    pub(super) const fn is_user(&self) -> bool {
+        matches!(self.kind, CompactionHistoryItemKind::User { .. })
+    }
+
     /// Returns whether this item is one tool exchange, call and result together.
     pub(super) const fn is_tool_exchange(&self) -> bool {
         matches!(self.kind, CompactionHistoryItemKind::ToolExchange { .. })
@@ -261,6 +269,13 @@ impl<'a> CompactionHistoryItem<'a> {
     }
 }
 
+pub(super) fn permission_review_task_anchor_entry(objective: &str) -> PermissionReviewContextEntry {
+    PermissionReviewContextEntry::new(
+        "task_anchor",
+        crate::compaction::bounded_excerpt(objective, PERMISSION_REVIEW_ENTRY_MAX_BYTES),
+    )
+}
+
 pub(super) fn permission_review_context_entry(
     item: &CompactionHistoryItem<'_>,
 ) -> PermissionReviewContextEntry {
@@ -281,13 +296,24 @@ pub(super) fn permission_review_context_entry(
         } => {
             let arguments_json = serde_json::to_string(call.arguments().as_object())
                 .unwrap_or_else(|_| "<unserializable arguments>".to_owned());
+            let arguments_preview = crate::compaction::bounded_excerpt(
+                &arguments_json,
+                PERMISSION_REVIEW_TOOL_ARGS_MAX_BYTES,
+            );
+            let content_limit = match result.status() {
+                merry_core::ToolCallResultStatus::Failed => {
+                    PERMISSION_REVIEW_FAILED_TOOL_CONTENT_MAX_BYTES
+                }
+                merry_core::ToolCallResultStatus::Succeeded => {
+                    PERMISSION_REVIEW_SUCCEEDED_TOOL_CONTENT_MAX_BYTES
+                }
+            };
             let text = format!(
-                "tool_call:{} arguments:{} result_status:{} artifact:{} content:{}",
+                "tool_call:{} arguments:{} result_status:{} content:{}",
                 call.name(),
-                arguments_json,
+                arguments_preview,
                 tool_call_result_status_label(result.status()),
-                result.artifact().id(),
-                artifact_content_preview(content, PERMISSION_REVIEW_ENTRY_MAX_BYTES),
+                artifact_content_preview(content, content_limit),
             );
             PermissionReviewContextEntry::new(
                 "tool",

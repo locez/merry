@@ -55,6 +55,82 @@ fn permission_review_overlay_exposes_allow_and_reject_actions_with_exact_id() {
 }
 
 #[test]
+fn structured_permission_review_renders_hierarchy_badges_queue_and_scrolls() {
+    use crate::permission_prompt::{
+        PermissionCapabilityBadge, PermissionFallbackNotice, PermissionReviewView,
+    };
+    use merry_runtime::{PathAccess, PermissionReviewRisk, PermissionUserAuthorization};
+
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.open_permission_review_view(PermissionReviewView {
+        approval_id: "approval-rich".to_owned(),
+        command: "git push origin fix/review-ui".to_owned(),
+        cwd: ".".to_owned(),
+        capabilities: vec![
+            PermissionCapabilityBadge::Network,
+            PermissionCapabilityBadge::Path {
+                path: "/tmp".to_owned(),
+                access: PathAccess::ReadWrite,
+            },
+            PermissionCapabilityBadge::HostIntegration("ssh-agent".to_owned()),
+        ],
+        review_only: false,
+        agent_reason: Some("Push verified commits to the remote branch.".to_owned()),
+        fallback: Some(PermissionFallbackNotice::ModelDenied {
+            risk: PermissionReviewRisk::High,
+            user_authorization: PermissionUserAuthorization::Medium,
+            rationale: "Remote push requires explicit user direction for the target branch."
+                .to_owned(),
+        }),
+        queue_total: 3,
+        plain_body: None,
+    });
+
+    let rendered = render_to_text(&state, 88, 26);
+    assert!(rendered.contains("Allow this command?"), "{rendered}");
+    assert!(rendered.contains("[HIGH RISK]"), "{rendered}");
+    assert!(rendered.contains("1/3"), "{rendered}");
+    assert!(rendered.contains("COMMAND"), "{rendered}");
+    assert!(
+        rendered.contains("$ git push origin fix/review-ui"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("CAPABILITIES"), "{rendered}");
+    assert!(rendered.contains("[network]"), "{rendered}");
+    assert!(rendered.contains("[rw /tmp]"), "{rendered}");
+    assert!(rendered.contains("[ssh-agent]"), "{rendered}");
+    assert!(rendered.contains("AI REVIEW"), "{rendered}");
+    assert!(rendered.contains("auth: medium"), "{rendered}");
+    assert!(
+        rendered.contains("Remote push requires explicit user direction"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("REASON"), "{rendered}");
+    assert!(rendered.contains("[Allow]"), "{rendered}");
+    assert!(rendered.contains("[Don't allow]"), "{rendered}");
+    assert!(rendered.contains("Enter/Y allow"), "{rendered}");
+
+    // Scrolling updates the overlay offset without closing or deciding.
+    assert_eq!(
+        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state),
+        ControllerEffect::None
+    );
+    assert_eq!(
+        handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &mut state),
+        ControllerEffect::None
+    );
+    assert!(matches!(
+        state.overlay(),
+        Some(crate::tui::overlay::Overlay::PermissionReview(_))
+    ));
+}
+
+#[test]
 fn provider_manager_escape_returns_to_settings_when_opened_from_settings() {
     let mut state = TuiState::new(
         "/repo".into(),

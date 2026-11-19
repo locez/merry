@@ -170,13 +170,13 @@ pub(super) async fn dispatch_effect(
         }
         ControllerEffect::ApprovePermission(approval_id) => {
             if let Some(next) = session.resolve_permission_review(&approval_id, true)? {
-                state.open_permission_review(next.0, next.1);
+                state.open_permission_review_view(next);
             }
             Ok(false)
         }
         ControllerEffect::DenyPermission(approval_id) => {
             if let Some(next) = session.resolve_permission_review(&approval_id, false)? {
-                state.open_permission_review(next.0, next.1);
+                state.open_permission_review_view(next);
             }
             Ok(false)
         }

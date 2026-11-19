@@ -121,8 +121,8 @@ pub use permission::{
     PermissionAdmissionFuture, PermissionAdmissionReview, PermissionAdmissionReviewSource,
     PermissionAdmissionSource, PermissionRequest, PermissionReviewMode, PermissionReviewRequest,
     PermissionReviewResponse, PermissionReviewResponseError, PermissionReviewRisk,
-    PermissionUserAuthorization, PermissionedAction, RequestedCapability, RequestedPathCapability,
-    RuntimeTrustLevel, parse_permission_request, request_permissions_tool,
+    PermissionReviewRules, PermissionUserAuthorization, PermissionedAction, RequestedCapability,
+    RequestedPathCapability, RuntimeTrustLevel, parse_permission_request, request_permissions_tool,
 };
 pub use plan::{
     BeginPlanInput, BeginPlanOutput, ControlPlanAttemptInput, PlanApprovalInput, PlanChangeInput,

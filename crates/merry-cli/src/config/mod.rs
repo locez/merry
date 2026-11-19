@@ -1,4 +1,6 @@
-use merry_runtime::{HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource};
+use merry_runtime::{
+    HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource, PermissionReviewRules,
+};
 use serde::Deserialize;
 use std::{
     collections::BTreeSet,
@@ -264,6 +266,29 @@ impl MerryConfig {
         integrations
     }
 
+    /// Returns user-trusted custom rules for AI permission review from global
+    /// config (`[permissions.review]`).
+    ///
+    /// Rules live only in global `$XDG_CONFIG_HOME/merry/config.toml` so
+    /// project-local repositories cannot silently weaken review boundaries.
+    pub fn permission_review_rules(&self) -> Result<PermissionReviewRules, ConfigError> {
+        let Some(review) = self
+            .raw
+            .permissions
+            .as_ref()
+            .and_then(|permissions| permissions.review.as_ref())
+        else {
+            return Ok(PermissionReviewRules::default());
+        };
+        PermissionReviewRules::new(
+            review.environment.clone(),
+            review.allow.clone(),
+            review.soft_deny.clone(),
+            review.hard_deny.clone(),
+        )
+        .map_err(|error| ConfigError::Invalid(error.to_string()))
+    }
+
     pub fn process_environment_overrides(&self) -> Result<Vec<(String, String)>, ConfigError> {
         let Some(permissions) = self.raw.permissions.as_ref() else {
             return Ok(Vec::new());
@@ -431,6 +456,20 @@ struct PermissionsToml {
     paths: Vec<PathRuleToml>,
     #[serde(default)]
     environment: Vec<EnvironmentVariableToml>,
+    review: Option<PermissionReviewToml>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PermissionReviewToml {
+    #[serde(default)]
+    environment: Vec<String>,
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    soft_deny: Vec<String>,
+    #[serde(default)]
+    hard_deny: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]

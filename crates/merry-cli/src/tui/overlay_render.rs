@@ -4,7 +4,7 @@ use super::{
     overlay::SettingItem,
     overlay::{
         CommandPalette, CommandSpec, MessageDialogKind, MessageDialogOverlay, Overlay,
-        PermissionReviewOverlay, PlanApprovalOverlay,
+        PlanApprovalOverlay,
     },
     state::TuiState,
     theme::{SemanticColor, dim_color},
@@ -124,7 +124,9 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
             super::provider_render::render_reasoning_picker(frame, state, picker)
         }
         Overlay::PlanApproval(approval) => render_plan_approval(frame, state, approval),
-        Overlay::PermissionReview(review) => render_permission_review(frame, state, review),
+        Overlay::PermissionReview(review) => {
+            super::permission_render::render_permission_review(frame, state, review)
+        }
         Overlay::Dialog(dialog) => render_message_dialog(frame, state, dialog),
         Overlay::Shortcuts(_) => render_shortcuts(frame, state),
     }
@@ -153,37 +155,6 @@ fn render_plan_approval(frame: &mut Frame<'_>, state: &TuiState, approval: &Plan
     );
     frame.render_widget(
         Paragraph::new(chip_line(state, &["Approve", "Back"])),
-        split.footer,
-    );
-}
-
-fn render_permission_review(
-    frame: &mut Frame<'_>,
-    state: &TuiState,
-    review: &PermissionReviewOverlay,
-) {
-    let split = permission_split(frame.area(), review.body());
-    let region = split.region;
-    frame.render_widget(Clear, region);
-    frame.render_widget(
-        Block::default()
-            .title(" Allow this command? ")
-            .borders(Borders::ALL)
-            .border_type(BorderType::Plain)
-            .border_style(
-                semantic_style(state, SemanticColor::Warning).add_modifier(Modifier::BOLD),
-            )
-            .style(code_surface_style(state)),
-        region,
-    );
-    frame.render_widget(
-        Paragraph::new(review.body().to_owned())
-            .style(semantic_style(state, SemanticColor::Assistant))
-            .wrap(Wrap { trim: false }),
-        split.body,
-    );
-    frame.render_widget(
-        Paragraph::new(chip_line(state, &["Allow", "Don't allow"])),
         split.footer,
     );
 }
@@ -621,16 +592,7 @@ pub(crate) fn overlay_pointer(
             }
         }
         Overlay::PermissionReview(review) => {
-            let footer = permission_split(area, review.body()).footer;
-            match chip_hit(
-                Position::new(footer.x, footer.y),
-                &["Allow", "Don't allow"],
-                position,
-            ) {
-                Some(0) => Some(OverlayPointer::PermissionAllow),
-                Some(1) => Some(OverlayPointer::PermissionReject),
-                _ => None,
-            }
+            super::permission_render::permission_review_pointer(state, area, review, position)
         }
         Overlay::Dialog(dialog) => {
             let footer = dialog_split(area, dialog.message()).footer;
@@ -668,22 +630,6 @@ fn approval_split(area: Rect, message: &str) -> OverlaySplit {
         .unwrap_or(24)
         .clamp(10, area.height.saturating_sub(2).min(24));
     split_overlay(area, desired_width, desired_height, 1)
-}
-
-fn permission_split(area: Rect, body: &str) -> OverlaySplit {
-    let desired_width = area.width.saturating_sub(4).min(MAX_OVERLAY_WIDTH);
-    let content_width = usize::from(desired_width.saturating_sub(4)).max(1);
-    let body_lines = estimated_wrapped_lines(body, content_width);
-    let available_height = area.height.saturating_sub(2);
-    let max_height = if available_height < 12 {
-        12
-    } else {
-        available_height.min(28)
-    };
-    let desired_height = u16::try_from(body_lines.saturating_add(7))
-        .unwrap_or(26)
-        .clamp(12, max_height);
-    split_overlay(area, desired_width, desired_height, 2)
 }
 
 fn dialog_split(area: Rect, message: &str) -> OverlaySplit {

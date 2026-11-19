@@ -464,3 +464,166 @@ fn sp3a_low_risk_process_admission_rejects_stdin_or_env() {
     );
     assert!(!is_low_risk_process_action_intent(&env_intent));
 }
+
+#[test]
+fn shell_forbidden_classification_ignores_non_executable_arguments_and_catches_nested_commands() {
+    for argv in [
+        vec!["bash", "-lc", "rg rm src/ 2>&1"],
+        vec!["bash", "-lc", "echo \"use bash and sudo\" 2>&1"],
+        vec!["bash", "-lc", "git log --grep=\"reset\" 2>&1 | head -n 20"],
+        vec!["bash", "-lc", "rm temp.txt 2>&1"],
+        vec!["bash", "-lc", "git stash list"],
+        vec!["bash", "-lc", "git stash show"],
+    ] {
+        let intent = ProcessActionIntent::new(
+            argv.into_iter().map(str::to_owned).collect(),
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("valid process intent");
+        assert!(
+            !requires_process_action_review(&intent),
+            "ordinary command should not false-trigger forbidden review: {:?}",
+            intent.argv()
+        );
+    }
+
+    for argv in [
+        vec!["bash", "-lc", "echo \"$(rm -rf target)\""],
+        vec!["bash", "-lc", "echo `sudo id`"],
+        vec!["bash", "-lc", "if true; then rm -rf target; fi"],
+        vec!["bash", "-lc", "env FOO=1 timeout 5 sudo ls"],
+        vec!["bash", "-lc", "git -C subdir reset --hard"],
+        vec!["bash", "-lc", "rm -f $TARGET"],
+        vec!["bash", "-lc", "rm -f *.rs"],
+        vec!["bash", "-lc", "git stash drop"],
+        vec!["bash", "-lc", "echo \"unclosed quote rm -rf target"],
+    ] {
+        let intent = ProcessActionIntent::new(
+            argv.into_iter().map(str::to_owned).collect(),
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("valid process intent");
+        assert!(
+            requires_process_action_review(&intent),
+            "nested/dynamic forbidden command must stay reviewed: {:?}",
+            intent.argv()
+        );
+    }
+}
+
+#[test]
+fn host_process_path_review_allows_read_only_git_and_network_urls_while_catching_writes() {
+    for argv in [
+        vec!["git", "diff", "--cached"],
+        vec!["git", "status", "-sb"],
+        vec!["git", "rev-parse", "HEAD"],
+        vec!["git", "log", "-n", "5", "--oneline"],
+        vec!["git", "branch", "-a"],
+        vec!["git", "remote", "-v"],
+        vec!["git", "tag", "-l"],
+        vec!["git", "stash", "list"],
+        vec!["git", "worktree", "list"],
+        vec!["bash", "-lc", "git diff --cached 2>&1 | head -n 20"],
+        vec!["bash", "-lc", "curl -sI https://example.com"],
+    ] {
+        let intent = ProcessActionIntent::new(
+            argv.into_iter().map(str::to_owned).collect(),
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("valid process intent");
+        assert!(
+            !requires_host_process_path_review(&intent),
+            "read-only git or network URL should not trigger host path review: {:?}",
+            intent.argv()
+        );
+    }
+
+    for argv in [
+        vec!["git", "add", "Cargo.toml"],
+        vec!["git", "commit", "-m", "wip"],
+        vec!["git", "branch", "new-topic"],
+        vec!["git", "tag", "v1.0.0"],
+        vec!["git", "config", "user.name", "test"],
+        vec!["git", "-c", "core.pager=cat", "status"],
+        vec!["git", "diff", "--output=patch.diff"],
+        vec!["bash", "-lc", "curl file:///etc/passwd"],
+        vec!["bash", "-lc", "git status && git commit -m \"wip\""],
+    ] {
+        let intent = ProcessActionIntent::new(
+            argv.into_iter().map(str::to_owned).collect(),
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("valid process intent");
+        assert!(
+            requires_host_process_path_review(&intent),
+            "git write, config override, or file URL must stay reviewed: {:?}",
+            intent.argv()
+        );
+    }
+}
+
+#[test]
+fn tree_sitter_bash_analysis_detects_env_injection_and_ignores_comments_or_quoted_literals() {
+    for argv in [
+        vec!["bash", "-lc", "LD_PRELOAD=/tmp/evil.so cargo test"],
+        vec![
+            "bash",
+            "-lc",
+            "export GIT_CONFIG_PARAMETERS=\"core.pager=evil\" && git status",
+        ],
+        vec!["bash", "-lc", "env \"LD_PRELOAD=/tmp/evil.so\" cargo test"],
+        vec!["bash", "-lc", "env -S \"sudo id\""],
+        vec!["env", "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib", "cargo"],
+    ] {
+        let intent = ProcessActionIntent::new(
+            argv.into_iter().map(str::to_owned).collect(),
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("valid process intent");
+        assert!(
+            requires_process_action_review(&intent),
+            "env injection must require action review: {:?}",
+            intent.argv()
+        );
+    }
+
+    for argv in [
+        vec!["bash", "-lc", "echo '$(literal not executed)'"],
+        vec!["bash", "-lc", "git status # comment mentioning /etc/hosts"],
+    ] {
+        let intent = ProcessActionIntent::new(
+            argv.into_iter().map(str::to_owned).collect(),
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("valid process intent");
+        assert!(
+            !requires_host_process_path_review(&intent),
+            "single-quoted literals and comments must not trigger host path review: {:?}",
+            intent.argv()
+        );
+    }
+}

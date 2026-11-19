@@ -4,7 +4,11 @@ use crate::{
     RuntimeModelRole,
     memory::MemoryActivationSource,
     model_config::{ModelProviderConfig, RuntimeModelConfigs},
-    permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
+    permission::{
+        MAX_RECORDED_PERMISSION_DECISIONS, PermissionAdmissionDecision, PermissionAdmissionSource,
+        PermissionRequest, PermissionReviewMode, PermissionReviewRules, RecordedPermissionDecision,
+        RuntimeTrustLevel,
+    },
     plan::{PlanController, PlanControllerError, PlanSubagentControl},
     process::{BackgroundProcessControl, PermissionedProcessRunnerFactory},
     session::SessionState,
@@ -14,7 +18,9 @@ use crate::{
 };
 use merry_core::{PlanHarnessSnapshot, SessionId};
 use std::{
+    collections::VecDeque,
     num::{NonZeroU64, NonZeroUsize},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -45,6 +51,9 @@ pub(super) struct RuntimeInner {
     pub(super) accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
     pub(super) runtime_trust_level: RuntimeTrustLevel,
     pub(super) permission_review_mode: PermissionReviewMode,
+    pub(super) permission_review_rules: PermissionReviewRules,
+    pub(super) permission_review_workspace_root: Option<PathBuf>,
+    pub(super) recorded_permission_decisions: RwLock<VecDeque<RecordedPermissionDecision>>,
     pub(super) permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     pub(super) permissioned_process_runner_factory:
         Option<Arc<dyn PermissionedProcessRunnerFactory>>,
@@ -130,6 +139,31 @@ impl RuntimeInner {
 
     pub(super) fn visible_tool_specs(&self) -> Vec<merry_core::ToolSpec> {
         self.tool_registry.tool_specs()
+    }
+
+    pub(super) async fn recorded_permission_decisions_snapshot(
+        &self,
+    ) -> Vec<RecordedPermissionDecision> {
+        self.recorded_permission_decisions
+            .read()
+            .await
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    pub(super) async fn record_permission_decision(
+        &self,
+        request: &PermissionRequest,
+        decision: &PermissionAdmissionDecision,
+    ) {
+        let mut decisions = self.recorded_permission_decisions.write().await;
+        if decisions.len() >= MAX_RECORDED_PERMISSION_DECISIONS {
+            decisions.pop_front();
+        }
+        decisions.push_back(RecordedPermissionDecision::from_request_and_decision(
+            request, decision,
+        ));
     }
 }
 

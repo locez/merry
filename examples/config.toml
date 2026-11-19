@@ -88,6 +88,23 @@ readwrite_paths = [
 #   { name = "RUSTUP_TOOLCHAIN", value = "stable" },
 # ]
 
+# Optional user-trusted custom rules for AI permission review. Kept strictly in
+# global config (never in project-local hidden directories) so repositories
+# cannot weaken review policy or risk accidental commits.
+# [permissions.review]
+# environment = [
+#   "Internal package registry: https://packages.example.test",
+# ]
+# allow = [
+#   "Running local project verification scripts under scripts/dev/",
+# ]
+# soft_deny = [
+#   "Modifying database migrations outside explicit migration tasks",
+# ]
+# hard_deny = [
+#   "Running any command against production kubeconfig contexts",
+# ]
+
 [skills]
 # Skill metadata is projected into the cacheable stable prefix. Full SKILL.md
 # bodies remain on disk and are read through bounded read_text ranges only when used.

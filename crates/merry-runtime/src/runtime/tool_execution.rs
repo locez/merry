@@ -408,9 +408,9 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     && crate::process::requires_host_process_path_review(intent);
                 if !fully_trusted && (requires_high_risk_review || requires_host_path_review) {
                     let reason = if requires_high_risk_review {
-                        "high-risk process action requires an independent action review"
+                        "action review triggered: command uses a reviewed shell, privilege, recursive-delete, or git-state operation"
                     } else {
-                        "host process action names an external filesystem path and requires action review"
+                        "action review triggered: host-mode command references a path outside the workspace or writes git metadata"
                     };
                     match review_process_action(inner, &pending, &proposal, &context, reason)
                         .await?

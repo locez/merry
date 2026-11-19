@@ -271,3 +271,50 @@ access = "write"
 
     assert!(error.to_string().contains("access"));
 }
+
+#[test]
+fn parses_and_validates_global_permission_review_rules() {
+    let paths = XdgPaths::from_parts(home(), None, None);
+    let config = MerryConfig::load_optional_from_text(
+        Some(
+            r#"
+[permissions.review]
+environment = ["Internal mirror: https://packages.example.test"]
+allow = ["Running local scripts under scripts/dev/"]
+soft_deny = ["Modifying database migrations"]
+hard_deny = ["Running against production kubeconfig contexts"]
+"#,
+        ),
+        &paths,
+    )
+    .expect("global review rules should parse")
+    .expect("config should be present");
+
+    let rules = config
+        .permission_review_rules()
+        .expect("review rules should validate");
+    assert_eq!(
+        rules.environment(),
+        ["Internal mirror: https://packages.example.test"]
+    );
+    assert_eq!(rules.allow(), ["Running local scripts under scripts/dev/"]);
+    assert_eq!(rules.soft_deny(), ["Modifying database migrations"]);
+    assert_eq!(
+        rules.hard_deny(),
+        ["Running against production kubeconfig contexts"]
+    );
+
+    let blank = MerryConfig::load_optional_from_text(
+        Some("[permissions.review]\nallow = [\"   \"]\n"),
+        &paths,
+    )
+    .expect("toml should parse")
+    .expect("config should be present");
+    assert!(blank.permission_review_rules().is_err());
+
+    let unknown = MerryConfig::load_optional_from_text(
+        Some("[permissions.review]\nunsupported = [\"x\"]\n"),
+        &paths,
+    );
+    assert!(unknown.is_err());
+}

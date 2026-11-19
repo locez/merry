@@ -497,3 +497,164 @@ async fn tool_result_images_persist_preserve_failures_and_drop_when_archived() {
         .expect("full tool result present");
     assert_eq!(full_item.len(), 1);
 }
+
+#[test]
+fn permission_review_context_preserves_task_anchor_and_user_intent_past_long_tool_runs() {
+    let mut session = SessionState::new(session_id());
+    session.set_task_anchor(
+        crate::TaskAnchor::new("Fix parser bugs and run cargo test.")
+            .expect("task anchor should be valid"),
+    );
+    session
+        .record_test_user_message_body("Please fix the bug, fetch missing crates, and run tests.")
+        .expect("user message should record");
+
+    // Push more than PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT tool exchanges so
+    // the trailing window contains only tool items.
+    for index in 0..16 {
+        let call = pending_tool_call(&format!("long-run-tool-{index}"));
+        session
+            .record_test_tool_call_pending(call.clone())
+            .expect("pending call should record");
+        session
+            .submit_tool_execution_outcomes(vec![(
+                call.id().clone(),
+                ToolExecutionOutcome::succeeded_text(format!("tool output {index}")),
+            )])
+            .expect("tool result should record");
+    }
+
+    let review = session
+        .permission_review_context_snapshot()
+        .expect("review context snapshot should build");
+    let rendered = format!("{review:?}");
+    assert!(
+        rendered.contains("task_anchor")
+            && rendered.contains("Fix parser bugs and run cargo test."),
+        "review context must retain task_anchor: {rendered}"
+    );
+    assert!(
+        rendered.contains("Please fix the bug, fetch missing crates, and run tests."),
+        "review context must keep user intent even after >12 tool exchanges: {rendered}"
+    );
+    assert!(
+        rendered.contains("tool output 15"),
+        "review context must keep the latest tool output: {rendered}"
+    );
+    assert!(
+        !rendered.contains("tool output 0"),
+        "older tool exchanges outside the trailing window should still stay bounded: {rendered}"
+    );
+}
+
+#[test]
+fn permission_review_context_retains_user_intent_after_compaction() {
+    let mut session = SessionState::new(session_id());
+    session
+        .record_test_user_message_body("Install dependencies and verify the build.")
+        .expect("user message should record");
+    let first_call = pending_tool_call("pre-compaction-call");
+    session
+        .record_test_tool_call_pending(first_call.clone())
+        .expect("pending call should record");
+    session
+        .submit_tool_execution_outcomes(vec![(
+            first_call.id().clone(),
+            ToolExecutionOutcome::succeeded_text("first tool output"),
+        )])
+        .expect("tool result should record");
+    let second_call = pending_tool_call("post-compaction-call");
+    session
+        .record_test_tool_call_pending(second_call.clone())
+        .expect("second pending call should record");
+    session
+        .submit_tool_execution_outcomes(vec![(
+            second_call.id().clone(),
+            ToolExecutionOutcome::succeeded_text("Could not resolve host: crates.io"),
+        )])
+        .expect("second tool result should record");
+
+    let input = session
+        .build_test_citation_compaction_input(
+            CitationCompactionPolicy::new(None, None, 1).expect("policy"),
+        )
+        .expect("compaction input")
+        .expect("covered turn");
+    session
+        .install_summary_compaction(input, "Earlier turn was compacted.")
+        .expect("compaction should install");
+
+    let review = session
+        .permission_review_context_snapshot()
+        .expect("review snapshot after compaction");
+    let rendered = format!("{review:?}");
+    assert!(
+        rendered.contains("Install dependencies and verify the build."),
+        "compacted user intent must still be visible to permission review: {rendered}"
+    );
+    assert!(
+        rendered.contains("Could not resolve host: crates.io"),
+        "recent uncompacted tool failure must remain visible: {rendered}"
+    );
+}
+
+#[test]
+fn permission_review_context_caps_succeeded_tool_output_tighter_than_failed_diagnostics() {
+    let mut session = SessionState::new(session_id());
+
+    let large_arg_call = PendingToolCall::new(
+        ToolCallId::new("call-large-args").expect("valid call id"),
+        ToolName::new("apply_patch").expect("valid tool name"),
+        ToolCallArguments::try_from(serde_json::json!({
+            "patch": "A".repeat(4000)
+        }))
+        .expect("valid arguments"),
+    );
+    session
+        .record_test_tool_call_pending(large_arg_call.clone())
+        .expect("pending call should record");
+    session
+        .submit_tool_execution_outcomes(vec![(
+            large_arg_call.id().clone(),
+            ToolExecutionOutcome::failed_text(
+                format!("{}permission denied sentinel", "x".repeat(400)),
+                merry_core::ErrorInfo::new("failed", "failed").expect("valid error"),
+            ),
+        )])
+        .expect("failed tool outcome should record");
+
+    let large_read_call = pending_tool_call("call-large-read");
+    session
+        .record_test_tool_call_pending(large_read_call.clone())
+        .expect("pending read call should record");
+    session
+        .submit_tool_execution_outcomes(vec![(
+            large_read_call.id().clone(),
+            ToolExecutionOutcome::succeeded_text(format!(
+                "HEAD_PREFIX {} TAIL_DROPPED_MARKER",
+                "b".repeat(1000)
+            )),
+        )])
+        .expect("succeeded tool outcome should record");
+
+    let review = session
+        .permission_review_context_snapshot()
+        .expect("review snapshot");
+    assert_eq!(review.len(), 2);
+    let failed_entry = format!("{:?}", review[0]);
+    let succeeded_entry = format!("{:?}", review[1]);
+
+    assert!(
+        failed_entry.contains("result_status:failed")
+            && failed_entry.contains("permission denied sentinel"),
+        "oversized tool args must not push out result_status or failure diagnostic: {failed_entry}"
+    );
+    assert!(
+        !failed_entry.contains("artifact:"),
+        "artifact id noise should be omitted from review context: {failed_entry}"
+    );
+    assert!(
+        succeeded_entry.contains("HEAD_PREFIX") && !succeeded_entry.contains("TAIL_DROPPED_MARKER"),
+        "succeeded tool output should stay tightly bounded at 256 bytes: {succeeded_entry}"
+    );
+}

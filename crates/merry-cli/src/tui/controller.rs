@@ -201,7 +201,7 @@ pub(crate) async fn run_controller(
                 _ = refresh_interval.tick(), if needs_refresh(&state) => {
                     if let Some(next) = session.prune_cancelled_permission_reviews() {
                         match next {
-                            Some((approval_id, body)) => state.open_permission_review(approval_id, body),
+                            Some(view) => state.open_permission_review_view(view),
                             None => state.close_overlay(),
                         }
                     }
@@ -316,8 +316,12 @@ pub(crate) async fn run_controller(
                         permission_requests_open = false;
                         continue;
                     };
-                    if let Some((approval_id, body)) = session.enqueue_permission_review(request) {
-                        state.open_permission_review(approval_id, body);
+                    if let Some(view) = session.enqueue_permission_review(request) {
+                        state.open_permission_review_view(view);
+                    } else {
+                        state.set_permission_review_queue_total(
+                            session.pending_permission_review_count(),
+                        );
                     }
                     render_once(&mut terminal, &mut state)?;
                 }

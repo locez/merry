@@ -1,7 +1,7 @@
 use crate::process::{
     classification::shell::{
-        executable_name, executable_token_is, parse_plain_shell_command_sequence,
-        rough_shell_words, shell_command_without_assignment_prefix,
+        command_words_have_env_injection, executable_name, executable_token_is,
+        parse_bash_security_analysis, parse_plain_shell_command_sequence,
         shell_like_process_input_from_argv, shell_process_input_from_argv,
     },
     contracts::{
@@ -309,6 +309,10 @@ fn is_forbidden_process_argv(argv: &[String]) -> bool {
 }
 
 fn is_forbidden_direct_process_argv(argv: &[String]) -> bool {
+    if command_words_have_env_injection(argv) {
+        return true;
+    }
+    let argv = strip_shell_command_prefixes(argv);
     let Some(executable) = argv.first().map(|argument| executable_name(argument)) else {
         return false;
     };
@@ -321,34 +325,121 @@ fn is_forbidden_direct_process_argv(argv: &[String]) -> bool {
         return true;
     }
 
-    executable == "git"
-        && argv
-            .get(1)
-            .is_some_and(|subcommand| FORBIDDEN_GIT_SUBCOMMANDS.contains(&subcommand.as_str()))
+    if executable == "git" {
+        return git_invocation_is_forbidden(argv);
+    }
+
+    false
+}
+
+fn git_invocation_is_forbidden(argv: &[String]) -> bool {
+    let Some((subcommand, sub_args)) = git_subcommand_and_args(argv) else {
+        return false;
+    };
+    if subcommand == "stash" && is_read_only_git_stash_args(sub_args) {
+        return false;
+    }
+    FORBIDDEN_GIT_SUBCOMMANDS.contains(&subcommand)
+}
+
+/// Peels common command wrappers (`env`, `timeout`, `command`, `exec`, `nohup`,
+/// `time`, `builtin`, `!`) so forbidden executables behind them are still
+/// detected.
+fn strip_shell_command_prefixes(mut argv: &[String]) -> &[String] {
+    for _ in 0..8 {
+        let Some(first) = argv.first() else {
+            return argv;
+        };
+        if matches!(
+            first.as_str(),
+            "!" | "time" | "exec" | "command" | "builtin" | "nohup"
+        ) {
+            argv = &argv[1..];
+            continue;
+        }
+        let head = executable_name(first);
+        if head == "env" {
+            let mut idx = 1;
+            let mut options_done = false;
+            while let Some(arg) = argv.get(idx) {
+                if !options_done && arg == "--" {
+                    options_done = true;
+                    idx += 1;
+                    continue;
+                }
+                if !options_done && arg.starts_with('-') {
+                    idx += 1;
+                    continue;
+                }
+                if arg.contains('=') && !arg.starts_with('=') {
+                    idx += 1;
+                    continue;
+                }
+                break;
+            }
+            argv = &argv[idx..];
+            continue;
+        }
+        if head == "timeout" {
+            let mut idx = 1;
+            while let Some(arg) = argv.get(idx) {
+                if matches!(arg.as_str(), "-k" | "--kill-after" | "-s" | "--signal") {
+                    idx += 2;
+                    continue;
+                }
+                if arg.starts_with('-') {
+                    idx += 1;
+                    continue;
+                }
+                // Consume the duration positional operand.
+                idx += 1;
+                break;
+            }
+            argv = argv.get(idx..).unwrap_or(&[]);
+            continue;
+        }
+        break;
+    }
+    argv
+}
+
+/// Returns the git subcommand and its trailing arguments, skipping recognized
+/// global git options before the subcommand.
+fn git_subcommand_and_args(argv: &[String]) -> Option<(&str, &[String])> {
+    let mut index = 1;
+    while let Some(arg) = argv.get(index) {
+        if matches!(
+            arg.as_str(),
+            "-C" | "-c"
+                | "--git-dir"
+                | "--work-tree"
+                | "--namespace"
+                | "--super-prefix"
+                | "--exec-path"
+                | "--config-env"
+        ) {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return Some((arg.as_str(), &argv[index + 1..]));
+    }
+    None
 }
 
 fn shell_script_contains_forbidden_process(script: &str) -> bool {
-    if let Some(commands) = parse_plain_shell_command_sequence(script) {
-        return commands.iter().any(|command| {
-            let command = shell_command_without_assignment_prefix(command);
-            !command.is_empty() && is_forbidden_direct_process_argv(command)
-        });
-    }
-
-    shell_script_contains_obvious_forbidden_text(script)
-}
-
-fn shell_script_contains_obvious_forbidden_text(script: &str) -> bool {
-    let words = rough_shell_words(script);
-    words.iter().enumerate().any(|(index, word)| {
-        let executable = executable_name(word);
-        executable == "rm"
-            || FORBIDDEN_PROCESS_EXECUTABLES.contains(&executable.as_str())
-            || (executable == "git"
-                && words.get(index + 1).is_some_and(|subcommand| {
-                    FORBIDDEN_GIT_SUBCOMMANDS.contains(&subcommand.as_str())
-                }))
-    })
+    let Some(analysis) = parse_bash_security_analysis(script) else {
+        // Syntax error or unparseable shell structure: fail closed.
+        return true;
+    };
+    analysis.env_injection
+        || analysis
+            .commands
+            .iter()
+            .any(|command| is_forbidden_direct_process_argv(command))
 }
 
 const FORBIDDEN_PROCESS_EXECUTABLES: &[&str] = &[
@@ -428,7 +519,9 @@ fn rm_operand_requires_review(operand: &str) -> bool {
         || operand == "*"
         || operand == "~"
         || operand.ends_with("/*")
-        || operand.contains('*')
+        || operand
+            .chars()
+            .any(|character| matches!(character, '*' | '?' | '[' | '{' | '$' | '`'))
 }
 
 /// Returns whether a process intent may enter the SP3-A low-risk process lane.
@@ -517,41 +610,262 @@ pub(crate) fn requires_host_process_path_review(intent: &ProcessActionIntent) ->
 }
 
 fn shell_script_contains_host_path(script: &str) -> bool {
-    script.contains("$(")
-        || script.contains('`')
-        || script.split_whitespace().any(is_explicit_host_path_token)
-        || contains_embedded_absolute_path(script)
+    let Some(analysis) = parse_bash_security_analysis(script) else {
+        return true;
+    };
+    analysis.has_command_substitution
+        || analysis.path_check_tokens.iter().any(|token| {
+            is_explicit_host_path_token(token) || contains_embedded_absolute_path(token)
+        })
 }
 
 fn contains_embedded_absolute_path(value: &str) -> bool {
     value.char_indices().any(|(index, character)| {
-        character == '/'
-            && (index == 0
-                || value[..index].chars().next_back().is_some_and(|previous| {
-                    matches!(previous, '"' | '\'' | '(' | '[' | '{' | '=' | ':' | ',')
-                }))
+        if character != '/' {
+            return false;
+        }
+        if index == 0 {
+            return true;
+        }
+        let Some(previous) = value[..index].chars().next_back() else {
+            return false;
+        };
+        if previous == ':' && is_non_file_url_scheme_separator(value, index) {
+            return false;
+        }
+        matches!(previous, '"' | '\'' | '(' | '[' | '{' | '=' | ':' | ',')
     })
 }
 
-fn shell_script_contains_git_metadata_write(script: &str) -> bool {
-    if let Some(commands) = parse_plain_shell_command_sequence(script) {
-        return commands
-            .iter()
-            .map(Vec::as_slice)
-            .map(shell_command_without_assignment_prefix)
-            .any(is_git_metadata_write_argv);
+/// Returns whether the `/` at `slash_index` is the `://` separator of a
+/// network URL scheme (such as `https://` or `http://`). `file://` is excluded
+/// because it references local filesystem paths.
+fn is_non_file_url_scheme_separator(value: &str, slash_index: usize) -> bool {
+    if !value[slash_index..].starts_with("//") {
+        return false;
     }
+    let prefix = &value[..slash_index - 1];
+    let scheme_start = prefix
+        .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.')))
+        .map_or(0, |pos| pos + 1);
+    let scheme = &prefix[scheme_start..];
+    matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "http" | "https" | "ws" | "wss" | "ftp" | "ftps" | "git" | "ssh"
+    )
+}
 
-    rough_shell_words(script)
+fn shell_script_contains_git_metadata_write(script: &str) -> bool {
+    let Some(analysis) = parse_bash_security_analysis(script) else {
+        return true;
+    };
+    analysis
+        .commands
         .iter()
-        .any(|word| executable_name(word) == "git")
+        .map(Vec::as_slice)
+        .any(is_git_metadata_write_argv)
 }
 
 fn is_git_metadata_write_argv(argv: &[String]) -> bool {
+    let argv = strip_shell_command_prefixes(argv);
     let Some(executable) = argv.first() else {
         return false;
     };
-    executable_name(executable) == "git" && !is_read_only_direct_process_argv(argv)
+    executable_name(executable) == "git" && !is_read_only_git_argv_for_host_review(argv)
+}
+
+/// Fail-closed read-only git detector used by host-mode path/metadata review.
+///
+/// Kept separate from the narrow SP3-A `Informational` lane so read-only git
+/// inspection (`git diff --cached`, `git status -sb`, `git rev-parse HEAD`,
+/// `git log -n 5`, `git branch -a`, `git remote -v`, `git stash list`, etc.)
+/// does not trigger unnecessary host-mode permission reviews while mutating
+/// subcommands and config/path overrides stay reviewed.
+fn is_read_only_git_argv_for_host_review(argv: &[String]) -> bool {
+    if is_read_only_direct_process_argv(argv) {
+        return true;
+    }
+    if argv.len() == 2 && matches!(argv[1].as_str(), "--version" | "-v" | "--help" | "-h") {
+        return true;
+    }
+
+    // Reject global git options that inject config, override repository paths,
+    // or execute external helpers before the subcommand.
+    let mut index = 1;
+    let subcommand = loop {
+        let Some(arg) = argv.get(index) else {
+            return false;
+        };
+        if matches!(
+            arg.as_str(),
+            "-c" | "--config-env"
+                | "--git-dir"
+                | "--work-tree"
+                | "--exec-path"
+                | "--namespace"
+                | "--super-prefix"
+                | "--bare"
+        ) || arg.starts_with("--git-dir=")
+            || arg.starts_with("--work-tree=")
+            || arg.starts_with("--exec-path=")
+            || arg.starts_with("--config-env=")
+            || arg.starts_with("-c")
+        {
+            return false;
+        }
+        if arg == "-C" {
+            let Some(dir) = argv.get(index + 1) else {
+                return false;
+            };
+            if !is_workspace_relative_file_argument(dir) {
+                return false;
+            }
+            index += 2;
+            continue;
+        }
+        if matches!(arg.as_str(), "--no-pager" | "-p" | "--paginate") {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return false;
+        }
+        break arg.as_str();
+    };
+    let args = &argv[index + 1..];
+
+    // Reject output-writing or external-command options on query subcommands.
+    let has_unsafe_query_flag = args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "-o" | "--output" | "--ext-diff" | "--textconv"
+        ) || arg.starts_with("--output=")
+    });
+    if has_unsafe_query_flag {
+        return false;
+    }
+
+    match subcommand {
+        "status" | "diff" | "log" | "show" | "blame" | "shortlog" | "describe" | "rev-parse"
+        | "rev-list" | "ls-files" | "ls-tree" | "cat-file" | "merge-base" | "name-rev" | "grep"
+        | "whatchanged" => true,
+        "branch" => is_read_only_git_branch_args(args),
+        "tag" => is_read_only_git_tag_args(args),
+        "remote" => is_read_only_git_remote_args(args),
+        "stash" => is_read_only_git_stash_args(args),
+        "worktree" => matches!(args.first().map(String::as_str), Some("list")),
+        "config" => is_read_only_git_config_args(args),
+        _ => false,
+    }
+}
+
+fn is_read_only_git_branch_args(args: &[String]) -> bool {
+    if args.is_empty() {
+        return true;
+    }
+    let mut index = 0;
+    let mut saw_list_flag = false;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "--show-current" | "-a" | "--all" | "-r" | "--remotes" | "-l" | "--list" | "-v"
+            | "-vv" | "--verbose" | "--merged" | "--no-merged" => {
+                saw_list_flag = true;
+                index += 1;
+            }
+            "--contains" | "--points-at" | "--sort" | "--format" => {
+                if args.get(index + 1).is_none() {
+                    return false;
+                }
+                saw_list_flag = true;
+                index += 2;
+            }
+            _ if arg.starts_with("--sort=")
+                || arg.starts_with("--format=")
+                || arg.starts_with("--contains=")
+                || arg.starts_with("--points-at=") =>
+            {
+                saw_list_flag = true;
+                index += 1;
+            }
+            _ => return false,
+        }
+    }
+    saw_list_flag
+}
+
+fn is_read_only_git_tag_args(args: &[String]) -> bool {
+    if args.is_empty() {
+        return true;
+    }
+    let mut index = 0;
+    let mut saw_list_flag = false;
+    while let Some(arg) = args.get(index) {
+        match arg.as_str() {
+            "-l" | "--list" | "-n" => {
+                saw_list_flag = true;
+                index += 1;
+            }
+            "--contains" | "--points-at" | "--sort" | "--format" => {
+                if args.get(index + 1).is_none() {
+                    return false;
+                }
+                saw_list_flag = true;
+                index += 2;
+            }
+            _ if arg.starts_with("--sort=")
+                || arg.starts_with("--format=")
+                || arg.starts_with("--contains=")
+                || arg.starts_with("--points-at=") =>
+            {
+                saw_list_flag = true;
+                index += 1;
+            }
+            _ => return false,
+        }
+    }
+    saw_list_flag
+}
+
+fn is_read_only_git_remote_args(args: &[String]) -> bool {
+    match args {
+        [] => true,
+        [flag] if matches!(flag.as_str(), "-v" | "--verbose") => true,
+        [sub, ..] if matches!(sub.as_str(), "show" | "get-url") => true,
+        _ => false,
+    }
+}
+
+fn is_read_only_git_stash_args(args: &[String]) -> bool {
+    matches!(args.first().map(String::as_str), Some("list" | "show"))
+}
+
+fn is_read_only_git_config_args(args: &[String]) -> bool {
+    let mut saw_read_flag = false;
+    for arg in args {
+        if matches!(
+            arg.as_str(),
+            "--unset"
+                | "--unset-all"
+                | "--replace-all"
+                | "--add"
+                | "--rename-section"
+                | "--remove-section"
+                | "--edit"
+                | "-e"
+                | "--file"
+                | "-f"
+        ) || arg.starts_with("--file=")
+        {
+            return false;
+        }
+        if matches!(
+            arg.as_str(),
+            "--get" | "--get-all" | "--get-regexp" | "--list" | "-l" | "--show-origin"
+        ) {
+            saw_read_flag = true;
+        }
+    }
+    saw_read_flag
 }
 
 fn is_explicit_host_path_token(argument: &str) -> bool {

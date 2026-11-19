@@ -45,6 +45,7 @@ mod markdown;
 mod output_rate;
 mod overlay;
 mod overlay_render;
+mod permission_render;
 mod plan;
 mod plan_controller;
 mod plan_projector;

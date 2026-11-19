@@ -274,11 +274,28 @@ impl TuiState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn open_permission_review(&mut self, approval_id: String, body: String) {
         self.completion_menu = None;
         self.overlays.dialog_back = None;
         self.overlays.provider_overlay_back = None;
         self.overlays.overlay = Some(Overlay::permission_review(approval_id, body));
+    }
+
+    pub(crate) fn open_permission_review_view(
+        &mut self,
+        view: crate::permission_prompt::PermissionReviewView,
+    ) {
+        self.completion_menu = None;
+        self.overlays.dialog_back = None;
+        self.overlays.provider_overlay_back = None;
+        self.overlays.overlay = Some(Overlay::permission_review_view(view));
+    }
+
+    pub(crate) fn set_permission_review_queue_total(&mut self, total: usize) {
+        if let Some(Overlay::PermissionReview(review)) = self.overlays.overlay.as_mut() {
+            review.set_queue_total(total);
+        }
     }
 
     pub(crate) fn plan_approval_input(&self) -> Option<merry_runtime::PlanApprovalInput> {

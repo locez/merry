@@ -1,12 +1,14 @@
-//! Narrow shell-wrapper recognition and lexical normalization; policy stays in the classifier.
+//! Narrow shell-wrapper recognition and tree-sitter-bash AST normalization;
+//! policy stays in the classifier.
 
 use crate::process::contracts::ProcessActionIntent;
+use tree_sitter::{Node, Parser, Tree};
+use tree_sitter_bash::LANGUAGE as BASH_LANGUAGE;
 
 /// Exact shell-wrapper input plus payload-free metadata helpers.
 ///
 /// This value recognizes only the validated wrapper shape used by the current
-/// shell read-only lane. It is not a shell parser and it does not authorize
-/// execution by itself.
+/// shell read-only lane. It does not authorize execution by itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ShellProcessInput<'a> {
     pub(super) shell: &'a str,
@@ -178,156 +180,6 @@ pub(crate) fn stable_process_input_fingerprint(bytes: &[u8]) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
-pub(super) fn parse_plain_shell_command_sequence(script: &str) -> Option<Vec<Vec<String>>> {
-    let mut chars = script.chars().peekable();
-    let mut commands = Vec::new();
-    let mut current_command = Vec::new();
-    let mut last_token_was_operator = false;
-
-    loop {
-        skip_shell_whitespace(&mut chars);
-        let Some(next) = chars.peek().copied() else {
-            break;
-        };
-
-        if is_shell_sequence_operator_start(next) {
-            parse_shell_sequence_operator(&mut chars)?;
-            if current_command.is_empty() {
-                return None;
-            }
-            commands.push(std::mem::take(&mut current_command));
-            last_token_was_operator = true;
-            continue;
-        }
-
-        let word = parse_plain_shell_word(&mut chars)?;
-        if word.is_empty() {
-            return None;
-        }
-        current_command.push(word);
-        last_token_was_operator = false;
-    }
-
-    if last_token_was_operator {
-        return None;
-    }
-    if !current_command.is_empty() {
-        commands.push(current_command);
-    }
-    if commands.is_empty() {
-        return None;
-    }
-
-    Some(commands)
-}
-
-pub(super) fn skip_shell_whitespace(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    while chars
-        .peek()
-        .is_some_and(|character| character.is_whitespace())
-    {
-        chars.next();
-    }
-}
-
-pub(super) fn parse_shell_sequence_operator(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-) -> Option<()> {
-    match chars.next()? {
-        ';' | '|' if chars.peek() != Some(&'|') => Some(()),
-        '|' if chars.peek() == Some(&'|') => {
-            chars.next();
-            Some(())
-        }
-        '&' if chars.peek() == Some(&'&') => {
-            chars.next();
-            Some(())
-        }
-        _ => None,
-    }
-}
-
-pub(super) fn parse_plain_shell_word(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-) -> Option<String> {
-    let mut word = String::new();
-    while let Some(next) = chars.peek().copied() {
-        if next.is_whitespace() || is_shell_sequence_operator_start(next) {
-            break;
-        }
-
-        match next {
-            '\'' => {
-                chars.next();
-                parse_plain_single_quoted_shell_fragment(chars, &mut word)?;
-            }
-            '"' => {
-                chars.next();
-                parse_plain_double_quoted_shell_fragment(chars, &mut word)?;
-            }
-            character if shell_word_character_is_disallowed(character) => return None,
-            character => {
-                chars.next();
-                word.push(character);
-            }
-        }
-    }
-
-    Some(word)
-}
-
-pub(super) fn parse_plain_single_quoted_shell_fragment(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    word: &mut String,
-) -> Option<()> {
-    for character in chars.by_ref() {
-        if character == '\'' {
-            return Some(());
-        }
-        word.push(character);
-    }
-    None
-}
-
-pub(super) fn parse_plain_double_quoted_shell_fragment(
-    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-    word: &mut String,
-) -> Option<()> {
-    for character in chars.by_ref() {
-        match character {
-            '"' => return Some(()),
-            '$' | '`' | '\\' | '!' => return None,
-            _ => word.push(character),
-        }
-    }
-    None
-}
-
-pub(super) fn is_shell_sequence_operator_start(character: char) -> bool {
-    matches!(character, ';' | '|' | '&')
-}
-
-pub(super) fn shell_word_character_is_disallowed(character: char) -> bool {
-    matches!(
-        character,
-        '$' | '`'
-            | '\\'
-            | '<'
-            | '>'
-            | '('
-            | ')'
-            | '{'
-            | '}'
-            | '['
-            | ']'
-            | '*'
-            | '?'
-            | '~'
-            | '#'
-            | '!'
-    )
-}
-
 pub(super) fn shell_like_process_input_from_argv(argv: &[String]) -> Option<ShellProcessInput<'_>> {
     #[cfg(windows)]
     {
@@ -373,37 +225,397 @@ pub(super) fn is_supported_shell_executable_name(shell: &str) -> bool {
     matches!(executable_name(shell).as_str(), "bash" | "sh" | "zsh")
 }
 
-pub(super) fn shell_command_without_assignment_prefix(command: &[String]) -> &[String] {
-    let executable_index = command
-        .iter()
-        .position(|word| !is_plain_shell_assignment_word(word))
-        .unwrap_or(command.len());
-    &command[executable_index..]
+/// AST-derived security summary of one parsed bash script.
+pub(super) struct BashSecurityAnalysis {
+    /// Every command node found anywhere in the AST (including inside control
+    /// flow, subshells, and `$(...)`/backtick substitutions), in source order.
+    pub(super) commands: Vec<Vec<String>>,
+    /// True if any inline assignment, `export`/`declare`, or `env` invocation
+    /// sets an execution-injecting environment variable or uses `env -S`.
+    pub(super) env_injection: bool,
+    /// True if the AST contains command or process substitution (`$(...)`,
+    /// `` `...` ``, `<(...)`, `>(...)`).
+    pub(super) has_command_substitution: bool,
+    /// Non-comment command words and redirect destinations for host-path checks.
+    pub(super) path_check_tokens: Vec<String>,
 }
 
-pub(super) fn is_plain_shell_assignment_word(word: &str) -> bool {
-    let Some((name, value)) = word.split_once('=') else {
-        return false;
-    };
-    !name.is_empty()
-        && !value.is_empty()
-        && name.bytes().enumerate().all(|(index, byte)| {
-            byte == b'_' || byte.is_ascii_alphabetic() || (index > 0 && byte.is_ascii_digit())
-        })
+const INJECTION_ENV_KEYS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "BASH_ENV",
+    "ENV",
+    "IFS",
+    "PATH",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_PROXY_COMMAND",
+    "PROMPT_COMMAND",
+];
+
+const INJECTION_ENV_KEY_PREFIXES: &[&str] = &["DYLD_", "GIT_CONFIG"];
+
+pub(super) fn is_injection_env_key(key: &str) -> bool {
+    INJECTION_ENV_KEYS.contains(&key)
+        || INJECTION_ENV_KEY_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
 }
 
-pub(super) fn rough_shell_words(script: &str) -> Vec<String> {
-    script
-        .split(|character: char| {
-            character.is_whitespace()
-                || matches!(
-                    character,
-                    ';' | '|' | '&' | '<' | '>' | '(' | ')' | '{' | '}' | '[' | ']' | '\'' | '"'
-                )
-        })
-        .filter(|word| !word.is_empty())
-        .map(str::to_owned)
-        .collect()
+fn try_parse_bash(script: &str) -> Option<Tree> {
+    let mut parser = Parser::new();
+    parser.set_language(&BASH_LANGUAGE.into()).ok()?;
+    parser.parse(script, None)
+}
+
+/// Parses a strictly plain, expansion-free, redirect-free command sequence
+/// joined only by `;`, `|`, `||`, or `&&` (used by the narrow SP3-A shell
+/// read-only lane).
+pub(super) fn parse_plain_shell_command_sequence(script: &str) -> Option<Vec<Vec<String>>> {
+    let tree = try_parse_bash(script)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return None;
+    }
+
+    const ALLOWED_KINDS: &[&str] = &[
+        "program",
+        "list",
+        "pipeline",
+        "command",
+        "command_name",
+        "word",
+        "string",
+        "string_content",
+        "raw_string",
+        "number",
+        "concatenation",
+    ];
+    const ALLOWED_PUNCT: &[&str] = &["&&", "||", ";", "|", "\"", "'"];
+
+    let mut stack = vec![root];
+    let mut command_nodes = Vec::new();
+    while let Some(node) = stack.pop() {
+        let kind = node.kind();
+        if node.is_named() {
+            if !ALLOWED_KINDS.contains(&kind) {
+                return None;
+            }
+            if kind == "command" {
+                command_nodes.push(node);
+            }
+        } else if !(ALLOWED_PUNCT.contains(&kind) || kind.trim().is_empty()) {
+            return None;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+
+    if command_nodes.is_empty() {
+        return None;
+    }
+    command_nodes.sort_by_key(Node::start_byte);
+
+    let mut commands = Vec::with_capacity(command_nodes.len());
+    for command_node in command_nodes {
+        let mut words = Vec::new();
+        let mut cursor = command_node.walk();
+        for child in command_node.children(&mut cursor) {
+            if !child.is_named() {
+                continue;
+            }
+            let word = decode_strict_plain_word(child, script)?;
+            if word.is_empty() {
+                return None;
+            }
+            words.push(word);
+        }
+        if words.is_empty() {
+            return None;
+        }
+        commands.push(words);
+    }
+    Some(commands)
+}
+
+fn decode_strict_plain_word(node: Node<'_>, src: &str) -> Option<String> {
+    match node.kind() {
+        "command_name" => {
+            let child = node.named_child(0)?;
+            decode_strict_plain_word(child, src)
+        }
+        "word" | "number" => {
+            let text = node.utf8_text(src.as_bytes()).ok()?;
+            if text.chars().any(shell_word_character_is_disallowed) {
+                return None;
+            }
+            Some(text.to_owned())
+        }
+        "raw_string" => {
+            let text = node.utf8_text(src.as_bytes()).ok()?;
+            text.strip_prefix('\'')
+                .and_then(|rest| rest.strip_suffix('\''))
+                .map(str::to_owned)
+        }
+        "string" => {
+            let mut out = String::new();
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if !child.is_named() {
+                    continue;
+                }
+                if child.kind() != "string_content" {
+                    return None;
+                }
+                let text = child.utf8_text(src.as_bytes()).ok()?;
+                if text.chars().any(|ch| matches!(ch, '$' | '`' | '\\' | '!')) {
+                    return None;
+                }
+                out.push_str(text);
+            }
+            Some(out)
+        }
+        "concatenation" => {
+            let mut out = String::new();
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.is_named() {
+                    out.push_str(&decode_strict_plain_word(child, src)?);
+                }
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+fn shell_word_character_is_disallowed(character: char) -> bool {
+    matches!(
+        character,
+        '$' | '`'
+            | '\\'
+            | '<'
+            | '>'
+            | '('
+            | ')'
+            | '{'
+            | '}'
+            | '['
+            | ']'
+            | '*'
+            | '?'
+            | '~'
+            | '#'
+            | '!'
+    )
+}
+
+/// Parses a bash script into an AST security summary. Returns `None` on syntax
+/// errors (such as unclosed quotes) so callers fail closed.
+pub(super) fn parse_bash_security_analysis(script: &str) -> Option<BashSecurityAnalysis> {
+    let tree = try_parse_bash(script)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return None;
+    }
+
+    let mut stack = vec![root];
+    let mut command_nodes = Vec::new();
+    let mut env_injection = false;
+    let mut has_command_substitution = false;
+    let mut path_check_tokens = Vec::new();
+
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "command" => command_nodes.push(node),
+            "command_substitution" | "process_substitution" => {
+                has_command_substitution = true;
+            }
+            "variable_assignment" => {
+                if let Some(key) = variable_assignment_key(node, script)
+                    && is_injection_env_key(key)
+                {
+                    env_injection = true;
+                }
+                if let Some(value_node) = node.child_by_field_name("value")
+                    && let Ok(text) = value_node.utf8_text(script.as_bytes())
+                {
+                    path_check_tokens.push(text.to_owned());
+                }
+            }
+            "file_redirect" => {
+                if let Some(dest) = node.child_by_field_name("destination") {
+                    path_check_tokens.push(decode_security_word(dest, script));
+                }
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+
+    command_nodes.sort_by_key(Node::start_byte);
+
+    let mut commands = Vec::with_capacity(command_nodes.len());
+    for command_node in command_nodes {
+        let mut words = Vec::new();
+        let mut cursor = command_node.walk();
+        for child in command_node.children(&mut cursor) {
+            if !child.is_named() {
+                continue;
+            }
+            if matches!(
+                child.kind(),
+                "variable_assignment" | "file_redirect" | "heredoc_redirect" | "comment"
+            ) {
+                continue;
+            }
+            let decoded = decode_security_word(child, script);
+            if !decoded.is_empty() {
+                path_check_tokens.push(decoded.clone());
+                words.push(decoded);
+            }
+        }
+        if !words.is_empty() {
+            if command_words_have_env_injection(&words) {
+                env_injection = true;
+            }
+            commands.push(words);
+        }
+    }
+
+    Some(BashSecurityAnalysis {
+        commands,
+        env_injection,
+        has_command_substitution,
+        path_check_tokens,
+    })
+}
+
+fn variable_assignment_key<'a>(node: Node<'_>, src: &'a str) -> Option<&'a str> {
+    if let Some(name_node) = node.child_by_field_name("name")
+        && let Ok(text) = name_node.utf8_text(src.as_bytes())
+    {
+        return Some(text);
+    }
+    node.utf8_text(src.as_bytes())
+        .ok()
+        .and_then(|text| text.split('=').next())
+}
+
+/// Detects dangerous `env` invocations (`env -S`, `env LD_PRELOAD=...`, etc.)
+/// even behind wrapper chains such as `timeout 5 env ...`.
+pub(super) fn command_words_have_env_injection(words: &[String]) -> bool {
+    let mut index = 0;
+    while let Some(head) = words.get(index) {
+        let name = executable_name(head);
+        if name == "env" {
+            let mut options_done = false;
+            for arg in &words[index + 1..] {
+                if !options_done && arg == "--" {
+                    options_done = true;
+                    continue;
+                }
+                if !options_done && arg.starts_with('-') {
+                    // `-S` / `--split-string` rewrites argv and can smuggle commands.
+                    if arg == "-S"
+                        || arg.starts_with("-S")
+                        || arg == "--split-string"
+                        || arg.starts_with("--split-string=")
+                        || (!arg.starts_with("--") && arg.contains('S'))
+                    {
+                        return true;
+                    }
+                    continue;
+                }
+                if let Some((key, _)) = arg.split_once('=') {
+                    if is_injection_env_key(key) {
+                        return true;
+                    }
+                    continue;
+                }
+                break;
+            }
+            return false;
+        }
+        if matches!(
+            head.as_str(),
+            "!" | "time" | "exec" | "command" | "builtin" | "nohup"
+        ) {
+            index += 1;
+            continue;
+        }
+        if name == "timeout" {
+            index += 1;
+            while let Some(arg) = words.get(index) {
+                if matches!(arg.as_str(), "-k" | "--kill-after" | "-s" | "--signal") {
+                    index += 2;
+                    continue;
+                }
+                if arg.starts_with('-') {
+                    index += 1;
+                    continue;
+                }
+                index += 1;
+                break;
+            }
+            continue;
+        }
+        break;
+    }
+    false
+}
+
+/// Decodes a command word for security analysis. Expansion-free quotes are
+/// unwrapped so `env "LD_PRELOAD=..."` or `"rm"` cannot hide behind quoting;
+/// dynamic nodes keep their raw source text so `$VAR`/`$(...)` remain visible.
+fn decode_security_word(node: Node<'_>, src: &str) -> String {
+    match node.kind() {
+        "command_name" => node
+            .named_child(0)
+            .map(|child| decode_security_word(child, src))
+            .unwrap_or_default(),
+        "raw_string" => node
+            .utf8_text(src.as_bytes())
+            .ok()
+            .and_then(|text| {
+                text.strip_prefix('\'')
+                    .and_then(|rest| rest.strip_suffix('\''))
+            })
+            .unwrap_or_default()
+            .to_owned(),
+        "string" => {
+            let mut out = String::new();
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if !child.is_named() {
+                    continue;
+                }
+                if child.kind() == "string_content" {
+                    if let Ok(text) = child.utf8_text(src.as_bytes()) {
+                        out.push_str(text);
+                    }
+                } else if let Ok(text) = child.utf8_text(src.as_bytes()) {
+                    out.push_str(text);
+                }
+            }
+            out
+        }
+        "concatenation" => {
+            let mut out = String::new();
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.is_named() {
+                    out.push_str(&decode_security_word(child, src));
+                }
+            }
+            out
+        }
+        _ => node.utf8_text(src.as_bytes()).unwrap_or("").to_owned(),
+    }
 }
 
 pub(super) fn executable_name(argument: &str) -> String {

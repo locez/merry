@@ -271,12 +271,22 @@ pub(crate) async fn run(
         Some(headless_reviewer.source()),
     )
     .map_err(unexpected)?;
+    let permission_review_rules = merry_config
+        .map(MerryConfig::permission_review_rules)
+        .transpose()
+        .map_err(unexpected)?
+        .unwrap_or_default();
     let coding_runtime = match loaded_session {
-        None => build_headless_coding_with_policy_composition(runtime_input, permission_policy)?,
+        None => build_headless_coding_with_policy_composition(
+            runtime_input,
+            permission_policy,
+            permission_review_rules,
+        )?,
         Some(loaded) => resume_headless_coding_composition_with_loaded_session(
             runtime_input,
             loaded,
             permission_policy,
+            permission_review_rules,
         )?,
     };
     let loop_config = coding_runtime.loop_config();

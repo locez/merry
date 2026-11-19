@@ -10,7 +10,7 @@ use crate::{
         PermissionRequest, PermissionedAction, permission_blocked_outcome,
         permission_denied_outcome, permission_invalid_arguments_outcome,
         permission_request_from_call, permission_request_from_process_call,
-        permission_review_error_outcome,
+        permission_review_error_outcome, probe_environment_metadata,
     },
     tool::{ActionProposalEvidence, ToolExecutionContext},
 };
@@ -387,66 +387,95 @@ pub(super) async fn review_permission_request(
         ));
     }
 
-    if mode.requires_model_review(inner.runtime_trust_level) {
-        let Some(model_config) = inner
+    let result = if mode.requires_model_review(inner.runtime_trust_level) {
+        if let Some(model_config) = inner
             .model_config_with_primary_fallback(RuntimeModelRole::ApprovalReview)
             .await
-        else {
-            return host_fallback_or_error(
+        {
+            let recorded_decisions = inner.recorded_permission_decisions_snapshot().await;
+            let environment = match inner.permission_review_workspace_root.as_deref() {
+                Some(workspace_root) => {
+                    probe_environment_metadata(
+                        workspace_root,
+                        &request,
+                        context.cancellation_token(),
+                    )
+                    .await
+                }
+                None => None,
+            };
+            let source = ModelBackedPermissionAdmissionSource::from_config_with_context(
+                model_config,
+                inner.permission_review_rules.clone(),
+                recorded_decisions,
+                environment,
+            )?;
+            let model_result = source
+                .review(
+                    request.clone(),
+                    PermissionAdmissionContext::new(context.cancellation_token().clone()),
+                )
+                .await;
+            match model_result {
+                Ok(decision)
+                    if !decision.is_approved()
+                        && matches!(mode, crate::PermissionReviewMode::ModelThenHostFallback) =>
+                {
+                    // The model is a first pass under this mode: a denial or an
+                    // uncertain approval hands the final decision to the host,
+                    // together with the review that produced it.
+                    let reason = HostFallbackReason::ModelDenied(decision.review().clone());
+                    host_fallback_or_error(inner, mode, request.clone(), context, reason).await
+                }
+                Ok(decision) => Ok(decision),
+                Err(error) if matches!(error, crate::PermissionAdmissionError::Cancelled) => {
+                    Err(error)
+                }
+                Err(error)
+                    if matches!(mode, crate::PermissionReviewMode::ModelThenHostFallback) =>
+                {
+                    let reason = HostFallbackReason::ReviewFailed {
+                        message: error.to_string(),
+                    };
+                    match host_fallback_or_error(inner, mode, request.clone(), context, reason)
+                        .await
+                    {
+                        Ok(decision) => Ok(decision),
+                        Err(fallback_error) => Err(crate::PermissionAdmissionError::ReviewFailed {
+                            message: format!(
+                                "AI approval review failed: {error}; human fallback failed: {fallback_error}"
+                            ),
+                        }),
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            host_fallback_or_error(
                 inner,
                 mode,
-                request,
+                request.clone(),
                 context,
                 HostFallbackReason::ReviewModelUnavailable,
             )
-            .await;
+            .await
+        }
+    } else {
+        let Some(source) = inner.permission_admission_source.as_ref() else {
+            return Err(crate::PermissionAdmissionError::ReviewModelUnavailable);
         };
-        let source = ModelBackedPermissionAdmissionSource::from_config(model_config)?;
-        let result = source
+        source
             .review(
                 request.clone(),
                 PermissionAdmissionContext::new(context.cancellation_token().clone()),
             )
-            .await;
-        return match result {
-            Ok(decision)
-                if !decision.is_approved()
-                    && matches!(mode, crate::PermissionReviewMode::ModelThenHostFallback) =>
-            {
-                // The model is a first pass under this mode: a denial or an
-                // uncertain approval hands the final decision to the host,
-                // together with the review that produced it.
-                let reason = HostFallbackReason::ModelDenied(decision.review().clone());
-                host_fallback_or_error(inner, mode, request, context, reason).await
-            }
-            Ok(decision) => Ok(decision),
-            Err(error) if matches!(error, crate::PermissionAdmissionError::Cancelled) => Err(error),
-            Err(error) if matches!(mode, crate::PermissionReviewMode::ModelThenHostFallback) => {
-                let reason = HostFallbackReason::ReviewFailed {
-                    message: error.to_string(),
-                };
-                match host_fallback_or_error(inner, mode, request, context, reason).await {
-                    Ok(decision) => Ok(decision),
-                    Err(fallback_error) => Err(crate::PermissionAdmissionError::ReviewFailed {
-                        message: format!(
-                            "AI approval review failed: {error}; human fallback failed: {fallback_error}"
-                        ),
-                    }),
-                }
-            }
-            Err(error) => Err(error),
-        };
-    }
-
-    let Some(source) = inner.permission_admission_source.as_ref() else {
-        return Err(crate::PermissionAdmissionError::ReviewModelUnavailable);
+            .await
     };
-    source
-        .review(
-            request,
-            PermissionAdmissionContext::new(context.cancellation_token().clone()),
-        )
-        .await
+
+    if let Ok(decision) = &result {
+        inner.record_permission_decision(&request, decision).await;
+    }
+    result
 }
 
 async fn host_fallback_or_error(

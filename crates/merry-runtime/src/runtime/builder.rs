@@ -7,7 +7,9 @@ use crate::{
     RuntimeModelRole, RuntimeProfile, SkillCatalog, TaskAnchor, ToolAdmission,
     memory::{MemoryActivationSource, StoredMemoryActivationSource},
     model_config::RuntimeModelConfigs,
-    permission::{PermissionAdmissionSource, PermissionReviewMode, RuntimeTrustLevel},
+    permission::{
+        PermissionAdmissionSource, PermissionReviewMode, PermissionReviewRules, RuntimeTrustLevel,
+    },
     plan::{
         PlanController, PlanSubagentControl,
         tools::{
@@ -31,8 +33,9 @@ use crate::{
 use merry_core::{SessionId, ToolName};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     num::NonZeroUsize,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64},
@@ -75,6 +78,8 @@ pub struct RuntimeBuilder {
     accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
     runtime_trust_level: RuntimeTrustLevel,
     permission_review_mode: PermissionReviewMode,
+    permission_review_rules: PermissionReviewRules,
+    permission_review_workspace_root: Option<PathBuf>,
     permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     background_process_control: Option<Arc<dyn BackgroundProcessControl>>,
@@ -120,6 +125,8 @@ impl RuntimeBuilder {
             accepted_local_workspace_process_runner: None,
             runtime_trust_level: RuntimeTrustLevel::Agent,
             permission_review_mode: PermissionReviewMode::DefaultForTrust,
+            permission_review_rules: PermissionReviewRules::default(),
+            permission_review_workspace_root: None,
             permission_admission_source: None,
             permissioned_process_runner_factory: None,
             background_process_control: None,
@@ -482,6 +489,21 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets user-trusted custom rules for AI permission review.
+    #[must_use]
+    pub fn permission_review_rules(mut self, rules: PermissionReviewRules) -> Self {
+        self.permission_review_rules = rules;
+        self
+    }
+
+    /// Sets the workspace root used for read-only harness environment probes
+    /// (such as `git status` cleanliness) during AI permission review.
+    #[must_use]
+    pub fn permission_review_workspace_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.permission_review_workspace_root = Some(root.into());
+        self
+    }
+
     /// Explicitly enables fully trusted SDK/host execution for registered
     /// tools. Runtime schema validation, tool executor boundaries, sandboxing,
     /// and cancellation remain active. Proposal-based commit lifecycle checks
@@ -830,6 +852,9 @@ impl RuntimeBuilder {
                     .accepted_local_workspace_process_runner,
                 runtime_trust_level: self.runtime_trust_level,
                 permission_review_mode: self.permission_review_mode,
+                permission_review_rules: self.permission_review_rules,
+                permission_review_workspace_root: self.permission_review_workspace_root,
+                recorded_permission_decisions: RwLock::new(VecDeque::new()),
                 permission_admission_source: self.permission_admission_source,
                 permissioned_process_runner_factory: self.permissioned_process_runner_factory,
                 background_process_control: self.background_process_control,

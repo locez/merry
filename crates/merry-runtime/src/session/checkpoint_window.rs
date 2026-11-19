@@ -15,7 +15,7 @@ use crate::{
             history::{HiddenToolExchangeVisibility, history_checkpoint_ref},
             planning::archived_refs_for_plan,
         },
-        history::permission_review_context_entry,
+        history::{permission_review_context_entry, permission_review_task_anchor_entry},
         transcript::{ToolResultPromptProjection, TranscriptItem},
     },
 };
@@ -27,6 +27,7 @@ mod history;
 mod planning;
 
 const PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT: usize = 12;
+const PERMISSION_REVIEW_PINNED_USER_LIMIT: usize = 4;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ArchivedRefManifest {
@@ -458,9 +459,19 @@ impl SessionState {
         outcome
     }
 
+    /// Builds the bounded runtime context snapshot supplied to permission review.
+    ///
+    /// Always retains the pinned `task_anchor` (when set) and recent user
+    /// messages even when a long burst of tool exchanges or compaction would
+    /// otherwise push user intent out of the trailing window.
     pub(crate) fn permission_review_context_snapshot(
         &self,
     ) -> Result<Vec<PermissionReviewContextEntry>, RuntimeError> {
+        let mut entries = Vec::new();
+        if let Some(task_anchor) = self.task_anchor.as_ref() {
+            entries.push(permission_review_task_anchor_entry(task_anchor.objective()));
+        }
+
         let items = self
             .model_turn_histories(HiddenToolExchangeVisibility::Include, true)?
             .into_iter()
@@ -469,10 +480,41 @@ impl SessionState {
         let start = items
             .len()
             .saturating_sub(PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT);
-        Ok(items[start..]
+
+        let earlier_users = items[..start]
             .iter()
-            .map(|record| permission_review_context_entry(&record.item))
-            .collect())
+            .filter(|record| record.item.is_user())
+            .collect::<Vec<_>>();
+        let pinned_start = earlier_users
+            .len()
+            .saturating_sub(PERMISSION_REVIEW_PINNED_USER_LIMIT);
+        for record in &earlier_users[pinned_start..] {
+            entries.push(permission_review_context_entry(&record.item));
+        }
+
+        let has_visible_user =
+            !earlier_users.is_empty() || items[start..].iter().any(|record| record.item.is_user());
+        if !has_visible_user && self.prompt_history_projection.compacted_through().is_some() {
+            let full_users = self
+                .model_turn_histories(HiddenToolExchangeVisibility::Include, false)?
+                .into_iter()
+                .flat_map(|turn| turn.items)
+                .filter(|record| record.item.is_user())
+                .collect::<Vec<_>>();
+            let fallback_start = full_users
+                .len()
+                .saturating_sub(PERMISSION_REVIEW_PINNED_USER_LIMIT);
+            for record in &full_users[fallback_start..] {
+                entries.push(permission_review_context_entry(&record.item));
+            }
+        }
+
+        entries.extend(
+            items[start..]
+                .iter()
+                .map(|record| permission_review_context_entry(&record.item)),
+        );
+        Ok(entries)
     }
 
     fn validate_compaction_window_is_current(

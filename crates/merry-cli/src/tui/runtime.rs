@@ -172,13 +172,23 @@ pub(crate) async fn start_tui_runtime_session(
         Some(permission_source),
     )
     .map_err(unexpected)?;
+    let permission_review_rules = merry_config
+        .map(MerryConfig::permission_review_rules)
+        .transpose()
+        .map_err(unexpected)?
+        .unwrap_or_default();
     let coding_runtime = match loaded_session {
         Some(loaded) => resume_headless_coding_composition_with_loaded_session(
             runtime_input,
             loaded,
             permission_policy,
+            permission_review_rules,
         )?,
-        None => build_headless_coding_with_policy_composition(runtime_input, permission_policy)?,
+        None => build_headless_coding_with_policy_composition(
+            runtime_input,
+            permission_policy,
+            permission_review_rules,
+        )?,
     };
     let loop_config = coding_runtime.loop_config();
     let runtime = coding_runtime.into_runtime();
@@ -232,22 +242,32 @@ impl TuiRuntimeSession {
         &self.runtime
     }
 
+    pub(crate) fn pending_permission_review_count(&self) -> usize {
+        self.pending_permission_reviews.len()
+    }
+
     pub(crate) fn enqueue_permission_review(
         &mut self,
         request: PermissionReviewRequest,
-    ) -> Option<(String, String)> {
+    ) -> Option<crate::permission_prompt::PermissionReviewView> {
         if request.is_cancelled() {
             return None;
         }
-        let view = permission_review_view(&request);
         let should_open = self.pending_permission_reviews.is_empty();
         self.pending_permission_reviews.push_back(request);
-        should_open.then_some(view)
+        let total = self.pending_permission_reviews.len();
+        should_open
+            .then(|| {
+                self.pending_permission_reviews
+                    .front()
+                    .map(|front| permission_review_view(front, total))
+            })
+            .flatten()
     }
 
     pub(crate) fn prune_cancelled_permission_reviews(
         &mut self,
-    ) -> Option<Option<(String, String)>> {
+    ) -> Option<Option<crate::permission_prompt::PermissionReviewView>> {
         let mut pruned = false;
         while self
             .pending_permission_reviews
@@ -258,9 +278,10 @@ impl TuiRuntimeSession {
             pruned = true;
         }
         pruned.then(|| {
+            let total = self.pending_permission_reviews.len();
             self.pending_permission_reviews
                 .front()
-                .map(permission_review_view)
+                .map(|front| permission_review_view(front, total))
         })
     }
 
@@ -268,7 +289,7 @@ impl TuiRuntimeSession {
         &mut self,
         approval_id: &str,
         approved: bool,
-    ) -> Result<Option<(String, String)>, CliError> {
+    ) -> Result<Option<crate::permission_prompt::PermissionReviewView>, CliError> {
         let Some(request) = self.pending_permission_reviews.pop_front() else {
             return Ok(None);
         };
@@ -284,10 +305,11 @@ impl TuiRuntimeSession {
             request.deny("Rejected by the Merry permission review UI.")
         };
         result.map_err(unexpected)?;
+        let total = self.pending_permission_reviews.len();
         Ok(self
             .pending_permission_reviews
             .front()
-            .map(permission_review_view))
+            .map(|front| permission_review_view(front, total)))
     }
 
     pub(crate) fn replace_config(&mut self, config: MerryConfig) {
@@ -395,11 +417,11 @@ async fn write_session_metadata(
         .map_err(unexpected)
 }
 
-fn permission_review_view(request: &PermissionReviewRequest) -> (String, String) {
-    (
-        request.approval_id(),
-        crate::permission_prompt::permission_review_lines(request).join("\n"),
-    )
+fn permission_review_view(
+    request: &PermissionReviewRequest,
+    queue_total: usize,
+) -> crate::permission_prompt::PermissionReviewView {
+    crate::permission_prompt::PermissionReviewView::from_request(request, queue_total)
 }
 
 fn preference_model_override<'a>(
