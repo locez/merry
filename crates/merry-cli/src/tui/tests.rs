@@ -1,7 +1,7 @@
 use crate::tui::input::{DraftImage, TuiSubmission};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, PendingToolCall, PendingToolCallBatch,
-    RuntimeEventSource, SessionId, ToolCallArguments, ToolCallBatchId, ToolCallId, ToolName,
+    PendingToolCall, PendingToolCallBatch, RuntimeEventSource, SessionId, ToolCallArguments,
+    ToolCallBatchId, ToolCallId, ToolName,
 };
 use ratatui::style::Color;
 
@@ -19,10 +19,6 @@ fn draft_image(marker: u8) -> DraftImage {
 
 fn source() -> RuntimeEventSource {
     RuntimeEventSource::new(SessionId::new("tui-test").unwrap(), 1)
-}
-
-fn text_artifact(id: &str) -> ArtifactRef {
-    ArtifactRef::new(ArtifactId::new(id).unwrap(), ArtifactKind::Text)
 }
 
 fn pending_call(id: &str, tool_name: &str) -> PendingToolCall {

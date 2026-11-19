@@ -5,7 +5,7 @@ use crate::{
         CompactionConfig, Runtime, request_context_budget,
         tests::support::{
             common::{collect_step, completed_event_with, model_name, named_model, session_id},
-            memory::{ScriptedMemoryActivationSource, activated_memory, record_memory_artifact},
+            memory::{ScriptedMemoryActivationSource, activated_memory},
             model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
             runtime_factories::runtime_with_provider_and_memory_source,
         },
@@ -105,11 +105,6 @@ async fn checkpoint_prefix_stays_byte_stable_when_activated_memory_changes() {
         "runtime-checkpoint-prefix-stability",
         provider.clone(),
         source,
-    );
-    record_memory_artifact(
-        &runtime,
-        "memory-first-request-only-artifact",
-        "exact evidence for the first request memory",
     );
     runtime
         .inner
@@ -431,10 +426,8 @@ async fn compaction_request_reuses_the_step_stable_prefix_and_appends_the_direct
 
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_preserves_native_tool_items_and_indexes_only_covered_evidence() {
-    use crate::runtime::tests::support::common::{artifact_id, pending_tool_call};
-    use merry_core::{
-        ArtifactKind, ArtifactRef, PendingToolCallBatch, ToolCallBatchId, ToolCallResult,
-    };
+    use crate::runtime::tests::support::common::pending_tool_call;
+    use merry_core::{PendingToolCallBatch, ToolCallBatchId, ToolCallResult, ToolOutput};
     use merry_llm::ModelInputItem;
     let primary = RecordingModelProvider::new();
     let compactor =
@@ -477,14 +470,8 @@ async fn compaction_preserves_native_tool_items_and_indexes_only_covered_evidenc
             session.close_model_response(turn, true).expect("close");
             session
                 .submit_tool_result(
-                    ToolCallResult::succeeded(
-                        call.id().clone(),
-                        ArtifactRef::new(
-                            artifact_id(&format!("cache-result-{index}")),
-                            ArtifactKind::Text,
-                        ),
-                    ),
-                    crate::ArtifactContent::text(format!("verbatim result {index}")),
+                    ToolCallResult::succeeded(call.id().clone()),
+                    ToolOutput::text(format!("verbatim result {index}")),
                 )
                 .expect("result");
         }

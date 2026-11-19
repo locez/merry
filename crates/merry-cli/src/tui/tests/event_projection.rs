@@ -3,12 +3,12 @@ use crate::tui::{
     projector::TuiProjector,
     render::render_to_text,
     state::{TimelineItem, TuiState},
-    tests::{pending_call_with_args, source, text_artifact},
+    tests::{pending_call_with_args, source},
     theme::TuiTheme,
 };
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, QueuedInputLane, QueuedInputView,
-    RuntimeEvent, ToolCallId, ToolCallResult, ToolOutput,
+    ErrorInfo, QueuedInputLane, QueuedInputView, RuntimeEvent, ToolCallId, ToolCallResult,
+    ToolOutput,
 };
 use merry_runtime::SessionTranscriptItem;
 use serde_json::json;
@@ -26,7 +26,6 @@ fn projector_renders_assistant_text_as_primary_timeline_item() {
     projector.apply(
         RuntimeEvent::AssistantMessage {
             text: "hello from assistant".to_owned(),
-            artifact: text_artifact("assistant-1"),
             source: source(),
         },
         &mut state,
@@ -51,13 +50,7 @@ fn projector_rebuilds_resume_transcript_history() {
     .with_successful_command_output(true);
     let mut projector = TuiProjector::default();
     let call = pending_call_with_args("call-read", "read_text", json!({"path": "hello_world.py"}));
-    let result = ToolCallResult::succeeded(
-        call.id().clone(),
-        ArtifactRef::new(
-            ArtifactId::new("read-result").expect("valid artifact id"),
-            ArtifactKind::Json,
-        ),
-    );
+    let result = ToolCallResult::succeeded(call.id().clone());
 
     projector.apply_transcript_item(
         SessionTranscriptItem::UserMessage {
@@ -140,7 +133,6 @@ fn projector_updates_streaming_assistant_delta_until_final_message() {
     projector.apply(
         RuntimeEvent::AssistantMessage {
             text: "hello final".to_owned(),
-            artifact: text_artifact("assistant-final"),
             source: source(),
         },
         &mut state,

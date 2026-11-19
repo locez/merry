@@ -9,9 +9,9 @@ use super::{
     classify_step_events, collect_step_events, continuation_step_input,
     final_assistant_output_from_step, record_final_output_tool_call,
     structured_output_failure_result, take_subagent_notification, take_subagent_notification_input,
-    tool_execution_cancelled_diagnostic, tool_resolution_artifact_id,
-    tool_resolution_diagnostic_code, tool_resolution_is_policy_denied, tool_resolution_status,
-    trace_loop_error, trace_loop_finish, validate_final_output,
+    tool_execution_cancelled_diagnostic, tool_resolution_diagnostic_code,
+    tool_resolution_is_policy_denied, tool_resolution_status, trace_loop_error, trace_loop_finish,
+    validate_final_output,
 };
 use crate::{Runtime, RuntimeError, StepContext, StepInput, ToolExecutionContext};
 use std::sync::{Arc, atomic::AtomicU64};
@@ -540,7 +540,6 @@ impl Runtime {
                                     tool_call_id = call.id().as_str(),
                                     tool_name = call.name().as_str(),
                                     status = tool_resolution_status(&execution_events),
-                                    artifact_id = tool_resolution_artifact_id(&execution_events),
                                     diagnostic_code =
                                         tool_resolution_diagnostic_code(&execution_events)
                                             .unwrap_or(""),

@@ -1,16 +1,15 @@
 //! Runtime error types.
 //!
-//! Errors in this module describe runtime construction, admission, artifact,
+//! Errors in this module describe runtime construction, admission,
 //! and tool execution contracts. Provider failures are normalized before they
 //! become runtime events; provider wire errors are not exposed as runtime state.
 
 use crate::ToolActionKind;
-use crate::artifact::{ArtifactContentKind, ArtifactError};
 use crate::checkpoint::CheckpointError;
 use crate::compaction::CompactionError;
 use crate::context::ContextError;
 use crate::session_store::SessionStoreError;
-use merry_core::{ArtifactId, CoreError, SessionId, ToolCallBatchId, ToolCallId, ToolName};
+use merry_core::{CoreError, SessionId, ToolCallBatchId, ToolCallId, ToolName, ToolOutputKind};
 use thiserror::Error;
 
 /// Errors raised by Merry runtime construction and step admission.
@@ -88,13 +87,6 @@ pub enum RuntimeError {
     InvalidUserImageInput {
         /// Actionable image validation detail.
         reason: String,
-    },
-
-    /// External artifact recording tried to use a runtime-owned artifact id prefix.
-    #[error("artifact id {artifact_id} uses a runtime-reserved prefix")]
-    ReservedArtifactId {
-        /// Rejected artifact identifier.
-        artifact_id: ArtifactId,
     },
 
     /// A submitted tool result does not match any pending or resolved call.
@@ -269,13 +261,13 @@ pub enum RuntimeError {
         action_kind: ToolActionKind,
     },
 
-    /// A tool result used content that the MVP submit path does not accept.
-    #[error("tool result artifact {artifact_id} uses unsupported content kind {content_kind:?}")]
+    /// A tool result used invalid or blank output content.
+    #[error("tool call {call_id} result uses invalid {output_kind:?} output content")]
     UnsupportedToolResultContent {
-        /// Artifact identifier for the submitted tool result.
-        artifact_id: ArtifactId,
-        /// Submitted content category.
-        content_kind: ArtifactContentKind,
+        /// Tool call identifier for the submitted tool result.
+        call_id: ToolCallId,
+        /// Submitted output category.
+        output_kind: ToolOutputKind,
     },
 
     /// Transcript item ids are exhausted for this session.
@@ -307,14 +299,6 @@ pub enum RuntimeError {
         /// Source core validation error.
         #[from]
         source: CoreError,
-    },
-
-    /// Artifact state could not be recorded or read.
-    #[error("artifact state error: {source}")]
-    Artifact {
-        /// Source artifact error.
-        #[from]
-        source: ArtifactError,
     },
 
     /// Context state could not be constructed or compiled.
@@ -422,7 +406,6 @@ impl RuntimeError {
             Self::PlanEffectAttribution { .. } => "plan_effect_attribution_failed",
             Self::PlanSubagentAttemptInactive { .. } => "plan_subagent_attempt_inactive",
             Self::InvalidUserImageInput { .. } => "invalid_user_image_input",
-            Self::ReservedArtifactId { .. } => "reserved_artifact_id",
             Self::UnknownToolCall { .. } => "unknown_tool_call",
             Self::BridgeToolResultBatchEmpty { .. } => "bridge_tool_result_batch_empty",
             Self::BridgeToolResultBatchMismatch { .. } => "bridge_tool_result_batch_mismatch",
@@ -452,7 +435,6 @@ impl RuntimeError {
             Self::InvalidModelTurnTransition { .. } => "invalid_model_turn_transition",
             Self::TranscriptToolCallMissing { .. } => "transcript_tool_call_missing",
             Self::Core { .. } => "core_error",
-            Self::Artifact { .. } => "artifact_error",
             Self::Context { .. } => "context_error",
             Self::Checkpoint { .. } => "checkpoint_error",
             Self::Compaction { .. } => "compaction_error",
@@ -481,9 +463,6 @@ impl RuntimeError {
                 | Self::UnsupportedToolResultContent { .. }
                 | Self::Core {
                     source: CoreError::InvalidToolCallResult { .. }
-                }
-                | Self::Artifact {
-                    source: ArtifactError::IncompatibleContent { .. }
                 }
         )
     }

@@ -157,7 +157,6 @@ async fn invalid_bridge_tool_arguments_resolve_failed_without_bridge_request() {
             "SessionStarted",
             "StepStarted",
             "ToolCallPending",
-            "ArtifactRecorded",
             "ToolCallResolved",
         ]
     );
@@ -216,7 +215,6 @@ async fn invalid_bridge_tool_arguments_resolve_with_single_slot_event_buffer() {
             "SessionStarted",
             "StepStarted",
             "ToolCallPending",
-            "ArtifactRecorded",
             "ToolCallResolved",
         ]
     );
@@ -294,6 +292,6 @@ async fn invalid_bridge_terminal_events_share_one_slot_without_stranding_produce
     let second_events = second_stream.collect::<Vec<_>>().await;
     assert_eq!(
         second_events.first().expect("second step event").sequence,
-        6
+        5
     );
 }

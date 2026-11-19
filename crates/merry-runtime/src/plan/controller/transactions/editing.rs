@@ -1,5 +1,5 @@
 use crate::{
-    ArtifactContent, FileSessionStore,
+    FileSessionStore, ToolOutput,
     plan::{
         PlanError,
         controller::{
@@ -99,7 +99,7 @@ pub(super) async fn begin_plan_with_source(
                 });
             };
             let base = SessionBase::capture(&session);
-            let content = ArtifactContent::json(
+            let content = ToolOutput::json(
                 serde_json::to_string(&output).expect("begin_plan output serializes"),
             );
             let prepared = prepare_plan_commit(
@@ -138,7 +138,7 @@ pub(super) async fn begin_plan_with_source(
             }];
             let output = begin_output(candidate.snapshot());
             let tool_resolution = tool_call_id.map(|call_id| {
-                let content = ArtifactContent::json(
+                let content = ToolOutput::json(
                     serde_json::to_string(&output).expect("begin_plan output serializes"),
                 );
                 (call_id, content)
@@ -286,7 +286,7 @@ pub(in crate::plan::controller) async fn update_plan(
         let base = SessionBase::capture(&session);
         let tool_resolution = tool_call_id.map(|call_id| {
             let tool_output = PlanUpdateToolOutput::from(&output);
-            let content = ArtifactContent::json(
+            let content = ToolOutput::json(
                 serde_json::to_string(&tool_output).expect("update_plan output serializes"),
             );
             (call_id, content)

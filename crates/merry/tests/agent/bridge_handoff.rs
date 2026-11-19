@@ -90,8 +90,9 @@ async fn bridge_requests_are_explicit_driver_messages() {
                     RuntimeEvent::ToolCallFinished { result, .. }
                     if result.status() == merry_core::ToolCallResultStatus::Succeeded
                 );
-                if let RuntimeEvent::ToolCallFinished { result, .. } = event.as_ref() {
-                    assert!(result.artifact().id().as_str().starts_with("tool-result-"));
+                if let RuntimeEvent::ToolCallFinished { result, output, .. } = event.as_ref() {
+                    assert!(!result.call_id().as_str().is_empty());
+                    assert!(output.is_some());
                 }
                 saw_final_output |= matches!(
                     event.as_ref(),

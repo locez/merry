@@ -497,6 +497,7 @@ mod tests {
     fn model_turn_id_exhaustion_does_not_mutate_transcript() {
         let mut transcript = Transcript {
             items: Vec::new(),
+            tool_result_index: BTreeMap::new(),
             next_id: super::super::transcript::TranscriptItemId::new(0),
             model_turns: BTreeMap::new(),
             model_turn_sequences: BTreeMap::new(),

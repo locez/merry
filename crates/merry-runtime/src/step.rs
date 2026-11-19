@@ -7,12 +7,9 @@
 pub use crate::user_input::StepInput;
 use crate::{
     CompiledContext, FinalOutputContract, ProjectRules, PromptProfile, SkillCatalog, TaskAnchor,
-    UserMessageInput,
-    artifact::ArtifactContent,
-    prompt::render_prompt_block,
-    session::{TranscriptImageSnapshot, TranscriptItemSnapshot},
+    UserImageInput, UserMessageInput, prompt::render_prompt_block, session::TranscriptItemSnapshot,
 };
-use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus, ToolSpec};
+use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus, ToolOutput, ToolSpec};
 use merry_llm::{
     GenerationConfig, ModelContent, ModelImage, ModelInputItem, ModelMessage, ModelMessageRole,
     ModelName, ModelRequest, ModelToolCall, ModelToolCallId, ModelToolResult,
@@ -304,11 +301,8 @@ fn model_input_from_transcript_snapshot(
 ) -> Result<ModelInputItem, merry_llm::ModelError> {
     match snapshot {
         TranscriptItemSnapshot::UserMessage { text, images, .. } => {
-            let message = UserMessageInput::new(
-                text,
-                images.iter().map(|image| image.input().clone()).collect(),
-            )
-            .map_err(|error| merry_llm::ModelError::invalid_request(error.to_string()))?;
+            let message = UserMessageInput::new(text, images.clone())
+                .map_err(|error| merry_llm::ModelError::invalid_request(error.to_string()))?;
             Ok(ModelInputItem::Message(ModelMessage::new(
                 ModelMessageRole::User,
                 message.model_content()?,
@@ -323,12 +317,12 @@ fn model_input_from_transcript_snapshot(
         TranscriptItemSnapshot::ToolResult {
             call_id,
             result,
-            content,
+            output,
             images,
         } => {
             debug_assert_eq!(call_id, result.call_id());
             Ok(ModelInputItem::ToolResult(model_tool_result_from_result(
-                result, content, images,
+                result, output, images,
             )?))
         }
     }
@@ -346,15 +340,14 @@ fn model_tool_call_from_pending(
 
 fn model_tool_result_from_result(
     result: &ToolCallResult,
-    content: &ArtifactContent,
-    images: &[TranscriptImageSnapshot],
+    output: &ToolOutput,
+    images: &[UserImageInput],
 ) -> Result<ModelToolResult, merry_llm::ModelError> {
     let call_id = ModelToolCallId::new(result.call_id().as_str())?;
-    let content = model_tool_result_content(content)?;
+    let content = model_tool_result_content(output)?;
     let model_images = images
         .iter()
-        .map(|image| {
-            let input = image.input();
+        .map(|input| {
             ModelImage::png(
                 input.label(),
                 input.shared_png_bytes(),
@@ -382,16 +375,11 @@ fn model_tool_result_from_result(
 }
 
 fn model_tool_result_content(
-    content: &ArtifactContent,
+    output: &ToolOutput,
 ) -> Result<ModelToolResultContent, merry_llm::ModelError> {
-    match content {
-        ArtifactContent::Text { content: text } => ModelToolResultContent::text(text),
-        ArtifactContent::Json { content: json } => ModelToolResultContent::json(json),
-        ArtifactContent::Binary { .. }
-        | ArtifactContent::Image { .. }
-        | ArtifactContent::Other { .. } => Err(merry_llm::ModelError::invalid_request(
-            "tool result continuation content must be text or json",
-        )),
+    match output {
+        ToolOutput::Text { text } => ModelToolResultContent::text(text),
+        ToolOutput::Json { json } => ModelToolResultContent::json(json),
     }
 }
 

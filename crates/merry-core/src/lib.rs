@@ -1,9 +1,7 @@
 //! Shared Merry protocol types and runtime contracts.
 
-pub mod artifact;
 pub mod error;
 pub mod event;
-pub mod evidence;
 pub mod id;
 pub mod journal;
 pub mod output_rate;
@@ -16,15 +14,13 @@ pub mod tool_catalog;
 pub mod trajectory;
 pub mod usage;
 
-pub use artifact::{ArtifactKind, ArtifactRef};
 pub use error::CoreError;
 pub use event::{ErrorInfo, MerryErrorDomain, MerryErrorInfo, MerryRetryability};
-pub use evidence::{EvidenceLocator, EvidenceRef};
 pub use id::{
-    ArtifactId, PlanApprovalRequirementId, PlanAttemptId, PlanBindingId, PlanDirectiveId, PlanId,
-    PlanLeaseId, PlanNodeId, ProviderName, SessionId, SkillId, SubagentId, SubagentTaskId,
-    ToolAdapterId, ToolBindingName, ToolCallBatchId, ToolCallId, ToolName, ToolSourceFingerprint,
-    ToolSourceId, TrajectoryRecordId,
+    PlanApprovalRequirementId, PlanAttemptId, PlanBindingId, PlanDirectiveId, PlanId, PlanLeaseId,
+    PlanNodeId, ProviderName, SessionId, SkillId, SubagentId, SubagentTaskId, ToolAdapterId,
+    ToolBindingName, ToolCallBatchId, ToolCallId, ToolName, ToolSourceFingerprint, ToolSourceId,
+    TrajectoryRecordId,
 };
 pub use journal::{RuntimeJournalEvent, RuntimeJournalPayload};
 pub use output_rate::{ModelOutputRate, OutputTimingQuality, OutputTokenSource};
@@ -39,8 +35,9 @@ pub use plan::{
     PlanRevisionSummary, PlanSchedulerStatus, PlanSnapshot,
 };
 pub use runtime_event::{
-    InteractiveRunState, QueuedInputLane, QueuedInputView, QueuedInputsView, RuntimeEvent,
-    RuntimeEventSource, SubagentStatus, ToolOutput,
+    ImageSummary, InteractiveRunState, QueuedInputLane, QueuedInputView, QueuedInputsView,
+    RuntimeEvent, RuntimeEventSource, SubagentStatus, ToolOutput, ToolOutputKind,
+    ToolOutputPreview,
 };
 pub use schema::ToolInputSchema;
 pub use subagent_activity::{SubagentActivityPhase, SubagentActivitySnapshot};

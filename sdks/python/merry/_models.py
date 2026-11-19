@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 from pydantic import BaseModel
 
 from ._errors import MerryErrorInfo, ToolDomainError
-from ._event_types import ArtifactReference, EventDiagnostic
+from ._event_types import EventDiagnostic
 from ._json import (
     JsonObject,
     JsonValue,
@@ -303,13 +303,10 @@ class FinalOutputRecord:
     """Recorded structured output metadata and its decoded JSON value."""
 
     call_id: str
-    artifact: ArtifactReference
     value: JsonValue
 
     def __post_init__(self) -> None:
         _validate_identifier("final output call id", self.call_id, 256)
-        if not isinstance(self.artifact, ArtifactReference):
-            raise TypeError("final output artifact must be an ArtifactReference")
         object.__setattr__(
             self, "value", require_json_value(self.value, "final output JSON")
         )

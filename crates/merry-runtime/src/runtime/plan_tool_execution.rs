@@ -1,5 +1,5 @@
 use crate::{
-    ArtifactContent, PlanControllerError, PlanError, RuntimeError,
+    PlanControllerError, PlanError, RuntimeError, ToolOutput,
     plan::{
         ReadPlanInput, SubagentPlanUpdateInput, UpdatePlanInput,
         tools::{READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME},
@@ -277,7 +277,7 @@ where
         session.submit_tool_execution_outcome(
             pending.id(),
             ToolCallResultStatus::Succeeded,
-            ArtifactContent::json(content),
+            ToolOutput::json(content),
             None,
             None,
         )?
@@ -334,7 +334,7 @@ async fn submit_rejection(
         session.submit_tool_execution_outcome(
             pending.id(),
             ToolCallResultStatus::Failed,
-            ArtifactContent::json(content.to_string()),
+            ToolOutput::json(content.to_string()),
             Some(diagnostic),
             None,
         )?
@@ -487,9 +487,6 @@ fn plan_error_code(error: &PlanError) -> &'static str {
         PlanError::UnknownDirective { .. } => "plan_directive_not_found",
         PlanError::InvalidDirectiveTransition { .. } => "plan_directive_transition_invalid",
         PlanError::StaleDirectiveTarget => "plan_directive_target_stale",
-        PlanError::MissingArtifactRef { .. } => "plan_artifact_ref_missing",
-        PlanError::InvalidEvidenceRef { .. } => "plan_evidence_ref_invalid",
-        PlanError::ArtifactPromotionConflict { .. } => "plan_artifact_promotion_conflict",
         PlanError::InvalidAuthoredNodeStatus { .. } => "plan_invalid_authored_status",
         PlanError::SubagentScopeViolation { .. } => "plan_subagent_scope_violation",
     }

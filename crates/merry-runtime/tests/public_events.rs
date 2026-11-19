@@ -1,6 +1,6 @@
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactKind, ModelUsage, RuntimeEvent, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
+    ModelUsage, RuntimeEvent, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
     ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
@@ -111,16 +111,10 @@ async fn assistant_output_projects_to_public_assistant_message() {
 
     assert!(matches!(durable[0], RuntimeEvent::SessionStarted { .. }));
     assert!(matches!(durable[1], RuntimeEvent::StepStarted { .. }));
-    let RuntimeEvent::AssistantMessage {
-        text,
-        artifact,
-        source,
-    } = durable[2]
-    else {
+    let RuntimeEvent::AssistantMessage { text, source } = durable[2] else {
         panic!("expected assistant message, got {:?}", durable[2]);
     };
     assert_eq!(text, "hello public event");
-    assert_eq!(artifact.kind(), &ArtifactKind::Text);
     assert_eq!(source.sequence, 3);
     assert!(events.iter().any(|event| matches!(
         event,

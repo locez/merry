@@ -6,19 +6,16 @@ use crate::support::{
     },
     process::RecordingProcessRunner,
     runtime::{
-        artifact_id, run_default_loop, runtime_with_provider, runtime_with_tool,
-        runtime_with_tool_action, session_id,
+        run_default_loop, runtime_with_provider, runtime_with_tool, runtime_with_tool_action,
+        session_id,
     },
     tools::{BlockingToolExecutor, ScriptedToolExecutor},
     tracing::capture_traces_for,
 };
-use merry_core::{
-    ArtifactKind, ArtifactRef, EvidenceLocator, RuntimeJournalPayload, ToolCallResultStatus,
-    ToolName,
-};
+use merry_core::{RuntimeJournalPayload, ToolCallResultStatus, ToolName};
 use merry_llm::ModelCapabilities;
 use merry_runtime::{
-    AgentLoopConfig, AgentLoopStatus, ArtifactError, CompactionConfig, ProcessActionIntent,
+    AgentLoopConfig, AgentLoopStatus, CompactionConfig, ContextSummary, ProcessActionIntent,
     Runtime, RuntimeError, StepContext, StepInput, TaskAnchor, ToolActionKind,
     process_command_tool,
 };
@@ -227,7 +224,6 @@ async fn unregistered_tool_resolves_failed_and_continues_once() {
             "SessionStarted",
             "StepStarted",
             "ToolCallPending",
-            "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
             "AssistantOutputRecorded",
@@ -289,7 +285,6 @@ async fn denied_registered_tool_resolves_failed_and_agent_loop_continues_once() 
             "SessionStarted",
             "StepStarted",
             "ToolCallPending",
-            "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
             "AssistantOutputRecorded",
@@ -473,34 +468,28 @@ async fn agent_loop_tool_execution_cancellation_returns_cancelled_and_keeps_pend
         ["SessionStarted", "StepStarted", "ToolCallPending"]
     );
     let pending = pending_tool_call(result.events()).clone();
-    assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+    assert_eq!(runtime.pending_tool_calls().await, vec![pending.clone()]);
     assert_eq!(executor.calls().len(), 1);
     assert_eq!(provider.recorded_requests().len(), 1);
 
-    let evidence_err = runtime
-        .evidence_ref(
-            &artifact_id("tool-result-3"),
-            EvidenceLocator::whole_artifact(),
-        )
-        .await
-        .expect_err("cancelled loop tool execution must not record a tool result artifact");
-    assert!(matches!(
-        evidence_err,
-        RuntimeError::Artifact {
-            source: ArtifactError::MissingArtifact { id }
-        } if id == artifact_id("tool-result-3")
-    ));
+    assert!(
+        runtime
+            .read_tool_output(pending.id())
+            .await
+            .expect("tool output query succeeds")
+            .is_none(),
+        "cancelled loop tool execution must not record tool output"
+    );
     assert!(result.events().iter().all(|event| !matches!(
         event.payload,
         RuntimeJournalPayload::ToolCallResolved { .. }
     )));
 
-    let artifact_events = runtime
-        .record_artifact(
-            ArtifactRef::new(artifact_id("post-cancel-artifact"), ArtifactKind::Text),
-            merry_runtime::ArtifactContent::text("runtime permit released\n"),
+    runtime
+        .record_context_summary(
+            ContextSummary::new("post-cancel-summary", "runtime permit released")
+                .expect("valid summary"),
         )
         .await
         .expect("runtime should release active permit after loop cancellation");
-    assert_eq!(event_kind_names(&artifact_events), ["ArtifactRecorded"]);
 }

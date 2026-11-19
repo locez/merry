@@ -8,7 +8,6 @@ use crate::{
     WorkspacePatchProposal,
     action_audit::{ActionAuditPolicy, ActionAuditStatus},
     action_policy::{ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy},
-    artifact::{ArtifactContent, ArtifactError},
     context::ContextCompiler,
     ledger::{LedgerFactKind, LedgerProjection, LedgerScope},
     memory::{
@@ -18,9 +17,8 @@ use crate::{
     },
 };
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
-    PendingToolCall, PendingToolCallBatch, RuntimeJournalPayload, SessionId, ToolCallArguments,
-    ToolCallBatchId, ToolCallId, ToolCallResult, ToolName,
+    ErrorInfo, PendingToolCall, PendingToolCallBatch, RuntimeJournalPayload, SessionId,
+    ToolCallArguments, ToolCallBatchId, ToolCallId, ToolCallResult, ToolName, ToolOutput,
 };
 use serde_json::json;
 
@@ -37,10 +35,6 @@ mod usage;
 
 fn session_id() -> SessionId {
     SessionId::new("session-state-test").expect("valid session id")
-}
-
-fn artifact_id(value: &str) -> ArtifactId {
-    ArtifactId::new(value).expect("valid artifact id")
 }
 
 fn tool_call_id(value: &str) -> ToolCallId {
@@ -150,7 +144,7 @@ fn activated_memory_with_details(
         memory_id(id),
         MemoryScope::Session,
         text,
-        vec![memory_evidence("primary source", &format!("{id}-artifact"))],
+        vec![memory_evidence("primary source", &format!("{id}-source"))],
         MemoryItemSelection::new(vec!["topic".to_owned()], confidence, priority, None)
             .expect("valid memory selection"),
     )
@@ -180,33 +174,6 @@ fn provenance() -> MemoryActivationProvenance {
     .expect("valid memory provenance")
 }
 
-fn memory_evidence(label: &str, artifact: &str) -> MemoryEvidence {
-    MemoryEvidence::new(
-        label,
-        EvidenceRef::new(artifact_id(artifact), EvidenceLocator::whole_artifact()),
-    )
-    .expect("valid memory evidence")
-}
-
-fn record_memory_artifacts(session: &mut SessionState, memories: &[&ActivatedMemory]) {
-    let mut seen = std::collections::BTreeSet::new();
-
-    for memory in memories {
-        for evidence in memory.item().evidence() {
-            if !seen.insert(evidence.reference().artifact_id.clone()) {
-                continue;
-            }
-
-            session
-                .record_artifact_state(
-                    ArtifactRef::new(evidence.reference().artifact_id.clone(), ArtifactKind::Text),
-                    ArtifactContent::text(format!(
-                        "evidence for {}\n{}",
-                        memory.item().id(),
-                        memory.item().text()
-                    )),
-                )
-                .expect("memory artifact records");
-        }
-    }
+fn memory_evidence(label: &str, source: &str) -> MemoryEvidence {
+    MemoryEvidence::new(label, source).expect("valid memory evidence")
 }

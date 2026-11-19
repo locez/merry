@@ -335,8 +335,8 @@ impl LifecycleFact {
 pub enum LedgerFactKind {
     /// Session start has been recorded.
     SessionStarted,
-    /// Artifact state has been recorded.
-    ArtifactRecorded,
+    /// Assistant text output has been recorded.
+    AssistantOutputRecorded,
     /// Step start has been recorded.
     StepStarted,
     /// Provider-neutral model retry status has been recorded.
@@ -371,7 +371,7 @@ pub enum LedgerFactKind {
 #[serde(rename_all = "snake_case")]
 enum PersistedLedgerFactKind {
     SessionStarted,
-    ArtifactRecorded,
+    AssistantOutputRecorded,
     StepStarted,
     ModelRetry,
     CompactionStarted,
@@ -392,7 +392,7 @@ impl From<LedgerFactKind> for PersistedLedgerFactKind {
     fn from(value: LedgerFactKind) -> Self {
         match value {
             LedgerFactKind::SessionStarted => Self::SessionStarted,
-            LedgerFactKind::ArtifactRecorded => Self::ArtifactRecorded,
+            LedgerFactKind::AssistantOutputRecorded => Self::AssistantOutputRecorded,
             LedgerFactKind::StepStarted => Self::StepStarted,
             LedgerFactKind::ModelRetry => Self::ModelRetry,
             LedgerFactKind::CompactionStarted => Self::CompactionStarted,
@@ -415,7 +415,7 @@ impl From<PersistedLedgerFactKind> for LedgerFactKind {
     fn from(value: PersistedLedgerFactKind) -> Self {
         match value {
             PersistedLedgerFactKind::SessionStarted => Self::SessionStarted,
-            PersistedLedgerFactKind::ArtifactRecorded => Self::ArtifactRecorded,
+            PersistedLedgerFactKind::AssistantOutputRecorded => Self::AssistantOutputRecorded,
             PersistedLedgerFactKind::StepStarted => Self::StepStarted,
             PersistedLedgerFactKind::ModelRetry => Self::ModelRetry,
             PersistedLedgerFactKind::CompactionStarted => Self::CompactionStarted,

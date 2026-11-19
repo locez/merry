@@ -298,7 +298,7 @@ mod tests {
     }
 
     fn text(outcome: &crate::ToolExecutionOutcome) -> String {
-        outcome.content().as_text().expect("text result").to_owned()
+        outcome.content().as_str().to_owned()
     }
 
     #[tokio::test]

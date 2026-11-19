@@ -20,11 +20,10 @@ use crate::{
     },
 };
 use merry_core::{
-    PendingToolCall, ToolCallArguments, ToolCallId, ToolCallResultStatus, ToolName, ToolSpec,
+    PendingToolCall, ToolCallArguments, ToolCallId, ToolCallResultStatus, ToolName, ToolOutputKind,
+    ToolSpec,
 };
-use merry_runtime::{
-    ActionExecutionEvidence, ArtifactContentKind, ToolConcurrency, ToolExecutionError,
-};
+use merry_runtime::{ActionExecutionEvidence, ToolConcurrency, ToolExecutionError};
 use merry_runtime::{
     ActionProposal, ActionProposalEvidence, ToolActionKind, ToolActionPreflight,
     ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
@@ -345,13 +344,7 @@ fn add_patch_preflight(tools: &WorkspaceTools, path: &str, lines: &[&str]) -> To
 }
 
 fn json_content(outcome: &ToolExecutionOutcome) -> Value {
-    serde_json::from_str(
-        outcome
-            .content()
-            .as_text()
-            .expect("json content should be text"),
-    )
-    .expect("tool outcome should be JSON")
+    serde_json::from_str(outcome.content().as_str()).expect("tool outcome should be JSON")
 }
 
 fn assert_failed_json(
@@ -371,7 +364,7 @@ fn assert_failed_json_for_tool(
     host_root: &Path,
 ) {
     assert_eq!(outcome.status(), ToolCallResultStatus::Failed);
-    assert_eq!(outcome.content().kind(), ArtifactContentKind::Json);
+    assert_eq!(outcome.content().kind(), ToolOutputKind::Json);
     assert_eq!(outcome.diagnostic().expect("diagnostic").code(), code);
 
     let payload = json_content(outcome);
@@ -419,8 +412,7 @@ fn assert_failed_json_for_tool(
     assert!(
         !outcome
             .content()
-            .as_text()
-            .expect("json content")
+            .as_str()
             .contains(host_root.to_str().expect("temp path utf8")),
         "tool output must not include absolute host roots"
     );
@@ -501,10 +493,7 @@ fn every_workspace_error_code_declares_its_recovery() {
 }
 
 fn assert_no_provider_visible_patch_metadata(outcome: &ToolExecutionOutcome) {
-    let text = outcome
-        .content()
-        .as_text()
-        .expect("json content should be text");
+    let text = outcome.content().as_str();
     for forbidden in [
         "approved workspace patch",
         "fingerprint",

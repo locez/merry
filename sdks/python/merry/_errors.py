@@ -20,7 +20,6 @@ from ._json import (
 NativeMerryError = _merry.NativeMerryError
 
 ErrorDomain: TypeAlias = Literal[
-    "artifact",
     "compaction",
     "config",
     "context",
@@ -41,7 +40,6 @@ Retryability: TypeAlias = Literal[
 
 _ERROR_DOMAINS = frozenset(
     {
-        "artifact",
         "compaction",
         "config",
         "context",
@@ -66,7 +64,6 @@ _ERROR_CONTEXT_KEYS = frozenset(
         "model_role",
         "config_path",
         "field_path",
-        "artifact_id",
         "checkpoint_id",
         "http_status",
         "exit_code",
@@ -79,8 +76,6 @@ _MAX_ERROR_CONTEXT_CHARS = 512
 
 
 def _validated_error_domain(value: str) -> ErrorDomain:
-    if value == "artifact":
-        return "artifact"
     if value == "compaction":
         return "compaction"
     if value == "config":
@@ -228,7 +223,6 @@ class ToolDomainError(Exception):
 
 
 _DOMAIN_ERRORS: Mapping[str, type[MerryError]] = {
-    "artifact": MerryRuntimeError,
     "compaction": MerryCompactionError,
     "config": MerryConfigError,
     "context": MerryContextError,

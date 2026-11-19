@@ -4,11 +4,10 @@ use crate::tui::{
     projector::TuiProjector,
     render::render_to_text,
     state::{CommandView, TimelineItem, TuiState},
-    tests::{pending_call_with_args, source, text_artifact},
+    tests::{pending_call_with_args, source},
     theme::TuiTheme,
 };
 use merry_core::{ErrorInfo, RuntimeEvent, ToolCallId, ToolCallResult, ToolOutput};
-use merry_runtime::ArtifactContent;
 use serde_json::json;
 
 #[test]
@@ -23,8 +22,7 @@ fn malformed_process_streams_remain_inspectable_as_raw_output() {
             value[name] = stream.clone();
             let output = value.to_string();
             assert!(process_output_preview(&output).is_none());
-            let captured = CapturedOutput::from_artifact(ArtifactContent::json(&output))
-                .expect("unrecognized text stays inspectable");
+            let captured = CapturedOutput::from_tool_output(ToolOutput::json(&output));
             assert_eq!(captured, CapturedOutput::Text(output.clone()));
             assert_eq!(captured.copy_text(), output);
         }
@@ -55,10 +53,7 @@ fn projector_renders_process_calls_as_ran_with_preview() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-process").unwrap(),
-                text_artifact("process-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("call-process").unwrap()),
             output: Some(ToolOutput::Json {
                 json: r#"{"kind":"process_action","status":0,"stdout":{"text":"hello world\n","bytes":12,"truncated":false},"stderr":{"text":"","bytes":0,"truncated":false}}"#.to_owned(),
             }),
@@ -100,7 +95,6 @@ fn projector_renders_nonzero_process_exit_as_command_result() {
         RuntimeEvent::ToolCallFinished {
             result: ToolCallResult::failed(
                 ToolCallId::new("call-process").unwrap(),
-                text_artifact("process-output"),
                 ErrorInfo::new("process_action_failed", "process exited with code 101")
                     .unwrap(),
             ),
@@ -147,7 +141,6 @@ fn projector_keeps_process_start_failure_as_diagnostic() {
         RuntimeEvent::ToolCallFinished {
             result: ToolCallResult::failed(
                 ToolCallId::new("call-process-start-failure").unwrap(),
-                text_artifact("process-start-failure-output"),
                 ErrorInfo::new("process_action_failed", "failed to start process").unwrap(),
             ),
             output: Some(ToolOutput::Json {
@@ -198,10 +191,7 @@ fn projector_shows_permission_allow_rationale_on_success() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-permission-success").unwrap(),
-                text_artifact("permission-success-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("call-permission-success").unwrap()),
             output: Some(ToolOutput::Json {
                 json: r#"{"ok":true,"kind":"process_action","permission_profile_id":"process.permission_request.approved","permission_review":{"source":"model","risk":"low","user_authorization":"high","rationale":"The exact command is grounded in the user's task."}}"#.to_owned(),
             }),
@@ -240,10 +230,7 @@ fn projector_keeps_process_preview_lines_intact() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-process").unwrap(),
-                text_artifact("process-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("call-process").unwrap()),
             output: Some(ToolOutput::Json {
                 json: format!(
                     r#"{{"kind":"process_action","status":0,"stdout":{{"text":"{}\n","bytes":160,"truncated":false}},"stderr":{{"text":"","bytes":0,"truncated":false}}}}"#,
@@ -288,10 +275,7 @@ fn projector_limits_process_preview_to_five_output_lines() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-process-five-lines").unwrap(),
-                text_artifact("process-five-lines-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("call-process-five-lines").unwrap()),
             output: Some(ToolOutput::Json {
                 json: r#"{"kind":"process_action","status":0,"stdout":{"text":"one\ntwo\nthree\nfour\nfive\nsix\n","bytes":28,"truncated":false},"stderr":{"text":"stderr should not be previewed\n","bytes":28,"truncated":false}}"#.to_owned(),
             }),

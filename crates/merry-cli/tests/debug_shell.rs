@@ -85,7 +85,6 @@ fn shell_events_jsonl_records_exact_argv_and_resolves_success() {
     let events = parse_jsonl(&output.stdout);
     let kinds = event_kinds(&events);
     assert!(kinds.contains(&"tool_call_pending"));
-    assert!(kinds.contains(&"artifact_recorded"));
     assert!(kinds.contains(&"tool_call_resolved"));
 
     let pending = events
@@ -149,7 +148,6 @@ fn shell_forbidden_command_denies_without_running_raw_command() {
     let events = parse_jsonl(&output.stdout);
     let kinds = event_kinds(&events);
     assert!(kinds.contains(&"tool_call_pending"));
-    assert!(kinds.contains(&"artifact_recorded"));
     assert!(kinds.contains(&"tool_call_resolved"));
 
     let resolved = events
@@ -204,7 +202,6 @@ fn shell_local_workspace_effect_denies_without_sandbox_admission_or_raw_cargo_ou
     let events = parse_jsonl(&output.stdout);
     let kinds = event_kinds(&events);
     assert!(kinds.contains(&"tool_call_pending"));
-    assert!(kinds.contains(&"artifact_recorded"));
     assert!(kinds.contains(&"tool_call_resolved"));
 
     let resolved = events

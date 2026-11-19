@@ -7,10 +7,9 @@ use super::{
     theme::TuiTheme,
 };
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, InteractiveRunState, PendingToolCall,
-    QueuedInputLane, QueuedInputView, RuntimeEvent, RuntimeEventSource, SessionId,
-    TOOL_CANCELLED_BY_USER_CODE, ToolCallArguments, ToolCallId, ToolCallResult, ToolName,
-    ToolOutput,
+    ErrorInfo, InteractiveRunState, PendingToolCall, QueuedInputLane, QueuedInputView,
+    RuntimeEvent, RuntimeEventSource, SessionId, TOOL_CANCELLED_BY_USER_CODE, ToolCallArguments,
+    ToolCallId, ToolCallResult, ToolName, ToolOutput,
 };
 
 fn state() -> TuiState {
@@ -43,15 +42,10 @@ fn pending_tool_call(id: &str) -> PendingToolCall {
 }
 
 fn tool_cancelled_event(id: &str) -> RuntimeEvent {
-    let artifact_id = format!("{id}-cancelled");
     let diagnostic_message = format!("tool call {id} was cancelled by user interrupt");
     RuntimeEvent::ToolCallFinished {
         result: ToolCallResult::failed(
             ToolCallId::new(id).expect("tool call id"),
-            ArtifactRef::new(
-                ArtifactId::new(&artifact_id).expect("artifact id"),
-                ArtifactKind::Text,
-            ),
             ErrorInfo::new(TOOL_CANCELLED_BY_USER_CODE, &diagnostic_message)
                 .expect("cancellation diagnostic"),
         ),

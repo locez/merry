@@ -49,7 +49,7 @@ async fn opt_in_workspace_write_patch_proposal_executes_and_records_execution_au
     assert_eq!(executor.approved_proposal_seen(), vec![true]);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     assert_eq!(
         resolved_tool_result(&events).status(),
@@ -105,17 +105,12 @@ async fn opt_in_workspace_write_patch_proposal_executes_and_records_execution_au
         .filter_map(|(index, kind)| (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index))
         .collect::<Vec<_>>();
     assert_eq!(audit_indexes.len(), 2);
-    let artifact_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
-        .expect("artifact lifecycle should be recorded");
     let resolved_index = lifecycle
         .iter()
         .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
         .expect("resolution lifecycle should be recorded");
     assert!(audit_indexes[0] < audit_indexes[1]);
-    assert!(audit_indexes[1] < artifact_index);
-    assert!(artifact_index < resolved_index);
+    assert!(audit_indexes[1] < resolved_index);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -145,7 +140,7 @@ async fn opt_in_workspace_write_patch_proposal_rejects_non_patch_tool_name() {
     assert_eq!(executor.execute_count(), 0);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     assert_eq!(
         resolved_tool_result(&events).status(),
@@ -197,7 +192,7 @@ async fn opt_in_workspace_write_patch_records_outcome_when_cancelled_after_side_
     assert!(executor.side_effect_happened());
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     assert_eq!(
         resolved_tool_result(&events).status(),

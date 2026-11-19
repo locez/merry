@@ -374,24 +374,12 @@ async fn successful_compaction_commit_resumes_exact_transactional_state() {
         .expect("checkpoint resumes");
     assert!(!outcome.checkpoint_id().as_str().is_empty());
     let session = resumed.inner.session.lock().await;
-    assert_eq!(
-        session
-            .full_transcript_snapshot()
-            .expect("full transcript resumes")
-            .len(),
-        2
-    );
+    assert_eq!(session.full_transcript_snapshot().len(), 2);
     assert_eq!(
         session.prompt_history_projection().compacted_through(),
         Some(ModelTurnId::new(1))
     );
-    assert_eq!(
-        session
-            .provider_transcript_snapshot()
-            .expect("provider transcript resumes")
-            .len(),
-        1
-    );
+    assert_eq!(session.provider_transcript_snapshot().len(), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]

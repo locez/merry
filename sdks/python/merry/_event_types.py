@@ -35,7 +35,6 @@ class EventType(str, Enum):
     MODEL_RETRY_ATTEMPT_STARTED = "model_retry_attempt_started"
     MODEL_RETRY_SCHEDULED = "model_retry_scheduled"
     MODEL_RETRY_EXHAUSTED = "model_retry_exhausted"
-    EVIDENCE_REFERENCED = "evidence_referenced"
     SKILL_USED = "skill_used"
     SUBAGENT_SPAWNED = "subagent_spawned"
     SUBAGENT_STARTED = "subagent_started"
@@ -102,21 +101,6 @@ class EventDiagnostic:
 
 
 @dataclass(frozen=True, slots=True)
-class ArtifactReference:
-    """Provider-neutral reference to a persisted runtime artifact."""
-
-    id: str
-    kind: str
-    label: str | None
-
-    def __post_init__(self) -> None:
-        _validate_identifier("artifact id", self.id, 256)
-        _validate_identifier("artifact kind", self.kind, 128)
-        if self.label is not None:
-            _validate_text("artifact label", self.label, 512)
-
-
-@dataclass(frozen=True, slots=True)
 class RuntimeToolCall:
     """Typed runtime view of a pending tool call."""
 
@@ -164,7 +148,7 @@ class RuntimeToolResultStatus(str, Enum):
 
 
 class RuntimeToolOutputKind(str, Enum):
-    """Content kind for an artifact-backed tool result."""
+    """Content kind for a recorded tool result."""
 
     TEXT = "text"
     JSON = "json"
@@ -199,11 +183,10 @@ class RuntimeToolOutput:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeToolResult:
-    """Typed artifact-backed tool result view."""
+    """Typed tool result metadata view."""
 
     call_id: str
     status: RuntimeToolResultStatus
-    artifact: ArtifactReference
     diagnostic: EventDiagnostic | None
 
     def __post_init__(self) -> None:
@@ -212,8 +195,6 @@ class RuntimeToolResult:
             raise TypeError(
                 "runtime tool result status must be a RuntimeToolResultStatus"
             )
-        if not isinstance(self.artifact, ArtifactReference):
-            raise TypeError("runtime tool result artifact must be an ArtifactReference")
         if self.diagnostic is not None and not isinstance(
             self.diagnostic, EventDiagnostic
         ):
@@ -229,19 +210,6 @@ class RuntimeToolResult:
             )
         if self.status is RuntimeToolResultStatus.FAILED and self.diagnostic is None:
             raise ValueError("failed runtime tool results must have a diagnostic")
-
-
-@dataclass(frozen=True, slots=True)
-class EvidenceReference:
-    """Typed outer shape of exact evidence, with an opaque locator payload."""
-
-    artifact_id: str
-    locator: RawEventData
-
-    def __post_init__(self) -> None:
-        _validate_identifier("evidence artifact id", self.artifact_id, 256)
-        if not isinstance(self.locator, RawEventData):
-            raise TypeError("evidence locator must be RawEventData")
 
 
 class SubagentStatus(str, Enum):

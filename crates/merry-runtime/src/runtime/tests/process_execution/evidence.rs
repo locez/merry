@@ -51,17 +51,13 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
     assert!(result.diagnostic().is_none());
     assert!(matches!(
         &events[0].payload,
-        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
-    ));
-    assert!(matches!(
-        &events[2].payload,
         RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
     assert!(runtime.pending_tool_calls().await.is_empty());
@@ -149,30 +145,13 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
         .filter_map(|(index, kind)| (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index))
         .collect::<Vec<_>>();
     assert_eq!(audit_indexes.len(), 2);
-    let artifact_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
-        .expect("artifact lifecycle should be recorded");
     let resolved_index = lifecycle
         .iter()
         .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
         .expect("resolution lifecycle should be recorded");
     assert!(audit_indexes[0] < audit_indexes[1]);
-    assert!(audit_indexes[1] < artifact_index);
-    assert!(artifact_index < resolved_index);
+    assert!(audit_indexes[1] < resolved_index);
 
-    let artifact_order = projection
-        .entries()
-        .iter()
-        .find_map(|entry| match entry {
-            LedgerProjection::Lifecycle {
-                kind: LedgerFactKind::ArtifactRecorded,
-                order,
-                ..
-            } => Some(*order),
-            LedgerProjection::Lifecycle { .. } | LedgerProjection::Fact { .. } => None,
-        })
-        .expect("artifact lifecycle should be projected");
     let resolved_order = projection
         .entries()
         .iter()
@@ -198,13 +177,12 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
         })
         .expect("process result should be reduced into a compact ledger observation");
     assert_eq!(observation_scope, LedgerScope::Tool);
-    assert!(artifact_order < observation_order);
     assert!(observation_order < resolved_order);
     assert!(observation_text.contains("exit code 0"));
     assert!(observation_text.contains("permission_profile=process.read_only"));
     assert!(observation_text.contains("stdout_bytes=21"));
     assert!(observation_text.contains("stderr_bytes=0"));
-    assert!(observation_text.contains(&format!("artifact={}", result.artifact().id().as_str())));
+    assert!(observation_text.contains(&format!("call_id={}", result.call_id().as_str())));
     assert!(!observation_text.contains("runtime tests passed"));
 }
 

@@ -1,22 +1,19 @@
 use crate::support::{
     events::{
-        assert_no_completion, assert_no_failed, assistant_output_artifact, event_kind_names,
+        assert_no_completion, assert_no_failed, assistant_output_text, event_kind_names,
         pending_tool_call,
     },
     models::{
         ScriptedModelProvider, completed_event, completed_outputs_event, completed_text_event,
         model_name, model_tool_call,
     },
-    runtime::{
-        artifact_id, collect_step, runtime_with_provider, runtime_with_scripted_provider,
-        session_id,
-    },
+    runtime::{collect_step, runtime_with_provider, runtime_with_scripted_provider, session_id},
 };
-use merry_core::{ArtifactKind, ArtifactRef, ToolCallResult};
+use merry_core::{ToolCallResult, ToolOutput};
 use merry_llm::{
     FinishReason, ModelEvent, ModelMessageRole, ModelOutput, testing::FakeModelProvider,
 };
-use merry_runtime::{ArtifactContent, Runtime};
+use merry_runtime::Runtime;
 use std::sync::Arc;
 
 #[tokio::test(flavor = "current_thread")]
@@ -86,12 +83,7 @@ async fn provider_completed_with_mixed_text_and_tool_call_records_commentary_and
             "ToolCallPending"
         ]
     );
-    let artifact = assistant_output_artifact(&events);
-    let content = runtime
-        .read_artifact_content(artifact.id())
-        .await
-        .expect("commentary artifact should be readable");
-    assert_eq!(content.as_text(), Some("partial answer"));
+    assert_eq!(assistant_output_text(&events), "partial answer");
     assert_eq!(pending_tool_call(&events).id().as_str(), "call-1");
     assert_no_failed(&events);
     assert_no_completion(&events);
@@ -128,12 +120,7 @@ async fn provider_tool_call_after_non_empty_text_delta_records_commentary_and_pe
             "ToolCallPending"
         ]
     );
-    let artifact = assistant_output_artifact(&events);
-    let content = runtime
-        .read_artifact_content(artifact.id())
-        .await
-        .expect("commentary artifact should be readable");
-    assert_eq!(content.as_text(), Some("thinking aloud"));
+    assert_eq!(assistant_output_text(&events), "thinking aloud");
     assert_eq!(pending_tool_call(&events).id().as_str(), "call-1");
     assert_no_failed(&events);
     assert_no_completion(&events);
@@ -163,11 +150,9 @@ async fn tool_progress_commentary_is_replayed_to_next_provider_step() {
 
     let pending_events = collect_step(&runtime, "Need notes.").await;
     let call = pending_tool_call(&pending_events).clone();
-    let result_artifact =
-        ArtifactRef::new(artifact_id("manual-result-commentary"), ArtifactKind::Text);
-    let result = ToolCallResult::succeeded(call.id().clone(), result_artifact.clone());
+    let result = ToolCallResult::succeeded(call.id().clone());
     runtime
-        .submit_tool_result(result, ArtifactContent::text("note result\n"))
+        .submit_tool_result(result, ToolOutput::text("note result\n"))
         .await
         .expect("tool result should resolve");
     let final_events = collect_step(&runtime, "Continue.").await;

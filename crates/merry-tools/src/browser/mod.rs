@@ -307,8 +307,7 @@ mod tests {
             .await
             .expect("network list succeeds");
         assert_eq!(listed.status(), ToolCallResultStatus::Succeeded);
-        let listed_json: Value =
-            serde_json::from_str(listed.content().as_text().expect("json")).expect("json");
+        let listed_json: Value = serde_json::from_str(listed.content().as_str()).expect("json");
         assert_eq!(listed_json["count"], 1);
         assert_eq!(listed_json["requests"][0]["request_id"], "62576.34");
 
@@ -323,8 +322,7 @@ mod tests {
             .await
             .expect("network details succeeds");
         assert_eq!(details.status(), ToolCallResultStatus::Succeeded);
-        let details_json: Value =
-            serde_json::from_str(details.content().as_text().expect("json")).expect("json");
+        let details_json: Value = serde_json::from_str(details.content().as_str()).expect("json");
         assert_eq!(details_json["body"], r#"{"error":"boom"}"#);
 
         // 6. Close shuts down cleanly.

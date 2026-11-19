@@ -2,20 +2,17 @@ use super::{
     ModelTurnId, ModelTurnStatus, PreparedCompactionInstall, PreparedPlanToolCommit,
     PromptHistoryProjection, SessionState,
     checkpoint_window::ArchivedRefManifest,
-    plan_persistence::validate_plan_snapshot_refs,
     transcript::{
         PersistedTranscript, ToolCallPromptProjection, ToolResultPromptProjection, Transcript,
         TranscriptItem,
     },
 };
 use crate::{
-    FileSessionStore, PlanPersistenceLocation, RuntimeError, SessionStoreError, UserImageInput,
-    UserMessageInput,
+    FileSessionStore, PlanPersistenceLocation, RuntimeError, SessionStoreError, UserMessageInput,
     action_audit::{ActionAuditRegistry, PersistedActionAuditRegistry},
-    artifact::{ArtifactContent, ArtifactRegistry, PersistedArtifactRecord},
     checkpoint::{CheckpointRef, CheckpointRefId, CheckpointSequenceRange, CheckpointSourceKind},
     context::{
-        CompactedCheckpoint, ContextCompiler, ContextEntry, ContextEvidence, ContextSummary,
+        CompactedCheckpoint, ContextCompiler, ContextEntry, ContextSummary,
         PersistedCompactedCheckpoint, SessionContextSnapshot,
     },
     ledger::{PersistedLedgerEntry, TaskLedger},
@@ -23,22 +20,18 @@ use crate::{
     plan::{PersistedPlanState, PlanState},
 };
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, EvidenceRef, PendingToolCall, PlanSnapshot, SessionId,
-    SessionUsage, ToolCallId, TrajectorySnapshot,
+    PendingToolCall, PlanSnapshot, SessionId, SessionUsage, ToolCallId, TrajectoryRecordDetails,
+    TrajectorySnapshot,
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Wire version of the persisted session document.
 ///
-/// Format 5 removed the judgment and summary-draft-promotion registries: they
-/// were only ever written by the deleted advisory review path and carried no
-/// state in any live session. Older documents are rejected with
+/// Format 6 removed the global artifact registry and stores message/tool
+/// payloads directly inside the transcript. Older documents are rejected with
 /// [`SessionStoreError::UnsupportedFormatVersion`] instead of migrated.
-const CURRENT_SESSION_STATE_FORMAT_VERSION: u32 = 5;
+const CURRENT_SESSION_STATE_FORMAT_VERSION: u32 = 6;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StoredSessionDocumentHeader {
@@ -54,7 +47,6 @@ struct StoredSessionDocument {
     next_sequence: u64,
     session_started: bool,
     ledger: Vec<PersistedLedgerEntry>,
-    artifacts: Vec<StoredArtifact>,
     compacted_checkpoint: Option<PersistedCompactedCheckpoint>,
     archived_ref_manifest: Vec<StoredArchivedRef>,
     prompt_history_projection: PromptHistoryProjection,
@@ -86,7 +78,6 @@ struct StoredArchivedRef {
     source_kind: CheckpointSourceKind,
     sequence_start: u64,
     sequence_end: u64,
-    evidence: EvidenceRef,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,27 +87,9 @@ struct StoredRegistries {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredArtifact {
-    artifact: ArtifactRef,
-    content: ArtifactContent,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum StoredContextEntry {
-    Summary {
-        id: String,
-        text: String,
-        evidence: Vec<StoredContextEvidence>,
-    },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredContextEvidence {
-    label: String,
-    reference: EvidenceRef,
+    Summary { id: String, text: String },
 }
 
 #[derive(Debug, Clone)]
@@ -133,7 +106,6 @@ struct PersistableSessionView<'a> {
     next_sequence: u64,
     session_started: bool,
     ledger: &'a TaskLedger,
-    artifacts: &'a ArtifactRegistry,
     pending_tool_calls: &'a [PendingToolCall],
     resolved_tool_calls: &'a BTreeSet<ToolCallId>,
     active_plan: Option<&'a PlanState>,
@@ -198,7 +170,6 @@ impl SessionState {
             next_sequence: self.next_sequence,
             session_started: self.session_started,
             ledger: &self.ledger,
-            artifacts: &self.artifacts,
             pending_tool_calls: &self.pending_tool_calls,
             resolved_tool_calls: &self.resolved_tool_calls,
             active_plan: self.active_plan.as_ref(),
@@ -220,7 +191,6 @@ impl SessionState {
             next_sequence: self.next_sequence,
             session_started: self.session_started,
             ledger: &self.ledger,
-            artifacts: &self.artifacts,
             pending_tool_calls: &self.pending_tool_calls,
             resolved_tool_calls: &self.resolved_tool_calls,
             active_plan: self.active_plan.as_ref(),
@@ -241,7 +211,6 @@ impl SessionState {
             next_sequence: prepared.next_sequence(),
             session_started: prepared.session_started(),
             ledger: prepared.ledger(),
-            artifacts: prepared.artifacts(),
             pending_tool_calls: prepared.pending_tool_calls(),
             resolved_tool_calls: prepared.resolved_tool_calls(),
             active_plan: Some(prepared.active_plan()),
@@ -264,7 +233,6 @@ impl SessionState {
             view.transcript,
             view.prompt_history_projection,
             view.compacted_checkpoint,
-            view.artifacts,
             view.resolved_tool_calls,
         )?;
         self.validate_persisted_context_entries_with_checkpoint(view.compacted_checkpoint)?;
@@ -279,22 +247,17 @@ impl SessionState {
                 active_plan.snapshot(),
                 PlanPersistenceLocation::Active,
             )?;
-            validate_plan_snapshot_refs(view.artifacts, active_plan.snapshot())?;
         }
         for (index, terminal) in view.terminal_plans.iter().enumerate() {
             crate::session_store::validate_plan_snapshot(
                 terminal,
                 PlanPersistenceLocation::Terminal { index },
             )?;
-            validate_plan_snapshot_refs(view.artifacts, terminal)?;
         }
 
-        let artifacts = view
-            .artifacts
-            .persisted_records()
-            .into_iter()
-            .map(StoredArtifact::from)
-            .collect::<Vec<_>>();
+        let trajectory_snapshot = view.trajectory_snapshot.map(|snapshot| {
+            strip_redundant_tool_outputs_for_persistence(snapshot, view.transcript)
+        });
 
         let document = StoredSessionDocument {
             format_version: CURRENT_SESSION_STATE_FORMAT_VERSION,
@@ -302,7 +265,6 @@ impl SessionState {
             next_sequence: view.next_sequence,
             session_started: view.session_started,
             ledger: view.ledger.persisted_entries(),
-            artifacts,
             compacted_checkpoint: view
                 .compacted_checkpoint
                 .map(CompactedCheckpoint::persisted),
@@ -330,7 +292,7 @@ impl SessionState {
             },
             active_plan: view.active_plan.map(PlanState::persisted),
             terminal_plans: view.terminal_plans.to_vec(),
-            trajectory_snapshot: view.trajectory_snapshot.cloned(),
+            trajectory_snapshot,
             external_tool_catalog: self.external_tool_catalog.clone(),
         };
         let document_bytes = serde_json::to_vec_pretty(&document)?;
@@ -381,19 +343,12 @@ impl SessionState {
                 })
             })
             .transpose()?;
-        let artifacts = document
-            .artifacts
-            .into_iter()
-            .map(PersistedArtifactRecord::from)
-            .collect();
         let mut session = Self {
             session_id: document.session_id,
             next_sequence: document.next_sequence,
             session_started: document.session_started,
             ledger: TaskLedger::from_persisted_entries(document.ledger)
                 .map_err(|_| invalid_document("stored ledger entry is invalid"))?,
-            artifacts: ArtifactRegistry::from_persisted_records(artifacts)
-                .map_err(|_| invalid_document("stored artifact registry is invalid"))?,
             memory_store: MemoryStore::new(),
             skill_catalog: None,
             project_rules: None,
@@ -434,7 +389,6 @@ impl SessionState {
             &session.transcript,
             session.prompt_history_projection,
             session.compacted_checkpoint.as_ref(),
-            &session.artifacts,
             &session.resolved_tool_calls,
         )?;
         session.validate_persisted_context_entries_with_checkpoint(
@@ -443,15 +397,11 @@ impl SessionState {
         session
             .validate_archived_ref_manifest()
             .map_err(runtime_error_to_invalid_document)?;
-        if let Some(active_plan) = session.active_plan.as_ref() {
-            validate_plan_snapshot_refs(&session.artifacts, active_plan.snapshot())?;
-        }
         for (index, terminal) in session.terminal_plans.iter().enumerate() {
             crate::session_store::validate_plan_snapshot(
                 terminal,
                 PlanPersistenceLocation::Terminal { index },
             )?;
-            validate_plan_snapshot_refs(&session.artifacts, terminal)?;
         }
         Ok(session)
     }
@@ -462,14 +412,13 @@ impl SessionState {
     ) -> Result<(), SessionStoreError> {
         let snapshot = SessionContextSnapshot::new(
             self.context_entries.clone(),
-            self.artifacts.clone(),
             Vec::new(),
             compacted_checkpoint.cloned(),
         );
         ContextCompiler::new()
             .compile(&snapshot)
             .map(|_| ())
-            .map_err(|_| invalid_document("stored context evidence is invalid"))
+            .map_err(|_| invalid_document("stored context entry is invalid"))
     }
 
     fn validate_persisted_transcript_for(
@@ -477,7 +426,6 @@ impl SessionState {
         transcript: &Transcript,
         prompt_history_projection: PromptHistoryProjection,
         compacted_checkpoint: Option<&CompactedCheckpoint>,
-        artifacts: &ArtifactRegistry,
         resolved_tool_calls: &BTreeSet<ToolCallId>,
     ) -> Result<(), SessionStoreError> {
         transcript
@@ -490,104 +438,15 @@ impl SessionState {
             BTreeMap::<ModelTurnId, BTreeMap<ToolCallId, ToolCallPromptProjection>>::new();
         let mut results_by_turn =
             BTreeMap::<ModelTurnId, BTreeMap<ToolCallId, ToolResultPromptProjection>>::new();
-        let validate_text_artifact = |artifact_id: &ArtifactId| -> Result<(), SessionStoreError> {
-            let artifact = artifacts
-                .read_ref(artifact_id)
-                .map_err(|_| invalid_document("stored transcript artifact is missing"))?;
-            let content = artifacts
-                .read_content(artifact_id)
-                .map_err(|_| invalid_document("stored transcript artifact is missing"))?;
-            if artifact.kind() != &ArtifactKind::Text || content.as_text().is_none() {
-                return Err(invalid_document(
-                    "stored user or assistant transcript artifact is not text",
-                ));
-            }
-            Ok(())
-        };
-        let validate_user_image_artifact =
-            |artifact_id: &ArtifactId| -> Result<UserImageInput, SessionStoreError> {
-                let artifact = artifacts.read_ref(artifact_id).map_err(|_| {
-                    invalid_document("stored user image transcript artifact is missing")
-                })?;
-                let content = artifacts.read_content(artifact_id).map_err(|_| {
-                    invalid_document("stored user image transcript artifact is missing")
-                })?;
-                if artifact.kind() != &ArtifactKind::Image {
-                    return Err(invalid_document(
-                        "stored user image transcript artifact is not an image",
-                    ));
-                }
-                let Some(label) = artifact.label() else {
-                    return Err(invalid_document(
-                        "stored user image transcript artifact has no label",
-                    ));
-                };
-                let ArtifactContent::Image { bytes, metadata } = content else {
-                    return Err(invalid_document(
-                        "stored user image transcript content is not an image",
-                    ));
-                };
-                let Some(metadata) = metadata else {
-                    return Err(invalid_document(
-                        "stored user image transcript artifact has no image metadata",
-                    ));
-                };
-                if metadata.media_type() != "image/png" {
-                    return Err(invalid_document(
-                        "stored user image transcript artifact is not normalized PNG",
-                    ));
-                }
-                UserImageInput::png(
-                    label,
-                    Arc::clone(bytes),
-                    metadata.width(),
-                    metadata.height(),
-                )
-                .map_err(|_| {
-                    invalid_document("stored user image transcript artifact metadata is invalid")
-                })
-            };
 
         for item in transcript.items() {
             match item {
-                TranscriptItem::UserMessage {
-                    id,
-                    artifact_id,
-                    image_artifact_ids,
-                    ..
-                } => {
-                    if artifact_id != &super::artifacts::user_message_id(*id) {
-                        return Err(invalid_document(
-                            "stored user transcript artifact identity is inconsistent",
-                        ));
-                    }
-                    validate_text_artifact(artifact_id)?;
-                    let text = artifacts
-                        .read_content(artifact_id)
-                        .expect("validated user text artifact remains readable")
-                        .as_text()
-                        .expect("validated user text artifact remains textual");
-                    let images = image_artifact_ids
-                        .iter()
-                        .enumerate()
-                        .map(|(offset, image_artifact_id)| {
-                            if image_artifact_id
-                                != &super::artifacts::user_message_image_id(*id, offset + 1)
-                            {
-                                return Err(invalid_document(
-                                    "stored user image transcript artifact identity is inconsistent",
-                                ));
-                            }
-                            validate_user_image_artifact(image_artifact_id)
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    UserMessageInput::new(text, images).map_err(|_| {
-                        invalid_document("stored user image transcript message is invalid")
+                TranscriptItem::UserMessage { text, images, .. } => {
+                    UserMessageInput::new(text.as_ref(), images.clone()).map_err(|_| {
+                        invalid_document("stored user transcript message is invalid")
                     })?;
                 }
-                TranscriptItem::AssistantText { artifact_id, .. } => {
-                    validate_text_artifact(artifact_id)?;
-                }
+                TranscriptItem::AssistantText { .. } => {}
                 TranscriptItem::ToolCall {
                     model_turn_id,
                     call,
@@ -603,57 +462,24 @@ impl SessionState {
                     model_turn_id,
                     call_id,
                     result,
-                    artifact_id,
-                    model_artifact_id,
-                    image_artifact_ids,
+                    payload,
                     prompt_projection,
                     ..
                 } => {
-                    if result.call_id() != call_id || result.artifact().id() != artifact_id {
+                    if result.call_id() != call_id {
                         return Err(invalid_document(
                             "stored transcript tool result identity is inconsistent",
                         ));
                     }
-                    let artifact = artifacts.read_ref(artifact_id).map_err(|_| {
-                        invalid_document("stored transcript tool result artifact is missing")
-                    })?;
-                    let content = artifacts.read_content(artifact_id).map_err(|_| {
-                        invalid_document("stored transcript tool result artifact is missing")
-                    })?;
-                    if artifact != result.artifact()
-                        || !matches!(artifact.kind(), ArtifactKind::Text | ArtifactKind::Json)
-                        || content.as_text().is_none()
-                    {
+                    if payload.full().as_str().trim().is_empty() {
                         return Err(invalid_document(
-                            "stored transcript tool result artifact is inconsistent",
+                            "stored transcript tool result output is blank",
                         ));
                     }
-                    if let Some(model_id) = model_artifact_id {
-                        let model_ref = artifacts.read_ref(model_id).map_err(|_| {
-                            invalid_document("stored model tool result artifact is missing")
-                        })?;
-                        let model_content = artifacts.read_content(model_id).map_err(|_| {
-                            invalid_document("stored model tool result artifact is missing")
-                        })?;
-                        if !matches!(model_ref.kind(), ArtifactKind::Text | ArtifactKind::Json)
-                            || model_content
-                                .as_text()
-                                .is_none_or(|text| text.trim().is_empty())
-                        {
-                            return Err(invalid_document(
-                                "stored model tool result artifact is not textual",
-                            ));
-                        }
-                    }
-                    for (offset, image_artifact_id) in image_artifact_ids.iter().enumerate() {
-                        if image_artifact_id
-                            != &super::artifacts::tool_result_image_id(artifact_id, offset + 1)
-                        {
-                            return Err(invalid_document(
-                                "stored tool result image artifact identity is inconsistent",
-                            ));
-                        }
-                        validate_user_image_artifact(image_artifact_id)?;
+                    if let Some(model) = payload.model()
+                        && model.as_str().trim().is_empty()
+                    {
+                        return Err(invalid_document("stored model tool result output is blank"));
                     }
                     if !resolved_tool_calls.contains(call_id) {
                         return Err(invalid_document(
@@ -696,7 +522,7 @@ impl SessionState {
                                     (
                                         ToolCallPromptProjection::Full,
                                         ToolResultPromptProjection::Full
-                                            | ToolResultPromptProjection::ArtifactNotice
+                                            | ToolResultPromptProjection::Collapsed
                                     ) | (
                                         ToolCallPromptProjection::Hidden,
                                         ToolResultPromptProjection::Hidden
@@ -732,6 +558,27 @@ impl SessionState {
     }
 }
 
+/// Drops duplicated tool outputs from persisted trajectory snapshots whenever the
+/// same output is already stored in `transcript`, avoiding double persistence.
+fn strip_redundant_tool_outputs_for_persistence(
+    snapshot: &TrajectorySnapshot,
+    transcript: &Transcript,
+) -> TrajectorySnapshot {
+    let mut stripped = snapshot.clone();
+    for mut record in stripped.records().to_vec() {
+        let Some(call_id) = record.tool_call_id().cloned() else {
+            continue;
+        };
+        if matches!(record.details(), TrajectoryRecordDetails::Tool { tool } if tool.output().is_some())
+            && transcript.tool_result_payload(&call_id).is_some()
+        {
+            record.set_tool_output(None);
+            stripped.upsert_record(record);
+        }
+    }
+    stripped
+}
+
 impl FileSessionStore {
     pub(crate) async fn stage_bundle(
         &self,
@@ -753,24 +600,6 @@ impl FileSessionStore {
     }
 }
 
-impl From<PersistedArtifactRecord> for StoredArtifact {
-    fn from(value: PersistedArtifactRecord) -> Self {
-        Self {
-            artifact: value.artifact,
-            content: value.content,
-        }
-    }
-}
-
-impl From<StoredArtifact> for PersistedArtifactRecord {
-    fn from(value: StoredArtifact) -> Self {
-        Self {
-            artifact: value.artifact,
-            content: value.content,
-        }
-    }
-}
-
 impl From<&CheckpointRef> for StoredArchivedRef {
     fn from(reference: &CheckpointRef) -> Self {
         Self {
@@ -778,7 +607,6 @@ impl From<&CheckpointRef> for StoredArchivedRef {
             source_kind: reference.source_kind(),
             sequence_start: reference.sequence_range().start(),
             sequence_end: reference.sequence_range().end(),
-            evidence: reference.evidence().clone(),
         }
     }
 }
@@ -791,7 +619,6 @@ impl TryFrom<StoredArchivedRef> for CheckpointRef {
             CheckpointRefId::new(&reference.id)?,
             reference.source_kind,
             CheckpointSequenceRange::new(reference.sequence_start, reference.sequence_end)?,
-            reference.evidence,
         ))
     }
 }
@@ -802,14 +629,6 @@ impl From<&ContextEntry> for StoredContextEntry {
         Self::Summary {
             id: summary.id().to_owned(),
             text: summary.text().to_owned(),
-            evidence: summary
-                .evidence()
-                .iter()
-                .map(|item| StoredContextEvidence {
-                    label: item.label().to_owned(),
-                    reference: item.reference().clone(),
-                })
-                .collect(),
         }
     }
 }
@@ -819,19 +638,10 @@ impl TryFrom<StoredContextEntry> for ContextEntry {
 
     fn try_from(value: StoredContextEntry) -> Result<Self, Self::Error> {
         match value {
-            StoredContextEntry::Summary { id, text, evidence } => {
-                let evidence = evidence
-                    .into_iter()
-                    .map(|item| {
-                        ContextEvidence::new(item.label, item.reference)
-                            .map_err(|_| invalid_document("stored context evidence is invalid"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(ContextEntry::summary(
-                    ContextSummary::new(id, text, evidence)
-                        .map_err(|_| invalid_document("stored context summary is invalid"))?,
-                ))
-            }
+            StoredContextEntry::Summary { id, text } => Ok(ContextEntry::summary(
+                ContextSummary::new(id, text)
+                    .map_err(|_| invalid_document("stored context summary is invalid"))?,
+            )),
         }
     }
 }

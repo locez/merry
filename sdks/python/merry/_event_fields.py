@@ -19,13 +19,13 @@ EVENT_FIELDS: dict[EventType, tuple[frozenset[str], frozenset[str]]] = {
         "checkpoint_id", "covered_history_item_count", "source"
     ),
     EventType.USAGE_UPDATED: _event_fields("usage", "source"),
-    EventType.ASSISTANT_MESSAGE: _event_fields("text", "artifact", "source"),
+    EventType.ASSISTANT_MESSAGE: _event_fields("text", "source"),
     EventType.ASSISTANT_MESSAGE_DELTA: _event_fields("delta", "source"),
     EventType.REASONING_DELTA: _event_fields("delta", "source"),
     EventType.TOOL_CALL_STARTED: _event_fields("call", "source"),
     EventType.TOOL_CALL_BATCH_STARTED: _event_fields("batch", "source"),
     EventType.TOOL_CALL_FINISHED: _event_fields("result", "output", "source"),
-    EventType.FINAL_OUTPUT_RECORDED: _event_fields("call_id", "artifact", "source"),
+    EventType.FINAL_OUTPUT_RECORDED: _event_fields("call_id", "json", "source"),
     EventType.MODEL_RETRY_ATTEMPT_STARTED: _event_fields(
         "attempt", "max_attempts", "source"
     ),
@@ -35,9 +35,8 @@ EVENT_FIELDS: dict[EventType, tuple[frozenset[str], frozenset[str]]] = {
     EventType.MODEL_RETRY_EXHAUSTED: _event_fields(
         "attempts_run", "max_attempts", "error_kind", "source"
     ),
-    EventType.EVIDENCE_REFERENCED: _event_fields("evidence", "source"),
     EventType.SKILL_USED: _event_fields(
-        "skill_name", "skill_md_path", "tool_call_id", "artifact", "source"
+        "skill_name", "skill_md_path", "tool_call_id", "source"
     ),
     EventType.SUBAGENT_SPAWNED: _event_fields(
         "agent_id", "task_id", "task_anchor", "source"

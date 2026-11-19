@@ -528,10 +528,10 @@ fn progress_lines(
         lines,
         state,
         &format!(
-            "- elapsed {}  turns {}  artifacts {}",
+            "- elapsed {}  turns {}  outputs {}",
             duration(progress.elapsed_ms),
             progress.model_turns,
-            progress.artifacts_created
+            progress.output_paths.len()
         ),
     );
     if let Some(summary) = progress.summary.as_deref() {

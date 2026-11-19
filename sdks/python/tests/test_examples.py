@@ -21,7 +21,6 @@ def test_examples_cover_typed_events_multiple_runtimes_and_two_field_output() ->
         merry.EventType.ASSISTANT_MESSAGE,
         merry.AssistantMessagePayload(
             "hello",
-            merry.ArtifactReference("artifact-1", "assistant_message", None),
             merry.EventSource("example-session", 1),
         ),
     )

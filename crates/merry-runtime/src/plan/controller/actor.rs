@@ -8,7 +8,6 @@ use super::transactions::{
 use crate::{
     FileSessionStore,
     plan::{
-        PlanArtifactPromotion,
         control::PlanControlOutput,
         execution::{
             PlanAttemptActor, PlanAttemptReportOutput, PlanAttemptStartOutput,
@@ -106,7 +105,6 @@ pub(super) enum PlanCommand {
     Progress {
         actor: PlanAttemptActor,
         input: ReportPlanProgressInput,
-        artifact_promotions: Vec<PlanArtifactPromotion>,
         now_ms: u64,
         reply: oneshot::Sender<Result<PlanCommandResult<PlanProgressOutput>, PlanControllerError>>,
     },
@@ -120,7 +118,6 @@ pub(super) enum PlanCommand {
     AttemptReport {
         actor: PlanAttemptActor,
         input: ReportPlanAttemptInput,
-        artifact_promotions: Vec<PlanArtifactPromotion>,
         now_ms: u64,
         reply: oneshot::Sender<
             Result<PlanCommandResult<PlanAttemptReportOutput>, PlanControllerError>,
@@ -394,7 +391,6 @@ pub(super) async fn run_controller(
             PlanCommand::Progress {
                 actor,
                 input,
-                artifact_promotions,
                 now_ms,
                 reply,
             } => {
@@ -404,7 +400,6 @@ pub(super) async fn run_controller(
                     &events,
                     actor,
                     input,
-                    artifact_promotions,
                     None,
                     now_ms,
                 )
@@ -424,7 +419,6 @@ pub(super) async fn run_controller(
                     &events,
                     actor,
                     input,
-                    Vec::new(),
                     Some(call_id),
                     now_ms,
                 )
@@ -435,7 +429,6 @@ pub(super) async fn run_controller(
             PlanCommand::AttemptReport {
                 actor,
                 input,
-                artifact_promotions,
                 now_ms,
                 reply,
             } => {
@@ -445,7 +438,6 @@ pub(super) async fn run_controller(
                     &events,
                     actor,
                     input,
-                    artifact_promotions,
                     None,
                     now_ms,
                 )
@@ -465,7 +457,6 @@ pub(super) async fn run_controller(
                     &events,
                     actor,
                     input,
-                    Vec::new(),
                     Some(call_id),
                     now_ms,
                 )

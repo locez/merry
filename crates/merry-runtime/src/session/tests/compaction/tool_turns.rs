@@ -2,9 +2,9 @@ use crate::{
     FileSessionStore,
     session::{
         tests::{
-            ArtifactContent, ArtifactKind, ArtifactRef, CitationCompactionPolicy, ModelTurnStatus,
-            PendingToolCallBatch, SessionId, SessionState, SessionStateTestExt, ToolCallBatchId,
-            ToolCallResult, TranscriptItem, artifact_id, pending_tool_call,
+            CitationCompactionPolicy, ModelTurnStatus, PendingToolCallBatch, SessionId,
+            SessionState, SessionStateTestExt, ToolCallBatchId, ToolCallResult, ToolOutput,
+            TranscriptItem, pending_tool_call,
         },
         transcript::{
             PersistedTranscriptItem, ToolCallPromptProjection, ToolResultPromptProjection,
@@ -40,20 +40,14 @@ fn compaction_groups_user_commentary_and_two_tool_pairs_in_one_turn() {
         .expect("tool response closes");
     session
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                call_b.id().clone(),
-                ArtifactRef::new(artifact_id("turn-result-b"), ArtifactKind::Text),
-            ),
-            ArtifactContent::text("result b"),
+            ToolCallResult::succeeded(call_b.id().clone()),
+            ToolOutput::text("result b"),
         )
         .expect("second call resolves first");
     session
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                call_a.id().clone(),
-                ArtifactRef::new(artifact_id("turn-result-a"), ArtifactKind::Text),
-            ),
-            ArtifactContent::text("result a"),
+            ToolCallResult::succeeded(call_a.id().clone()),
+            ToolOutput::text("result a"),
         )
         .expect("first call resolves second");
 
@@ -121,26 +115,21 @@ fn compaction_groups_user_commentary_and_two_tool_pairs_in_one_turn() {
 }
 
 #[test]
-fn artifact_notice_reaches_the_compaction_payload_instead_of_the_archived_body() {
+fn collapsed_notice_reaches_the_compaction_payload_instead_of_the_full_body() {
     let mut session =
-        SessionState::new(SessionId::new("compaction-artifact-notice").expect("valid session id"));
-    let call = pending_tool_call("artifact-notice-call");
+        SessionState::new(SessionId::new("compaction-collapsed-notice").expect("valid session id"));
+    let call = pending_tool_call("collapsed-notice-call");
     session
         .record_test_tool_call_pending(call.clone())
         .expect("tool call records");
-    let result_artifact_id = artifact_id("artifact-notice-result");
-    // Large enough that sending it to the compactor would dominate the request.
     let exact_content = format!(
-        "exact artifact notice source content {}",
+        "exact collapsed notice source content {}",
         "archived ballast ".repeat(2_000)
     );
     session
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                call.id().clone(),
-                ArtifactRef::new(result_artifact_id.clone(), ArtifactKind::Text),
-            ),
-            ArtifactContent::text(&exact_content),
+            ToolCallResult::succeeded(call.id().clone()),
+            ToolOutput::text(&exact_content),
         )
         .expect("tool result records");
     let result_projection = session
@@ -156,14 +145,12 @@ fn artifact_notice_reaches_the_compaction_payload_instead_of_the_archived_body()
             _ => None,
         });
     *result_projection.expect("tool result projection exists") =
-        ToolResultPromptProjection::ArtifactNotice;
+        ToolResultPromptProjection::Collapsed;
     session
-        .record_test_user_message_body("retained artifact notice tail")
+        .record_test_user_message_body("retained collapsed notice tail")
         .expect("retained user records");
 
-    let provider = session
-        .provider_transcript_snapshot()
-        .expect("provider projection builds");
+    let provider = session.provider_transcript_snapshot();
     assert_eq!(provider.len(), 3);
     assert!(matches!(
         &provider[0],
@@ -171,17 +158,16 @@ fn artifact_notice_reaches_the_compaction_payload_instead_of_the_archived_body()
             if provider_call.id() == call.id()
     ));
     let notice = match &provider[1] {
-        crate::session::TranscriptItemSnapshot::ToolResult { content, .. } => {
-            serde_json::from_str::<serde_json::Value>(
-                content.as_text().expect("artifact notice is textual JSON"),
-            )
-            .expect("artifact notice parses")
+        crate::session::TranscriptItemSnapshot::ToolResult { output, .. } => {
+            serde_json::from_str::<serde_json::Value>(output.as_str())
+                .expect("collapsed notice parses")
         }
         other => panic!("expected tool result, got {other:?}"),
     };
-    assert_eq!(notice["merry_archived"], true);
+    assert_eq!(notice["merry_omitted"], true);
     assert_eq!(notice["status"], "succeeded");
-    assert_eq!(notice["artifact_id"], "artifact-notice-result");
+    assert_eq!(notice["call_id"], "collapsed-notice-call");
+    assert!(notice.get("artifact_id").is_none());
     assert!(notice.get("ref").is_none());
 
     let input = session
@@ -191,10 +177,6 @@ fn artifact_notice_reaches_the_compaction_payload_instead_of_the_archived_body()
         .expect("input builds")
         .expect("tool turn is compressible");
     let covered = input.render_covered_segment();
-    // The covered segment carries the same notice the request shows, not the archived body.
-    // Reading the body sent a real session 916,710 tokens against a 360,847 token request
-    // body, so no retention choice could host the compaction request; honoring the notice
-    // keeps the segment proportional to what the conversation held.
     let window = serde_json::to_value(input.covered_window()).expect("window serializes");
     let result = window[0]["items"]
         .as_array()
@@ -206,13 +188,12 @@ fn artifact_notice_reaches_the_compaction_payload_instead_of_the_archived_body()
     let notice: serde_json::Value =
         serde_json::from_str(result["content"].as_str().expect("result content is text"))
             .expect("notice parses");
-    assert_eq!(notice["merry_archived"], true);
-    assert_eq!(notice["artifact_id"], "artifact-notice-result");
-    assert_eq!(result["artifact_id"], "artifact-notice-result");
+    assert_eq!(notice["merry_omitted"], true);
+    assert_eq!(notice["call_id"], "collapsed-notice-call");
     assert!(!covered.contains("archived ballast"));
     assert!(
         covered.len() * 10 < exact_content.len(),
-        "covered segment of {} bytes must stay far below the archived body of {} bytes",
+        "covered segment of {} bytes must stay far below the collapsed body of {} bytes",
         covered.len(),
         exact_content.len()
     );
@@ -222,21 +203,17 @@ fn artifact_notice_reaches_the_compaction_payload_instead_of_the_archived_body()
         .expect("checkpoint installs");
 
     assert_eq!(
-        session
-            .provider_transcript_snapshot()
-            .expect("provider projection rebuilds"),
+        session.provider_transcript_snapshot(),
         vec![crate::session::TranscriptItemSnapshot::UserMessage {
-            text: "retained artifact notice tail".to_owned(),
+            text: "retained collapsed notice tail".to_owned(),
             images: Vec::new(),
             origin: crate::session::UserInputOrigin::ExternalUser,
         }]
     );
     assert!(matches!(
-        &session
-            .full_transcript_snapshot()
-            .expect("full transcript remains exact")[1],
-        crate::session::TranscriptItemSnapshot::ToolResult { content, .. }
-            if content.as_text() == Some(exact_content.as_str())
+        &session.full_transcript_snapshot()[1],
+        crate::session::TranscriptItemSnapshot::ToolResult { output, .. }
+            if output.as_str() == exact_content.as_str()
     ));
 }
 
@@ -258,18 +235,16 @@ fn compaction_accepts_resolved_multi_tool_batches() {
             .expect("valid batch"),
         )
         .expect("batch records");
-    let artifact_b = ArtifactRef::new(artifact_id("artifact-b"), ArtifactKind::Json);
     session
         .submit_tool_result(
-            ToolCallResult::succeeded(call_b.id().clone(), artifact_b),
-            ArtifactContent::json(r#"{"result":"b"}"#),
+            ToolCallResult::succeeded(call_b.id().clone()),
+            ToolOutput::json(r#"{"result":"b"}"#),
         )
         .expect("second call resolves first");
-    let artifact_a = ArtifactRef::new(artifact_id("artifact-a"), ArtifactKind::Json);
     session
         .submit_tool_result(
-            ToolCallResult::succeeded(call_a.id().clone(), artifact_a),
-            ArtifactContent::json(r#"{"result":"a"}"#),
+            ToolCallResult::succeeded(call_a.id().clone()),
+            ToolOutput::json(r#"{"result":"a"}"#),
         )
         .expect("first call resolves second");
     session
@@ -308,9 +283,7 @@ fn compaction_accepts_resolved_multi_tool_batches() {
         ]
     );
     assert_eq!(
-        session
-            .provider_transcript_snapshot()
-            .expect("provider projection builds"),
+        session.provider_transcript_snapshot(),
         vec![crate::session::TranscriptItemSnapshot::UserMessage {
             text: "retained raw tail".to_owned(),
             images: Vec::new(),
@@ -340,9 +313,7 @@ fn compaction_uses_full_hidden_exchange_while_provider_projection_skips_it() {
         .record_test_user_message_body("retained visible tail")
         .expect("tail records");
 
-    let review_context = session
-        .permission_review_context_snapshot()
-        .expect("permission context builds");
+    let review_context = session.permission_review_context_snapshot();
     let review_debug = format!("{review_context:?}");
     assert!(review_debug.contains("tool_call:lookup"));
     assert!(review_debug.contains("must-not-reenter-model-context"));
@@ -364,9 +335,7 @@ fn compaction_uses_full_hidden_exchange_while_provider_projection_skips_it() {
             .contains("must-not-reenter-model-context")
     );
 
-    let full = session
-        .full_transcript_snapshot()
-        .expect("full transcript builds");
+    let full = session.full_transcript_snapshot();
     assert_eq!(full.len(), 4);
     assert!(matches!(
         &full[1],
@@ -375,14 +344,11 @@ fn compaction_uses_full_hidden_exchange_while_provider_projection_skips_it() {
     ));
     assert!(matches!(
         &full[2],
-        crate::session::TranscriptItemSnapshot::ToolResult { content, .. }
-            if content.as_text()
-                == Some(r#"{"private_final_output":"must-not-reenter-model-context"}"#)
+        crate::session::TranscriptItemSnapshot::ToolResult { output, .. }
+            if output.as_str() == r#"{"private_final_output":"must-not-reenter-model-context"}"#
     ));
 
-    let prompt = session
-        .provider_transcript_snapshot()
-        .expect("prompt transcript builds");
+    let prompt = session.provider_transcript_snapshot();
     assert_eq!(prompt.len(), 2);
     assert!(prompt.iter().all(|item| matches!(
         item,
@@ -420,9 +386,7 @@ async fn installing_compaction_preserves_hidden_final_output_in_full_and_stored_
         .install_summary_compaction(input, "The old visible context was compacted.")
         .expect("checkpoint installs");
 
-    let full = session
-        .full_transcript_snapshot()
-        .expect("full transcript remains readable");
+    let full = session.full_transcript_snapshot();
     assert_eq!(full.len(), 4);
     assert!(matches!(
         &full[0],
@@ -436,9 +400,8 @@ async fn installing_compaction_preserves_hidden_final_output_in_full_and_stored_
     ));
     assert!(matches!(
         &full[2],
-        crate::session::TranscriptItemSnapshot::ToolResult { content, .. }
-            if content.as_text()
-                == Some(r#"{"private_final_output":"preserve-after-install"}"#)
+        crate::session::TranscriptItemSnapshot::ToolResult { output, .. }
+            if output.as_str() == r#"{"private_final_output":"preserve-after-install"}"#
     ));
     assert!(matches!(
         &full[3],
@@ -446,9 +409,7 @@ async fn installing_compaction_preserves_hidden_final_output_in_full_and_stored_
             if text == "retained visible tail"
     ));
 
-    let prompt = session
-        .provider_transcript_snapshot()
-        .expect("prompt transcript remains readable");
+    let prompt = session.provider_transcript_snapshot();
     assert_eq!(prompt.len(), 1);
     assert!(matches!(
         &prompt[0],
@@ -502,17 +463,12 @@ async fn installing_compaction_preserves_hidden_final_output_in_full_and_stored_
         } if call_id == final_call.id()
     ));
     assert!(matches!(
-        &loaded
-            .full_transcript_snapshot()
-            .expect("loaded full transcript remains readable")[2],
-        crate::session::TranscriptItemSnapshot::ToolResult { content, .. }
-            if content.as_text()
-                == Some(r#"{"private_final_output":"preserve-after-install"}"#)
+        &loaded.full_transcript_snapshot()[2],
+        crate::session::TranscriptItemSnapshot::ToolResult { output, .. }
+            if output.as_str() == r#"{"private_final_output":"preserve-after-install"}"#
     ));
     assert_eq!(
-        loaded
-            .provider_transcript_snapshot()
-            .expect("loaded prompt transcript remains readable"),
+        loaded.provider_transcript_snapshot(),
         vec![crate::session::TranscriptItemSnapshot::UserMessage {
             text: "retained visible tail".to_owned(),
             images: Vec::new(),

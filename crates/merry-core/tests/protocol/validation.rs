@@ -1,11 +1,11 @@
 use crate::{assert_schema_compiles, json_schema};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, CompactionUsageWindow, ContextWindowSource, CoreError,
-    ErrorInfo, EvidenceLocator, EvidenceRef, MerryErrorDomain, MerryErrorInfo, MerryRetryability,
-    ModelUsage, PendingToolCall, ProviderName, RuntimeEvent, RuntimeJournalEvent,
-    RuntimeJournalPayload, SessionId, SessionUsage, SkillId, SubagentActivityPhase,
-    SubagentActivitySnapshot, ToolCallArguments, ToolCallId, ToolCallResult, ToolCallResultStatus,
-    ToolInputSchema, ToolName, ToolSpec, UsageContextWindow,
+    CompactionUsageWindow, ContextWindowSource, CoreError, ErrorInfo, ImageSummary,
+    MerryErrorDomain, MerryErrorInfo, MerryRetryability, ModelUsage, PendingToolCall, ProviderName,
+    RuntimeEvent, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, SessionUsage, SkillId,
+    SubagentActivityPhase, SubagentActivitySnapshot, ToolCallArguments, ToolCallId, ToolCallResult,
+    ToolCallResultStatus, ToolInputSchema, ToolName, ToolOutput, ToolOutputKind, ToolOutputPreview,
+    ToolSpec, UsageContextWindow,
 };
 use schemars::Schema;
 use serde_json::json;
@@ -74,18 +74,6 @@ fn core_error_display_messages_include_actionable_context() {
             .contains("ToolInputSchema must be a JSON object")
     );
 
-    let evidence_error =
-        EvidenceLocator::line_range(9, 2).expect_err("descending line range should reject");
-    assert!(matches!(
-        evidence_error,
-        CoreError::InvalidEvidenceLocator { .. }
-    ));
-    assert!(
-        evidence_error
-            .to_string()
-            .contains("line range start must be less than or equal to end")
-    );
-
     let tool_error = ToolSpec::new(
         ToolName::new("valid_tool").expect("valid name"),
         "",
@@ -103,19 +91,18 @@ fn core_error_display_messages_include_actionable_context() {
 #[test]
 fn schemars_generation_compiles_for_public_protocol_types() {
     assert_schema_compiles::<SessionId>();
-    assert_schema_compiles::<ArtifactId>();
     assert_schema_compiles::<ToolName>();
     assert_schema_compiles::<SkillId>();
     assert_schema_compiles::<ProviderName>();
-    assert_schema_compiles::<ArtifactKind>();
-    assert_schema_compiles::<ArtifactRef>();
-    assert_schema_compiles::<EvidenceLocator>();
-    assert_schema_compiles::<EvidenceRef>();
     assert_schema_compiles::<ToolCallId>();
     assert_schema_compiles::<ToolCallArguments>();
     assert_schema_compiles::<PendingToolCall>();
     assert_schema_compiles::<ToolCallResultStatus>();
     assert_schema_compiles::<ToolCallResult>();
+    assert_schema_compiles::<ToolOutputKind>();
+    assert_schema_compiles::<ToolOutput>();
+    assert_schema_compiles::<ToolOutputPreview>();
+    assert_schema_compiles::<ImageSummary>();
     assert_schema_compiles::<ToolInputSchema>();
     assert_schema_compiles::<ToolSpec>();
     assert_schema_compiles::<ErrorInfo>();

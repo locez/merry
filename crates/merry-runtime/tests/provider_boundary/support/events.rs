@@ -1,5 +1,5 @@
 use merry_core::{
-    ArtifactRef, PendingToolCall, PendingToolCallBatch, RuntimeJournalEvent, RuntimeJournalPayload,
+    PendingToolCall, PendingToolCallBatch, RuntimeJournalEvent, RuntimeJournalPayload,
     ToolCallResult,
 };
 
@@ -19,10 +19,8 @@ pub(crate) fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static s
             RuntimeJournalPayload::StepCompleted => "StepCompleted",
             RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
             RuntimeJournalPayload::Failed { .. } => "Failed",
-            RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
             RuntimeJournalPayload::AssistantOutputDelta { .. } => "AssistantOutputDelta",
             RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
-            RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
             RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
             RuntimeJournalPayload::ToolCallBatchPending { .. } => "ToolCallBatchPending",
             RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
@@ -62,9 +60,9 @@ pub(crate) fn assert_no_artifact_recorded(events: &[RuntimeJournalEvent]) {
     assert!(
         events.iter().all(|event| !matches!(
             event.payload,
-            RuntimeJournalPayload::ArtifactRecorded { .. }
+            RuntimeJournalPayload::AssistantOutputRecorded { .. }
         )),
-        "terminal failure/cancellation must not record artifacts: {events:?}"
+        "terminal failure/cancellation must not record assistant output: {events:?}"
     );
 }
 
@@ -88,14 +86,14 @@ pub(crate) fn assert_no_failed(events: &[RuntimeJournalEvent]) {
     );
 }
 
-pub(crate) fn assistant_output_artifact(events: &[RuntimeJournalEvent]) -> &ArtifactRef {
+pub(crate) fn assistant_output_text(events: &[RuntimeJournalEvent]) -> &str {
     events
         .iter()
         .find_map(|event| match &event.payload {
-            RuntimeJournalPayload::AssistantOutputRecorded { artifact } => Some(artifact),
+            RuntimeJournalPayload::AssistantOutputRecorded { text } => Some(text.as_str()),
             _ => None,
         })
-        .expect("assistant output artifact should be recorded")
+        .expect("assistant output should be recorded")
 }
 
 pub(crate) fn pending_tool_call(events: &[RuntimeJournalEvent]) -> &PendingToolCall {

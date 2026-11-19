@@ -4,11 +4,10 @@ use crate::support::{
         ScriptedModelProvider, ScriptedProviderStep, completed_outputs_event, completed_text_event,
         model_tool_call, model_tool_call_with_args, model_tool_call_with_id,
     },
-    runtime::{artifact_id, collect_step, runtime_with_scripted_provider},
+    runtime::{collect_step, runtime_with_scripted_provider},
 };
-use merry_core::{ArtifactKind, ArtifactRef, ToolCallResult, ToolCallResultStatus};
+use merry_core::{ToolCallResult, ToolCallResultStatus, ToolOutput};
 use merry_llm::{FinishReason, ModelError, ModelInputItem, ModelOutput, ProviderErrorKind};
-use merry_runtime::ArtifactContent;
 use serde_json::{Map, json};
 
 #[tokio::test(flavor = "current_thread")]
@@ -26,14 +25,8 @@ async fn provider_request_keeps_tool_exchange_before_later_user_turn() {
     let pending = pending_tool_call(&first_events).clone();
     runtime
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                pending.id().clone(),
-                ArtifactRef::new(
-                    artifact_id("provider-transcript-result"),
-                    ArtifactKind::Text,
-                ),
-            ),
-            ArtifactContent::text("file contents\n"),
+            ToolCallResult::succeeded(pending.id().clone()),
+            ToolOutput::text("file contents\n"),
         )
         .await
         .expect("tool result should resolve");
@@ -69,13 +62,9 @@ async fn submitted_tool_result_is_compiled_as_provider_neutral_continuation() {
     let runtime = runtime_with_scripted_provider("provider-tool-continuation", provider.clone());
     let pending_events = collect_step(&runtime, "Request a search.").await;
     let call = pending_tool_call(&pending_events).clone();
-    let result_artifact = ArtifactRef::new(
-        artifact_id("manual-result-continuation-text"),
-        ArtifactKind::Text,
-    );
-    let result = ToolCallResult::succeeded(call.id().clone(), result_artifact.clone());
+    let result = ToolCallResult::succeeded(call.id().clone());
     runtime
-        .submit_tool_result(result, ArtifactContent::text("exact search result\n"))
+        .submit_tool_result(result, ToolOutput::text("exact search result\n"))
         .await
         .expect("tool result should resolve");
 
@@ -144,14 +133,10 @@ async fn successful_provider_step_keeps_tool_exchange_until_compaction() {
         runtime_with_scripted_provider("provider-tool-exchange-success", provider.clone());
     let pending_events = collect_step(&runtime, "Request a tool.").await;
     let call = pending_tool_call(&pending_events).clone();
-    let result_artifact = ArtifactRef::new(
-        artifact_id("manual-result-tool-exchange-success"),
-        ArtifactKind::Text,
-    );
     runtime
         .submit_tool_result(
-            ToolCallResult::succeeded(call.id().clone(), result_artifact),
-            ArtifactContent::text("result remains raw before compaction\n"),
+            ToolCallResult::succeeded(call.id().clone()),
+            ToolOutput::text("result remains raw before compaction\n"),
         )
         .await
         .expect("tool result should resolve");
@@ -200,14 +185,8 @@ async fn new_pending_tool_call_keeps_prior_tool_exchange() {
     let old_call = pending_tool_call(&pending_events).clone();
     runtime
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                old_call.id().clone(),
-                ArtifactRef::new(
-                    artifact_id("manual-result-before-new-pending"),
-                    ArtifactKind::Text,
-                ),
-            ),
-            ArtifactContent::text("old result\n"),
+            ToolCallResult::succeeded(old_call.id().clone()),
+            ToolOutput::text("old result\n"),
         )
         .await
         .expect("old tool result should resolve");
@@ -216,14 +195,8 @@ async fn new_pending_tool_call_keeps_prior_tool_exchange() {
     let new_call = pending_tool_call(&new_pending_events).clone();
     runtime
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                new_call.id().clone(),
-                ArtifactRef::new(
-                    artifact_id("manual-result-after-new-pending"),
-                    ArtifactKind::Text,
-                ),
-            ),
-            ArtifactContent::text("new result\n"),
+            ToolCallResult::succeeded(new_call.id().clone()),
+            ToolOutput::text("new result\n"),
         )
         .await
         .expect("new tool result should resolve");
@@ -281,14 +254,8 @@ async fn duplicate_new_tool_call_id_keeps_tool_exchange_for_retry() {
     let old_call = pending_tool_call(&pending_events).clone();
     runtime
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                old_call.id().clone(),
-                ArtifactRef::new(
-                    artifact_id("manual-result-before-duplicate-new-id"),
-                    ArtifactKind::Text,
-                ),
-            ),
-            ArtifactContent::text("old result\n"),
+            ToolCallResult::succeeded(old_call.id().clone()),
+            ToolOutput::text("old result\n"),
         )
         .await
         .expect("old tool result should resolve");
@@ -340,14 +307,8 @@ async fn provider_error_keeps_tool_exchange_for_retry() {
     let call = pending_tool_call(&pending_events).clone();
     runtime
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                call.id().clone(),
-                ArtifactRef::new(
-                    artifact_id("manual-result-retry-after-error"),
-                    ArtifactKind::Text,
-                ),
-            ),
-            ArtifactContent::text("retry me\n"),
+            ToolCallResult::succeeded(call.id().clone()),
+            ToolOutput::text("retry me\n"),
         )
         .await
         .expect("tool result should resolve");
@@ -386,14 +347,8 @@ async fn provider_setup_error_keeps_tool_exchange_for_retry() {
     let call = pending_tool_call(&pending_events).clone();
     runtime
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                call.id().clone(),
-                ArtifactRef::new(
-                    artifact_id("manual-result-retry-after-setup-error"),
-                    ArtifactKind::Text,
-                ),
-            ),
-            ArtifactContent::text("retry after setup\n"),
+            ToolCallResult::succeeded(call.id().clone()),
+            ToolOutput::text("retry after setup\n"),
         )
         .await
         .expect("tool result should resolve");
@@ -429,14 +384,8 @@ async fn provider_cancel_keeps_tool_exchange_for_retry() {
     let call = pending_tool_call(&pending_events).clone();
     runtime
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                call.id().clone(),
-                ArtifactRef::new(
-                    artifact_id("manual-result-retry-after-cancel"),
-                    ArtifactKind::Text,
-                ),
-            ),
-            ArtifactContent::text("retry after cancel\n"),
+            ToolCallResult::succeeded(call.id().clone()),
+            ToolOutput::text("retry after cancel\n"),
         )
         .await
         .expect("tool result should resolve");

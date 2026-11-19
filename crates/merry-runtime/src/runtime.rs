@@ -205,12 +205,15 @@ impl Runtime {
         &self.inner.session_id
     }
 
-    pub(crate) fn schedule_memory_maintenance(&self) {
-        self::memory_maintenance::schedule(&self.inner);
+    #[cfg(test)]
+    pub(crate) fn session_for_tests(
+        &self,
+    ) -> &Arc<tokio::sync::Mutex<crate::session::SessionState>> {
+        &self.inner.session
     }
 
-    fn observe_recorded_journal_events(&self, events: &[RuntimeJournalEvent]) {
-        self.inner.project_journal_events(events);
+    pub(crate) fn schedule_memory_maintenance(&self) {
+        self::memory_maintenance::schedule(&self.inner);
     }
 
     pub(crate) fn record_queued_input_accepted(&self, inputs: &[QueuedInputView]) {

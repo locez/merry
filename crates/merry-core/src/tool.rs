@@ -1,8 +1,6 @@
 //! Tool specification and invocation vocabulary.
 
-use crate::{
-    ArtifactRef, CoreError, ErrorInfo, ToolCallBatchId, ToolCallId, ToolInputSchema, ToolName,
-};
+use crate::{CoreError, ErrorInfo, ToolCallBatchId, ToolCallId, ToolInputSchema, ToolName};
 use schemars::JsonSchema;
 use serde::{
     Deserialize, Deserializer, Serialize,
@@ -201,7 +199,7 @@ impl<'de> Deserialize<'de> for PendingToolCallBatch {
 pub enum ToolCallResultStatus {
     /// Tool execution completed successfully.
     Succeeded,
-    /// Tool execution failed and returned failure details as an artifact.
+    /// Tool execution failed and returned failure details.
     Failed,
 }
 
@@ -213,9 +211,7 @@ pub struct ToolCallResult {
     call_id: ToolCallId,
     /// Runtime-owned success/failure status for this tool result.
     status: ToolCallResultStatus,
-    /// Artifact reference for the exact tool result payload.
-    artifact: ArtifactRef,
-    /// Small failure diagnostic. Exact payload must live in the artifact.
+    /// Small failure diagnostic.
     diagnostic: Option<ErrorInfo>,
 }
 
@@ -224,36 +220,32 @@ impl ToolCallResult {
     pub fn new(
         call_id: ToolCallId,
         status: ToolCallResultStatus,
-        artifact: ArtifactRef,
         diagnostic: Option<ErrorInfo>,
     ) -> Result<Self, CoreError> {
         validate_result_diagnostic(status, diagnostic.as_ref())?;
         Ok(Self {
             call_id,
             status,
-            artifact,
             diagnostic,
         })
     }
 
     /// Creates a successful tool call result.
     #[must_use]
-    pub fn succeeded(call_id: ToolCallId, artifact: ArtifactRef) -> Self {
+    pub fn succeeded(call_id: ToolCallId) -> Self {
         Self {
             call_id,
             status: ToolCallResultStatus::Succeeded,
-            artifact,
             diagnostic: None,
         }
     }
 
     /// Creates a failed tool call result with a small diagnostic.
     #[must_use]
-    pub fn failed(call_id: ToolCallId, artifact: ArtifactRef, diagnostic: ErrorInfo) -> Self {
+    pub fn failed(call_id: ToolCallId, diagnostic: ErrorInfo) -> Self {
         Self {
             call_id,
             status: ToolCallResultStatus::Failed,
-            artifact,
             diagnostic: Some(diagnostic),
         }
     }
@@ -270,12 +262,6 @@ impl ToolCallResult {
         self.status
     }
 
-    /// Borrows the exact result artifact reference.
-    #[must_use]
-    pub fn artifact(&self) -> &ArtifactRef {
-        &self.artifact
-    }
-
     /// Borrows the optional failure diagnostic.
     #[must_use]
     pub fn diagnostic(&self) -> Option<&ErrorInfo> {
@@ -288,7 +274,6 @@ impl ToolCallResult {
 struct ToolCallResultWire {
     call_id: ToolCallId,
     status: ToolCallResultStatus,
-    artifact: ArtifactRef,
     diagnostic: Option<ErrorInfo>,
 }
 
@@ -298,8 +283,7 @@ impl<'de> Deserialize<'de> for ToolCallResult {
         D: Deserializer<'de>,
     {
         let wire = ToolCallResultWire::deserialize(deserializer)?;
-        Self::new(wire.call_id, wire.status, wire.artifact, wire.diagnostic)
-            .map_err(de::Error::custom)
+        Self::new(wire.call_id, wire.status, wire.diagnostic).map_err(de::Error::custom)
     }
 }
 

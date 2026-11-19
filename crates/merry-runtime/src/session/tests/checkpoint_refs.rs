@@ -2,7 +2,7 @@ use super::*;
 use crate::CheckpointSourceKind;
 
 #[test]
-fn checkpoint_refs_point_to_original_user_and_assistant_artifacts() {
+fn checkpoint_refs_record_user_and_assistant_transcript_items() {
     let mut session = SessionState::new(
         SessionId::new("checkpoint-direct-discussion-refs").expect("valid session id"),
     );
@@ -37,20 +37,10 @@ fn checkpoint_refs_point_to_original_user_and_assistant_artifacts() {
         .find(|reference| reference.id().as_str() == "h1")
         .expect("assistant ref should use transcript item id");
     assert_eq!(user.source_kind(), CheckpointSourceKind::UserMessage);
-    assert_eq!(user.evidence().artifact_id.as_str(), "user-message-0");
-    assert!(user.evidence().locator.is_whole_artifact());
     assert_eq!(
         assistant.source_kind(),
         CheckpointSourceKind::AssistantMessage
     );
-    assert!(
-        assistant
-            .evidence()
-            .artifact_id
-            .as_str()
-            .starts_with("assistant-output-")
-    );
-    assert!(assistant.evidence().locator.is_whole_artifact());
 }
 
 #[test]
@@ -72,18 +62,16 @@ fn checkpoint_tool_result_refs_preserve_b_after_a_result_identity() {
             .expect("valid batch"),
         )
         .expect("batch records");
-    let artifact_b = ArtifactRef::new(artifact_id("direct-ref-artifact-b"), ArtifactKind::Json);
     session
         .submit_tool_result(
-            ToolCallResult::succeeded(call_b.id().clone(), artifact_b),
-            ArtifactContent::json(r#"{"result":"b"}"#),
+            ToolCallResult::succeeded(call_b.id().clone()),
+            ToolOutput::json(r#"{"result":"b"}"#),
         )
         .expect("B resolves first");
-    let artifact_a = ArtifactRef::new(artifact_id("direct-ref-artifact-a"), ArtifactKind::Json);
     session
         .submit_tool_result(
-            ToolCallResult::succeeded(call_a.id().clone(), artifact_a),
-            ArtifactContent::json(r#"{"result":"a"}"#),
+            ToolCallResult::succeeded(call_a.id().clone()),
+            ToolOutput::json(r#"{"result":"a"}"#),
         )
         .expect("A resolves second");
     session
@@ -97,17 +85,15 @@ fn checkpoint_tool_result_refs_preserve_b_after_a_result_identity() {
         .expect("input builds")
         .expect("old history is compressible");
     let refs = input.manifest().refs();
-    let ref_a = refs
-        .iter()
-        .find(|reference| reference.evidence().artifact_id.as_str() == "direct-ref-artifact-a")
-        .expect("A result ref exists");
     let ref_b = refs
         .iter()
-        .find(|reference| reference.evidence().artifact_id.as_str() == "direct-ref-artifact-b")
+        .find(|reference| reference.id().as_str() == "h3")
         .expect("B result ref exists");
+    let ref_a = refs
+        .iter()
+        .find(|reference| reference.id().as_str() == "h4")
+        .expect("A result ref exists");
 
-    assert_eq!(ref_a.id().as_str(), "h4");
-    assert_eq!(ref_b.id().as_str(), "h3");
     assert_eq!(ref_a.source_kind(), CheckpointSourceKind::ToolResult);
     assert_eq!(ref_b.source_kind(), CheckpointSourceKind::ToolResult);
 }

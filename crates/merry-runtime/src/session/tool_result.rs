@@ -4,9 +4,9 @@ use crate::{
     ledger::{CompactLedgerText, LedgerScope, LedgerUpdateKind},
     tool::ToolResultContent,
 };
-use merry_core::{ArtifactRef, ErrorInfo, ToolCallResultStatus};
+use merry_core::{ErrorInfo, ToolCallId, ToolCallResultStatus};
 
-/// Compact ledger fact to record after a tool result artifact is durable.
+/// Compact ledger fact to record after a tool result is durable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolResultLedgerObservation {
     scope: LedgerScope,
@@ -24,13 +24,13 @@ impl ToolResultLedgerObservation {
         })
     }
 
-    pub(super) fn into_update_for_artifact(self, artifact: &ArtifactRef) -> LedgerUpdateKind {
+    pub(super) fn into_update_for_call(self, call_id: &ToolCallId) -> LedgerUpdateKind {
         let summary = CompactLedgerText::try_from(format!(
-            "{}; artifact={}",
+            "{}; call_id={}",
             self.summary.as_str(),
-            artifact.id().as_str()
+            call_id.as_str()
         ))
-        .expect("validated compact ledger text remains non-empty after appending artifact id");
+        .expect("validated compact ledger text remains non-empty after appending call id");
 
         LedgerUpdateKind::Observation {
             scope: self.scope,

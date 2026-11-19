@@ -61,16 +61,7 @@ async fn maintain(inner: &Arc<RuntimeInner>, memory: &Arc<DurableMemory>) {
     };
     let transcript = {
         let session = inner.session.lock().await;
-        match session.full_transcript_snapshot() {
-            Ok(items) => items,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "durable memory could not read the session transcript"
-                );
-                return;
-            }
-        }
+        session.full_transcript_snapshot()
     };
     let session_id = inner.session_id.as_str().to_owned();
     let turns = count_external_turns(&transcript);

@@ -5,7 +5,6 @@ use super::{
     CitationCompactionModelTurn, CitationCompactionTurnItem, CompactionWindowFingerprint,
     CompactionWindowPlan,
 };
-use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
 use std::collections::BTreeSet;
 
 fn test_window(
@@ -34,11 +33,4 @@ fn test_window(
         CompactionWindowFingerprint::new(0),
     );
     (window, plan)
-}
-
-fn evidence(artifact_id: &str) -> EvidenceRef {
-    EvidenceRef::new(
-        ArtifactId::new(artifact_id).expect("valid artifact id"),
-        EvidenceLocator::whole_artifact(),
-    )
 }

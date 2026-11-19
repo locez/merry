@@ -16,6 +16,8 @@ mod records;
 
 mod replay;
 
+pub(crate) use records::TRAJECTORY_TOOL_PREVIEW_BYTES;
+
 const TRAJECTORY_EVENT_BUFFER: usize = 256;
 
 /// Runtime-owned read model for one session's trajectory.

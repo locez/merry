@@ -1,8 +1,8 @@
 use merry_core::{
-    ArtifactKind, ArtifactRef, SessionId, ToolCallArguments, ToolCallId, ToolInputSchema, ToolName,
-    ToolSpec, TrajectoryEvent, TrajectoryLane, TrajectoryPayload, TrajectoryPayloadKind,
-    TrajectoryPromptBlock, TrajectoryRecord, TrajectoryRecordId, TrajectoryRecordKind,
-    TrajectoryRecordStatus, TrajectorySnapshot, TrajectoryTurnId,
+    SessionId, ToolCallArguments, ToolCallId, ToolInputSchema, ToolName, ToolSpec, TrajectoryEvent,
+    TrajectoryLane, TrajectoryPayload, TrajectoryPayloadKind, TrajectoryPromptBlock,
+    TrajectoryRecord, TrajectoryRecordId, TrajectoryRecordKind, TrajectoryRecordStatus,
+    TrajectorySnapshot, TrajectoryTurnId,
 };
 use schemars::Schema;
 use serde_json::json;
@@ -47,14 +47,6 @@ fn canonical_fixture() -> serde_json::Value {
         "file contents".to_owned(),
         true,
     )));
-    tool.add_artifact(
-        ArtifactRef::new(
-            merry_core::ArtifactId::new("artifact-1").expect("valid artifact id"),
-            ArtifactKind::Text,
-        )
-        .with_label("README.md")
-        .expect("valid artifact label"),
-    );
     tool.finish(TrajectoryRecordStatus::Succeeded, 43);
 
     let mut snapshot = TrajectorySnapshot::new(session_id);

@@ -19,7 +19,6 @@ const ALLOWED_ERROR_CONTEXT_KEYS: &[&str] = &[
     "model_role",
     "config_path",
     "field_path",
-    "artifact_id",
     "checkpoint_id",
     "http_status",
     "exit_code",
@@ -97,8 +96,6 @@ pub enum MerryErrorDomain {
     Context,
     /// Compaction failed or produced invalid state.
     Compaction,
-    /// Artifact persistence or lookup failed.
-    Artifact,
     /// Sandbox execution or permission handling failed.
     Sandbox,
     /// An internal invariant failed.

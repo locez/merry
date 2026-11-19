@@ -1,7 +1,7 @@
 //! Thin Python bindings for the public Merry facade.
 //!
 //! PyO3 types in this crate only bridge construction, owned run messages, and
-//! lifecycle methods. Runtime state, policy, artifacts, and tool admission
+//! lifecycle methods. Runtime state, policy, tool outputs, and tool admission
 //! remain owned by the Rust facade and runtime crates.
 
 mod agent;

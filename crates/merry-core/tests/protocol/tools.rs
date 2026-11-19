@@ -1,9 +1,9 @@
 use crate::{assert_json_round_trip, json_schema};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, PendingToolCall, PendingToolCallBatch,
-    RuntimeEvent, RuntimeEventSource, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
-    ToolCallArguments, ToolCallBatchId, ToolCallId, ToolCallResult, ToolCallResultStatus,
-    ToolInputSchema, ToolName, ToolOutput, ToolSpec,
+    ErrorInfo, PendingToolCall, PendingToolCallBatch, RuntimeEvent, RuntimeEventSource,
+    RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallArguments, ToolCallBatchId,
+    ToolCallId, ToolCallResult, ToolCallResultStatus, ToolInputSchema, ToolName, ToolOutput,
+    ToolOutputKind, ToolSpec,
 };
 use schemars::Schema;
 use serde_json::json;
@@ -236,28 +236,18 @@ fn pending_tool_call_validates_call_id_tool_name_and_object_arguments() {
 }
 
 #[test]
-fn tool_call_result_uses_status_constraints_and_artifact_reference_only() {
+fn tool_call_result_uses_status_constraints_and_call_id_identity() {
     let call_id = ToolCallId::new("call-1").expect("valid call id");
-    let artifact = ArtifactRef::new(
-        ArtifactId::new("tool-result-1").expect("valid artifact id"),
-        ArtifactKind::Json,
-    );
-    let success = ToolCallResult::succeeded(call_id.clone(), artifact.clone());
+    let success = ToolCallResult::succeeded(call_id.clone());
 
     assert_eq!(success.call_id(), &call_id);
     assert_eq!(success.status(), ToolCallResultStatus::Succeeded);
-    assert_eq!(success.artifact(), &artifact);
     assert!(success.diagnostic().is_none());
     assert_eq!(
         serde_json::to_value(&success).expect("success result serializes"),
         json!({
             "call_id": "call-1",
             "status": "succeeded",
-            "artifact": {
-                "id": "tool-result-1",
-                "kind": "json",
-                "label": null
-            },
             "diagnostic": null
         })
     );
@@ -265,7 +255,7 @@ fn tool_call_result_uses_status_constraints_and_artifact_reference_only() {
 
     let diagnostic =
         ErrorInfo::new("tool_failed", "Tool exited with status 2").expect("valid diagnostic");
-    let failed = ToolCallResult::failed(call_id.clone(), artifact.clone(), diagnostic.clone());
+    let failed = ToolCallResult::failed(call_id.clone(), diagnostic.clone());
     assert_eq!(failed.status(), ToolCallResultStatus::Failed);
     assert_eq!(failed.diagnostic(), Some(&diagnostic));
     assert_eq!(
@@ -273,11 +263,6 @@ fn tool_call_result_uses_status_constraints_and_artifact_reference_only() {
         json!({
             "call_id": "call-1",
             "status": "failed",
-            "artifact": {
-                "id": "tool-result-1",
-                "kind": "json",
-                "label": null
-            },
             "diagnostic": {
                 "code": "tool_failed",
                 "message": "Tool exited with status 2"
@@ -290,21 +275,15 @@ fn tool_call_result_uses_status_constraints_and_artifact_reference_only() {
         ToolCallResult::new(
             call_id.clone(),
             ToolCallResultStatus::Succeeded,
-            artifact.clone(),
             Some(diagnostic.clone())
         )
         .is_err()
     );
-    assert!(ToolCallResult::new(call_id, ToolCallResultStatus::Failed, artifact, None).is_err());
+    assert!(ToolCallResult::new(call_id, ToolCallResultStatus::Failed, None).is_err());
     assert!(
         serde_json::from_value::<ToolCallResult>(json!({
             "call_id": "call-1",
             "status": "succeeded",
-            "artifact": {
-                "id": "tool-result-1",
-                "kind": "json",
-                "label": null
-            },
             "diagnostic": {
                 "code": "unexpected",
                 "message": "success must not carry diagnostics"
@@ -316,11 +295,6 @@ fn tool_call_result_uses_status_constraints_and_artifact_reference_only() {
         serde_json::from_value::<ToolCallResult>(json!({
             "call_id": "call-1",
             "status": "failed",
-            "artifact": {
-                "id": "tool-result-1",
-                "kind": "json",
-                "label": null
-            },
             "diagnostic": null
         }))
         .is_err()
@@ -328,14 +302,25 @@ fn tool_call_result_uses_status_constraints_and_artifact_reference_only() {
 }
 
 #[test]
+fn tool_output_bounded_preview_truncates_on_utf8_boundaries() {
+    let output = ToolOutput::text("aébc");
+    assert_eq!(output.kind(), ToolOutputKind::Text);
+    assert_eq!(output.byte_len(), "aébc".len());
+
+    let preview = output.bounded_preview(3);
+    assert_eq!(preview.kind(), ToolOutputKind::Text);
+    assert_eq!(preview.content(), "aé");
+    assert!(preview.truncated());
+    assert_eq!(preview.byte_length(), "aébc".len());
+
+    let full = output.bounded_preview(10);
+    assert_eq!(full.content(), "aébc");
+    assert!(!full.truncated());
+}
+
+#[test]
 fn tool_call_resolved_event_uses_snake_case_and_no_inline_payload() {
-    let result = ToolCallResult::succeeded(
-        ToolCallId::new("call-1").expect("valid call id"),
-        ArtifactRef::new(
-            ArtifactId::new("tool-result-1").expect("valid artifact id"),
-            ArtifactKind::Text,
-        ),
-    );
+    let result = ToolCallResult::succeeded(ToolCallId::new("call-1").expect("valid call id"));
     let event = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),
         10,
@@ -352,11 +337,6 @@ fn tool_call_resolved_event_uses_snake_case_and_no_inline_payload() {
                 "result": {
                     "call_id": "call-1",
                     "status": "succeeded",
-                    "artifact": {
-                        "id": "tool-result-1",
-                        "kind": "text",
-                        "label": null
-                    },
                     "diagnostic": null
                 }
             }
@@ -387,13 +367,7 @@ fn public_tool_call_started_does_not_expose_bridge_runner() {
 
 #[test]
 fn public_tool_call_finished_carries_complete_text_output() {
-    let result = ToolCallResult::succeeded(
-        ToolCallId::new("call-1").expect("valid call id"),
-        ArtifactRef::new(
-            ArtifactId::new("tool-result-1").expect("valid artifact id"),
-            ArtifactKind::Text,
-        ),
-    );
+    let result = ToolCallResult::succeeded(ToolCallId::new("call-1").expect("valid call id"));
     let event = RuntimeEvent::ToolCallFinished {
         result,
         output: Some(ToolOutput::Text {

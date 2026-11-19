@@ -1,9 +1,9 @@
 //! Public recursive plan snapshots and lifecycle vocabulary.
 
 use crate::{
-    ArtifactRef, ErrorInfo, EvidenceRef, PlanApprovalRequirementId, PlanAttemptId, PlanBindingId,
-    PlanDirectiveId, PlanId, PlanLeaseId, PlanNodeId, SessionId, SessionUsage, SkillId, SubagentId,
-    SubagentTaskId, ToolName,
+    ErrorInfo, PlanApprovalRequirementId, PlanAttemptId, PlanBindingId, PlanDirectiveId, PlanId,
+    PlanLeaseId, PlanNodeId, SessionId, SessionUsage, SkillId, SubagentId, SubagentTaskId,
+    ToolName,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -324,8 +324,8 @@ pub struct PlanCapabilityEnvelopeSnapshot {
 #[serde(deny_unknown_fields)]
 pub struct PlanNodeResult {
     pub conclusion: String,
-    pub evidence_refs: Vec<EvidenceRef>,
-    pub artifact_refs: Vec<ArtifactRef>,
+    #[serde(default)]
+    pub output_paths: Vec<String>,
     pub changed_paths: Vec<String>,
     pub verification: Vec<String>,
     pub open_questions: Vec<String>,
@@ -410,11 +410,11 @@ pub struct PlanAttemptProgressSnapshot {
     /// Count of successful runtime-observed actions that may have external effects.
     #[serde(default)]
     pub observable_side_effects: usize,
-    pub artifacts_created: usize,
     #[serde(default)]
-    pub artifact_refs: Vec<ArtifactRef>,
+    pub output_paths: Vec<String>,
     pub changed_paths: Vec<String>,
-    pub acceptance_evidence: Vec<EvidenceRef>,
+    #[serde(default)]
+    pub evidence_notes: Vec<String>,
     pub repeated_failure_fingerprint: Option<String>,
     pub summary: Option<String>,
     pub next_action: Option<String>,

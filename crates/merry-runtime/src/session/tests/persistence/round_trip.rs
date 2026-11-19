@@ -1,18 +1,15 @@
 use crate::{
-    CompactedCheckpoint, ContextCompiler, ContextEntry, ContextEvidence, ContextSummary,
-    FileSessionStore, ProjectRules, SkillCatalog, TaskAnchor,
-    artifact::ArtifactContent,
+    CompactedCheckpoint, ContextCompiler, ContextEntry, ContextSummary, FileSessionStore,
+    ProjectRules, SkillCatalog, TaskAnchor,
     session::tests::{
         ActionAuditPolicy, ActionAuditStatus, ActionExecutionEvidence, ActionPolicyDisposition,
-        ActionProposal, ActionProposalEvidence, ActionRiskTier, ArtifactId, DefaultActionPolicy,
-        ErrorInfo, ModelTurnStatus, SessionState, SessionStateTestExt,
-        WorkspacePatchExecutionEvidence, WorkspacePatchProposal, artifact_id, pending_tool_call,
-        persistence::persisted_image_message, session_id, tool_call_id,
+        ActionProposal, ActionProposalEvidence, ActionRiskTier, DefaultActionPolicy, ErrorInfo,
+        ModelTurnStatus, SessionState, SessionStateTestExt, WorkspacePatchExecutionEvidence,
+        WorkspacePatchProposal, pending_tool_call, persistence::persisted_image_message,
+        session_id, tool_call_id,
     },
 };
-use merry_core::{
-    ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, ToolCallResult, ToolCallResultStatus,
-};
+use merry_core::{ToolCallResult, ToolCallResultStatus, ToolOutput};
 
 #[tokio::test]
 async fn session_state_round_trip_preserves_user_images_for_provider_history() {
@@ -32,23 +29,18 @@ async fn session_state_round_trip_preserves_user_images_for_provider_history() {
     let loaded = SessionState::load_from(&store, &session_id())
         .await
         .expect("image session should load");
-    let snapshot = loaded
-        .provider_transcript_snapshot()
-        .expect("provider history should compile");
+    let snapshot = loaded.provider_transcript_snapshot();
     let [crate::session::TranscriptItemSnapshot::UserMessage { text, images, .. }] =
         snapshot.as_slice()
     else {
         panic!("provider history should contain one image message");
     };
     assert_eq!(text, message.text());
-    assert_eq!(images.len(), message.images().len());
-    for (actual, expected) in images.iter().zip(message.images()) {
-        assert_eq!(actual.input(), expected);
-    }
+    assert_eq!(images.as_slice(), message.images());
 }
 
 #[tokio::test]
-async fn session_state_round_trip_preserves_turns_user_artifact_and_projections() {
+async fn session_state_round_trip_preserves_turns_user_text_and_projections() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     let mut session = SessionState::new(session_id());
@@ -93,6 +85,11 @@ async fn session_state_round_trip_preserves_turns_user_artifact_and_projections(
             .expect("saved state should read"),
     )
     .expect("saved state should be JSON");
+    assert_eq!(stored["format_version"], 6);
+    assert!(
+        stored.get("artifacts").is_none(),
+        "v6 state.json must not contain a top-level artifacts table"
+    );
     assert_eq!(
         stored["prompt_history_projection"]["compacted_through"],
         serde_json::Value::Null
@@ -108,21 +105,17 @@ async fn session_state_round_trip_preserves_turns_user_artifact_and_projections(
         .expect("session should load");
 
     assert_eq!(loaded.transcript.persisted(), transcript_before);
+    let full = loaded.full_transcript_snapshot();
     assert_eq!(
-        loaded
-            .full_transcript_snapshot()
-            .expect("full transcript should remain readable")
-            .len(),
+        full.len(),
         4,
         "hidden final-output exchange remains in the full transcript view"
     );
-    assert_eq!(
-        loaded
-            .read_artifact_content(&artifact_id("user-message-0"))
-            .expect("user artifact should load")
-            .as_text(),
-        Some("  exact persisted user text\n")
-    );
+    assert!(matches!(
+        &full[0],
+        crate::session::TranscriptItemSnapshot::UserMessage { text, .. }
+            if text == "  exact persisted user text\n"
+    ));
     assert_eq!(
         loaded.model_turn_status(text_turn),
         Some(ModelTurnStatus::Completed)
@@ -160,19 +153,10 @@ async fn session_state_save_load_round_trips_next_reasoning_state() {
     session
         .record_test_user_message_body("remember this user fact")
         .expect("user message records");
-    let artifact = ArtifactRef::new(artifact_id("resume-source"), ArtifactKind::Text);
-    session
-        .record_artifact_events(artifact.clone(), ArtifactContent::text("exact evidence"))
-        .expect("artifact records");
-    let evidence = EvidenceRef::new(artifact.id().clone(), EvidenceLocator::whole_artifact());
     session
         .record_context_entry(ContextEntry::summary(
-            ContextSummary::new(
-                "resume-summary",
-                "A grounded summary for resume.",
-                vec![ContextEvidence::new("source", evidence).expect("context evidence")],
-            )
-            .expect("summary"),
+            ContextSummary::new("resume-summary", "A grounded summary for resume.")
+                .expect("summary"),
         ))
         .expect("context records");
     session.set_compacted_checkpoint(
@@ -186,11 +170,10 @@ async fn session_state_save_load_round_trips_next_reasoning_state() {
             ToolCallResult::new(
                 tool_call_id("call-resume"),
                 ToolCallResultStatus::Succeeded,
-                ArtifactRef::new(artifact_id("manual-tool-result"), ArtifactKind::Text),
                 None,
             )
             .expect("tool result"),
-            ArtifactContent::text("manual result"),
+            ToolOutput::text("manual result"),
         )
         .expect("tool result records");
 
@@ -206,6 +189,10 @@ async fn session_state_save_load_round_trips_next_reasoning_state() {
         loaded.transcript_items_for_tests(),
         session.transcript_items_for_tests()
     );
+    assert_eq!(
+        loaded.read_tool_output(&tool_call_id("call-resume")),
+        Some(ToolOutput::text("manual result"))
+    );
 
     let compiled = ContextCompiler::new()
         .compile(&loaded.context_snapshot())
@@ -214,46 +201,6 @@ async fn session_state_save_load_round_trips_next_reasoning_state() {
     assert!(snapshot.contains("resume-summary"));
     assert!(snapshot.contains("resume checkpoint text"));
     assert!(loaded.compacted_checkpoint_summary().is_some());
-}
-
-#[tokio::test]
-async fn session_state_save_loads_inline_artifacts_without_payload_files() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let mut session = SessionState::new(session_id());
-    let long_id = "a".repeat(128);
-    let artifact = ArtifactRef::new(
-        ArtifactId::new(&long_id).expect("max length artifact id is valid"),
-        ArtifactKind::Text,
-    );
-    session
-        .record_artifact_events(artifact.clone(), ArtifactContent::text("inline payload"))
-        .expect("artifact records");
-
-    session.save_to(&store).await.expect("session saves");
-    assert!(
-        !store.artifacts_dir(&session_id()).exists(),
-        "single-file resume state should not create artifact payload files"
-    );
-    let json = String::from_utf8(
-        store
-            .read_state_bytes(&session_id())
-            .await
-            .expect("state reads"),
-    )
-    .expect("state is utf8 json");
-    assert!(json.contains("inline payload"));
-
-    let loaded = SessionState::load_from(&store, &session_id())
-        .await
-        .expect("session loads from single state file");
-    assert_eq!(
-        loaded
-            .read_artifact_content(artifact.id())
-            .expect("inline artifact resumes")
-            .as_text(),
-        Some("inline payload")
-    );
 }
 
 #[tokio::test]
@@ -308,7 +255,7 @@ async fn session_state_save_load_round_trips_action_audit_registry() {
         .submit_proposed_tool_execution_outcome(
             proposal,
             merry_core::ToolCallResultStatus::Succeeded,
-            ArtifactContent::json(r#"{"ok":true}"#),
+            ToolOutput::json(r#"{"ok":true}"#),
             None,
             Some(execution_evidence.clone()),
             allow_policy,
@@ -327,7 +274,7 @@ async fn session_state_save_load_round_trips_action_audit_registry() {
             &call,
             &decision,
             None,
-            ArtifactContent::json(r#"{"ok":false}"#),
+            ToolOutput::json(r#"{"ok":false}"#),
             diagnostic,
         )
         .expect("denial records");

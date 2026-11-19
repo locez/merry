@@ -1,9 +1,8 @@
 use crate::{
-    ArtifactError, RuntimeError,
+    RuntimeError,
     action_audit::ActionAuditStatus,
     process::ProcessExitStatus,
     runtime::tests::support::{
-        common::artifact_id,
         process::{FakeProcessRunner, ProcessProposingToolExecutor},
         tool_helpers::{
             action_audit_records, event_kind_names_for_tool_execution, policy_tool_spec,
@@ -13,7 +12,6 @@ use crate::{
     },
     tool::{ActionExecutionEvidence, RegisteredTool, ToolActionKind, ToolExecutionContext},
 };
-use merry_core::EvidenceLocator;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -50,7 +48,7 @@ async fn opt_in_process_action_commits_output_after_runner_cancels_token() {
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
@@ -119,23 +117,17 @@ async fn opt_in_process_action_pre_cancel_keeps_pending_without_audit_or_result_
     assert_eq!(executor.propose_count(), 0);
     assert_eq!(executor.execute_count(), 0);
     assert_eq!(runner.call_count(), 0);
-    assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+    assert_eq!(runtime.pending_tool_calls().await, vec![pending.clone()]);
     assert_eq!(runtime.ledger_projection().await, projection_before);
     assert!(action_audit_records(&runtime).await.is_empty());
-    let expected_result_artifact_id = artifact_id("tool-result-2");
-    let evidence_err = runtime
-        .evidence_ref(
-            &expected_result_artifact_id,
-            EvidenceLocator::whole_artifact(),
-        )
-        .await
-        .expect_err("pre-cancelled process action must not record result artifact");
-    assert!(matches!(
-        evidence_err,
-        RuntimeError::Artifact {
-            source: ArtifactError::MissingArtifact { id }
-        } if id == expected_result_artifact_id
-    ));
+    assert!(
+        runtime
+            .read_tool_output(pending.id())
+            .await
+            .expect("tool output query succeeds")
+            .is_none(),
+        "pre-cancelled process action must not record tool output"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -174,21 +166,15 @@ async fn opt_in_process_action_runner_cancel_keeps_pending_without_audit_or_resu
     assert_eq!(executor.propose_count(), 1);
     assert_eq!(executor.execute_count(), 0);
     assert_eq!(runner.call_count(), 1);
-    assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+    assert_eq!(runtime.pending_tool_calls().await, vec![pending.clone()]);
     assert_eq!(runtime.ledger_projection().await, projection_before);
     assert!(action_audit_records(&runtime).await.is_empty());
-    let expected_result_artifact_id = artifact_id("tool-result-2");
-    let evidence_err = runtime
-        .evidence_ref(
-            &expected_result_artifact_id,
-            EvidenceLocator::whole_artifact(),
-        )
-        .await
-        .expect_err("runner-cancelled process action must not record result artifact");
-    assert!(matches!(
-        evidence_err,
-        RuntimeError::Artifact {
-            source: ArtifactError::MissingArtifact { id }
-        } if id == expected_result_artifact_id
-    ));
+    assert!(
+        runtime
+            .read_tool_output(pending.id())
+            .await
+            .expect("tool output query succeeds")
+            .is_none(),
+        "runner-cancelled process action must not record tool output"
+    );
 }

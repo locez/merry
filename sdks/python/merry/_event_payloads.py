@@ -19,12 +19,10 @@ from ._event_lifecycle import (
     UsageUpdatedPayload,
 )
 from ._event_types import (
-    ArtifactReference,
     EventDiagnostic,
     EventPayload,
     EventSource,
     EventType,
-    EvidenceReference,
     InteractiveRunState,
     QueuedInput,
     QueuedInputLane,
@@ -48,7 +46,6 @@ from ._output_rate import ModelOutputRateUpdatedPayload
 class AssistantMessagePayload(SourcedEventPayload):
     event_type: ClassVar[EventType] = EventType.ASSISTANT_MESSAGE
     text: str
-    artifact: ArtifactReference
     source: EventSource
 
     def __post_init__(self) -> None:
@@ -60,8 +57,6 @@ class AssistantMessagePayload(SourcedEventPayload):
             allow_blank=True,
             allow_newline_tab=True,
         )
-        if not isinstance(self.artifact, ArtifactReference):
-            raise TypeError("assistant message artifact must be an ArtifactReference")
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,26 +136,19 @@ class ToolCallFinishedPayload(SourcedEventPayload):
 class FinalOutputRecordedPayload(SourcedEventPayload):
     event_type: ClassVar[EventType] = EventType.FINAL_OUTPUT_RECORDED
     call_id: str
-    artifact: ArtifactReference
+    json: str
     source: EventSource
 
     def __post_init__(self) -> None:
         _validate_event_source(self.source)
         _validate_identifier("final output call id", self.call_id, 256)
-        if not isinstance(self.artifact, ArtifactReference):
-            raise TypeError("final output artifact must be an ArtifactReference")
-
-
-@dataclass(frozen=True, slots=True)
-class EvidenceReferencedPayload(SourcedEventPayload):
-    event_type: ClassVar[EventType] = EventType.EVIDENCE_REFERENCED
-    evidence: EvidenceReference
-    source: EventSource
-
-    def __post_init__(self) -> None:
-        _validate_event_source(self.source)
-        if not isinstance(self.evidence, EvidenceReference):
-            raise TypeError("evidence must be an EvidenceReference")
+        _validate_text(
+            "final output JSON",
+            self.json,
+            1_048_576,
+            allow_blank=True,
+            allow_newline_tab=True,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +157,6 @@ class SkillUsedPayload(SourcedEventPayload):
     skill_name: str
     skill_md_path: str
     tool_call_id: str
-    artifact: ArtifactReference
     source: EventSource
 
     def __post_init__(self) -> None:
@@ -177,8 +164,6 @@ class SkillUsedPayload(SourcedEventPayload):
         _validate_identifier("skill name", self.skill_name, 256)
         _validate_identifier("skill SKILL.md path", self.skill_md_path, 4096)
         _validate_identifier("skill tool call id", self.tool_call_id, 256)
-        if not isinstance(self.artifact, ArtifactReference):
-            raise TypeError("skill artifact must be an ArtifactReference")
 
 
 @dataclass(frozen=True, slots=True)
@@ -475,7 +460,6 @@ EventPayloadValue: TypeAlias = (
     | ModelRetryAttemptStartedPayload
     | ModelRetryScheduledPayload
     | ModelRetryExhaustedPayload
-    | EvidenceReferencedPayload
     | SkillUsedPayload
     | SubagentSpawnedPayload
     | SubagentStartedPayload

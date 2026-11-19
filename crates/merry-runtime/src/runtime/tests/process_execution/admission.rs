@@ -59,7 +59,7 @@ async fn opt_in_process_action_denies_dangerous_argv_without_runner_call() {
     assert_eq!(runner.call_count(), 0);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     assert_eq!(
         resolved_tool_result(&events).status(),
@@ -122,7 +122,7 @@ async fn denied_process_action_traces_denied_tool_finish_without_process_executi
 
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     assert_eq!(runner.call_count(), 0);
     assert!(logs.contains("\"event\":\"runtime.tool.execute.finish\""));
@@ -231,7 +231,7 @@ async fn opt_in_accepted_local_workspace_process_action_executes_local_workspace
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
@@ -332,17 +332,12 @@ async fn opt_in_accepted_local_workspace_process_action_executes_local_workspace
         .filter_map(|(index, kind)| (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index))
         .collect::<Vec<_>>();
     assert_eq!(audit_indexes.len(), 2);
-    let artifact_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
-        .expect("artifact lifecycle should be recorded");
     let resolved_index = lifecycle
         .iter()
         .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
         .expect("resolution lifecycle should be recorded");
     assert!(audit_indexes[0] < audit_indexes[1]);
-    assert!(audit_indexes[1] < artifact_index);
-    assert!(artifact_index < resolved_index);
+    assert!(audit_indexes[1] < resolved_index);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -386,7 +381,7 @@ async fn accepted_local_workspace_process_action_denies_when_admission_profile_m
     assert_eq!(runner.call_count(), 0);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     assert_eq!(
         resolved_tool_result(&events).status(),
@@ -446,7 +441,7 @@ async fn accepted_local_workspace_process_action_executes_unknown_argv_under_loc
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     assert_eq!(
         resolved_tool_result(&events).status(),
@@ -510,7 +505,7 @@ async fn opt_in_process_action_with_stdin_is_denied_without_runner_call() {
     assert_eq!(runner.call_count(), 0);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     assert_eq!(
         resolved_tool_result(&events).status(),

@@ -34,13 +34,12 @@ fn persisted_image_message() -> UserMessageInput {
 
 fn current_document() -> serde_json::Value {
     serde_json::json!({
-        "format_version": 5,
+        "format_version": 6,
         "external_tool_catalog": { "format_version": 1, "entries": [] },
         "session_id": session_id(),
         "next_sequence": 0,
         "session_started": false,
         "ledger": [],
-        "artifacts": [],
         "compacted_checkpoint": null,
         "archived_ref_manifest": [],
         "prompt_history_projection": { "compacted_through": null },

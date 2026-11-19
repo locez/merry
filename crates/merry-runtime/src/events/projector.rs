@@ -1,17 +1,15 @@
 //! Projection from internal runtime journal events to public runtime events.
 
-use super::tool_output::public_tool_output;
-use crate::{ArtifactContent, Runtime, RuntimeError};
+use crate::{Runtime, RuntimeError};
 use merry_core::{
-    ArtifactId, RuntimeEvent, RuntimeEventSource, RuntimeJournalEvent, RuntimeJournalPayload,
-    ToolCallId,
+    RuntimeEvent, RuntimeEventSource, RuntimeJournalEvent, RuntimeJournalPayload, ToolCallId,
 };
 use std::collections::BTreeSet;
 
 /// Stateful public-event projector for one journal stream.
 ///
-/// The projector is read-only with respect to runtime state. It only reads
-/// artifact contents required to make public events ergonomic and deterministic.
+/// The projector is read-only with respect to runtime state. It reads recorded
+/// tool outputs required to make public events ergonomic and deterministic.
 #[derive(Debug, Default)]
 pub struct RuntimeEventProjector {
     started_tool_calls: BTreeSet<ToolCallId>,
@@ -87,23 +85,14 @@ impl RuntimeEventProjector {
                 error_kind,
                 source,
             })),
-            RuntimeJournalPayload::ArtifactRecorded { .. } => Ok(None),
             RuntimeJournalPayload::AssistantOutputDelta { delta } => {
                 Ok(Some(RuntimeEvent::AssistantMessageDelta { delta, source }))
             }
             RuntimeJournalPayload::ReasoningOutputDelta { delta } => {
                 Ok(Some(RuntimeEvent::ReasoningDelta { delta, source }))
             }
-            RuntimeJournalPayload::AssistantOutputRecorded { artifact } => {
-                let text = read_text_artifact(runtime, artifact.id()).await?;
-                Ok(Some(RuntimeEvent::AssistantMessage {
-                    text,
-                    artifact,
-                    source,
-                }))
-            }
-            RuntimeJournalPayload::EvidenceReferenced { evidence } => {
-                Ok(Some(RuntimeEvent::EvidenceReferenced { evidence, source }))
+            RuntimeJournalPayload::AssistantOutputRecorded { text } => {
+                Ok(Some(RuntimeEvent::AssistantMessage { text, source }))
             }
             RuntimeJournalPayload::ToolCallPending { call }
             | RuntimeJournalPayload::BridgeToolCallRequested { call } => {
@@ -116,20 +105,21 @@ impl RuntimeEventProjector {
                 Ok(Some(RuntimeEvent::ToolCallBatchStarted { batch, source }))
             }
             RuntimeJournalPayload::ToolCallResolved { result } => {
-                let output = match runtime.read_artifact_content(result.artifact().id()).await {
-                    Ok(content) => public_tool_output(&content),
-                    Err(_) => None,
-                };
+                let output = runtime
+                    .read_tool_output(result.call_id())
+                    .await
+                    .ok()
+                    .flatten();
                 Ok(Some(RuntimeEvent::ToolCallFinished {
                     result,
                     output,
                     source,
                 }))
             }
-            RuntimeJournalPayload::FinalOutputRecorded { call_id, artifact } => {
+            RuntimeJournalPayload::FinalOutputRecorded { call_id, json } => {
                 Ok(Some(RuntimeEvent::FinalOutputRecorded {
                     call_id,
-                    artifact,
+                    json,
                     source,
                 }))
             }
@@ -137,12 +127,10 @@ impl RuntimeEventProjector {
                 skill_name,
                 skill_md_path,
                 tool_call_id,
-                artifact,
             } => Ok(Some(RuntimeEvent::SkillUsed {
                 skill_name,
                 skill_md_path,
                 tool_call_id,
-                artifact,
                 source,
             })),
             RuntimeJournalPayload::SubagentSpawned {
@@ -272,30 +260,12 @@ impl RuntimeEventProjector {
     }
 }
 
-async fn read_text_artifact(
-    runtime: &Runtime,
-    artifact_id: &ArtifactId,
-) -> Result<String, RuntimeError> {
-    let content = runtime.read_artifact_content(artifact_id).await?;
-    match content {
-        ArtifactContent::Text { content: text } | ArtifactContent::Json { content: text } => {
-            Ok(text)
-        }
-        ArtifactContent::Binary { .. }
-        | ArtifactContent::Image { .. }
-        | ArtifactContent::Other { .. } => Err(RuntimeError::InvalidStepInput {
-            reason: "assistant output artifact content is not text",
-        }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ArtifactContent;
     use merry_core::{
-        ArtifactKind, ArtifactRef, ErrorInfo, PendingToolCall, SessionId, SubagentId,
-        SubagentTaskId, ToolCallArguments, ToolCallResult, ToolName,
+        ErrorInfo, PendingToolCall, PendingToolCallBatch, SessionId, SubagentId, SubagentTaskId,
+        ToolCallArguments, ToolCallBatchId, ToolCallResult, ToolName, ToolOutput,
     };
     use serde_json::json;
 
@@ -305,10 +275,6 @@ mod tests {
 
     fn source_event(sequence: u64, payload: RuntimeJournalPayload) -> RuntimeJournalEvent {
         RuntimeJournalEvent::new(session_id(), sequence, payload)
-    }
-
-    fn artifact_id(value: &str) -> ArtifactId {
-        ArtifactId::new(value).expect("valid artifact id")
     }
 
     fn tool_call_id(value: &str) -> ToolCallId {
@@ -327,25 +293,6 @@ mod tests {
         Runtime::builder(session_id())
             .build()
             .expect("runtime should build")
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn generic_artifact_recording_does_not_project_to_public_event() {
-        let runtime = runtime();
-        let mut projector = RuntimeEventProjector::new();
-        let event = source_event(
-            1,
-            RuntimeJournalPayload::ArtifactRecorded {
-                artifact: ArtifactRef::new(artifact_id("generic-artifact"), ArtifactKind::Text),
-            },
-        );
-
-        let projected = projector
-            .project(event, &runtime)
-            .await
-            .expect("projection should not fail");
-
-        assert_eq!(projected, None);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -434,15 +381,26 @@ mod tests {
     async fn tool_result_projects_with_complete_text_output() {
         let runtime = runtime();
         let mut projector = RuntimeEventProjector::new();
-        let artifact = ArtifactRef::new(
-            artifact_id("external-complete-artifact"),
-            ArtifactKind::Text,
-        );
-        runtime
-            .record_artifact(artifact.clone(), ArtifactContent::text("complete text"))
-            .await
-            .expect("artifact should record");
-        let result = ToolCallResult::succeeded(tool_call_id("call-complete"), artifact);
+        let call = pending_tool_call("call-complete");
+        let result = ToolCallResult::succeeded(call.id().clone());
+        {
+            let mut session = runtime.session_for_tests().lock().await;
+            let turn = session.begin_model_turn().expect("turn should begin");
+            let batch = PendingToolCallBatch::new(
+                ToolCallBatchId::new("batch-complete").expect("valid batch id"),
+                vec![call],
+            )
+            .expect("valid batch");
+            session
+                .record_tool_call_batch_pending(turn, batch)
+                .expect("tool call should record");
+            session
+                .close_model_response(turn, true)
+                .expect("model response should close");
+            session
+                .submit_tool_result(result.clone(), ToolOutput::text("complete text"))
+                .expect("tool result should record");
+        }
         let event = source_event(
             4,
             RuntimeJournalPayload::ToolCallResolved {
@@ -458,10 +416,10 @@ mod tests {
 
         assert!(matches!(
             projected,
-                RuntimeEvent::ToolCallFinished {
-                    result: projected,
-                    output: Some(merry_core::ToolOutput::Text { text }),
-                    ..
+            RuntimeEvent::ToolCallFinished {
+                result: projected,
+                output: Some(merry_core::ToolOutput::Text { text }),
+                ..
             } if projected == result && text == "complete text"
         ));
     }

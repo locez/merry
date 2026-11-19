@@ -328,8 +328,7 @@ fn decode_and_normalize_mcp_image(label: &str, raw_b64: &str) -> Option<UserImag
 mod tests {
     use super::*;
     use crate::protocol::{McpContent, ToolsCallResult};
-    use merry_core::ToolCallResultStatus;
-    use merry_runtime::ArtifactContent;
+    use merry_core::{ToolCallResultStatus, ToolOutput};
 
     #[test]
     fn converts_text_result_to_successful_outcome() {
@@ -348,7 +347,7 @@ mod tests {
         );
 
         assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
-        assert_eq!(outcome.content(), &ArtifactContent::text("hello"));
+        assert_eq!(outcome.content(), &ToolOutput::text("hello"));
     }
 
     #[test]
@@ -388,7 +387,7 @@ mod tests {
         assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
         assert_eq!(
             outcome.content(),
-            &ArtifactContent::text("captured <data-image-omitted> done")
+            &ToolOutput::text("captured <data-image-omitted> done")
         );
         assert_eq!(outcome.images().len(), 1);
         assert_eq!(outcome.images()[0].label(), "[Image #1]");

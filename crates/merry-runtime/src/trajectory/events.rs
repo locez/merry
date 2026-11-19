@@ -8,7 +8,7 @@ use crate::trajectory::{
     },
 };
 use merry_core::{
-    ErrorInfo, RuntimeJournalEvent, RuntimeJournalPayload, ToolCallResult, ToolOutput,
+    ErrorInfo, RuntimeJournalEvent, RuntimeJournalPayload, ToolCallResult, ToolOutputPreview,
     TrajectoryLane, TrajectoryRecordKind, TrajectoryRecordStatus, TrajectoryTurnId,
 };
 
@@ -29,16 +29,17 @@ impl RuntimeObservability {
         &self,
         event: &RuntimeJournalEvent,
         assistant_text: Option<&str>,
-        tool_output: Option<&ToolOutput>,
+        tool_output: Option<&ToolOutputPreview>,
     ) {
         if matches!(&event.payload, RuntimeJournalPayload::StepStarted) {
             self.publish_pending_inputs(event.sequence);
         }
         match &event.payload {
-            RuntimeJournalPayload::AssistantOutputRecorded { artifact } => {
+            RuntimeJournalPayload::AssistantOutputRecorded { text } => {
+                let identity = format!("assistant-{}", event.sequence);
                 let Some(mut record) = record(
                     "assistant",
-                    artifact.id().as_str(),
+                    &identity,
                     TrajectoryLane::Model,
                     TrajectoryRecordKind::AssistantMessage,
                     TrajectoryRecordStatus::Succeeded,
@@ -47,11 +48,9 @@ impl RuntimeObservability {
                     return;
                 };
                 record.set_label("Assistant message".to_owned());
-                if let Some(text) = assistant_text {
-                    record.set_summary(Some(truncate_summary(text)));
-                    record.set_message_details(text.to_owned(), false);
-                }
-                record.add_artifact(artifact.clone());
+                let text = assistant_text.unwrap_or(text.as_str());
+                record.set_summary(Some(truncate_summary(text)));
+                record.set_message_details(text.to_owned(), false);
                 self.publish(Some(record), event.sequence);
             }
             RuntimeJournalPayload::ToolCallPending { call }
@@ -179,7 +178,7 @@ impl RuntimeObservability {
         &self,
         result: &ToolCallResult,
         sequence: u64,
-        output: Option<&ToolOutput>,
+        output: Option<&ToolOutputPreview>,
     ) {
         let existing = self.find_record_by_tool_call(result.call_id());
         let Some(record) = merge_tool_result(existing, result.call_id(), result, sequence, output)

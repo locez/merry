@@ -12,7 +12,7 @@ use crate::{
 };
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactId, ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
+    ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
     ToolCallArguments, ToolCallId, ToolName,
 };
 use merry_llm::{
@@ -161,10 +161,6 @@ pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
     }
 }
 
-pub(in crate::runtime::tests) fn artifact_id(value: &str) -> ArtifactId {
-    ArtifactId::new(value).expect("valid artifact id")
-}
-
 pub(in crate::runtime::tests) fn session_id(value: &str) -> SessionId {
     SessionId::new(value).expect("valid session id")
 }
@@ -234,10 +230,8 @@ pub(in crate::runtime::tests) fn event_kind_names(
             RuntimeJournalPayload::StepCompleted => "StepCompleted",
             RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
             RuntimeJournalPayload::Failed { .. } => "Failed",
-            RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
             RuntimeJournalPayload::AssistantOutputDelta { .. } => "AssistantOutputDelta",
             RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
-            RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
             RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
             RuntimeJournalPayload::BridgeToolCallRequested { .. } => "BridgeToolCallRequested",
             RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",

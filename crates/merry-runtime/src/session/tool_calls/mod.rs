@@ -1,8 +1,8 @@
-use super::{ModelTurnId, SessionState, artifacts::assistant_output_id};
-use crate::{RuntimeError, artifact::ArtifactContent, ledger::LedgerFactKind};
+use super::{ModelTurnId, SessionState};
+use crate::{RuntimeError, ledger::LedgerFactKind};
 use merry_core::{
-    ArtifactKind, ArtifactRef, ErrorInfo, PendingToolCall, PendingToolCallBatch,
-    RuntimeJournalEvent, RuntimeJournalPayload, ToolCallBatchId, ToolCallId,
+    ErrorInfo, PendingToolCall, PendingToolCallBatch, RuntimeJournalEvent, RuntimeJournalPayload,
+    ToolCallBatchId, ToolCallId,
 };
 
 mod action;
@@ -132,26 +132,11 @@ impl SessionState {
         }
 
         let mut transcript = self.transcript.clone();
-        let commentary_record = commentary
-            .map(|text| {
-                let artifact = ArtifactRef::new(
-                    assistant_output_id(self.next_sequence()),
-                    ArtifactKind::Text,
-                );
-                let content = ArtifactContent::text(text);
-                self.artifacts
-                    .ensure_recordable(&artifact, &content)
-                    .map_err(|error| {
-                        tool_response_diagnostic("assistant_output_artifact", error)
-                    })?;
-                transcript
-                    .push_assistant_text(turn_id, artifact.id().clone())
-                    .map_err(|error| {
-                        tool_response_diagnostic("assistant_output_artifact", error)
-                    })?;
-                Ok((artifact, content))
-            })
-            .transpose()?;
+        if let Some(text) = commentary.as_deref() {
+            transcript
+                .push_assistant_text(turn_id, text.into())
+                .map_err(|error| tool_response_diagnostic("assistant_output_record", error))?;
+        }
         for call in &calls {
             transcript
                 .push_tool_call(turn_id, call.clone())
@@ -161,18 +146,12 @@ impl SessionState {
             .close_model_response(turn_id, true)
             .map_err(|error| tool_response_diagnostic("model_turn_close", error))?;
 
-        let recorded_commentary = commentary_record.map(|(artifact, content)| {
-            let content_bytes = content.as_bytes().len();
-            let recorded = self.artifacts.record_preflighted(artifact, content);
-            Self::trace_artifact_record(self.session_id.as_str(), &recorded, content_bytes);
-            recorded
-        });
         self.transcript = transcript;
         self.pending_tool_calls.extend(calls);
-        let commentary_event = recorded_commentary.map(|artifact| {
+        let commentary_event = commentary.map(|text| {
             self.record_event(
-                RuntimeJournalPayload::AssistantOutputRecorded { artifact },
-                LedgerFactKind::ArtifactRecorded,
+                RuntimeJournalPayload::AssistantOutputRecorded { text },
+                LedgerFactKind::AssistantOutputRecorded,
             )
         });
         let tool_event = self.record_event(tool_payload, LedgerFactKind::ToolCallPending);

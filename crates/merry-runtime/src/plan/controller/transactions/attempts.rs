@@ -1,14 +1,10 @@
 use crate::{
-    ArtifactContent, FileSessionStore,
+    FileSessionStore, ToolOutput,
     plan::{
-        PlanArtifactPromotion,
         controller::{
             PlanCommandResult, PlanControllerError,
             transactions::{
-                persistence::{
-                    SessionBase, persist_and_install, prepare_plan_commit,
-                    prepare_plan_commit_with_artifact_promotions,
-                },
+                persistence::{SessionBase, persist_and_install, prepare_plan_commit},
                 plan_updated_payload,
             },
         },
@@ -171,7 +167,7 @@ pub(in crate::plan::controller) async fn issue_directive(
             };
             (
                 call_id,
-                ArtifactContent::json(
+                ToolOutput::json(
                     serde_json::to_string(&tool_output)
                         .expect("control_plan_attempt output serializes"),
                 ),
@@ -201,7 +197,6 @@ pub(in crate::plan::controller) async fn report_progress(
     events: &broadcast::Sender<RuntimeJournalEvent>,
     actor: PlanAttemptActor,
     input: ReportPlanProgressInput,
-    artifact_promotions: Vec<PlanArtifactPromotion>,
     tool_call_id: Option<ToolCallId>,
     now_ms: u64,
 ) -> Result<PlanCommandResult<PlanProgressOutput>, PlanControllerError> {
@@ -211,12 +206,6 @@ pub(in crate::plan::controller) async fn report_progress(
             .active_plan()
             .ok_or(PlanControllerError::NoActivePlan)?
             .clone();
-        let artifacts = session.artifacts_with_plan_promotions(&artifact_promotions)?;
-        SessionState::validate_plan_refs_in(
-            &artifacts,
-            &input.evidence_refs,
-            &input.artifact_refs,
-        )?;
         let output = candidate.report_progress(&actor, input, now_ms)?;
         let mut payloads = vec![plan_updated_payload(&output.snapshot)];
         payloads.extend(
@@ -245,21 +234,19 @@ pub(in crate::plan::controller) async fn report_progress(
             };
             (
                 call_id,
-                ArtifactContent::json(
+                ToolOutput::json(
                     serde_json::to_string(&tool_output)
                         .expect("report_plan_progress output serializes"),
                 ),
             )
         });
         let base = SessionBase::capture(&session);
-        let prepared = prepare_plan_commit_with_artifact_promotions(
+        let prepared = prepare_plan_commit(
             &session,
             candidate,
             session.terminal_plans().to_vec(),
             payloads,
-            artifact_promotions,
             tool_resolution,
-            true,
         )?;
         (base, output, prepared)
     };
@@ -277,7 +264,6 @@ pub(in crate::plan::controller) async fn report_attempt(
     events: &broadcast::Sender<RuntimeJournalEvent>,
     actor: PlanAttemptActor,
     input: ReportPlanAttemptInput,
-    artifact_promotions: Vec<PlanArtifactPromotion>,
     tool_call_id: Option<ToolCallId>,
     now_ms: u64,
 ) -> Result<PlanCommandResult<PlanAttemptReportOutput>, PlanControllerError> {
@@ -287,14 +273,6 @@ pub(in crate::plan::controller) async fn report_attempt(
             .active_plan()
             .ok_or(PlanControllerError::NoActivePlan)?
             .clone();
-        let artifacts = session.artifacts_with_plan_promotions(&artifact_promotions)?;
-        if let Some(result) = input.result.as_ref() {
-            SessionState::validate_plan_refs_in(
-                &artifacts,
-                &result.evidence_refs,
-                &result.artifact_refs,
-            )?;
-        }
         let output = candidate.report_attempt(&actor, input, now_ms)?;
         let mut payloads = vec![plan_updated_payload(&output.snapshot)];
         payloads.extend(
@@ -338,21 +316,19 @@ pub(in crate::plan::controller) async fn report_attempt(
             };
             (
                 call_id,
-                ArtifactContent::json(
+                ToolOutput::json(
                     serde_json::to_string(&tool_output)
                         .expect("report_plan_attempt output serializes"),
                 ),
             )
         });
         let base = SessionBase::capture(&session);
-        let prepared = prepare_plan_commit_with_artifact_promotions(
+        let prepared = prepare_plan_commit(
             &session,
             candidate,
             session.terminal_plans().to_vec(),
             payloads,
-            artifact_promotions,
             tool_resolution,
-            true,
         )?;
         (base, output, prepared)
     };

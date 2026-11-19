@@ -71,8 +71,7 @@ fn apply_patch_executor_replaces_one_hunk_in_existing_utf8_file() {
     assert!(
         !outcome
             .content()
-            .as_text()
-            .expect("json content")
+            .as_str()
             .contains(temp.path().to_str().expect("temp path utf8")),
         "tool output must not include absolute host roots"
     );

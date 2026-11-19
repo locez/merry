@@ -3,23 +3,17 @@ use crate::support::{
     tools::{ScriptedToolExecutor, test_tool_spec},
 };
 use futures_util::StreamExt;
-use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, RuntimeJournalEvent, SessionId,
-};
+use merry_core::{RuntimeJournalEvent, SessionId};
 use merry_llm::testing::FakeModelProvider;
 use merry_runtime::{
-    ArtifactContent, ContextCompiler, ContextEvidence, ContextSummary, RegisteredTool, Runtime,
-    StepContext, StepInput, ToolActionKind,
+    ContextCompiler, ContextSummary, RegisteredTool, Runtime, StepContext, StepInput,
+    ToolActionKind,
 };
 use std::{num::NonZeroUsize, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) fn session_id(value: &str) -> SessionId {
     SessionId::new(value).expect("valid session id")
-}
-
-pub(crate) fn artifact_id(value: &str) -> ArtifactId {
-    ArtifactId::new(value).expect("valid artifact id")
 }
 
 pub(crate) fn runtime_with_provider(session: &str, provider: FakeModelProvider) -> Runtime {
@@ -71,34 +65,11 @@ pub(crate) async fn collect_step_with_context(
 }
 
 pub(crate) async fn record_valid_context(runtime: &Runtime) -> String {
-    let artifact = ArtifactRef::new(
-        artifact_id("provider-boundary-context-artifact"),
-        ArtifactKind::Text,
-    );
-    runtime
-        .record_artifact(
-            artifact.clone(),
-            ArtifactContent::text("alpha\nbeta\ngamma\n"),
-        )
-        .await
-        .expect("artifact should record through eventful path");
-    let evidence = runtime
-        .evidence_ref(
-            artifact.id(),
-            EvidenceLocator::line_range(2, 3).expect("valid line range"),
-        )
-        .await
-        .expect("evidence should resolve");
-
     runtime
         .record_context_summary(
             ContextSummary::new(
                 "provider-boundary-summary",
                 "Provider boundary context is compiled.",
-                vec![
-                    ContextEvidence::new("selected lines", evidence)
-                        .expect("valid context evidence"),
-                ],
             )
             .expect("valid context summary"),
         )

@@ -1,15 +1,14 @@
 use crate::{
     RuntimeError,
-    artifact::ArtifactContent,
     compaction::{CitationCompactionToolResult, CitationCompactionTurnItem, CompactionError},
     permission::PermissionReviewContextEntry,
     token_estimate::{BYTES_PER_TOKEN, estimate_text_tokens},
 };
-use merry_core::{PendingToolCall, ToolCallResult};
+use merry_core::{PendingToolCall, ToolCallResult, ToolOutput, ToolOutputKind};
 use std::{borrow::Cow, collections::BTreeSet};
 
 use super::transcript::{
-    ToolCallPromptProjection, ToolResultPromptProjection, archived_tool_result_notice_json,
+    ToolCallPromptProjection, ToolResultPromptProjection, collapsed_tool_result_notice_json,
 };
 
 const PERMISSION_REVIEW_ENTRY_MAX_BYTES: usize = 2048;
@@ -44,8 +43,8 @@ pub(super) enum CompactionHistoryItemKind<'a> {
     ToolExchange {
         call: &'a PendingToolCall,
         result: &'a ToolCallResult,
-        content: &'a ArtifactContent,
-        model_content: &'a ArtifactContent,
+        content: &'a ToolOutput,
+        model_content: &'a ToolOutput,
         call_prompt_projection: ToolCallPromptProjection,
         prompt_projection: ToolResultPromptProjection,
     },
@@ -80,10 +79,10 @@ impl<'a> CompactionHistoryItem<'a> {
         history_id: u64,
         call: &'a PendingToolCall,
         result: &'a ToolCallResult,
-        content: &'a ArtifactContent,
+        content: &'a ToolOutput,
         call_prompt_projection: ToolCallPromptProjection,
         prompt_projection: ToolResultPromptProjection,
-        model_content: Option<&'a ArtifactContent>,
+        model_content: Option<&'a ToolOutput>,
     ) -> Self {
         Self {
             history_id,
@@ -121,10 +120,10 @@ impl<'a> CompactionHistoryItem<'a> {
                 ..
             } => {
                 // The request already shortened this result, so the payload carries the
-                // same notice instead of the archived body.
-                let use_notice = *prompt_projection == ToolResultPromptProjection::ArtifactNotice;
+                // same notice instead of the collapsed body.
+                let use_notice = *prompt_projection == ToolResultPromptProjection::Collapsed;
                 let (content_kind, content) =
-                    compaction_tool_result_text(result, model_content, use_notice)?;
+                    compaction_tool_result_text(result, model_content, use_notice);
                 CitationCompactionTurnItem::tool_exchange(
                     self.history_id,
                     ref_id.to_owned(),
@@ -133,7 +132,6 @@ impl<'a> CompactionHistoryItem<'a> {
                     serde_json::Value::Object(call.arguments().as_object().clone()),
                     CitationCompactionToolResult::new(
                         result.status(),
-                        result.artifact().id(),
                         content_kind,
                         content.into_owned(),
                     ),
@@ -164,10 +162,7 @@ impl<'a> CompactionHistoryItem<'a> {
                         return Ok(0);
                     }
                     (ToolCallPromptProjection::Full, ToolResultPromptProjection::Full)
-                    | (
-                        ToolCallPromptProjection::Full,
-                        ToolResultPromptProjection::ArtifactNotice,
-                    ) => {}
+                    | (ToolCallPromptProjection::Full, ToolResultPromptProjection::Collapsed) => {}
                     (ToolCallPromptProjection::Hidden, _)
                     | (ToolCallPromptProjection::Full, ToolResultPromptProjection::Hidden) => {
                         return Err(CompactionError::StaleWindow.into());
@@ -182,9 +177,9 @@ impl<'a> CompactionHistoryItem<'a> {
                 let (_, result_text) = compaction_tool_result_text(
                     result,
                     model_content,
-                    *prompt_projection == ToolResultPromptProjection::ArtifactNotice
+                    *prompt_projection == ToolResultPromptProjection::Collapsed
                         || archived_tool_call_ids.contains(call.id()),
-                )?;
+                );
                 Ok(estimate_text_tokens(call.name().as_str())
                     + estimate_text_tokens(&arguments)
                     + estimate_text_tokens(&result_text))
@@ -223,8 +218,8 @@ impl<'a> CompactionHistoryItem<'a> {
                 let result_text = compaction_tool_result_text(
                     result,
                     model_content,
-                    *prompt_projection == ToolResultPromptProjection::ArtifactNotice,
-                )?
+                    *prompt_projection == ToolResultPromptProjection::Collapsed,
+                )
                 .1;
                 let arguments =
                     serde_json::to_string(call.arguments().as_object()).map_err(|error| {
@@ -256,7 +251,7 @@ impl<'a> CompactionHistoryItem<'a> {
                 (ToolCallPromptProjection::Full, ToolResultPromptProjection::Full) => {
                     Some((self.history_id, call.id().clone(), false))
                 }
-                (ToolCallPromptProjection::Full, ToolResultPromptProjection::ArtifactNotice) => {
+                (ToolCallPromptProjection::Full, ToolResultPromptProjection::Collapsed) => {
                     Some((self.history_id, call.id().clone(), true))
                 }
                 (ToolCallPromptProjection::Hidden, ToolResultPromptProjection::Hidden)
@@ -313,7 +308,7 @@ pub(super) fn permission_review_context_entry(
                 call.name(),
                 arguments_preview,
                 tool_call_result_status_label(result.status()),
-                artifact_content_preview(content, content_limit),
+                crate::compaction::bounded_excerpt(content.as_str(), content_limit),
             );
             PermissionReviewContextEntry::new(
                 "tool",
@@ -324,57 +319,25 @@ pub(super) fn permission_review_context_entry(
 }
 
 /// Text the compaction payload carries for one tool result.
-///
-/// The payload shows the same result text the request shows. When the request
-/// replaced an archived result with an artifact notice, the payload carries that
-/// notice: sending the archived body instead would ask the compactor to read
-/// content the model never saw, and the checkpoint only summarizes what the
-/// conversation actually held. The notice names the artifact and omits the body.
-///
-/// Both the payload builder and the sizing estimate go through this one function.
-/// They disagreed once, and the runtime then believed a covered window fit while
-/// the payload it built did not, which ended the step with "no compaction window
-/// fits the compaction request budget".
 fn compaction_tool_result_text<'a>(
     result: &ToolCallResult,
-    content: &'a ArtifactContent,
+    content: &'a ToolOutput,
     use_notice: bool,
-) -> Result<(&'static str, Cow<'a, str>), RuntimeError> {
+) -> (&'static str, Cow<'a, str>) {
     if use_notice {
-        Ok((
+        (
             "json",
-            Cow::Owned(archived_tool_result_notice_json(
+            Cow::Owned(collapsed_tool_result_notice_json(
                 result.status(),
-                result.artifact().id(),
+                result.call_id(),
             )),
-        ))
+        )
     } else {
-        let (content_kind, content) = exact_artifact_text(content)?;
-        Ok((content_kind, Cow::Borrowed(content)))
-    }
-}
-
-fn exact_artifact_text(content: &ArtifactContent) -> Result<(&'static str, &str), RuntimeError> {
-    match content {
-        ArtifactContent::Text { content } => Ok(("text", content)),
-        ArtifactContent::Json { content } => Ok(("json", content)),
-        ArtifactContent::Binary { .. }
-        | ArtifactContent::Image { .. }
-        | ArtifactContent::Other { .. } => Err(CompactionError::PayloadSerialization {
-            message: "compaction tool result content must be text or json".to_owned(),
-        }
-        .into()),
-    }
-}
-
-fn artifact_content_preview(content: &ArtifactContent, max_bytes: usize) -> String {
-    match content.as_text() {
-        Some(text) => crate::compaction::bounded_excerpt(text, max_bytes),
-        None => format!(
-            "{:?} content, {} bytes",
-            content.kind(),
-            content.as_bytes().len()
-        ),
+        let content_kind = match content.kind() {
+            ToolOutputKind::Text => "text",
+            ToolOutputKind::Json => "json",
+        };
+        (content_kind, Cow::Borrowed(content.as_str()))
     }
 }
 

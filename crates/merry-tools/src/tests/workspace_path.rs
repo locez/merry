@@ -110,8 +110,7 @@ fn read_text_accepts_absolute_path_inside_the_workspace() {
     assert!(
         !outcome
             .content()
-            .as_text()
-            .expect("json content")
+            .as_str()
             .contains(canonical_root(&temp).to_str().expect("root utf8")),
         "tool output must not include absolute host roots"
     );

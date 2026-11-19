@@ -27,7 +27,6 @@ pub use protocol::{
     ReadPlanInput, ReportPlanAttemptInput, ReportPlanProgressInput, SubagentPlanChangeInput,
     SubagentPlanUpdateInput, UpdatePlanInput,
 };
-pub(crate) use subagent::PlanArtifactPromotion;
 pub use subagent::PlanSubagentControl;
 pub(crate) use subagent_scope::PlanSubagentScope;
 pub(crate) use validation::validate_snapshot_limits;

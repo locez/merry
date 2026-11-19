@@ -25,9 +25,9 @@ pub(crate) use helpers::{
     blocked_reason_code, can_retry_structured_output, collect_step_events, continuation_step_input,
     final_assistant_output_from_step, publish_journal_event, record_final_output_tool_call,
     structured_output_failure_result, take_subagent_notification, take_subagent_notification_input,
-    tool_execution_cancelled_diagnostic, tool_resolution_artifact_id,
-    tool_resolution_diagnostic_code, tool_resolution_is_policy_denied, tool_resolution_status,
-    trace_loop_error, trace_loop_finish, validate_final_output,
+    tool_execution_cancelled_diagnostic, tool_resolution_diagnostic_code,
+    tool_resolution_is_policy_denied, tool_resolution_status, trace_loop_error, trace_loop_finish,
+    validate_final_output,
 };
 pub(crate) use tool_flow::{
     PendingLoopToolCall, PendingLoopToolWave, StepOutcome, classify_step_events,

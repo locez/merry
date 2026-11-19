@@ -1,7 +1,6 @@
 use crate::{
-    ContextEvidence, ContextSummary, FINAL_OUTPUT_TOOL_NAME, FileSessionStore, RuntimeError,
-    SessionTranscriptItem, StepContext, StepInput,
-    artifact::ArtifactContent,
+    FINAL_OUTPUT_TOOL_NAME, FileSessionStore, RuntimeError, SessionTranscriptItem, StepContext,
+    StepInput,
     ledger::{LedgerFactKind, LedgerProjection},
     runtime::{
         Runtime,
@@ -21,8 +20,8 @@ use crate::{
 };
 use futures_util::{FutureExt, StreamExt};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall,
-    RuntimeJournalPayload, ToolCallArguments, ToolCallId, ToolCallResult, ToolName,
+    PendingToolCall, RuntimeJournalPayload, ToolCallArguments, ToolCallId, ToolCallResult,
+    ToolName, ToolOutput,
 };
 use merry_llm::{FinishReason, ModelOutput};
 use serde_json::json;
@@ -98,21 +97,14 @@ async fn complete_boundary_savepoint_text_output_step_completed_persists_resume_
         .resume_from_store(store)
         .await
         .expect("runtime resumes after text step");
-    let artifact_id = events
+    let assistant_text = events
         .iter()
         .find_map(|event| match &event.payload {
-            RuntimeJournalPayload::AssistantOutputRecorded { artifact, .. } => Some(artifact.id()),
+            RuntimeJournalPayload::AssistantOutputRecorded { text } => Some(text.as_str()),
             _ => None,
         })
-        .expect("assistant output artifact is emitted");
-    assert_eq!(
-        resumed
-            .read_artifact_content(artifact_id)
-            .await
-            .expect("assistant output artifact resumes")
-            .as_text(),
-        Some("persist me")
-    );
+        .expect("assistant output is emitted");
+    assert_eq!(assistant_text, "persist me");
     assert_eq!(
         resumed
             .session_transcript()
@@ -167,17 +159,13 @@ async fn dropping_text_stream_while_savepoint_is_blocked_keeps_terminal_batch_co
     ));
     let session = loop {
         let session = runtime.inner.session.lock().await;
-        let assistant_recorded = session
-            .full_transcript_snapshot()
-            .expect("transcript remains readable")
-            .iter()
-            .any(|item| {
-                matches!(
-                    item,
-                    crate::session::TranscriptItemSnapshot::AssistantText { text }
-                        if text == "atomic terminal response"
-                )
-            });
+        let assistant_recorded = session.full_transcript_snapshot().iter().any(|item| {
+            matches!(
+                item,
+                crate::session::TranscriptItemSnapshot::AssistantText { text }
+                    if text == "atomic terminal response"
+            )
+        });
         if assistant_recorded {
             break session;
         }
@@ -328,15 +316,10 @@ async fn load_session_from_store_does_not_enable_automatic_savepoints() {
             .iter()
             .any(|event| matches!(event.payload, RuntimeJournalPayload::StepCompleted))
     );
-    let artifact_id = events
-        .iter()
-        .find_map(|event| match &event.payload {
-            RuntimeJournalPayload::AssistantOutputRecorded { artifact, .. } => {
-                Some(artifact.id().clone())
-            }
-            _ => None,
-        })
-        .expect("assistant output artifact is emitted");
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        RuntimeJournalPayload::AssistantOutputRecorded { text } if text == "not auto saved"
+    )));
 
     let resumed = Runtime::builder(session_id)
         .resume_from_store(store)
@@ -344,7 +327,11 @@ async fn load_session_from_store_does_not_enable_automatic_savepoints() {
         .expect("runtime resumes original saved state");
 
     assert!(
-        resumed.read_artifact_content(&artifact_id).await.is_err(),
+        resumed
+            .session_transcript()
+            .await
+            .expect("transcript resumes")
+            .is_empty(),
         "loaded sessions should not write automatic savepoints"
     );
 }
@@ -417,14 +404,10 @@ async fn complete_boundary_savepoint_submit_tool_result_persists_complete_exchan
             .record_test_tool_call_pending(pending.clone())
             .expect("pending call records");
     }
-    let artifact = ArtifactRef::new(
-        ArtifactId::new("manual-result-artifact").expect("valid artifact id"),
-        ArtifactKind::Json,
-    );
-    let result = ToolCallResult::succeeded(pending.id().clone(), artifact);
+    let result = ToolCallResult::succeeded(pending.id().clone());
 
     let events = runtime
-        .submit_tool_result(result, ArtifactContent::json(r#"{"ok":true}"#))
+        .submit_tool_result(result, ToolOutput::json(r#"{"ok":true}"#))
         .await
         .expect("tool result submits");
 
@@ -439,11 +422,12 @@ async fn complete_boundary_savepoint_submit_tool_result_persists_complete_exchan
     assert!(resumed.pending_tool_calls().await.is_empty());
     assert_eq!(
         resumed
-            .read_artifact_content(&ArtifactId::new("manual-result-artifact").expect("valid id"))
+            .read_tool_output(&ToolCallId::new("manual-call").expect("valid id"))
             .await
-            .expect("manual result artifact resumes")
-            .as_text(),
-        Some(r#"{"ok":true}"#)
+            .expect("manual tool output query succeeds")
+            .expect("manual tool output resumes")
+            .as_str(),
+        r#"{"ok":true}"#
     );
     assert_eq!(
         resumed
@@ -456,10 +440,6 @@ async fn complete_boundary_savepoint_submit_tool_result_persists_complete_exchan
                 call_id: ToolCallId::new("manual-call").expect("valid call id"),
                 result: ToolCallResult::succeeded(
                     ToolCallId::new("manual-call").expect("valid call id"),
-                    ArtifactRef::new(
-                        ArtifactId::new("manual-result-artifact").expect("valid artifact id"),
-                        ArtifactKind::Json,
-                    ),
                 ),
                 output: Some(merry_core::ToolOutput::Json {
                     json: r#"{"ok":true}"#.to_owned()
@@ -488,14 +468,10 @@ async fn automatic_savepoint_failure_does_not_fail_submitted_tool_result() {
             .record_test_tool_call_pending(pending.clone())
             .expect("pending call records");
     }
-    let artifact = ArtifactRef::new(
-        ArtifactId::new("manual-result-store-fails").expect("valid artifact id"),
-        ArtifactKind::Json,
-    );
-    let result = ToolCallResult::succeeded(pending.id().clone(), artifact.clone());
+    let result = ToolCallResult::succeeded(pending.id().clone());
 
     let events = runtime
-        .submit_tool_result(result, ArtifactContent::json(r#"{"ok":true}"#))
+        .submit_tool_result(result, ToolOutput::json(r#"{"ok":true}"#))
         .await
         .expect("tool result succeeds even when automatic savepoint fails");
 
@@ -506,11 +482,12 @@ async fn automatic_savepoint_failure_does_not_fail_submitted_tool_result() {
     assert!(runtime.pending_tool_calls().await.is_empty());
     assert_eq!(
         runtime
-            .read_artifact_content(artifact.id())
+            .read_tool_output(pending.id())
             .await
-            .expect("committed result artifact remains readable")
-            .as_text(),
-        Some(r#"{"ok":true}"#)
+            .expect("tool output query succeeds")
+            .expect("committed tool output remains readable")
+            .as_str(),
+        r#"{"ok":true}"#
     );
 }
 
@@ -550,33 +527,6 @@ async fn automatic_savepoint_failure_does_not_fail_text_step_completion() {
             .iter()
             .any(|event| matches!(event.payload, RuntimeJournalPayload::Failed { .. }))
     );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn record_context_summary_rejects_missing_evidence_before_savepoint() {
-    let runtime = Runtime::builder(session_id("runtime-context-missing-evidence"))
-        .build()
-        .expect("runtime builds");
-    let missing_ref = EvidenceRef::new(
-        ArtifactId::new("missing-context-evidence").expect("valid artifact id"),
-        EvidenceLocator::whole_artifact(),
-    );
-    let summary = ContextSummary::new(
-        "missing-evidence-summary",
-        "This summary points at missing exact evidence.",
-        vec![
-            ContextEvidence::new("missing exact evidence", missing_ref)
-                .expect("context evidence builds"),
-        ],
-    )
-    .expect("context summary builds");
-
-    let error = runtime
-        .record_context_summary(summary)
-        .await
-        .expect_err("missing evidence is rejected at record time");
-
-    assert!(error.to_string().contains("unreadable evidence"));
 }
 
 #[tokio::test(flavor = "current_thread")]

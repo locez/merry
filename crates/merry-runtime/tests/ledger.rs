@@ -82,7 +82,7 @@ fn records_existing_event_lifecycle_facts() {
     let mut ledger = TaskLedger::default();
 
     ledger.record_lifecycle(0, LedgerFactKind::SessionStarted);
-    ledger.record_lifecycle(1, LedgerFactKind::ArtifactRecorded);
+    ledger.record_lifecycle(1, LedgerFactKind::AssistantOutputRecorded);
     ledger.record_lifecycle(2, LedgerFactKind::StepStarted);
     ledger.record_lifecycle(3, LedgerFactKind::StepCompleted);
     ledger.record_lifecycle(4, LedgerFactKind::ToolCallPending);
@@ -98,7 +98,7 @@ fn records_existing_event_lifecycle_facts() {
         lifecycle,
         [
             (0, LedgerFactKind::SessionStarted),
-            (1, LedgerFactKind::ArtifactRecorded),
+            (1, LedgerFactKind::AssistantOutputRecorded),
             (2, LedgerFactKind::StepStarted),
             (3, LedgerFactKind::StepCompleted),
             (4, LedgerFactKind::ToolCallPending),

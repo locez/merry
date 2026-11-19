@@ -38,7 +38,7 @@ pub use session_permissions::{
 pub use validation::ProcessActionError;
 
 pub(crate) use classification::{
-    ShellProcessInput, required_process_permission_profile_id, requires_host_process_path_review,
+    required_process_permission_profile_id, requires_host_process_path_review,
     requires_process_action_review, shell_command_argv, shell_process_input,
     stable_process_input_fingerprint,
 };

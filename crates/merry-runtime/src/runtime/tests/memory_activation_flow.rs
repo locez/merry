@@ -9,9 +9,8 @@ use crate::{
             },
             memory::{
                 ScriptedMemoryActivationResponse, ScriptedMemoryActivationSource, activated_memory,
-                activated_memory_with_unreadable_evidence,
                 assert_activated_memory_projection_cleared, compiled_context_snapshot, memory_item,
-                pending_memory_activation_source, record_memory_artifact, record_memory_item,
+                pending_memory_activation_source, record_memory_item,
             },
             model_provider::RecordingModelProvider,
             runtime_factories::{
@@ -56,11 +55,6 @@ async fn default_stored_source_projects_session_memory_before_user_message() {
     );
     let provider = RecordingModelProvider::new();
     let runtime = runtime_with_provider("runtime-memory-context", provider.clone());
-    record_memory_artifact(
-        &runtime,
-        "memory-topic-artifact",
-        "exact evidence for timing memory",
-    );
     record_memory_item(&runtime, memory);
 
     let events = collect_step(
@@ -122,11 +116,6 @@ async fn unmatched_stored_memory_does_not_add_system_message() {
     );
     let provider = RecordingModelProvider::new();
     let runtime = runtime_with_provider("runtime-memory-no-match", provider.clone());
-    record_memory_artifact(
-        &runtime,
-        "memory-other-artifact",
-        "exact evidence for unmatched memory",
-    );
     record_memory_item(&runtime, memory);
 
     let events = collect_step(
@@ -165,40 +154,6 @@ async fn unmatched_stored_memory_does_not_add_system_message() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn stored_memory_with_missing_evidence_fails_before_provider_call() {
-    let memory = memory_item(
-        "memory-missing-evidence",
-        "This memory has no readable evidence artifact.",
-        "memory-missing-evidence-artifact",
-        &["topic"],
-    );
-    let provider = RecordingModelProvider::new();
-    let runtime = runtime_with_provider("runtime-memory-missing-evidence", provider.clone());
-    record_memory_item(&runtime, memory);
-
-    let events = collect_step(
-        &runtime,
-        "Topic request.",
-        crate::StepContext::new(CancellationToken::new()),
-    )
-    .await;
-
-    assert_eq!(
-        event_kind_names(&events),
-        ["SessionStarted", "StepStarted", "Failed"]
-    );
-    assert_eq!(failed_code(&events), Some("context_compile"));
-    assert_eq!(provider.recorded_requests().len(), 0);
-    assert_eq!(
-        crate::ContextCompiler::new()
-            .compile(&runtime.context_snapshot().await)
-            .expect("context compiles after missing evidence cleanup")
-            .to_snapshot(),
-        ""
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn provider_step_replaces_activated_memories_between_requests() {
     let first_memory = activated_memory(
         "memory-stale",
@@ -211,11 +166,6 @@ async fn provider_step_replaces_activated_memories_between_requests() {
         "runtime-memory-replace",
         provider.clone(),
         source.clone(),
-    );
-    record_memory_artifact(
-        &runtime,
-        "memory-stale-artifact",
-        "exact evidence for stale memory",
     );
 
     let first_events = collect_step(
@@ -309,11 +259,6 @@ async fn activation_source_error_clears_previous_successful_projection() {
         "runtime-memory-source-error-clears",
         provider.clone(),
         source.clone(),
-    );
-    record_memory_artifact(
-        &runtime,
-        "memory-success-artifact",
-        "exact evidence for successful memory",
     );
 
     let first_events = collect_step(
@@ -439,42 +384,6 @@ async fn provider_absent_step_does_not_activate_memory() {
         crate::ContextCompiler::new()
             .compile(&runtime.context_snapshot().await)
             .expect("empty context compiles")
-            .to_snapshot(),
-        ""
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn unreadable_memory_evidence_from_activation_fails_before_provider_call() {
-    let source =
-        ScriptedMemoryActivationSource::new(vec![vec![activated_memory_with_unreadable_evidence(
-            "memory-unreadable",
-        )]]);
-    let provider = RecordingModelProvider::new();
-    let runtime = runtime_with_provider_and_memory_source(
-        "runtime-memory-context-compile-failure",
-        provider.clone(),
-        source.clone(),
-    );
-
-    let events = collect_step(
-        &runtime,
-        "Topic request.",
-        crate::StepContext::new(CancellationToken::new()),
-    )
-    .await;
-
-    assert_eq!(
-        event_kind_names(&events),
-        ["SessionStarted", "StepStarted", "Failed"]
-    );
-    assert_eq!(failed_code(&events), Some("context_compile"));
-    assert_eq!(source.call_count(), 1);
-    assert_eq!(provider.recorded_requests().len(), 0);
-    assert_eq!(
-        crate::ContextCompiler::new()
-            .compile(&runtime.context_snapshot().await)
-            .expect("context compiles after bad projection cleanup")
             .to_snapshot(),
         ""
     );

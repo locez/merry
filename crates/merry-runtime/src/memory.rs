@@ -8,7 +8,6 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use crate::text;
-use merry_core::EvidenceRef;
 use std::{cmp::Ordering, fmt};
 use thiserror::Error;
 
@@ -89,22 +88,24 @@ impl PartialOrd for MemoryConfidence {
     }
 }
 
-/// Exact evidence supporting an internal memory item's text.
+/// Provenance note supporting an internal memory item's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MemoryEvidence {
     label: String,
-    reference: EvidenceRef,
+    source: String,
 }
 
 impl MemoryEvidence {
     pub(crate) fn new(
         label: impl Into<String>,
-        reference: EvidenceRef,
+        source: impl Into<String>,
     ) -> Result<Self, MemoryError> {
         let label = label.into();
         validate_non_blank("memory evidence label", &label)?;
+        let source = source.into();
+        validate_non_blank("memory evidence source", &source)?;
 
-        Ok(Self { label, reference })
+        Ok(Self { label, source })
     }
 
     #[must_use]
@@ -113,8 +114,8 @@ impl MemoryEvidence {
     }
 
     #[must_use]
-    pub(crate) fn reference(&self) -> &EvidenceRef {
-        &self.reference
+    pub(crate) fn source(&self) -> &str {
+        &self.source
     }
 }
 

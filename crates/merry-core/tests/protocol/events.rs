@@ -1,8 +1,7 @@
 use crate::assert_json_round_trip;
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, QueuedInputLane, QueuedInputView,
-    QueuedInputsView, RuntimeEvent, RuntimeEventSource, RuntimeJournalEvent, RuntimeJournalPayload,
-    SessionId, ToolCallId,
+    ErrorInfo, QueuedInputLane, QueuedInputView, QueuedInputsView, RuntimeEvent,
+    RuntimeEventSource, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallId,
 };
 use serde_json::json;
 
@@ -11,10 +10,6 @@ fn public_runtime_event_assistant_message_uses_top_level_type() {
     let source = RuntimeEventSource::new(SessionId::new("session-1").expect("valid session id"), 4);
     let event = RuntimeEvent::AssistantMessage {
         text: "hello from the model".to_owned(),
-        artifact: ArtifactRef::new(
-            ArtifactId::new("assistant-output-4").expect("valid artifact id"),
-            ArtifactKind::Text,
-        ),
         source,
     };
 
@@ -23,11 +18,6 @@ fn public_runtime_event_assistant_message_uses_top_level_type() {
         json!({
             "type": "assistant_message",
             "text": "hello from the model",
-            "artifact": {
-                "id": "assistant-output-4",
-                "kind": "text",
-                "label": null
-            },
             "source": {
                 "session_id": "session-1",
                 "sequence": 4
@@ -130,10 +120,6 @@ fn skill_used_event_records_catalog_skill_read() {
             skill_name: "demo-skill".to_owned(),
             skill_md_path: "demo/SKILL.md".to_owned(),
             tool_call_id: ToolCallId::new("call-read-skill").expect("valid call id"),
-            artifact: ArtifactRef::new(
-                ArtifactId::new("tool-result-1").expect("valid artifact id"),
-                ArtifactKind::Json,
-            ),
         },
     );
 
@@ -146,12 +132,7 @@ fn skill_used_event_records_catalog_skill_read() {
                 "type": "skill_used",
                 "skill_name": "demo-skill",
                 "skill_md_path": "demo/SKILL.md",
-                "tool_call_id": "call-read-skill",
-                "artifact": {
-                    "id": "tool-result-1",
-                    "kind": "json",
-                    "label": null
-                }
+                "tool_call_id": "call-read-skill"
             }
         })
     );
@@ -163,11 +144,8 @@ fn runtime_event_uses_stable_snake_case_tags_and_round_trips() {
     let event = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),
         7,
-        RuntimeJournalPayload::ArtifactRecorded {
-            artifact: ArtifactRef::new(
-                ArtifactId::new("artifact-1").expect("valid artifact id"),
-                ArtifactKind::Text,
-            ),
+        RuntimeJournalPayload::AssistantOutputRecorded {
+            text: "hello".to_owned(),
         },
     );
 
@@ -177,16 +155,22 @@ fn runtime_event_uses_stable_snake_case_tags_and_round_trips() {
             "session_id": "session-1",
             "sequence": 7,
             "payload": {
-                "type": "artifact_recorded",
-                "artifact": {
-                    "id": "artifact-1",
-                    "kind": "text",
-                    "label": null
-                }
+                "type": "assistant_output_recorded",
+                "text": "hello"
             }
         })
     );
     assert_json_round_trip(&event);
+
+    let final_output = RuntimeJournalEvent::new(
+        SessionId::new("session-1").expect("valid session id"),
+        9,
+        RuntimeJournalPayload::FinalOutputRecorded {
+            call_id: ToolCallId::new("call-final").expect("valid call id"),
+            json: r#"{"ok":true}"#.to_owned(),
+        },
+    );
+    assert_json_round_trip(&final_output);
 
     let failed = RuntimeJournalEvent::new(
         SessionId::new("session-1").expect("valid session id"),

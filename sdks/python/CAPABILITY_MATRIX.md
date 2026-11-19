@@ -11,11 +11,11 @@ the source of truth for every durable or policy-sensitive capability.
 | Event payload contract | `EventType` plus typed payload union; unknown events are retained as `UnknownEventPayload` | `merry-core::RuntimeEvent` serde contract | `merry/_event_parser.py`, `tests/test_events.py` |
 | Streaming lifecycle | `Agent.stream` -> `AgentRun.next`, async iteration | `merry::binding::OwnedAgentRun` | `tests/test_run.py` |
 | Python tool decorator | `@builder.tool`, `@agent.tool`, `Tool` | Rust bridge tool registration; Python host registry for callables | `tests/test_tools.py` |
-| Tool batch contract | `ToolCallBatch.submit`, `ToolRegistry.execute` | Rust batch lease, ordering, admission, artifacts | `tests/test_run.py`, `tests/test_tools.py`, `crates/merry/tests/agent.rs` |
-| Tool domain failure | `ToolDomainError` -> `ToolResult` | Rust tool result/artifact continuation | `tests/test_tools.py` |
+| Tool batch contract | `ToolCallBatch.submit`, `ToolRegistry.execute` | Rust batch lease, ordering, admission, tool outputs | `tests/test_run.py`, `tests/test_tools.py`, `crates/merry/tests/agent.rs` |
+| Tool domain failure | `ToolDomainError` -> `ToolResult` | Rust tool result/output continuation | `tests/test_tools.py` |
 | Cancellation | `AgentRun.cancel`, `AgentRun.close`, task cancellation | Rust run cancellation and durable terminal result | `tests/test_run.py`, `crates/merry/tests/agent.rs` |
 | Final report | `RunResult` | Rust `merry::RunResult` and runtime status/usage | `tests/test_run.py` |
-| Structured output | `final_output_model`, `structured_output` | Rust `FinalOutputContract` and recorded artifact | `tests/test_run.py`, `crates/merry/tests/agent.rs` |
+| Structured output | `final_output_model`, `structured_output` | Rust `FinalOutputContract` and recorded output | `tests/test_run.py`, `crates/merry/tests/agent.rs` |
 | Generation controls | Not exposed in this slice | Rust `GenerationConfig` | Deferred until a stable Python model maps the full facade contract |
 | Structured-output retry policy | Not exposed in this slice | Rust `StructuredOutputRetryPolicy` | Deferred; Python does not duplicate retry state |
 | Save/resume | `save_session`, `session_store`, `resume` | Rust `FileSessionStore` and runtime session state | `tests/test_run.py`, Rust facade agent tests |

@@ -1,11 +1,10 @@
 //! CLI-owned adapters for the runtime-neutral local Web service.
 
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream::BoxStream};
-use merry_core::{ArtifactId, SessionId, TrajectoryEvent, TrajectorySnapshot};
-use merry_runtime::{ArtifactContentKind, Runtime};
+use merry_core::{SessionId, ToolCallId, TrajectoryEvent, TrajectorySnapshot};
+use merry_runtime::Runtime;
 use merry_web::{
-    WebArtifactContent, WebArtifactKind, WebBackend, WebBackendError, WebServerConfig,
-    WebServerError, WebServerHandle,
+    WebBackend, WebBackendError, WebServerConfig, WebServerError, WebServerHandle, WebToolOutput,
 };
 use std::{
     net::{IpAddr, Ipv4Addr},
@@ -13,7 +12,7 @@ use std::{
 };
 use tokio::sync::broadcast;
 
-const MAX_WEB_ARTIFACT_BYTES: usize = 1024 * 1024;
+const MAX_WEB_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Adapts one runtime session to the local Web service boundary.
 pub(crate) struct RuntimeWebBackend {
@@ -146,40 +145,36 @@ impl WebBackend for RuntimeWebBackend {
         .boxed()
     }
 
-    fn artifact_content(
+    fn tool_output(
         &self,
         session_id: &SessionId,
-        artifact_id: &ArtifactId,
-    ) -> BoxFuture<'_, Result<WebArtifactContent, WebBackendError>> {
+        call_id: &ToolCallId,
+    ) -> BoxFuture<'_, Result<Option<WebToolOutput>, WebBackendError>> {
         if !self.owns_session(session_id) {
             return async { Err(WebBackendError::SessionUnavailable) }.boxed();
         }
         let runtime = self.runtime.clone();
-        let artifact_id = artifact_id.clone();
+        let call_id = call_id.clone();
         async move {
-            let content = runtime
-                .read_artifact_preview(&artifact_id, MAX_WEB_ARTIFACT_BYTES)
+            let preview = runtime
+                .read_tool_output_preview(&call_id, MAX_WEB_TOOL_OUTPUT_BYTES)
                 .await
                 .map_err(|error| {
-                    tracing::debug!(error = %error, %artifact_id, "artifact content read failed");
+                    tracing::debug!(error = %error, %call_id, "tool output read failed");
                     WebBackendError::Unavailable
                 })?;
-            let kind = match content.kind() {
-                ArtifactContentKind::Text => WebArtifactKind::Text,
-                ArtifactContentKind::Json => WebArtifactKind::Json,
-                ArtifactContentKind::Binary => WebArtifactKind::Binary,
-                ArtifactContentKind::Image => WebArtifactKind::Image,
-                ArtifactContentKind::Other => WebArtifactKind::Other,
+            let Some(preview) = preview else {
+                return Ok(None);
             };
             let byte_length =
-                u64::try_from(content.byte_length()).map_err(|_| WebBackendError::Unavailable)?;
-            Ok(WebArtifactContent::new(
-                artifact_id,
-                kind,
-                content.content().map(str::to_owned),
-                content.truncated(),
+                u64::try_from(preview.byte_length()).map_err(|_| WebBackendError::Unavailable)?;
+            Ok(Some(WebToolOutput::new(
+                call_id,
+                preview.kind(),
+                preview.content().to_owned(),
+                preview.truncated(),
                 byte_length,
-            ))
+            )))
         }
         .boxed()
     }

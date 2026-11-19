@@ -1,7 +1,7 @@
 use super::RuntimeInner;
-use crate::ArtifactContent;
 use crate::events::RuntimeJournalEventBatch;
-use merry_core::{ArtifactId, RuntimeJournalEvent, RuntimeJournalPayload, ToolOutput};
+use crate::trajectory::TRAJECTORY_TOOL_PREVIEW_BYTES;
+use merry_core::{RuntimeJournalEvent, RuntimeJournalPayload, ToolCallId};
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 
@@ -15,8 +15,7 @@ impl RuntimeInner {
 
     /// Projects events and refreshes the resume savepoint after session state is recorded.
     pub(super) async fn commit_journal_events(&self, events: &[RuntimeJournalEvent]) {
-        self.project_journal_events_with_artifact_contents(events)
-            .await;
+        self.project_journal_events_with_tool_outputs(events).await;
         persist_resume_safe_savepoint_if_configured(self).await;
     }
 
@@ -40,88 +39,51 @@ impl RuntimeInner {
     ) {
         let mut events = Vec::new();
         batch.for_each(|event| events.push(event.clone()));
-        self.project_journal_events_with_artifact_contents(&events)
-            .await;
+        self.project_journal_events_with_tool_outputs(&events).await;
         persist_resume_safe_savepoint_if_configured(self).await;
         permit.send(batch);
     }
 }
 
 impl RuntimeInner {
-    async fn project_journal_events_with_artifact_contents(&self, events: &[RuntimeJournalEvent]) {
-        let assistant_artifact_ids = events
-            .iter()
-            .filter_map(|event| match &event.payload {
-                RuntimeJournalPayload::AssistantOutputRecorded { artifact } => {
-                    Some(artifact.id().clone())
-                }
-                _ => None,
-            })
-            .collect::<Vec<ArtifactId>>();
-        let tool_result_artifact_ids = events
+    async fn project_journal_events_with_tool_outputs(&self, events: &[RuntimeJournalEvent]) {
+        let tool_call_ids = events
             .iter()
             .filter_map(|event| match &event.payload {
                 RuntimeJournalPayload::ToolCallResolved { result } => {
-                    Some(result.artifact().id().clone())
+                    Some(result.call_id().clone())
                 }
                 _ => None,
             })
-            .collect::<Vec<ArtifactId>>();
-        let (assistant_texts, tool_outputs) =
-            if assistant_artifact_ids.is_empty() && tool_result_artifact_ids.is_empty() {
-                (Vec::new(), Vec::new())
-            } else {
-                let session = self.session.lock().await;
-                let assistant_texts = assistant_artifact_ids
-                    .into_iter()
-                    .filter_map(|artifact_id| {
-                        session
-                            .read_artifact_content(&artifact_id)
-                            .ok()
-                            .and_then(|content| content.as_text().map(str::to_owned))
-                            .map(|text| (artifact_id, text))
-                    })
-                    .collect::<Vec<_>>();
-                let tool_outputs = tool_result_artifact_ids
-                    .into_iter()
-                    .filter_map(|artifact_id| {
-                        session
-                            .read_artifact_content(&artifact_id)
-                            .ok()
-                            .and_then(tool_output_from_content)
-                            .map(|output| (artifact_id, output))
-                    })
-                    .collect::<Vec<_>>();
-                (assistant_texts, tool_outputs)
-            };
+            .collect::<Vec<ToolCallId>>();
+        let tool_outputs = if tool_call_ids.is_empty() {
+            Vec::new()
+        } else {
+            let session = self.session.lock().await;
+            tool_call_ids
+                .into_iter()
+                .filter_map(|call_id| {
+                    session
+                        .read_model_tool_preview(&call_id, TRAJECTORY_TOOL_PREVIEW_BYTES)
+                        .map(|preview| (call_id, preview))
+                })
+                .collect::<Vec<_>>()
+        };
         for event in events {
             let assistant_text = match &event.payload {
-                RuntimeJournalPayload::AssistantOutputRecorded { artifact } => assistant_texts
-                    .iter()
-                    .find(|(artifact_id, _)| artifact_id == artifact.id())
-                    .map(|(_, text)| text.as_str()),
+                RuntimeJournalPayload::AssistantOutputRecorded { text } => Some(text.as_str()),
                 _ => None,
             };
             let tool_output = match &event.payload {
                 RuntimeJournalPayload::ToolCallResolved { result } => tool_outputs
                     .iter()
-                    .find(|(artifact_id, _)| artifact_id == result.artifact().id())
+                    .find(|(call_id, _)| call_id == result.call_id())
                     .map(|(_, output)| output),
                 _ => None,
             };
             self.trajectory
                 .observe_journal_event_with_contents(event, assistant_text, tool_output);
         }
-    }
-}
-
-fn tool_output_from_content(content: ArtifactContent) -> Option<ToolOutput> {
-    match content {
-        ArtifactContent::Text { content: text } => Some(ToolOutput::Text { text }),
-        ArtifactContent::Json { content: json } => Some(ToolOutput::Json { json }),
-        ArtifactContent::Binary { .. }
-        | ArtifactContent::Image { .. }
-        | ArtifactContent::Other { .. } => None,
     }
 }
 

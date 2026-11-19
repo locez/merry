@@ -1,7 +1,7 @@
 use crate::{assert_json_round_trip, assert_uuid_v4_string};
 use merry_core::{
-    ArtifactId, PlanAttemptId, PlanDirectiveId, PlanId, PlanLeaseId, PlanNodeId, ProviderName,
-    SessionId, SkillId, SubagentId, SubagentTaskId,
+    PlanAttemptId, PlanDirectiveId, PlanId, PlanLeaseId, PlanNodeId, ProviderName, SessionId,
+    SkillId, SubagentId, SubagentTaskId,
 };
 use serde_json::json;
 use std::str::FromStr;
@@ -11,7 +11,6 @@ fn ids_validate_and_round_trip_as_json_strings() {
     let session = SessionId::new("session-1").expect("valid session id");
     let uuid_session = SessionId::new("550e8400-e29b-41d4-a716-446655440000")
         .expect("uuid session id should be valid");
-    let artifact = ArtifactId::from_str("artifact_1").expect("valid artifact id");
     let skill = SkillId::try_from("skill.alpha").expect("valid skill id");
     let provider =
         ProviderName::try_from(String::from("openai-compatible")).expect("valid provider name");
@@ -21,7 +20,6 @@ fn ids_validate_and_round_trip_as_json_strings() {
         uuid_session.as_str(),
         "550e8400-e29b-41d4-a716-446655440000"
     );
-    assert_eq!(artifact.to_string(), "artifact_1");
     assert_eq!(skill.as_str(), "skill.alpha");
     assert_eq!(provider.as_str(), "openai-compatible");
 
@@ -32,7 +30,6 @@ fn ids_validate_and_round_trip_as_json_strings() {
 
     assert_json_round_trip(&session);
     assert_json_round_trip(&uuid_session);
-    assert_json_round_trip(&artifact);
     assert_json_round_trip(&skill);
     assert_json_round_trip(&provider);
 
@@ -62,8 +59,8 @@ fn ids_validate_and_round_trip_as_json_strings() {
     }
 
     let overlong = "a".repeat(129);
-    assert!(ArtifactId::new(&overlong).is_err());
-    assert!(serde_json::from_value::<ArtifactId>(json!(overlong)).is_err());
+    assert!(SkillId::new(&overlong).is_err());
+    assert!(serde_json::from_value::<SkillId>(json!(overlong)).is_err());
 }
 
 #[test]

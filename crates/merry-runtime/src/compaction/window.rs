@@ -4,7 +4,7 @@ use crate::{
     session::{ModelTurnId, ModelTurnStatus},
     token_estimate::TokenEstimateScale,
 };
-use merry_core::{ArtifactId, ToolCallId, ToolCallResultStatus};
+use merry_core::{ToolCallId, ToolCallResultStatus};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -434,8 +434,8 @@ impl CitationCompactionTurnItem {
                 result,
                 ..
             } => format!(
-                "### Tool {name} ({call_id})\n\nArguments:\n{arguments}\n\nResult ({}, {}):\n{}",
-                result.status, result.artifact_id, result.content
+                "### Tool {name} ({call_id})\n\nArguments:\n{arguments}\n\nResult ({}):\n{}",
+                result.status, result.content
             ),
         }
     }
@@ -462,7 +462,6 @@ impl CitationCompactionTurnItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CitationCompactionToolResult {
     status: &'static str,
-    artifact_id: String,
     content_kind: &'static str,
     content: String,
 }
@@ -470,13 +469,11 @@ pub(crate) struct CitationCompactionToolResult {
 impl CitationCompactionToolResult {
     pub(crate) fn new(
         status: ToolCallResultStatus,
-        artifact_id: &ArtifactId,
         content_kind: &'static str,
         content: String,
     ) -> Self {
         Self {
             status: tool_call_result_status_label(status),
-            artifact_id: artifact_id.as_str().to_owned(),
             content_kind,
             content,
         }

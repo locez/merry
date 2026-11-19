@@ -3,7 +3,7 @@ use crate::tui::{
     projector::TuiProjector,
     render::render_to_text,
     state::{PatchChangeView, PatchLineView, PatchOperationView, TimelineItem, TuiState},
-    tests::{pending_call, pending_call_with_args, source, text_artifact},
+    tests::{pending_call, pending_call_with_args, source},
     theme::TuiTheme,
 };
 use merry_core::{ErrorInfo, RuntimeEvent, ToolCallId, ToolCallResult, ToolOutput};
@@ -36,10 +36,7 @@ fn projector_projects_apply_patch_using_patch_tool_format() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-patch").unwrap(),
-                text_artifact("patch-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("call-patch").unwrap()),
             output: Some(ToolOutput::Json {
                 json: r#"{"ok":true,"tool":"apply_patch","changes":[{"path":"crates/merry-cli/src/tui/render.rs","hunks":1,"bytes_before":120,"bytes_after":121,"lines":[{"kind":"context","old_line":10,"new_line":10,"text":"    let old = true;"},{"kind":"remove","old_line":11,"text":"    lines.push(old);"},{"kind":"add","new_line":11,"text":"    lines.push(new);"}]}]}"#.to_owned(),
             }),
@@ -96,10 +93,7 @@ fn projector_projects_apply_patch_add_file_line_numbers() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-add-file").unwrap(),
-                text_artifact("patch-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("call-add-file").unwrap()),
             output: Some(ToolOutput::Json {
                 json: r#"{"ok":true,"tool":"apply_patch","changes":[{"path":"hello.txt","hunks":1,"bytes_before":0,"bytes_after":12}]}"#.to_owned(),
             }),
@@ -144,10 +138,7 @@ fn projector_reads_delete_and_line_counts_from_the_envelope() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-delete-file").unwrap(),
-                text_artifact("patch-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("call-delete-file").unwrap()),
             output: Some(ToolOutput::Json {
                 json: r#"{"ok":true,"tool":"apply_patch","changes":[{"path":"notes/old.md","op":"delete","hunks":0,"lines_before":4,"lines_after":0,"bytes_before":30,"bytes_after":0,"lines":[]}]}"#.to_owned(),
             }),
@@ -204,10 +195,7 @@ fn projector_derives_patch_line_numbers_from_hunk_headers() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-numbered-patch").unwrap(),
-                text_artifact("patch-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("call-numbered-patch").unwrap()),
             output: Some(ToolOutput::Json {
                 json: r#"{"ok":true,"tool":"apply_patch","changes":[{"path":"hello_world.py","hunks":1,"bytes_before":209,"bytes_after":222}]}"#.to_owned(),
             }),
@@ -260,7 +248,6 @@ fn projector_replaces_failed_patch_row_without_leaving_stale_pending_row() {
         RuntimeEvent::ToolCallFinished {
             result: ToolCallResult::failed(
                 ToolCallId::new("call-patch-fail").unwrap(),
-                text_artifact("patch-failure"),
                 ErrorInfo::new(
                     "apply_patch_preimage_mismatch",
                     "preimage text was not found in the target file",
@@ -358,10 +345,7 @@ fn projector_expands_apply_patch_by_tool_name() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-patch").unwrap(),
-                text_artifact("patch-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("call-patch").unwrap()),
             output: Some(ToolOutput::Json {
                 json: r#"{"tool":"apply_patch","status":"applied"}"#.to_owned(),
             }),
@@ -394,10 +378,7 @@ fn projector_keeps_diff_like_non_patch_output_as_a_read_preview() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-read").unwrap(),
-                text_artifact("read-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("call-read").unwrap()),
             output: Some(ToolOutput::Text {
                 text: "--- a/src/lib.rs\n+++ b/src/lib.rs\n+not a patch result".to_owned(),
             }),

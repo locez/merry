@@ -2,7 +2,7 @@
 
 The Python package is an async-first ergonomic wrapper over the Rust-owned
 Merry facade. Python owns typed conversion and host-side callable execution;
-Rust owns sessions, events, artifacts, ledger state, permissions, retries,
+Rust owns sessions, events, tool outputs, ledger state, permissions, retries,
 tool admission, and run lifecycle.
 
 ## Install
@@ -128,7 +128,7 @@ agent = builder.provider(
 `@agent.tool` is also available after `build()` and before the first run. The
 decorator returns a typed `Tool[InputT, OutputT]`, which can be passed to
 `ToolRegistry` or called directly in tests. Duplicate names, reserved names,
-schema validation, admission, ordering, artifacts, and result persistence
+schema validation, admission, ordering, and result persistence
 remain Rust responsibilities.
 
 Expected business failures should use `ToolDomainError`; they become a failed
@@ -228,7 +228,7 @@ The configured path is a store root directory. Each session is persisted under
 `<store_root>/<session_id>/state.json`. An explicit root may be passed to
 `resume(path)` when it differs from the configured store root.
 
-The session document, ledger, artifact references, and resume validation are
+The session document, ledger, transcript tool outputs, and resume validation are
 owned by Rust. Python only supplies the provider and store configuration.
 
 ## Errors And Tests

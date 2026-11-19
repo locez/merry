@@ -139,26 +139,19 @@ pub(in crate::runtime::tests) fn resolved_tool_result(
         .expect("tool call should resolve")
 }
 
-/// Reads the artifact of a resolved tool result and parses it as JSON.
-///
-/// `label` names the behaviour under test so a failure points at the test's
-/// subject instead of a generic artifact read. Every runtime test that inspects
-/// a tool-result payload goes through this helper, so the "artifact exists,
-/// holds text, and is JSON" contract is asserted in one place.
+/// Reads the stored output of a resolved tool result and parses it as JSON.
 pub(in crate::runtime::tests) async fn resolved_artifact_json(
     runtime: &Runtime,
     result: &merry_core::ToolCallResult,
     label: &str,
 ) -> serde_json::Value {
-    let content = runtime
-        .read_artifact_content(result.artifact().id())
+    let output = runtime
+        .read_tool_output(result.call_id())
         .await
-        .unwrap_or_else(|error| panic!("{label} artifact should be readable: {error}"));
-    let text = content
-        .as_text()
-        .unwrap_or_else(|| panic!("{label} artifact should be textual JSON"));
-    serde_json::from_str(text)
-        .unwrap_or_else(|error| panic!("{label} artifact should parse as JSON: {error}"))
+        .unwrap_or_else(|error| panic!("{label} tool output should be readable: {error}"))
+        .unwrap_or_else(|| panic!("{label} tool output should exist"));
+    serde_json::from_str(output.as_str())
+        .unwrap_or_else(|error| panic!("{label} tool output should parse as JSON: {error}"))
 }
 
 pub(in crate::runtime::tests) async fn register_policy_pending_tool(
@@ -322,7 +315,6 @@ pub(in crate::runtime::tests) fn event_kind_names_for_tool_execution(
     events
         .iter()
         .map(|event| match event.payload {
-            RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
             RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
             RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
             RuntimeJournalPayload::SessionUsageUpdated { .. } => "SessionUsageUpdated",
@@ -332,7 +324,6 @@ pub(in crate::runtime::tests) fn event_kind_names_for_tool_execution(
             RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
             RuntimeJournalPayload::Failed { .. } => "Failed",
             RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
-            RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
             RuntimeJournalPayload::SkillUsed { .. } => "SkillUsed",
             _ => "Other",
         })

@@ -45,7 +45,7 @@ async fn session_state_current_format_without_plan_round_trips_current_format() 
             .expect("rewritten state reads"),
     )
     .expect("rewritten state is JSON");
-    assert_eq!(rewritten["format_version"], 5);
+    assert_eq!(rewritten["format_version"], 6);
     assert_eq!(rewritten["active_plan"], serde_json::Value::Null);
     assert_eq!(rewritten["terminal_plans"], serde_json::json!([]));
 }
@@ -250,8 +250,8 @@ async fn session_state_round_trip_preserves_plan_attempt_lease_directive_recover
         &live_actor,
         ReportPlanProgressInput {
             summary: "live progress is durable".to_owned(),
-            evidence_refs: Vec::new(),
-            artifact_refs: Vec::new(),
+            evidence_notes: Vec::new(),
+            output_paths: Vec::new(),
             next_action: Some("continue verification".to_owned()),
             checkpoint_ref: Some("persisted-checkpoint".to_owned()),
             acknowledged_directive_ids: vec![live_directive.directive.directive_id],

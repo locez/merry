@@ -30,7 +30,6 @@ from ._errors import (
     ToolDomainError,
 )
 from ._events import (
-    ArtifactReference,
     AssistantMessageDeltaPayload,
     AssistantMessagePayload,
     ClosedPayload,
@@ -42,8 +41,6 @@ from ._events import (
     EventPayloadValue,
     EventSource,
     EventType,
-    EvidenceReference,
-    EvidenceReferencedPayload,
     FinalOutputRecordedPayload,
     InteractiveRunState,
     InteractiveRunStateChangedPayload,
@@ -121,7 +118,6 @@ __all__ = [
     "AgentBuilder",
     "Anthropic",
     "AnthropicProvider",
-    "ArtifactReference",
     "AssistantMessageDeltaPayload",
     "AssistantMessagePayload",
     "BlockedReason",
@@ -136,8 +132,6 @@ __all__ = [
     "EventPayloadValue",
     "EventSource",
     "EventType",
-    "EvidenceReference",
-    "EvidenceReferencedPayload",
     "FinalOutputRecord",
     "FinalOutputRecordedPayload",
     "InteractiveRunState",

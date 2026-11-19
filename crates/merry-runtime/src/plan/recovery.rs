@@ -458,7 +458,7 @@ impl PlanState {
             .find(|progress| &progress.attempt_id == attempt_id)
             .is_none_or(|progress| {
                 progress.observable_side_effects == 0
-                    && progress.artifacts_created == 0
+                    && progress.output_paths.is_empty()
                     && progress.changed_paths.is_empty()
             })
     }

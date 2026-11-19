@@ -1,16 +1,13 @@
 use super::{RuntimeInner, diagnostic_from_text};
 use crate::{
-    ActionExecutionEvidence, ActionProposal, ArtifactContent, ProcessActionIntent,
-    ProcessExitStatus, ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerOutput, RuntimeError, action_audit::ActionAuditPolicy,
+    ActionExecutionEvidence, ActionProposal, ProcessActionIntent, ProcessExitStatus,
+    ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
+    ProcessRunnerOutput, RuntimeError, action_audit::ActionAuditPolicy,
     action_policy::ActionPolicyDecision, permission::PermissionAdmissionReview,
-    process::ShellProcessInput, process::shell_process_input,
-    session::ProposedToolExecutionOutcome, session::ToolResultLedgerObservation,
-    tool::ActionProposalEvidence, tool::ToolExecutionContext,
+    process::shell_process_input, session::ProposedToolExecutionOutcome,
+    session::ToolResultLedgerObservation, tool::ActionProposalEvidence, tool::ToolExecutionContext,
 };
-use merry_core::{
-    ArtifactRef, PendingToolCall, RuntimeJournalEvent, SessionId, ToolCallResultStatus,
-};
+use merry_core::{PendingToolCall, RuntimeJournalEvent, SessionId, ToolCallResultStatus};
 use std::sync::Arc;
 
 mod output;
@@ -65,25 +62,6 @@ pub(super) async fn execute_admitted_process_action(
             call_id: pending.id().clone(),
             message: "admitted process proposal did not include process action evidence".to_owned(),
         });
-    };
-
-    if context.cancellation_token().is_cancelled() {
-        return Err(RuntimeError::ToolExecutionCancelled {
-            session_id: inner.session_id.clone(),
-            call_id: pending.id().clone(),
-        });
-    }
-
-    let shell_input_artifact = if let Some(shell_input) = shell_process_input(&intent) {
-        let input_content =
-            shell_input_artifact_content(shell_input, &intent, permission_profile_id, pending);
-        let mut session = inner.session.lock().await;
-        let recorded = session
-            .record_process_input_artifact(input_content)
-            .map_err(RuntimeError::from)?;
-        Some(recorded)
-    } else {
-        None
     };
 
     if context.cancellation_token().is_cancelled() {
@@ -155,14 +133,10 @@ pub(super) async fn execute_admitted_process_action(
         permission_profile_id,
         &output,
     );
-    let shell_input_artifact_ref = shell_input_artifact
-        .as_ref()
-        .map(|(artifact, _events)| artifact);
     let content = output::result_content(
         &intent,
         &output,
         permission_profile_id,
-        shell_input_artifact_ref,
         permission_review.as_ref(),
     );
     let status = if output.ok() {
@@ -181,13 +155,8 @@ pub(super) async fn execute_admitted_process_action(
             ),
         ))
     };
-    let observation = process_result_ledger_observation(
-        &intent,
-        &output,
-        status,
-        permission_profile_id,
-        shell_input_artifact_ref,
-    );
+    let observation =
+        process_result_ledger_observation(&intent, &output, status, permission_profile_id);
 
     let outcome = ProposedToolExecutionOutcome::new(
         proposal,
@@ -202,10 +171,7 @@ pub(super) async fn execute_admitted_process_action(
         let mut session = inner.session.lock().await;
         session.submit_proposed_tool_execution_outcome_record(outcome)?
     };
-    Ok(merge_process_input_and_result_events(
-        shell_input_artifact.map(|(_artifact, events)| events),
-        result_events,
-    ))
+    Ok(result_events)
 }
 
 fn trace_process_execution_start(
@@ -293,41 +259,11 @@ fn trace_process_execution_finish(
     );
 }
 
-fn shell_input_artifact_content(
-    shell_input: ShellProcessInput<'_>,
-    intent: &ProcessActionIntent,
-    permission_profile_id: ProcessPermissionProfileId,
-    pending: &PendingToolCall,
-) -> ArtifactContent {
-    ArtifactContent::json(
-        serde_json::json!({
-            "kind": "shell_command_input",
-            "permission_profile_id": permission_profile_id.as_str(),
-            "tool_call_id": pending.id().as_str(),
-            "tool_name": pending.name().as_str(),
-            "intent": {
-                "summary": intent.summary(),
-                "cwd": intent.cwd(),
-            },
-            "input_evidence": {
-                "kind": "shell_command_script",
-                "shell": shell_input.shell(),
-                "flag": shell_input.flag(),
-                "script": shell_input.script(),
-                "script_bytes": shell_input.script_bytes(),
-                "script_fingerprint": shell_input.script_fingerprint(),
-            },
-        })
-        .to_string(),
-    )
-}
-
 fn process_result_ledger_observation(
     intent: &ProcessActionIntent,
     output: &ProcessRunnerOutput,
     result_status: ToolCallResultStatus,
     permission_profile_id: ProcessPermissionProfileId,
-    input_artifact: Option<&ArtifactRef>,
 ) -> ToolResultLedgerObservation {
     let mut summary = if let Some(shell_input) = shell_process_input(intent) {
         format!(
@@ -360,25 +296,9 @@ fn process_result_ledger_observation(
     if output.stderr_truncated() {
         summary.push_str("; stderr_truncated=true");
     }
-    if let Some(input_artifact) = input_artifact {
-        summary.push_str("; input_artifact=");
-        summary.push_str(input_artifact.id().as_str());
-    }
 
     ToolResultLedgerObservation::new(crate::ledger::LedgerScope::Tool, summary)
         .expect("process result ledger summary is built from a non-empty static prefix")
-}
-
-fn merge_process_input_and_result_events(
-    input_events: Option<Vec<RuntimeJournalEvent>>,
-    result_events: Vec<RuntimeJournalEvent>,
-) -> Vec<RuntimeJournalEvent> {
-    let Some(mut input_events) = input_events else {
-        return result_events;
-    };
-
-    input_events.extend(result_events);
-    input_events
 }
 
 fn process_result_status_label(status: ToolCallResultStatus) -> &'static str {

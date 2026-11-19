@@ -1,6 +1,6 @@
 use crate::{
-    ArtifactContent, FileSessionStore,
-    plan::{PlanArtifactPromotion, controller::PlanControllerError, domain::PlanState, validation},
+    FileSessionStore, ToolOutput,
+    plan::{controller::PlanControllerError, domain::PlanState, validation},
     session::{PreparedPlanToolCommit, SessionState},
 };
 use merry_core::{
@@ -19,7 +19,6 @@ enum PreparedPlanInstall {
         candidate: Box<PlanState>,
         terminal_plans: Vec<PlanSnapshot>,
         payloads: Vec<RuntimeJournalPayload>,
-        artifact_promotions: Vec<PlanArtifactPromotion>,
     },
     Tool {
         prepared: Box<PreparedPlanToolCommit>,
@@ -32,7 +31,7 @@ pub(super) fn prepare_plan_commit(
     candidate: PlanState,
     terminal_plans: Vec<PlanSnapshot>,
     payloads: Vec<RuntimeJournalPayload>,
-    tool_resolution: Option<(ToolCallId, ArtifactContent)>,
+    tool_resolution: Option<(ToolCallId, ToolOutput)>,
 ) -> Result<PreparedPlanCommit, PlanControllerError> {
     prepare_plan_commit_with_tool_persistence(
         session,
@@ -50,42 +49,21 @@ pub(super) fn prepare_plan_commit_with_tool_persistence(
     candidate: PlanState,
     terminal_plans: Vec<PlanSnapshot>,
     payloads: Vec<RuntimeJournalPayload>,
-    tool_resolution: Option<(ToolCallId, ArtifactContent)>,
-    persist_tool_resolution: bool,
-) -> Result<PreparedPlanCommit, PlanControllerError> {
-    prepare_plan_commit_with_artifact_promotions(
-        session,
-        candidate,
-        terminal_plans,
-        payloads,
-        Vec::new(),
-        tool_resolution,
-        persist_tool_resolution,
-    )
-}
-
-pub(super) fn prepare_plan_commit_with_artifact_promotions(
-    session: &SessionState,
-    candidate: PlanState,
-    terminal_plans: Vec<PlanSnapshot>,
-    payloads: Vec<RuntimeJournalPayload>,
-    artifact_promotions: Vec<PlanArtifactPromotion>,
-    tool_resolution: Option<(ToolCallId, ArtifactContent)>,
+    tool_resolution: Option<(ToolCallId, ToolOutput)>,
     persist_tool_resolution: bool,
 ) -> Result<PreparedPlanCommit, PlanControllerError> {
     validation::validate_snapshot_limits(candidate.snapshot())?;
     for terminal in &terminal_plans {
         validation::validate_snapshot_limits(terminal)?;
     }
-    if let Some((call_id, content)) = tool_resolution {
-        debug_assert!(artifact_promotions.is_empty());
+    if let Some((call_id, output)) = tool_resolution {
         let prepared = session.prepare_plan_tool_commit(
             candidate,
             terminal_plans,
             payloads,
             &call_id,
             ToolCallResultStatus::Succeeded,
-            content,
+            output,
             None,
         )?;
         let bundle = persist_tool_resolution
@@ -104,7 +82,6 @@ pub(super) fn prepare_plan_commit_with_artifact_promotions(
             candidate: Box::new(candidate),
             terminal_plans,
             payloads,
-            artifact_promotions,
         },
     })
 }
@@ -121,7 +98,6 @@ pub(super) async fn persist_and_install(
             candidate,
             terminal_plans,
             payloads,
-            artifact_promotions,
         } => {
             persist_and_install_plan_only(
                 session,
@@ -130,7 +106,6 @@ pub(super) async fn persist_and_install(
                 *candidate,
                 terminal_plans,
                 payloads,
-                artifact_promotions,
             )
             .await?
         }
@@ -163,7 +138,6 @@ pub(super) async fn persist_and_install(
     Ok(committed_events)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn persist_and_install_plan_only(
     session: &Arc<Mutex<SessionState>>,
     store: Option<&FileSessionStore>,
@@ -171,10 +145,7 @@ async fn persist_and_install_plan_only(
     candidate: PlanState,
     terminal_plans: Vec<PlanSnapshot>,
     payloads: Vec<RuntimeJournalPayload>,
-    artifact_promotions: Vec<PlanArtifactPromotion>,
 ) -> Result<Vec<RuntimeJournalEvent>, PlanControllerError> {
-    // Reserve event identities before disk IO. A failed commit may leave a gap,
-    // but a later attempt can never reuse an event identity that was prepared here.
     let committed_events = {
         let mut session = session.lock().await;
         if !base.plan_matches(&session) {
@@ -191,31 +162,19 @@ async fn persist_and_install_plan_only(
         if !base.plan_matches(&session) {
             return Err(PlanControllerError::StaleTransaction);
         }
-        install_plan_only_candidate(
-            &mut session,
-            candidate,
-            terminal_plans,
-            &artifact_promotions,
-        )?;
+        install_plan_only_candidate(&mut session, candidate, terminal_plans);
         return Ok(committed_events);
     };
 
     loop {
-        // Session activity may advance the global sequence while the sidecar is
-        // staging. Rewrite until the persisted frontier and install point agree.
         let (overlay, persisted_next_sequence) = {
             let session = session.lock().await;
             if !base.plan_matches(&session) {
                 return Err(PlanControllerError::StaleTransaction);
             }
-            let artifacts = session.artifacts_with_plan_promotions(&artifact_promotions)?;
             let next_sequence = session.next_sequence();
-            let overlay = session.persistable_plan_overlay(
-                &candidate,
-                &terminal_plans,
-                next_sequence,
-                &artifacts,
-            )?;
+            let overlay =
+                session.persistable_plan_overlay(&candidate, &terminal_plans, next_sequence)?;
             (overlay, next_sequence)
         };
         store
@@ -232,12 +191,7 @@ async fn persist_and_install_plan_only(
         if session.next_sequence() != persisted_next_sequence {
             continue;
         }
-        install_plan_only_candidate(
-            &mut session,
-            candidate,
-            terminal_plans,
-            &artifact_promotions,
-        )?;
+        install_plan_only_candidate(&mut session, candidate, terminal_plans);
         return Ok(committed_events);
     }
 }
@@ -246,10 +200,7 @@ fn install_plan_only_candidate(
     session: &mut SessionState,
     candidate: PlanState,
     terminal_plans: Vec<PlanSnapshot>,
-    artifact_promotions: &[PlanArtifactPromotion],
-) -> Result<(), PlanControllerError> {
-    let artifacts = session.artifacts_with_plan_promotions(artifact_promotions)?;
-    session.replace_artifacts_for_plan_commit(artifacts);
+) {
     session.take_active_plan();
     for snapshot in terminal_plans {
         if !session
@@ -261,7 +212,6 @@ fn install_plan_only_candidate(
         }
     }
     session.set_active_plan(candidate);
-    Ok(())
 }
 
 #[derive(Debug, Clone)]

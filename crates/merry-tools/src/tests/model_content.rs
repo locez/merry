@@ -2,11 +2,7 @@ use super::read::read_text_range_outcome;
 use super::*;
 
 fn model_body(outcome: &ToolExecutionOutcome) -> &str {
-    outcome
-        .model_content()
-        .expect("model body")
-        .as_text()
-        .expect("text or JSON")
+    outcome.model_content().expect("model body").as_str()
 }
 
 #[test]
@@ -58,14 +54,8 @@ fn patch_model_body_reports_actual_operations_without_echoing_the_patch() {
     assert_eq!(read_text(&temp.path().join("add.txt")), "new\n");
     assert_eq!(read_text(&temp.path().join("update.txt")), "replacement\n");
     assert!(!temp.path().join("delete.txt").exists());
-    assert!(
-        outcome
-            .content()
-            .as_text()
-            .expect("full result")
-            .contains("replacement")
-    );
-    assert!(model_body(&outcome).len() * 2 < outcome.content().as_bytes().len());
+    assert!(outcome.content().as_str().contains("replacement"));
+    assert!(model_body(&outcome).len() * 2 < outcome.content().as_str().len());
 }
 
 #[test]

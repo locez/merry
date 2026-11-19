@@ -6,22 +6,10 @@ fn context_snapshot_is_independent_from_later_recorded_memory() {
 
     let stale = session.context_snapshot();
     let memory = activated_memory("memory-later");
-    session.record_activated_memory(memory.clone());
-    session
-        .record_artifact_state(
-            ArtifactRef::new(artifact_id("memory-later-artifact"), ArtifactKind::Text),
-            ArtifactContent::text("first exact memory evidence\n"),
-        )
-        .expect("memory artifact records");
+    session.record_activated_memory(memory);
     let current = session.context_snapshot();
     let second_memory = activated_memory_with_details("memory-later-2", "later text", 1, 2, 0.5);
     session.record_activated_memory(second_memory);
-    session
-        .record_artifact_state(
-            ArtifactRef::new(artifact_id("memory-later-2-artifact"), ArtifactKind::Text),
-            ArtifactContent::text("second exact memory evidence\n"),
-        )
-        .expect("later memory artifact records");
 
     let stale = ContextCompiler::new()
         .compile(&stale)
@@ -35,7 +23,7 @@ fn context_snapshot_is_independent_from_later_recorded_memory() {
     assert!(
         current
             .to_snapshot()
-            .contains("memory-evidence:primary source:memory-later-artifact:whole")
+            .contains("memory-evidence:primary source:memory-later-source")
     );
     assert!(
         current
@@ -50,7 +38,6 @@ fn record_activated_memories_appends_to_memory_projection() {
     let mut session = SessionState::new(session_id());
     let memory_a = activated_memory("memory-a");
     let memory_b = activated_memory("memory-b");
-    record_memory_artifacts(&mut session, &[&memory_a, &memory_b]);
     session.record_activated_memories(vec![memory_a, memory_b]);
 
     let compiled = ContextCompiler::new()
@@ -66,7 +53,6 @@ fn replace_activated_memories_updates_current_memory_projection() {
     let mut session = SessionState::new(session_id());
     let stale = activated_memory("memory-stale");
     let current = activated_memory("memory-current");
-    record_memory_artifacts(&mut session, &[&stale, &current]);
 
     session.record_activated_memory(stale);
     session.replace_activated_memories(vec![current]);
@@ -83,7 +69,6 @@ fn replace_activated_memories_updates_current_memory_projection() {
 fn replace_activated_memories_with_empty_clears_current_memory_projection() {
     let mut session = SessionState::new(session_id());
     let memory = activated_memory("memory-cleared");
-    record_memory_artifacts(&mut session, &[&memory]);
 
     session.record_activated_memory(memory);
     session.replace_activated_memories(Vec::new());
@@ -103,7 +88,6 @@ fn duplicate_recorded_activated_memories_compile_once_deterministically() {
         activated_memory_with_details("memory-duplicate", "Higher duplicate.", 2, 0, 0.5);
 
     let mut first = SessionState::new(session_id());
-    record_memory_artifacts(&mut first, &[&lower_duplicate, &higher_duplicate]);
     first.record_activated_memories(vec![lower_duplicate.clone(), higher_duplicate.clone()]);
     let first = ContextCompiler::new()
         .compile(&first.context_snapshot())
@@ -111,7 +95,6 @@ fn duplicate_recorded_activated_memories_compile_once_deterministically() {
         .to_snapshot();
 
     let mut second = SessionState::new(session_id());
-    record_memory_artifacts(&mut second, &[&higher_duplicate, &lower_duplicate]);
     second.record_activated_memories(vec![higher_duplicate, lower_duplicate]);
     let second = ContextCompiler::new()
         .compile(&second.context_snapshot())

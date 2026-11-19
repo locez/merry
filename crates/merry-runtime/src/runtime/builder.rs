@@ -749,7 +749,7 @@ impl RuntimeBuilder {
         let restored_trajectory = session.trajectory_snapshot();
         let has_restored_trajectory = restored_trajectory.is_some();
         let trajectory_replay = if has_restored_trajectory {
-            Some((session.trajectory_items()?, session.ledger_projection()))
+            Some((session.trajectory_items(), session.ledger_projection()))
         } else {
             None
         };
@@ -780,7 +780,7 @@ impl RuntimeBuilder {
 
         if !has_restored_trajectory {
             let transcript = session
-                .full_transcript_snapshot()?
+                .full_transcript_snapshot()
                 .into_iter()
                 .map(crate::SessionTranscriptItem::from)
                 .collect::<Vec<_>>();

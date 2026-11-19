@@ -8,7 +8,9 @@ use crate::runtime_events::{
     write_runtime_step_events_to,
 };
 use futures_util::stream;
-use merry_core::{ProviderName, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolName};
+use merry_core::{
+    ProviderName, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolName, ToolOutput,
+};
 use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
     ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
@@ -16,9 +18,9 @@ use merry_llm::{
 };
 use merry_process::TokioProcessRunner;
 use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, ArtifactContent, MAX_PROCESS_OUTPUT_LIMIT_BYTES,
-    ProcessActionIntent, ProcessEnvPolicy, ProcessOutputEnvelope, ProcessRunner, Runtime,
-    StepContext, StepInput, ToolExecutionContext, process_command_tool, shell_command_for_argv,
+    AcceptedLocalWorkspaceProcessAdmission, MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionIntent,
+    ProcessEnvPolicy, ProcessOutputEnvelope, ProcessRunner, Runtime, StepContext, StepInput,
+    ToolExecutionContext, process_command_tool, shell_command_for_argv,
 };
 use std::{env, sync::Arc};
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
@@ -170,12 +172,15 @@ where
             CliError::Unexpected("shell command did not resolve a tool call".to_owned())
         })?;
     let content = runtime
-        .read_artifact_content(result.artifact().id())
+        .read_tool_output(result.call_id())
         .await
-        .map_err(unexpected)?;
-    let ArtifactContent::Json { content } = content else {
+        .map_err(unexpected)?
+        .ok_or_else(|| {
+            CliError::Unexpected("shell command tool output was not recorded".to_owned())
+        })?;
+    let ToolOutput::Json { json: content } = content else {
         return Err(CliError::Unexpected(
-            "shell command result artifact was not JSON".to_owned(),
+            "shell command result output was not JSON".to_owned(),
         ));
     };
     let output = serde_json::from_str::<ProcessOutputEnvelope<'_>>(&content).map_err(unexpected)?;

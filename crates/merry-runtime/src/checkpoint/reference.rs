@@ -1,5 +1,4 @@
 use super::{CheckpointError, CheckpointId, CheckpointRefId, CheckpointSequenceRange};
-use merry_core::EvidenceRef;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -10,7 +9,6 @@ pub enum CheckpointSourceKind {
     AssistantMessage,
     ToolCall,
     ToolResult,
-    ArtifactRange,
 }
 
 impl CheckpointSourceKind {
@@ -21,7 +19,6 @@ impl CheckpointSourceKind {
             Self::AssistantMessage => "assistant_message",
             Self::ToolCall => "tool_call",
             Self::ToolResult => "tool_result",
-            Self::ArtifactRange => "artifact_range",
         }
     }
 }
@@ -31,7 +28,6 @@ pub struct CheckpointRef {
     id: CheckpointRefId,
     source_kind: CheckpointSourceKind,
     sequence_range: CheckpointSequenceRange,
-    evidence: EvidenceRef,
 }
 
 impl CheckpointRef {
@@ -40,13 +36,11 @@ impl CheckpointRef {
         id: CheckpointRefId,
         source_kind: CheckpointSourceKind,
         sequence_range: CheckpointSequenceRange,
-        evidence: EvidenceRef,
     ) -> Self {
         Self {
             id,
             source_kind,
             sequence_range,
-            evidence,
         }
     }
 
@@ -63,11 +57,6 @@ impl CheckpointRef {
     #[must_use]
     pub fn sequence_range(&self) -> CheckpointSequenceRange {
         self.sequence_range
-    }
-
-    #[must_use]
-    pub fn evidence(&self) -> &EvidenceRef {
-        &self.evidence
     }
 }
 

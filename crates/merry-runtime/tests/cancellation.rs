@@ -1,16 +1,16 @@
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactId, EvidenceLocator, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload,
-    SessionId, ToolCallId, ToolInputSchema, ToolName, ToolSpec,
+    PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallId,
+    ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_llm::{
     FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse, ModelToolCall,
     ModelToolCallId, ToolArguments, testing::FakeModelProvider,
 };
 use merry_runtime::{
-    ArtifactError, LedgerFactKind, LedgerProjection, RegisteredTool, Runtime, RuntimeError,
-    StepContext, StepInput, ToolActionKind, ToolExecutionContext, ToolExecutionError,
-    ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    LedgerFactKind, LedgerProjection, RegisteredTool, Runtime, RuntimeError, StepContext,
+    StepInput, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture,
 };
 use schemars::Schema;
 use serde_json::json;
@@ -29,10 +29,6 @@ fn session_id() -> SessionId {
 
 fn tool_call_id(value: &str) -> ToolCallId {
     ToolCallId::new(value).expect("valid tool call id")
-}
-
-fn artifact_id(value: &str) -> ArtifactId {
-    ArtifactId::new(value).expect("valid artifact id")
 }
 
 fn tool_spec() -> ToolSpec {
@@ -95,10 +91,8 @@ fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
             RuntimeJournalPayload::StepCompleted => "StepCompleted",
             RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
             RuntimeJournalPayload::Failed { .. } => "Failed",
-            RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
             RuntimeJournalPayload::AssistantOutputDelta { .. } => "AssistantOutputDelta",
             RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
-            RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
             RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
             RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
             RuntimeJournalPayload::SkillUsed { .. } => "SkillUsed",
@@ -107,20 +101,15 @@ fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static str> {
         .collect()
 }
 
-async fn assert_missing_tool_result_artifact(runtime: &Runtime) {
-    let evidence_err = runtime
-        .evidence_ref(
-            &artifact_id("tool-result-4"),
-            EvidenceLocator::whole_artifact(),
-        )
-        .await
-        .expect_err("cancelled tool execution must not record runtime-owned tool result artifact");
-    assert!(matches!(
-        evidence_err,
-        RuntimeError::Artifact {
-            source: ArtifactError::MissingArtifact { id }
-        } if id == artifact_id("tool-result-4")
-    ));
+async fn assert_missing_tool_result_output(runtime: &Runtime) {
+    assert!(
+        runtime
+            .read_tool_output(&tool_call_id("cancel-tool-call"))
+            .await
+            .expect("tool output query should succeed")
+            .is_none(),
+        "cancelled tool execution must not record tool output"
+    );
 }
 
 fn runtime_with_waiting_tool(session: &str, executor: impl ToolExecutor + 'static) -> Runtime {
@@ -356,7 +345,7 @@ async fn pre_cancelled_tool_execution_keeps_pending_and_releases_active_permit()
     assert_eq!(executor.call_count(), 0);
     assert_eq!(runtime.pending_tool_calls().await.len(), 1);
     assert_eq!(runtime.ledger_projection().await, projection_before_cancel);
-    assert_missing_tool_result_artifact(&runtime).await;
+    assert_missing_tool_result_output(&runtime).await;
     let follow_up_events = start_step_after_cleanup(&runtime, "after pre-cancel").await;
     assert!(
         follow_up_events
@@ -398,7 +387,7 @@ async fn pre_cancelled_workspace_write_tool_execution_keeps_pending_without_deni
     assert_eq!(executor.call_count(), 0);
     assert_eq!(runtime.pending_tool_calls().await.len(), 1);
     assert_eq!(runtime.ledger_projection().await, projection_before_cancel);
-    assert_missing_tool_result_artifact(&runtime).await;
+    assert_missing_tool_result_output(&runtime).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -466,7 +455,7 @@ async fn cancelling_during_tool_execution_keeps_pending_and_releases_active_perm
     ));
     assert_eq!(runtime.pending_tool_calls().await.len(), 1);
     assert_eq!(runtime.ledger_projection().await, projection_before_cancel);
-    assert_missing_tool_result_artifact(&runtime).await;
+    assert_missing_tool_result_output(&runtime).await;
     let follow_up_events = start_step_after_cleanup(&runtime, "after during-cancel").await;
     assert!(
         follow_up_events
@@ -531,7 +520,7 @@ async fn cancelling_after_successful_tool_execution_keeps_pending_and_releases_a
     assert_eq!(executor.call_count(), 1);
     assert_eq!(runtime.pending_tool_calls().await, pending_before_cancel);
     assert_eq!(runtime.ledger_projection().await, projection_before_cancel);
-    assert_missing_tool_result_artifact(&runtime).await;
+    assert_missing_tool_result_output(&runtime).await;
     let follow_up_events = start_step_after_cleanup(&runtime, "after late-cancel").await;
     assert!(
         follow_up_events

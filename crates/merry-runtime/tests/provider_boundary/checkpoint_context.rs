@@ -5,14 +5,13 @@ use crate::support::{
         ScriptedModelProvider, completed_event, completed_outputs_event, completed_text_event,
         model_name, model_tool_call,
     },
-    runtime::{artifact_id, collect_step, runtime_with_provider, session_id},
+    runtime::{collect_step, session_id},
     tools::{ScriptedToolExecutor, test_tool_spec},
 };
-use merry_core::{ArtifactKind, ArtifactRef};
 use merry_llm::{FinishReason, ModelMessageRole, ModelOutput, testing::FakeModelProvider};
 use merry_runtime::{
-    ArtifactContent, CitationCompactionPolicy, CompactedCheckpoint, ProjectRules, RegisteredTool,
-    Runtime, SessionTranscriptItem, StepContext, TaskAnchor, ToolExecutionContext,
+    CitationCompactionPolicy, CompactedCheckpoint, ProjectRules, RegisteredTool, Runtime,
+    SessionTranscriptItem, StepContext, TaskAnchor, ToolExecutionContext,
 };
 use std::sync::Arc;
 
@@ -368,44 +367,6 @@ async fn compacted_checkpoint_renders_before_task_anchor_and_transcript_body() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn compacted_checkpoint_does_not_project_unrelated_artifact_payloads() {
-    let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
-    let runtime = Runtime::builder(session_id("provider-compacted-checkpoint-boundary"))
-        .compacted_checkpoint(
-            CompactedCheckpoint::new("compacted checkpoint payload")
-                .expect("valid compacted checkpoint"),
-        )
-        .model_provider(Arc::new(provider.clone()), model_name())
-        .build()
-        .expect("runtime should build");
-    let payload = "unrelated artifact payload sentinel must stay out";
-    runtime
-        .record_artifact(
-            ArtifactRef::new(artifact_id("unrelated-artifact"), ArtifactKind::Text),
-            ArtifactContent::text(payload),
-        )
-        .await
-        .expect("artifact should record");
-
-    collect_step(&runtime, "Answer with compacted checkpoint only.").await;
-
-    let request = provider.recorded_requests()[0].clone();
-    assert!(request.messages().iter().any(|message| {
-        message
-            .content()
-            .as_text()
-            .contains("compacted checkpoint payload")
-    }));
-    assert!(
-        request
-            .messages()
-            .iter()
-            .all(|message| !message.content().as_text().contains(payload)),
-        "compacted checkpoint must not sweep unrelated artifact payloads into prompt"
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn ledger_observations_do_not_enter_prompt_context_by_default() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_outputs_event(
@@ -444,32 +405,5 @@ async fn ledger_observations_do_not_enter_prompt_context_by_default() {
                 && !text.contains("Ledger")
         }),
         "ledger/tool-result observations must not be rendered into prompt messages by default"
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn artifact_payloads_do_not_enter_prompt_context_by_default() {
-    let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
-    let runtime = runtime_with_provider("provider-artifact-not-projected", provider.clone());
-    let payload = "artifact payload sentinel must stay out of prompt";
-    runtime
-        .record_artifact(
-            ArtifactRef::new(artifact_id("artifact-not-projected"), ArtifactKind::Text),
-            ArtifactContent::text(payload),
-        )
-        .await
-        .expect("artifact should record");
-
-    collect_step(&runtime, "Answer without compacted checkpoint context.").await;
-
-    let requests = provider.recorded_requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].stable_prefix_message_count(), 2);
-    assert!(
-        requests[0]
-            .messages()
-            .iter()
-            .all(|message| !message.content().as_text().contains(payload)),
-        "recorded artifact payload must not be rendered into prompt messages by default"
     );
 }

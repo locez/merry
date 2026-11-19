@@ -1,7 +1,7 @@
 pub(super) use futures_util::StreamExt;
 pub(super) use merry_core::{
-    ArtifactKind, ProviderName, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
-    ToolCallResult, ToolCallResultStatus, ToolName,
+    ProviderName, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallResult,
+    ToolCallResultStatus, ToolName, ToolOutputKind,
 };
 pub(super) use merry_llm::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
@@ -332,9 +332,7 @@ pub(super) fn event_kind_names(events: &[RuntimeJournalEvent]) -> Vec<&'static s
             RuntimeJournalPayload::ModelRetryScheduled { .. } => "ModelRetryScheduled",
             RuntimeJournalPayload::ModelRetryExhausted { .. } => "ModelRetryExhausted",
             RuntimeJournalPayload::StepCompleted => "StepCompleted",
-            RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
             RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
-            RuntimeJournalPayload::EvidenceReferenced { .. } => "EvidenceReferenced",
             RuntimeJournalPayload::ToolCallPending { .. } => "ToolCallPending",
             RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
             RuntimeJournalPayload::Cancelled { .. } => "Cancelled",
@@ -354,15 +352,8 @@ pub(super) fn resolved_tool_result(events: &[RuntimeJournalEvent]) -> &ToolCallR
         .expect("tool resolution event should be present")
 }
 
-fn assert_artifact_recorded_before_tool_resolution(
-    events: &[RuntimeJournalEvent],
-    result: &ToolCallResult,
-    expected_artifacts: usize,
-) {
-    let expected = std::iter::repeat_n("ArtifactRecorded", expected_artifacts)
-        .chain(std::iter::once("ToolCallResolved"))
-        .collect::<Vec<_>>();
-    assert_eq!(event_kind_names(events), expected);
+fn assert_tool_resolved_only(events: &[RuntimeJournalEvent], result: &ToolCallResult) {
+    assert_eq!(event_kind_names(events), ["ToolCallResolved"]);
     assert!(
         events
             .iter()
@@ -371,19 +362,14 @@ fn assert_artifact_recorded_before_tool_resolution(
     );
     assert!(matches!(
         &events[0].payload,
-        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
-    ));
-    assert!(matches!(
-        &events[expected_artifacts].payload,
         RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
 }
 
 pub(super) fn assert_succeeded_json_result(events: &[RuntimeJournalEvent]) {
     let result = resolved_tool_result(events);
-    assert_artifact_recorded_before_tool_resolution(events, result, 2);
+    assert_tool_resolved_only(events, result);
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
-    assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
     assert!(result.diagnostic().is_none());
 }
 
@@ -433,15 +419,10 @@ pub(super) fn assert_successful_patch_content_does_not_leak_internal_metadata(js
     }
 }
 
-pub(super) fn assert_failed_json_result(
-    events: &[RuntimeJournalEvent],
-    diagnostic_code: &str,
-    expected_artifacts: usize,
-) {
+pub(super) fn assert_failed_json_result(events: &[RuntimeJournalEvent], diagnostic_code: &str) {
     let result = resolved_tool_result(events);
-    assert_artifact_recorded_before_tool_resolution(events, result, expected_artifacts);
+    assert_tool_resolved_only(events, result);
     assert_eq!(result.status(), ToolCallResultStatus::Failed);
-    assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
     assert_eq!(
         result
             .diagnostic()

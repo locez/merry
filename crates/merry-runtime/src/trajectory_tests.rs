@@ -1,11 +1,9 @@
-use crate::{
-    ArtifactContent, SessionTranscriptItem, session::SessionState, trajectory::RuntimeObservability,
-};
+use crate::{SessionTranscriptItem, session::SessionState, trajectory::RuntimeObservability};
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, PendingToolCall, PendingToolCallBatch, QueuedInputLane,
-    QueuedInputView, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallArguments,
-    ToolCallBatchId, ToolCallId, ToolCallResult, ToolInputSchema, ToolName, ToolOutput, ToolSpec,
-    TrajectoryEvent, TrajectoryLane, TrajectoryPayload, TrajectoryRecord, TrajectoryRecordDetails,
+    PendingToolCall, PendingToolCallBatch, QueuedInputLane, QueuedInputView, RuntimeJournalEvent,
+    RuntimeJournalPayload, SessionId, ToolCallArguments, ToolCallBatchId, ToolCallId,
+    ToolCallResult, ToolInputSchema, ToolName, ToolOutput, ToolSpec, TrajectoryEvent,
+    TrajectoryLane, TrajectoryPayload, TrajectoryRecord, TrajectoryRecordDetails,
     TrajectoryRecordId, TrajectoryRecordKind, TrajectoryRecordStatus, TrajectorySnapshot,
     TrajectoryTurnId,
 };
@@ -36,14 +34,8 @@ fn tool_result_updates_the_existing_tool_record() {
         1,
         RuntimeJournalPayload::ToolCallPending { call: call.clone() },
     ));
-    let artifact = ArtifactRef::new(
-        ArtifactId::new("artifact-1").expect("valid artifact"),
-        ArtifactKind::Text,
-    );
-    let result = ToolCallResult::succeeded(call.id().clone(), artifact);
-    let output = ToolOutput::Text {
-        text: "exact tool result".to_owned(),
-    };
+    let result = ToolCallResult::succeeded(call.id().clone());
+    let output = ToolOutput::text("exact tool result").bounded_preview(usize::MAX);
     observability.observe_journal_event_with_contents(
         &RuntimeJournalEvent::new(
             SessionId::new("trajectory-test").expect("valid session"),
@@ -87,11 +79,7 @@ fn tool_records_retain_schema_arguments_and_result_payload() {
     .expect("valid tool specification");
     let observability = RuntimeObservability::new(session_id.clone(), vec![spec]);
     let call = tool_call();
-    let artifact = ArtifactRef::new(
-        ArtifactId::new("artifact-1").expect("valid artifact"),
-        ArtifactKind::Text,
-    );
-    let result = ToolCallResult::succeeded(call.id().clone(), artifact);
+    let result = ToolCallResult::succeeded(call.id().clone());
     observability.seed_from_transcript(&[
         SessionTranscriptItem::ToolCall { call: call.clone() },
         SessionTranscriptItem::ToolResult {
@@ -250,13 +238,7 @@ fn trajectory_retains_complete_long_messages_prompts_and_tool_output() {
         SessionTranscriptItem::ToolCall { call: call.clone() },
         SessionTranscriptItem::ToolResult {
             call_id: call.id().clone(),
-            result: ToolCallResult::succeeded(
-                call.id().clone(),
-                ArtifactRef::new(
-                    ArtifactId::new("artifact-1").expect("valid artifact id"),
-                    ArtifactKind::Text,
-                ),
-            ),
+            result: ToolCallResult::succeeded(call.id().clone()),
             output: Some(ToolOutput::Text {
                 text: long_output.clone(),
             }),
@@ -283,24 +265,21 @@ fn trajectory_retains_complete_long_messages_prompts_and_tool_output() {
     let merry_core::TrajectoryRecordDetails::Tool { tool } = tool_record.details() else {
         panic!("tool record should expose tool details");
     };
-    let output = tool.output().expect("tool output is retained");
-    assert_eq!(output.content(), long_output);
-    assert!(!output.truncated());
+    let output = tool.output().expect("tool output preview is retained");
+    assert!(output.truncated());
+    assert!(long_output.starts_with(output.content()));
+    assert!(output.content().len() <= crate::trajectory::TRAJECTORY_TOOL_PREVIEW_BYTES);
 }
 
 #[test]
 fn assistant_output_events_retain_exact_message_details() {
     let session_id = SessionId::new("trajectory-test").expect("valid session");
     let observability = RuntimeObservability::new(session_id.clone(), Vec::new());
-    let artifact = ArtifactRef::new(
-        ArtifactId::new("assistant-output-1").expect("valid artifact id"),
-        ArtifactKind::Text,
-    );
     let event = RuntimeJournalEvent::new(
         session_id,
         12,
         RuntimeJournalPayload::AssistantOutputRecorded {
-            artifact: artifact.clone(),
+            text: "assistant answer".to_owned(),
         },
     );
 
@@ -312,7 +291,6 @@ fn assistant_output_events_retain_exact_message_details() {
         .first()
         .expect("assistant record is projected");
     assert_eq!(record.summary(), Some("assistant answer"));
-    assert_eq!(record.artifacts(), &[artifact]);
     assert_eq!(
         record.details(),
         &TrajectoryRecordDetails::Message {
@@ -394,45 +372,53 @@ fn compaction_completion_closes_the_active_compaction_record() {
 }
 
 #[test]
-fn restoring_snapshot_hydrates_missing_assistant_message_details() {
+fn restoring_snapshot_hydrates_stripped_tool_output_from_session() {
     let session_id = SessionId::new("trajectory-test").expect("valid session");
-    let artifact = ArtifactRef::new(
-        ArtifactId::new("assistant-output-401").expect("valid artifact id"),
-        ArtifactKind::Text,
-    );
     let mut session = SessionState::new(session_id.clone());
-    let assistant_text = "legacy assistant response";
+    let turn = session.begin_model_turn().expect("turn begins");
+    let call = tool_call();
+    let batch = PendingToolCallBatch::new(
+        ToolCallBatchId::new("hydrate-batch").expect("valid batch id"),
+        vec![call.clone()],
+    )
+    .expect("valid batch");
     session
-        .record_artifact_state(artifact.clone(), ArtifactContent::text(assistant_text))
-        .expect("assistant artifact is recordable");
+        .record_tool_call_batch_pending(turn, batch)
+        .expect("tool call records");
+    session
+        .close_model_response(turn, true)
+        .expect("model response closes");
+    session
+        .submit_tool_result(
+            ToolCallResult::succeeded(call.id().clone()),
+            ToolOutput::text("hydrated tool output"),
+        )
+        .expect("tool result records");
 
     let mut snapshot = TrajectorySnapshot::new(session_id.clone());
     let mut record = TrajectoryRecord::new(
-        TrajectoryRecordId::new("assistant-record").expect("valid record id"),
-        TrajectoryLane::Model,
-        TrajectoryRecordKind::AssistantMessage,
-        "Assistant message".to_owned(),
+        TrajectoryRecordId::new("tool-record").expect("valid record id"),
+        TrajectoryLane::Tools,
+        TrajectoryRecordKind::ToolCall,
+        "read_file".to_owned(),
         TrajectoryRecordStatus::Succeeded,
         401,
     );
-    record.add_artifact(artifact);
+    record.set_relationship(None, Some(call.id().clone()));
+    record.set_tool_details(Some(call.name().clone()), call.arguments().clone());
     snapshot.upsert_record(record);
 
     let observability = RuntimeObservability::new(session_id, Vec::new());
     observability.restore_snapshot(snapshot, &session);
 
     let snapshot = observability.snapshot();
-    let record = snapshot
-        .records()
-        .first()
-        .expect("restored assistant record");
-    assert_eq!(record.summary(), Some(assistant_text));
+    let record = snapshot.records().first().expect("restored tool record");
+    let TrajectoryRecordDetails::Tool { tool } = record.details() else {
+        panic!("restored record should have tool details");
+    };
     assert_eq!(
-        record.details(),
-        &TrajectoryRecordDetails::Message {
-            content: assistant_text.to_owned(),
-            truncated: false,
-        }
+        tool.output().map(TrajectoryPayload::content),
+        Some("hydrated tool output")
     );
 }
 
@@ -500,34 +486,20 @@ fn restoring_snapshot_replays_transcript_tail_with_durable_sequences() {
     session
         .close_model_response(new_turn, true)
         .expect("new tool response closes");
-    let first_result = ToolCallResult::succeeded(
-        call.id().clone(),
-        ArtifactRef::new(
-            ArtifactId::new("tool-result-replay-1").expect("valid artifact id"),
-            ArtifactKind::Json,
-        ),
-    );
+    let first_result = ToolCallResult::succeeded(call.id().clone());
     let first_resolved = session
-        .submit_tool_result(first_result, ArtifactContent::json(r#"{"ok":true}"#))
+        .submit_tool_result(first_result, ToolOutput::json(r#"{"ok":true}"#))
         .expect("tool result records");
-    let second_result = ToolCallResult::succeeded(
-        second_call.id().clone(),
-        ArtifactRef::new(
-            ArtifactId::new("tool-result-replay-2").expect("valid artifact id"),
-            ArtifactKind::Json,
-        ),
-    );
+    let second_result = ToolCallResult::succeeded(second_call.id().clone());
     let second_resolved = session
-        .submit_tool_result(second_result, ArtifactContent::json(r#"{"ok":false}"#))
+        .submit_tool_result(second_result, ToolOutput::json(r#"{"ok":false}"#))
         .expect("second tool result records");
     let continuation = session.begin_model_turn().expect("continuation begins");
     let assistant = session
         .record_assistant_text_output(continuation, "new answer".to_owned())
         .expect("new assistant records");
 
-    let session_trajectory = session
-        .trajectory_items()
-        .expect("session trajectory is readable");
+    let session_trajectory = session.trajectory_items();
     let ledger = session.ledger_projection();
     let resumed = RuntimeObservability::new(session_id, Vec::new());
     resumed.restore_snapshot(persisted_snapshot, &session);
@@ -623,9 +595,7 @@ fn replay_uses_model_turn_sequence_after_step_fails_before_turn_begins() {
         .record_user_message_body(second_turn, "second input")
         .expect("second input records");
 
-    let trajectory = session
-        .trajectory_items()
-        .expect("trajectory projection is readable");
+    let trajectory = session.trajectory_items();
     let observability = RuntimeObservability::new(session_id, Vec::new());
     observability.reconcile_from_session(&trajectory, &session.ledger_projection());
 

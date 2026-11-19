@@ -1,5 +1,5 @@
-use crate::{ArtifactContent, session::TranscriptItemSnapshot};
-use merry_core::{ArtifactRef, PendingToolCall, ToolCallId, ToolCallResult, ToolOutput};
+use crate::session::TranscriptItemSnapshot;
+use merry_core::{ImageSummary, PendingToolCall, ToolCallId, ToolCallResult, ToolOutput};
 use std::collections::BTreeMap;
 
 /// Read-only public projection of persisted session transcript items.
@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 pub enum SessionTranscriptItem {
     UserMessage {
         text: String,
-        images: Vec<ArtifactRef>,
+        images: Vec<ImageSummary>,
     },
     AssistantText {
         text: String,
@@ -25,24 +25,18 @@ pub enum SessionTranscriptItem {
     },
 }
 
-/// Complete transcript evidence used to rebuild the runtime trajectory after
+/// Complete transcript record used to rebuild the runtime trajectory after
 /// restoring a persisted session.
-///
-/// This stays internal to the runtime. The public transcript projection keeps
-/// its smaller compatibility surface, while trajectory replay retains the
-/// artifact identities needed to recover exact sequence and evidence links.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionTrajectoryItem {
     UserMessage {
         item_id: u64,
         model_turn_id: u64,
-        artifact: ArtifactRef,
         text: String,
     },
     AssistantText {
         item_id: u64,
         model_turn_id: u64,
-        artifact: ArtifactRef,
         text: String,
     },
     ToolCall {
@@ -55,7 +49,6 @@ pub(crate) enum SessionTrajectoryItem {
         model_turn_id: u64,
         call_id: ToolCallId,
         result: ToolCallResult,
-        artifact: ArtifactRef,
         output: Option<ToolOutput>,
     },
 }
@@ -74,7 +67,7 @@ impl From<TranscriptItemSnapshot> for SessionTranscriptItem {
                 text,
                 images: images
                     .into_iter()
-                    .map(|image| image.artifact().clone())
+                    .map(|image| ImageSummary::new(image.label(), image.width(), image.height()))
                     .collect(),
             },
             TranscriptItemSnapshot::AssistantText { text } => Self::AssistantText { text },
@@ -82,23 +75,13 @@ impl From<TranscriptItemSnapshot> for SessionTranscriptItem {
             TranscriptItemSnapshot::ToolResult {
                 call_id,
                 result,
-                content,
-                images: _,
+                output,
+                ..
             } => Self::ToolResult {
                 call_id,
                 result,
-                output: tool_output_from_content(content),
+                output: Some(output),
             },
         }
-    }
-}
-
-fn tool_output_from_content(content: ArtifactContent) -> Option<ToolOutput> {
-    match content {
-        ArtifactContent::Text { content: text } => Some(ToolOutput::Text { text }),
-        ArtifactContent::Json { content: json } => Some(ToolOutput::Json { json }),
-        ArtifactContent::Binary { .. }
-        | ArtifactContent::Image { .. }
-        | ArtifactContent::Other { .. } => None,
     }
 }

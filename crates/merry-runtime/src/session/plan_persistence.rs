@@ -1,14 +1,12 @@
 use super::SessionState;
 use crate::{
     FileSessionStore, PlanPersistenceLocation, SessionStoreError,
-    artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
     plan::{PersistedPlanState, PlanState},
 };
-use merry_core::{ArtifactId, ArtifactRef, PlanSnapshot, SessionId};
+use merry_core::{PlanSnapshot, SessionId};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
-const PLAN_OVERLAY_FORMAT_VERSION: u32 = 1;
+const PLAN_OVERLAY_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,7 +18,6 @@ struct StoredPlanOverlayDocument {
     base_terminal_plan_count: usize,
     active_plan: PersistedPlanState,
     terminal_plans: Vec<PlanSnapshot>,
-    artifacts: Vec<StoredPlanArtifact>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -28,13 +25,6 @@ struct StoredPlanOverlayDocument {
 struct StoredPlanVersion {
     plan_id: merry_core::PlanId,
     revision: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredPlanArtifact {
-    artifact: ArtifactRef,
-    content: ArtifactContent,
 }
 
 #[derive(Debug, Clone)]
@@ -49,38 +39,17 @@ impl SessionState {
         active_plan: &PlanState,
         terminal_plans: &[PlanSnapshot],
         next_sequence: u64,
-        artifacts: &ArtifactRegistry,
     ) -> Result<PersistablePlanOverlayBundle, SessionStoreError> {
         crate::session_store::validate_plan_snapshot(
             active_plan.snapshot(),
             PlanPersistenceLocation::OverlayActive,
         )?;
-        validate_plan_snapshot_refs(artifacts, active_plan.snapshot())?;
         for (index, terminal) in terminal_plans.iter().enumerate() {
             crate::session_store::validate_plan_snapshot(
                 terminal,
                 PlanPersistenceLocation::OverlayTerminal { index },
             )?;
-            validate_plan_snapshot_refs(artifacts, terminal)?;
         }
-        let artifact_ids = plan_artifact_ids(active_plan.snapshot())
-            .into_iter()
-            .chain(terminal_plans.iter().flat_map(plan_artifact_ids))
-            .collect::<BTreeSet<_>>();
-        let stored_artifacts = artifact_ids
-            .into_iter()
-            .map(|artifact_id| {
-                let artifact = artifacts
-                    .read_ref(&artifact_id)
-                    .map_err(|_| invalid_document("plan overlay artifact is missing"))?
-                    .clone();
-                let content = artifacts
-                    .read_content(&artifact_id)
-                    .map_err(|_| invalid_document("plan overlay artifact content is missing"))?
-                    .clone();
-                Ok(StoredPlanArtifact { artifact, content })
-            })
-            .collect::<Result<Vec<_>, SessionStoreError>>()?;
         let document = StoredPlanOverlayDocument {
             format_version: PLAN_OVERLAY_FORMAT_VERSION,
             session_id: self.session_id.clone(),
@@ -92,7 +61,6 @@ impl SessionState {
             base_terminal_plan_count: self.terminal_plans.len(),
             active_plan: active_plan.persisted(),
             terminal_plans: terminal_plans.to_vec(),
-            artifacts: stored_artifacts,
         };
         Ok(PersistablePlanOverlayBundle {
             session_id: self.session_id.clone(),
@@ -150,122 +118,22 @@ impl SessionState {
             return Ok(());
         }
 
-        let mut artifacts = self.artifacts.clone();
-        for stored in document.artifacts {
-            match artifacts.read_record(stored.artifact.id()) {
-                Ok(existing)
-                    if existing.artifact() == &stored.artifact
-                        && existing.content() == &stored.content => {}
-                Ok(_) => {
-                    return Err(invalid_document(
-                        "plan overlay artifact conflicts with session state",
-                    ));
-                }
-                Err(ArtifactError::MissingArtifact { .. }) => {
-                    artifacts
-                        .record(stored.artifact, stored.content)
-                        .map_err(|_| invalid_document("plan overlay artifact is invalid"))?;
-                }
-                Err(_) => {
-                    return Err(invalid_document("plan overlay artifact is invalid"));
-                }
-            }
-        }
         crate::session_store::validate_plan_snapshot(
             active_plan.snapshot(),
             PlanPersistenceLocation::OverlayActive,
         )?;
-        validate_plan_snapshot_refs(&artifacts, active_plan.snapshot())?;
         for (index, terminal) in document.terminal_plans.iter().enumerate() {
             crate::session_store::validate_plan_snapshot(
                 terminal,
                 PlanPersistenceLocation::OverlayTerminal { index },
             )?;
-            validate_plan_snapshot_refs(&artifacts, terminal)?;
         }
 
         self.next_sequence = self.next_sequence.max(document.next_sequence);
-        self.artifacts = artifacts;
         self.active_plan = Some(active_plan);
         self.terminal_plans = document.terminal_plans;
         Ok(())
     }
-}
-
-pub(super) fn validate_plan_snapshot_refs(
-    artifacts: &ArtifactRegistry,
-    snapshot: &PlanSnapshot,
-) -> Result<(), SessionStoreError> {
-    for result in snapshot
-        .nodes
-        .iter()
-        .filter_map(|node| node.result.as_ref())
-        .chain(
-            snapshot
-                .attempts
-                .iter()
-                .filter_map(|attempt| attempt.result.as_ref()),
-        )
-    {
-        SessionState::validate_plan_refs_in(
-            artifacts,
-            &result.evidence_refs,
-            &result.artifact_refs,
-        )
-        .map_err(|_| invalid_document("stored plan result references invalid evidence"))?;
-    }
-    for progress in &snapshot.attempt_progress {
-        SessionState::validate_plan_refs_in(
-            artifacts,
-            &progress.acceptance_evidence,
-            &progress.artifact_refs,
-        )
-        .map_err(|_| invalid_document("stored plan progress references invalid evidence"))?;
-    }
-    Ok(())
-}
-
-fn plan_artifact_ids(snapshot: &PlanSnapshot) -> Vec<ArtifactId> {
-    let mut ids = BTreeSet::new();
-    for result in snapshot
-        .nodes
-        .iter()
-        .filter_map(|node| node.result.as_ref())
-        .chain(
-            snapshot
-                .attempts
-                .iter()
-                .filter_map(|attempt| attempt.result.as_ref()),
-        )
-    {
-        ids.extend(
-            result
-                .artifact_refs
-                .iter()
-                .map(|artifact| artifact.id().clone()),
-        );
-        ids.extend(
-            result
-                .evidence_refs
-                .iter()
-                .map(|evidence| evidence.artifact_id.clone()),
-        );
-    }
-    for progress in &snapshot.attempt_progress {
-        ids.extend(
-            progress
-                .artifact_refs
-                .iter()
-                .map(|artifact| artifact.id().clone()),
-        );
-        ids.extend(
-            progress
-                .acceptance_evidence
-                .iter()
-                .map(|evidence| evidence.artifact_id.clone()),
-        );
-    }
-    ids.into_iter().collect()
 }
 
 impl FileSessionStore {

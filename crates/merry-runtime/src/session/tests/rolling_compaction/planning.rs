@@ -68,8 +68,8 @@ fn one_shot_covers_everything_and_shortens_all_but_the_newest_tool_exchanges() {
     );
     let retained = covered_exchanges[0];
     assert_eq!(
-        retained["result"]["artifact_id"].as_str(),
-        Some("one-shot-result-3"),
+        retained["call_id"].as_str(),
+        Some("one-shot-call-3"),
         "the retained exchange is the newest covered one"
     );
     assert!(

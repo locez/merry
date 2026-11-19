@@ -50,19 +50,19 @@ struct ClipboardImageCompletion {
 }
 
 pub(super) struct CommandOutputCompletion {
-    artifact_id: merry_core::ArtifactId,
+    call_id: merry_core::ToolCallId,
     generation: u64,
     result: Result<super::command_details::CapturedOutput, String>,
 }
 
 impl CommandOutputCompletion {
     pub(super) fn new(
-        artifact_id: merry_core::ArtifactId,
+        call_id: merry_core::ToolCallId,
         generation: u64,
         result: Result<super::command_details::CapturedOutput, String>,
     ) -> Self {
         Self {
-            artifact_id,
+            call_id,
             generation,
             result,
         }
@@ -70,7 +70,7 @@ impl CommandOutputCompletion {
 
     pub(super) fn apply(self, state: &mut TuiState) {
         if self.generation == state.command_details_generation() {
-            super::command_details::apply_output(state, &self.artifact_id, self.result);
+            super::command_details::apply_output(state, &self.call_id, self.result);
         }
     }
 }
@@ -88,7 +88,7 @@ pub(crate) enum ControllerEffect {
     SubmitNext(TuiSubmission),
     SubmitBacklog(TuiSubmission),
     PasteImage,
-    LoadCommandOutput(merry_core::ArtifactId),
+    LoadCommandOutput(merry_core::ToolCallId),
     CopyText(String),
     CopyTextTooLarge,
     Interrupt,

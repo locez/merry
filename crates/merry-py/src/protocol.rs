@@ -8,8 +8,8 @@ use merry::{
     },
 };
 use merry_core::{
-    ArtifactRef, ErrorInfo, RuntimeEvent, SessionUsage, ToolCallArguments, ToolCallBatchId,
-    ToolCallId, ToolInputSchema, ToolName,
+    ErrorInfo, RuntimeEvent, SessionUsage, ToolCallArguments, ToolCallBatchId, ToolCallId,
+    ToolInputSchema, ToolName,
 };
 use schemars::Schema;
 use serde::{Deserialize, Serialize};
@@ -100,14 +100,12 @@ struct NativeRunResult<'a> {
 #[derive(Serialize)]
 struct NativeFinalOutput<'a> {
     call_id: &'a ToolCallId,
-    artifact: &'a ArtifactRef,
     json: &'a str,
 }
 
 pub(crate) fn run_result_to_json(result: &RunResult) -> Result<String, serde_json::Error> {
     let final_output_json = result.final_output_json().map(|output| NativeFinalOutput {
         call_id: output.call_id(),
-        artifact: output.artifact(),
         json: output.json(),
     });
     let wire = NativeRunResult {

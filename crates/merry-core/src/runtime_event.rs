@@ -1,10 +1,10 @@
 //! Public runtime event contract for SDK/UI consumers.
 
 use crate::{
-    ArtifactRef, CoordinatorDirectiveSnapshot, ErrorInfo, EvidenceRef, PendingToolCall,
-    PendingToolCallBatch, PlanAttemptId, PlanAttemptProgressSnapshot, PlanAttemptSnapshot, PlanId,
-    PlanLeaseSnapshot, PlanNodeId, PlanPhase, PlanRevisionSummary, PlanSnapshot, SessionId,
-    SessionUsage, SubagentId, SubagentTaskId, ToolCallId, ToolCallResult,
+    CoordinatorDirectiveSnapshot, ErrorInfo, PendingToolCall, PendingToolCallBatch, PlanAttemptId,
+    PlanAttemptProgressSnapshot, PlanAttemptSnapshot, PlanId, PlanLeaseSnapshot, PlanNodeId,
+    PlanPhase, PlanRevisionSummary, PlanSnapshot, SessionId, SessionUsage, SubagentId,
+    SubagentTaskId, ToolCallId, ToolCallResult,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -41,7 +41,6 @@ pub enum RuntimeEvent {
     /// The assistant produced user-facing text.
     AssistantMessage {
         text: String,
-        artifact: ArtifactRef,
         source: RuntimeEventSource,
     },
     /// Incremental assistant text from the active model stream.
@@ -71,7 +70,7 @@ pub enum RuntimeEvent {
         batch: PendingToolCallBatch,
         source: RuntimeEventSource,
     },
-    /// A tool call finished with an artifact-backed result.
+    /// A tool call finished with a recorded result.
     ToolCallFinished {
         result: ToolCallResult,
         output: Option<ToolOutput>,
@@ -80,7 +79,7 @@ pub enum RuntimeEvent {
     /// A final-output contract recorded structured terminal output.
     FinalOutputRecorded {
         call_id: ToolCallId,
-        artifact: ArtifactRef,
+        json: String,
         source: RuntimeEventSource,
     },
     /// A model provider attempt started.
@@ -105,17 +104,11 @@ pub enum RuntimeEvent {
         error_kind: String,
         source: RuntimeEventSource,
     },
-    /// Exact evidence was referenced.
-    EvidenceReferenced {
-        evidence: EvidenceRef,
-        source: RuntimeEventSource,
-    },
     /// A model used a skill by reading its catalog-listed `SKILL.md`.
     SkillUsed {
         skill_name: String,
         skill_md_path: String,
         tool_call_id: ToolCallId,
-        artifact: ArtifactRef,
         source: RuntimeEventSource,
     },
     /// A subagent task was accepted for execution.
@@ -277,12 +270,164 @@ pub enum SubagentStatus {
     Cancelled,
 }
 
-/// Complete public text or JSON output for a tool result artifact.
+/// Kind of recorded tool output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputKind {
+    /// UTF-8 plain text.
+    Text,
+    /// Serialized JSON text.
+    Json,
+}
+
+/// Complete public text or JSON output for a tool result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolOutput {
     Text { text: String },
     Json { json: String },
+}
+
+impl ToolOutput {
+    /// Creates UTF-8 text tool output.
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    /// Creates serialized JSON tool output.
+    #[must_use]
+    pub fn json(json: impl Into<String>) -> Self {
+        Self::Json { json: json.into() }
+    }
+
+    /// Returns the output kind.
+    #[must_use]
+    pub const fn kind(&self) -> ToolOutputKind {
+        match self {
+            Self::Text { .. } => ToolOutputKind::Text,
+            Self::Json { .. } => ToolOutputKind::Json,
+        }
+    }
+
+    /// Borrows the exact UTF-8 payload.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Text { text } | Self::Json { json: text } => text,
+        }
+    }
+
+    /// Returns the exact UTF-8 byte length.
+    #[must_use]
+    pub fn byte_len(&self) -> usize {
+        self.as_str().len()
+    }
+
+    /// Creates a bounded UTF-8-safe preview without cloning the full payload.
+    #[must_use]
+    pub fn bounded_preview(&self, max_bytes: usize) -> ToolOutputPreview {
+        let value = self.as_str();
+        let byte_length = value.len();
+        if byte_length <= max_bytes {
+            return ToolOutputPreview::new(self.kind(), value.to_owned(), false, byte_length);
+        }
+        let mut end = 0;
+        for (index, character) in value.char_indices() {
+            let next = index + character.len_utf8();
+            if next > max_bytes {
+                break;
+            }
+            end = next;
+        }
+        ToolOutputPreview::new(self.kind(), value[..end].to_owned(), true, byte_length)
+    }
+}
+
+/// Bounded UTF-8 preview of a recorded tool output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolOutputPreview {
+    kind: ToolOutputKind,
+    content: String,
+    truncated: bool,
+    byte_length: usize,
+}
+
+impl ToolOutputPreview {
+    /// Creates a bounded tool output preview.
+    #[must_use]
+    pub fn new(kind: ToolOutputKind, content: String, truncated: bool, byte_length: usize) -> Self {
+        Self {
+            kind,
+            content,
+            truncated,
+            byte_length,
+        }
+    }
+
+    /// Returns the tool output kind.
+    #[must_use]
+    pub const fn kind(&self) -> ToolOutputKind {
+        self.kind
+    }
+
+    /// Borrows the bounded UTF-8 preview content.
+    #[must_use]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    /// Returns whether the exact output exceeded the preview bound.
+    #[must_use]
+    pub const fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// Returns the exact byte length of the full recorded output.
+    #[must_use]
+    pub const fn byte_length(&self) -> usize {
+        self.byte_length
+    }
+}
+
+/// Lightweight public summary of an attached image without raw bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImageSummary {
+    label: String,
+    width: u32,
+    height: u32,
+}
+
+impl ImageSummary {
+    /// Creates an image summary.
+    #[must_use]
+    pub fn new(label: impl Into<String>, width: u32, height: u32) -> Self {
+        Self {
+            label: label.into(),
+            width,
+            height,
+        }
+    }
+
+    /// Borrows the human-readable image label.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Returns decoded image width in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Returns decoded image height in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
 }
 
 /// Public interactive driver state.

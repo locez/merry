@@ -4,8 +4,7 @@ use crate::plan::{
     UpdatePlanInput, domain::PlanState, execution::PlanAttemptActor,
 };
 use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef,
-    PlanActivationSource, PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot,
+    ErrorInfo, PlanActivationSource, PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot,
     PlanDirectiveConstraints, PlanDirectiveKind, PlanDirectiveStatus, PlanExecutorPolicy,
     PlanHarnessSnapshot, PlanId, PlanNodeResult, PlanNodeStatus, PlanRecoveryPolicySnapshot,
     PlanResourcePolicySnapshot, SessionId,
@@ -84,8 +83,7 @@ fn actor(name: &str) -> PlanAttemptActor {
 fn completed_result(conclusion: &str) -> PlanNodeResult {
     PlanNodeResult {
         conclusion: conclusion.to_owned(),
-        evidence_refs: Vec::new(),
-        artifact_refs: Vec::new(),
+        output_paths: Vec::new(),
         changed_paths: Vec::new(),
         verification: vec!["deterministic test passed".to_owned()],
         open_questions: Vec::new(),
@@ -226,17 +224,17 @@ fn progress_payload_references_are_bounded() {
     let executor = actor("bounded-progress-executor");
     plan.start_attempt(&ids["work"], executor.clone(), 1_000)
         .expect("attempt starts");
-    let artifact_id = ArtifactId::new("artifact-progress-bound").expect("valid artifact id");
-    let evidence = EvidenceRef::new(artifact_id.clone(), EvidenceLocator::whole_artifact());
-    let artifact = ArtifactRef::new(artifact_id, ArtifactKind::Text);
 
     let error = plan
         .report_progress(
             &executor,
             ReportPlanProgressInput {
-                summary: "too many evidence refs".to_owned(),
-                evidence_refs: vec![evidence; crate::plan::validation::MAX_PAYLOAD_ITEMS + 1],
-                artifact_refs: Vec::new(),
+                summary: "too many evidence notes".to_owned(),
+                evidence_notes: vec![
+                    "note".to_owned();
+                    crate::plan::validation::MAX_PAYLOAD_ITEMS + 1
+                ],
+                output_paths: Vec::new(),
                 next_action: None,
                 checkpoint_ref: None,
                 acknowledged_directive_ids: Vec::new(),
@@ -245,11 +243,11 @@ fn progress_payload_references_are_bounded() {
             },
             1_001,
         )
-        .expect_err("progress evidence refs must be bounded");
+        .expect_err("progress evidence notes must be bounded");
     assert!(matches!(
         error,
         crate::plan::PlanError::TooManyPayloadItems {
-            field: "evidence_refs",
+            field: "evidence_notes",
             actual: 17,
             maximum: 16
         }
@@ -259,9 +257,12 @@ fn progress_payload_references_are_bounded() {
         .report_progress(
             &executor,
             ReportPlanProgressInput {
-                summary: "too many artifact refs".to_owned(),
-                evidence_refs: Vec::new(),
-                artifact_refs: vec![artifact; crate::plan::validation::MAX_PAYLOAD_ITEMS + 1],
+                summary: "too many output paths".to_owned(),
+                evidence_notes: Vec::new(),
+                output_paths: vec![
+                    "out/file.txt".to_owned();
+                    crate::plan::validation::MAX_PAYLOAD_ITEMS + 1
+                ],
                 next_action: None,
                 checkpoint_ref: None,
                 acknowledged_directive_ids: Vec::new(),
@@ -270,11 +271,11 @@ fn progress_payload_references_are_bounded() {
             },
             1_002,
         )
-        .expect_err("progress artifact refs must be bounded");
+        .expect_err("progress output paths must be bounded");
     assert!(matches!(
         error,
         crate::plan::PlanError::TooManyPayloadItems {
-            field: "artifact_refs",
+            field: "output_paths",
             actual: 17,
             maximum: 16
         }
@@ -296,8 +297,7 @@ fn serialized_plan_snapshot_size_is_bounded_before_attempt_install() {
                 outcome: PlanAttemptOutcome::Completed,
                 result: Some(PlanNodeResult {
                     conclusion: "x".repeat(crate::plan::validation::MAX_PLAN_SNAPSHOT_BYTES),
-                    evidence_refs: Vec::new(),
-                    artifact_refs: Vec::new(),
+                    output_paths: Vec::new(),
                     changed_paths: Vec::new(),
                     verification: Vec::new(),
                     open_questions: Vec::new(),
@@ -349,8 +349,8 @@ fn multiple_progress_reports_stay_inside_one_attempt_and_apply_directive_explici
             &subagent,
             ReportPlanProgressInput {
                 summary: "Collected the primary evidence".to_owned(),
-                evidence_refs: Vec::new(),
-                artifact_refs: Vec::new(),
+                evidence_notes: Vec::new(),
+                output_paths: Vec::new(),
                 next_action: Some("Run final verification".to_owned()),
                 checkpoint_ref: Some("checkpoint-a".to_owned()),
                 acknowledged_directive_ids: vec![directive.directive.directive_id.clone()],
@@ -370,8 +370,8 @@ fn multiple_progress_reports_stay_inside_one_attempt_and_apply_directive_explici
             &subagent,
             ReportPlanProgressInput {
                 summary: "Final verification is in progress".to_owned(),
-                evidence_refs: Vec::new(),
-                artifact_refs: Vec::new(),
+                evidence_notes: Vec::new(),
+                output_paths: Vec::new(),
                 next_action: Some("Return the result".to_owned()),
                 checkpoint_ref: None,
                 acknowledged_directive_ids: Vec::new(),
@@ -585,8 +585,8 @@ fn durable_progress_moves_the_review_window_forward() {
         &subagent,
         ReportPlanProgressInput {
             summary: "Durable evidence was recorded".to_owned(),
-            evidence_refs: Vec::new(),
-            artifact_refs: Vec::new(),
+            evidence_notes: Vec::new(),
+            output_paths: Vec::new(),
             next_action: Some("Continue the same path".to_owned()),
             checkpoint_ref: None,
             acknowledged_directive_ids: Vec::new(),

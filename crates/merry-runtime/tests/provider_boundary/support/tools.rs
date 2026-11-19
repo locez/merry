@@ -1,6 +1,5 @@
 use merry_core::{
-    ArtifactRef, ErrorInfo, PendingToolCall, ToolCallId, ToolCallResult, ToolInputSchema, ToolName,
-    ToolSpec,
+    ErrorInfo, PendingToolCall, ToolCallId, ToolCallResult, ToolInputSchema, ToolName, ToolSpec,
 };
 use merry_runtime::{
     ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
@@ -10,15 +9,9 @@ use schemars::Schema;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
-pub(crate) fn failed_tool_result(
-    call_id: ToolCallId,
-    artifact: ArtifactRef,
-    code: &str,
-    message: &str,
-) -> ToolCallResult {
+pub(crate) fn failed_tool_result(call_id: ToolCallId, code: &str, message: &str) -> ToolCallResult {
     ToolCallResult::failed(
         call_id,
-        artifact,
         merry_core::ErrorInfo::new(code, message).expect("valid diagnostic"),
     )
 }

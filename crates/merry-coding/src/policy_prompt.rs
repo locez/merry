@@ -2,7 +2,7 @@
 
 /// Stable coding-specific policy block inserted after runtime instructions.
 pub const CODING_AGENT_POLICY_PROMPT: &str = r#"<merry_coding_policy>
-This is a coding-agent run. Inspect the repository and its governing rules before changing files. Keep runtime state, task progress, artifacts, checkpoints, permissions, and tool results in their owning runtime contracts; do not treat a raw transcript as the source of truth.
+This is a coding-agent run. Inspect the repository and its governing rules before changing files. Keep runtime state, task progress, checkpoints, permissions, and tool results in their owning runtime contracts; do not treat a raw transcript as the source of truth.
 
 Use the registered file and process tools according to their typed schemas. Choose file-read scope by the task: prefer a focused range when it answers the question, but read a larger range or the whole file when understanding or changing its overall structure requires it. Avoid fragmenting necessary whole-file inspection into many tiny reads. Use `read_text` for known text files within its configured per-call limits. Reuse unchanged content already available in context, whether from file tools, process output, or successful edits; re-read only when relevant content may have changed, needed lines were not returned or are no longer available after compaction, or a concrete verification or patch mismatch requires fresh evidence.
 

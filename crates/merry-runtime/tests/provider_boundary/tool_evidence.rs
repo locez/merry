@@ -4,19 +4,16 @@ use crate::support::{
         ScriptedModelProvider, completed_outputs_event, completed_text_event, model_name,
         model_tool_call_with_args, model_tool_call_with_id,
     },
-    runtime::{artifact_id, collect_step, runtime_with_registered_tool, session_id},
+    runtime::{collect_step, runtime_with_registered_tool, session_id},
     tools::{ScriptedToolExecutor, path_tool_spec, test_tool_spec},
 };
-use merry_core::{
-    ArtifactKind, ArtifactRef, EvidenceLocator, RuntimeJournalPayload, ToolCallResultStatus,
-    ToolName,
-};
+use merry_core::{RuntimeJournalPayload, ToolCallResultStatus, ToolName, ToolOutput};
 use merry_llm::{FinishReason, ModelOutput, ModelToolCall, testing::FakeModelProvider};
 use merry_runtime::{
-    ArtifactContent, ArtifactError, LedgerFactKind, LedgerProjection, ProcessActionIntent,
-    ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-    ProcessRunnerFuture, ProcessRunnerOutput, RegisteredTool, Runtime, SkillCatalog, SkillMetadata,
-    ToolExecutionContext, process_command_tool,
+    LedgerFactKind, LedgerProjection, ProcessActionIntent, ProcessExitStatus, ProcessRunner,
+    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+    RegisteredTool, Runtime, SkillCatalog, SkillMetadata, ToolExecutionContext,
+    process_command_tool,
 };
 use serde_json::{Map, Value, json};
 use std::{path::PathBuf, sync::Arc};
@@ -85,68 +82,25 @@ async fn read_only_shell_wrapper_records_input_and_result_artifacts() {
         .await
         .expect("read-only shell wrapper should execute through the process runner");
 
-    assert_eq!(
-        event_kind_names(&execution_events),
-        [
-            "ArtifactRecorded",
-            "ArtifactRecorded",
-            "ArtifactRecorded",
-            "ToolCallResolved"
-        ]
-    );
-    let input_artifact = execution_events
-        .iter()
-        .find_map(|event| match &event.payload {
-            RuntimeJournalPayload::ArtifactRecorded { artifact }
-                if artifact.id().as_str().starts_with("process-input-") =>
-            {
-                Some(artifact)
-            }
-            _ => None,
-        })
-        .expect("shell input artifact should be recorded before result");
+    assert_eq!(event_kind_names(&execution_events), ["ToolCallResolved"]);
     let result = resolved_tool_result(&execution_events);
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
 
-    let input_content = runtime
-        .read_artifact_content(input_artifact.id())
-        .await
-        .expect("input artifact should be readable");
-    let input_text = input_content
-        .as_text()
-        .expect("input artifact should be textual JSON");
-    let input_payload: Value = serde_json::from_str(input_text).expect("input JSON should parse");
-    assert_eq!(input_payload["kind"], "shell_command_input");
-    assert_eq!(
-        input_payload["permission_profile_id"],
-        "process.shell.read_only"
-    );
-    assert_eq!(
-        input_payload["input_evidence"]["script"],
-        "echo ProcessRunner | wc -l"
-    );
-
     let result_content = runtime
-        .read_artifact_content(result.artifact().id())
+        .read_tool_output(result.call_id())
         .await
-        .expect("result artifact should be readable");
-    let result_text = result_content
-        .as_text()
-        .expect("result artifact should be textual JSON");
+        .expect("result output read")
+        .expect("result output should be stored");
     let result_payload: Value =
-        serde_json::from_str(result_text).expect("result JSON should parse");
+        serde_json::from_str(result_content.as_str()).expect("result JSON should parse");
     assert_eq!(
         result_payload["permission_profile_id"],
         "process.shell.read_only"
     );
     assert_eq!(
-        result_payload["input_artifact"],
-        json!({
-            "id": input_artifact.id().as_str(),
-            "kind": "json",
-        })
+        result_payload["input_evidence"]["script"],
+        "echo ProcessRunner | wc -l"
     );
-    assert!(result_payload.get("input_evidence").is_none());
     assert_eq!(result_payload["stdout"]["text"], "1\n");
     assert_eq!(result_payload["stderr"]["text"], "");
 }
@@ -185,69 +139,33 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
         vec![0, 1, 2, 3]
     );
     let pending = pending_tool_call(&pending_events).clone();
-    let reserved_artifact = ArtifactRef::new(artifact_id("tool-result-4"), ArtifactKind::Text);
-    let before_reserved = runtime.ledger_projection().await;
-    let reserved_err = runtime
-        .record_artifact(
-            reserved_artifact.clone(),
-            ArtifactContent::text("external shadow result\n"),
-        )
-        .await
-        .expect_err("external recording should not use runtime-owned tool result ids");
-    let after_reserved = runtime.ledger_projection().await;
-
-    assert!(matches!(
-        reserved_err,
-        merry_runtime::RuntimeError::ReservedArtifactId { artifact_id }
-            if artifact_id == *reserved_artifact.id()
-    ));
-    assert_eq!(before_reserved, after_reserved);
-    assert_eq!(runtime.pending_tool_calls().await, vec![pending.clone()]);
-    let evidence_err = runtime
-        .evidence_ref(reserved_artifact.id(), EvidenceLocator::whole_artifact())
-        .await
-        .expect_err("reserved tool result id must not be externally recorded");
-    assert!(matches!(
-        evidence_err,
-        merry_runtime::RuntimeError::Artifact {
-            source: ArtifactError::MissingArtifact { id }
-        } if id == *reserved_artifact.id()
-    ));
-
     let execution_events = runtime
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
         .expect("tool execution should resolve");
 
-    assert_eq!(
-        event_kind_names(&execution_events),
-        ["ArtifactRecorded", "ToolCallResolved"]
-    );
+    assert_eq!(event_kind_names(&execution_events), ["ToolCallResolved"]);
     assert_eq!(
         execution_events
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![4, 5]
+        vec![4]
     );
     let result = resolved_tool_result(&execution_events);
     assert!(matches!(
         &execution_events[0].payload,
-        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
-    ));
-    assert!(matches!(
-        &execution_events[1].payload,
         RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
-    assert_eq!(result.artifact().id().as_str(), "tool-result-4");
-    assert_eq!(result.artifact().kind(), &ArtifactKind::Text);
     assert_eq!(result.call_id(), pending.id());
-    let evidence = runtime
-        .evidence_ref(result.artifact().id(), EvidenceLocator::whole_artifact())
-        .await
-        .expect("executor result artifact should be readable after ArtifactRecorded");
-    assert_eq!(evidence.artifact_id, *result.artifact().id());
+    assert_eq!(
+        runtime
+            .read_tool_output(result.call_id())
+            .await
+            .expect("executor result output read"),
+        Some(ToolOutput::text("search result\n"))
+    );
     assert_eq!(executor.calls(), vec![pending.clone()]);
     let projection = runtime.ledger_projection().await;
     assert_eq!(
@@ -271,11 +189,6 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
             LedgerProjection::Lifecycle {
                 sequence: 4,
                 order: 3,
-                kind: LedgerFactKind::ArtifactRecorded,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 5,
-                order: 4,
                 kind: LedgerFactKind::ToolCallResolved,
             },
         ]
@@ -291,7 +204,7 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![6, 7, 8, 9]
+        vec![5, 6, 7, 8]
     );
 
     let requests = provider.recorded_requests();
@@ -354,27 +267,24 @@ async fn reading_catalog_skill_file_emits_skill_used_event() {
 
     assert_eq!(
         event_kind_names(&execution_events),
-        ["ArtifactRecorded", "ToolCallResolved", "SkillUsed"]
+        ["ToolCallResolved", "SkillUsed"]
     );
     assert_eq!(
         execution_events
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![4, 5, 6]
+        vec![4, 5]
     );
-    let result = resolved_tool_result(&execution_events);
     assert!(matches!(
-        &execution_events[2].payload,
+        &execution_events[1].payload,
         RuntimeJournalPayload::SkillUsed {
             skill_name,
             skill_md_path,
             tool_call_id,
-            artifact,
         } if skill_name == "demo-skill"
             && skill_md_path == "demo/SKILL.md"
             && tool_call_id == pending.id()
-            && artifact == result.artifact()
     ));
 }
 
@@ -406,16 +316,13 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
         .await
         .expect("domain failure should resolve the pending call");
 
-    assert_eq!(
-        event_kind_names(&execution_events),
-        ["ArtifactRecorded", "ToolCallResolved"]
-    );
+    assert_eq!(event_kind_names(&execution_events), ["ToolCallResolved"]);
     assert_eq!(
         execution_events
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![4, 5]
+        vec![4]
     );
     assert!(
         execution_events
@@ -426,15 +333,9 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
     let result = resolved_tool_result(&execution_events);
     assert!(matches!(
         &execution_events[0].payload,
-        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
-    ));
-    assert!(matches!(
-        &execution_events[1].payload,
         RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
     assert_eq!(result.status(), ToolCallResultStatus::Failed);
-    assert_eq!(result.artifact().id().as_str(), "tool-result-4");
-    assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
     assert_eq!(result.call_id(), pending.id());
     assert_eq!(
         result
@@ -444,11 +345,13 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
         "tool_lookup_failed"
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
-    let evidence = runtime
-        .evidence_ref(result.artifact().id(), EvidenceLocator::whole_artifact())
-        .await
-        .expect("domain failure artifact should be readable after ArtifactRecorded");
-    assert_eq!(evidence.artifact_id, *result.artifact().id());
+    assert_eq!(
+        runtime
+            .read_tool_output(result.call_id())
+            .await
+            .expect("domain failure output read"),
+        Some(ToolOutput::json(r#"{"ok":false}"#))
+    );
     let projection = runtime.ledger_projection().await;
     assert_eq!(
         projection.entries(),
@@ -471,11 +374,6 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
             LedgerProjection::Lifecycle {
                 sequence: 4,
                 order: 3,
-                kind: LedgerFactKind::ArtifactRecorded,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 5,
-                order: 4,
                 kind: LedgerFactKind::ToolCallResolved,
             },
         ]

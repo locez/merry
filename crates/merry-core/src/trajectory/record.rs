@@ -1,7 +1,7 @@
 //! Serializable trajectory records and their typed payloads.
 
 use crate::{
-    ArtifactRef, ErrorInfo, ToolCallArguments, ToolCallId, ToolName, TrajectoryRecordId,
+    ErrorInfo, ToolCallArguments, ToolCallId, ToolName, TrajectoryRecordId,
     trajectory::{
         TrajectoryTurnId,
         serialization::{optional_turn_id_as_string, optional_u64_as_string, u64_as_string},
@@ -237,7 +237,6 @@ pub struct TrajectoryRecord {
     parent_id: Option<TrajectoryRecordId>,
     #[schemars(extend("x-merry-output-required" = true))]
     tool_call_id: Option<ToolCallId>,
-    artifacts: Vec<ArtifactRef>,
     #[schemars(extend("x-merry-output-required" = true))]
     diagnostic: Option<ErrorInfo>,
     #[serde(with = "optional_u64_as_string")]
@@ -285,7 +284,6 @@ impl TrajectoryRecord {
             end_sequence: None,
             parent_id: None,
             tool_call_id: None,
-            artifacts: Vec::new(),
             diagnostic: None,
             started_at_ms: None,
             finished_at_ms: None,
@@ -363,12 +361,6 @@ impl TrajectoryRecord {
     #[must_use]
     pub fn tool_call_id(&self) -> Option<&ToolCallId> {
         self.tool_call_id.as_ref()
-    }
-
-    /// Borrows exact artifact references attached to this record.
-    #[must_use]
-    pub fn artifacts(&self) -> &[ArtifactRef] {
-        &self.artifacts
     }
 
     /// Borrows the optional failure diagnostic.
@@ -453,17 +445,6 @@ impl TrajectoryRecord {
     ) {
         self.parent_id = parent_id;
         self.tool_call_id = tool_call_id;
-    }
-
-    /// Adds an exact artifact reference if it is not already present.
-    pub fn add_artifact(&mut self, artifact: ArtifactRef) {
-        if !self
-            .artifacts
-            .iter()
-            .any(|current| current.id() == artifact.id())
-        {
-            self.artifacts.push(artifact);
-        }
     }
 
     /// Stores a diagnostic and marks the record as failed.

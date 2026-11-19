@@ -710,7 +710,7 @@ fn build_stream_lines(
         append_text(
             &mut lines,
             state,
-            "Non-UTF-8 output is displayed as text; the artifact retains the original bytes.",
+            "Non-UTF-8 output is displayed as text; the full tool output retains the original bytes.",
             width,
             SemanticColor::Warning,
         );

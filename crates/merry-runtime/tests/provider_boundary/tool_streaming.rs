@@ -7,11 +7,11 @@ use crate::support::{
         ScriptedModelProvider, completed_outputs_event, completed_text_event, model_tool_call,
         model_tool_call_with_args, model_tool_call_with_id,
     },
-    runtime::{artifact_id, collect_step, runtime_with_provider, runtime_with_scripted_provider},
+    runtime::{collect_step, runtime_with_provider, runtime_with_scripted_provider},
 };
-use merry_core::{ArtifactKind, ArtifactRef, ToolCallId, ToolCallResult};
+use merry_core::{ToolCallId, ToolCallResult, ToolOutput};
 use merry_llm::{FinishReason, ModelEvent, ModelOutput, testing::FakeModelProvider};
-use merry_runtime::{ArtifactContent, LedgerFactKind, LedgerProjection};
+use merry_runtime::{LedgerFactKind, LedgerProjection};
 use serde_json::{Map, json};
 
 #[tokio::test(flavor = "current_thread")]
@@ -311,40 +311,22 @@ async fn repeated_provider_tool_call_id_after_pending_fails_without_second_pendi
         ]
     );
 
-    let result_artifact = ArtifactRef::new(
-        artifact_id("manual-result-after-duplicate-pending"),
-        ArtifactKind::Text,
-    );
-    let result = ToolCallResult::succeeded(
-        ToolCallId::new("call-1").expect("valid call id"),
-        result_artifact.clone(),
-    );
+    let result = ToolCallResult::succeeded(ToolCallId::new("call-1").expect("valid call id"));
     let resolved_events = runtime
-        .submit_tool_result(
-            result.clone(),
-            ArtifactContent::text("only accepted once\n"),
-        )
+        .submit_tool_result(result.clone(), ToolOutput::text("only accepted once\n"))
         .await
         .expect("single pending call should resolve");
-    let duplicate_result = ToolCallResult::succeeded(
-        ToolCallId::new("call-1").expect("valid call id"),
-        ArtifactRef::new(
-            artifact_id("manual-result-after-duplicate-second"),
-            ArtifactKind::Text,
-        ),
-    );
+    let duplicate_result =
+        ToolCallResult::succeeded(ToolCallId::new("call-1").expect("valid call id"));
     let duplicate_err = runtime
         .submit_tool_result(
             duplicate_result,
-            ArtifactContent::text("must not resolve twice\n"),
+            ToolOutput::text("must not resolve twice\n"),
         )
         .await
         .expect_err("resolved call id should reject duplicate result");
 
-    assert_eq!(
-        event_kind_names(&resolved_events),
-        ["ArtifactRecorded", "ToolCallResolved"]
-    );
+    assert_eq!(event_kind_names(&resolved_events), ["ToolCallResolved"]);
     assert!(matches!(
         duplicate_err,
         merry_runtime::RuntimeError::ToolCallAlreadyResolved { call_id, .. }

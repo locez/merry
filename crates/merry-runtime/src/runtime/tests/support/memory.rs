@@ -1,5 +1,4 @@
 use crate::{
-    artifact::ArtifactContent,
     memory::{
         ActivatedMemory, MemoryActivationContext, MemoryActivationFuture, MemoryActivationReason,
         MemoryActivationScore, MemoryActivationSource, MemoryActivationSourceKind, MemoryError,
@@ -8,15 +7,14 @@ use crate::{
     runtime::{
         Runtime,
         tests::support::{
-            common::{RuntimeSessionStateTestExt, artifact_id},
+            common::RuntimeSessionStateTestExt,
             model_provider::{NotifyOnDrop, RecordingModelProvider},
             runtime_factories::runtime_with_provider_and_memory_source,
         },
     },
 };
 use merry_core::{
-    ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, PendingToolCall, ToolCallArguments,
-    ToolCallId, ToolCallResultStatus, ToolName,
+    PendingToolCall, ToolCallArguments, ToolCallId, ToolCallResultStatus, ToolName, ToolOutput,
 };
 use std::sync::{
     Arc, Mutex as StdMutex,
@@ -54,7 +52,7 @@ pub(in crate::runtime::tests) fn activated_memory(
 pub(in crate::runtime::tests) fn memory_item(
     id: &str,
     text: &str,
-    evidence_artifact: &str,
+    evidence_source: &str,
     triggers: &[&str],
 ) -> MemoryItem {
     MemoryItem::new(
@@ -62,14 +60,7 @@ pub(in crate::runtime::tests) fn memory_item(
         MemoryScope::Session,
         text,
         vec![
-            MemoryEvidence::new(
-                "primary source",
-                EvidenceRef::new(
-                    artifact_id(evidence_artifact),
-                    EvidenceLocator::whole_artifact(),
-                ),
-            )
-            .expect("valid memory evidence"),
+            MemoryEvidence::new("primary source", evidence_source).expect("valid memory evidence"),
         ],
         MemoryItemSelection::new(
             triggers
@@ -83,30 +74,6 @@ pub(in crate::runtime::tests) fn memory_item(
         .expect("valid memory selection"),
     )
     .expect("valid memory item")
-}
-
-pub(in crate::runtime::tests) fn activated_memory_with_unreadable_evidence(
-    id: &str,
-) -> ActivatedMemory {
-    activated_memory(id, "Unreadable evidence memory.", &format!("{id}-missing"))
-}
-
-pub(in crate::runtime::tests) fn record_memory_artifact(
-    runtime: &Runtime,
-    artifact_id_value: &str,
-    content: &str,
-) {
-    let mut session = runtime
-        .inner
-        .session
-        .try_lock()
-        .expect("session lock is free");
-    session
-        .record_artifact_state(
-            ArtifactRef::new(artifact_id(artifact_id_value), ArtifactKind::Text),
-            ArtifactContent::text(content),
-        )
-        .expect("memory artifact records");
 }
 
 pub(in crate::runtime::tests) fn record_prior_failed_tool_result(runtime: &Runtime, content: &str) {
@@ -131,7 +98,7 @@ pub(in crate::runtime::tests) fn record_prior_failed_tool_result(runtime: &Runti
         .submit_tool_execution_outcome(
             call.id(),
             ToolCallResultStatus::Failed,
-            ArtifactContent::json(content.to_owned()),
+            ToolOutput::json(content.to_owned()),
             Some(
                 merry_core::ErrorInfo::new("process_action_failed", "process action failed")
                     .expect("valid diagnostic"),
@@ -157,16 +124,11 @@ pub(in crate::runtime::tests) fn runtime_with_provider_and_single_memory(
     provider: RecordingModelProvider,
     memory_id: &str,
     memory_text: &str,
-    memory_artifact_id: &str,
+    memory_source: &str,
 ) -> (Runtime, ScriptedMemoryActivationSource) {
-    let memory = activated_memory(memory_id, memory_text, memory_artifact_id);
+    let memory = activated_memory(memory_id, memory_text, memory_source);
     let source = ScriptedMemoryActivationSource::new(vec![vec![memory.clone()]]);
     let runtime = runtime_with_provider_and_memory_source(session, provider, source.clone());
-    record_memory_artifact(
-        &runtime,
-        memory_artifact_id,
-        "exact evidence for lifecycle memory",
-    );
     record_memory_item(&runtime, memory.item().clone());
     (runtime, source)
 }

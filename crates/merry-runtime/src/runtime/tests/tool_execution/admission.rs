@@ -52,13 +52,12 @@ async fn read_only_registered_tool_executes_under_default_policy() {
         events
             .iter()
             .map(|event| match event.payload {
-                RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
                 RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
                 RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
                 _ => "Other",
             })
             .collect::<Vec<_>>(),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
@@ -220,7 +219,7 @@ async fn trusted_external_tools_are_allowed_without_commit_lifecycle() {
     assert_eq!(executor.call_count(), 1);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
@@ -292,21 +291,16 @@ async fn workspace_write_tool_is_denied_before_executor_and_records_sanitized_fa
         events
             .iter()
             .map(|event| match event.payload {
-                RuntimeJournalPayload::ArtifactRecorded { .. } => "ArtifactRecorded",
                 RuntimeJournalPayload::AssistantOutputRecorded { .. } => "AssistantOutputRecorded",
                 RuntimeJournalPayload::ToolCallResolved { .. } => "ToolCallResolved",
                 _ => "Other",
             })
             .collect::<Vec<_>>(),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     let result = resolved_tool_result(&events);
     assert!(matches!(
         &events[0].payload,
-        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
-    ));
-    assert!(matches!(
-        &events[1].payload,
         RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Failed);
@@ -344,11 +338,6 @@ async fn workspace_write_tool_is_denied_before_executor_and_records_sanitized_fa
     assert_lifecycle_order(
         &lifecycle,
         LedgerFactKind::ActionAuditRecorded,
-        LedgerFactKind::ArtifactRecorded,
-    );
-    assert_lifecycle_order(
-        &lifecycle,
-        LedgerFactKind::ActionAuditRecorded,
         LedgerFactKind::ToolCallResolved,
     );
 }
@@ -379,7 +368,7 @@ async fn workspace_write_tool_with_proposal_records_proposed_before_denied_and_r
     assert_eq!(executor.execute_count(), 0);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     assert_sanitized_policy_denial_content(
         &denied_action_content(&runtime, &events).await,
@@ -431,17 +420,12 @@ async fn workspace_write_tool_with_proposal_records_proposed_before_denied_and_r
         .filter_map(|(index, kind)| (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index))
         .collect::<Vec<_>>();
     assert_eq!(audit_indexes.len(), 2);
-    let artifact_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
-        .expect("artifact lifecycle should be recorded");
     let resolved_index = lifecycle
         .iter()
         .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
         .expect("resolution lifecycle should be recorded");
     assert!(audit_indexes[0] < audit_indexes[1]);
-    assert!(audit_indexes[1] < artifact_index);
-    assert!(artifact_index < resolved_index);
+    assert!(audit_indexes[1] < resolved_index);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -543,7 +527,7 @@ async fn command_exec_with_process_proposal_records_proposed_then_denied_without
     assert_eq!(executor.execute_count(), 0);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     assert_sanitized_policy_denial_content(
         &denied_action_content(&runtime, &events).await,
@@ -601,17 +585,12 @@ async fn command_exec_with_process_proposal_records_proposed_then_denied_without
         .filter_map(|(index, kind)| (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index))
         .collect::<Vec<_>>();
     assert_eq!(audit_indexes.len(), 2);
-    let artifact_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
-        .expect("artifact lifecycle should be recorded");
     let resolved_index = lifecycle
         .iter()
         .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
         .expect("resolution lifecycle should be recorded");
     assert!(audit_indexes[0] < audit_indexes[1]);
-    assert!(audit_indexes[1] < artifact_index);
-    assert!(artifact_index < resolved_index);
+    assert!(audit_indexes[1] < resolved_index);
     assert!(runtime.pending_tool_calls().await.is_empty());
 }
 

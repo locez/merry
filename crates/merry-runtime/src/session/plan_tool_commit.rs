@@ -1,13 +1,15 @@
-use super::{SessionState, transcript::ToolResultPromptProjection};
+use super::{
+    SessionState,
+    transcript::{ToolResultPayload, ToolResultPromptProjection},
+};
 use crate::{
     RuntimeError,
-    artifact::{ArtifactContent, ArtifactRegistry},
     ledger::{LedgerFactKind, TaskLedger},
     plan::PlanState,
 };
 use merry_core::{
-    ArtifactRef, ErrorInfo, PendingToolCall, PlanSnapshot, RuntimeJournalEvent,
-    RuntimeJournalPayload, ToolCallId, ToolCallResult, ToolCallResultStatus,
+    ErrorInfo, PendingToolCall, PlanSnapshot, RuntimeJournalEvent, RuntimeJournalPayload,
+    ToolCallId, ToolCallResult, ToolCallResultStatus, ToolOutput,
 };
 use std::collections::BTreeSet;
 
@@ -15,14 +17,11 @@ pub(crate) struct PreparedPlanToolCommit {
     next_sequence: u64,
     session_started: bool,
     ledger: TaskLedger,
-    artifacts: ArtifactRegistry,
     active_plan: PlanState,
     terminal_plans: Vec<PlanSnapshot>,
     transcript: super::Transcript,
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
-    recorded_artifact: ArtifactRef,
-    recorded_content_bytes: usize,
     events: Vec<RuntimeJournalEvent>,
 }
 
@@ -37,10 +36,6 @@ impl PreparedPlanToolCommit {
 
     pub(crate) fn ledger(&self) -> &TaskLedger {
         &self.ledger
-    }
-
-    pub(crate) fn artifacts(&self) -> &ArtifactRegistry {
-        &self.artifacts
     }
 
     pub(crate) fn active_plan(&self) -> &PlanState {
@@ -77,7 +72,7 @@ impl SessionState {
         plan_payloads: Vec<RuntimeJournalPayload>,
         call_id: &ToolCallId,
         status: ToolCallResultStatus,
-        content: ArtifactContent,
+        output: ToolOutput,
         diagnostic: Option<ErrorInfo>,
     ) -> Result<PreparedPlanToolCommit, RuntimeError> {
         let pending_index = self
@@ -103,10 +98,12 @@ impl SessionState {
                 call_id: call_id.clone(),
             })?;
 
+        self.validate_tool_output(call_id, &output)?;
+
         let mut next_sequence = self.next_sequence;
         let mut session_started = self.session_started;
         let mut ledger = self.ledger.clone();
-        let mut events = Vec::with_capacity(plan_payloads.len() + 3);
+        let mut events = Vec::with_capacity(plan_payloads.len() + 2);
         if !session_started {
             session_started = true;
             events.push(record_candidate_event(
@@ -127,40 +124,19 @@ impl SessionState {
             ));
         }
 
-        let artifact_kind = self.tool_result_artifact_kind(&content)?;
-        let artifact = ArtifactRef::new(
-            super::artifacts::tool_result_id(next_sequence),
-            artifact_kind,
-        );
-        let result = ToolCallResult::new(call_id.clone(), status, artifact.clone(), diagnostic)?;
-
-        let mut artifacts = self.artifacts.clone();
-        artifacts.ensure_recordable(&artifact, &content)?;
-        let content_bytes = content.as_bytes().len();
-        let recorded_artifact = artifacts.record_preflighted(artifact, content);
+        let result = ToolCallResult::new(call_id.clone(), status, diagnostic)?;
         let mut transcript = self.transcript.clone();
         transcript.push_tool_result(
             call_id.clone(),
             result.clone(),
-            recorded_artifact.id().clone(),
+            ToolResultPayload::new(output, None, Vec::new()),
             ToolResultPromptProjection::Full,
-            None,
-            Vec::new(),
         )?;
         let mut pending_tool_calls = self.pending_tool_calls.clone();
         pending_tool_calls.remove(pending_index);
         let mut resolved_tool_calls = self.resolved_tool_calls.clone();
         resolved_tool_calls.insert(call_id.clone());
 
-        events.push(record_candidate_event(
-            &self.session_id,
-            &mut next_sequence,
-            &mut ledger,
-            RuntimeJournalPayload::ArtifactRecorded {
-                artifact: recorded_artifact.clone(),
-            },
-            Some(LedgerFactKind::ArtifactRecorded),
-        ));
         events.push(record_candidate_event(
             &self.session_id,
             &mut next_sequence,
@@ -173,28 +149,19 @@ impl SessionState {
             next_sequence,
             session_started,
             ledger,
-            artifacts,
             active_plan,
             terminal_plans,
             transcript,
             pending_tool_calls,
             resolved_tool_calls,
-            recorded_artifact,
-            recorded_content_bytes: content_bytes,
             events,
         })
     }
 
     pub(crate) fn install_plan_tool_commit(&mut self, prepared: PreparedPlanToolCommit) {
-        Self::trace_artifact_record(
-            self.session_id.as_str(),
-            &prepared.recorded_artifact,
-            prepared.recorded_content_bytes,
-        );
         self.next_sequence = prepared.next_sequence;
         self.session_started = prepared.session_started;
         self.ledger = prepared.ledger;
-        self.artifacts = prepared.artifacts;
         self.active_plan = Some(prepared.active_plan);
         self.terminal_plans = prepared.terminal_plans;
         self.transcript = prepared.transcript;

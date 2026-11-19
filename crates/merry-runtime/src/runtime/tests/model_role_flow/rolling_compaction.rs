@@ -1,20 +1,18 @@
 use crate::{
     CitationCompactionPolicy, RuntimeModelRole, StepContext,
-    artifact::ArtifactContent,
     runtime::{
         CompactionConfig, Runtime,
         tests::support::{
             common::{
-                artifact_id, collect_step, completed_event, completed_event_with, model_name,
-                pending_tool_call, session_id,
+                collect_step, completed_event, completed_event_with, model_name, pending_tool_call,
+                session_id,
             },
             model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
         },
     },
 };
 use merry_core::{
-    ArtifactKind, ArtifactRef, PendingToolCallBatch, RuntimeJournalPayload, ToolCallBatchId,
-    ToolCallResult,
+    PendingToolCallBatch, RuntimeJournalPayload, ToolCallBatchId, ToolCallResult, ToolOutput,
 };
 use merry_llm::{FinishReason, ModelCapabilities, ModelName, ModelOutput, ModelProvider};
 use std::num::NonZeroU64;
@@ -281,14 +279,8 @@ async fn assert_one_shot_reduction(
                 .expect("tool response closes");
             session
                 .submit_tool_result(
-                    ToolCallResult::succeeded(
-                        call.id().clone(),
-                        ArtifactRef::new(
-                            artifact_id(&format!("one-shot-result-{index:02}")),
-                            ArtifactKind::Text,
-                        ),
-                    ),
-                    ArtifactContent::text(format!(
+                    ToolCallResult::succeeded(call.id().clone()),
+                    ToolOutput::text(format!(
                         "one-shot result body {index} {}",
                         "z".repeat(result_bytes)
                     )),

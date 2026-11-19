@@ -69,18 +69,14 @@ pub(super) async fn dispatch_effect(
     }
     match effect {
         ControllerEffect::None => Ok(false),
-        ControllerEffect::LoadCommandOutput(artifact_id) => {
+        ControllerEffect::LoadCommandOutput(call_id) => {
             let runtime = session.runtime().clone();
             let sender = command_output_tx.clone();
             let generation = state.command_details_generation();
             background_tasks.spawn(async move {
-                let result = crate::tui::command_details::load_output(&runtime, &artifact_id).await;
+                let result = crate::tui::command_details::load_output(&runtime, &call_id).await;
                 let _ = sender
-                    .send(CommandOutputCompletion::new(
-                        artifact_id,
-                        generation,
-                        result,
-                    ))
+                    .send(CommandOutputCompletion::new(call_id, generation, result))
                     .await;
             });
             Ok(false)

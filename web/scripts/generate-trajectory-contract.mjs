@@ -54,7 +54,6 @@ function renderTypescript(rootSchema) {
   appendFieldConstants(lines, "TrajectoryEvent", rootSchema);
   lines.push("");
   lines.push(`export type TrajectoryEvent = ${renderType(rootSchema, context)};`);
-  lines.push("export type ArtifactReference = ArtifactRef;");
   lines.push("export type Diagnostic = ErrorInfo;");
   return lines.join("\n");
 }

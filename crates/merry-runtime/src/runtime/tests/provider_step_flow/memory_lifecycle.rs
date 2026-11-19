@@ -9,7 +9,7 @@ use crate::{
             memory::{
                 ScriptedMemoryActivationResponse, ScriptedMemoryActivationSource, activated_memory,
                 assert_activated_memory_projection_cleared,
-                assert_activated_memory_projection_retained, record_memory_artifact,
+                assert_activated_memory_projection_retained,
                 runtime_with_provider_and_single_memory,
             },
             model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
@@ -41,11 +41,6 @@ async fn cancellation_after_activation_before_provider_request_clears_projection
         "runtime-memory-activation-cancel-clears",
         provider.clone(),
         source.clone(),
-    );
-    record_memory_artifact(
-        &runtime,
-        "memory-cancelled-after-activation-artifact",
-        "exact evidence for activation cancellation",
     );
 
     let events = collect_step(&runtime, "Topic request.", crate::StepContext::new(token)).await;

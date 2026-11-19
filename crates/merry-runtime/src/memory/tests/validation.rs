@@ -1,4 +1,4 @@
-use super::{evidence, evidence_ref, item, memory_id, provenance, selection};
+use super::{evidence, item, memory_id, provenance, selection};
 use crate::memory::{
     ActivatedMemory, MemoryActivationReason, MemoryActivationScore, MemoryActivationSeed,
     MemoryActivationSourceKind, MemoryError, MemoryEvidence, MemoryId, MemoryItem,
@@ -55,9 +55,16 @@ fn memory_item_rejects_empty_evidence_and_blank_evidence_label() {
     ));
 
     assert!(matches!(
-        MemoryEvidence::new(" ", evidence_ref("artifact-blank-label")),
+        MemoryEvidence::new(" ", "source-blank-label"),
         Err(MemoryError::BlankField {
             field: "memory evidence label"
+        })
+    ));
+
+    assert!(matches!(
+        MemoryEvidence::new("source", " "),
+        Err(MemoryError::BlankField {
+            field: "memory evidence source"
         })
     ));
 
@@ -68,7 +75,7 @@ fn memory_item_rejects_empty_evidence_and_blank_evidence_label() {
             "remember this",
             vec![MemoryEvidence {
                 label: " ".to_owned(),
-                reference: evidence_ref("artifact-blank-label"),
+                source: "source-blank-label".to_owned(),
             }],
             selection(&["topic"], 0.5, 0, None),
         ),

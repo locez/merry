@@ -1,6 +1,5 @@
-use super::{ContextError, evidence::format_locator};
-use crate::{artifact::ArtifactRegistry, memory::ActivatedMemory};
-use merry_core::EvidenceRef;
+use super::ContextError;
+use crate::memory::ActivatedMemory;
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
@@ -31,28 +30,26 @@ pub(crate) fn stable_content_hash(bytes: &[u8]) -> String {
     }
     format!("fnv1a64:{hash:016x}")
 }
-/// Session-owned context state, matching artifact view, and internal projections.
+/// Session-owned context state and internal projections.
 ///
 /// The fields are private so public callers can compile only snapshots created
-/// by the runtime session that owns summaries, artifact state, and any
-/// crate-internal context projections.
+/// by the runtime session that owns context entries and crate-internal
+/// projections.
 ///
 /// Treat this as an opaque view of session state. It is cloneable for
 /// deterministic compilation and tests, but external callers should not depend
 /// on its internal storage shape.
 ///
 /// ```compile_fail
-/// use merry_runtime::{ArtifactRegistry, ContextEntry, SessionContextSnapshot};
+/// use merry_runtime::{ContextEntry, SessionContextSnapshot};
 ///
 /// let entries: Vec<ContextEntry> = Vec::new();
-/// let artifacts = ArtifactRegistry::default();
 ///
-/// let _ = SessionContextSnapshot { entries, artifacts };
+/// let _ = SessionContextSnapshot { entries };
 /// ```
 #[derive(Debug, Clone)]
 pub struct SessionContextSnapshot {
     entries: Vec<ContextEntry>,
-    artifacts: ArtifactRegistry,
     memories: Vec<ActivatedMemory>,
     compacted_checkpoint: Option<CompactedCheckpoint>,
 }
@@ -60,13 +57,11 @@ pub struct SessionContextSnapshot {
 impl SessionContextSnapshot {
     pub(crate) fn new(
         entries: Vec<ContextEntry>,
-        artifacts: ArtifactRegistry,
         memories: Vec<ActivatedMemory>,
         compacted_checkpoint: Option<CompactedCheckpoint>,
     ) -> Self {
         Self {
             entries,
-            artifacts,
             memories,
             compacted_checkpoint,
         }
@@ -74,10 +69,6 @@ impl SessionContextSnapshot {
 
     pub(super) fn entries(&self) -> &[ContextEntry] {
         &self.entries
-    }
-
-    pub(super) fn artifacts(&self) -> &ArtifactRegistry {
-        &self.artifacts
     }
 
     pub(super) fn memories(&self) -> &[ActivatedMemory] {
@@ -96,12 +87,12 @@ impl SessionContextSnapshot {
 
 /// Structured input item for the public context compiler view.
 ///
-/// The MVP public view has only summary entries. Crate-internal projections,
+/// The MVP public view has only summary/note entries. Crate-internal projections,
 /// including activated memory, are carried by [`SessionContextSnapshot`] rather
 /// than exposed as public entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextEntry {
-    /// A compact navigation summary backed by exact evidence references.
+    /// A compact runtime context summary or dynamic note.
     Summary(ContextSummary),
 }
 
@@ -119,34 +110,23 @@ impl ContextEntry {
     }
 }
 
-/// Navigation text that must remain tied to exact retrievable evidence.
-///
-/// The text is a compact guide for context assembly. It must not replace the
-/// artifact-backed evidence that supports it.
+/// Runtime-owned dynamic context note or summary entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextSummary {
     id: String,
     text: String,
-    evidence: Vec<ContextEvidence>,
 }
 
 impl ContextSummary {
     /// Creates a validated context summary.
-    ///
-    /// Evidence presence is checked during compilation so construction can
-    /// remain focused on field validity.
-    pub fn new(
-        id: impl Into<String>,
-        text: impl Into<String>,
-        evidence: Vec<ContextEvidence>,
-    ) -> Result<Self, ContextError> {
+    pub fn new(id: impl Into<String>, text: impl Into<String>) -> Result<Self, ContextError> {
         let id = id.into();
         validate_non_blank("context summary id", &id)?;
 
         let text = text.into();
         validate_non_blank("context summary text", &text)?;
 
-        Ok(Self { id, text, evidence })
+        Ok(Self { id, text })
     }
 
     /// Stable summary identifier used for deterministic ordering.
@@ -155,16 +135,10 @@ impl ContextSummary {
         &self.id
     }
 
-    /// Navigation text for this summary.
+    /// Text for this summary.
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
-    }
-
-    /// Exact evidence references linked to this summary.
-    #[must_use]
-    pub fn evidence(&self) -> &[ContextEvidence] {
-        &self.evidence
     }
 }
 
@@ -313,46 +287,5 @@ impl CompactedCheckpoint {
         persisted: PersistedCompactedCheckpoint,
     ) -> Result<Self, ContextError> {
         Self::new(persisted.text)
-    }
-}
-
-/// Exact evidence metadata linked from compiled context.
-///
-/// Evidence metadata keeps the compiled context connected to exact artifact
-/// locations. Labels explain why a reference was selected; they are not a
-/// substitute for readable evidence content.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContextEvidence {
-    label: String,
-    reference: EvidenceRef,
-}
-
-impl ContextEvidence {
-    /// Creates labeled evidence metadata for compiled context.
-    pub fn new(label: impl Into<String>, reference: EvidenceRef) -> Result<Self, ContextError> {
-        let label = label.into();
-        validate_non_blank("context evidence label", &label)?;
-
-        Ok(Self { label, reference })
-    }
-
-    /// Human-readable reason this evidence was selected.
-    #[must_use]
-    pub fn label(&self) -> &str {
-        &self.label
-    }
-
-    /// Exact artifact location for the evidence.
-    #[must_use]
-    pub fn reference(&self) -> &EvidenceRef {
-        &self.reference
-    }
-
-    pub(super) fn sort_key(&self) -> (&str, String, &str) {
-        (
-            self.reference.artifact_id.as_str(),
-            format_locator(&self.reference.locator),
-            self.label.as_str(),
-        )
     }
 }

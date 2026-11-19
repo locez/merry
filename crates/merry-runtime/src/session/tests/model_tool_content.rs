@@ -24,29 +24,21 @@ fn completed_result(full: &str, model: Option<&str>) -> (SessionState, ToolCallR
             _ => None,
         })
         .expect("resolved result");
-    for event in &events {
-        if let RuntimeJournalPayload::ArtifactRecorded { artifact } = &event.payload {
-            session
-                .read_artifact_content(artifact.id())
-                .expect("recorded artifact is readable");
-            assert!(event.sequence < events.last().expect("resolved event").sequence);
-        }
-    }
     (session, result)
 }
 
-fn result_body(snapshot: &[TranscriptItemSnapshot]) -> &ArtifactContent {
+fn result_body(snapshot: &[TranscriptItemSnapshot]) -> &ToolOutput {
     snapshot
         .iter()
         .find_map(|item| match item {
-            TranscriptItemSnapshot::ToolResult { content, .. } => Some(content),
+            TranscriptItemSnapshot::ToolResult { output, .. } => Some(output),
             _ => None,
         })
         .expect("tool result in history")
 }
 
 #[tokio::test]
-async fn model_body_replays_after_save_without_changing_full_evidence() {
+async fn model_body_replays_after_save_without_changing_full_output() {
     let full = "full display details ".repeat(200);
     let (session, result) = completed_result(&full, Some(MODEL_BODY));
     let store_dir = tempfile::tempdir().expect("tempdir");
@@ -57,28 +49,22 @@ async fn model_body_replays_after_save_without_changing_full_evidence() {
         .expect("load");
     for state in [&session, &loaded] {
         assert_eq!(
-            result_body(
-                &state
-                    .provider_transcript_snapshot()
-                    .expect("provider history")
-            ),
-            &ArtifactContent::text(MODEL_BODY)
+            result_body(&state.provider_transcript_snapshot()),
+            &ToolOutput::text(MODEL_BODY)
         );
         assert_eq!(
-            result_body(&state.full_transcript_snapshot().expect("full history")),
-            &ArtifactContent::text(&full)
+            result_body(&state.full_transcript_snapshot()),
+            &ToolOutput::text(&full)
         );
         assert_eq!(
-            state
-                .read_artifact_content(result.artifact().id())
-                .expect("full evidence"),
-            ArtifactContent::text(&full)
+            state.read_tool_output(result.call_id()),
+            Some(ToolOutput::text(&full))
         );
     }
 }
 
 #[tokio::test]
-async fn omitted_model_body_preserves_legacy_history_and_equal_body_reuses_artifact() {
+async fn omitted_or_equal_model_body_elides_model_output_in_state_json() {
     for model in [None, Some(MODEL_BODY)] {
         let (session, _) = completed_result(MODEL_BODY, model);
         let dir = tempfile::tempdir().expect("tempdir");
@@ -93,13 +79,13 @@ async fn omitted_model_body_preserves_legacy_history_and_equal_body_reuses_artif
             .iter()
             .find(|item| item["type"] == "tool_result")
             .expect("result");
-        assert!(result.get("model_artifact_id").is_none());
+        assert!(result.get("model_output").is_none());
         let loaded = SessionState::load_from(&store, &session_id())
             .await
-            .expect("legacy-shaped state loads");
+            .expect("state loads");
         assert_eq!(
-            result_body(&loaded.provider_transcript_snapshot().expect("history")),
-            &ArtifactContent::text(MODEL_BODY)
+            result_body(&loaded.provider_transcript_snapshot()),
+            &ToolOutput::text(MODEL_BODY)
         );
     }
 }
@@ -118,7 +104,7 @@ fn invalid_model_body_rejects_entire_batch_without_resolving_any_call() {
             .expect("batch"),
         )
         .expect("pending batch");
-    let before = session.full_transcript_snapshot().expect("history");
+    let before = session.full_transcript_snapshot();
     let sequence = session.next_sequence();
     let error = session
         .submit_tool_execution_outcomes(vec![
@@ -137,42 +123,12 @@ fn invalid_model_body_rejects_entire_batch_without_resolving_any_call() {
         RuntimeError::UnsupportedToolResultContent { .. }
     ));
     assert_eq!(session.next_sequence(), sequence);
-    assert_eq!(session.full_transcript_snapshot().expect("history"), before);
+    assert_eq!(session.full_transcript_snapshot(), before);
     assert_eq!(session.pending_tool_calls(), vec![first, second]);
 }
 
 #[tokio::test]
-async fn missing_model_artifact_is_rejected_instead_of_silently_using_full_content() {
-    let (session, _) = completed_result("full", Some(MODEL_BODY));
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(dir.path());
-    session.save_to(&store).await.expect("save");
-    let mut document: serde_json::Value =
-        serde_json::from_slice(&store.read_state_bytes(&session_id()).await.expect("read"))
-            .expect("JSON");
-    let result = document["transcript"]["items"]
-        .as_array_mut()
-        .expect("items")
-        .iter_mut()
-        .find(|item| item["type"] == "tool_result")
-        .expect("result");
-    result["model_artifact_id"] = json!("missing-model-body");
-    store
-        .write_state_bytes(&session_id(), &serde_json::to_vec(&document).expect("JSON"))
-        .await
-        .expect("write");
-    let error = SessionState::load_from(&store, &session_id())
-        .await
-        .expect_err("missing model evidence");
-    assert!(
-        error
-            .to_string()
-            .contains("model tool result artifact is missing")
-    );
-}
-
-#[tokio::test]
-async fn compaction_window_uses_model_body_and_keeps_full_artifact() {
+async fn compaction_window_uses_model_body_and_keeps_full_output() {
     let full = "full original evidence\n".repeat(200);
     let (mut session, result) = completed_result(&full, Some(MODEL_BODY));
     session
@@ -192,10 +148,7 @@ async fn compaction_window_uses_model_body_and_keeps_full_artifact() {
         .find(|item| item["role"] == "tool_exchange")
         .expect("exchange");
     assert_eq!(exchange["result"]["content"], MODEL_BODY);
-    assert_eq!(
-        exchange["result"]["artifact_id"],
-        result.artifact().id().as_str()
-    );
+    assert!(exchange["result"].get("artifact_id").is_none());
     session
         .install_summary_compaction(input, "Covered history was compacted.")
         .expect("install");
@@ -206,10 +159,8 @@ async fn compaction_window_uses_model_body_and_keeps_full_artifact() {
         .await
         .expect("load");
     assert_eq!(
-        loaded
-            .read_artifact_content(result.artifact().id())
-            .expect("full evidence"),
-        ArtifactContent::text(&full)
+        loaded.read_tool_output(result.call_id()),
+        Some(ToolOutput::text(&full))
     );
 }
 
@@ -229,12 +180,8 @@ fn permission_review_keeps_full_evidence_when_history_uses_a_model_body() {
             .expect("full review")
     );
     assert_eq!(
-        result_body(
-            &compact
-                .provider_transcript_snapshot()
-                .expect("model history")
-        ),
-        &ArtifactContent::text(MODEL_BODY)
+        result_body(&compact.provider_transcript_snapshot()),
+        &ToolOutput::text(MODEL_BODY)
     );
 }
 
@@ -269,13 +216,13 @@ fn history_budget_and_compactor_budget_do_not_charge_for_display_only_bytes() {
             .expect("plan");
         assert!(
             plan.is_none(),
-            "compact history should fit without archiving or summarizing display bytes"
+            "compact history should fit without collapsing or summarizing display bytes"
         );
     }
 }
 
 #[tokio::test]
-async fn archived_compact_results_keep_notices_and_full_evidence_after_resume() {
+async fn collapsed_compact_results_keep_notices_and_full_output_after_resume() {
     use crate::compaction::{CompactionCoverageBudget, CompactionPreparation};
 
     let mut session = SessionState::new(session_id());
@@ -302,48 +249,47 @@ async fn archived_compact_results_keep_notices_and_full_evidence_after_resume() 
             CompactionCoverageBudget::limited(0),
         )
         .expect("preparation")
-        .expect("archive needed");
+        .expect("collapse needed");
     let CompactionPreparation::ArchiveToolResults(input) = preparation else {
-        panic!("archive-only expected");
+        panic!("collapse-only expected");
     };
-    let reference = input.archived_refs().first().expect("archive ref").clone();
+    let call_id = input
+        .window_plan()
+        .archived_tool_call_ids()
+        .iter()
+        .next()
+        .expect("collapsed call id")
+        .clone();
     session
         .install_archive_only_compaction(input)
-        .expect("archive");
+        .expect("collapse");
     let dir = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(dir.path());
     session.save_to(&store).await.expect("save");
     let loaded = SessionState::load_from(&store, &session_id())
         .await
         .expect("load");
-    let stored = loaded
-        .artifacts
-        .read_evidence(reference.evidence())
-        .expect("full evidence")
-        .as_text()
-        .expect("text evidence")
-        .to_owned();
-    assert_eq!(stored, full);
-    let snapshot = loaded
-        .provider_transcript_snapshot()
-        .expect("model history");
-    let notice: serde_json::Value =
-        serde_json::from_str(result_body(&snapshot).as_text().expect("notice JSON")).expect("JSON");
-    assert_eq!(notice["merry_archived"], true);
     assert_eq!(
-        notice["artifact_id"],
-        reference.evidence().artifact_id.as_str()
+        loaded.read_tool_output(&call_id),
+        Some(ToolOutput::text(&full))
     );
+    let snapshot = loaded.provider_transcript_snapshot();
+    let notice: serde_json::Value =
+        serde_json::from_str(result_body(&snapshot).as_str()).expect("JSON");
+    assert_eq!(notice["merry_omitted"], true);
+    assert_eq!(notice["status"], "succeeded");
+    assert_eq!(notice["call_id"], call_id.as_str());
+    assert!(notice.get("artifact_id").is_none());
     assert!(notice.get("ref").is_none());
 }
 
 #[tokio::test]
-async fn tool_result_images_persist_preserve_failures_and_drop_when_archived() {
+async fn tool_result_images_persist_preserve_failures_and_drop_when_collapsed() {
     use crate::compaction::{CompactionCoverageBudget, CompactionPreparation};
     use crate::context::{ContextCompiler, SessionContextSnapshot};
     use crate::step::{StepModelRequestParts, compile_step_model_request};
     use crate::{PromptProfile, StepContext, StepInput, UserImageInput};
-    use merry_core::{ArtifactKind, ErrorInfo};
+    use merry_core::ErrorInfo;
     use merry_llm::{GenerationConfig, ModelInputItem, ModelName};
 
     let png_bytes = std::sync::Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10, 42]);
@@ -362,7 +308,7 @@ async fn tool_result_images_persist_preserve_failures_and_drop_when_archived() {
             .expect("batch"),
         )
         .expect("pending batch");
-    let events = session
+    session
         .submit_tool_execution_outcomes(vec![
             (
                 ok_call.id().clone(),
@@ -379,34 +325,15 @@ async fn tool_result_images_persist_preserve_failures_and_drop_when_archived() {
         ])
         .expect("resolve outcomes with images");
 
-    let image_events = events
-        .iter()
-        .filter(|event| {
-            matches!(
-                &event.payload,
-                RuntimeJournalPayload::ArtifactRecorded { artifact }
-                    if artifact.kind() == &ArtifactKind::Image
-            )
-        })
-        .count();
-    assert_eq!(image_events, 2);
-
     let dir = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(dir.path());
     session.save_to(&store).await.expect("save");
     let loaded = SessionState::load_from(&store, &session_id())
         .await
         .expect("load");
-    let transcript = loaded
-        .provider_transcript_snapshot()
-        .expect("provider transcript");
+    let transcript = loaded.provider_transcript_snapshot();
     let empty_context = ContextCompiler::new()
-        .compile(&SessionContextSnapshot::new(
-            Vec::new(),
-            loaded.artifacts.clone(),
-            Vec::new(),
-            None,
-        ))
+        .compile(&SessionContextSnapshot::new(Vec::new(), Vec::new(), None))
         .expect("empty context compiles");
     let compiled = compile_step_model_request(StepModelRequestParts {
         input: &StepInput::user_text("continue").expect("input"),
@@ -440,7 +367,7 @@ async fn tool_result_images_persist_preserve_failures_and_drop_when_archived() {
     assert_eq!(model_results[1].images()[0].label(), "browser-snapshot.png");
     let _ = StepContext::default();
 
-    // 2. Archiving older tool results drops screenshots from active provider projection.
+    // 2. Collapsing older tool results drops screenshots from active provider projection.
     let mut archive_session = SessionState::new(session_id());
     for turn in 0..5 {
         let call = pending_tool_call(&format!("archive-img-{turn}"));
@@ -464,30 +391,26 @@ async fn tool_result_images_persist_preserve_failures_and_drop_when_archived() {
             CompactionCoverageBudget::limited(0),
         )
         .expect("preparation")
-        .expect("archive needed");
+        .expect("collapse needed");
     let CompactionPreparation::ArchiveToolResults(input) = preparation else {
-        panic!("archive-only expected");
+        panic!("collapse-only expected");
     };
     archive_session
         .install_archive_only_compaction(input)
-        .expect("archive");
-    let active_snapshot = archive_session
-        .provider_transcript_snapshot()
-        .expect("active transcript");
+        .expect("collapse");
+    let active_snapshot = archive_session.provider_transcript_snapshot();
     let archived_item = active_snapshot
         .iter()
         .find_map(|item| match item {
             TranscriptItemSnapshot::ToolResult { images, .. } => Some(images),
             _ => None,
         })
-        .expect("archived tool result present");
+        .expect("collapsed tool result present");
     assert!(
         archived_item.is_empty(),
-        "archived tool result must drop attached images from prompt projection"
+        "collapsed tool result must drop attached images from prompt projection"
     );
-    let full_snapshot = archive_session
-        .full_transcript_snapshot()
-        .expect("full transcript");
+    let full_snapshot = archive_session.full_transcript_snapshot();
     let full_item = full_snapshot
         .iter()
         .find_map(|item| match item {
@@ -509,8 +432,6 @@ fn permission_review_context_preserves_task_anchor_and_user_intent_past_long_too
         .record_test_user_message_body("Please fix the bug, fetch missing crates, and run tests.")
         .expect("user message should record");
 
-    // Push more than PERMISSION_REVIEW_RECENT_CONTEXT_LIMIT tool exchanges so
-    // the trailing window contains only tool items.
     for index in 0..16 {
         let call = pending_tool_call(&format!("long-run-tool-{index}"));
         session
@@ -526,7 +447,7 @@ fn permission_review_context_preserves_task_anchor_and_user_intent_past_long_too
 
     let review = session
         .permission_review_context_snapshot()
-        .expect("review context snapshot should build");
+        .expect("review snapshot");
     let rendered = format!("{review:?}");
     assert!(
         rendered.contains("task_anchor")
@@ -586,7 +507,7 @@ fn permission_review_context_retains_user_intent_after_compaction() {
 
     let review = session
         .permission_review_context_snapshot()
-        .expect("review snapshot after compaction");
+        .expect("review snapshot");
     let rendered = format!("{review:?}");
     assert!(
         rendered.contains("Install dependencies and verify the build."),

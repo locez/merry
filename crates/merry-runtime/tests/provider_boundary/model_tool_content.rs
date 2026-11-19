@@ -8,10 +8,10 @@ use crate::support::{
     tools::{ScriptedToolExecutor, ToolExecutorResponse},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use merry_core::ToolName;
+use merry_core::{ToolName, ToolOutput};
 use merry_llm::{FinishReason, ModelOutput, ModelRequest};
 use merry_runtime::{
-    ArtifactContent, ProcessActionIntent, ProcessExitStatus, ProcessOutputEnvelope, ProcessRunner,
+    ProcessActionIntent, ProcessExitStatus, ProcessOutputEnvelope, ProcessRunner,
     ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, Runtime,
     ToolExecutionContext, ToolExecutionOutcome, process_command_tool,
 };
@@ -40,17 +40,14 @@ async fn provider_replays_only_model_body_while_artifact_remains_exact() {
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
         .expect("execute");
-    assert_eq!(
-        event_kind_names(&events),
-        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
-    );
+    assert_eq!(event_kind_names(&events), ["ToolCallResolved"]);
     let result = resolved_tool_result(&events);
     assert_eq!(
         runtime
-            .read_artifact_content(result.artifact().id())
+            .read_tool_output(result.call_id())
             .await
-            .expect("full artifact"),
-        ArtifactContent::text(&full)
+            .expect("full output read"),
+        Some(ToolOutput::text(&full))
     );
     collect_step(&runtime, "continue").await;
     collect_step(&runtime, "continue again").await;
@@ -113,7 +110,7 @@ impl ProcessRunner for OutputProcessRunner {
     }
 }
 
-async fn process_requests(runner: OutputProcessRunner) -> (ArtifactContent, Vec<ModelRequest>) {
+async fn process_requests(runner: OutputProcessRunner) -> (ToolOutput, Vec<ModelRequest>) {
     let call = model_tool_call_with_args(
         "call-process",
         "run_process",
@@ -144,9 +141,10 @@ async fn process_requests(runner: OutputProcessRunner) -> (ArtifactContent, Vec<
         .expect("execute");
     let result = resolved_tool_result(&events);
     let full = runtime
-        .read_artifact_content(result.artifact().id())
+        .read_tool_output(result.call_id())
         .await
-        .expect("full artifact");
+        .expect("full output read")
+        .expect("full output exists");
     collect_step(&runtime, "continue").await;
     collect_step(&runtime, "continue again").await;
     let requests = provider.recorded_requests();
@@ -172,7 +170,7 @@ async fn process_text_replays_without_rewriting_whitespace_controls_or_structure
         false,
     ))
     .await;
-    let payload: Value = serde_json::from_str(full.as_text().expect("full JSON")).expect("JSON");
+    let payload: Value = serde_json::from_str(full.as_str()).expect("JSON");
     assert_eq!(payload["stdout"]["text"], stdout);
     assert_eq!(payload["stderr"]["text"], stderr);
     let expected = format!("exit 2\nstdout:\n{stdout}stderr:\n{stderr}");
@@ -221,11 +219,9 @@ async fn binary_process_results_keep_lossless_artifacts_and_textual_model_bodies
                 let (full, requests) =
                     process_requests(OutputProcessRunner::new(status, stdout, stderr, truncated))
                         .await;
-                let payload: Value = serde_json::from_str(full.as_text().expect("full JSON"))
-                    .expect("JSON artifact");
-                let envelope: ProcessOutputEnvelope<'_> =
-                    serde_json::from_str(full.as_text().expect("full JSON"))
-                        .expect("runtime artifact is readable by the shared consumer contract");
+                let payload: Value = serde_json::from_str(full.as_str()).expect("JSON tool output");
+                let envelope: ProcessOutputEnvelope<'_> = serde_json::from_str(full.as_str())
+                    .expect("runtime tool output is readable by the shared consumer contract");
                 assert_eq!(envelope.exit_code(), status.exit_code().map(i64::from));
                 assert_eq!(envelope.stdout().text(), String::from_utf8_lossy(stdout));
                 assert_eq!(envelope.stderr().text(), String::from_utf8_lossy(stderr));
@@ -326,8 +322,7 @@ async fn small_and_large_binary_streams_never_replay_the_json_envelope() {
                 false,
             ))
             .await;
-            let payload: Value =
-                serde_json::from_str(full.as_text().expect("full JSON")).expect("JSON artifact");
+            let payload: Value = serde_json::from_str(full.as_str()).expect("JSON tool output");
             let encoded = payload[stream]["bytes_base64"]
                 .as_str()
                 .expect("lossless bytes");

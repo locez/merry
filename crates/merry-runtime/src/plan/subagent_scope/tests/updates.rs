@@ -283,8 +283,7 @@ async fn scoped_replace_preserves_existing_descendant_runtime_state() {
     let target_id = defined.client_key_to_runtime_node_id["runtime-target"].clone();
     let runtime_result = PlanNodeResult {
         conclusion: "The previous runtime result remains authoritative".to_owned(),
-        evidence_refs: Vec::new(),
-        artifact_refs: Vec::new(),
+        output_paths: Vec::new(),
         changed_paths: vec!["src/runtime.rs".to_owned()],
         verification: vec!["runtime check".to_owned()],
         open_questions: Vec::new(),

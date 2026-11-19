@@ -3,9 +3,7 @@ use crate::tui::{
     projector::TuiProjector,
     render::{render_to_buffer, render_to_text},
     state::{TimelineItem, TuiState},
-    tests::{
-        find_cell_color, pending_batch, pending_call, pending_call_with_args, source, text_artifact,
-    },
+    tests::{find_cell_color, pending_batch, pending_call, pending_call_with_args, source},
     theme::TuiTheme,
 };
 use merry_core::{ErrorInfo, RuntimeEvent, ToolCallId, ToolCallResult, ToolOutput};
@@ -32,10 +30,7 @@ fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-read").unwrap(),
-                text_artifact("read-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("call-read").unwrap()),
             output: Some(ToolOutput::Text {
                 text: "file contents".to_owned(),
             }),
@@ -52,10 +47,7 @@ fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-patch").unwrap(),
-                text_artifact("patch-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("call-patch").unwrap()),
             output: Some(ToolOutput::Text {
                 text: "--- a/src/lib.rs\n+++ b/src/lib.rs\n+new line".to_owned(),
             }),
@@ -91,7 +83,6 @@ fn projector_shows_the_specific_schema_violation_for_failed_tool_input() {
         RuntimeEvent::ToolCallFinished {
             result: ToolCallResult::failed(
                 ToolCallId::new("call-read-plan").unwrap(),
-                text_artifact("read-plan-schema-error"),
                 ErrorInfo::new(
                     "tool_input_schema_invalid",
                     "tool arguments did not match the registered input schema",
@@ -255,10 +246,7 @@ fn projector_renders_generic_tool_arguments_and_completed_result() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("call-custom").unwrap(),
-                text_artifact("custom-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("call-custom").unwrap()),
             output: Some(ToolOutput::Text {
                 text: "2 matching documents".to_owned(),
             }),
@@ -421,7 +409,6 @@ fn projector_compacts_failed_tool_result_without_raw_artifact_json() {
         RuntimeEvent::ToolCallFinished {
             result: ToolCallResult::failed(
                 ToolCallId::new("call-permission").unwrap(),
-                text_artifact("permission-output"),
                 ErrorInfo::new(
                     "permission_review_failed",
                     "permission review failed: provider stream Protocol: stream line must start with data:",
@@ -473,7 +460,6 @@ fn projector_replaces_pending_row_with_failed_result_instead_of_leaving_stale_ro
         RuntimeEvent::ToolCallFinished {
             result: ToolCallResult::failed(
                 ToolCallId::new("call-custom").unwrap(),
-                text_artifact("custom-failure"),
                 ErrorInfo::new("custom_lookup_failed", "no matching documents found").unwrap(),
             ),
             output: Some(ToolOutput::Text {

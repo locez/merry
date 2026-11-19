@@ -3,7 +3,6 @@
 mod journal_stream;
 mod projector;
 mod public_stream;
-mod tool_output;
 
 pub use journal_stream::RuntimeJournalEventStream;
 pub(crate) use journal_stream::{

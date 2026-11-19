@@ -1,6 +1,6 @@
 //! HTTP routing and lifecycle for the local Web service.
 
-use crate::{WebArtifactContent, WebBackend, WebBackendError, WebServerConfig, assets};
+use crate::{WebBackend, WebBackendError, WebServerConfig, WebToolOutput, assets};
 use axum::{
     Router,
     extract::{Path, State},
@@ -13,7 +13,7 @@ use axum::{
 };
 use futures_core::stream::Stream;
 use futures_util::StreamExt;
-use merry_core::{ArtifactId, SessionId, TrajectoryEvent, TrajectorySnapshot};
+use merry_core::{SessionId, ToolCallId, TrajectoryEvent, TrajectorySnapshot};
 use serde::Serialize;
 use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
 use thiserror::Error;
@@ -220,8 +220,8 @@ where
             get(trajectory_snapshot::<B>),
         )
         .route(
-            "/api/v1/sessions/{session_id}/artifacts/{artifact_id}",
-            get(artifact_content::<B>),
+            "/api/v1/sessions/{session_id}/tool-calls/{tool_call_id}/output",
+            get(tool_output::<B>),
         )
         .route(
             "/api/v1/sessions/{session_id}/events",
@@ -261,7 +261,7 @@ async fn capabilities() -> impl IntoResponse {
             "/api/v1/healthz",
             "/api/v1/capabilities",
             "/api/v1/sessions/:session_id/trajectory",
-            "/api/v1/sessions/:session_id/artifacts/:artifact_id",
+            "/api/v1/sessions/:session_id/tool-calls/:tool_call_id/output",
             "/api/v1/sessions/:session_id/events",
         ],
     })
@@ -306,21 +306,21 @@ where
     ))
 }
 
-async fn artifact_content<B>(
+async fn tool_output<B>(
     State(state): State<AppState<B>>,
-    Path((raw_session_id, raw_artifact_id)): Path<(String, String)>,
-) -> Result<axum::Json<WebArtifactContent>, ApiError>
+    Path((raw_session_id, raw_tool_call_id)): Path<(String, String)>,
+) -> Result<axum::Json<WebToolOutput>, ApiError>
 where
     B: WebBackend,
 {
     let session_id = parse_session_id(raw_session_id)?;
-    let artifact_id = ArtifactId::new(&raw_artifact_id).map_err(|_| ApiError::InvalidArtifactId)?;
-    state
+    let call_id = ToolCallId::new(&raw_tool_call_id).map_err(|_| ApiError::InvalidToolCallId)?;
+    let output = state
         .backend
-        .artifact_content(&session_id, &artifact_id)
+        .tool_output(&session_id, &call_id)
         .await
-        .map(axum::Json)
-        .map_err(ApiError::from)
+        .map_err(ApiError::from)?;
+    output.map(axum::Json).ok_or(ApiError::ToolOutputNotFound)
 }
 
 fn trajectory_sse_event(item: Result<TrajectoryEvent, WebBackendError>) -> Event {
@@ -382,7 +382,8 @@ struct ApiErrorBody {
 #[derive(Debug)]
 enum ApiError {
     InvalidSessionId,
-    InvalidArtifactId,
+    InvalidToolCallId,
+    ToolOutputNotFound,
     SessionUnavailable,
     BackendUnavailable,
 }
@@ -415,11 +416,18 @@ impl IntoResponse for ApiError {
                     message: "session is not available",
                 },
             ),
-            Self::InvalidArtifactId => (
+            Self::InvalidToolCallId => (
                 StatusCode::BAD_REQUEST,
                 ApiErrorBody {
-                    code: "invalid_artifact_id",
-                    message: "artifact id is invalid",
+                    code: "invalid_tool_call_id",
+                    message: "tool call id is invalid",
+                },
+            ),
+            Self::ToolOutputNotFound => (
+                StatusCode::NOT_FOUND,
+                ApiErrorBody {
+                    code: "tool_output_not_found",
+                    message: "tool output is not available",
                 },
             ),
             Self::BackendUnavailable => (
@@ -471,21 +479,24 @@ mod tests {
             async move { Ok(stream::once(async move { Ok(event) }).boxed()) }.boxed()
         }
 
-        fn artifact_content(
+        fn tool_output(
             &self,
             _session_id: &SessionId,
-            artifact_id: &ArtifactId,
-        ) -> futures_util::future::BoxFuture<'_, Result<WebArtifactContent, WebBackendError>>
+            call_id: &ToolCallId,
+        ) -> futures_util::future::BoxFuture<'_, Result<Option<WebToolOutput>, WebBackendError>>
         {
-            let artifact_id = artifact_id.clone();
+            let call_id = call_id.clone();
             async move {
-                Ok(WebArtifactContent::new(
-                    artifact_id,
-                    crate::WebArtifactKind::Text,
-                    Some("fixture".to_owned()),
+                if call_id.as_str() == "missing" {
+                    return Ok(None);
+                }
+                Ok(Some(WebToolOutput::new(
+                    call_id,
+                    merry_core::ToolOutputKind::Text,
+                    "fixture".to_owned(),
                     false,
                     7,
-                ))
+                )))
             }
             .boxed()
         }
@@ -531,7 +542,7 @@ mod tests {
             "/assets/trajectory-format.js",
             "/assets/trajectory-view.js",
             "/assets/app.css",
-            "/api/v1/sessions/session-1/artifacts/artifact-1",
+            "/api/v1/sessions/session-1/tool-calls/call-1/output",
         ] {
             let response = app
                 .clone()
@@ -567,7 +578,7 @@ mod tests {
         for uri in [
             "/api/v1/sessions/session-1/trajectory",
             "/api/v1/sessions/session-1/events",
-            "/api/v1/sessions/session-1/artifacts/artifact-1",
+            "/api/v1/sessions/session-1/tool-calls/call-1/output",
         ] {
             let response = app
                 .clone()
@@ -611,16 +622,30 @@ mod tests {
         assert!(!std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED).is_loopback());
     }
 
+    #[tokio::test]
+    async fn missing_tool_output_returns_not_found() {
+        let response = test_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/sessions/session-1/tool-calls/missing/output")
+                    .body(Body::empty())
+                    .expect("valid request"),
+            )
+            .await
+            .expect("tool output response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
     #[test]
-    fn artifact_byte_lengths_use_lossless_wire_strings() {
-        let artifact = WebArtifactContent::new(
-            ArtifactId::new("artifact-1").expect("valid artifact id"),
-            crate::WebArtifactKind::Binary,
-            None,
+    fn tool_output_byte_lengths_use_lossless_wire_strings() {
+        let output = WebToolOutput::new(
+            ToolCallId::new("call-1").expect("valid call id"),
+            merry_core::ToolOutputKind::Json,
+            "{}".to_owned(),
             false,
             9_007_199_254_740_993,
         );
-        let value = serde_json::to_value(artifact).expect("artifact serializes");
+        let value = serde_json::to_value(output).expect("tool output serializes");
         assert_eq!(value["byte_length"], "9007199254740993");
     }
 

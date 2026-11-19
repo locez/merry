@@ -270,8 +270,7 @@ fn terminal_report_winning_the_cancel_race_still_settles_draining_plan() {
                 outcome: PlanAttemptOutcome::Completed,
                 result: Some(merry_core::PlanNodeResult {
                     conclusion: "report won the cancellation race".to_owned(),
-                    evidence_refs: Vec::new(),
-                    artifact_refs: Vec::new(),
+                    output_paths: Vec::new(),
                     changed_paths: Vec::new(),
                     verification: Vec::new(),
                     open_questions: Vec::new(),

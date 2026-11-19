@@ -1,12 +1,11 @@
 use crate::{
-    ContextEntry, ContextEvidence, ContextSummary, FileSessionStore,
-    artifact::ArtifactContent,
+    FileSessionStore,
     session::tests::{
-        SessionId, SessionState, SessionStateTestExt, artifact_id, pending_tool_call,
+        SessionId, SessionState, SessionStateTestExt, pending_tool_call,
         persistence::current_document, session_id,
     },
 };
-use merry_core::{ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef, ToolCallResult};
+use merry_core::{ToolCallResult, ToolOutput};
 
 #[tokio::test]
 async fn session_state_save_rejects_pending_tool_calls() {
@@ -52,48 +51,6 @@ async fn session_state_load_rejects_session_id_mismatch() {
     );
 }
 
-#[tokio::test]
-async fn session_state_load_rejects_context_evidence_without_artifact() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let mut session = SessionState::new(session_id());
-    let artifact = ArtifactRef::new(artifact_id("missing-after-corruption"), ArtifactKind::Text);
-    session
-        .record_artifact_events(artifact.clone(), ArtifactContent::text("exact evidence"))
-        .expect("artifact records");
-    let evidence = EvidenceRef::new(artifact.id().clone(), EvidenceLocator::whole_artifact());
-    session
-        .record_context_entry(ContextEntry::summary(
-            ContextSummary::new(
-                "corrupted-summary",
-                "A summary with corrupted persisted evidence.",
-                vec![ContextEvidence::new("source", evidence).expect("context evidence")],
-            )
-            .expect("summary"),
-        ))
-        .expect("context records");
-    session.save_to(&store).await.expect("session saves");
-
-    let mut document: serde_json::Value = serde_json::from_slice(
-        &store
-            .read_state_bytes(&session_id())
-            .await
-            .expect("state reads"),
-    )
-    .expect("state is json");
-    document["artifacts"] = serde_json::Value::Array(Vec::new());
-    let bytes = serde_json::to_vec_pretty(&document).expect("state serializes");
-    store
-        .write_state_bytes(&session_id(), &bytes)
-        .await
-        .expect("corrupted state writes");
-
-    let error = SessionState::load_from(&store, &session_id())
-        .await
-        .expect_err("corrupted context evidence is rejected");
-    assert!(error.to_string().contains("session document is invalid"));
-}
-
 #[test]
 fn session_state_save_rejects_in_progress_model_turn() {
     let mut session = SessionState::new(session_id());
@@ -130,81 +87,6 @@ fn session_state_save_rejects_prompt_projection_without_checkpoint() {
     let error = session
         .persistable_bundle()
         .expect_err("a projection without its checkpoint is not resume-safe");
-
-    assert!(matches!(
-        error,
-        crate::SessionStoreError::InvalidDocument { .. }
-    ));
-}
-
-#[tokio::test]
-async fn session_state_load_rejects_missing_user_source_artifact() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let mut session = SessionState::new(session_id());
-    session
-        .record_test_user_message_body("exact source must survive resume")
-        .expect("user source records");
-    session.save_to(&store).await.expect("session saves");
-
-    let mut document: serde_json::Value = serde_json::from_slice(
-        &store
-            .read_state_bytes(&session_id())
-            .await
-            .expect("state reads"),
-    )
-    .expect("state is json");
-    document["artifacts"] = serde_json::Value::Array(Vec::new());
-    store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("corrupt document serializes"),
-        )
-        .await
-        .expect("corrupt state writes");
-
-    let error = SessionState::load_from(&store, &session_id())
-        .await
-        .expect_err("missing transcript source artifact must reject resume");
-    assert!(matches!(
-        error,
-        crate::SessionStoreError::InvalidDocument { .. }
-    ));
-}
-
-#[tokio::test]
-async fn session_state_load_rejects_user_message_cross_linked_to_readable_text_artifact() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let mut document = current_document();
-    document["artifacts"] = serde_json::json!([{
-        "artifact": ArtifactRef::new(artifact_id("unrelated-user-source"), ArtifactKind::Text),
-        "content": ArtifactContent::text("readable but not the stable user source")
-    }]);
-    document["transcript"] = serde_json::json!({
-        "items": [{
-            "type": "user_message",
-            "id": 0,
-            "model_turn_id": 1,
-            "artifact_id": "unrelated-user-source",
-            "image_artifact_ids": [],
-            "origin": "external_user"
-        }],
-        "next_id": 1,
-        "model_turns": { "1": "completed" },
-        "next_model_turn_id": 2
-    });
-    store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("current document serializes"),
-        )
-        .await
-        .expect("corrupted current state writes");
-
-    let error = SessionState::load_from(&store, &session_id())
-        .await
-        .expect_err("cross-linked user source artifact must reject resume");
 
     assert!(matches!(
         error,
@@ -331,11 +213,8 @@ async fn session_state_load_rejects_mismatched_tool_result_identity() {
         .expect("call records");
     session
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                call.id().clone(),
-                ArtifactRef::new(artifact_id("persisted-result-artifact"), ArtifactKind::Text),
-            ),
-            ArtifactContent::text("result"),
+            ToolCallResult::succeeded(call.id().clone()),
+            ToolOutput::text("result"),
         )
         .expect("result records");
     session.save_to(&store).await.expect("session saves");

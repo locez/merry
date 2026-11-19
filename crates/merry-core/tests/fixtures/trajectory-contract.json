@@ -19,7 +19,6 @@
         },
         "records": [
           {
-            "artifacts": [],
             "details": {
               "content": "Inspect the repository",
               "truncated": false,
@@ -42,13 +41,6 @@
             "turn_id": "7"
           },
           {
-            "artifacts": [
-              {
-                "id": "artifact-1",
-                "kind": "text",
-                "label": "README.md"
-              }
-            ],
             "details": {
               "tool": {
                 "arguments": {
@@ -107,13 +99,6 @@
     {
       "latest_sequence": "43",
       "record": {
-        "artifacts": [
-          {
-            "id": "artifact-1",
-            "kind": "text",
-            "label": "README.md"
-          }
-        ],
         "details": {
           "tool": {
             "arguments": {
@@ -190,7 +175,6 @@
     },
     "records": [
       {
-        "artifacts": [],
         "details": {
           "content": "Inspect the repository",
           "truncated": false,
@@ -213,13 +197,6 @@
         "turn_id": "7"
       },
       {
-        "artifacts": [
-          {
-            "id": "artifact-1",
-            "kind": "text",
-            "label": "README.md"
-          }
-        ],
         "details": {
           "tool": {
             "arguments": {

@@ -43,8 +43,14 @@ impl PlanState {
         if let Some(checkpoint_ref) = input.checkpoint_ref.as_deref() {
             validation::validate_reason(checkpoint_ref)?;
         }
-        validation::validate_payload_items("evidence_refs", input.evidence_refs.len())?;
-        validation::validate_payload_items("artifact_refs", input.artifact_refs.len())?;
+        validation::validate_payload_items("output_paths", input.output_paths.len())?;
+        validation::validate_payload_items("evidence_notes", input.evidence_notes.len())?;
+        for path in &input.output_paths {
+            validation::validate_payload_text("output_paths", path)?;
+        }
+        for note in &input.evidence_notes {
+            validation::validate_payload_text("evidence_notes", note)?;
+        }
         let mut candidate = self.clone();
         let (attempt_index, _) = candidate.validate_current_attempt(actor)?;
         let attempt_id = candidate.snapshot.attempts[attempt_index]
@@ -69,17 +75,14 @@ impl PlanState {
         progress.elapsed_ms = now_ms.saturating_sub(started_at_ms);
         progress.last_runtime_activity_at_ms = now_ms;
         progress.last_durable_progress_at_ms = Some(now_ms);
-        progress.artifacts_created = progress
-            .artifacts_created
-            .saturating_add(input.artifact_refs.len());
-        for artifact in input.artifact_refs {
-            if !progress.artifact_refs.contains(&artifact) {
-                progress.artifact_refs.push(artifact);
+        for path in input.output_paths {
+            if !progress.output_paths.contains(&path) {
+                progress.output_paths.push(path);
             }
         }
-        for evidence in input.evidence_refs {
-            if !progress.acceptance_evidence.contains(&evidence) {
-                progress.acceptance_evidence.push(evidence);
+        for note in input.evidence_notes {
+            if !progress.evidence_notes.contains(&note) {
+                progress.evidence_notes.push(note);
             }
         }
         progress.summary = Some(input.summary);

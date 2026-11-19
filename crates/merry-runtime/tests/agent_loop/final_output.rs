@@ -119,7 +119,6 @@ async fn agent_loop_completes_when_model_calls_final_output_tool() {
             "SessionStarted",
             "StepStarted",
             "ToolCallPending",
-            "ArtifactRecorded",
             "FinalOutputRecorded",
         ]
     );
@@ -274,11 +273,9 @@ async fn invalid_final_output_tool_arguments_retry_as_failed_tool_result() {
             "SessionStarted",
             "StepStarted",
             "ToolCallPending",
-            "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
             "ToolCallPending",
-            "ArtifactRecorded",
             "FinalOutputRecorded",
         ]
     );
@@ -350,11 +347,9 @@ async fn agent_loop_executes_runtime_tool_before_final_output_tool() {
             "SessionStarted",
             "StepStarted",
             "ToolCallPending",
-            "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
             "ToolCallPending",
-            "ArtifactRecorded",
             "FinalOutputRecorded",
         ]
     );

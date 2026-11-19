@@ -1,11 +1,8 @@
 mod execution;
 mod schema;
 
-use crate::{
-    ArtifactContent, ChildRuntimeFactory, ChildRuntimeInput, Runtime, SubagentConfig,
-    SubagentManager,
-};
-use merry_core::{PendingToolCall, SessionId, ToolCallArguments, ToolCallId, ToolName};
+use crate::{ChildRuntimeFactory, ChildRuntimeInput, Runtime, SubagentConfig, SubagentManager};
+use merry_core::{PendingToolCall, SessionId, ToolCallArguments, ToolCallId, ToolName, ToolOutput};
 use serde_json::Value;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -53,8 +50,8 @@ fn pending_call(name: &str, arguments: Value) -> PendingToolCall {
 }
 
 fn outcome_json(outcome: &crate::ToolExecutionOutcome) -> Value {
-    let ArtifactContent::Json { content } = outcome.content() else {
+    let ToolOutput::Json { json } = outcome.content() else {
         panic!("expected JSON tool outcome");
     };
-    serde_json::from_str(content).expect("outcome contains valid JSON")
+    serde_json::from_str(json).expect("outcome contains valid JSON")
 }

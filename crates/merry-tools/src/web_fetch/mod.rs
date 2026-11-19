@@ -225,10 +225,17 @@ async fn execute_fetch(config: &WebFetchConfig, input: WebFetchInput) -> ToolExe
                 truncated: false,
                 content: summary.clone(),
             };
-            return ToolExecutionOutcome::succeeded_json(
-                serde_json::to_string(&artifact).expect("web_fetch redirect artifact serializes"),
-            )
-            .with_model_text(summary);
+            let json = match serde_json::to_string(&artifact) {
+                Ok(json) => json,
+                Err(error) => {
+                    return web_fetch_failed(
+                        "web_fetch_encode_failed",
+                        error.to_string(),
+                        Some(current_url.as_str()),
+                    );
+                }
+            };
+            return ToolExecutionOutcome::succeeded_json(json).with_model_text(summary);
         }
         Err(outcome) => return *outcome,
     };
@@ -284,10 +291,17 @@ async fn execute_fetch(config: &WebFetchConfig, input: WebFetchInput) -> ToolExe
         truncated,
         content: full_extracted,
     };
-    ToolExecutionOutcome::succeeded_json(
-        serde_json::to_string(&artifact).expect("web_fetch artifact serializes"),
-    )
-    .with_model_text(model_summary)
+    let json = match serde_json::to_string(&artifact) {
+        Ok(json) => json,
+        Err(error) => {
+            return web_fetch_failed(
+                "web_fetch_encode_failed",
+                error.to_string(),
+                Some(current_url.as_str()),
+            );
+        }
+    };
+    ToolExecutionOutcome::succeeded_json(json).with_model_text(model_summary)
 }
 
 enum RedirectStep {
@@ -570,10 +584,7 @@ mod tests {
             .await
             .expect("fetch succeeds");
         assert_eq!(ok.status(), ToolCallResultStatus::Succeeded);
-        let model_text = ok
-            .model_content()
-            .and_then(|c| c.as_text())
-            .expect("model text");
+        let model_text = ok.model_content().map(|c| c.as_str()).expect("model text");
         assert!(model_text.contains("Title: Test Page"));
         assert!(model_text.contains("# Hello"));
         assert!(!model_text.contains("bad()"));
@@ -586,10 +597,9 @@ mod tests {
             .await
             .expect("cross-host redirect returns cleanly");
         assert_eq!(cross_host.status(), ToolCallResultStatus::Succeeded);
-        let artifact: serde_json::Value =
-            serde_json::from_str(cross_host.content().as_text().expect("json artifact"))
-                .expect("valid json");
-        assert_eq!(artifact["redirect_url"], "https://other.example.com/target");
+        let output: serde_json::Value =
+            serde_json::from_str(cross_host.content().as_str()).expect("valid json");
+        assert_eq!(output["redirect_url"], "https://other.example.com/target");
 
         server.abort();
     }

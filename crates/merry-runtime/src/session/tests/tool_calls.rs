@@ -20,10 +20,10 @@ fn invalid_result_diagnostics_are_rejected_before_publishing_state() {
             session
                 .record_test_tool_call_pending(call.clone())
                 .expect("pending call");
-            let history = session.full_transcript_snapshot().expect("history");
+            let history = session.full_transcript_snapshot();
             let ledger = session.ledger_projection();
             let sequence = session.next_sequence();
-            let content = ArtifactContent::text("must not be published");
+            let content = ToolOutput::text("must not be published");
             let error = if proposed {
                 let evidence = WorkspacePatchProposal::new(
                     "note.txt",
@@ -67,10 +67,7 @@ fn invalid_result_diagnostics_are_rejected_before_publishing_state() {
                 }
             ));
             assert_eq!(session.next_sequence(), sequence);
-            assert_eq!(
-                session.full_transcript_snapshot().expect("history"),
-                history
-            );
+            assert_eq!(session.full_transcript_snapshot(), history);
             assert_eq!(session.ledger_projection(), ledger);
             assert_eq!(session.pending_tool_calls(), vec![call]);
             assert!(session.action_audit_snapshot().records().is_empty());
@@ -90,12 +87,9 @@ fn tool_result_inherits_originating_model_turn() {
         .close_model_response(turn_id, true)
         .expect("tool-call response should close");
 
-    let result = ToolCallResult::succeeded(
-        call.id().clone(),
-        ArtifactRef::new(artifact_id("turn-result"), ArtifactKind::Text),
-    );
+    let result = ToolCallResult::succeeded(call.id().clone());
     session
-        .submit_tool_result(result, ArtifactContent::text("result"))
+        .submit_tool_result(result, ToolOutput::text("result"))
         .expect("tool result should record");
 
     let result_turn = session
@@ -138,11 +132,8 @@ fn out_of_order_batch_results_complete_originating_turn_only_after_last_result()
 
     session
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                call_b.id().clone(),
-                ArtifactRef::new(artifact_id("turn-b-result"), ArtifactKind::Text),
-            ),
-            ArtifactContent::text("b"),
+            ToolCallResult::succeeded(call_b.id().clone()),
+            ToolOutput::text("b"),
         )
         .expect("second result should record first");
     assert_eq!(
@@ -152,11 +143,8 @@ fn out_of_order_batch_results_complete_originating_turn_only_after_last_result()
 
     session
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                call_a.id().clone(),
-                ArtifactRef::new(artifact_id("turn-a-result"), ArtifactKind::Text),
-            ),
-            ArtifactContent::text("a"),
+            ToolCallResult::succeeded(call_a.id().clone()),
+            ToolOutput::text("a"),
         )
         .expect("first result should record last");
 
@@ -234,7 +222,7 @@ fn pending_tool_call_batch_conflict_leaves_session_unchanged() {
 }
 
 #[test]
-fn denied_tool_action_records_audit_lifecycle_before_artifact_and_resolution() {
+fn denied_tool_action_records_audit_lifecycle_before_resolution() {
     let mut session = SessionState::new(session_id());
     let call = pending_tool_call("denied-action-call");
     let decision = DefaultActionPolicy.decide(crate::ToolActionKind::WorkspaceWrite);
@@ -252,18 +240,14 @@ fn denied_tool_action_records_audit_lifecycle_before_artifact_and_resolution() {
             &call,
             &decision,
             None,
-            ArtifactContent::json(r#"{"ok":false}"#),
+            ToolOutput::json(r#"{"ok":false}"#),
             diagnostic,
         )
         .expect("denial should resolve");
 
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert!(matches!(
         events[0].payload,
-        RuntimeJournalPayload::ArtifactRecorded { .. }
-    ));
-    assert!(matches!(
-        events[1].payload,
         RuntimeJournalPayload::ToolCallResolved { .. }
     ));
 
@@ -294,21 +278,16 @@ fn denied_tool_action_records_audit_lifecycle_before_artifact_and_resolution() {
         .iter()
         .position(|kind| *kind == LedgerFactKind::ActionAuditRecorded)
         .expect("audit lifecycle should be recorded");
-    let artifact_index = lifecycle_kinds
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
-        .expect("artifact lifecycle should be recorded");
     let resolved_index = lifecycle_kinds
         .iter()
         .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
         .expect("resolution lifecycle should be recorded");
-    assert!(audit_index < artifact_index);
-    assert!(artifact_index < resolved_index);
+    assert!(audit_index < resolved_index);
     assert!(session.pending_tool_calls().is_empty());
 }
 
 #[test]
-fn proposed_tool_execution_records_executed_audit_before_artifact_and_resolution() {
+fn proposed_tool_execution_records_executed_audit_before_resolution() {
     let mut session = SessionState::new(session_id());
     let call = pending_tool_call("executed-action-call");
     session
@@ -361,20 +340,16 @@ fn proposed_tool_execution_records_executed_audit_before_artifact_and_resolution
         .submit_proposed_tool_execution_outcome(
             proposal,
             merry_core::ToolCallResultStatus::Succeeded,
-            ArtifactContent::json(r#"{"ok":true}"#),
+            ToolOutput::json(r#"{"ok":true}"#),
             None,
             Some(execution_evidence.clone()),
             policy,
         )
         .expect("proposed execution should resolve");
 
-    assert_eq!(events.len(), 2);
+    assert_eq!(events.len(), 1);
     assert!(matches!(
         events[0].payload,
-        RuntimeJournalPayload::ArtifactRecorded { .. }
-    ));
-    assert!(matches!(
-        events[1].payload,
         RuntimeJournalPayload::ToolCallResolved { .. }
     ));
 
@@ -413,21 +388,16 @@ fn proposed_tool_execution_records_executed_audit_before_artifact_and_resolution
         .filter_map(|(index, kind)| (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index))
         .collect::<Vec<_>>();
     assert_eq!(audit_indexes.len(), 2);
-    let artifact_index = lifecycle_kinds
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
-        .expect("artifact lifecycle should be recorded");
     let resolved_index = lifecycle_kinds
         .iter()
         .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
         .expect("resolution lifecycle should be recorded");
     assert!(audit_indexes[0] < audit_indexes[1]);
-    assert!(audit_indexes[1] < artifact_index);
-    assert!(artifact_index < resolved_index);
+    assert!(audit_indexes[1] < resolved_index);
 }
 
 #[test]
-fn proposed_tool_execution_can_record_observation_after_artifact_before_resolution() {
+fn proposed_tool_execution_can_record_observation_before_resolution() {
     let mut session = SessionState::new(session_id());
     let call = pending_tool_call("observed-action-call");
     session
@@ -486,7 +456,7 @@ fn proposed_tool_execution_can_record_observation_after_artifact_before_resoluti
             ProposedToolExecutionOutcome::new(
                 proposal,
                 merry_core::ToolCallResultStatus::Succeeded,
-                ArtifactContent::json(r#"{"ok":true}"#),
+                ToolOutput::json(r#"{"ok":true}"#),
                 None,
                 Some(execution_evidence),
                 policy,
@@ -503,18 +473,6 @@ fn proposed_tool_execution_can_record_observation_after_artifact_before_resoluti
         .expect("tool result should resolve");
 
     let projection = session.ledger_projection();
-    let artifact_order = projection
-        .entries()
-        .iter()
-        .find_map(|entry| match entry {
-            LedgerProjection::Lifecycle {
-                kind: LedgerFactKind::ArtifactRecorded,
-                order,
-                ..
-            } => Some(*order),
-            LedgerProjection::Lifecycle { .. } | LedgerProjection::Fact { .. } => None,
-        })
-        .expect("artifact lifecycle should be recorded");
     let resolved_order = projection
         .entries()
         .iter()
@@ -543,9 +501,8 @@ fn proposed_tool_execution_can_record_observation_after_artifact_before_resoluti
         })
         .expect("tool observation should be projected");
 
-    assert!(artifact_order < observation_order);
     assert!(observation_order < resolved_order);
-    assert!(observation_text.contains(&format!("artifact={}", result.artifact().id().as_str())));
+    assert!(observation_text.contains(&format!("call_id={}", result.call_id().as_str())));
 }
 
 #[test]
@@ -597,11 +554,7 @@ fn guarded_tool_action_records_internal_audit_without_events_or_resolution() {
             ..
         })
     ));
-    let expected_result_artifact_id = artifact_id("tool-result-2");
-    assert!(matches!(
-        session.read_artifact_content(&expected_result_artifact_id),
-        Err(ArtifactError::MissingArtifact { id }) if id == expected_result_artifact_id
-    ));
+    assert!(session.read_tool_output(call.id()).is_none());
 
     let audit_snapshot_after_first = session.action_audit_snapshot();
     let projection_after_first = session.ledger_projection();
@@ -613,14 +566,11 @@ fn guarded_tool_action_records_internal_audit_without_events_or_resolution() {
     assert_eq!(session.pending_tool_calls(), vec![call.clone()]);
     assert_eq!(session.action_audit_snapshot(), audit_snapshot_after_first);
     assert_eq!(session.ledger_projection(), projection_after_first);
-    assert!(matches!(
-        session.read_artifact_content(&expected_result_artifact_id),
-        Err(ArtifactError::MissingArtifact { id }) if id == expected_result_artifact_id
-    ));
+    assert!(session.read_tool_output(call.id()).is_none());
 }
 
 #[test]
-fn submit_tool_result_starts_session_before_artifact_and_resolution_when_needed() {
+fn submit_tool_result_starts_session_before_resolution_when_needed() {
     let mut session = SessionState::new(session_id());
     let pending = pending_tool_call("pre-start-call");
     let turn_id = session.begin_model_turn().expect("model turn should begin");
@@ -632,11 +582,10 @@ fn submit_tool_result_starts_session_before_artifact_and_resolution_when_needed(
         .close_model_response(turn_id, true)
         .expect("fixture response should close");
     session.pending_tool_calls.push(pending);
-    let artifact = ArtifactRef::new(artifact_id("pre-start-result"), ArtifactKind::Json);
-    let result = ToolCallResult::succeeded(tool_call_id("pre-start-call"), artifact.clone());
+    let result = ToolCallResult::succeeded(tool_call_id("pre-start-call"));
 
     let events = session
-        .submit_tool_result(result.clone(), ArtifactContent::json(r#"{"ok":true}"#))
+        .submit_tool_result(result.clone(), ToolOutput::json(r#"{"ok":true}"#))
         .expect("tool result should submit");
 
     assert_eq!(
@@ -644,7 +593,7 @@ fn submit_tool_result_starts_session_before_artifact_and_resolution_when_needed(
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 2]
+        vec![0, 1]
     );
     assert!(matches!(
         events[0].payload,
@@ -652,10 +601,6 @@ fn submit_tool_result_starts_session_before_artifact_and_resolution_when_needed(
     ));
     assert!(matches!(
         &events[1].payload,
-        RuntimeJournalPayload::ArtifactRecorded { artifact: recorded } if recorded == &artifact
-    ));
-    assert!(matches!(
-        &events[2].payload,
         RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == &result
     ));
 }

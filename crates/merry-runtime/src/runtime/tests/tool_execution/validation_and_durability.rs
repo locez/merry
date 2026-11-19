@@ -1,9 +1,9 @@
 use crate::{
-    ArtifactError, FileSessionStore, RuntimeError,
+    FileSessionStore, RuntimeError,
     runtime::{
         Runtime,
         tests::support::{
-            common::{RuntimeSessionStateTestExt, artifact_id, session_id},
+            common::{RuntimeSessionStateTestExt, session_id},
             tool_executors::{
                 CancelDuringRuntimeControlExecutor, ProposingToolExecutor, SuccessfulToolExecutor,
             },
@@ -19,8 +19,8 @@ use crate::{
     tool::{RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionOutcome},
 };
 use merry_core::{
-    EvidenceLocator, PendingToolCall, RuntimeJournalPayload, ToolCallArguments, ToolCallId,
-    ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec, TrajectoryRecordStatus,
+    PendingToolCall, RuntimeJournalPayload, ToolCallArguments, ToolCallId, ToolCallResultStatus,
+    ToolInputSchema, ToolName, ToolSpec, TrajectoryRecordStatus,
 };
 use schemars::Schema;
 use serde_json::json;
@@ -118,7 +118,7 @@ async fn registered_tool_arguments_are_validated_before_execution() {
     assert_eq!(executor.call_count(), 0);
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), ToolCallResultStatus::Failed);
@@ -195,7 +195,7 @@ async fn runtime_control_tool_resolves_even_if_token_is_cancelled_during_executi
     assert!(executor.token_seen().is_cancelled());
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
+        ["ToolCallResolved"]
     );
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), merry_core::ToolCallResultStatus::Succeeded);
@@ -272,23 +272,17 @@ async fn pre_cancelled_denied_tool_execution_keeps_pending_without_artifact() {
             if call_id == *pending.id()
     ));
     assert_eq!(executor.call_count(), 0);
-    assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+    assert_eq!(runtime.pending_tool_calls().await, vec![pending.clone()]);
     assert_eq!(runtime.ledger_projection().await, projection_before);
     assert!(action_audit_records(&runtime).await.is_empty());
-    let expected_result_artifact_id = artifact_id("tool-result-2");
-    let evidence_err = runtime
-        .evidence_ref(
-            &expected_result_artifact_id,
-            EvidenceLocator::whole_artifact(),
-        )
-        .await
-        .expect_err("pre-cancelled policy denial must not record result artifact");
-    assert!(matches!(
-        evidence_err,
-        crate::RuntimeError::Artifact {
-            source: ArtifactError::MissingArtifact { id }
-        } if id == expected_result_artifact_id
-    ));
+    assert!(
+        runtime
+            .read_tool_output(pending.id())
+            .await
+            .expect("tool output query succeeds")
+            .is_none(),
+        "pre-cancelled policy denial must not record tool output"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -333,21 +327,15 @@ async fn cancelling_before_proposal_commit_keeps_pending_without_audit_or_result
             if call_id == *pending.id()
     ));
     assert_eq!(executor.execute_count(), 0);
-    assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
+    assert_eq!(runtime.pending_tool_calls().await, vec![pending.clone()]);
     assert_eq!(runtime.ledger_projection().await, projection_before);
     assert!(action_audit_records(&runtime).await.is_empty());
-    let expected_result_artifact_id = artifact_id("tool-result-2");
-    let evidence_err = runtime
-        .evidence_ref(
-            &expected_result_artifact_id,
-            EvidenceLocator::whole_artifact(),
-        )
-        .await
-        .expect_err("cancelled proposal must not record result artifact");
-    assert!(matches!(
-        evidence_err,
-        crate::RuntimeError::Artifact {
-            source: ArtifactError::MissingArtifact { id }
-        } if id == expected_result_artifact_id
-    ));
+    assert!(
+        runtime
+            .read_tool_output(pending.id())
+            .await
+            .expect("tool output query succeeds")
+            .is_none(),
+        "cancelled proposal must not record tool output"
+    );
 }

@@ -178,10 +178,7 @@ fn successful_command_output_uses_a_terminal_panel_by_default() {
     );
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(
-                ToolCallId::new("process").unwrap(),
-                super::text_artifact("process-output"),
-            ),
+            result: ToolCallResult::succeeded(ToolCallId::new("process").unwrap()),
             output: Some(ToolOutput::Json {
                 json: json!({
                     "kind": "process_action",

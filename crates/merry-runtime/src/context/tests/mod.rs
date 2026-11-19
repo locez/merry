@@ -1,13 +1,9 @@
 use super::{ContextEntry, SessionContextSnapshot};
-use crate::{
-    artifact::{ArtifactContent, ArtifactRegistry},
-    memory::{
-        ActivatedMemory, MemoryActivationProvenance, MemoryActivationReason, MemoryActivationScore,
-        MemoryActivationSourceKind, MemoryEvidence, MemoryId, MemoryItem, MemoryItemSelection,
-        MemoryScope,
-    },
+use crate::memory::{
+    ActivatedMemory, MemoryActivationProvenance, MemoryActivationReason, MemoryActivationScore,
+    MemoryActivationSourceKind, MemoryEvidence, MemoryId, MemoryItem, MemoryItemSelection,
+    MemoryScope,
 };
-use merry_core::{ArtifactId, ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef};
 
 mod budget;
 mod input;
@@ -24,11 +20,7 @@ pub(super) fn activated_memory(
         id,
         scope,
         text,
-        vec![memory_evidence(
-            "primary source",
-            &format!("{id}-artifact"),
-            EvidenceLocator::whole_artifact(),
-        )],
+        vec![memory_evidence("primary source", &format!("{id}-source"))],
         score,
         reasons,
         provenance(),
@@ -89,17 +81,8 @@ pub(super) fn memory_id(value: &str) -> MemoryId {
     MemoryId::new(value).expect("memory id is valid")
 }
 
-pub(super) fn artifact_id(value: &str) -> ArtifactId {
-    ArtifactId::new(value).expect("artifact id is valid")
-}
-
-pub(super) fn memory_evidence(
-    label: &str,
-    artifact: &str,
-    locator: EvidenceLocator,
-) -> MemoryEvidence {
-    MemoryEvidence::new(label, EvidenceRef::new(artifact_id(artifact), locator))
-        .expect("memory evidence is valid")
+pub(super) fn memory_evidence(label: &str, source: &str) -> MemoryEvidence {
+    MemoryEvidence::new(label, source).expect("memory evidence is valid")
 }
 
 pub(super) fn memory_selection(confidence: f32, priority: i32) -> MemoryItemSelection {
@@ -115,33 +98,5 @@ pub(super) fn snapshot_with_memories(
     entries: Vec<ContextEntry>,
     memories: Vec<ActivatedMemory>,
 ) -> SessionContextSnapshot {
-    let mut artifacts = ArtifactRegistry::default();
-    record_text_artifacts(&mut artifacts, &memories);
-    SessionContextSnapshot::new(entries, artifacts, memories, None)
-}
-
-pub(super) fn record_text_artifacts(
-    artifacts: &mut ArtifactRegistry,
-    memories: &[ActivatedMemory],
-) {
-    let mut seen = std::collections::BTreeSet::new();
-
-    for memory in memories {
-        for evidence in memory.item().evidence() {
-            if !seen.insert(evidence.reference().artifact_id.clone()) {
-                continue;
-            }
-
-            artifacts
-                .record(
-                    ArtifactRef::new(evidence.reference().artifact_id.clone(), ArtifactKind::Text),
-                    ArtifactContent::text(format!(
-                        "evidence for {}\n{}",
-                        memory.item().id(),
-                        memory.item().text()
-                    )),
-                )
-                .expect("memory artifact records");
-        }
-    }
+    SessionContextSnapshot::new(entries, memories, None)
 }

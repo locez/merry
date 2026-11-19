@@ -3,9 +3,7 @@
 use crate::tool_input_validation::{
     CompiledToolInputValidator, ToolInputValidationError, ToolInputValidatorError,
 };
-use merry_core::{
-    ArtifactRef, CoreError, PendingToolCall, ToolCallId, ToolInputSchema, ToolName, ToolSpec,
-};
+use merry_core::{CoreError, PendingToolCall, ToolCallId, ToolInputSchema, ToolName, ToolSpec};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::{collections::BTreeSet, fmt, sync::Arc};
@@ -117,29 +115,18 @@ impl FinalOutputContract {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalOutput {
     call_id: ToolCallId,
-    artifact: ArtifactRef,
     json: String,
 }
 
 impl FinalOutput {
-    pub(crate) fn new(call_id: ToolCallId, artifact: ArtifactRef, json: String) -> Self {
-        Self {
-            call_id,
-            artifact,
-            json,
-        }
+    pub(crate) fn new(call_id: ToolCallId, json: String) -> Self {
+        Self { call_id, json }
     }
 
     /// Borrows the model/provider-originated final-output tool call id.
     #[must_use]
     pub fn call_id(&self) -> &ToolCallId {
         &self.call_id
-    }
-
-    /// Borrows the JSON artifact reference containing the final output.
-    #[must_use]
-    pub fn artifact(&self) -> &ArtifactRef {
-        &self.artifact
     }
 
     /// Borrows the exact JSON payload.

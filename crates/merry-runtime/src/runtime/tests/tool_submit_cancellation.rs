@@ -1,18 +1,14 @@
 use crate::{
-    ArtifactError,
     runtime::{
         Runtime,
         tests::support::{
-            common::{RuntimeSessionStateTestExt, artifact_id},
-            tool_executors::SuccessfulToolExecutor,
+            common::RuntimeSessionStateTestExt, tool_executors::SuccessfulToolExecutor,
             tool_helpers::registered_tool_spec,
         },
     },
     tool::{RegisteredTool, ToolExecutionContext},
 };
-use merry_core::{
-    EvidenceLocator, PendingToolCall, SessionId, ToolCallArguments, ToolCallId, ToolName,
-};
+use merry_core::{PendingToolCall, SessionId, ToolCallArguments, ToolCallId, ToolName};
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -159,19 +155,12 @@ async fn cancelling_registered_tool_after_success_before_submit_keeps_pending() 
     ));
     assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
     assert_eq!(runtime.ledger_projection().await, projection_before);
-
-    let expected_result_artifact_id = artifact_id("tool-result-1");
-    let evidence_err = runtime
-        .evidence_ref(
-            &expected_result_artifact_id,
-            EvidenceLocator::whole_artifact(),
-        )
-        .await
-        .expect_err("cancelled tool execution must not record runtime-owned result artifact");
-    assert!(matches!(
-        evidence_err,
-        crate::RuntimeError::Artifact {
-            source: ArtifactError::MissingArtifact { id }
-        } if id == expected_result_artifact_id
-    ));
+    assert!(
+        runtime
+            .read_tool_output(&call_id)
+            .await
+            .expect("tool output query succeeds")
+            .is_none(),
+        "cancelled tool execution must not record tool output"
+    );
 }

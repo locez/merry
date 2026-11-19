@@ -4,10 +4,7 @@
 //! user text are truncated. When the JSON still exceeds the budget, middle
 //! items are replaced by `[...` / `...]` markers.
 
-use crate::{
-    ArtifactContent,
-    session::{TranscriptItemSnapshot, UserInputOrigin},
-};
+use crate::session::{TranscriptItemSnapshot, UserInputOrigin};
 use merry_core::PendingToolCall;
 
 use super::manifest::truncate_utf8;
@@ -174,8 +171,11 @@ fn render_item(item: &TranscriptItemSnapshot, stats: &mut CondensationStats) -> 
                 "arguments": arguments
             })
         }
-        TranscriptItemSnapshot::ToolResult { content, .. } => {
-            let (text, trimmed) = bounded(&artifact_text(content), TOOL_OUTPUT_MAX);
+        TranscriptItemSnapshot::ToolResult { output, images, .. } => {
+            if !images.is_empty() {
+                stats.images_dropped = true;
+            }
+            let (text, trimmed) = bounded(output.as_str(), TOOL_OUTPUT_MAX);
             stats.tool_results_trimmed |= trimmed;
             serde_json::json!({"role": "tool_result", "text": text})
         }
@@ -186,15 +186,6 @@ fn tool_arguments(call: &PendingToolCall) -> (String, bool) {
     let rendered =
         serde_json::to_string(call.arguments().as_object()).unwrap_or_else(|_| "{}".to_owned());
     bounded(&rendered, TOOL_ARGS_MAX)
-}
-
-fn artifact_text(content: &ArtifactContent) -> String {
-    match content {
-        ArtifactContent::Text { content } | ArtifactContent::Json { content } => content.clone(),
-        ArtifactContent::Binary { .. }
-        | ArtifactContent::Image { .. }
-        | ArtifactContent::Other { .. } => String::new(),
-    }
 }
 
 fn bounded(text: &str, max_bytes: usize) -> (String, bool) {

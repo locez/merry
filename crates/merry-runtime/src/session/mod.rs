@@ -2,7 +2,6 @@
 
 use crate::{
     action_audit::ActionAuditRegistry,
-    artifact::ArtifactRegistry,
     context::{CompactedCheckpoint, ContextEntry, ProjectRules, TaskAnchor},
     ledger::TaskLedger,
     memory::{ActivatedMemory, MemoryStore},
@@ -12,7 +11,6 @@ use crate::{
 use merry_core::{PendingToolCall, PlanSnapshot, SessionId, ToolCallId, TrajectorySnapshot};
 use std::collections::BTreeSet;
 
-mod artifacts;
 mod checkpoint_window;
 mod context_state;
 mod events;
@@ -30,12 +28,11 @@ mod usage;
 
 pub(crate) use self::checkpoint_window::PreparedCompactionInstall;
 pub(crate) use self::{
-    artifacts::is_runtime_reserved_artifact_id,
     model_turns::{ModelTurn, ModelTurnId, ModelTurnStatus, PromptHistoryProjection},
     persistence::PersistableSessionBundle,
     plan_tool_commit::PreparedPlanToolCommit,
     tool_result::{ProposedToolExecutionOutcome, ToolResultLedgerObservation},
-    transcript::{Transcript, TranscriptImageSnapshot, TranscriptItemSnapshot, UserInputOrigin},
+    transcript::{Transcript, TranscriptItemSnapshot, UserInputOrigin},
 };
 pub(crate) use crate::session_projection::{SessionTrajectory, SessionTrajectoryItem};
 
@@ -49,7 +46,6 @@ pub(crate) struct SessionState {
     next_sequence: u64,
     session_started: bool,
     ledger: TaskLedger,
-    artifacts: ArtifactRegistry,
     memory_store: MemoryStore,
     skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
@@ -85,7 +81,6 @@ impl SessionState {
             next_sequence: 0,
             session_started: false,
             ledger: TaskLedger::default(),
-            artifacts: ArtifactRegistry::default(),
             memory_store: MemoryStore::new(),
             skill_catalog: None,
             project_rules: None,
@@ -163,39 +158,23 @@ impl SessionState {
             .items()
             .iter()
             .map(|item| match item {
-                transcript::TranscriptItem::UserMessage { artifact_id, .. } => {
-                    let content = self
-                        .read_artifact_content(artifact_id)
-                        .expect("user transcript artifact should be readable");
-                    let text = content
-                        .as_text()
-                        .expect("user transcript artifact should be text");
+                transcript::TranscriptItem::UserMessage { text, .. } => {
                     format!("user:{text}")
                 }
-                transcript::TranscriptItem::AssistantText { artifact_id, .. } => {
-                    let content = self
-                        .read_artifact_content(artifact_id)
-                        .expect("assistant transcript artifact should be readable");
-                    let text = content
-                        .as_text()
-                        .expect("assistant transcript artifact should be text");
+                transcript::TranscriptItem::AssistantText { text, .. } => {
                     format!("assistant:{text}")
                 }
                 transcript::TranscriptItem::ToolCall { call, .. } => {
                     format!("tool_call:{}", call.id().as_str())
                 }
                 transcript::TranscriptItem::ToolResult {
-                    call_id,
-                    artifact_id,
-                    ..
+                    call_id, payload, ..
                 } => {
-                    let content = self
-                        .read_artifact_content(artifact_id)
-                        .expect("tool result transcript artifact should be readable");
-                    let text = content
-                        .as_text()
-                        .expect("tool result transcript artifact should be text");
-                    format!("tool_result:{}:{text}", call_id.as_str())
+                    format!(
+                        "tool_result:{}:{}",
+                        call_id.as_str(),
+                        payload.full().as_str()
+                    )
                 }
             })
             .collect()
@@ -207,22 +186,6 @@ impl SessionState {
             .items()
             .iter()
             .map(transcript::TranscriptItem::model_turn_id)
-            .collect()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn assistant_transcript_artifact_ids_for_tests(
-        &self,
-    ) -> Vec<merry_core::ArtifactId> {
-        self.transcript
-            .items()
-            .iter()
-            .filter_map(|item| match item {
-                transcript::TranscriptItem::AssistantText { artifact_id, .. } => {
-                    Some(artifact_id.clone())
-                }
-                _ => None,
-            })
             .collect()
     }
 }

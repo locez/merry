@@ -9,9 +9,7 @@ use crate::support::{
     },
     tools::{ScriptedToolExecutor, assert_sanitized_policy_denial_json, test_tool_spec},
 };
-use merry_core::{
-    ArtifactKind, EvidenceLocator, RuntimeJournalPayload, ToolCallResultStatus, ToolName,
-};
+use merry_core::{RuntimeJournalPayload, ToolCallResultStatus, ToolName, ToolOutputKind};
 use merry_llm::{FinishReason, ModelOutput};
 use merry_runtime::{
     LedgerFactKind, LedgerProjection, RegisteredTool, Runtime, ToolActionKind, ToolAdmission,
@@ -53,24 +51,17 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
         .await
         .expect("unregistered tool should synthesize failed result");
 
-    assert_eq!(
-        event_kind_names(&execution_events),
-        ["ArtifactRecorded", "ToolCallResolved"]
-    );
+    assert_eq!(event_kind_names(&execution_events), ["ToolCallResolved"]);
     assert_eq!(
         execution_events
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![4, 5]
+        vec![4]
     );
     let result = resolved_tool_result(&execution_events);
     assert!(matches!(
         &execution_events[0].payload,
-        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
-    ));
-    assert!(matches!(
-        &execution_events[1].payload,
         RuntimeJournalPayload::ToolCallResolved { result: resolved } if resolved == result
     ));
     assert_eq!(result.status(), ToolCallResultStatus::Failed);
@@ -81,16 +72,15 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
             .code(),
         "tool_not_registered"
     );
-    assert_eq!(result.artifact().id().as_str(), "tool-result-4");
-    assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
     assert_eq!(result.call_id(), pending.id());
     assert!(failed_code(&execution_events).is_none());
     assert!(runtime.pending_tool_calls().await.is_empty());
-    let evidence = runtime
-        .evidence_ref(result.artifact().id(), EvidenceLocator::whole_artifact())
+    let output = runtime
+        .read_tool_output(result.call_id())
         .await
-        .expect("unregistered tool failure artifact should be readable after ArtifactRecorded");
-    assert_eq!(evidence.artifact_id, *result.artifact().id());
+        .expect("unregistered tool failure output read")
+        .expect("unregistered tool failure output should be stored");
+    assert_eq!(output.kind(), ToolOutputKind::Json);
     let projection = runtime.ledger_projection().await;
     assert_eq!(
         projection.entries(),
@@ -113,11 +103,6 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
             LedgerProjection::Lifecycle {
                 sequence: 4,
                 order: 3,
-                kind: LedgerFactKind::ArtifactRecorded,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 5,
-                order: 4,
                 kind: LedgerFactKind::ToolCallResolved,
             },
         ]
@@ -133,7 +118,7 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![6, 7, 8, 9]
+        vec![5, 6, 7, 8]
     );
     assert_eq!(provider.recorded_requests()[1].continuations().len(), 1);
 }
@@ -207,10 +192,7 @@ async fn denied_registered_tool_result_is_compiled_as_failed_provider_neutral_co
     let continuation_events = collect_step(&runtime, "Continue after denial.").await;
 
     assert_eq!(executor.calls().len(), 0);
-    assert_eq!(
-        event_kind_names(&execution_events),
-        ["ArtifactRecorded", "ToolCallResolved"]
-    );
+    assert_eq!(event_kind_names(&execution_events), ["ToolCallResolved"]);
     assert_eq!(
         event_kind_names(&continuation_events),
         ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]

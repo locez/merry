@@ -1,25 +1,18 @@
 use crate::support::{
-    events::{
-        assert_no_artifact_recorded, assistant_output_artifact, event_kind_names, failed_code,
-    },
+    events::{assert_no_artifact_recorded, assistant_output_text, event_kind_names, failed_code},
     models::{GatedStreamingProvider, completed_event, completed_text_event, model_name},
     runtime::{
-        artifact_id, collect_step, collect_step_with_context, record_valid_context,
-        runtime_with_provider, runtime_with_provider_event_buffer, session_id,
+        collect_step, collect_step_with_context, record_valid_context, runtime_with_provider,
+        runtime_with_provider_event_buffer, session_id,
     },
 };
 use futures_util::StreamExt;
-use merry_core::{
-    ArtifactKind, ArtifactRef, EvidenceLocator, RuntimeJournalPayload, TrajectoryLane,
-};
+use merry_core::{RuntimeJournalPayload, TrajectoryLane};
 use merry_llm::{
     GenerationConfig, ModelEvent, ModelMessageRole, ModelRetryPolicy, ParallelToolCalls,
     testing::FakeModelProvider,
 };
-use merry_runtime::{
-    ArtifactContent, ArtifactError, ContextSummary, LedgerFactKind, LedgerProjection, Runtime,
-    StepContext, StepInput,
-};
+use merry_runtime::{LedgerFactKind, LedgerProjection, Runtime, StepContext, StepInput};
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::mpsc, time::timeout};
 use tokio_util::sync::CancellationToken;
@@ -55,14 +48,7 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
             .collect::<Vec<_>>(),
         vec![0, 1, 2, 3, 4, 5]
     );
-    let artifact = assistant_output_artifact(&events);
-    assert_eq!(artifact.id().as_str(), "assistant-output-4");
-    assert_eq!(artifact.kind(), &ArtifactKind::Text);
-    let evidence = runtime
-        .evidence_ref(artifact.id(), EvidenceLocator::whole_artifact())
-        .await
-        .expect("artifact event should be observable only after artifact is readable");
-    assert_eq!(evidence.artifact_id, *artifact.id());
+    assert_eq!(assistant_output_text(&events), "model result");
 
     let projection = runtime.ledger_projection().await;
     assert_eq!(
@@ -81,7 +67,7 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
             LedgerProjection::Lifecycle {
                 sequence: 4,
                 order: 2,
-                kind: LedgerFactKind::ArtifactRecorded,
+                kind: LedgerFactKind::AssistantOutputRecorded,
             },
             LedgerProjection::Lifecycle {
                 sequence: 5,
@@ -199,57 +185,6 @@ async fn runtime_step_exposes_live_delta_before_provider_completion() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn reserved_assistant_output_external_recording_does_not_block_runtime_owned_output() {
-    let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
-    let runtime = runtime_with_provider("provider-reserved-assistant-output", provider);
-    let artifact = ArtifactRef::new(artifact_id("assistant-output-3"), ArtifactKind::Text);
-    let before = runtime.ledger_projection().await;
-
-    let err = runtime
-        .record_artifact(
-            artifact.clone(),
-            ArtifactContent::text("external shadow output\n"),
-        )
-        .await
-        .expect_err("external recording should not use runtime-owned assistant output ids");
-    let after = runtime.ledger_projection().await;
-
-    assert!(matches!(
-        err,
-        merry_runtime::RuntimeError::ReservedArtifactId { artifact_id } if artifact_id == *artifact.id()
-    ));
-    assert_eq!(before, after);
-    let evidence_err = runtime
-        .evidence_ref(artifact.id(), EvidenceLocator::whole_artifact())
-        .await
-        .expect_err("reserved artifact must not be recorded");
-    assert!(matches!(
-        evidence_err,
-        merry_runtime::RuntimeError::Artifact {
-            source: ArtifactError::MissingArtifact { id }
-        } if id == *artifact.id()
-    ));
-
-    let events = collect_step(&runtime, "after reserved artifact").await;
-    assert_eq!(
-        event_kind_names(&events),
-        [
-            "SessionStarted",
-            "StepStarted",
-            "AssistantOutputRecorded",
-            "StepCompleted"
-        ]
-    );
-    let generated = assistant_output_artifact(&events);
-    assert_eq!(generated.id().as_str(), "assistant-output-3");
-    let evidence = runtime
-        .evidence_ref(generated.id(), EvidenceLocator::whole_artifact())
-        .await
-        .expect("runtime-owned assistant output should be readable");
-    assert_eq!(evidence.artifact_id, *generated.id());
-}
-
-#[tokio::test(flavor = "current_thread")]
 async fn runtime_step_with_provider_uses_step_generation_config() {
     let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
     let runtime = runtime_with_provider("provider-generation-config", provider.clone());
@@ -305,7 +240,12 @@ async fn runtime_step_with_provider_includes_compiled_context_as_system_message(
 
     assert_eq!(
         event_kind_names(&events),
-        ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
+        [
+            "SessionStarted",
+            "StepStarted",
+            "AssistantOutputRecorded",
+            "StepCompleted"
+        ]
     );
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);
@@ -359,7 +299,7 @@ async fn runtime_step_with_provider_includes_compiled_context_as_system_message(
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_stop_multiline_text_artifact_supports_line_evidence() {
+async fn provider_stop_multiline_text_output_is_preserved() {
     let provider = FakeModelProvider::new(vec![Ok(completed_text_event(
         "first line\nsecond line\nthird line\n",
     ))]);
@@ -376,15 +316,10 @@ async fn provider_stop_multiline_text_artifact_supports_line_evidence() {
             "StepCompleted"
         ]
     );
-    let artifact = assistant_output_artifact(&events);
-    let evidence = runtime
-        .evidence_ref(
-            artifact.id(),
-            EvidenceLocator::line_range(2, 2).expect("valid line range"),
-        )
-        .await
-        .expect("assistant output line evidence should resolve");
-    assert_eq!(evidence.artifact_id, *artifact.id());
+    assert_eq!(
+        assistant_output_text(&events),
+        "first line\nsecond line\nthird line\n"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -431,14 +366,8 @@ async fn second_provider_step_continues_sequences_and_replays_transcript() {
         event_kind_names(&second_events),
         ["StepStarted", "AssistantOutputRecorded", "StepCompleted"]
     );
-    assert_eq!(
-        assistant_output_artifact(&first_events).id().as_str(),
-        "assistant-output-3"
-    );
-    assert_eq!(
-        assistant_output_artifact(&second_events).id().as_str(),
-        "assistant-output-7"
-    );
+    assert_eq!(assistant_output_text(&first_events), "model result");
+    assert_eq!(assistant_output_text(&second_events), "model result");
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 2);
@@ -473,29 +402,6 @@ async fn second_provider_step_continues_sequences_and_replays_transcript() {
     assert_eq!(
         requests[1].messages()[4].content().as_text(),
         "Second request."
-    );
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn runtime_rejects_invalid_context_summary_before_provider_step() {
-    let provider = FakeModelProvider::new(vec![Ok(completed_event())]);
-    let runtime = runtime_with_provider("provider-context-failure", provider.clone());
-    let error = runtime
-        .record_context_summary(
-            ContextSummary::new(
-                "invalid-summary",
-                "This summary has no evidence.",
-                Vec::new(),
-            )
-            .expect("summary construction allows compiler validation"),
-        )
-        .await
-        .expect_err("invalid context summary is rejected before provider step");
-
-    assert_eq!(provider.recorded_requests().len(), 0);
-    assert_eq!(
-        error.to_string(),
-        "context state error: context summary invalid-summary has no exact evidence references"
     );
 }
 

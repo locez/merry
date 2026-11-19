@@ -1,5 +1,4 @@
 import type {
-  ArtifactReference,
   Diagnostic,
   JsonValue,
   ToolSpec,
@@ -477,7 +476,7 @@ function renderSummaryTab(
     </div>
     ${renderSummaryEvidence(record, toolSpecs)}
     ${renderDiagnostic(record.diagnostic)}
-    ${renderArtifacts(record.artifacts, sessionId)}`;
+    ${renderToolOutputLink(record, sessionId)}`;
 }
 
 function renderSummaryEvidence(record: TrajectoryRecord, toolSpecs: readonly ToolSpec[]): string {
@@ -513,10 +512,10 @@ function renderPayloadTab(record: TrajectoryRecord): string {
 
 function renderResultTab(record: TrajectoryRecord, sessionId: string): string {
   if (record.details.type !== "tool" || record.details.tool.output === null) {
-    return `${emptyInspectorSection("No tool result is attached to this event.")}${renderArtifacts(record.artifacts, sessionId)}`;
+    return emptyInspectorSection("No tool result is attached to this event.");
   }
   const output = record.details.tool.output;
-  return `${codeSection("Tool result", output.content, output.kind)}${truncationNotice(output.truncated)}${renderArtifacts(record.artifacts, sessionId)}`;
+  return `${codeSection("Tool result", output.content, output.kind)}${truncationNotice(output.truncated)}${renderToolOutputLink(record, sessionId)}`;
 }
 
 function renderSchemaTab(record: TrajectoryRecord, toolSpecs: readonly ToolSpec[]): string {
@@ -552,21 +551,27 @@ function renderDiagnostic(diagnostic: Diagnostic | null): string {
     : `<div class="diagnostic-box"><span>${escapeHtml(diagnostic.code)}</span><p>${escapeHtml(diagnostic.message)}</p></div>`;
 }
 
-function renderArtifacts(artifacts: readonly ArtifactReference[], sessionId?: string): string {
-  if (artifacts.length === 0) {
+function renderToolOutputLink(record: TrajectoryRecord, sessionId?: string): string {
+  if (
+    sessionId === undefined
+    || record.tool_call_id === null
+    || record.details.type !== "tool"
+    || record.details.tool.output === null
+  ) {
     return "";
   }
+  const output = record.details.tool.output;
   return `
     <div class="inspector-section">
-      <p class="eyebrow">ARTIFACTS</p>
-      <ul class="artifact-list">
-        ${artifacts.map((artifact: ArtifactReference) => `<li><code>${escapeHtml(artifact.id)}</code><span>${escapeHtml(artifact.label ?? artifact.kind)}</span>${sessionId === undefined ? "" : `<a class="artifact-link" href="${artifactUrl(sessionId, artifact.id)}" target="_blank" rel="noreferrer" aria-label="Open exact artifact" title="Open exact artifact">&#8599;</a>`}</li>`).join("")}
+      <p class="eyebrow">TOOL OUTPUT</p>
+      <ul class="tool-output-list">
+        <li><code>${escapeHtml(record.tool_call_id)}</code><span>${escapeHtml(output.kind)}</span><a class="tool-output-link" href="${toolOutputUrl(sessionId, record.tool_call_id)}" target="_blank" rel="noreferrer" aria-label="Open full tool output" title="Open full tool output">&#8599;</a></li>
       </ul>
     </div>`;
 }
 
-function artifactUrl(sessionId: string, artifactId: string): string {
-  return `/api/v1/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`;
+function toolOutputUrl(sessionId: string, toolCallId: string): string {
+  return `/api/v1/sessions/${encodeURIComponent(sessionId)}/tool-calls/${encodeURIComponent(toolCallId)}/output`;
 }
 
 function codeSection(label: string, content: string, kind: string): string {
@@ -583,7 +588,7 @@ function emptyInspectorSection(message: string): string {
 }
 
 function truncationNotice(truncated: boolean): string {
-  return truncated ? `<p class="truncation-note">Preview is bounded; the exact artifact remains available.</p>` : "";
+  return truncated ? `<p class="truncation-note">Preview is bounded; the full tool output remains available.</p>` : "";
 }
 
 function detail(label: string, value: string, monospace = false): string {

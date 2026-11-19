@@ -1,16 +1,17 @@
 use crate::session::{
     ModelTurnId,
     tests::{
-        ArtifactContent, ArtifactKind, ArtifactRef, CitationCompactionPolicy, ModelTurnStatus,
-        PendingToolCallBatch, RuntimeError, SessionId, SessionState, SessionStateTestExt,
-        TaskAnchor, ToolCallBatchId, ToolCallResult, TranscriptItem, artifact_id,
-        pending_tool_call,
+        CitationCompactionPolicy, ModelTurnStatus, PendingToolCallBatch, RuntimeError, SessionId,
+        SessionState, SessionStateTestExt, TaskAnchor, ToolCallBatchId, ToolCallResult, ToolOutput,
+        TranscriptItem, pending_tool_call,
     },
     transcript::{
-        ToolCallPromptProjection, ToolResultPromptProjection, Transcript, TranscriptItemId,
+        ToolCallPromptProjection, ToolResultPayload, ToolResultPromptProjection, Transcript,
+        TranscriptItemId,
     },
 };
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[test]
 fn compaction_window_retains_complete_model_turns_without_splitting() {
@@ -110,11 +111,7 @@ fn compaction_structure_errors_map_to_stale_window() {
     let turn_a = ModelTurnId::new(1);
     let turn_b = ModelTurnId::new(2);
     let call = pending_tool_call("invalid-structure-call");
-    let result_artifact_id = artifact_id("invalid-structure-result");
-    let result = ToolCallResult::succeeded(
-        call.id().clone(),
-        ArtifactRef::new(result_artifact_id.clone(), ArtifactKind::Text),
-    );
+    let result = ToolCallResult::succeeded(call.id().clone());
     let call_item = |id, model_turn_id| TranscriptItem::ToolCall {
         id: TranscriptItemId::new(id),
         model_turn_id,
@@ -126,16 +123,14 @@ fn compaction_structure_errors_map_to_stale_window() {
         model_turn_id,
         call_id: call.id().clone(),
         result: result.clone(),
-        artifact_id: result_artifact_id.clone(),
-        model_artifact_id: None,
-        image_artifact_ids: Vec::new(),
+        payload: ToolResultPayload::new(ToolOutput::text("invalid-structure"), None, Vec::new()),
         prompt_projection: ToolResultPromptProjection::Full,
     };
-    let user_item = |id, model_turn_id, artifact| TranscriptItem::UserMessage {
+    let user_item = |id, model_turn_id, text: &str| TranscriptItem::UserMessage {
         id: TranscriptItemId::new(id),
         model_turn_id,
-        artifact_id: artifact_id(artifact),
-        image_artifact_ids: Vec::new(),
+        text: Arc::<str>::from(text),
+        images: Vec::new(),
         origin: crate::session::UserInputOrigin::ExternalUser,
     };
 
@@ -192,6 +187,7 @@ fn compaction_structure_errors_map_to_stale_window() {
         );
         session.transcript = Transcript {
             items,
+            tool_result_index: BTreeMap::new(),
             next_id: TranscriptItemId::new(3),
             model_turns: model_turns.into_iter().collect(),
             model_turn_sequences: BTreeMap::new(),
@@ -369,25 +365,14 @@ fn compaction_retains_an_entire_multi_item_tool_turn() {
     session
         .close_model_response(turn_id, true)
         .expect("tool response closes");
-    for (call, artifact, content) in [
-        (
-            &call_a,
-            "retained-turn-result-a",
-            "retained tool result a sentinel",
-        ),
-        (
-            &call_b,
-            "retained-turn-result-b",
-            "retained tool result b sentinel",
-        ),
+    for (call, content) in [
+        (&call_a, "retained tool result a sentinel"),
+        (&call_b, "retained tool result b sentinel"),
     ] {
         session
             .submit_tool_result(
-                ToolCallResult::succeeded(
-                    call.id().clone(),
-                    ArtifactRef::new(artifact_id(artifact), ArtifactKind::Text),
-                ),
-                ArtifactContent::text(content),
+                ToolCallResult::succeeded(call.id().clone()),
+                ToolOutput::text(content),
             )
             .expect("tool result records");
     }

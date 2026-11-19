@@ -1,9 +1,9 @@
 use merry_core::{
-    ArtifactRef, ErrorInfo, EvidenceRef, PlanApprovalRequirementId,
-    PlanApprovalRequirementSnapshot, PlanAttemptId, PlanAttemptOutcome,
-    PlanCapabilityEnvelopeSnapshot, PlanDirectiveConstraints, PlanDirectiveId, PlanDirectiveKind,
-    PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanNodeId, PlanNodeResult, PlanNodeStatus,
-    PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, PlanSnapshot, SkillId,
+    ErrorInfo, PlanApprovalRequirementId, PlanApprovalRequirementSnapshot, PlanAttemptId,
+    PlanAttemptOutcome, PlanCapabilityEnvelopeSnapshot, PlanDirectiveConstraints, PlanDirectiveId,
+    PlanDirectiveKind, PlanExecutorPolicy, PlanHarnessSnapshot, PlanId, PlanNodeId, PlanNodeResult,
+    PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot,
+    PlanSnapshot, SkillId,
 };
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
@@ -92,10 +92,12 @@ pub struct ControlPlanAttemptInput {
 #[serde(deny_unknown_fields)]
 pub struct ReportPlanProgressInput {
     pub summary: String,
+    #[serde(default)]
     #[schemars(length(max = MAX_PAYLOAD_ITEMS))]
-    pub evidence_refs: Vec<EvidenceRef>,
+    pub output_paths: Vec<String>,
+    #[serde(default)]
     #[schemars(length(max = MAX_PAYLOAD_ITEMS))]
-    pub artifact_refs: Vec<ArtifactRef>,
+    pub evidence_notes: Vec<String>,
     pub next_action: Option<String>,
     pub checkpoint_ref: Option<String>,
     pub acknowledged_directive_ids: Vec<PlanDirectiveId>,

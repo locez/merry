@@ -1,9 +1,8 @@
 use crate::{
     compaction::CompactionWindowBudget,
     session::tests::{
-        ArtifactContent, ArtifactKind, ArtifactRef, CitationCompactionPolicy, PendingToolCallBatch,
-        SessionState, SessionStateTestExt, ToolCallBatchId, ToolCallResult, artifact_id,
-        pending_tool_call,
+        CitationCompactionPolicy, PendingToolCallBatch, SessionState, SessionStateTestExt,
+        ToolCallBatchId, ToolCallResult, ToolOutput, pending_tool_call,
     },
 };
 
@@ -25,7 +24,7 @@ fn record_completed_user_turn(session: &mut SessionState, text: &str) {
 fn record_completed_tool_turn(
     session: &mut SessionState,
     call_id: &str,
-    result_artifact_id: &str,
+    _result_label: &str,
     result_body: &str,
 ) {
     let turn_id = session.begin_model_turn().expect("tool turn begins");
@@ -48,11 +47,8 @@ fn record_completed_tool_turn(
         .expect("tool response closes");
     session
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                call.id().clone(),
-                ArtifactRef::new(artifact_id(result_artifact_id), ArtifactKind::Text),
-            ),
-            ArtifactContent::text(result_body),
+            ToolCallResult::succeeded(call.id().clone()),
+            ToolOutput::text(result_body),
         )
         .expect("tool result records");
 }

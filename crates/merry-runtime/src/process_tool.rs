@@ -440,13 +440,8 @@ mod tests {
             .diagnostic()
             .expect("failed process argument outcome should include diagnostic");
         assert_eq!(diagnostic.code(), PROCESS_COMMAND_INVALID_ARGUMENTS_CODE);
-        let payload: Value = serde_json::from_str(
-            outcome
-                .content()
-                .as_text()
-                .expect("failed process argument outcome should be JSON"),
-        )
-        .expect("failed process argument outcome should parse as JSON");
+        let payload: Value = serde_json::from_str(outcome.content().as_str())
+            .expect("failed process argument outcome should parse as JSON");
         assert_eq!(
             payload["error"]["message"],
             "command must be a non-empty string"

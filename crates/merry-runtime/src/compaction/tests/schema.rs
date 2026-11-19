@@ -1,4 +1,4 @@
-use super::{evidence, test_window};
+use super::test_window;
 use crate::compaction::{
     CitationCompactionInput, CitationCompactionInputParts, CitationCompactionInputPolicy,
     CitationCompactionPolicy, CitationCompactionWindowBundle,
@@ -32,7 +32,6 @@ fn payload_compaction_request_asks_for_prose_not_a_schema() {
             CheckpointRefId::new("r1").expect("valid ref id"),
             CheckpointSourceKind::UserMessage,
             CheckpointSequenceRange::new(1, 1).expect("valid range"),
-            evidence("user-message-1"),
         )],
     )
     .expect("valid manifest");

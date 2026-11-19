@@ -22,7 +22,6 @@ function message(id, kind, sequence, turnId, text) {
     end_sequence: null,
     parent_id: null,
     tool_call_id: null,
-    artifacts: [],
     diagnostic: null,
     started_at_ms: null,
     finished_at_ms: null,

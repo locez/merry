@@ -10,8 +10,8 @@ use crate::{
 };
 use futures_util::StreamExt;
 use merry_core::{
-    ArtifactKind, ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload,
-    SessionId, ToolCallResultStatus,
+    ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
+    ToolCallResultStatus,
 };
 use tokio::sync::mpsc;
 
@@ -50,22 +50,14 @@ pub(crate) async fn collect_step_events(
 }
 
 pub(crate) async fn final_assistant_output_from_step(
-    runtime: &Runtime,
+    _runtime: &Runtime,
     events: &[RuntimeJournalEvent],
 ) -> Option<String> {
     for event in events.iter().rev() {
-        let RuntimeJournalPayload::AssistantOutputRecorded { artifact } = &event.payload else {
+        let RuntimeJournalPayload::AssistantOutputRecorded { text } = &event.payload else {
             continue;
         };
-        if artifact.kind() != &ArtifactKind::Text {
-            continue;
-        }
-        let Ok(content) = runtime.read_artifact_content(artifact.id()).await else {
-            continue;
-        };
-        if let Some(text) = content.as_text() {
-            return Some(text.to_owned());
-        }
+        return Some(text.clone());
     }
 
     None
@@ -245,18 +237,6 @@ pub(crate) fn tool_resolution_status(events: &[RuntimeJournalEvent]) -> &'static
             _ => None,
         })
         .unwrap_or("unresolved")
-}
-
-pub(crate) fn tool_resolution_artifact_id(events: &[RuntimeJournalEvent]) -> String {
-    events
-        .iter()
-        .find_map(|event| match &event.payload {
-            RuntimeJournalPayload::ToolCallResolved { result } => {
-                Some(result.artifact().id().as_str().to_owned())
-            }
-            _ => None,
-        })
-        .unwrap_or_default()
 }
 
 pub(crate) fn tool_resolution_diagnostic_code(events: &[RuntimeJournalEvent]) -> Option<&str> {

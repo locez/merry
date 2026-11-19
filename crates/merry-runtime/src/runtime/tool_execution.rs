@@ -1,6 +1,5 @@
 use crate::{
-    ActionExecutionEvidence, ActionProposal, ArtifactContent, ProcessPermissionProfileId,
-    RuntimeError,
+    ActionExecutionEvidence, ActionProposal, ProcessPermissionProfileId, RuntimeError, ToolOutput,
     action_audit::ActionAuditPolicy,
     action_policy::{
         ActionPolicyDecision, DefaultActionPolicy, classify_tool_action_risk,
@@ -26,8 +25,8 @@ use crate::{
     tool::{ActionProposalEvidence, ToolActionPreflight, ToolExecutionContext, ToolExecutionError},
 };
 use merry_core::{
-    CoreError, ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, SessionId,
-    ToolCallId, ToolCallResultStatus,
+    CoreError, ErrorInfo, PendingToolCall, RuntimeJournalEvent, SessionId, ToolCallId,
+    ToolCallResultStatus,
 };
 use std::sync::Arc;
 
@@ -96,7 +95,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
             DIAGNOSTIC_TOOL_NOT_REGISTERED,
             format!("tool {} is not registered", pending.name()),
         );
-        let content = ArtifactContent::json(format!(
+        let content = ToolOutput::json(format!(
             r#"{{"error":"tool_not_registered","tool":"{}"}}"#,
             pending.name()
         ));
@@ -670,7 +669,7 @@ async fn resolve_tool_admission_denial(
             pending.name()
         ),
     );
-    let content = ArtifactContent::json(
+    let content = ToolOutput::json(
         serde_json::json!({
             "error": DIAGNOSTIC_TOOL_NOT_ADMITTED,
             "tool": pending.name().as_str(),
@@ -702,7 +701,7 @@ async fn resolve_plan_harness_denial(
     pending: &PendingToolCall,
     diagnostic: ErrorInfo,
 ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
-    let content = ArtifactContent::json(
+    let content = ToolOutput::json(
         serde_json::json!({
             "ok": false,
             "tool": pending.name().as_str(),
@@ -772,7 +771,7 @@ pub(super) fn denied_tool_action_outcome(pending: &PendingToolCall) -> crate::To
 pub(super) fn trace_denied_tool_execution(
     session_id: &str,
     pending: &PendingToolCall,
-    events: &[RuntimeJournalEvent],
+    _events: &[RuntimeJournalEvent],
 ) {
     tracing::info!(
         event = "runtime.tool.execute.finish",
@@ -780,7 +779,6 @@ pub(super) fn trace_denied_tool_execution(
         tool_call_id = pending.id().as_str(),
         tool_name = pending.name().as_str(),
         status = "denied",
-        artifact_id = tool_resolution_artifact_id(events),
         diagnostic_code = DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
         "runtime tool execution denied"
     );
@@ -789,7 +787,7 @@ pub(super) fn trace_denied_tool_execution(
 pub(super) fn trace_review_denied_tool_execution(
     session_id: &str,
     pending: &PendingToolCall,
-    events: &[RuntimeJournalEvent],
+    _events: &[RuntimeJournalEvent],
     status: &'static str,
 ) {
     tracing::info!(
@@ -798,7 +796,6 @@ pub(super) fn trace_review_denied_tool_execution(
         tool_call_id = pending.id().as_str(),
         tool_name = pending.name().as_str(),
         status,
-        artifact_id = tool_resolution_artifact_id(events),
         diagnostic_code = if status == "review_failed" {
             "permission_review_failed"
         } else {
@@ -806,18 +803,6 @@ pub(super) fn trace_review_denied_tool_execution(
         },
         "runtime tool execution stopped by high-risk action review"
     );
-}
-
-fn tool_resolution_artifact_id(events: &[RuntimeJournalEvent]) -> String {
-    events
-        .iter()
-        .find_map(|event| match &event.payload {
-            RuntimeJournalPayload::ToolCallResolved { result } => {
-                Some(result.artifact().id().as_str().to_owned())
-            }
-            _ => None,
-        })
-        .unwrap_or_default()
 }
 
 pub(super) fn validate_action_proposal(

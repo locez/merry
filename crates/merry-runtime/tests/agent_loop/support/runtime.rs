@@ -2,7 +2,7 @@ use crate::support::{
     models::{ScriptedModelProvider, model_name},
     tools::tool_spec,
 };
-use merry_core::{ArtifactId, SessionId, ToolCallId};
+use merry_core::{SessionId, ToolCallId};
 use merry_runtime::{
     AgentLoopConfig, Runtime, StepContext, StepInput, ToolActionKind, ToolExecutor,
 };
@@ -11,10 +11,6 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) fn session_id(value: &str) -> SessionId {
     SessionId::new(value).expect("valid session id")
-}
-
-pub(crate) fn artifact_id(value: &str) -> ArtifactId {
-    ArtifactId::new(value).expect("valid artifact id")
 }
 
 pub(crate) fn tool_call_id(value: &str) -> ToolCallId {

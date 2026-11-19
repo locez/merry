@@ -1,7 +1,6 @@
 //! Runtime-owned JSON Schema validation for model-supplied tool arguments.
 
-use crate::ArtifactContent;
-use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName};
+use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolOutput};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use thiserror::Error;
@@ -84,8 +83,8 @@ impl ToolInputValidationError {
         .expect("static tool input validation diagnostic is valid")
     }
 
-    pub(crate) fn content_for_call(&self, call: &PendingToolCall) -> ArtifactContent {
-        ArtifactContent::json(self.payload_for_call(call).to_string())
+    pub(crate) fn content_for_call(&self, call: &PendingToolCall) -> ToolOutput {
+        ToolOutput::json(self.payload_for_call(call).to_string())
     }
 
     pub(crate) fn payload_for_call(&self, call: &PendingToolCall) -> Value {

@@ -1,14 +1,12 @@
 use super::{Runtime, RuntimeError, diagnostic_from_text};
 use crate::{
-    ArtifactContent, ArtifactContentPreview, ContextEntry, ContextSummary,
-    LedgerProjectionSnapshot, SessionContextSnapshot, SessionTranscriptItem,
-    events::ActiveStepPermit, session::is_runtime_reserved_artifact_id,
+    ContextEntry, ContextSummary, LedgerProjectionSnapshot, SessionContextSnapshot,
+    SessionTranscriptItem, events::ActiveStepPermit,
     tool_input_validation::ToolInputValidationError,
 };
 use merry_core::{
-    ArtifactId, ArtifactRef, ErrorInfo, EvidenceLocator, EvidenceRef, PendingToolCall,
-    RuntimeJournalEvent, TOOL_CANCELLED_BY_USER_CODE, ToolCallId, ToolCallResult,
-    ToolCallResultStatus,
+    ErrorInfo, PendingToolCall, RuntimeJournalEvent, TOOL_CANCELLED_BY_USER_CODE, ToolCallId,
+    ToolCallResult, ToolCallResultStatus, ToolOutput, ToolOutputPreview,
 };
 use std::sync::Arc;
 
@@ -26,54 +24,10 @@ impl Runtime {
             .clone()
     }
 
-    /// Records exact artifact state into the owning session and returns observable events.
+    /// Resolves one pending tool call with its recorded output.
     ///
-    /// When this is the first observable action in the session, `SessionStarted`
-    /// is returned before `ArtifactRecorded`.
-    ///
-    /// This direct mutation path acquires the active-step permit and therefore
-    /// cannot run concurrently with [`Runtime::step`],
-    /// [`Runtime::submit_tool_result`], or [`Runtime::execute_tool_call`]. State
-    /// is written before returned events are handed to the caller.
-    ///
-    /// Artifact ids with runtime-reserved prefixes are rejected. Runtime-owned
-    /// ids are used for internally generated artifacts such as assistant output
-    /// and registered tool execution results.
-    pub async fn record_artifact(
-        &self,
-        artifact: ArtifactRef,
-        content: ArtifactContent,
-    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
-        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
-            .ok_or_else(|| RuntimeError::StepAlreadyActive {
-                session_id: self.inner.session_id.clone(),
-            })?;
-
-        if is_runtime_reserved_artifact_id(artifact.id()) {
-            return Err(RuntimeError::ReservedArtifactId {
-                artifact_id: artifact.id().clone(),
-            });
-        }
-
-        let events = {
-            let mut session = self.inner.session.lock().await;
-            session
-                .record_artifact_events(artifact, content)
-                .map_err(RuntimeError::from)?
-        };
-        self.observe_recorded_journal_events(&events);
-        Ok(events)
-    }
-
-    /// Resolves one pending tool call with an artifact-backed result.
-    ///
-    /// The artifact content is durably recorded before `ToolCallResolved` is
-    /// emitted. The event carries only the artifact reference, not the payload.
-    ///
-    /// This is the manual result path for external tool runners. Callers choose
-    /// the artifact id and must not use runtime-reserved artifact ids. The
-    /// registered executor path is [`Runtime::execute_tool_call`], where runtime
-    /// code owns the generated artifact id and result envelope.
+    /// The output is durably recorded in the session transcript before
+    /// `ToolCallResolved` is emitted.
     ///
     /// Cancellation or executor infrastructure failures do not resolve the call;
     /// a pending tool call remains pending until this method or
@@ -81,32 +35,26 @@ impl Runtime {
     pub async fn submit_tool_result(
         &self,
         result: ToolCallResult,
-        content: ArtifactContent,
+        output: ToolOutput,
     ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
         let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
                 session_id: self.inner.session_id.clone(),
             })?;
 
-        self.submit_tool_result_with_active_permit(result, content, &_active_permit)
+        self.submit_tool_result_with_active_permit(result, output, &_active_permit)
             .await
     }
 
     pub(crate) async fn submit_tool_result_with_active_permit(
         &self,
         result: ToolCallResult,
-        content: ArtifactContent,
+        output: ToolOutput,
         _active_permit: &ActiveStepPermit,
     ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
-        if is_runtime_reserved_artifact_id(result.artifact().id()) {
-            return Err(RuntimeError::ReservedArtifactId {
-                artifact_id: result.artifact().id().clone(),
-            });
-        }
-
         let events = {
             let mut session = self.inner.session.lock().await;
-            session.submit_tool_result(result, content)?
+            session.submit_tool_result(result, output)?
         };
         self.inner.commit_journal_events(&events).await;
         Ok(events)
@@ -176,7 +124,7 @@ impl Runtime {
             session.submit_tool_execution_outcome(
                 call_id,
                 ToolCallResultStatus::Failed,
-                ArtifactContent::text("Tool execution was cancelled by user interrupt."),
+                ToolOutput::text("Tool execution was cancelled by user interrupt."),
                 Some(diagnostic),
                 None,
             )?
@@ -187,15 +135,6 @@ impl Runtime {
 
     /// Resolves every pending tool call with a durable failed result so the
     /// session reaches a resume-safe boundary, returning how many were resolved.
-    ///
-    /// A run that settles while a tool call is still pending cannot be saved at
-    /// all: [`crate::SessionStoreError::UnsafePendingToolCalls`] rejects the
-    /// bundle, so the partial session is lost instead of persisted. Owners of
-    /// run settlement call this before saving to record why each call never
-    /// produced a result, which is what keeps a failed run resumable.
-    ///
-    /// This acquires the active-step permit and therefore cannot run while a
-    /// step, tool submission, or tool execution is in flight.
     pub async fn abandon_pending_tool_calls(&self, reason: &str) -> Result<usize, RuntimeError> {
         let active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
@@ -228,7 +167,7 @@ impl Runtime {
             session.submit_tool_execution_outcome(
                 call_id,
                 ToolCallResultStatus::Failed,
-                ArtifactContent::text(format!("Tool execution was abandoned: {reason}")),
+                ToolOutput::text(format!("Tool execution was abandoned: {reason}")),
                 Some(diagnostic),
                 None,
             )?
@@ -238,8 +177,7 @@ impl Runtime {
     }
 
     /// Converts an executor infrastructure failure into a durable failed
-    /// result for an interactive continuation. Direct executor callers keep
-    /// the lower-level contract of leaving infrastructure failures pending.
+    /// result for an interactive continuation.
     pub(crate) async fn submit_tool_execution_failure_with_active_permit(
         &self,
         call_id: &ToolCallId,
@@ -252,7 +190,7 @@ impl Runtime {
             session.submit_tool_execution_outcome(
                 call_id,
                 ToolCallResultStatus::Failed,
-                ArtifactContent::text(format!("Tool execution failed: {message}")),
+                ToolOutput::text(format!("Tool execution failed: {message}")),
                 Some(diagnostic),
                 None,
             )?
@@ -273,7 +211,7 @@ impl Runtime {
             session.submit_tool_execution_outcome(
                 call_id,
                 ToolCallResultStatus::Failed,
-                ArtifactContent::text(format!(
+                ToolOutput::text(format!(
                     "Structured output was invalid: {message}. Call merry_final_output again with a value matching the requested schema."
                 )),
                 Some(diagnostic),
@@ -284,59 +222,31 @@ impl Runtime {
         Ok(events)
     }
 
-    /// Creates an exact evidence reference from artifact state owned by this session.
+    /// Reads the full recorded output for one resolved tool call.
     ///
-    /// Prefer this facade over reading [`crate::ArtifactRegistry`] directly. The
-    /// returned reference is valid only for artifact content already owned by
-    /// this runtime session.
-    pub async fn evidence_ref(
+    /// Returns `Ok(None)` when `call_id` has no recorded result in this session.
+    pub async fn read_tool_output(
         &self,
-        artifact_id: &ArtifactId,
-        locator: EvidenceLocator,
-    ) -> Result<EvidenceRef, RuntimeError> {
+        call_id: &ToolCallId,
+    ) -> Result<Option<ToolOutput>, RuntimeError> {
         let session = self.inner.session.lock().await;
-        session
-            .evidence_ref(artifact_id, locator)
-            .map_err(Into::into)
+        Ok(session.read_tool_output(call_id))
     }
 
-    /// Reads exact artifact content already owned by this runtime session.
+    /// Reads a bounded UTF-8 preview of one resolved tool call without cloning
+    /// the full output.
     ///
-    /// This is an inspection facade over session-owned artifact state. It does
-    /// not mutate runtime state, advance event sequence, or expose provider
-    /// wire formats.
-    pub async fn read_artifact_content(
+    /// Returns `Ok(None)` when `call_id` has no recorded result in this session.
+    pub async fn read_tool_output_preview(
         &self,
-        artifact_id: &ArtifactId,
-    ) -> Result<ArtifactContent, RuntimeError> {
-        let session = self.inner.session.lock().await;
-        session
-            .read_artifact_content(artifact_id)
-            .map_err(Into::into)
-    }
-
-    /// Reads bounded artifact inspection data without cloning the full payload.
-    pub async fn read_artifact_preview(
-        &self,
-        artifact_id: &ArtifactId,
+        call_id: &ToolCallId,
         max_bytes: usize,
-    ) -> Result<ArtifactContentPreview, RuntimeError> {
+    ) -> Result<Option<ToolOutputPreview>, RuntimeError> {
         let session = self.inner.session.lock().await;
-        session
-            .read_artifact_preview(artifact_id, max_bytes)
-            .map_err(Into::into)
+        Ok(session.read_tool_output_preview(call_id, max_bytes))
     }
 
     /// Records a structured context entry into the owning session.
-    ///
-    /// This is the raw/manual MVP direct context mutation surface. It appends
-    /// summary-only context entries today after acquiring the active-step
-    /// permit. It validates evidence readability and duplicate summary ids, but
-    /// does not emit runtime events or write ledger facts.
-    ///
-    /// Direct writes are not summary-draft promotion, do not record promotion
-    /// lifecycle state, and are not governed by the internal summary-draft
-    /// promotion acceptance/replay rules.
     pub async fn record_context_entry(&self, entry: ContextEntry) -> Result<(), RuntimeError> {
         let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
@@ -349,18 +259,6 @@ impl Runtime {
     }
 
     /// Records a summary context entry into the owning session.
-    ///
-    /// Summaries are navigation only; exact supporting evidence must remain
-    /// readable through session-owned artifacts before the summary can enter
-    /// compiled context. This helper is the raw/manual MVP direct write path:
-    /// it delegates to [`Runtime::record_context_entry`], so it records with
-    /// the same active-step admission guard, immediate evidence readability
-    /// validation, duplicate-id rejection, and without runtime events or ledger
-    /// facts.
-    ///
-    /// This API is the raw manual write path: it does not perform
-    /// acceptance/replay checks and never derives context mutation from model
-    /// output.
     pub async fn record_context_summary(
         &self,
         summary: ContextSummary,
@@ -369,32 +267,19 @@ impl Runtime {
             .await
     }
 
-    /// Builds a sealed context snapshot from session-owned context and artifacts.
-    ///
-    /// The snapshot is opaque and session-owned. It exists so
-    /// [`crate::ContextCompiler`] can validate summaries against the matching
-    /// artifact view without accepting arbitrary caller-assembled state.
+    /// Builds a sealed context snapshot from session-owned context state.
     pub async fn context_snapshot(&self) -> SessionContextSnapshot {
         let session = self.inner.session.lock().await;
         session.context_snapshot()
     }
 
     /// Builds a read-only deterministic projection of the task ledger.
-    ///
-    /// This is the preferred public read path for lifecycle and compact ledger
-    /// facts. Direct [`crate::TaskLedger`] access is a low-level in-memory MVP
-    /// primitive and should not be treated as the stable application-facing
-    /// ledger API.
     pub async fn ledger_projection(&self) -> LedgerProjectionSnapshot {
         let session = self.inner.session.lock().await;
         session.ledger_projection()
     }
 
     /// Returns a snapshot of provider-neutral tool calls currently awaiting results.
-    ///
-    /// The returned calls are normalized Merry runtime state, not provider wire
-    /// payloads. A call remains listed until a durable result is submitted or
-    /// executed through a registered executor.
     pub async fn pending_tool_calls(&self) -> Vec<PendingToolCall> {
         let session = self.inner.session.lock().await;
         session.pending_tool_calls()
@@ -404,7 +289,7 @@ impl Runtime {
     pub async fn session_transcript(&self) -> Result<Vec<SessionTranscriptItem>, RuntimeError> {
         let snapshots = {
             let session = self.inner.session.lock().await;
-            session.full_transcript_snapshot()?
+            session.full_transcript_snapshot()
         };
         Ok(snapshots
             .into_iter()

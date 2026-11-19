@@ -3,15 +3,15 @@ use crate::support::{
     models::{
         ScriptedModelProvider, completed_outputs_event, completed_text_event, model_tool_call,
     },
-    runtime::{artifact_id, collect_step, runtime_with_provider, runtime_with_scripted_provider},
+    runtime::{collect_step, runtime_with_provider, runtime_with_scripted_provider},
     tools::failed_tool_result,
 };
 use merry_core::{
-    ArtifactKind, ArtifactRef, EvidenceLocator, RuntimeJournalPayload, ToolCallResult,
-    ToolCallResultStatus, TrajectoryRecordDetails, TrajectoryRecordKind, TrajectoryRecordStatus,
+    RuntimeJournalPayload, ToolCallResult, ToolCallResultStatus, ToolOutput,
+    TrajectoryRecordDetails, TrajectoryRecordKind, TrajectoryRecordStatus,
 };
 use merry_llm::{FinishReason, ModelOutput, testing::FakeModelProvider};
-use merry_runtime::{ArtifactContent, LedgerFactKind, LedgerProjection};
+use merry_runtime::{LedgerFactKind, LedgerProjection};
 
 #[tokio::test(flavor = "current_thread")]
 async fn failed_tool_result_status_diagnostic_and_content_are_compiled_without_runtime_failed_event()
@@ -29,20 +29,15 @@ async fn failed_tool_result_status_diagnostic_and_content_are_compiled_without_r
     );
     let pending_events = collect_step(&runtime, "Request a failing tool.").await;
     let call = pending_tool_call(&pending_events).clone();
-    let result_artifact = ArtifactRef::new(
-        artifact_id("manual-result-continuation-failed-json"),
-        ArtifactKind::Json,
-    );
     let result = failed_tool_result(
         call.id().clone(),
-        result_artifact.clone(),
         "tool_failed",
         "Tool exited with status 2",
     );
     let resolved_events = runtime
         .submit_tool_result(
             result,
-            ArtifactContent::json(r#"{"stderr":"permission denied"}"#),
+            ToolOutput::json(r#"{"stderr":"permission denied"}"#),
         )
         .await
         .expect("failed tool result should resolve");
@@ -77,7 +72,7 @@ async fn failed_tool_result_status_diagnostic_and_content_are_compiled_without_r
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn t6_failure_evidence_links_journal_artifact_ledger_and_trajectory() {
+async fn t6_failure_links_journal_output_ledger_and_trajectory() {
     let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
         vec![ModelOutput::tool_call(model_tool_call())],
         FinishReason::ToolCalls,
@@ -87,34 +82,26 @@ async fn t6_failure_evidence_links_journal_artifact_ledger_and_trajectory() {
     let call = pending_tool_call(&pending_events).clone();
     let diagnostic = merry_core::ErrorInfo::new("tool_failed", "Tool exited with status 2")
         .expect("valid diagnostic");
-    let result_artifact = ArtifactRef::new(artifact_id("manual-result-failed"), ArtifactKind::Json);
-    let result = ToolCallResult::failed(call.id().clone(), result_artifact.clone(), diagnostic);
+    let result = ToolCallResult::failed(call.id().clone(), diagnostic);
 
     let events = runtime
         .submit_tool_result(
             result.clone(),
-            ArtifactContent::json(r#"{"stderr":"permission denied"}"#),
+            ToolOutput::json(r#"{"stderr":"permission denied"}"#),
         )
         .await
         .expect("failed tool result should resolve");
 
-    assert_eq!(
-        event_kind_names(&events),
-        ["ArtifactRecorded", "ToolCallResolved"]
-    );
+    assert_eq!(event_kind_names(&events), ["ToolCallResolved"]);
     assert_eq!(
         events
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![4, 5]
+        vec![4]
     );
     assert!(matches!(
         &events[0].payload,
-        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == &result_artifact
-    ));
-    assert!(matches!(
-        &events[1].payload,
         RuntimeJournalPayload::ToolCallResolved { result: resolved }
             if resolved.status() == ToolCallResultStatus::Failed
                 && resolved.diagnostic().map(merry_core::ErrorInfo::code) == Some("tool_failed")
@@ -127,11 +114,13 @@ async fn t6_failure_evidence_links_journal_artifact_ledger_and_trajectory() {
             .all(|event| !matches!(event.payload, RuntimeJournalPayload::Failed { .. })),
         "tool execution failure must be represented as ToolCallResolved, not RuntimeJournalPayload::Failed"
     );
-    let evidence = runtime
-        .evidence_ref(result_artifact.id(), EvidenceLocator::whole_artifact())
-        .await
-        .expect("failure artifact should be readable");
-    assert_eq!(evidence.artifact_id, *result_artifact.id());
+    assert_eq!(
+        runtime
+            .read_tool_output(call.id())
+            .await
+            .expect("failure output read"),
+        Some(ToolOutput::json(r#"{"stderr":"permission denied"}"#))
+    );
 
     let projection = runtime.ledger_projection().await;
     assert_eq!(
@@ -155,11 +144,6 @@ async fn t6_failure_evidence_links_journal_artifact_ledger_and_trajectory() {
             LedgerProjection::Lifecycle {
                 sequence: 4,
                 order: 3,
-                kind: LedgerFactKind::ArtifactRecorded,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 5,
-                order: 4,
                 kind: LedgerFactKind::ToolCallResolved,
             },
         ]
@@ -197,7 +181,6 @@ async fn t6_failure_evidence_links_journal_artifact_ledger_and_trajectory() {
     assert_eq!(tool_record.status(), TrajectoryRecordStatus::Failed);
     assert_eq!(tool_record.start_sequence(), pending_sequence);
     assert_eq!(tool_record.end_sequence(), Some(resolved_sequence));
-    assert_eq!(tool_record.artifacts(), &[result_artifact]);
     assert_eq!(
         tool_record.diagnostic().map(merry_core::ErrorInfo::code),
         Some("tool_failed")

@@ -1,18 +1,15 @@
 use super::{
-    activated_memory, activated_memory_with_evidence, artifact_id, labeled_provenance,
-    memory_evidence, memory_id, memory_selection, memory_snapshot, provenance, ranked_reasons,
-    record_text_artifacts, score, snapshot_with_memories,
+    activated_memory, activated_memory_with_evidence, labeled_provenance, memory_evidence,
+    memory_id, memory_selection, memory_snapshot, provenance, ranked_reasons, score,
 };
 use crate::{
-    CompactedCheckpoint, ContextCompiler, ContextEntry, ContextError, ContextEvidence,
-    ContextSummary, SessionContextSnapshot,
-    artifact::{ArtifactContent, ArtifactError, ArtifactRegistry},
+    CompactedCheckpoint, ContextCompiler, ContextEntry, ContextError, ContextSummary,
+    SessionContextSnapshot,
     memory::{
         ActivatedMemory, MemoryActivationProvenance, MemoryActivationReason,
         MemoryActivationSourceKind, MemoryItem, MemoryScope,
     },
 };
-use merry_core::{ArtifactKind, ArtifactRef, EvidenceLocator, EvidenceRef};
 
 #[test]
 fn to_snapshot_includes_activated_memory_text_and_reasons() {
@@ -49,7 +46,7 @@ fn to_snapshot_includes_activated_memory_text_and_reasons() {
             "memory-activation-source-label:user request",
             "memory-activation-query:topic",
             "memory-activation-allowed-scopes:session,task,step",
-            "memory-evidence:primary source:memory-main-artifact:whole",
+            "memory-evidence:primary source:memory-main-source",
             "memory-reason:scope_allowed",
             "memory-reason:trigger:rust",
             "memory-reason:trigger:workspace",
@@ -70,33 +67,10 @@ fn compacted_checkpoint_renders_before_summaries_and_memory() {
         score(1, 0, 0.5),
         ranked_reasons(1, 0, 0.5),
     );
-    let mut artifacts = ArtifactRegistry::default();
-    artifacts
-        .record(
-            ArtifactRef::new(artifact_id("summary-artifact"), ArtifactKind::Text),
-            ArtifactContent::text("summary evidence"),
-        )
-        .expect("artifact records");
-    record_text_artifacts(&mut artifacts, std::slice::from_ref(&memory));
     let summary = ContextEntry::summary(
-        ContextSummary::new(
-            "summary-a",
-            "Summary projection.",
-            vec![
-                ContextEvidence::new(
-                    "whole",
-                    EvidenceRef::new(
-                        artifact_id("summary-artifact"),
-                        EvidenceLocator::whole_artifact(),
-                    ),
-                )
-                .expect("evidence metadata is valid"),
-            ],
-        )
-        .expect("summary fields are valid"),
+        ContextSummary::new("summary-a", "Summary projection.").expect("summary fields are valid"),
     );
-    let snapshot =
-        SessionContextSnapshot::new(vec![summary], artifacts, vec![memory], Some(checkpoint));
+    let snapshot = SessionContextSnapshot::new(vec![summary], vec![memory], Some(checkpoint));
 
     let compiled = ContextCompiler::new()
         .compile(&snapshot)
@@ -104,7 +78,9 @@ fn compacted_checkpoint_renders_before_summaries_and_memory() {
         .to_snapshot();
 
     assert!(
-        compiled.starts_with("compacted-checkpoint:\nguidance:This summary is the record of the turns that were removed."),
+        compiled.starts_with(
+            "compacted-checkpoint:\nguidance:This summary is the record of the turns that were removed."
+        ),
         "compacted checkpoint should render before summary and memory sections"
     );
     assert!(
@@ -234,11 +210,7 @@ fn duplicate_memory_id_ties_include_evidence_and_provenance_in_canonical_key() {
         "memory-duplicate",
         MemoryScope::Session,
         "Same text.",
-        vec![memory_evidence(
-            "source",
-            "artifact-z",
-            EvidenceLocator::whole_artifact(),
-        )],
+        vec![memory_evidence("source", "source-z")],
         score(1, 1, 0.5),
         ranked_reasons(1, 1, 0.5),
         provenance(),
@@ -247,11 +219,7 @@ fn duplicate_memory_id_ties_include_evidence_and_provenance_in_canonical_key() {
         "memory-duplicate",
         MemoryScope::Session,
         "Same text.",
-        vec![memory_evidence(
-            "source",
-            "artifact-a",
-            EvidenceLocator::whole_artifact(),
-        )],
+        vec![memory_evidence("source", "source-a")],
         score(1, 1, 0.5),
         ranked_reasons(1, 1, 0.5),
         provenance(),
@@ -271,18 +239,14 @@ fn duplicate_memory_id_ties_include_evidence_and_provenance_in_canonical_key() {
 
     assert_eq!(first, second);
     assert_eq!(first.matches("memory:memory-duplicate").count(), 1);
-    assert!(first.contains("memory-evidence:source:artifact-a:whole"));
-    assert!(!first.contains("memory-evidence:source:artifact-z:whole"));
+    assert!(first.contains("memory-evidence:source:source-a"));
+    assert!(!first.contains("memory-evidence:source:source-z"));
 
     let z_provenance = activated_memory_with_evidence(
         "memory-duplicate",
         MemoryScope::Session,
         "Same text.",
-        vec![memory_evidence(
-            "source",
-            "artifact-a",
-            EvidenceLocator::whole_artifact(),
-        )],
+        vec![memory_evidence("source", "source-a")],
         score(1, 1, 0.5),
         ranked_reasons(1, 1, 0.5),
         labeled_provenance("Z source"),
@@ -291,11 +255,7 @@ fn duplicate_memory_id_ties_include_evidence_and_provenance_in_canonical_key() {
         "memory-duplicate",
         MemoryScope::Session,
         "Same text.",
-        vec![memory_evidence(
-            "source",
-            "artifact-a",
-            EvidenceLocator::whole_artifact(),
-        )],
+        vec![memory_evidence("source", "source-a")],
         score(1, 1, 0.5),
         ranked_reasons(1, 1, 0.5),
         labeled_provenance("A source"),
@@ -343,75 +303,6 @@ fn sections_public_view_does_not_expose_memory_projection() {
 }
 
 #[test]
-fn memory_projection_does_not_bypass_summary_evidence_validation() {
-    let memory = activated_memory(
-        "memory-present",
-        MemoryScope::Session,
-        "Memory should not make invalid summaries compile.",
-        score(1, 0, 0.5),
-        ranked_reasons(1, 0, 0.5),
-    );
-    let summary = ContextEntry::summary(
-        ContextSummary::new("summary-without-evidence", "Missing evidence.", Vec::new())
-            .expect("summary fields are valid"),
-    );
-    let snapshot = snapshot_with_memories(vec![summary], vec![memory]);
-
-    let error = ContextCompiler::new()
-        .compile(&snapshot)
-        .expect_err("summary evidence validation still applies");
-
-    assert_eq!(
-        error,
-        ContextError::SummaryWithoutEvidence {
-            id: "summary-without-evidence".to_owned()
-        }
-    );
-}
-
-#[test]
-fn summary_evidence_validation_still_uses_artifact_registry_with_memory_present() {
-    let memory = activated_memory(
-        "memory-present",
-        MemoryScope::Session,
-        "Memory should not make missing artifacts compile.",
-        score(1, 0, 0.5),
-        ranked_reasons(1, 0, 0.5),
-    );
-    let summary = ContextEntry::summary(
-        ContextSummary::new(
-            "summary-missing-artifact",
-            "Missing artifact.",
-            vec![
-                ContextEvidence::new(
-                    "missing",
-                    EvidenceRef::new(
-                        artifact_id("missing-artifact"),
-                        EvidenceLocator::whole_artifact(),
-                    ),
-                )
-                .expect("evidence metadata is valid"),
-            ],
-        )
-        .expect("summary fields are valid"),
-    );
-    let snapshot = snapshot_with_memories(vec![summary], vec![memory]);
-
-    let error = ContextCompiler::new()
-        .compile(&snapshot)
-        .expect_err("missing summary evidence still fails");
-
-    assert!(matches!(
-        error,
-        ContextError::UnreadableEvidence {
-            summary_id,
-            artifact_id,
-            source: ArtifactError::MissingArtifact { .. },
-        } if summary_id == "summary-missing-artifact" && artifact_id.as_str() == "missing-artifact"
-    ));
-}
-
-#[test]
 fn compiler_rejects_memory_without_evidence() {
     let item = MemoryItem::new_unchecked_for_tests(
         memory_id("memory-without-evidence"),
@@ -428,8 +319,7 @@ fn compiler_rejects_memory_without_evidence() {
         provenance(),
     )
     .expect("activation can expose legacy bad memory for compiler validation");
-    let snapshot =
-        SessionContextSnapshot::new(Vec::new(), ArtifactRegistry::default(), vec![memory], None);
+    let snapshot = SessionContextSnapshot::new(Vec::new(), vec![memory], None);
 
     let error = ContextCompiler::new()
         .compile(&snapshot)
@@ -444,92 +334,15 @@ fn compiler_rejects_memory_without_evidence() {
 }
 
 #[test]
-fn compiler_rejects_unreadable_memory_evidence_with_artifact_source() {
-    let memory = activated_memory_with_evidence(
-        "memory-missing-evidence",
-        MemoryScope::Session,
-        "Memory with missing evidence.",
-        vec![memory_evidence(
-            "missing",
-            "missing-memory-artifact",
-            EvidenceLocator::whole_artifact(),
-        )],
-        score(1, 0, 0.5),
-        ranked_reasons(1, 0, 0.5),
-        provenance(),
-    );
-    let snapshot =
-        SessionContextSnapshot::new(Vec::new(), ArtifactRegistry::default(), vec![memory], None);
-
-    let error = ContextCompiler::new()
-        .compile(&snapshot)
-        .expect_err("missing memory evidence should fail");
-
-    assert!(matches!(
-        error,
-        ContextError::UnreadableMemoryEvidence {
-            memory_id,
-            artifact_id,
-            source: ArtifactError::MissingArtifact { id },
-        } if memory_id == "memory-missing-evidence"
-            && artifact_id.as_str() == "missing-memory-artifact"
-            && id.as_str() == "missing-memory-artifact"
-    ));
-}
-
-#[test]
-fn compiler_rejects_invalid_memory_evidence_locator_with_artifact_source() {
-    let memory = activated_memory_with_evidence(
-        "memory-invalid-evidence",
-        MemoryScope::Session,
-        "Memory with invalid evidence.",
-        vec![memory_evidence(
-            "invalid",
-            "invalid-memory-artifact",
-            EvidenceLocator::line_range(9, 10).expect("valid locator shape"),
-        )],
-        score(1, 0, 0.5),
-        ranked_reasons(1, 0, 0.5),
-        provenance(),
-    );
-    let mut artifacts = ArtifactRegistry::default();
-    record_text_artifacts(&mut artifacts, std::slice::from_ref(&memory));
-    let snapshot = SessionContextSnapshot::new(Vec::new(), artifacts, vec![memory], None);
-
-    let error = ContextCompiler::new()
-        .compile(&snapshot)
-        .expect_err("invalid memory evidence locator should fail");
-
-    assert!(matches!(
-        error,
-        ContextError::UnreadableMemoryEvidence {
-            memory_id,
-            artifact_id,
-            source: ArtifactError::InvalidEvidenceLocator { id, .. },
-        } if memory_id == "memory-invalid-evidence"
-            && artifact_id.as_str() == "invalid-memory-artifact"
-            && id.as_str() == "invalid-memory-artifact"
-    ));
-}
-
-#[test]
 fn valid_memory_evidence_appears_in_snapshot_deterministically() {
     let memory = activated_memory_with_evidence(
         "memory-evidence",
         MemoryScope::Session,
         "Memory with sorted evidence.",
         vec![
-            memory_evidence(
-                "z label",
-                "artifact-b",
-                EvidenceLocator::line_range(1, 1).expect("valid line"),
-            ),
-            memory_evidence("a label", "artifact-a", EvidenceLocator::whole_artifact()),
-            memory_evidence(
-                "b label",
-                "artifact-a",
-                EvidenceLocator::byte_range(0, 6).expect("valid byte"),
-            ),
+            memory_evidence("z label", "source-b"),
+            memory_evidence("a label", "source-a"),
+            memory_evidence("b label", "source-a"),
         ],
         score(1, 0, 0.5),
         ranked_reasons(1, 0, 0.5),
@@ -542,7 +355,9 @@ fn valid_memory_evidence_appears_in_snapshot_deterministically() {
         .expect("memory evidence compiles")
         .to_snapshot();
 
-    assert!(compiled.contains("memory-evidence:b label:artifact-a:byte:0-6\nmemory-evidence:a label:artifact-a:whole\nmemory-evidence:z label:artifact-b:line:1-1"));
+    assert!(compiled.contains(
+        "memory-evidence:a label:source-a\nmemory-evidence:b label:source-a\nmemory-evidence:z label:source-b"
+    ));
 }
 
 #[test]
@@ -552,8 +367,8 @@ fn evidence_and_provenance_ordering_is_independent_of_insertion_order() {
         MemoryScope::Session,
         "Memory with shuffled evidence.",
         vec![
-            memory_evidence("z label", "artifact-z", EvidenceLocator::whole_artifact()),
-            memory_evidence("a label", "artifact-a", EvidenceLocator::whole_artifact()),
+            memory_evidence("z label", "source-z"),
+            memory_evidence("a label", "source-a"),
         ],
         score(1, 0, 0.5),
         ranked_reasons(1, 0, 0.5),
@@ -570,8 +385,8 @@ fn evidence_and_provenance_ordering_is_independent_of_insertion_order() {
         MemoryScope::Session,
         "Memory with shuffled evidence.",
         vec![
-            memory_evidence("a label", "artifact-a", EvidenceLocator::whole_artifact()),
-            memory_evidence("z label", "artifact-z", EvidenceLocator::whole_artifact()),
+            memory_evidence("a label", "source-a"),
+            memory_evidence("z label", "source-z"),
         ],
         score(1, 0, 0.5),
         ranked_reasons(1, 0, 0.5),
@@ -595,32 +410,14 @@ fn evidence_and_provenance_ordering_is_independent_of_insertion_order() {
 
     assert_eq!(first, second);
     assert!(first.contains(
-        "memory-activation-allowed-scopes:session,step\nmemory-evidence:a label:artifact-a:whole\nmemory-evidence:z label:artifact-z:whole"
+        "memory-activation-allowed-scopes:session,step\nmemory-evidence:a label:source-a\nmemory-evidence:z label:source-z"
     ));
 }
 
 #[test]
 fn summaries_and_memory_compile_together() {
-    let mut artifacts = ArtifactRegistry::default();
-    artifacts
-        .record(
-            ArtifactRef::new(artifact_id("artifact-a"), ArtifactKind::Text),
-            ArtifactContent::text("exact evidence\n"),
-        )
-        .expect("artifact records");
     let summary = ContextEntry::summary(
-        ContextSummary::new(
-            "summary-a",
-            "Navigation.",
-            vec![
-                ContextEvidence::new(
-                    "whole artifact",
-                    EvidenceRef::new(artifact_id("artifact-a"), EvidenceLocator::whole_artifact()),
-                )
-                .expect("evidence metadata is valid"),
-            ],
-        )
-        .expect("summary fields are valid"),
+        ContextSummary::new("summary-a", "Navigation.").expect("summary fields are valid"),
     );
     let memory = activated_memory(
         "memory-a",
@@ -629,8 +426,7 @@ fn summaries_and_memory_compile_together() {
         score(1, 0, 0.5),
         ranked_reasons(1, 0, 0.5),
     );
-    record_text_artifacts(&mut artifacts, std::slice::from_ref(&memory));
-    let snapshot = SessionContextSnapshot::new(vec![summary], artifacts, vec![memory], None);
+    let snapshot = SessionContextSnapshot::new(vec![summary], vec![memory], None);
 
     let compiled = ContextCompiler::new()
         .compile(&snapshot)
@@ -642,7 +438,6 @@ fn summaries_and_memory_compile_together() {
         [
             "summary:summary-a",
             "text:Navigation.",
-            "evidence:whole artifact:artifact-a:whole",
             "memory:memory-a",
             "memory-scope:session",
             "memory-text:Internal memory.",
@@ -650,7 +445,7 @@ fn summaries_and_memory_compile_together() {
             "memory-activation-source-label:user request",
             "memory-activation-query:topic",
             "memory-activation-allowed-scopes:session,task,step",
-            "memory-evidence:primary source:memory-a-artifact:whole",
+            "memory-evidence:primary source:memory-a-source",
             "memory-reason:scope_allowed",
             "memory-reason:trigger:topic",
             "memory-reason:rank:matches=1;priority=0;confidence=0.500",

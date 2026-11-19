@@ -7,31 +7,25 @@
 //!   provider-neutral runtime step at a time.
 //! - [`Tool`] defines the typed application-tool path; [`RegisteredTool`] and
 //!   [`ToolExecutor`] define the runtime-owned integration path.
-//! - [`Runtime::record_artifact`], [`Runtime::evidence_ref`], and
-//!   [`Runtime::ledger_projection`] expose session-owned artifact evidence and
+//! - [`Runtime::read_tool_output`], [`Runtime::read_tool_output_preview`], and
+//!   [`Runtime::ledger_projection`] expose session-owned tool outputs and
 //!   ledger reads without leaking provider wire formats.
 //!
 //! A few lower-level primitives are currently public because the in-memory MVP
 //! still needs explicit composition and tests around structured state:
-//! [`ArtifactRegistry`], [`TaskLedger`], [`ContextCompiler`], context entries,
-//! ledger updates, and artifact records. Treat these as unstable
-//! implementation-facing surfaces unless a [`Runtime`] method provides the same
-//! read or mutation path.
+//! [`TaskLedger`], [`ContextCompiler`], context entries, and ledger updates.
+//! Treat these as unstable implementation-facing surfaces unless a [`Runtime`]
+//! method provides the same read or mutation path.
 //!
-//! Runtime state is structured: summaries are navigation, exact evidence lives
-//! in artifacts, and lifecycle facts are recorded before observable events are
-//! emitted. The crate boundary is intentionally provider-neutral. Provider
-//! adapters normalize requests and events in `merry-llm`/provider crates rather
-//! than storing provider response formats here.
-//!
-//! The public API and crate boundaries are still unstable while the runtime
-//! builder, event protocol, Memory Activation, and artifact/ledger persistence
-//! contracts settle.
+//! Runtime state is structured and lifecycle facts are recorded before
+//! observable events are emitted. The crate boundary is intentionally
+//! provider-neutral. Provider adapters normalize requests and events in
+//! `merry-llm`/provider crates rather than storing provider response formats
+//! here.
 
 mod action_audit;
 mod action_policy;
 mod agent_loop;
-mod artifact;
 mod bridge;
 mod checkpoint;
 mod compaction;
@@ -79,10 +73,6 @@ pub use agent_loop::{
     AgentLoopStatus, AgentRun, AgentRunMessage, DEFAULT_AGENT_LOOP_MAX_MODEL_TURNS,
     StructuredOutputRetryPolicy,
 };
-pub use artifact::{
-    ArtifactContent, ArtifactContentKind, ArtifactContentPreview, ArtifactError, ArtifactRecord,
-    ArtifactRegistry, ImageArtifactMetadata, TextEvidencePage,
-};
 pub use checkpoint::{
     CheckpointError, CheckpointId, CheckpointRef, CheckpointRefId, CheckpointRefManifest,
     CheckpointSequenceRange, CheckpointSourceKind,
@@ -94,9 +84,8 @@ pub use compaction::{
 pub use context::{
     CheckpointDecision, CompactedCheckpoint, CompactedCheckpointSummary, CompiledContext,
     CompiledContextSection, ContextBudget, ContextCompiler, ContextEntry, ContextError,
-    ContextEvidence, ContextSummary, DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS, ProjectRules,
-    ResolvedContextWindow, SessionContextSnapshot, TaskAnchor, decide_checkpoint,
-    resolve_context_window,
+    ContextSummary, DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS, ProjectRules, ResolvedContextWindow,
+    SessionContextSnapshot, TaskAnchor, decide_checkpoint, resolve_context_window,
 };
 pub use durable_memory::{DurableMemory, DurableMemoryError, MemoryLayout, MemoryWriteKind};
 pub use error::RuntimeError;
@@ -113,7 +102,9 @@ pub use ledger::{
     CompactLedgerText, LedgerFactKind, LedgerProjection, LedgerProjectionSnapshot, LedgerScope,
     LedgerUpdate, LedgerUpdateKind, LedgerValidationError, LifecycleFact, TaskLedger,
 };
-pub use merry_core::{ContextWindowSource, ToolSpec};
+pub use merry_core::{
+    ContextWindowSource, ImageSummary, ToolOutput, ToolOutputKind, ToolOutputPreview, ToolSpec,
+};
 pub use model_config::RuntimeModelRole;
 pub use permission::{
     ChannelPermissionAdmissionSource, HostFallbackReason, HostIntegration,

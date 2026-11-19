@@ -1,11 +1,11 @@
-use crate::{ArtifactContent, UserImageInput, tool::proposal::ActionExecutionEvidence};
-use merry_core::{ErrorInfo, ToolCallResultStatus};
+use crate::{UserImageInput, tool::proposal::ActionExecutionEvidence};
+use merry_core::{ErrorInfo, ToolCallResultStatus, ToolOutput};
 
 /// Domain-level result from a tool execution.
 ///
-/// Executors supply full evidence and may omit its presentation-only envelope
-/// from a separate model body. Runtime owns artifact ids, persistence, events,
-/// and ledger updates; an absent model body preserves the full result.
+/// Executors supply full output and may omit its presentation-only envelope
+/// from a separate model body. Runtime owns persistence, events, and ledger
+/// updates; an absent model body preserves the full result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExecutionOutcome {
     status: ToolCallResultStatus,
@@ -14,18 +14,18 @@ pub struct ToolExecutionOutcome {
     execution_evidence: Option<ActionExecutionEvidence>,
 }
 
-/// Full evidence, optional model body, and optional normalized PNG images, kept together through admission.
+/// Full output, optional model body, and optional normalized PNG images, kept together through admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolResultContent {
-    artifact: ArtifactContent,
-    model: Option<Box<ArtifactContent>>,
+    full: ToolOutput,
+    model: Option<Box<ToolOutput>>,
     images: Vec<UserImageInput>,
 }
 
-impl From<ArtifactContent> for ToolResultContent {
-    fn from(artifact: ArtifactContent) -> Self {
+impl From<ToolOutput> for ToolResultContent {
+    fn from(full: ToolOutput) -> Self {
         Self {
-            artifact,
+            full,
             model: None,
             images: Vec::new(),
         }
@@ -33,11 +33,11 @@ impl From<ArtifactContent> for ToolResultContent {
 }
 
 impl ToolResultContent {
-    pub(crate) fn artifact(&self) -> &ArtifactContent {
-        &self.artifact
+    pub(crate) fn full(&self) -> &ToolOutput {
+        &self.full
     }
 
-    pub(crate) fn model(&self) -> Option<&ArtifactContent> {
+    pub(crate) fn model(&self) -> Option<&ToolOutput> {
         self.model.as_deref()
     }
 
@@ -45,7 +45,7 @@ impl ToolResultContent {
         &self.images
     }
 
-    pub(crate) fn with_model(mut self, model: ArtifactContent) -> Self {
+    pub(crate) fn with_model(mut self, model: ToolOutput) -> Self {
         self.model = Some(Box::new(model));
         self
     }
@@ -63,18 +63,8 @@ impl ToolResultContent {
         self
     }
 
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        ArtifactContent,
-        Option<ArtifactContent>,
-        Vec<UserImageInput>,
-    ) {
-        (
-            self.artifact,
-            self.model.map(|content| *content),
-            self.images,
-        )
+    pub(crate) fn into_parts(self) -> (ToolOutput, Option<ToolOutput>, Vec<UserImageInput>) {
+        (self.full, self.model.map(|content| *content), self.images)
     }
 }
 
@@ -82,13 +72,13 @@ impl ToolExecutionOutcome {
     /// Creates a successful text result.
     #[must_use]
     pub fn succeeded_text(content: impl Into<String>) -> Self {
-        Self::succeeded(ArtifactContent::text(content))
+        Self::succeeded(ToolOutput::text(content))
     }
 
     /// Creates a successful JSON result.
     #[must_use]
     pub fn succeeded_json(content: impl Into<String>) -> Self {
-        Self::succeeded(ArtifactContent::json(content))
+        Self::succeeded(ToolOutput::json(content))
     }
 
     /// Creates a failed text result with a small diagnostic.
@@ -97,7 +87,7 @@ impl ToolExecutionOutcome {
     /// should resolve the pending call durably.
     #[must_use]
     pub fn failed_text(content: impl Into<String>, diagnostic: ErrorInfo) -> Self {
-        Self::failed(ArtifactContent::text(content), diagnostic)
+        Self::failed(ToolOutput::text(content), diagnostic)
     }
 
     /// Creates a failed JSON result with a small diagnostic.
@@ -106,7 +96,7 @@ impl ToolExecutionOutcome {
     /// should resolve the pending call durably.
     #[must_use]
     pub fn failed_json(content: impl Into<String>, diagnostic: ErrorInfo) -> Self {
-        Self::failed(ArtifactContent::json(content), diagnostic)
+        Self::failed(ToolOutput::json(content), diagnostic)
     }
 
     /// Returns the tool execution status.
@@ -115,40 +105,40 @@ impl ToolExecutionOutcome {
         self.status
     }
 
-    /// Borrows the exact execution content.
+    /// Borrows the exact full execution output.
     ///
-    /// Runtime records this content before emitting the resolution event.
+    /// Runtime records this output before emitting the resolution event.
     #[must_use]
-    pub fn content(&self) -> &ArtifactContent {
-        self.content.artifact()
+    pub fn content(&self) -> &ToolOutput {
+        self.content.full()
     }
 
-    /// Borrows the optional model-facing body instead of the full artifact.
+    /// Borrows the optional model-facing body instead of the full output.
     ///
-    /// Runtime persists this body for request replay and compaction. Artifact
-    /// reads, evidence references, and presentation retain [`Self::content`].
+    /// Runtime persists this body for request replay and compaction. Full tool
+    /// output reads and presentation retain [`Self::content`].
     #[must_use]
-    pub fn model_content(&self) -> Option<&ArtifactContent> {
+    pub fn model_content(&self) -> Option<&ToolOutput> {
         self.content.model()
     }
 
-    /// Supplies model-facing text without changing the full result artifact.
+    /// Supplies model-facing text without changing the full result output.
     ///
     /// Keep execution status, useful output, and completeness warnings in this
     /// body. Runtime rejects blank bodies before resolving the tool call.
     #[must_use]
     pub fn with_model_text(mut self, content: impl Into<String>) -> Self {
-        self.content = self.content.with_model(ArtifactContent::text(content));
+        self.content = self.content.with_model(ToolOutput::text(content));
         self
     }
 
-    /// Supplies model-facing JSON without changing the full result artifact.
+    /// Supplies model-facing JSON without changing the full result output.
     ///
     /// The caller owns the JSON schema and must preserve actionable results.
     /// Runtime rejects blank bodies before resolving the tool call.
     #[must_use]
     pub fn with_model_json(mut self, content: impl Into<String>) -> Self {
-        self.content = self.content.with_model(ArtifactContent::json(content));
+        self.content = self.content.with_model(ToolOutput::json(content));
         self
     }
 
@@ -184,8 +174,8 @@ impl ToolExecutionOutcome {
     /// Borrows provider-invisible evidence produced by the actual execution.
     ///
     /// Runtime records this only in internal action audit state. It must not be
-    /// rendered into tool result artifacts, provider continuations, or provider
-    /// request payloads.
+    /// rendered into tool results, provider continuations, or provider request
+    /// payloads.
     #[must_use]
     pub fn execution_evidence(&self) -> Option<&ActionExecutionEvidence> {
         self.execution_evidence.as_ref()
@@ -214,7 +204,7 @@ impl ToolExecutionOutcome {
         )
     }
 
-    pub(super) fn succeeded(content: ArtifactContent) -> Self {
+    pub(super) fn succeeded(content: ToolOutput) -> Self {
         Self {
             status: ToolCallResultStatus::Succeeded,
             content: content.into(),
@@ -223,7 +213,7 @@ impl ToolExecutionOutcome {
         }
     }
 
-    pub(super) fn failed(content: ArtifactContent, diagnostic: ErrorInfo) -> Self {
+    pub(super) fn failed(content: ToolOutput, diagnostic: ErrorInfo) -> Self {
         Self {
             status: ToolCallResultStatus::Failed,
             content: content.into(),

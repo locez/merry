@@ -1,6 +1,5 @@
 use crate::{
     CitationCompactionPolicy, RuntimeModelRole, StepContext,
-    artifact::ArtifactContent,
     runtime::{
         CompactionConfig, Runtime,
         tests::{
@@ -9,8 +8,8 @@ use crate::{
             },
             support::{
                 common::{
-                    artifact_id, collect_step, completed_event, completed_event_with,
-                    event_kind_names, model_name, pending_tool_call, session_id,
+                    collect_step, completed_event, completed_event_with, event_kind_names,
+                    model_name, pending_tool_call, session_id,
                 },
                 model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
             },
@@ -19,8 +18,7 @@ use crate::{
     session::{ModelTurnId, ModelTurnStatus},
 };
 use merry_core::{
-    ArtifactKind, ArtifactRef, PendingToolCallBatch, RuntimeJournalPayload, ToolCallBatchId,
-    ToolCallResult,
+    PendingToolCallBatch, RuntimeJournalPayload, ToolCallBatchId, ToolCallResult, ToolOutput,
 };
 use merry_llm::{FinishReason, ModelCapabilities, ModelName, ModelOutput};
 use std::sync::Arc;
@@ -345,14 +343,8 @@ async fn threshold_compaction_archives_tool_results_without_replacing_five_retai
                 .expect("tool response closes");
             session
                 .submit_tool_result(
-                    ToolCallResult::succeeded(
-                        call.id().clone(),
-                        ArtifactRef::new(
-                            artifact_id(&format!("archive-result-{index}")),
-                            ArtifactKind::Text,
-                        ),
-                    ),
-                    ArtifactContent::text(format!(
+                    ToolCallResult::succeeded(call.id().clone()),
+                    ToolOutput::text(format!(
                         "large tool result {index} {}",
                         "archive ballast ".repeat(4_000)
                     )),
@@ -393,7 +385,7 @@ async fn threshold_compaction_archives_tool_results_without_replacing_five_retai
             .result()
             .content()
             .as_str()
-            .contains("\"merry_archived\":true")
+            .contains("\"merry_omitted\":true")
     }));
     for index in 1..=5 {
         assert!(request_text.contains(&format!("archive-call-{index}")));

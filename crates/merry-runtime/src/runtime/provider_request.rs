@@ -148,7 +148,7 @@ pub(super) fn step_request_inputs_from_session(
     plan_control_override: Option<String>,
     coordinator_plan_tools: bool,
 ) -> Result<StepRequestInputs, RuntimeError> {
-    let transcript = session.provider_transcript_snapshot()?;
+    let transcript = session.provider_transcript_snapshot();
     Ok(StepRequestInputs::from_session(
         session,
         transcript,
@@ -405,9 +405,7 @@ mod tests {
             .expect("history turn completes");
         let with_history = StepRequestInputs::from_session(
             &session,
-            session
-                .provider_transcript_snapshot()
-                .expect("provider transcript builds"),
+            session.provider_transcript_snapshot(),
             None,
             false,
         );

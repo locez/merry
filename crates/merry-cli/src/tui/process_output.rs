@@ -1,5 +1,6 @@
 use crate::tui::state::ToolOutputPreview;
-use merry_runtime::{ArtifactContent, ProcessOutputEnvelope, ProcessOutputStream};
+use merry_core::ToolOutput;
+use merry_runtime::{ProcessOutputEnvelope, ProcessOutputStream};
 
 /// A normalized captured process stream.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -19,7 +20,7 @@ impl From<ProcessOutputStream<'_>> for CapturedStream {
     }
 }
 
-/// Normalized captured text. Unknown artifact formats remain inspectable as raw text.
+/// Normalized captured text. Unknown formats remain inspectable as raw text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CapturedOutput {
     Process {
@@ -30,27 +31,20 @@ pub(crate) enum CapturedOutput {
 }
 
 impl CapturedOutput {
-    pub(crate) fn from_artifact(content: ArtifactContent) -> Result<Self, String> {
-        let text = match content {
-            ArtifactContent::Text { content } | ArtifactContent::Json { content } => content,
-            _ => {
-                return Err(
-                    "This artifact contains binary data, not a text command output.".into(),
-                );
-            }
+    pub(crate) fn from_tool_output(output: ToolOutput) -> Self {
+        let text = match output {
+            ToolOutput::Text { text } | ToolOutput::Json { json: text } => text,
         };
-        Ok(
-            match serde_json::from_str::<ProcessOutputEnvelope<'_>>(&text) {
-                Ok(output) => {
-                    let (stdout, stderr) = output.into_streams();
-                    Self::Process {
-                        stdout: stdout.into(),
-                        stderr: stderr.into(),
-                    }
+        match serde_json::from_str::<ProcessOutputEnvelope<'_>>(&text) {
+            Ok(output) => {
+                let (stdout, stderr) = output.into_streams();
+                Self::Process {
+                    stdout: stdout.into(),
+                    stderr: stderr.into(),
                 }
-                Err(_) => Self::Text(text),
-            },
-        )
+            }
+            Err(_) => Self::Text(text),
+        }
     }
 
     /// Copies captured text, preserving whitespace and separating stdout from stderr.

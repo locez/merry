@@ -8,8 +8,8 @@ use crate::{
     tool::ToolResultContent,
 };
 use merry_core::{
-    ArtifactRef, ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload,
-    ToolCallResult, ToolCallResultStatus,
+    ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, ToolCallResult,
+    ToolCallResultStatus,
 };
 
 impl SessionState {
@@ -70,21 +70,17 @@ impl SessionState {
                 call_id: call_id.clone(),
             })?;
 
-        let artifact_kind = self.tool_result_artifact_kind(content.artifact())?;
-        let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
-        let result = ToolCallResult::new(call_id, status, artifact, diagnostic)?;
+        let result = ToolCallResult::new(call_id, status, diagnostic)?;
         let observation =
-            observation.map(|observation| observation.into_update_for_artifact(result.artifact()));
+            observation.map(|observation| observation.into_update_for_call(result.call_id()));
 
-        let artifacts = self.prepare_tool_result_artifacts(&result, content)?;
+        let payload = self.prepare_tool_result_payload(result.call_id(), content)?;
         let mut transcript = self.transcript.clone();
         transcript.push_tool_result(
             result.call_id().clone(),
             result.clone(),
-            result.artifact().id().clone(),
+            payload,
             ToolResultPromptProjection::Full,
-            artifacts.model_artifact_id(),
-            artifacts.image_artifact_ids(),
         )?;
 
         let pending = self.pending_tool_calls.remove(pending_index);
@@ -107,7 +103,6 @@ impl SessionState {
         self.transcript = transcript;
         self.resolved_tool_calls.insert(result.call_id().clone());
 
-        events.extend(self.record_tool_result_artifacts(artifacts));
         if let Some(observation) = observation {
             self.record_tool_result_observation(observation);
         }
@@ -158,20 +153,14 @@ impl SessionState {
                 call_id: pending.id().clone(),
             })?;
 
-        let content = content.into();
-        let artifact_kind = self.tool_result_artifact_kind(content.artifact())?;
-        let artifact = ArtifactRef::new(self.next_tool_result_artifact_id(), artifact_kind);
-        let result = ToolCallResult::failed(pending.id().clone(), artifact, diagnostic);
-
-        let artifacts = self.prepare_tool_result_artifacts(&result, content)?;
+        let result = ToolCallResult::failed(pending.id().clone(), diagnostic);
+        let payload = self.prepare_tool_result_payload(result.call_id(), content.into())?;
         let mut transcript = self.transcript.clone();
         transcript.push_tool_result(
             result.call_id().clone(),
             result.clone(),
-            result.artifact().id().clone(),
+            payload,
             ToolResultPromptProjection::Full,
-            artifacts.model_artifact_id(),
-            artifacts.image_artifact_ids(),
         )?;
 
         let pending = self.pending_tool_calls.remove(pending_index);
@@ -186,7 +175,6 @@ impl SessionState {
         self.record_denied_tool_action_audit(&pending, decision);
         self.transcript = transcript;
         self.resolved_tool_calls.insert(result.call_id().clone());
-        events.extend(self.record_tool_result_artifacts(artifacts));
         events.push(self.record_event(
             RuntimeJournalPayload::ToolCallResolved { result },
             LedgerFactKind::ToolCallResolved,

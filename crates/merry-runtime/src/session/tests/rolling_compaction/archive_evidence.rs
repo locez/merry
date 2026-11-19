@@ -2,9 +2,8 @@ use crate::{
     FileSessionStore,
     compaction::{CompactionCoverageBudget, CompactionPreparation},
     session::tests::{
-        ArtifactContent, ArtifactKind, ArtifactRef, ErrorInfo, PendingToolCallBatch, SessionId,
-        SessionState, ToolCallBatchId, ToolCallResult, TranscriptItem, artifact_id,
-        pending_tool_call,
+        ErrorInfo, PendingToolCallBatch, SessionId, SessionState, ToolCallBatchId, ToolCallResult,
+        ToolOutput, TranscriptItem, pending_tool_call,
         rolling_compaction::{
             policy, record_completed_tool_turn, record_completed_user_turn, window_budget,
         },
@@ -12,7 +11,7 @@ use crate::{
 };
 
 #[test]
-fn reverse_tool_results_archive_by_result_arrival_and_keep_pairs_valid() {
+fn reverse_tool_results_collapse_by_result_arrival_and_keep_pairs_valid() {
     let mut session =
         SessionState::new(SessionId::new("rolling-reverse-results").expect("valid session id"));
     record_completed_user_turn(&mut session, "old prefix");
@@ -37,17 +36,11 @@ fn reverse_tool_results_archive_by_result_arrival_and_keep_pairs_valid() {
     session
         .close_model_response(tool_turn, true)
         .expect("tool response closes");
-    for (call, artifact, body) in [
-        (&call_b, "reverse-result-b", "b".repeat(1_000)),
-        (&call_a, "reverse-result-a", "a".repeat(1_000)),
-    ] {
+    for (call, body) in [(&call_b, "b".repeat(1_000)), (&call_a, "a".repeat(1_000))] {
         session
             .submit_tool_result(
-                ToolCallResult::succeeded(
-                    call.id().clone(),
-                    ArtifactRef::new(artifact_id(artifact), ArtifactKind::Text),
-                ),
-                ArtifactContent::text(body),
+                ToolCallResult::succeeded(call.id().clone()),
+                ToolOutput::text(body),
             )
             .expect("tool result records");
     }
@@ -60,7 +53,7 @@ fn reverse_tool_results_archive_by_result_arrival_and_keep_pairs_valid() {
     assert_eq!(
         plan.archived_tool_call_ids_for_tests(),
         vec![call_b.id().clone()],
-        "the first arriving result must be archived first"
+        "the first arriving result must be collapsed first"
     );
 
     let resolved = policy(5).resolve(64_000).expect("budget resolves");
@@ -95,9 +88,7 @@ fn reverse_tool_results_archive_by_result_arrival_and_keep_pairs_valid() {
     session
         .install_summary_compaction(input, "The covered prefix was compacted.")
         .expect("checkpoint installs");
-    let provider = session
-        .provider_transcript_snapshot()
-        .expect("provider projection builds");
+    let provider = session.provider_transcript_snapshot();
     let calls = provider
         .iter()
         .filter_map(|item| match item {
@@ -110,23 +101,24 @@ fn reverse_tool_results_archive_by_result_arrival_and_keep_pairs_valid() {
         .iter()
         .find_map(|item| match item {
             crate::session::TranscriptItemSnapshot::ToolResult {
-                call_id, content, ..
-            } if call_id == call_b.id() => content.as_text(),
+                call_id, output, ..
+            } if call_id == call_b.id() => Some(output.as_str()),
             _ => None,
         })
         .expect("result B notice exists");
     let notice: serde_json::Value = serde_json::from_str(notice).expect("notice is typed JSON");
-    assert_eq!(notice["merry_archived"], true);
+    assert_eq!(notice["merry_omitted"], true);
     assert_eq!(notice["status"], "succeeded");
-    assert_eq!(notice["artifact_id"], "reverse-result-b");
+    assert_eq!(notice["call_id"], "reverse-call-b");
+    assert!(notice.get("artifact_id").is_none());
     assert!(notice.get("ref").is_none());
 
     let result_a = provider
         .iter()
         .find_map(|item| match item {
             crate::session::TranscriptItemSnapshot::ToolResult {
-                call_id, content, ..
-            } if call_id == call_a.id() => content.as_text(),
+                call_id, output, ..
+            } if call_id == call_a.id() => Some(output.as_str()),
             _ => None,
         })
         .expect("result A remains visible");
@@ -134,7 +126,7 @@ fn reverse_tool_results_archive_by_result_arrival_and_keep_pairs_valid() {
 }
 
 #[test]
-fn archives_tried_in_five_turn_plan_do_not_leak_into_three_turn_fallback() {
+fn collapses_tried_in_five_turn_plan_do_not_leak_into_three_turn_fallback() {
     let mut session = SessionState::new(SessionId::new("rolling-archive-reset").expect("valid id"));
     record_completed_user_turn(&mut session, "old prefix");
     for turn in 1..=2 {
@@ -158,14 +150,8 @@ fn archives_tried_in_five_turn_plan_do_not_leak_into_three_turn_fallback() {
             .expect("tool response closes");
         session
             .submit_tool_result(
-                ToolCallResult::succeeded(
-                    call.id().clone(),
-                    ArtifactRef::new(
-                        artifact_id(&format!("dropped-result-{turn}")),
-                        ArtifactKind::Text,
-                    ),
-                ),
-                ArtifactContent::text("tool body".repeat(100)),
+                ToolCallResult::succeeded(call.id().clone()),
+                ToolOutput::text("tool body".repeat(100)),
             )
             .expect("tool result records");
     }
@@ -183,7 +169,7 @@ fn archives_tried_in_five_turn_plan_do_not_leak_into_three_turn_fallback() {
 }
 
 #[tokio::test]
-async fn archive_only_manifest_resolves_refs_and_round_trips_through_store() {
+async fn collapse_only_retains_full_tool_output_and_round_trips_through_store() {
     let session_id = SessionId::new("rolling-archive-manifest").expect("valid id");
     let mut session = SessionState::new(session_id.clone());
     for turn in 1..=5 {
@@ -202,26 +188,26 @@ async fn archive_only_manifest_resolves_refs_and_round_trips_through_store() {
             CompactionCoverageBudget::limited(0),
         )
         .expect("preparation builds")
-        .expect("archive-only is required");
+        .expect("collapse-only is required");
     let CompactionPreparation::ArchiveToolResults(input) = preparation else {
-        panic!("expected archive-only preparation");
+        panic!("expected collapse-only preparation");
     };
-    let archived = input
-        .archived_refs()
-        .first()
-        .expect("one archived ref exists")
+    let collapsed_call_id = input
+        .window_plan()
+        .archived_tool_call_ids()
+        .iter()
+        .next()
+        .expect("one collapsed call id exists")
         .clone();
     session
         .install_archive_only_compaction(input)
-        .expect("archive-only install succeeds");
+        .expect("collapse-only install succeeds");
 
     assert!(session.compacted_checkpoint.is_none());
     let stored = session
-        .artifacts
-        .read_evidence(archived.evidence())
-        .expect("archive evidence is stored")
-        .as_text()
-        .expect("archive evidence is text")
+        .read_tool_output(&collapsed_call_id)
+        .expect("collapsed tool output remains readable")
+        .as_str()
         .to_owned();
     assert!(stored.contains("manifest exact body 1"));
 
@@ -233,17 +219,15 @@ async fn archive_only_manifest_resolves_refs_and_round_trips_through_store() {
         .expect("session loads");
     assert!(loaded.compacted_checkpoint.is_none());
     let loaded_text = loaded
-        .artifacts
-        .read_evidence(archived.evidence())
-        .expect("loaded archive evidence is stored")
-        .as_text()
-        .expect("loaded archive evidence is text")
+        .read_tool_output(&collapsed_call_id)
+        .expect("loaded collapsed tool output remains readable")
+        .as_str()
         .to_owned();
     assert_eq!(loaded_text, stored);
 }
 
 #[test]
-fn failed_archived_result_notice_names_the_artifact_without_a_ref() {
+fn failed_collapsed_result_notice_names_the_call_id_without_a_ref() {
     let mut session = SessionState::new(SessionId::new("rolling-failed-notice").expect("valid id"));
     let turn_id = session.begin_model_turn().expect("failed tool turn begins");
     let failed_call = pending_tool_call("failed-notice-call");
@@ -264,10 +248,9 @@ fn failed_archived_result_notice_names_the_artifact_without_a_ref() {
         .submit_tool_result(
             ToolCallResult::failed(
                 failed_call.id().clone(),
-                ArtifactRef::new(artifact_id("failed-notice-result"), ArtifactKind::Text),
                 ErrorInfo::new("tool_failed", "expected failure").expect("valid diagnostic"),
             ),
-            ArtifactContent::text("f".repeat(1_000)),
+            ToolOutput::text("f".repeat(1_000)),
         )
         .expect("failed result records");
     for turn in 2..=5 {
@@ -287,29 +270,28 @@ fn failed_archived_result_notice_names_the_artifact_without_a_ref() {
             CompactionCoverageBudget::limited(0),
         )
         .expect("preparation builds")
-        .expect("archive-only is required");
+        .expect("collapse-only is required");
     let CompactionPreparation::ArchiveToolResults(input) = preparation else {
-        panic!("expected archive-only preparation");
+        panic!("expected collapse-only preparation");
     };
     session
         .install_archive_only_compaction(input)
-        .expect("archive-only install succeeds");
+        .expect("collapse-only install succeeds");
 
     let notice = session
         .provider_transcript_snapshot()
-        .expect("provider projection builds")
         .into_iter()
         .find_map(|item| match item {
             crate::session::TranscriptItemSnapshot::ToolResult {
-                call_id, content, ..
-            } if call_id == *failed_call.id() => content.as_text().map(str::to_owned),
+                call_id, output, ..
+            } if call_id == *failed_call.id() => Some(output.as_str().to_owned()),
             _ => None,
         })
         .expect("failed notice exists");
     let notice: serde_json::Value = serde_json::from_str(&notice).expect("notice parses");
     let object = notice.as_object().expect("notice is an object");
     assert_eq!(object.len(), 3);
-    assert_eq!(notice["merry_archived"], true);
+    assert_eq!(notice["merry_omitted"], true);
     assert_eq!(notice["status"], "failed");
-    assert_eq!(notice["artifact_id"], "failed-notice-result");
+    assert_eq!(notice["call_id"], "failed-notice-call");
 }

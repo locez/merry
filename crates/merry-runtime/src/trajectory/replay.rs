@@ -6,7 +6,8 @@ use crate::{
     trajectory::{
         RuntimeObservability,
         records::{
-            lifecycle_record, merge_tool_result, record, tool_call_record, truncate_summary,
+            TRAJECTORY_TOOL_PREVIEW_BYTES, lifecycle_record, merge_tool_result, record,
+            tool_call_record, trajectory_payload_from_preview, truncate_summary,
         },
     },
     trajectory_replay::{ReplayRecords, ReplaySequences},
@@ -35,7 +36,7 @@ impl RuntimeObservability {
             return;
         }
         snapshot.reopen();
-        hydrate_assistant_message_details(&mut snapshot, session);
+        hydrate_tool_outputs(&mut snapshot, session);
         if snapshot.tool_specs().is_empty() {
             snapshot.set_tool_specs(state.snapshot.tool_specs().to_vec());
         }
@@ -91,9 +92,7 @@ impl RuntimeObservability {
                 SessionTrajectoryItem::UserMessage {
                     item_id,
                     model_turn_id,
-                    artifact,
                     text,
-                    ..
                 } => {
                     let sequence = sequences
                         .model_turn_sequence(*model_turn_id)
@@ -109,30 +108,28 @@ impl RuntimeObservability {
                     state.next_turn_id = state
                         .next_turn_id
                         .max(logical_turn_number.saturating_add(1));
-                    let mut record =
-                        if let Some(record) = replay_records.take_user(artifact, turn_id) {
-                            record
-                        } else {
-                            let identity = format!("{item_id}-{sequence}");
-                            let Some(record) = record(
-                                "input",
-                                &identity,
-                                TrajectoryLane::Input,
-                                TrajectoryRecordKind::UserInput,
-                                TrajectoryRecordStatus::Completed,
-                                sequence,
-                            ) else {
-                                continue;
-                            };
-                            record
+                    let mut record = if let Some(record) = replay_records.take_user(turn_id) {
+                        record
+                    } else {
+                        let identity = format!("{item_id}-{sequence}");
+                        let Some(record) = record(
+                            "input",
+                            &identity,
+                            TrajectoryLane::Input,
+                            TrajectoryRecordKind::UserInput,
+                            TrajectoryRecordStatus::Completed,
+                            sequence,
+                        ) else {
+                            continue;
                         };
+                        record
+                    };
                     record.set_start_sequence(sequence);
                     record.set_label("User input".to_owned());
                     record.set_sequence_order(sequence_order);
                     record.set_turn_id(Some(turn_id));
                     record.set_summary(Some(truncate_summary(text)));
                     record.set_message_details(text.clone(), false);
-                    record.add_artifact(artifact.clone());
                     record.set_relationship(None, None);
                     let record_id = record.id().clone();
                     insert_without_publish(&mut state.snapshot, record);
@@ -142,26 +139,24 @@ impl RuntimeObservability {
                     active_parent_id = Some(record_id);
                 }
                 SessionTrajectoryItem::AssistantText {
+                    item_id,
                     model_turn_id,
-                    artifact,
                     text,
-                    ..
                 } => {
                     turn_by_model_turn
                         .entry(*model_turn_id)
                         .or_insert(active_turn_id);
-                    let artifact_id = artifact.id().as_str();
-                    let artifact_sequence =
-                        sequence_from_artifact(artifact_id, "assistant-output-");
-                    let sequence = artifact_sequence
+                    let sequence = sequences
+                        .next_assistant_recorded_sequence()
                         .or_else(|| sequences.model_turn_sequence(*model_turn_id))
                         .unwrap_or_else(|| sequences.next_fallback());
-                    let mut record = if let Some(record) = replay_records.take_assistant(artifact) {
+                    let mut record = if let Some(record) = replay_records.take_assistant(sequence) {
                         record
                     } else {
+                        let identity = format!("assistant-{sequence}-{item_id}");
                         let Some(record) = record(
                             "assistant",
-                            artifact_id,
+                            &identity,
                             TrajectoryLane::Model,
                             TrajectoryRecordKind::AssistantMessage,
                             TrajectoryRecordStatus::Succeeded,
@@ -177,7 +172,6 @@ impl RuntimeObservability {
                     record.set_turn_id(active_turn_id);
                     record.set_summary(Some(truncate_summary(text)));
                     record.set_message_details(text.clone(), false);
-                    record.add_artifact(artifact.clone());
                     record.set_relationship(active_parent_id.clone(), None);
                     insert_without_publish(&mut state.snapshot, record);
                 }
@@ -221,7 +215,6 @@ impl RuntimeObservability {
                     model_turn_id,
                     call_id,
                     result,
-                    artifact,
                     output,
                     ..
                 } => {
@@ -234,21 +227,20 @@ impl RuntimeObservability {
                         .iter()
                         .find(|record| record.tool_call_id() == Some(call_id))
                         .cloned();
-                    let artifact_sequence =
-                        sequence_from_artifact(artifact.id().as_str(), "tool-result-");
                     let sequence = sequences
                         .next_tool_resolved_sequence()
-                        .or_else(|| artifact_sequence.map(|sequence| sequence.saturating_add(1)))
                         .unwrap_or_else(|| sequences.next_fallback());
+                    let preview = output
+                        .as_ref()
+                        .map(|output| output.bounded_preview(TRAJECTORY_TOOL_PREVIEW_BYTES));
                     let Some(mut record) =
-                        merge_tool_result(existing, call_id, result, sequence, output.as_ref())
+                        merge_tool_result(existing, call_id, result, sequence, preview.as_ref())
                     else {
                         continue;
                     };
                     record.set_turn_id(active_turn_id);
                     record.set_relationship(active_parent_id.clone(), Some(call_id.clone()));
                     record.set_sequence_order(sequence_order);
-                    record.add_artifact(artifact.clone());
                     insert_without_publish(&mut state.snapshot, record);
                 }
             }
@@ -366,8 +358,11 @@ impl RuntimeObservability {
                         .iter()
                         .find(|record| record.tool_call_id() == Some(call_id))
                         .cloned();
+                    let preview = output
+                        .as_ref()
+                        .map(|output| output.bounded_preview(TRAJECTORY_TOOL_PREVIEW_BYTES));
                     let Some(record) =
-                        merge_tool_result(existing, call_id, result, sequence, output.as_ref())
+                        merge_tool_result(existing, call_id, result, sequence, preview.as_ref())
                     else {
                         continue;
                     };
@@ -398,30 +393,23 @@ pub(super) fn insert_without_publish(snapshot: &mut TrajectorySnapshot, record: 
     snapshot.upsert_record(record);
 }
 
-pub(super) fn hydrate_assistant_message_details(
-    snapshot: &mut TrajectorySnapshot,
-    session: &SessionState,
-) {
+pub(super) fn hydrate_tool_outputs(snapshot: &mut TrajectorySnapshot, session: &SessionState) {
     for mut record in snapshot.records().to_vec() {
-        if record.kind() != TrajectoryRecordKind::AssistantMessage
-            || !matches!(record.details(), TrajectoryRecordDetails::None)
-        {
-            continue;
-        }
-        let Some(text) = record.artifacts().iter().find_map(|artifact| {
-            session
-                .read_artifact_content(artifact.id())
-                .ok()
-                .and_then(|content| content.as_text().map(str::to_owned))
-        }) else {
+        let Some(call_id) = record.tool_call_id().cloned() else {
             continue;
         };
-        record.set_summary(Some(truncate_summary(&text)));
-        record.set_message_details(text, false);
+        if !matches!(
+            record.details(),
+            TrajectoryRecordDetails::Tool { tool } if tool.output().is_none()
+        ) {
+            continue;
+        }
+        let Some(preview) =
+            session.read_model_tool_preview(&call_id, TRAJECTORY_TOOL_PREVIEW_BYTES)
+        else {
+            continue;
+        };
+        record.set_tool_output(Some(trajectory_payload_from_preview(&preview)));
         snapshot.upsert_record(record);
     }
-}
-
-pub(super) fn sequence_from_artifact(artifact_id: &str, prefix: &str) -> Option<u64> {
-    artifact_id.strip_prefix(prefix)?.parse().ok()
 }

@@ -10,9 +10,7 @@ use crate::process::{
     },
 };
 pub use shell::shell_command_for_argv;
-pub(crate) use shell::{
-    ShellProcessInput, shell_command_argv, shell_process_input, stable_process_input_fingerprint,
-};
+pub(crate) use shell::{shell_command_argv, shell_process_input, stable_process_input_fingerprint};
 use std::path::Path;
 
 mod shell;

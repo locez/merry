@@ -101,7 +101,7 @@ pub(crate) fn write_clipboard_request(writer: &mut impl io::Write, text: &str) -
     if text.len() > MAX_CLIPBOARD_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "Clipboard payload exceeds 1 MiB; inspect the artifact in the trajectory instead",
+            "Clipboard payload exceeds 1 MiB; inspect the full tool output in the trajectory instead",
         ));
     }
     execute!(

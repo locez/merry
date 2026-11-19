@@ -417,11 +417,6 @@ impl FileSessionStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn artifacts_dir(&self, session_id: &SessionId) -> PathBuf {
-        self.session_dir(session_id).join("artifacts")
-    }
-
-    #[cfg(test)]
     pub(crate) async fn write_state_bytes(
         &self,
         session_id: &SessionId,

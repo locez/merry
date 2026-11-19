@@ -1,7 +1,7 @@
 //! Runtime-neutral backend contracts for the local Web service.
 
 use futures_util::future::BoxFuture;
-use merry_core::{ArtifactId, SessionId, TrajectoryEvent, TrajectorySnapshot};
+use merry_core::{SessionId, ToolCallId, ToolOutputKind, TrajectoryEvent, TrajectorySnapshot};
 use serde::{Serialize, Serializer};
 use std::fmt::Debug;
 use thiserror::Error;
@@ -20,19 +20,19 @@ pub enum WebBackendError {
     ResyncRequired,
 }
 
-/// Exact artifact content returned by the optional inspection endpoint.
+/// Bounded tool output returned by the optional inspection endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct WebArtifactContent {
-    /// Stable artifact identifier.
-    artifact_id: ArtifactId,
-    /// Provider-neutral artifact kind.
-    kind: WebArtifactKind,
-    /// Bounded UTF-8 preview for text and JSON artifacts.
-    content: Option<String>,
+pub struct WebToolOutput {
+    /// Stable tool call identifier.
+    call_id: ToolCallId,
+    /// Provider-neutral tool output kind.
+    kind: ToolOutputKind,
+    /// Bounded UTF-8 preview for the stored tool output.
+    content: String,
     /// Whether the response was bounded by the Web response limit.
     truncated: bool,
-    /// Exact byte length of the stored artifact.
+    /// Exact byte length of the stored tool output.
     #[serde(serialize_with = "serialize_u64_as_string")]
     byte_length: u64,
 }
@@ -44,18 +44,18 @@ where
     serializer.collect_str(value)
 }
 
-impl WebArtifactContent {
-    /// Creates a bounded artifact response for the HTTP adapter.
+impl WebToolOutput {
+    /// Creates a bounded tool output response for the HTTP adapter.
     #[must_use]
     pub fn new(
-        artifact_id: ArtifactId,
-        kind: WebArtifactKind,
-        content: Option<String>,
+        call_id: ToolCallId,
+        kind: ToolOutputKind,
+        content: String,
         truncated: bool,
         byte_length: u64,
     ) -> Self {
         Self {
-            artifact_id,
+            call_id,
             kind,
             content,
             truncated,
@@ -63,22 +63,22 @@ impl WebArtifactContent {
         }
     }
 
-    /// Borrows the stable artifact identifier.
+    /// Borrows the stable tool call identifier.
     #[must_use]
-    pub fn artifact_id(&self) -> &ArtifactId {
-        &self.artifact_id
+    pub fn call_id(&self) -> &ToolCallId {
+        &self.call_id
     }
 
-    /// Returns the provider-neutral artifact kind.
+    /// Returns the provider-neutral tool output kind.
     #[must_use]
-    pub fn kind(&self) -> WebArtifactKind {
+    pub fn kind(&self) -> ToolOutputKind {
         self.kind
     }
 
-    /// Borrows exact text when the artifact is textual.
+    /// Borrows the bounded UTF-8 tool output content.
     #[must_use]
-    pub fn content(&self) -> Option<&str> {
-        self.content.as_deref()
+    pub fn content(&self) -> &str {
+        &self.content
     }
 
     /// Returns whether the response was bounded.
@@ -87,27 +87,11 @@ impl WebArtifactContent {
         self.truncated
     }
 
-    /// Returns the byte length of the stored artifact.
+    /// Returns the byte length of the stored tool output.
     #[must_use]
     pub fn byte_length(&self) -> u64 {
         self.byte_length
     }
-}
-
-/// Artifact categories exposed by the Web inspection boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebArtifactKind {
-    /// UTF-8 text.
-    Text,
-    /// Serialized JSON text.
-    Json,
-    /// Binary bytes.
-    Binary,
-    /// Image bytes.
-    Image,
-    /// Other opaque bytes.
-    Other,
 }
 
 /// Runtime-neutral data adapter consumed by the HTTP service.
@@ -130,10 +114,10 @@ pub trait WebBackend: Send + Sync + 'static {
         >,
     >;
 
-    /// Reads a bounded session-owned artifact preview for an inspector request.
-    fn artifact_content(
+    /// Reads a bounded session-owned tool output preview for an inspector request.
+    fn tool_output(
         &self,
         session_id: &SessionId,
-        artifact_id: &ArtifactId,
-    ) -> BoxFuture<'_, Result<WebArtifactContent, WebBackendError>>;
+        call_id: &ToolCallId,
+    ) -> BoxFuture<'_, Result<Option<WebToolOutput>, WebBackendError>>;
 }

@@ -1,6 +1,5 @@
 export type * from "./trajectory-contract.generated.js";
 import type {
-  ArtifactReference,
   Diagnostic,
   JsonObject,
   JsonSchemaValue,
@@ -19,8 +18,6 @@ import type {
   WireInteger,
 } from "./trajectory-contract.generated.js";
 import {
-  ARTIFACT_REF_FIELDS,
-  ARTIFACT_KIND_VALUES,
   ERROR_INFO_FIELDS,
   TOOL_SPEC_FIELDS,
   TRAJECTORY_EVENT_PROMPT_UPDATED_FIELDS,
@@ -114,7 +111,6 @@ function decodeRecord(value: unknown): TrajectoryRecord {
     end_sequence: readNullableU64(object.end_sequence, "record.end_sequence"),
     parent_id: readNullableString(object.parent_id, "record.parent_id"),
     tool_call_id: readNullableString(object.tool_call_id, "record.tool_call_id"),
-    artifacts: readArray(object.artifacts, "record.artifacts").map(decodeArtifact),
     diagnostic: object.diagnostic === undefined || object.diagnostic === null
       ? null
       : decodeDiagnostic(object.diagnostic),
@@ -194,15 +190,6 @@ function decodePayload(value: unknown): TrajectoryPayload {
     kind: readEnum(object.kind, TRAJECTORY_PAYLOAD_KIND_VALUES, "payload.kind"),
     content: readString(object.content, "payload.content"),
     truncated: readBoolean(object.truncated, "payload.truncated"),
-  };
-}
-
-function decodeArtifact(value: unknown): ArtifactReference {
-  const object = readObject(value, "artifact reference", ARTIFACT_REF_FIELDS);
-  return {
-    id: readString(object.id, "artifact.id"),
-    kind: readEnum(object.kind, ARTIFACT_KIND_VALUES, "artifact.kind"),
-    label: readNullableString(object.label, "artifact.label"),
   };
 }
 

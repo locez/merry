@@ -190,10 +190,4 @@ pub enum PlanError {
     },
     #[error("directive target attempt or lease is stale")]
     StaleDirectiveTarget,
-    #[error("plan result references missing artifact {artifact_id}")]
-    MissingArtifactRef { artifact_id: merry_core::ArtifactId },
-    #[error("plan result references invalid evidence in artifact {artifact_id}")]
-    InvalidEvidenceRef { artifact_id: merry_core::ArtifactId },
-    #[error("promoted plan artifact {artifact_id} conflicts with existing root-session content")]
-    ArtifactPromotionConflict { artifact_id: merry_core::ArtifactId },
 }

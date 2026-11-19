@@ -121,8 +121,7 @@ fn completed_report(
         outcome: PlanAttemptOutcome::Completed,
         result: Some(PlanNodeResult {
             conclusion: conclusion.to_owned(),
-            evidence_refs: Vec::new(),
-            artifact_refs: Vec::new(),
+            output_paths: Vec::new(),
             changed_paths: Vec::new(),
             verification: vec!["test verification".to_owned()],
             open_questions: Vec::new(),

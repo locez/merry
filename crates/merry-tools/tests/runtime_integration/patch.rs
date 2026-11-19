@@ -24,10 +24,7 @@ async fn registered_apply_patch_tool_is_policy_denied_before_mutating_file() {
         .await
         .expect("runtime policy denial should resolve pending call");
 
-    assert_eq!(
-        event_kind_names(&execution_events),
-        ["ArtifactRecorded", "ToolCallResolved"]
-    );
+    assert_eq!(event_kind_names(&execution_events), ["ToolCallResolved"]);
     let result = resolved_tool_result(&execution_events);
     assert_eq!(result.status(), ToolCallResultStatus::Failed);
     assert_eq!(
@@ -115,17 +112,12 @@ async fn opt_in_apply_patch_tool_applies_patch_and_records_artifact_before_resol
         .filter_map(|(index, kind)| (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index))
         .collect::<Vec<_>>();
     assert_eq!(audit_indexes.len(), 2);
-    let artifact_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
-        .expect("artifact lifecycle should exist");
     let resolved_index = lifecycle
         .iter()
         .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
         .expect("resolution lifecycle should exist");
     assert!(audit_indexes[0] < audit_indexes[1]);
-    assert!(audit_indexes[1] < artifact_index);
-    assert!(artifact_index < resolved_index);
+    assert!(audit_indexes[1] < resolved_index);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -146,15 +138,7 @@ async fn opt_in_apply_patch_tool_adds_new_file_through_runtime() {
     );
     assert_succeeded_json_result(&execution_events);
     let lifecycle = lifecycle_kinds(&runtime.ledger_projection().await);
-    let artifact_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
-        .expect("artifact lifecycle should exist");
-    let resolved_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
-        .expect("resolution lifecycle should exist");
-    assert!(artifact_index < resolved_index);
+    assert!(lifecycle.contains(&LedgerFactKind::ToolCallResolved));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -183,7 +167,7 @@ async fn opt_in_apply_patch_preflight_failure_resolves_with_patch_diagnostic() {
         fs::read_to_string(temp.path().join("note.txt")).expect("workspace file should read"),
         "alpha\nold\nomega\n"
     );
-    assert_failed_json_result(&execution_events, "apply_patch_preimage_absent", 2);
+    assert_failed_json_result(&execution_events, "apply_patch_preimage_absent");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -232,12 +216,11 @@ async fn opt_in_patch_success_continuation_does_not_leak_internal_evidence() {
     );
     let result = resolved_tool_result(&execution_events);
     let full = runtime
-        .read_artifact_content(result.artifact().id())
+        .read_tool_output(result.call_id())
         .await
-        .expect("full patch artifact");
-    assert_successful_patch_content_does_not_leak_internal_metadata(
-        full.as_text().expect("JSON artifact"),
-    );
+        .expect("full patch output read")
+        .expect("full patch output exists");
+    assert_successful_patch_content_does_not_leak_internal_metadata(full.as_str());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -345,15 +328,7 @@ async fn opt_in_apply_patch_tool_deletes_file_and_reports_the_operation() {
         "deleting a file must leave its parent directory in place"
     );
     let lifecycle = lifecycle_kinds(&runtime.ledger_projection().await);
-    let artifact_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ArtifactRecorded)
-        .expect("artifact lifecycle should exist");
-    let resolved_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
-        .expect("resolution lifecycle should exist");
-    assert!(artifact_index < resolved_index);
+    assert!(lifecycle.contains(&LedgerFactKind::ToolCallResolved));
 
     // The provider-visible result is what the model sees, so it must name the
     // removal instead of leaving a delete and an emptied file indistinguishable.
@@ -373,11 +348,12 @@ async fn opt_in_apply_patch_tool_deletes_file_and_reports_the_operation() {
     );
     let result = resolved_tool_result(&execution_events);
     let full = runtime
-        .read_artifact_content(result.artifact().id())
+        .read_tool_output(result.call_id())
         .await
-        .expect("full delete artifact");
-    let envelope: Value = serde_json::from_str(full.as_text().expect("JSON artifact"))
-        .expect("delete result should be JSON");
+        .expect("full delete output read")
+        .expect("full delete output exists");
+    let envelope: Value =
+        serde_json::from_str(full.as_str()).expect("delete result should be JSON");
     assert_eq!(envelope["ok"], true);
     assert_eq!(envelope["tool"], APPLY_PATCH_TOOL);
     assert_eq!(envelope["changes"][0]["path"], "dir/gone.txt");
@@ -407,7 +383,7 @@ async fn policy_denied_delete_resolves_without_removing_the_file() {
         .await
         .expect("runtime policy denial should resolve pending call");
 
-    assert_failed_json_result(&execution_events, "action_policy_denied", 1);
+    assert_failed_json_result(&execution_events, "action_policy_denied");
     assert_eq!(
         fs::read_to_string(temp.path().join("note.txt")).expect("workspace file should read"),
         "alpha\n",
@@ -437,7 +413,7 @@ async fn delete_outside_the_write_scope_is_denied_and_keeps_the_file() {
     let execution_events =
         execute_first_pending_call(&runtime, "delete a note outside scope").await;
 
-    assert_failed_json_result(&execution_events, "workspace_path_denied", 2);
+    assert_failed_json_result(&execution_events, "workspace_path_denied");
     assert_eq!(
         fs::read_to_string(temp.path().join("denied/note.txt")).expect("denied file should read"),
         "alpha\n",

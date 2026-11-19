@@ -9,16 +9,13 @@ use crate::tui::{
     render::{prepare_viewport, render_to_buffer, render_to_text},
     state::TuiState,
     terminal::write_clipboard_request,
-    tests::{pending_call_with_args, source, text_artifact},
+    tests::{pending_call_with_args, source},
     text_interaction::MouseInput,
     theme::TuiTheme,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::{
-    ArtifactId, ArtifactRef, ErrorInfo, RuntimeEvent, SessionId, ToolCallId, ToolCallResult,
-    ToolOutput,
-};
-use merry_runtime::{ArtifactContent, Runtime};
+use merry_core::{ErrorInfo, RuntimeEvent, SessionId, ToolCallId, ToolCallResult, ToolOutput};
+use merry_runtime::Runtime;
 use ratatui::{
     layout::{Position, Size},
     style::Color,
@@ -48,8 +45,7 @@ fn completed_command(
     command: &str,
     status: i64,
     output: &str,
-) -> ArtifactRef {
-    let artifact = text_artifact(id);
+) -> ToolCallId {
     let mut projector = TuiProjector::default();
     projector.apply(
         RuntimeEvent::ToolCallStarted {
@@ -64,11 +60,10 @@ fn completed_command(
     );
     let call_id = ToolCallId::new(id).unwrap();
     let result = if status == 0 {
-        ToolCallResult::succeeded(call_id, artifact.clone())
+        ToolCallResult::succeeded(call_id.clone())
     } else {
         ToolCallResult::failed(
-            call_id,
-            artifact.clone(),
+            call_id.clone(),
             ErrorInfo::new("process_action_failed", "command failed").unwrap(),
         )
     };
@@ -86,19 +81,19 @@ fn completed_command(
         },
         state,
     );
-    artifact
+    call_id
 }
 
 fn key(state: &mut TuiState, code: KeyCode) -> ControllerEffect {
     handle_key_event(KeyEvent::new(code, KeyModifiers::NONE), state)
 }
 
-fn open(state: &mut TuiState) -> ArtifactId {
+fn open(state: &mut TuiState) -> ToolCallId {
     let effect = handle_key_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT), state);
-    let ControllerEffect::LoadCommandOutput(artifact_id) = effect else {
-        panic!("opening a completed command should request its artifact");
+    let ControllerEffect::LoadCommandOutput(call_id) = effect else {
+        panic!("opening a completed command should request its tool call output");
     };
-    artifact_id
+    call_id
 }
 
 fn draw(state: &mut TuiState, width: u16, height: u16) -> String {
@@ -109,14 +104,14 @@ fn draw(state: &mut TuiState, width: u16, height: u16) -> String {
 #[test]
 fn command_details_shortcut_toggles_without_changing_the_draft_or_reading_position() {
     let mut state = state();
-    let artifact = completed_command(&mut state, "toggle", "pwd", 0, "");
+    let call_id = completed_command(&mut state, "toggle", "pwd", 0, "");
     state.append_assistant_delta(None, &"context\n".repeat(40));
     state.insert_input_str("keep my draft");
     state.scroll_timeline_up_by(10);
     let before = draw(&mut state, 80, 24);
 
     for _ in 0..3 {
-        assert_eq!(open(&mut state), *artifact.id());
+        assert_eq!(open(&mut state), call_id);
         assert!(draw(&mut state, 80, 24).contains("Loading captured output"));
         assert_eq!(
             handle_key_event(
@@ -128,7 +123,7 @@ fn command_details_shortcut_toggles_without_changing_the_draft_or_reading_positi
         assert!(state.overlay().is_none());
         apply_output(
             &mut state,
-            artifact.id(),
+            &call_id,
             Ok(CapturedOutput::Text("late output".into())),
         );
         assert_eq!(draw(&mut state, 80, 24), before);
@@ -211,23 +206,22 @@ fn command_details_shortcut_does_not_dismiss_unrelated_dialogs() {
 fn hidden_success_output_is_inspectable_and_copy_preserves_the_actual_command() {
     let mut state = state().with_successful_command_output(false);
     let command = "printf '%s' 'line one'\nprintf 'line two'";
-    let artifact = completed_command(&mut state, "first", command, 0, "secret preview");
+    let call_id = completed_command(&mut state, "first", command, 0, "secret preview");
     state.insert_input_str("unfinished draft");
     let compact = draw(&mut state, 100, 26);
     assert!(!compact.contains("secret preview"));
-    assert_eq!(open(&mut state), *artifact.id());
+    assert_eq!(open(&mut state), call_id);
     assert!(draw(&mut state, 100, 26).contains("Loading captured output"));
     apply_output(
         &mut state,
-        artifact.id(),
-        Ok(CapturedOutput::from_artifact(ArtifactContent::json(
+        &call_id,
+        Ok(CapturedOutput::from_tool_output(ToolOutput::json(
             json!({
                 "kind": "process_action", "stdout": {"text": "first line\n\n  indented\nlast line"},
                 "stderr": {"text": "an error"},
             })
             .to_string(),
-        ))
-        .unwrap()),
+        ))),
     );
     let expanded = draw(&mut state, 100, 26);
     assert!(expanded.contains("Directory: src"));
@@ -255,14 +249,14 @@ fn command_navigation_ignores_stale_loads_and_keeps_failed_output_accessible() {
     let mut state = state();
     let first = completed_command(&mut state, "first", "pwd", 0, "");
     let second = completed_command(&mut state, "second", "git status", 128, "line one");
-    assert_eq!(open(&mut state), *second.id());
+    assert_eq!(open(&mut state), second);
     assert_eq!(
         key(&mut state, KeyCode::Left),
-        ControllerEffect::LoadCommandOutput(first.id().clone())
+        ControllerEffect::LoadCommandOutput(first.clone())
     );
     apply_output(
         &mut state,
-        second.id(),
+        &second,
         Ok(CapturedOutput::Text("STALE".into())),
     );
     let pending = draw(&mut state, 80, 24);
@@ -271,11 +265,11 @@ fn command_navigation_ignores_stale_loads_and_keeps_failed_output_accessible() {
     assert_eq!(key(&mut state, KeyCode::Left), ControllerEffect::None);
     assert_eq!(
         key(&mut state, KeyCode::Right),
-        ControllerEffect::LoadCommandOutput(second.id().clone())
+        ControllerEffect::LoadCommandOutput(second.clone())
     );
     apply_output(
         &mut state,
-        second.id(),
+        &second,
         Ok(CapturedOutput::Text("COMPLETE ERROR".into())),
     );
     let failed = draw(&mut state, 80, 24);
@@ -284,7 +278,7 @@ fn command_navigation_ignores_stale_loads_and_keeps_failed_output_accessible() {
     key(&mut state, KeyCode::Esc);
     apply_output(
         &mut state,
-        second.id(),
+        &second,
         Ok(CapturedOutput::Text("late completion".into())),
     );
     assert!(state.overlay().is_none());
@@ -293,10 +287,10 @@ fn command_navigation_ignores_stale_loads_and_keeps_failed_output_accessible() {
 #[test]
 fn full_output_scrolls_beyond_preview_and_u16_limits_without_truncating_text() {
     let mut state = state();
-    let artifact = completed_command(&mut state, "large", "cargo test", 0, "");
+    let call_id = completed_command(&mut state, "large", "cargo test", 0, "");
     open(&mut state);
     let output = format!("{}TAIL-完整-output", "line\n".repeat(66_000));
-    apply_output(&mut state, artifact.id(), Ok(CapturedOutput::Text(output)));
+    apply_output(&mut state, &call_id, Ok(CapturedOutput::Text(output)));
     for width in [24, 80] {
         key(&mut state, KeyCode::End);
         let bottom = draw(&mut state, width, 24);
@@ -318,46 +312,60 @@ fn full_output_scrolls_beyond_preview_and_u16_limits_without_truncating_text() {
 #[test]
 fn upstream_truncation_binary_text_and_load_failures_are_explicit() {
     let mut state = state();
-    let artifact = completed_command(&mut state, "limited", "build", 1, "");
+    let call_id = completed_command(&mut state, "limited", "build", 1, "");
     open(&mut state);
-    apply_output(&mut state, artifact.id(), Ok(CapturedOutput::from_artifact(ArtifactContent::json(json!({
-        "kind": "process_action", "stdout": {"text": "prefix", "truncated": true, "utf8": false}, "stderr": {"text": ""},
-    }).to_string())).unwrap()));
+    apply_output(
+        &mut state,
+        &call_id,
+        Ok(CapturedOutput::from_tool_output(ToolOutput::json(
+            json!({
+                "kind": "process_action", "stdout": {"text": "prefix", "truncated": true, "utf8": false}, "stderr": {"text": ""},
+            })
+            .to_string(),
+        ))),
+    );
     let rendered = draw(&mut state, 110, 28);
     assert!(rendered.contains("capture truncated"));
     assert!(rendered.contains("Non-UTF-8"));
-    apply_output(
-        &mut state,
-        artifact.id(),
-        Err("artifact unavailable".into()),
-    );
-    assert!(draw(&mut state, 80, 24).contains("Could not load output: artifact unavailable"));
+    apply_output(&mut state, &call_id, Err("output unavailable".into()));
+    assert!(draw(&mut state, 80, 24).contains("Could not load output: output unavailable"));
     assert_eq!(key(&mut state, KeyCode::Char('y')), ControllerEffect::None);
-    assert!(CapturedOutput::from_artifact(ArtifactContent::binary(vec![0, 1])).is_err());
 }
 
 #[tokio::test]
-async fn output_loader_reads_runtime_artifacts_and_reports_missing_records() {
+async fn output_loader_reads_runtime_tool_outputs_and_reports_missing_records() {
+    use futures_util::StreamExt;
+    use merry_runtime::{StepContext, StepInput};
+    use std::sync::Arc;
+
+    let event = crate::testing::process_tool_call("capture", &["echo", "hi"], Some(".")).unwrap();
+    let provider = crate::testing::ScriptedProvider::new(vec![vec![Ok(event)]]);
     let runtime = Runtime::builder(SessionId::new("command-inspection").unwrap())
+        .model_provider(Arc::new(provider), crate::testing::model_name())
         .build()
         .unwrap();
-    let artifact = text_artifact("capture");
+    let _events = runtime
+        .step(
+            StepInput::user_text("run command").unwrap(),
+            StepContext::default(),
+        )
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let call_id = ToolCallId::new("capture").unwrap();
     runtime
-        .record_artifact(
-            artifact.clone(),
-            ArtifactContent::text("exact captured output\n"),
+        .submit_tool_result(
+            ToolCallResult::succeeded(call_id.clone()),
+            ToolOutput::text("exact captured output\n"),
         )
         .await
         .unwrap();
     assert_eq!(
-        load_output(&runtime, artifact.id())
-            .await
-            .unwrap()
-            .copy_text(),
+        load_output(&runtime, &call_id).await.unwrap().copy_text(),
         "exact captured output\n"
     );
     assert!(
-        load_output(&runtime, &ArtifactId::new("missing").unwrap())
+        load_output(&runtime, &ToolCallId::new("missing").unwrap())
             .await
             .is_err()
     );
@@ -400,7 +408,7 @@ fn inspection_toggle_and_follow_shortcuts_respect_configured_bindings() {
         toml::from_str("open_command_details = 'ctrl+f'\nfollow_latest = 'ctrl+b'").unwrap();
     let keymap = Keymap::from_config(&config).unwrap();
     let mut state = TuiState::new("/repo".into(), "test".into(), keymap, TuiTheme::default());
-    let artifact = completed_command(&mut state, "configured", "pwd", 0, "");
+    let call_id = completed_command(&mut state, "configured", "pwd", 0, "");
     let collapsed = draw(&mut state, 80, 24);
     assert!(collapsed.contains("Ctrl+F output"));
     assert!(!collapsed.contains(&output_hint()));
@@ -409,7 +417,7 @@ fn inspection_toggle_and_follow_shortcuts_respect_configured_bindings() {
             KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
             &mut state
         ),
-        ControllerEffect::LoadCommandOutput(artifact.id().clone())
+        ControllerEffect::LoadCommandOutput(call_id)
     );
     let expanded = draw(&mut state, 80, 24);
     assert!(expanded.contains("Ctrl+F / Esc close"));
@@ -439,7 +447,7 @@ fn inspection_toggle_and_follow_shortcuts_respect_configured_bindings() {
 fn reopening_the_same_command_rejects_older_load_completions() {
     use crate::tui::controller::CommandOutputCompletion;
     let mut state = state();
-    let artifact = completed_command(&mut state, "reopen", "pwd", 0, "");
+    let call_id = completed_command(&mut state, "reopen", "pwd", 0, "");
     open(&mut state);
     let previous_generation = state.command_details_generation();
     key(&mut state, KeyCode::Esc);
@@ -447,17 +455,13 @@ fn reopening_the_same_command_rejects_older_load_completions() {
     key(&mut state, KeyCode::Char('y'));
     let generation = state.command_details_generation();
     CommandOutputCompletion::new(
-        artifact.id().clone(),
+        call_id.clone(),
         generation,
         Ok(CapturedOutput::Text("latest capture".into())),
     )
     .apply(&mut state);
-    CommandOutputCompletion::new(
-        artifact.id().clone(),
-        previous_generation,
-        Err("obsolete timeout".into()),
-    )
-    .apply(&mut state);
+    CommandOutputCompletion::new(call_id, previous_generation, Err("obsolete timeout".into()))
+        .apply(&mut state);
     let rendered = draw(&mut state, 100, 24);
     assert!(rendered.contains("latest capture"));
     assert!(!rendered.contains("obsolete timeout"));
@@ -483,12 +487,8 @@ fn mouse_wheel_stays_within_output_bounds_and_switches_only_on_history_rail() {
     let size = Size::new(80, 20);
     let body_pos = Position::new(50, 10);
 
-    assert_eq!(open(&mut state), *third.id());
-    apply_output(
-        &mut state,
-        third.id(),
-        Ok(CapturedOutput::Text("clean".into())),
-    );
+    assert_eq!(open(&mut state), third);
+    apply_output(&mut state, &third, Ok(CapturedOutput::Text("clean".into())));
     let rendered = draw(&mut state, size.width, size.height);
     assert!(rendered.contains("HISTORY (3/3)"), "{rendered}");
 
@@ -507,17 +507,13 @@ fn mouse_wheel_stays_within_output_bounds_and_switches_only_on_history_rail() {
     let rail_pos = find_label(&rendered, "HISTORY (3/3)");
     assert_eq!(
         handle_mouse_scroll_up(rail_pos, size, &mut state),
-        ControllerEffect::LoadCommandOutput(second.id().clone())
+        ControllerEffect::LoadCommandOutput(second.clone())
     );
     let long_output = (1..=60)
         .map(|n| format!("output line {n:02}"))
         .collect::<Vec<_>>()
         .join("\n");
-    apply_output(
-        &mut state,
-        second.id(),
-        Ok(CapturedOutput::Text(long_output)),
-    );
+    apply_output(&mut state, &second, Ok(CapturedOutput::Text(long_output)));
     draw(&mut state, size.width, size.height);
 
     // Scrolling aggressively past the bottom of #2 stops cleanly at the bottom without switching.
@@ -545,15 +541,15 @@ fn mouse_wheel_stays_within_output_bounds_and_switches_only_on_history_rail() {
     // History rail wheel still steps backward to #1 and forward to #2 -> #3.
     assert_eq!(
         handle_mouse_scroll_up(rail_pos, size, &mut state),
-        ControllerEffect::LoadCommandOutput(first.id().clone())
+        ControllerEffect::LoadCommandOutput(first.clone())
     );
     assert_eq!(
         handle_mouse_scroll_down(rail_pos, size, &mut state),
-        ControllerEffect::LoadCommandOutput(second.id().clone())
+        ControllerEffect::LoadCommandOutput(second.clone())
     );
     assert_eq!(
         handle_mouse_scroll_down(rail_pos, size, &mut state),
-        ControllerEffect::LoadCommandOutput(third.id().clone())
+        ControllerEffect::LoadCommandOutput(third.clone())
     );
 }
 
@@ -565,10 +561,10 @@ fn wide_history_rail_supports_click_and_wheel_navigation_and_footer_chips() {
     let third = completed_command(&mut state, "third", "cargo check", 1, "");
     let size = Size::new(120, 26);
 
-    assert_eq!(open(&mut state), *third.id());
+    assert_eq!(open(&mut state), third);
     apply_output(
         &mut state,
-        third.id(),
+        &third,
         Ok(CapturedOutput::Text("error: build failed".into())),
     );
     let rendered = draw(&mut state, size.width, size.height);
@@ -584,24 +580,20 @@ fn wide_history_rail_supports_click_and_wheel_navigation_and_footer_chips() {
     let first_row = find_label(&rendered, "1 ✓ pwd");
     assert_eq!(
         handle_mouse_input(MouseInput::Down(first_row), size, &mut state),
-        ControllerEffect::LoadCommandOutput(first.id().clone())
+        ControllerEffect::LoadCommandOutput(first.clone())
     );
-    apply_output(
-        &mut state,
-        first.id(),
-        Ok(CapturedOutput::Text("/repo".into())),
-    );
+    apply_output(&mut state, &first, Ok(CapturedOutput::Text("/repo".into())));
     let rendered_first = draw(&mut state, size.width, size.height);
     assert!(rendered_first.contains("Command 1/3"), "{rendered_first}");
 
     // Wheel down over the left history rail switches directly to #2.
     assert_eq!(
         handle_mouse_scroll_down(first_row, size, &mut state),
-        ControllerEffect::LoadCommandOutput(second.id().clone())
+        ControllerEffect::LoadCommandOutput(second.clone())
     );
     apply_output(
         &mut state,
-        second.id(),
+        &second,
         Ok(CapturedOutput::Text("diff output".into())),
     );
     let rendered_second = draw(&mut state, size.width, size.height);
@@ -611,13 +603,13 @@ fn wide_history_rail_supports_click_and_wheel_navigation_and_footer_chips() {
     let next_chip = find_label(&rendered_second, "[Next ▶]");
     assert_eq!(
         handle_mouse_input(MouseInput::Down(next_chip), size, &mut state),
-        ControllerEffect::LoadCommandOutput(third.id().clone())
+        ControllerEffect::LoadCommandOutput(third.clone())
     );
     let rendered_third = draw(&mut state, size.width, size.height);
     let prev_chip = find_label(&rendered_third, "[◀ Prev]");
     assert_eq!(
         handle_mouse_input(MouseInput::Down(prev_chip), size, &mut state),
-        ControllerEffect::LoadCommandOutput(second.id().clone())
+        ControllerEffect::LoadCommandOutput(second.clone())
     );
     let rendered_again = draw(&mut state, size.width, size.height);
     let copy_cmd_chip = find_label(&rendered_again, "[Copy cmd]");
@@ -638,17 +630,17 @@ fn left_hand_shortcuts_navigate_scroll_and_close() {
     let mut state = state();
     let first = completed_command(&mut state, "first", "echo one", 0, "");
     let second = completed_command(&mut state, "second", "echo two", 0, "");
-    assert_eq!(open(&mut state), *second.id());
+    assert_eq!(open(&mut state), second);
 
     assert_eq!(
         key(&mut state, KeyCode::Char('a')),
-        ControllerEffect::LoadCommandOutput(first.id().clone())
+        ControllerEffect::LoadCommandOutput(first.clone())
     );
     let output = (1..=40)
         .map(|n| format!("line-{n:02}"))
         .collect::<Vec<_>>()
         .join("\n");
-    apply_output(&mut state, first.id(), Ok(CapturedOutput::Text(output)));
+    apply_output(&mut state, &first, Ok(CapturedOutput::Text(output)));
     let top = draw(&mut state, 80, 20);
     assert!(top.contains("line-01"));
 
@@ -666,7 +658,7 @@ fn left_hand_shortcuts_navigate_scroll_and_close() {
 
     assert_eq!(
         key(&mut state, KeyCode::Char('d')),
-        ControllerEffect::LoadCommandOutput(second.id().clone())
+        ControllerEffect::LoadCommandOutput(second.clone())
     );
     assert_eq!(key(&mut state, KeyCode::Char('q')), ControllerEffect::None);
     assert!(state.overlay().is_none());
@@ -679,10 +671,10 @@ fn ansi_diff_and_json_outputs_render_with_highlighting_without_escape_leaks() {
     let diff_cmd = completed_command(&mut state, "diff", "git diff", 0, "");
     let json_cmd = completed_command(&mut state, "json", "cat config.json", 0, "");
 
-    assert_eq!(open(&mut state), *json_cmd.id());
+    assert_eq!(open(&mut state), json_cmd);
     apply_output(
         &mut state,
-        json_cmd.id(),
+        &json_cmd,
         Ok(CapturedOutput::Text(
             "{\n  \"enabled\": true,\n  \"retries\": 3\n}".into(),
         )),
@@ -700,11 +692,11 @@ fn ansi_diff_and_json_outputs_render_with_highlighting_without_escape_leaks() {
     // Switch to git diff and verify syntect's Diff grammar colors additions vs deletions distinctly.
     assert_eq!(
         key(&mut state, KeyCode::Char('a')),
-        ControllerEffect::LoadCommandOutput(diff_cmd.id().clone())
+        ControllerEffect::LoadCommandOutput(diff_cmd.clone())
     );
     apply_output(
         &mut state,
-        diff_cmd.id(),
+        &diff_cmd,
         Ok(CapturedOutput::Text(
             "diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-old_line\n+new_line".into(),
         )),
@@ -726,11 +718,11 @@ fn ansi_diff_and_json_outputs_render_with_highlighting_without_escape_leaks() {
     // Switch to ANSI output and verify SGR green applies without leaking "[32m" or OSC title.
     assert_eq!(
         key(&mut state, KeyCode::Char('a')),
-        ControllerEffect::LoadCommandOutput(ansi_cmd.id().clone())
+        ControllerEffect::LoadCommandOutput(ansi_cmd.clone())
     );
     apply_output(
         &mut state,
-        ansi_cmd.id(),
+        &ansi_cmd,
         Ok(CapturedOutput::Text(
             "\x1b]0;window-title\x07\x1b[32mALL_PASSED\x1b[0m plain".into(),
         )),
@@ -751,7 +743,7 @@ fn split_stdout_and_stderr_panes_scroll_independently_by_hover_click_and_key() {
     let both = completed_command(&mut state, "both", "cargo test", 0, "");
     let size = Size::new(100, 26);
 
-    assert_eq!(open(&mut state), *both.id());
+    assert_eq!(open(&mut state), both);
     let stdout_text = (1..=30)
         .map(|n| format!("stdout-line-{n:02}"))
         .collect::<Vec<_>>()
@@ -762,16 +754,15 @@ fn split_stdout_and_stderr_panes_scroll_independently_by_hover_click_and_key() {
         .join("\n");
     apply_output(
         &mut state,
-        both.id(),
-        Ok(CapturedOutput::from_artifact(ArtifactContent::json(
+        &both,
+        Ok(CapturedOutput::from_tool_output(ToolOutput::json(
             json!({
                 "kind": "process_action",
                 "stdout": {"text": stdout_text},
                 "stderr": {"text": stderr_text},
             })
             .to_string(),
-        ))
-        .unwrap()),
+        ))),
     );
 
     let initial = draw(&mut state, size.width, size.height);
@@ -824,20 +815,19 @@ fn split_stdout_and_stderr_panes_scroll_independently_by_hover_click_and_key() {
     // Switching to a stderr-only command collapses stdout to empty and auto-focuses stderr.
     assert_eq!(
         key(&mut state, KeyCode::Char('a')),
-        ControllerEffect::LoadCommandOutput(stderr_only.id().clone())
+        ControllerEffect::LoadCommandOutput(stderr_only.clone())
     );
     apply_output(
         &mut state,
-        stderr_only.id(),
-        Ok(CapturedOutput::from_artifact(ArtifactContent::json(
+        &stderr_only,
+        Ok(CapturedOutput::from_tool_output(ToolOutput::json(
             json!({
                 "kind": "process_action",
                 "stdout": {"text": ""},
                 "stderr": {"text": stderr_text},
             })
             .to_string(),
-        ))
-        .unwrap()),
+        ))),
     );
     let stderr_only_view = draw(&mut state, size.width, size.height);
     assert!(
@@ -867,19 +857,18 @@ fn syntect_log_and_source_grammars_highlight_stdout_and_stderr_without_special_c
     );
     let log_cmd = completed_command(&mut state, "log", "cargo check", 1, "");
 
-    assert_eq!(open(&mut state), *log_cmd.id());
+    assert_eq!(open(&mut state), log_cmd);
     apply_output(
         &mut state,
-        log_cmd.id(),
-        Ok(CapturedOutput::from_artifact(ArtifactContent::json(
+        &log_cmd,
+        Ok(CapturedOutput::from_tool_output(ToolOutput::json(
             json!({
                 "kind": "process_action",
                 "stdout": {"text": "2026-11-19 INFO https://example.com \"ready\" 42"},
                 "stderr": {"text": "2026-11-19 ERROR failed at src/lib.rs:42\nplain diagnostic context"},
             })
             .to_string(),
-        ))
-        .unwrap()),
+        ))),
     );
     prepare_viewport(&mut state, Size::new(100, 26));
     let buf = render_to_buffer(&state, 100, 26);
@@ -911,20 +900,19 @@ fn syntect_log_and_source_grammars_highlight_stdout_and_stderr_without_special_c
     // Switch to shell-wrapped Rust file output and confirm syntect RGB highlighting applies.
     assert_eq!(
         key(&mut state, KeyCode::Char('a')),
-        ControllerEffect::LoadCommandOutput(wrapped_src.id().clone())
+        ControllerEffect::LoadCommandOutput(wrapped_src.clone())
     );
     apply_output(
         &mut state,
-        wrapped_src.id(),
-        Ok(CapturedOutput::from_artifact(ArtifactContent::json(
+        &wrapped_src,
+        Ok(CapturedOutput::from_tool_output(ToolOutput::json(
             json!({
                 "kind": "process_action",
                 "stdout": {"text": "pub fn greet() -> &'static str {\n    \"hello\"\n}"},
                 "stderr": {"text": ""},
             })
             .to_string(),
-        ))
-        .unwrap()),
+        ))),
     );
     prepare_viewport(&mut state, Size::new(100, 24));
     let src_buf = render_to_buffer(&state, 100, 24);
@@ -941,11 +929,11 @@ fn syntect_log_and_source_grammars_highlight_stdout_and_stderr_without_special_c
 fn adversarial_stderr_tokens_multibyte_escapes_and_tiny_viewports_never_panic() {
     let mut state = state();
     let cmd = completed_command(&mut state, "edge", "bash -lc 'ls /missing'", 2, "");
-    assert_eq!(open(&mut state), *cmd.id());
+    assert_eq!(open(&mut state), cmd);
     apply_output(
         &mut state,
-        cmd.id(),
-        Ok(CapturedOutput::from_artifact(ArtifactContent::json(
+        &cmd,
+        Ok(CapturedOutput::from_tool_output(ToolOutput::json(
             json!({
                 "kind": "process_action",
                 "stdout": {
@@ -964,8 +952,7 @@ fn adversarial_stderr_tokens_multibyte_escapes_and_tiny_viewports_never_panic() 
                 },
             })
             .to_string(),
-        ))
-        .unwrap()),
+        ))),
     );
 
     for (width, height) in [(1, 1), (8, 4), (24, 10), (80, 24), (160, 40)] {
@@ -1019,20 +1006,19 @@ fn history_position_follows_commands_that_finish_while_the_viewer_is_open() {
     );
     let middle = completed_command(&mut state, "middle", "middle-cmd", 0, "");
     let latest = completed_command(&mut state, "latest", "latest-cmd", 0, "");
-    assert_eq!(open(&mut state), *latest.id());
+    assert_eq!(open(&mut state), latest);
     apply_output(
         &mut state,
-        latest.id(),
+        &latest,
         Ok(CapturedOutput::Text("latest output".into())),
     );
     let before = draw(&mut state, 120, 26);
     assert!(before.contains("Command 2/2"), "{before}");
     assert!(before.contains("HISTORY (2/2)"), "{before}");
 
-    let early_artifact = text_artifact("early");
     projector.apply(
         RuntimeEvent::ToolCallFinished {
-            result: ToolCallResult::succeeded(ToolCallId::new("early").unwrap(), early_artifact),
+            result: ToolCallResult::succeeded(ToolCallId::new("early").unwrap()),
             output: Some(ToolOutput::Json {
                 json: json!({
                     "kind": "process_action",
@@ -1064,7 +1050,7 @@ fn history_position_follows_commands_that_finish_while_the_viewer_is_open() {
 
     apply_output(
         &mut state,
-        middle.id(),
+        &middle,
         Ok(CapturedOutput::Text("middle output".into())),
     );
     key(&mut state, KeyCode::Char('a'));
@@ -1076,7 +1062,7 @@ fn history_position_follows_commands_that_finish_while_the_viewer_is_open() {
     assert!(after_trailing.contains("middle-cmd"), "{after_trailing}");
     assert_eq!(
         key(&mut state, KeyCode::Char('d')),
-        ControllerEffect::LoadCommandOutput(latest.id().clone())
+        ControllerEffect::LoadCommandOutput(latest.clone())
     );
     let _ = trailing;
 }
@@ -1085,7 +1071,7 @@ fn history_position_follows_commands_that_finish_while_the_viewer_is_open() {
 fn wheel_outside_a_pane_keeps_the_focused_stream() {
     let mut state = state();
     let command = completed_command(&mut state, "split-wheel", "cargo test", 0, "");
-    assert_eq!(open(&mut state), *command.id());
+    assert_eq!(open(&mut state), command);
     let stdout_text = (1..=20)
         .map(|n| format!("stdout-line-{n:02}"))
         .collect::<Vec<_>>()
@@ -1096,16 +1082,15 @@ fn wheel_outside_a_pane_keeps_the_focused_stream() {
         .join("\n");
     apply_output(
         &mut state,
-        command.id(),
-        Ok(CapturedOutput::from_artifact(ArtifactContent::json(
+        &command,
+        Ok(CapturedOutput::from_tool_output(ToolOutput::json(
             json!({
                 "kind": "process_action",
                 "stdout": {"text": stdout_text},
                 "stderr": {"text": stderr_text},
             })
             .to_string(),
-        ))
-        .unwrap()),
+        ))),
     );
     let size = Size::new(100, 26);
     key(&mut state, KeyCode::Char('2'));
@@ -1133,12 +1118,12 @@ fn wheel_outside_a_pane_keeps_the_focused_stream() {
 fn single_buffer_ignores_the_stderr_focus_key() {
     let mut state = state();
     let command = completed_command(&mut state, "single-key", "echo lines", 0, "");
-    assert_eq!(open(&mut state), *command.id());
+    assert_eq!(open(&mut state), command);
     let output = (1..=30)
         .map(|n| format!("line-{n:02}"))
         .collect::<Vec<_>>()
         .join("\n");
-    apply_output(&mut state, command.id(), Ok(CapturedOutput::Text(output)));
+    apply_output(&mut state, &command, Ok(CapturedOutput::Text(output)));
     draw(&mut state, 80, 20);
     key(&mut state, KeyCode::Char('2'));
     key(&mut state, KeyCode::Char('e'));

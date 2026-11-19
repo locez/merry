@@ -228,10 +228,9 @@ impl PlanState {
             provider_request_in_flight: false,
             tool_call_in_flight: false,
             observable_side_effects: 0,
-            artifacts_created: 0,
-            artifact_refs: Vec::new(),
+            output_paths: Vec::new(),
             changed_paths: Vec::new(),
-            acceptance_evidence: Vec::new(),
+            evidence_notes: Vec::new(),
             repeated_failure_fingerprint: None,
             summary: None,
             next_action: None,
@@ -391,8 +390,7 @@ impl PlanState {
                 if status == PlanNodeStatus::Completed && node.result.is_none() {
                     node.result = Some(PlanNodeResult {
                         conclusion: "All declared child work completed.".to_owned(),
-                        evidence_refs: Vec::new(),
-                        artifact_refs: Vec::new(),
+                        output_paths: Vec::new(),
                         changed_paths: Vec::new(),
                         verification: vec![
                             "Every declared child node reached completed status.".to_owned(),

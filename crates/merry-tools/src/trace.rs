@@ -216,7 +216,7 @@ impl<'a> WorkspaceTraceFinish<'a> {
 
     fn output_bytes(self) -> Option<usize> {
         match self {
-            Self::Outcome(outcome) => Some(outcome.content().as_bytes().len()),
+            Self::Outcome(outcome) => Some(outcome.content().as_str().len()),
             Self::Cancelled | Self::Error(_) => None,
         }
     }

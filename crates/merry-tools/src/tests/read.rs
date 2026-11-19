@@ -25,8 +25,7 @@ fn read_text_returns_requested_line_window_without_host_root() {
     assert!(
         !outcome
             .content()
-            .as_text()
-            .expect("json content")
+            .as_str()
             .contains(temp.path().to_str().expect("temp path utf8"))
     );
 }

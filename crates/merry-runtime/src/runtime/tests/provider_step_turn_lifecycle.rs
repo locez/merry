@@ -95,17 +95,13 @@ async fn one_slot_commentary_observes_atomically_committed_tool_response() {
 
     let session = loop {
         let session = runtime.inner.session.lock().await;
-        let commentary_recorded = session
-            .full_transcript_snapshot()
-            .expect("transcript should be readable")
-            .iter()
-            .any(|item| {
-                matches!(
-                    item,
-                    crate::session::TranscriptItemSnapshot::AssistantText { text }
-                        if text == "Commentary delivered before drop."
-                )
-            });
+        let commentary_recorded = session.full_transcript_snapshot().iter().any(|item| {
+            matches!(
+                item,
+                crate::session::TranscriptItemSnapshot::AssistantText { text }
+                    if text == "Commentary delivered before drop."
+            )
+        });
         if commentary_recorded {
             break session;
         }
@@ -127,10 +123,7 @@ async fn one_slot_commentary_observes_atomically_committed_tool_response() {
         Some(ModelTurnStatus::AwaitingToolResults)
     );
     assert_eq!(
-        session
-            .full_transcript_snapshot()
-            .expect("transcript should remain readable")
-            .len(),
+        session.full_transcript_snapshot().len(),
         3,
         "user input, commentary, and tool call must commit before commentary is observable"
     );
@@ -139,7 +132,7 @@ async fn one_slot_commentary_observes_atomically_committed_tool_response() {
             entry,
             LedgerProjection::Lifecycle {
                 sequence: 3,
-                kind: LedgerFactKind::ArtifactRecorded,
+                kind: LedgerFactKind::AssistantOutputRecorded,
                 ..
             }
         )

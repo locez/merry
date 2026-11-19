@@ -1,9 +1,10 @@
 use crate::{
-    ArtifactContent, ProcessActionIntent, ProcessExitStatus, ProcessOutputEnvelope,
-    ProcessPermissionProfileId, ProcessRunnerOutput, permission::PermissionAdmissionReview,
-    process::shell_process_input, tool::ToolResultContent,
+    ProcessActionIntent, ProcessExitStatus, ProcessOutputEnvelope, ProcessPermissionProfileId,
+    ProcessRunnerOutput, permission::PermissionAdmissionReview, process::shell_process_input,
+    tool::ToolResultContent,
 };
-use merry_core::{ArtifactKind, ArtifactRef};
+use merry_core::ToolOutput;
+use serde::Serialize;
 
 const TRUNCATION_GUIDANCE: &str =
     "Output is incomplete; inspect a narrower range before drawing conclusions.";
@@ -15,17 +16,15 @@ pub(super) fn result_content(
     intent: &ProcessActionIntent,
     output: &ProcessRunnerOutput,
     permission_profile_id: ProcessPermissionProfileId,
-    input_artifact: Option<&ArtifactRef>,
     permission_review: Option<&PermissionAdmissionReview>,
 ) -> ToolResultContent {
-    ToolResultContent::from(artifact_content(
+    ToolResultContent::from(full_output(
         intent,
         output,
         permission_profile_id,
-        input_artifact,
         permission_review,
     ))
-    .with_model(ArtifactContent::text(model_text(output)))
+    .with_model(ToolOutput::text(model_text(output)))
 }
 
 fn model_text(output: &ProcessRunnerOutput) -> String {
@@ -114,83 +113,118 @@ fn append_section(text: &mut String, name: &str, content: &str) {
     text.push_str(content);
 }
 
-fn artifact_content(
+fn full_output(
     intent: &ProcessActionIntent,
     output: &ProcessRunnerOutput,
     permission_profile_id: ProcessPermissionProfileId,
-    input_artifact: Option<&ArtifactRef>,
     permission_review: Option<&PermissionAdmissionReview>,
-) -> ArtifactContent {
+) -> ToolOutput {
     let shell_input = shell_process_input(intent);
-    let intent_payload = if let Some(shell_input) = shell_input {
-        serde_json::json!({
-            "summary": intent.summary(),
-            "command": shell_input.script(),
-            "cwd": intent.cwd(),
-        })
-    } else {
-        serde_json::json!({
-            "summary": intent.summary(),
-            "argv": intent.argv(),
-            "cwd": intent.cwd(),
-        })
+    let recovery = recovery_guidance(output.status());
+    let truncated = output.stdout_truncated() || output.stderr_truncated();
+    let truncation = truncated.then(|| ProcessTruncationRecord {
+        kind: "process_output_truncated",
+        message: format!("{TRUNCATION_GUIDANCE} {OUTPUT_RECOVERY_GUIDANCE}"),
+        stdout_truncated: output.stdout_truncated(),
+        stderr_truncated: output.stderr_truncated(),
+    });
+    // A still-running process can carry recovery text and a truncation note.
+    // Recovery keeps the `guidance` field; truncation moves beside it.
+    let (guidance, output_guidance) = match (recovery, truncation) {
+        (Some(message), truncation) => (
+            Some(ProcessGuidanceRecord::Recovery {
+                kind: "process_action_recovery",
+                message,
+            }),
+            truncation,
+        ),
+        (None, Some(truncation)) => (Some(ProcessGuidanceRecord::Truncated(truncation)), None),
+        (None, None) => (None, None),
     };
-
-    let mut payload = serde_json::json!(ProcessOutputEnvelope::new(
-        output,
-        permission_profile_id,
-        permission_review,
-    ));
-    payload["intent"] = intent_payload;
-
-    if let Some(guidance) = recovery_guidance(output.status()) {
-        payload["guidance"] = serde_json::json!({
-            "kind": "process_action_recovery",
-            "message": guidance,
-        });
+    let document = ProcessActionDocument {
+        envelope: ProcessOutputEnvelope::new(output, permission_profile_id, permission_review),
+        intent: match shell_input {
+            Some(shell_input) => ProcessIntentRecord {
+                summary: intent.summary(),
+                command: Some(shell_input.script()),
+                argv: None,
+                cwd: intent.cwd(),
+            },
+            None => ProcessIntentRecord {
+                summary: intent.summary(),
+                command: None,
+                argv: Some(intent.argv()),
+                cwd: intent.cwd(),
+            },
+        },
+        guidance,
+        output_guidance,
+        input_evidence: shell_input.map(|shell_input| ShellInputEvidence {
+            kind: "shell_command_script",
+            shell: shell_input.shell(),
+            flag: shell_input.flag(),
+            script: shell_input.script(),
+            script_bytes: shell_input.script_bytes(),
+            script_fingerprint: shell_input.script_fingerprint(),
+        }),
+    };
+    match serde_json::to_string(&document) {
+        Ok(json) => ToolOutput::json(json),
+        Err(_) => ToolOutput::json(
+            r#"{"ok":false,"kind":"process_action","error":"process result could not be encoded"}"#,
+        ),
     }
-
-    if output.stdout_truncated() || output.stderr_truncated() {
-        // A still-running process is successful and also has recovery text.
-        // Keep that text; put the truncation note beside it.
-        let key = if output.ok() && payload.get("guidance").is_none() {
-            "guidance"
-        } else {
-            "output_guidance"
-        };
-        payload[key] = serde_json::json!({
-            "kind": "process_output_truncated",
-            "message": format!("{TRUNCATION_GUIDANCE} {OUTPUT_RECOVERY_GUIDANCE}"),
-            "stdout_truncated": output.stdout_truncated(),
-            "stderr_truncated": output.stderr_truncated(),
-        });
-    }
-
-    if let Some(input_artifact) = input_artifact {
-        payload["input_artifact"] = artifact_ref_json(input_artifact);
-    } else if let Some(shell_input) = shell_input {
-        payload["input_evidence"] = serde_json::json!({
-            "kind": "shell_command_script",
-            "shell": shell_input.shell(),
-            "flag": shell_input.flag(),
-            "script": shell_input.script(),
-            "script_bytes": shell_input.script_bytes(),
-            "script_fingerprint": shell_input.script_fingerprint(),
-        });
-    }
-
-    ArtifactContent::json(payload.to_string())
 }
 
-fn artifact_ref_json(artifact: &ArtifactRef) -> serde_json::Value {
-    let kind = match artifact.kind() {
-        ArtifactKind::Text => "text",
-        ArtifactKind::Json => "json",
-        ArtifactKind::Binary => "binary",
-        ArtifactKind::Image => "image",
-        ArtifactKind::Other => "other",
-    };
-    serde_json::json!({ "id": artifact.id().as_str(), "kind": kind })
+#[derive(Serialize)]
+struct ProcessActionDocument<'a> {
+    #[serde(flatten)]
+    envelope: ProcessOutputEnvelope<'a>,
+    intent: ProcessIntentRecord<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    guidance: Option<ProcessGuidanceRecord<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_guidance: Option<ProcessTruncationRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_evidence: Option<ShellInputEvidence<'a>>,
+}
+
+#[derive(Serialize)]
+struct ProcessIntentRecord<'a> {
+    summary: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    argv: Option<&'a [String]>,
+    cwd: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ProcessGuidanceRecord<'a> {
+    Recovery {
+        kind: &'static str,
+        message: &'a str,
+    },
+    Truncated(ProcessTruncationRecord),
+}
+
+#[derive(Serialize)]
+struct ProcessTruncationRecord {
+    kind: &'static str,
+    message: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
+
+#[derive(Serialize)]
+struct ShellInputEvidence<'a> {
+    kind: &'static str,
+    shell: &'a str,
+    flag: &'a str,
+    script: &'a str,
+    script_bytes: usize,
+    script_fingerprint: String,
 }
 
 #[cfg(test)]

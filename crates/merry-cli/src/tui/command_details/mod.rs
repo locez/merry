@@ -4,7 +4,7 @@ use crate::tui::{
     state::{CommandView, TimelineItem, TuiState},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::ArtifactId;
+use merry_core::ToolCallId;
 
 pub(crate) use layout::{details_pointer, handle_mouse_scroll, prepare_viewport};
 pub(crate) use output::CapturedOutput;
@@ -82,7 +82,7 @@ impl HistoryPlace {
     }
 }
 
-/// An on-demand view of one completed command, backed by its runtime artifact.
+/// An on-demand view of one completed command, backed by its runtime tool output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommandDetails {
     timeline_index: usize,
@@ -109,9 +109,9 @@ impl CommandDetails {
         }
     }
 
-    pub(crate) fn artifact_id(&self) -> Option<&ArtifactId> {
+    pub(crate) fn call_id(&self) -> Option<&ToolCallId> {
         match &self.view {
-            CommandView::Finished { artifact, .. } => Some(artifact.id()),
+            CommandView::Finished { call_id, .. } => Some(call_id),
             CommandView::Running { .. } => None,
         }
     }
@@ -314,21 +314,21 @@ pub(crate) fn inspect_command(
         return ControllerEffect::None;
     };
     let details = CommandDetails::new(index, view.clone());
-    let Some(artifact_id) = details.artifact_id().cloned() else {
+    let Some(call_id) = details.call_id().cloned() else {
         return ControllerEffect::None;
     };
     state.open_command_details(details);
-    ControllerEffect::LoadCommandOutput(artifact_id)
+    ControllerEffect::LoadCommandOutput(call_id)
 }
 
 /// Ignores stale loads after closing the viewer or selecting a different command.
 pub(crate) fn apply_output(
     state: &mut TuiState,
-    artifact_id: &ArtifactId,
+    call_id: &ToolCallId,
     result: Result<CapturedOutput, String>,
 ) {
     if let Some(Overlay::CommandDetails(details)) = state.overlay_mut()
-        && details.artifact_id() == Some(artifact_id)
+        && details.call_id() == Some(call_id)
     {
         details.layout = None;
         details.feedback = None;
@@ -349,17 +349,18 @@ pub(crate) fn apply_output(
     }
 }
 
-/// Reads only the selected artifact, with a bounded wait and no execution side effects.
+/// Reads only the selected tool call output, with a bounded wait and no execution side effects.
 pub(crate) async fn load_output(
     runtime: &merry_runtime::Runtime,
-    artifact_id: &ArtifactId,
+    call_id: &ToolCallId,
 ) -> Result<CapturedOutput, String> {
-    let content = tokio::time::timeout(
+    let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        runtime.read_artifact_content(artifact_id),
+        runtime.read_tool_output(call_id),
     )
     .await
     .map_err(|_| "Reading the command output timed out".to_owned())?
-    .map_err(|error| error.to_string())?;
-    CapturedOutput::from_artifact(content)
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| format!("Tool output for call '{call_id}' is not available."))?;
+    Ok(CapturedOutput::from_tool_output(output))
 }

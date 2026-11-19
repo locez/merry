@@ -6,10 +6,7 @@ use crate::tui::{
     tests::{pending_call_with_args, source},
     theme::TuiTheme,
 };
-use merry_core::{
-    ArtifactId, ArtifactKind, ArtifactRef, ErrorInfo, RuntimeEvent, ToolCallId, ToolCallResult,
-    ToolOutput,
-};
+use merry_core::{ErrorInfo, RuntimeEvent, ToolCallId, ToolCallResult, ToolOutput};
 use merry_runtime::SessionTranscriptItem;
 use serde_json::json;
 
@@ -35,11 +32,7 @@ fn successful_read_output_follows_display_policy_live_and_on_resume() {
                 },
             ] {
                 let mut state = read_state(show_output);
-                let kind = match &output {
-                    ToolOutput::Json { .. } => ArtifactKind::Json,
-                    ToolOutput::Text { .. } => ArtifactKind::Text,
-                };
-                let result = successful_read_result(kind);
+                let result = successful_read_result();
 
                 project_read_result(
                     &mut state,
@@ -71,7 +64,6 @@ fn failed_read_output_stays_visible_live_and_on_resume() {
             let mut state = read_state(show_output);
             let result = ToolCallResult::failed(
                 ToolCallId::new("read-call").unwrap(),
-                ArtifactRef::new(ArtifactId::new("read-result").unwrap(), ArtifactKind::Json),
                 ErrorInfo::new("file_not_found", "workspace file was not found").unwrap(),
             );
             let output = ToolOutput::Json {
@@ -118,7 +110,7 @@ fn read_preview_preserves_truncation_and_follows_render_time_settings() {
             ("first\n", true, true),
         ] {
             let mut state = read_state(false);
-            let result = successful_read_result(ArtifactKind::Json);
+            let result = successful_read_result();
             let output = ToolOutput::Json {
                 json: json!({
                     "ok": true,
@@ -154,7 +146,7 @@ fn successful_read_shows_decoded_content_and_arguments_without_completion_noise(
     for arguments in [json!({}), json!({"path": "AGENTS.md"})] {
         let has_path = arguments.get("path").is_some();
         let mut state = read_state(true);
-        let result = successful_read_result(ArtifactKind::Json);
+        let result = successful_read_result();
         let output = ToolOutput::Json {
             json: json!({
                 "ok": true,
@@ -200,15 +192,11 @@ fn read_projection_retains_only_bounded_previews_for_json_text_and_empty_files()
                 .to_string(),
             },
         ] {
-            let kind = match &output {
-                ToolOutput::Json { .. } => ArtifactKind::Json,
-                ToolOutput::Text { .. } => ArtifactKind::Text,
-            };
             let mut state = read_state(false);
             project_read_result(
                 &mut state,
                 replay,
-                successful_read_result(kind),
+                successful_read_result(),
                 output,
                 json!({"path": "notes.txt"}),
             );
@@ -237,11 +225,8 @@ fn read_state(show_output: bool) -> TuiState {
     .with_successful_command_output(show_output)
 }
 
-fn successful_read_result(kind: ArtifactKind) -> ToolCallResult {
-    ToolCallResult::succeeded(
-        ToolCallId::new("read-call").unwrap(),
-        ArtifactRef::new(ArtifactId::new("read-result").unwrap(), kind),
-    )
+fn successful_read_result() -> ToolCallResult {
+    ToolCallResult::succeeded(ToolCallId::new("read-call").unwrap())
 }
 
 fn project_read_result(

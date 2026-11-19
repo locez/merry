@@ -126,7 +126,6 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
             "SessionStarted",
             "StepStarted",
             "ToolCallPending",
-            "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
             "AssistantOutputRecorded",
@@ -139,7 +138,7 @@ async fn agent_loop_executes_one_tool_and_continues_to_final_completion() {
             .iter()
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
-        vec![0, 1, 3, 4, 5, 6, 8, 9]
+        vec![0, 1, 3, 4, 5, 7, 8]
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
     assert_eq!(executor.calls().len(), 1);
@@ -209,9 +208,7 @@ async fn agent_loop_executes_parallel_safe_batch_and_continues_in_model_order() 
             "SessionStarted",
             "StepStarted",
             "ToolCallBatchPending",
-            "ArtifactRecorded",
             "ToolCallResolved",
-            "ArtifactRecorded",
             "ToolCallResolved",
             "StepStarted",
             "AssistantOutputRecorded",

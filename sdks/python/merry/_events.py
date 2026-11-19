@@ -11,7 +11,6 @@ from ._event_payloads import (
     CompactionCompletedPayload,
     CompactionStartedPayload,
     EventPayloadValue,
-    EvidenceReferencedPayload,
     FinalOutputRecordedPayload,
     InteractiveRunStateChangedPayload,
     ModelOutputRateUpdatedPayload,
@@ -49,12 +48,10 @@ from ._event_payloads import (
     UsageUpdatedPayload,
 )
 from ._event_types import (
-    ArtifactReference,
     EventDiagnostic,
     EventPayload,
     EventSource,
     EventType,
-    EvidenceReference,
     InteractiveRunState,
     QueuedInput,
     QueuedInputLane,
@@ -88,7 +85,6 @@ class Event:
 
 
 __all__ = [
-    "ArtifactReference",
     "AssistantMessageDeltaPayload",
     "AssistantMessagePayload",
     "ClosedPayload",
@@ -100,8 +96,6 @@ __all__ = [
     "EventPayloadValue",
     "EventSource",
     "EventType",
-    "EvidenceReference",
-    "EvidenceReferencedPayload",
     "FinalOutputRecordedPayload",
     "InteractiveRunState",
     "InteractiveRunStateChangedPayload",

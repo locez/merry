@@ -1,11 +1,11 @@
-use merry_core::{ArtifactRef, QueuedInputLane, QueuedInputView};
+use merry_core::{QueuedInputLane, QueuedInputView, ToolCallId};
 use std::time::Duration;
 use tokio::time::Instant;
 
 const TOOL_PREVIEW_MAX_LINES: usize = 5;
 const TOOL_PREVIEW_MAX_LINE_CHARS: usize = 180;
 
-/// A bounded display preview; complete tool output remains in runtime artifacts.
+/// A bounded display preview; complete tool output remains in the runtime transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ToolOutputPreview {
     pub(crate) lines: Vec<String>,
@@ -57,7 +57,7 @@ pub(crate) enum CommandView {
         preview: ToolOutputPreview,
         command: String,
         cwd: String,
-        artifact: ArtifactRef,
+        call_id: ToolCallId,
         elapsed: Option<Duration>,
         /// Presentation fold. Finished commands start closed and open on click.
         expanded: bool,

@@ -188,7 +188,6 @@ define_id!(
     MAX_IDENTIFIER_LEN,
     validate_session_id
 );
-define_id!(ArtifactId, "ArtifactId");
 define_id!(SkillId, "SkillId");
 define_id!(SubagentId, "SubagentId");
 define_id!(SubagentTaskId, "SubagentTaskId");

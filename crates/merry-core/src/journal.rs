@@ -1,10 +1,10 @@
 //! Internal ordered runtime journal contract.
 
 use crate::{
-    ArtifactRef, CoordinatorDirectiveSnapshot, ErrorInfo, EvidenceRef, PendingToolCall,
-    PendingToolCallBatch, PlanAttemptId, PlanAttemptProgressSnapshot, PlanAttemptSnapshot, PlanId,
-    PlanLeaseSnapshot, PlanNodeId, PlanPhase, PlanRevisionSummary, PlanSnapshot, SessionId,
-    SessionUsage, SubagentId, SubagentTaskId, ToolCallId, ToolCallResult,
+    CoordinatorDirectiveSnapshot, ErrorInfo, PendingToolCall, PendingToolCallBatch, PlanAttemptId,
+    PlanAttemptProgressSnapshot, PlanAttemptSnapshot, PlanId, PlanLeaseSnapshot, PlanNodeId,
+    PlanPhase, PlanRevisionSummary, PlanSnapshot, SessionId, SessionUsage, SubagentId,
+    SubagentTaskId, ToolCallId, ToolCallResult,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -96,8 +96,6 @@ pub enum RuntimeJournalPayload {
     },
     /// Session usage was updated from a provider-reported model response.
     SessionUsageUpdated { usage: SessionUsage },
-    /// An artifact reference was recorded.
-    ArtifactRecorded { artifact: ArtifactRef },
     /// Incremental assistant text output from the active model stream.
     ///
     /// This is an ordered progress event. It does not make the text durable or
@@ -106,24 +104,22 @@ pub enum RuntimeJournalPayload {
     AssistantOutputDelta { delta: String },
     /// Incremental model reasoning text. Live progress only; it is not durable evidence.
     ReasoningOutputDelta { delta: String },
-    /// An assistant text output artifact was recorded.
-    AssistantOutputRecorded { artifact: ArtifactRef },
-    /// Exact evidence was referenced.
-    EvidenceReferenced { evidence: EvidenceRef },
+    /// Assistant text output was durably recorded.
+    AssistantOutputRecorded { text: String },
     /// A model requested a tool call that is waiting for runtime policy/execution.
     ToolCallPending { call: PendingToolCall },
     /// A model requested an ordered batch of tool calls in one turn.
     ToolCallBatchPending { batch: PendingToolCallBatch },
     /// A model requested a bridge tool call that must be executed by an external runner.
     BridgeToolCallRequested { call: PendingToolCall },
-    /// A pending tool call was resolved with an artifact-backed result.
+    /// A pending tool call was resolved with a recorded result.
     ToolCallResolved { result: ToolCallResult },
     /// A runtime-owned final-output tool call recorded structured terminal output.
     FinalOutputRecorded {
         /// Provider-originated call id for the final-output tool call.
         call_id: ToolCallId,
-        /// JSON artifact containing the final structured output.
-        artifact: ArtifactRef,
+        /// Exact JSON final structured output.
+        json: String,
     },
     /// A model used a skill by successfully reading its catalog-listed `SKILL.md`.
     SkillUsed {
@@ -133,8 +129,6 @@ pub enum RuntimeJournalPayload {
         skill_md_path: String,
         /// Tool call that read the skill body.
         tool_call_id: ToolCallId,
-        /// Artifact that contains the read result.
-        artifact: ArtifactRef,
     },
     /// A subagent task was accepted for execution.
     SubagentSpawned {

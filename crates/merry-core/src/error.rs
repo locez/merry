@@ -25,17 +25,6 @@ pub enum CoreError {
         reason: &'static str,
     },
 
-    /// An evidence locator failed validation.
-    #[error("invalid evidence locator for {kind}: {reason} (value: {value:?})")]
-    InvalidEvidenceLocator {
-        /// The locator field or variant being validated.
-        kind: &'static str,
-        /// The invalid value.
-        value: String,
-        /// Actionable validation detail.
-        reason: &'static str,
-    },
-
     /// A tool specification failed validation.
     #[error("invalid tool spec: {reason}")]
     InvalidToolSpec {

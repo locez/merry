@@ -613,8 +613,7 @@ fn execution_contract_fingerprint_ignores_runtime_node_state() {
             outcome: PlanAttemptOutcome::Completed,
             result: Some(PlanNodeResult {
                 conclusion: "Root acceptance is satisfied".to_owned(),
-                evidence_refs: Vec::new(),
-                artifact_refs: Vec::new(),
+                output_paths: Vec::new(),
                 changed_paths: Vec::new(),
                 verification: vec!["deterministic check passed".to_owned()],
                 open_questions: Vec::new(),

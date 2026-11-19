@@ -171,12 +171,11 @@ async fn runtime_process_stays_running_and_animates_until_the_backend_completes(
             crate::tui::keymap::KeyAction::OpenCommandDetails,
             &mut state,
         );
-        let crate::tui::controller::ControllerEffect::LoadCommandOutput(artifact_id) = effect
-        else {
-            panic!("completed runtime command should expose its output artifact");
+        let crate::tui::controller::ControllerEffect::LoadCommandOutput(call_id) = effect else {
+            panic!("completed runtime command should expose its tool call id");
         };
-        let output = crate::tui::command_details::load_output(&runtime, &artifact_id).await;
-        crate::tui::command_details::apply_output(&mut state, &artifact_id, output);
+        let output = crate::tui::command_details::load_output(&runtime, &call_id).await;
+        crate::tui::command_details::apply_output(&mut state, &call_id, output);
         let inspected = render_to_text(&state, 100, 24);
         assert!(inspected.contains("stdout"), "{inspected}");
         assert!(inspected.contains("done"), "{inspected}");

@@ -95,9 +95,6 @@ fn sample_plan_snapshot() -> PlanSnapshot {
 #[path = "protocol/events.rs"]
 mod events;
 
-#[path = "protocol/evidence.rs"]
-mod evidence;
-
 #[path = "protocol/identifiers.rs"]
 mod identifiers;
 

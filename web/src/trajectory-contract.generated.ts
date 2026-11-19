@@ -7,18 +7,6 @@ export type JsonSchemaValue = boolean | JsonObject;
 export type Schema = JsonSchemaValue;
 export type WireInteger = bigint;
 
-export type ArtifactId = string;
-
-export type ArtifactKind = "text" | "json" | "binary" | "image" | "other";
-export const ARTIFACT_KIND_VALUES = ["text","json","binary","image","other"] as const;
-
-export type ArtifactRef = {
-  readonly "id": ArtifactId;
-  readonly "kind": ArtifactKind;
-  readonly "label": string | null;
-};
-export const ARTIFACT_REF_FIELDS = ["id","kind","label"] as const;
-
 export type ErrorInfo = {
   readonly "code": string;
   readonly "message": string;
@@ -71,7 +59,6 @@ export type TrajectoryPromptSnapshot = {
 export const TRAJECTORY_PROMPT_SNAPSHOT_FIELDS = ["dynamic_context_count","latest_dynamic_sequence","stable_blocks"] as const;
 
 export type TrajectoryRecord = {
-  readonly "artifacts": readonly ArtifactRef[];
   readonly "details": TrajectoryRecordDetails;
   readonly "diagnostic": ErrorInfo | null;
   readonly "end_sequence": WireInteger | null;
@@ -89,7 +76,7 @@ export type TrajectoryRecord = {
   readonly "tool_call_id": ToolCallId | null;
   readonly "turn_id": WireInteger | null;
 };
-export const TRAJECTORY_RECORD_FIELDS = ["artifacts","details","diagnostic","end_sequence","finished_at_ms","id","kind","label","lane","parent_id","sequence_order","start_sequence","started_at_ms","status","summary","tool_call_id","turn_id"] as const;
+export const TRAJECTORY_RECORD_FIELDS = ["details","diagnostic","end_sequence","finished_at_ms","id","kind","label","lane","parent_id","sequence_order","start_sequence","started_at_ms","status","summary","tool_call_id","turn_id"] as const;
 
 export type TrajectoryRecordDetails = {
   readonly "type": "none";
@@ -156,5 +143,4 @@ export type TrajectoryEvent = {
   readonly "revision": WireInteger;
   readonly "type": "session_closed";
 };
-export type ArtifactReference = ArtifactRef;
 export type Diagnostic = ErrorInfo;

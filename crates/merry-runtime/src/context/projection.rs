@@ -1,9 +1,5 @@
-use super::evidence::{format_locator, validate_evidence, validate_memory_evidence};
-use super::{
-    CompactedCheckpoint, ContextEntry, ContextError, ContextEvidence, SessionContextSnapshot,
-};
+use super::{CompactedCheckpoint, ContextEntry, ContextError, SessionContextSnapshot};
 use crate::{
-    artifact::ArtifactRegistry,
     memory::{
         ActivatedMemory, MemoryActivationProvenance, MemoryActivationReason, MemoryActivationScore,
         MemoryEvidence, MemoryId, MemoryScope,
@@ -11,7 +7,6 @@ use crate::{
     text,
     token_estimate::estimate_text_tokens,
 };
-use merry_core::EvidenceRef;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, btree_map::Entry},
@@ -40,16 +35,15 @@ fn canonicalize_memory_reason_text(value: &str) -> String {
 /// Compiles allowlisted structured runtime state into a deterministic context snapshot.
 ///
 /// Public callers must compile from a session-owned snapshot, not from an
-/// arbitrary entry list paired with an arbitrary artifact registry.
+/// arbitrary entry list.
 ///
 /// ```compile_fail
-/// use merry_runtime::{ArtifactRegistry, ContextCompiler, ContextEntry};
+/// use merry_runtime::{ContextCompiler, ContextEntry};
 ///
 /// let compiler = ContextCompiler::new();
 /// let entries: Vec<ContextEntry> = Vec::new();
-/// let artifacts = ArtifactRegistry::default();
 ///
-/// let _ = compiler.compile(entries, &artifacts);
+/// let _ = compiler.compile(entries);
 /// ```
 #[derive(Debug, Default)]
 pub struct ContextCompiler;
@@ -61,14 +55,7 @@ impl ContextCompiler {
         Self
     }
 
-    /// Compiles structured context entries after proving linked evidence is readable.
-    ///
-    /// This enforces the runtime rule that summaries are navigation only:
-    /// every linked exact evidence reference must resolve through recorded
-    /// artifact content before summary text enters the compiled context.
-    /// Reducers must not use ordinary `ContextSummary` entries as a default
-    /// channel for projecting tool-result summaries, ledger observations, or
-    /// artifact payloads into prompts.
+    /// Compiles structured context entries deterministically.
     ///
     /// Output ordering is deterministic for a given snapshot. The resulting
     /// [`CompiledContext`] is a runtime-owned intermediate, not a stable prompt
@@ -79,7 +66,6 @@ impl ContextCompiler {
     ) -> Result<CompiledContext, ContextError> {
         compile_entries(
             snapshot.entries(),
-            snapshot.artifacts(),
             snapshot.memories(),
             snapshot.compacted_checkpoint(),
         )
@@ -89,18 +75,12 @@ impl ContextCompiler {
         &self,
         snapshot: &SessionContextSnapshot,
     ) -> Result<CompiledContext, ContextError> {
-        compile_entries(
-            snapshot.entries(),
-            snapshot.artifacts(),
-            snapshot.memories(),
-            None,
-        )
+        compile_entries(snapshot.entries(), snapshot.memories(), None)
     }
 }
 
 fn compile_entries(
     entries: &[ContextEntry],
-    artifacts: &ArtifactRegistry,
     memories: &[ActivatedMemory],
     compacted_checkpoint: Option<&CompactedCheckpoint>,
 ) -> Result<CompiledContext, ContextError> {
@@ -109,21 +89,9 @@ fn compile_entries(
     for entry in entries {
         match entry {
             ContextEntry::Summary(summary) => {
-                if summary.evidence().is_empty() {
-                    return Err(ContextError::SummaryWithoutEvidence {
-                        id: summary.id().to_owned(),
-                    });
-                }
-
-                let mut evidence = summary.evidence().to_vec();
-                evidence.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
-
-                validate_evidence(summary.id(), &evidence, artifacts)?;
-
                 sections.push(CompiledContextSection::Summary {
                     id: summary.id().to_owned(),
                     text: summary.text().to_owned(),
-                    evidence,
                 });
             }
         }
@@ -131,7 +99,13 @@ fn compile_entries(
 
     sections.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
 
-    validate_memory_evidence(memories, artifacts)?;
+    for memory in memories {
+        if memory.item().evidence().is_empty() {
+            return Err(ContextError::MemoryWithoutEvidence {
+                memory_id: memory.item().id().as_str().to_owned(),
+            });
+        }
+    }
     let mut memory_projection = canonical_memory_projection(memories);
     memory_projection.sort_by(|left, right| {
         right
@@ -197,17 +171,9 @@ impl CompiledContext {
     fn append_body_prompt_lines(&self, lines: &mut Vec<String>) {
         for section in &self.sections {
             match section {
-                CompiledContextSection::Summary { id, text, evidence } => {
+                CompiledContextSection::Summary { id, text } => {
                     lines.push(format!("summary:{id}"));
                     lines.push(format!("text:{text}"));
-                    for item in evidence {
-                        lines.push(format!(
-                            "evidence:{}:{}:{}",
-                            item.label(),
-                            item.reference().artifact_id,
-                            format_locator(&item.reference().locator)
-                        ));
-                    }
                 }
             }
         }
@@ -236,12 +202,7 @@ impl CompiledContext {
                 format_memory_scopes(memory.provenance.allowed_scopes())
             ));
             for item in &memory.evidence {
-                lines.push(format!(
-                    "memory-evidence:{}:{}:{}",
-                    item.label,
-                    item.reference.artifact_id,
-                    format_locator(&item.reference.locator)
-                ));
+                lines.push(format!("memory-evidence:{}:{}", item.label, item.source));
             }
             for reason in &memory.reasons {
                 match reason {
@@ -315,14 +276,12 @@ impl ContextCheckpointSegment {
 /// and in [`CompiledContext::to_snapshot`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompiledContextSection {
-    /// Navigation summary plus exact retrievable evidence references.
+    /// Dynamic runtime context summary or note.
     Summary {
         /// Stable summary identifier.
         id: String,
-        /// Summary text used for navigation.
+        /// Summary text.
         text: String,
-        /// Exact evidence metadata that preserves source access.
-        evidence: Vec<ContextEvidence>,
     },
 }
 
@@ -412,23 +371,19 @@ type CompiledMemoryCanonicalKey<'a> = (
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CompiledMemoryEvidence {
     label: String,
-    reference: EvidenceRef,
+    source: String,
 }
 
 impl CompiledMemoryEvidence {
     fn from_evidence(evidence: &MemoryEvidence) -> Self {
         Self {
             label: evidence.label().to_owned(),
-            reference: evidence.reference().clone(),
+            source: evidence.source().to_owned(),
         }
     }
 
-    fn sort_key(&self) -> (&str, String, &str) {
-        (
-            self.reference.artifact_id.as_str(),
-            format_locator(&self.reference.locator),
-            self.label.as_str(),
-        )
+    fn sort_key(&self) -> (&str, &str) {
+        (self.source.as_str(), self.label.as_str())
     }
 }
 

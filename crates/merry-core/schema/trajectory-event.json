@@ -109,67 +109,6 @@
     }
   ],
   "$defs": {
-    "ArtifactId": {
-      "description": "Validated ArtifactId newtype.",
-      "type": "string"
-    },
-    "ArtifactKind": {
-      "description": "Provider-neutral artifact kind.",
-      "oneOf": [
-        {
-          "description": "UTF-8 text.",
-          "type": "string",
-          "const": "text"
-        },
-        {
-          "description": "Structured JSON.",
-          "type": "string",
-          "const": "json"
-        },
-        {
-          "description": "Opaque binary data.",
-          "type": "string",
-          "const": "binary"
-        },
-        {
-          "description": "Image data.",
-          "type": "string",
-          "const": "image"
-        },
-        {
-          "description": "A provider-neutral kind not covered by the stable variants.",
-          "type": "string",
-          "const": "other"
-        }
-      ]
-    },
-    "ArtifactRef": {
-      "description": "Reference to an artifact recorded elsewhere.",
-      "type": "object",
-      "properties": {
-        "id": {
-          "description": "Stable artifact identifier.",
-          "$ref": "#/$defs/ArtifactId"
-        },
-        "kind": {
-          "description": "Provider-neutral artifact kind.",
-          "$ref": "#/$defs/ArtifactKind"
-        },
-        "label": {
-          "description": "Optional human-readable label.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "x-merry-output-required": true
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "id",
-        "kind"
-      ]
-    },
     "ErrorInfo": {
       "description": "Serializable runtime diagnostic.\n\nThis type carries stable diagnostic text only; it does not serialize Rust\nerror internals such as source chains or backtraces.",
       "type": "object",
@@ -365,12 +304,6 @@
       "description": "One normalized record in the trajectory read model.",
       "type": "object",
       "properties": {
-        "artifacts": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ArtifactRef"
-          }
-        },
         "details": {
           "$ref": "#/$defs/TrajectoryRecordDetails"
         },
@@ -481,7 +414,6 @@
         "status",
         "start_sequence",
         "sequence_order",
-        "artifacts",
         "details"
       ]
     },

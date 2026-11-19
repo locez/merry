@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from ._errors import output_decode_error
 from ._event_parser import parse_event
-from ._event_types import ArtifactReference, EventDiagnostic
+from ._event_types import EventDiagnostic
 from ._events import Event
 from ._json import (
     JsonObject,
@@ -185,18 +185,7 @@ def _parse_final_output_json(value: object) -> FinalOutputRecord | None:
     validate_object_keys(
         data,
         "native final output",
-        required={"call_id", "artifact", "json"},
-    )
-    artifact_data = require_json_object(data["artifact"], "final output artifact")
-    validate_object_keys(
-        artifact_data,
-        "final output artifact",
-        required={"id", "kind", "label"},
-    )
-    artifact = ArtifactReference(
-        id=_required_string(artifact_data, "id"),
-        kind=_required_string(artifact_data, "kind"),
-        label=_optional_string(artifact_data["label"], "artifact label"),
+        required={"call_id", "json"},
     )
     json_value: object = data["json"]
     if not isinstance(json_value, str):
@@ -207,7 +196,6 @@ def _parse_final_output_json(value: object) -> FinalOutputRecord | None:
         raise TypeError("native final output contains invalid JSON") from error
     return FinalOutputRecord(
         call_id=_required_string(data, "call_id"),
-        artifact=artifact,
         value=require_json_value(decoded, "native final output JSON"),
     )
 

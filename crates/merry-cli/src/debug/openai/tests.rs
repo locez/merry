@@ -70,7 +70,6 @@ async fn tool_helper_executes_one_pending_call_and_continues() {
             "step_started",
             "model_output_rate_updated",
             "tool_call_pending",
-            "artifact_recorded",
             "tool_call_resolved",
             "step_started",
             "model_output_rate_updated",

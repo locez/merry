@@ -12,7 +12,6 @@ from ._event_payloads import (
     CompactionCompletedPayload,
     CompactionStartedPayload,
     EventPayloadValue,
-    EvidenceReferencedPayload,
     FinalOutputRecordedPayload,
     InteractiveRunStateChangedPayload,
     ModelOutputRateUpdatedPayload,
@@ -50,11 +49,9 @@ from ._event_payloads import (
     UsageUpdatedPayload,
 )
 from ._event_types import (
-    ArtifactReference,
     EventDiagnostic,
     EventSource,
     EventType,
-    EvidenceReference,
     InteractiveRunState,
     QueuedInput,
     QueuedInputLane,
@@ -137,7 +134,6 @@ def _parse_payload(
         case EventType.ASSISTANT_MESSAGE:
             return AssistantMessagePayload(
                 _event_text(data, "text"),
-                _artifact(data["artifact"]),
                 _source(data),
             )
         case EventType.ASSISTANT_MESSAGE_DELTA:
@@ -161,7 +157,7 @@ def _parse_payload(
         case EventType.FINAL_OUTPUT_RECORDED:
             return FinalOutputRecordedPayload(
                 _required_string(data, "call_id"),
-                _artifact(data["artifact"]),
+                _event_text(data, "json"),
                 _source(data),
             )
         case EventType.MODEL_RETRY_ATTEMPT_STARTED:
@@ -186,14 +182,11 @@ def _parse_payload(
                 _required_string(data, "error_kind"),
                 _source(data),
             )
-        case EventType.EVIDENCE_REFERENCED:
-            return EvidenceReferencedPayload(_evidence(data["evidence"]), _source(data))
         case EventType.SKILL_USED:
             return SkillUsedPayload(
                 _required_string(data, "skill_name"),
                 _required_string(data, "skill_md_path"),
                 _required_string(data, "tool_call_id"),
-                _artifact(data["artifact"]),
                 _source(data),
             )
         case EventType.SUBAGENT_SPAWNED:
@@ -323,20 +316,6 @@ def _source(data: Mapping[str, JsonValue]) -> EventSource:
     )
 
 
-def _artifact(value: object) -> ArtifactReference:
-    data = require_json_object(value, "artifact reference")
-    validate_object_keys(
-        data,
-        "artifact reference",
-        required={"id", "kind", "label"},
-    )
-    return ArtifactReference(
-        id=_required_string(data, "id"),
-        kind=_required_string(data, "kind"),
-        label=_optional_string(data.get("label")),
-    )
-
-
 def _tool_call(value: object) -> RuntimeToolCall:
     data = require_json_object(value, "runtime tool call")
     validate_object_keys(
@@ -368,14 +347,13 @@ def _tool_result(value: object) -> RuntimeToolResult:
     validate_object_keys(
         data,
         "runtime tool result",
-        required={"call_id", "status", "artifact", "diagnostic"},
+        required={"call_id", "status", "diagnostic"},
     )
     return RuntimeToolResult(
         call_id=_required_string(data, "call_id"),
         status=_enum_value(
             RuntimeToolResultStatus, data["status"], "tool result status"
         ),
-        artifact=_artifact(data["artifact"]),
         diagnostic=None
         if data.get("diagnostic") is None
         else _diagnostic(data["diagnostic"]),
@@ -390,19 +368,6 @@ def _optional_tool_output(value: object) -> RuntimeToolOutput | None:
     key = "text" if kind is RuntimeToolOutputKind.TEXT else "json"
     validate_object_keys(data, "runtime tool output", required={"kind", key})
     return RuntimeToolOutput(kind=kind, value=_required_string(data, key))
-
-
-def _evidence(value: object) -> EvidenceReference:
-    data = require_json_object(value, "evidence reference")
-    validate_object_keys(
-        data,
-        "evidence reference",
-        required={"artifact_id", "locator"},
-    )
-    return EvidenceReference(
-        artifact_id=_required_string(data, "artifact_id"),
-        locator=RawEventData.from_value(data["locator"], "evidence locator"),
-    )
 
 
 def _diagnostic(value: object) -> EventDiagnostic:

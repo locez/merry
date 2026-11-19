@@ -37,7 +37,6 @@ impl SessionState {
                 skill_name,
                 skill_md_path,
                 tool_call_id: pending.id().clone(),
-                artifact: result.artifact().clone(),
             },
             LedgerFactKind::SkillUsed,
         ))

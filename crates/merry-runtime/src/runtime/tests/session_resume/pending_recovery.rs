@@ -29,7 +29,9 @@ async fn abandoning_pending_tool_calls_makes_a_stalled_session_saveable() {
         .await
         .record_test_tool_call_pending(call)
         .expect("pending call records");
-    runtime.observe_recorded_journal_events(std::slice::from_ref(&pending_event));
+    runtime
+        .inner
+        .project_journal_events(std::slice::from_ref(&pending_event));
     let trajectory_before_abandonment = runtime
         .trajectory_snapshot()
         .await

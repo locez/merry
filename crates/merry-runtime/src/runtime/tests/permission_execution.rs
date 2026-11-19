@@ -132,12 +132,7 @@ async fn request_permissions_approved_by_review_executes_exact_process_action() 
 
     assert_eq!(
         event_kind_names_for_tool_execution(&events),
-        [
-            "ArtifactRecorded",
-            "ArtifactRecorded",
-            "ArtifactRecorded",
-            "ToolCallResolved"
-        ]
+        ["ToolCallResolved"]
     );
     assert_eq!(runner_factory.call_count(), 1);
     assert_eq!(runner_factory.observed_network_requests(), [true]);

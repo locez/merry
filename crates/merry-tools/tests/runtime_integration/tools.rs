@@ -20,11 +20,11 @@ async fn read_success_and_failure_continue_with_compact_body_and_full_artifact()
         let events = execute_first_pending_call(&runtime, "read file").await;
         let result = resolved_tool_result(&events);
         let full = runtime
-            .read_artifact_content(result.artifact().id())
+            .read_tool_output(result.call_id())
             .await
-            .expect("full artifact");
-        let full: Value =
-            serde_json::from_str(full.as_text().expect("JSON artifact")).expect("JSON");
+            .expect("full output read")
+            .expect("full output exists");
+        let full: Value = serde_json::from_str(full.as_str()).expect("JSON");
         let events = collect_step(&runtime, "continue").await;
         assert_eq!(
             event_kind_names(&events),
@@ -77,16 +77,18 @@ async fn registered_read_text_tool_records_artifact_before_resolving_pending_cal
         .await
         .expect("registered read_text tool should execute");
 
-    assert_eq!(
-        event_kind_names(&execution_events),
-        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
-    );
-    let result = match &execution_events[2].payload {
+    assert_eq!(event_kind_names(&execution_events), ["ToolCallResolved"]);
+    let result = match &execution_events[0].payload {
         RuntimeJournalPayload::ToolCallResolved { result } => result,
         other => panic!("expected tool resolution, got {other:?}"),
     };
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
-    assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
+    let output = runtime
+        .read_tool_output(result.call_id())
+        .await
+        .expect("output read")
+        .expect("output exists");
+    assert_eq!(output.kind(), ToolOutputKind::Json);
     assert!(runtime.pending_tool_calls().await.is_empty());
 }
 
@@ -112,20 +114,18 @@ async fn registered_read_text_domain_failure_records_failed_json_before_resolvin
         .await
         .expect("domain failure should resolve pending call");
 
-    assert_eq!(
-        event_kind_names(&execution_events),
-        ["ArtifactRecorded", "ArtifactRecorded", "ToolCallResolved"]
-    );
-    let result = match &execution_events[2].payload {
+    assert_eq!(event_kind_names(&execution_events), ["ToolCallResolved"]);
+    let result = match &execution_events[0].payload {
         RuntimeJournalPayload::ToolCallResolved { result } => result,
         other => panic!("expected tool resolution, got {other:?}"),
     };
-    assert!(matches!(
-        &execution_events[0].payload,
-        RuntimeJournalPayload::ArtifactRecorded { artifact } if artifact == result.artifact()
-    ));
     assert_eq!(result.status(), ToolCallResultStatus::Failed);
-    assert_eq!(result.artifact().kind(), &ArtifactKind::Json);
+    let output = runtime
+        .read_tool_output(result.call_id())
+        .await
+        .expect("output read")
+        .expect("output exists");
+    assert_eq!(output.kind(), ToolOutputKind::Json);
     assert_eq!(
         result
             .diagnostic()

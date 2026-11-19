@@ -2,9 +2,9 @@ use super::*;
 use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
 use crate::testing::{ScriptedProvider, tool_call, workspace_tool_call};
 use merry::profiles::CODING_LOOP_PROCESS_TOOL;
-use merry_core::RuntimeJournalPayload;
+use merry_core::{RuntimeJournalPayload, ToolOutput};
 use merry_llm::{FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse};
-use merry_runtime::{ArtifactContent, StepContext, StepInput, ToolExecutionContext};
+use merry_runtime::{StepContext, StepInput, ToolExecutionContext};
 use merry_tools::{APPLY_PATCH_TOOL, READ_TEXT_TOOL};
 use serde_json::Value;
 use std::{
@@ -261,22 +261,21 @@ async fn cmd_check_command_tool_reports_path_availability() {
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
         .expect("tool should execute");
-    let artifact_id = resolved
+    let call_id = resolved
         .iter()
         .find_map(|event| match &event.payload {
-            RuntimeJournalPayload::ToolCallResolved { result } => {
-                Some(result.artifact().id().clone())
-            }
+            RuntimeJournalPayload::ToolCallResolved { result } => Some(result.call_id().clone()),
             _ => None,
         })
-        .expect("tool result artifact should be recorded");
+        .expect("tool result should be recorded");
     let content = runtime
-        .read_artifact_content(&artifact_id)
+        .read_tool_output(&call_id)
         .await
-        .expect("tool result artifact should be readable");
+        .expect("tool result output read")
+        .expect("tool result output should exist");
     let payload = match content {
-        ArtifactContent::Json { content } => {
-            serde_json::from_str::<serde_json::Value>(&content).expect("json payload")
+        ToolOutput::Json { json } => {
+            serde_json::from_str::<serde_json::Value>(&json).expect("json payload")
         }
         other => panic!("expected json content, got {other:?}"),
     };

@@ -2,12 +2,12 @@
 
 use crate::{LedgerFactKind, LedgerProjection, LedgerProjectionSnapshot};
 use merry_core::{
-    ArtifactRef, TrajectoryRecord, TrajectoryRecordId, TrajectoryRecordKind, TrajectorySnapshot,
+    TrajectoryRecord, TrajectoryRecordId, TrajectoryRecordKind, TrajectorySnapshot,
     TrajectoryTurnId,
 };
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
-/// Matches legacy records to the ordered transcript during projection replay.
+/// Matches existing snapshot records to the ordered transcript during projection replay.
 pub(crate) struct ReplayRecords {
     user_records: Vec<TrajectoryRecord>,
     assistant_records: Vec<TrajectoryRecord>,
@@ -36,36 +36,22 @@ impl ReplayRecords {
         }
     }
 
-    /// Takes the best matching legacy user record for one transcript item.
-    pub(crate) fn take_user(
-        &mut self,
-        artifact: &ArtifactRef,
-        turn_id: TrajectoryTurnId,
-    ) -> Option<TrajectoryRecord> {
+    /// Takes the best matching user record for one transcript item.
+    pub(crate) fn take_user(&mut self, turn_id: TrajectoryTurnId) -> Option<TrajectoryRecord> {
         take_record(
             &self.user_records,
             &mut self.used_user_ids,
-            |record| {
-                record
-                    .artifacts()
-                    .iter()
-                    .any(|current| current.id() == artifact.id())
-            },
             |record| record.turn_id() == Some(turn_id),
+            |_| false,
         )
     }
 
-    /// Takes the best matching legacy assistant record for one transcript item.
-    pub(crate) fn take_assistant(&mut self, artifact: &ArtifactRef) -> Option<TrajectoryRecord> {
+    /// Takes the best matching assistant record for one transcript item.
+    pub(crate) fn take_assistant(&mut self, sequence: u64) -> Option<TrajectoryRecord> {
         take_record(
             &self.assistant_records,
             &mut self.used_assistant_ids,
-            |record| {
-                record
-                    .artifacts()
-                    .iter()
-                    .any(|current| current.id() == artifact.id())
-            },
+            |record| record.start_sequence() == sequence,
             |_| false,
         )
     }
@@ -107,6 +93,7 @@ fn take_record(
 pub(crate) struct ReplaySequences {
     step_sequences: Vec<u64>,
     model_turn_sequences: BTreeMap<u64, u64>,
+    assistant_recorded: VecDeque<u64>,
     tool_pending: VecDeque<u64>,
     last_tool_pending: Option<u64>,
     tool_resolved: VecDeque<u64>,
@@ -116,10 +103,6 @@ pub(crate) struct ReplaySequences {
 
 impl ReplaySequences {
     /// Collects all source sequences needed to normalize a session projection.
-    ///
-    /// The transcript may contain records from before the persisted trajectory
-    /// savepoint. Keep every queue, not only the savepoint tail, because legacy
-    /// snapshots can contain the right records at synthetic sequence numbers.
     pub(crate) fn from_ledger(
         baseline: u64,
         ledger: &LedgerProjectionSnapshot,
@@ -128,6 +111,7 @@ impl ReplaySequences {
         let mut replay = Self {
             step_sequences: Vec::new(),
             model_turn_sequences: model_turn_sequences.clone(),
+            assistant_recorded: VecDeque::new(),
             tool_pending: VecDeque::new(),
             last_tool_pending: None,
             tool_resolved: VecDeque::new(),
@@ -144,6 +128,9 @@ impl ReplaySequences {
             replay.latest_sequence = replay.latest_sequence.max(sequence);
             match kind {
                 Some(LedgerFactKind::StepStarted) => replay.step_sequences.push(sequence),
+                Some(LedgerFactKind::AssistantOutputRecorded) => {
+                    replay.assistant_recorded.push_back(sequence);
+                }
                 Some(LedgerFactKind::ToolCallPending)
                 | Some(LedgerFactKind::BridgeToolCallRequested) => pending_sequences.push(sequence),
                 Some(LedgerFactKind::ToolCallResolved) => {
@@ -156,8 +143,6 @@ impl ReplaySequences {
         }
         replay.step_sequences.sort_unstable();
         replay.last_tool_pending = pending_sequences.last().copied();
-        // A batch records one pending lifecycle fact for several calls. Expand
-        // that source sequence once per resolved result before the next batch.
         for (index, sequence) in pending_sequences.iter().enumerate() {
             let next_pending = pending_sequences.get(index + 1).copied();
             let batch_size = resolved_sequences
@@ -198,6 +183,11 @@ impl ReplaySequences {
             .partition_point(|candidate| *candidate <= sequence)
             .checked_sub(1)?;
         u64::try_from(index + 1).ok()
+    }
+
+    /// Returns the next durable assistant-output sequence when one remains.
+    pub(crate) fn next_assistant_recorded_sequence(&mut self) -> Option<u64> {
+        self.assistant_recorded.pop_front()
     }
 
     /// Returns the next durable pending-tool sequence, or a monotonic fallback.

@@ -2,7 +2,6 @@
 
 use crate::{
     RuntimeError,
-    artifact::ArtifactError,
     checkpoint::{
         CheckpointError, CheckpointRef, CheckpointRefId, CheckpointSequenceRange,
         CheckpointSourceKind,
@@ -21,7 +20,7 @@ use crate::{
     },
     token_estimate::BYTES_PER_TOKEN,
 };
-use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef, ToolCallId};
+use merry_core::ToolCallId;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -166,22 +165,12 @@ impl SessionState {
                 id,
                 call_id,
                 result,
-                artifact_id,
-                model_artifact_id,
+                payload,
                 prompt_projection,
                 ..
             } = item
                 && results
-                    .insert(
-                        call_id.clone(),
-                        (
-                            *id,
-                            result,
-                            artifact_id,
-                            model_artifact_id.as_ref(),
-                            *prompt_projection,
-                        ),
-                    )
+                    .insert(call_id.clone(), (*id, result, payload, *prompt_projection))
                     .is_some()
             {
                 return Err(CompactionError::StaleWindow.into());
@@ -191,43 +180,18 @@ impl SessionState {
 
         for &item in turn.items() {
             match item {
-                TranscriptItem::UserMessage {
-                    id, artifact_id, ..
-                } => {
-                    let content = self.artifacts.read_content(artifact_id)?;
-                    let text =
-                        content
-                            .as_text()
-                            .ok_or_else(|| ArtifactError::InvalidEvidenceLocator {
-                                id: artifact_id.clone(),
-                                reason: "user transcript artifact is not textual",
-                            })?;
+                TranscriptItem::UserMessage { id, text, .. } => {
                     items.push(CompactionHistoryRecord {
                         item: CompactionHistoryItem::user(id.as_u64(), text),
-                        reference: history_checkpoint_ref(
-                            *id,
-                            CheckpointSourceKind::UserMessage,
-                            artifact_id,
-                        )?,
+                        reference: history_checkpoint_ref(*id, CheckpointSourceKind::UserMessage)?,
                     });
                 }
-                TranscriptItem::AssistantText {
-                    id, artifact_id, ..
-                } => {
-                    let content = self.artifacts.read_content(artifact_id)?;
-                    let text =
-                        content
-                            .as_text()
-                            .ok_or_else(|| ArtifactError::InvalidEvidenceLocator {
-                                id: artifact_id.clone(),
-                                reason: "assistant transcript artifact is not textual",
-                            })?;
+                TranscriptItem::AssistantText { id, text, .. } => {
                     items.push(CompactionHistoryRecord {
                         item: CompactionHistoryItem::assistant(id.as_u64(), text),
                         reference: history_checkpoint_ref(
                             *id,
                             CheckpointSourceKind::AssistantMessage,
-                            artifact_id,
                         )?,
                     });
                 }
@@ -236,8 +200,7 @@ impl SessionState {
                     prompt_projection: call_projection,
                     ..
                 } => {
-                    let Some(&(id, result, artifact_id, model_artifact_id, result_projection)) =
-                        results.get(call.id())
+                    let Some(&(id, result, payload, result_projection)) = results.get(call.id())
                     else {
                         if turn.status().is_open() {
                             continue;
@@ -255,34 +218,24 @@ impl SessionState {
                         }
                         (ToolCallPromptProjection::Hidden, ToolResultPromptProjection::Hidden)
                         | (ToolCallPromptProjection::Full, ToolResultPromptProjection::Full)
-                        | (
-                            ToolCallPromptProjection::Full,
-                            ToolResultPromptProjection::ArtifactNotice,
-                        ) => {}
+                        | (ToolCallPromptProjection::Full, ToolResultPromptProjection::Collapsed) =>
+                            {}
                         (ToolCallPromptProjection::Hidden, _)
                         | (ToolCallPromptProjection::Full, ToolResultPromptProjection::Hidden) => {
                             return Err(CompactionError::StaleWindow.into());
                         }
                     }
-                    let content = self.artifacts.read_content(artifact_id)?;
-                    let model_content = model_artifact_id
-                        .map(|id| self.artifacts.read_content(id))
-                        .transpose()?;
                     items.push(CompactionHistoryRecord {
                         item: CompactionHistoryItem::tool_exchange(
                             id.as_u64(),
                             call,
                             result,
-                            content,
+                            payload.full(),
                             *call_projection,
                             result_projection,
-                            model_content,
+                            payload.model(),
                         ),
-                        reference: history_checkpoint_ref(
-                            id,
-                            CheckpointSourceKind::ToolResult,
-                            artifact_id,
-                        )?,
+                        reference: history_checkpoint_ref(id, CheckpointSourceKind::ToolResult)?,
                     });
                 }
                 TranscriptItem::ToolResult { .. } => {}
@@ -419,13 +372,11 @@ impl SessionState {
 pub(super) fn history_checkpoint_ref(
     item_id: TranscriptItemId,
     source_kind: CheckpointSourceKind,
-    artifact_id: &ArtifactId,
 ) -> Result<CheckpointRef, CheckpointError> {
     Ok(CheckpointRef::new(
         history_ref_id(item_id)?,
         source_kind,
         CheckpointSequenceRange::new(item_id.as_u64(), item_id.as_u64())?,
-        EvidenceRef::new(artifact_id.clone(), EvidenceLocator::whole_artifact()),
     ))
 }
 

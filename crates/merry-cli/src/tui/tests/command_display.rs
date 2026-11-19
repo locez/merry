@@ -4,7 +4,7 @@ use crate::tui::{
     projector::TuiProjector,
     render::{render_to_buffer, render_to_text},
     state::{TimelineItem, TuiState},
-    tests::{find_cell_color, find_text_position, pending_call_with_args, source, text_artifact},
+    tests::{find_cell_color, find_text_position, pending_call_with_args, source},
     text_interaction::MouseInput,
     theme::TuiTheme,
 };
@@ -62,13 +62,11 @@ fn process_output(
 
 fn process_result(id: &str, exit_code: i64) -> ToolCallResult {
     let call_id = ToolCallId::new(id).unwrap();
-    let artifact = text_artifact(&format!("{id}-output"));
     if exit_code == 0 {
-        ToolCallResult::succeeded(call_id, artifact)
+        ToolCallResult::succeeded(call_id)
     } else {
         ToolCallResult::failed(
             call_id,
-            artifact,
             ErrorInfo::new(
                 "process_action_failed",
                 &format!("process exited with code {exit_code}"),
@@ -490,7 +488,6 @@ async fn cancelled_commands_stop_animating_without_showing_a_successful_result()
         RuntimeEvent::ToolCallFinished {
             result: ToolCallResult::failed(
                 ToolCallId::new("process").unwrap(),
-                text_artifact("cancelled-output"),
                 ErrorInfo::new(TOOL_CANCELLED_BY_USER_CODE, "cancelled by user").unwrap(),
             ),
             output: None,

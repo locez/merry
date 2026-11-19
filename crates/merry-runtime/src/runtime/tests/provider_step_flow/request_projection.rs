@@ -1,11 +1,10 @@
 use crate::{
-    artifact::ArtifactContent,
     runtime::{
         Runtime,
         tests::support::{
             common::{
-                artifact_id, collect_step, completed_event_with, event_kind_names, failed_code,
-                model_name, model_tool_call, session_id,
+                collect_step, completed_event_with, event_kind_names, failed_code, model_name,
+                model_tool_call, session_id,
             },
             memory::{
                 assert_activated_memory_projection_cleared,
@@ -19,7 +18,7 @@ use crate::{
     session::{ModelTurnId, ModelTurnStatus},
 };
 use futures_util::StreamExt;
-use merry_core::{ArtifactKind, ArtifactRef, RuntimeJournalPayload, ToolCallResult};
+use merry_core::{RuntimeJournalPayload, ToolCallResult, ToolOutput};
 use merry_llm::{FinishReason, ModelOutput};
 use std::sync::Arc;
 use tokio::sync::oneshot;
@@ -318,11 +317,8 @@ async fn duplicate_tool_call_response_aborts_turn_before_failed_event() {
         .expect("first call should be pending");
     runtime
         .submit_tool_result(
-            ToolCallResult::succeeded(
-                pending.id().clone(),
-                ArtifactRef::new(artifact_id("duplicate-turn-result"), ArtifactKind::Text),
-            ),
-            ArtifactContent::text("resolved"),
+            ToolCallResult::succeeded(pending.id().clone()),
+            ToolOutput::text("resolved"),
         )
         .await
         .expect("first call should resolve");
@@ -331,8 +327,7 @@ async fn duplicate_tool_call_response_aborts_turn_before_failed_event() {
         .session
         .lock()
         .await
-        .full_transcript_snapshot()
-        .expect("transcript should be readable");
+        .full_transcript_snapshot();
 
     let events = collect_step(
         &runtime,
@@ -363,9 +358,7 @@ async fn duplicate_tool_call_response_aborts_turn_before_failed_event() {
         session.model_turn_status(ModelTurnId::new(2)),
         Some(ModelTurnStatus::Aborted)
     );
-    let transcript_after = session
-        .full_transcript_snapshot()
-        .expect("transcript should remain readable");
+    let transcript_after = session.full_transcript_snapshot();
     assert_eq!(
         &transcript_after[..transcript_before.len()],
         transcript_before

@@ -19,7 +19,6 @@ use crate::{
         transcript::{ToolResultPromptProjection, TranscriptItem},
     },
 };
-use merry_core::EvidenceRef;
 use std::collections::BTreeSet;
 
 mod history;
@@ -51,7 +50,7 @@ impl ArchivedRefManifest {
         &self.refs
     }
 
-    fn fingerprint_material(&self) -> Vec<(String, CheckpointSourceKind, u64, u64, EvidenceRef)> {
+    fn fingerprint_material(&self) -> Vec<(String, CheckpointSourceKind, u64, u64)> {
         self.refs
             .iter()
             .map(|reference| {
@@ -60,7 +59,6 @@ impl ArchivedRefManifest {
                     reference.source_kind(),
                     reference.sequence_range().start(),
                     reference.sequence_range().end(),
-                    reference.evidence().clone(),
                 )
             })
             .collect()
@@ -612,10 +610,6 @@ impl SessionState {
         if expected != archived_ref_manifest.refs() {
             return Err(CompactionError::StaleWindow.into());
         }
-        for reference in archived_ref_manifest.refs() {
-            self.artifacts
-                .validate_text_evidence(reference.evidence())?;
-        }
         Ok(())
     }
 
@@ -630,8 +624,7 @@ impl SessionState {
             let TranscriptItem::ToolResult {
                 id,
                 model_turn_id,
-                artifact_id,
-                prompt_projection: ToolResultPromptProjection::ArtifactNotice,
+                prompt_projection: ToolResultPromptProjection::Collapsed,
                 ..
             } = item
             else {
@@ -643,7 +636,6 @@ impl SessionState {
             refs.push(history_checkpoint_ref(
                 *id,
                 CheckpointSourceKind::ToolResult,
-                artifact_id,
             )?);
         }
         Ok(refs)

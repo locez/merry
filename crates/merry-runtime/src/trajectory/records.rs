@@ -2,7 +2,7 @@
 
 use merry_core::{
     ErrorInfo, PendingToolCall, ToolCallArguments, ToolCallId, ToolCallResult,
-    ToolCallResultStatus, ToolOutput, TrajectoryLane, TrajectoryPayload, TrajectoryPayloadKind,
+    ToolCallResultStatus, TrajectoryLane, TrajectoryPayload, TrajectoryPayloadKind,
     TrajectoryRecord, TrajectoryRecordId, TrajectoryRecordKind, TrajectoryRecordStatus,
 };
 use serde_json::Map;
@@ -49,9 +49,9 @@ pub(super) fn tool_call_record(
 
 pub(super) fn tool_result_record(
     call_id: &ToolCallId,
-    result: &ToolCallResult,
+    _result: &ToolCallResult,
     sequence: u64,
-    output: Option<&ToolOutput>,
+    output: Option<&merry_core::ToolOutputPreview>,
 ) -> Option<TrajectoryRecord> {
     let mut record = record(
         "tool",
@@ -63,8 +63,7 @@ pub(super) fn tool_result_record(
     )?;
     record.set_label("Tool".to_owned());
     record.set_tool_details(None, ToolCallArguments::new(Map::new()));
-    record.set_tool_output(output.and_then(trajectory_payload));
-    record.add_artifact(result.artifact().clone());
+    record.set_tool_output(output.map(trajectory_payload_from_preview));
     record.set_relationship(None, Some(call_id.clone()));
     Some(record)
 }
@@ -74,14 +73,13 @@ pub(super) fn merge_tool_result(
     call_id: &ToolCallId,
     result: &ToolCallResult,
     sequence: u64,
-    output: Option<&ToolOutput>,
+    output: Option<&merry_core::ToolOutputPreview>,
 ) -> Option<TrajectoryRecord> {
     let mut record = existing.or_else(|| tool_result_record(call_id, result, sequence, output))?;
     record.finish(tool_status(result.status()), sequence);
-    record.add_artifact(result.artifact().clone());
     let parent_id = record.parent_id().cloned();
     record.set_relationship(parent_id, Some(call_id.clone()));
-    if let Some(output) = output.and_then(trajectory_payload) {
+    if let Some(output) = output.map(trajectory_payload_from_preview) {
         record.set_tool_output(Some(output));
     }
     if let Some(diagnostic) = result.diagnostic() {
@@ -178,10 +176,15 @@ pub(super) fn truncate_summary(value: &str) -> String {
     summary
 }
 
-pub(super) fn trajectory_payload(output: &ToolOutput) -> Option<TrajectoryPayload> {
-    let (kind, content) = match output {
-        ToolOutput::Text { text } => (TrajectoryPayloadKind::Text, text.as_str()),
-        ToolOutput::Json { json } => (TrajectoryPayloadKind::Json, json.as_str()),
+/// Tool bodies kept on the trajectory. The transcript owns the full output.
+pub(crate) const TRAJECTORY_TOOL_PREVIEW_BYTES: usize = 4 * 1024;
+
+pub(super) fn trajectory_payload_from_preview(
+    preview: &merry_core::ToolOutputPreview,
+) -> TrajectoryPayload {
+    let kind = match preview.kind() {
+        merry_core::ToolOutputKind::Text => TrajectoryPayloadKind::Text,
+        merry_core::ToolOutputKind::Json => TrajectoryPayloadKind::Json,
     };
-    Some(TrajectoryPayload::new(kind, content.to_owned(), false))
+    TrajectoryPayload::new(kind, preview.content().to_owned(), preview.truncated())
 }

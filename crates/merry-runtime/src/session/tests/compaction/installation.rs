@@ -46,9 +46,7 @@ fn compaction_install_advances_prompt_boundary_without_deleting_full_transcript(
         ]
     );
     assert_eq!(
-        session
-            .provider_transcript_snapshot()
-            .expect("provider projection builds"),
+        session.provider_transcript_snapshot(),
         vec![crate::session::TranscriptItemSnapshot::UserMessage {
             text: "retained user".to_owned(),
             images: Vec::new(),
@@ -96,9 +94,7 @@ fn compaction_install_advances_boundary_through_trailing_empty_aborted_turn() {
         Some(empty_aborted_turn)
     );
     assert_eq!(
-        session
-            .provider_transcript_snapshot()
-            .expect("provider projection builds"),
+        session.provider_transcript_snapshot(),
         vec![crate::session::TranscriptItemSnapshot::UserMessage {
             text: "retained after empty turn".to_owned(),
             images: Vec::new(),
@@ -209,9 +205,7 @@ fn installing_valid_checkpoint_hides_only_covered_history_from_provider() {
         vec!["user:old user", "assistant:old assistant", "user:tail user"]
     );
     assert_eq!(
-        session
-            .provider_transcript_snapshot()
-            .expect("provider projection builds"),
+        session.provider_transcript_snapshot(),
         vec![crate::session::TranscriptItemSnapshot::UserMessage {
             text: "tail user".to_owned(),
             images: Vec::new(),

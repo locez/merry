@@ -182,7 +182,7 @@ pub(super) fn completed_process_view(
             preview,
             command: tool.command.clone(),
             cwd: tool.cwd.clone(),
-            artifact: result.artifact().clone(),
+            call_id: result.call_id().clone(),
             elapsed: tool.started_at.map(|started_at| started_at.elapsed()),
             expanded: false,
         },

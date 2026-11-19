@@ -35,10 +35,14 @@ async fn offline_tools_resolve_failure_then_reconnect_without_changing_definitio
         "mcp_server_unavailable"
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
-    runtime
-        .read_artifact_content(result.artifact().id())
-        .await
-        .expect("failed tool result has a readable durable artifact");
+    assert!(
+        runtime
+            .read_tool_output(result.call_id())
+            .await
+            .expect("tool output read")
+            .is_some(),
+        "failed tool result has a readable durable output"
+    );
     runtime.save_session_to(store).await.unwrap();
     assert_eq!(server.calls(), 0);
     tokio::time::pause();

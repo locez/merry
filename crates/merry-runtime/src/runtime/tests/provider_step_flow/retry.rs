@@ -74,20 +74,14 @@ async fn model_retry_events_are_emitted_for_failure_before_output() {
             "StepCompleted",
         ]
     );
-    let artifact_id = events
+    let text = events
         .iter()
         .find_map(|event| match &event.payload {
-            RuntimeJournalPayload::AssistantOutputRecorded { artifact } => {
-                Some(artifact.id().clone())
-            }
+            RuntimeJournalPayload::AssistantOutputRecorded { text } => Some(text.as_str()),
             _ => None,
         })
-        .expect("assistant output artifact should be recorded");
-    let content = runtime
-        .read_artifact_content(&artifact_id)
-        .await
-        .expect("artifact should be readable");
-    assert_eq!(content.as_text(), Some("successful attempt"));
+        .expect("assistant output should be recorded");
+    assert_eq!(text, "successful attempt");
     let session = runtime.inner.session.lock().await;
     assert_eq!(
         session.model_turn_status(ModelTurnId::new(1)),

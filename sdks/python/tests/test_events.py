@@ -11,11 +11,6 @@ def test_event_parser_returns_typed_payloads() -> None:
         {
             "type": "assistant_message",
             "text": "hello",
-            "artifact": {
-                "id": "artifact-1",
-                "kind": "assistant_message",
-                "label": None,
-            },
             "source": {"session_id": "session-1", "sequence": 1},
         }
     )
@@ -38,7 +33,6 @@ def test_event_parser_preserves_line_breaks_in_assistant_text() -> None:
         {
             "type": "assistant_message",
             "text": "line one\r\nline two\tcontinued",
-            "artifact": {"id": "artifact-1", "kind": "text", "label": None},
             "source": {"session_id": "session-1", "sequence": 2},
         }
     )
@@ -61,7 +55,6 @@ def test_event_parser_accepts_blank_assistant_text_and_delta() -> None:
         {
             "type": "assistant_message",
             "text": "",
-            "artifact": {"id": "artifact-1", "kind": "text", "label": None},
             "source": {"session_id": "session-1", "sequence": 2},
         }
     )
@@ -108,28 +101,18 @@ def test_event_envelope_rejects_mismatched_discriminants() -> None:
 
 
 def test_event_value_objects_validate_nested_types_and_json_kind() -> None:
-    artifact = merry.ArtifactReference("artifact-1", "tool", None)
     diagnostic = merry.EventDiagnostic("tool.failed", "Tool failed.")
 
-    with pytest.raises(TypeError, match="artifact reference"):
+    with pytest.raises(TypeError, match="event diagnostic"):
         parse_event(
             {
                 "type": "tool_call_finished",
                 "result": {
                     "call_id": "call-1",
-                    "status": "succeeded",
-                    "artifact": "artifact-1",
-                    "diagnostic": None,
+                    "status": "failed",
+                    "diagnostic": "not-an-object",
                 },
                 "output": None,
-                "source": {"session_id": "session-1", "sequence": 1},
-            }
-        )
-    with pytest.raises(TypeError, match="evidence locator"):
-        parse_event(
-            {
-                "type": "evidence_referenced",
-                "evidence": {"artifact_id": "artifact-1", "locator": "line-1"},
                 "source": {"session_id": "session-1", "sequence": 1},
             }
         )
@@ -139,7 +122,6 @@ def test_event_value_objects_validate_nested_types_and_json_kind() -> None:
     result = merry.RuntimeToolResult(
         call_id="call-1",
         status=merry.RuntimeToolResultStatus.FAILED,
-        artifact=artifact,
         diagnostic=diagnostic,
     )
     assert result.diagnostic == diagnostic

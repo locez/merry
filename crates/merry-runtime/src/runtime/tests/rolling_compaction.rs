@@ -247,7 +247,6 @@ async fn run_three_cycle_case(window_tokens: u64) {
             .lock()
             .await
             .provider_transcript_snapshot()
-            .expect("projection")
             .len()
             / 2;
         assert_eq!(
@@ -559,9 +558,7 @@ async fn assert_provider_projection_has_complete_raw_tail(
     submitted_inputs: &[String],
 ) {
     let session = runtime.inner.session.lock().await;
-    let projection = session
-        .provider_transcript_snapshot()
-        .expect("provider transcript projects");
+    let projection = session.provider_transcript_snapshot();
     assert!(projection.len() >= 4 && projection.len() <= 12);
     assert_eq!(projection.len() % 2, 0);
     let retained = projection.len() / 2 - 1;

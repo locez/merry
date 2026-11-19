@@ -6,23 +6,13 @@ use super::{
     ActivatedMemory, MemoryActivationProvenance, MemoryActivationSeed, MemoryActivationSourceKind,
     MemoryEvidence, MemoryId, MemoryItem, MemoryItemSelection, MemoryScope,
 };
-use merry_core::{ArtifactId, EvidenceLocator, EvidenceRef};
 
 fn memory_id(value: &str) -> MemoryId {
     MemoryId::new(value).expect("memory id is valid")
 }
 
-fn artifact_id(value: &str) -> ArtifactId {
-    ArtifactId::new(value).expect("artifact id is valid")
-}
-
-fn evidence_ref(id: &str) -> EvidenceRef {
-    EvidenceRef::new(artifact_id(id), EvidenceLocator::whole_artifact())
-}
-
 fn evidence(label: &str) -> MemoryEvidence {
-    MemoryEvidence::new(label, evidence_ref(&format!("artifact-{label}")))
-        .expect("memory evidence is valid")
+    MemoryEvidence::new(label, format!("source-{label}")).expect("memory evidence is valid")
 }
 
 fn provenance() -> MemoryActivationProvenance {

@@ -1,13 +1,13 @@
 //! Projects child-loop results and exact tool evidence into manager-owned records.
 
 use crate::{
-    AgentLoopBlockedReason, AgentLoopResult, AgentLoopStatus, ArtifactContent, Runtime,
+    AgentLoopBlockedReason, AgentLoopResult, AgentLoopStatus, Runtime,
     subagent::{
         APPLY_PATCH_TOOL_NAME, SubagentResultView, SubagentStatusLabel, child::error_info,
         manager::ManagedSubagent, spec::validate_scope_path,
     },
 };
-use merry_core::{RuntimeJournalEvent, RuntimeJournalPayload, ToolCallResultStatus};
+use merry_core::{RuntimeJournalEvent, RuntimeJournalPayload, ToolCallResultStatus, ToolOutput};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -102,8 +102,7 @@ pub(super) async fn changed_paths_from_child_events(
                         .get(result.call_id())
                         .is_some_and(|tool_name| tool_name.as_str() == APPLY_PATCH_TOOL_NAME) =>
             {
-                let Ok(content) = runtime.read_artifact_content(result.artifact().id()).await
-                else {
+                let Ok(Some(content)) = runtime.read_tool_output(result.call_id()).await else {
                     continue;
                 };
                 collect_apply_patch_changed_paths(&content, &mut paths);
@@ -116,12 +115,10 @@ pub(super) async fn changed_paths_from_child_events(
 }
 
 pub(super) fn collect_apply_patch_changed_paths(
-    content: &ArtifactContent,
+    content: &ToolOutput,
     paths: &mut BTreeSet<String>,
 ) {
-    let Some(text) = content.as_text() else {
-        return;
-    };
+    let text = content.as_str();
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
     };

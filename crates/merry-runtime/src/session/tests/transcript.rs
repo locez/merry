@@ -1,5 +1,7 @@
 use super::*;
-use crate::session::transcript::{PersistedTranscript, ToolResultPromptProjection};
+use crate::session::transcript::{
+    PersistedTranscript, ToolResultPayload, ToolResultPromptProjection,
+};
 use crate::session::{ModelTurnId, ModelTurnStatus, Transcript, TranscriptItem, UserInputOrigin};
 use crate::{UserImageInput, UserMessageInput};
 use std::sync::Arc;
@@ -60,11 +62,7 @@ fn unknown_model_turn_mutations_are_rejected() {
             .abort_model_turn(unknown)
             .expect_err("unknown abort should fail"),
         transcript
-            .push_user_message(
-                unknown,
-                artifact_id("unknown-turn-user"),
-                UserInputOrigin::ExternalUser,
-            )
+            .push_user_message(unknown, "unknown-turn-user", UserInputOrigin::ExternalUser)
             .expect_err("unknown output should fail"),
     ] {
         assert!(matches!(
@@ -93,7 +91,7 @@ fn terminal_model_turn_rejects_reclose_reabort_and_new_output() {
         Err(RuntimeError::InvalidModelTurnTransition { .. })
     ));
     assert!(matches!(
-        transcript.push_assistant_text(completed, artifact_id("late-assistant")),
+        transcript.push_assistant_text(completed, "late-assistant".into()),
         Err(RuntimeError::InvalidModelTurnTransition { .. })
     ));
 
@@ -112,11 +110,7 @@ fn terminal_model_turn_rejects_reclose_reabort_and_new_output() {
         Err(RuntimeError::InvalidModelTurnTransition { .. })
     ));
     assert!(matches!(
-        transcript.push_user_message(
-            aborted,
-            artifact_id("late-user"),
-            UserInputOrigin::ExternalUser,
-        ),
+        transcript.push_user_message(aborted, "late-user", UserInputOrigin::ExternalUser),
         Err(RuntimeError::InvalidModelTurnTransition { .. })
     ));
 }
@@ -152,7 +146,7 @@ fn awaiting_tool_results_model_turn_cannot_abort() {
 }
 
 #[test]
-fn session_user_message_keeps_exact_text_only_in_stable_artifact() {
+fn session_user_message_keeps_exact_text_in_transcript() {
     let mut session = SessionState::new(session_id());
     let turn_id = session.begin_model_turn().expect("model turn should begin");
     let exact_text = "  exact user text\nwith trailing space \n";
@@ -163,27 +157,20 @@ fn session_user_message_keeps_exact_text_only_in_stable_artifact() {
 
     let [
         TranscriptItem::UserMessage {
-            artifact_id,
+            text,
             model_turn_id,
             ..
         },
     ] = session.transcript.items()
     else {
-        panic!("transcript should contain one artifact-backed user message");
+        panic!("transcript should contain one user message");
     };
     assert_eq!(*model_turn_id, turn_id);
-    assert_eq!(artifact_id.as_str(), "user-message-0");
-    assert_eq!(
-        session
-            .read_artifact_content(artifact_id)
-            .expect("user source artifact should be readable")
-            .as_text(),
-        Some(exact_text)
-    );
+    assert_eq!(text.as_ref(), exact_text);
 }
 
 #[test]
-fn session_user_message_records_ordered_normalized_image_artifacts() {
+fn session_user_message_records_ordered_normalized_images() {
     let mut session = SessionState::new(session_id());
     let turn_id = session.begin_model_turn().expect("model turn should begin");
     let message = image_message();
@@ -192,114 +179,24 @@ fn session_user_message_records_ordered_normalized_image_artifacts() {
         .record_user_message(turn_id, &message)
         .expect("image message should record");
 
-    let [
-        TranscriptItem::UserMessage {
-            artifact_id,
-            image_artifact_ids,
-            ..
-        },
-    ] = session.transcript.items()
-    else {
+    let [TranscriptItem::UserMessage { text, images, .. }] = session.transcript.items() else {
         panic!("transcript should contain one image-bearing user message");
     };
-    assert_eq!(artifact_id.as_str(), "user-message-0");
-    assert_eq!(
-        image_artifact_ids
-            .iter()
-            .map(merry_core::ArtifactId::as_str)
-            .collect::<Vec<_>>(),
-        ["user-message-0-image-1", "user-message-0-image-2"]
-    );
+    assert_eq!(text.as_ref(), message.text());
+    assert_eq!(images.as_slice(), message.images());
 
-    for (index, expected) in message.images().iter().enumerate() {
-        let id = &image_artifact_ids[index];
-        let artifact = session
-            .artifacts
-            .read_ref(id)
-            .expect("image artifact metadata should be readable");
-        assert_eq!(artifact.kind(), &ArtifactKind::Image);
-        assert_eq!(artifact.label(), Some(expected.label()));
-        let ArtifactContent::Image { bytes, metadata } = session
-            .read_artifact_content(id)
-            .expect("image artifact content should be readable")
-        else {
-            panic!("user image artifact should use image content");
-        };
-        assert_eq!(bytes.as_ref(), expected.png_bytes());
-        let metadata = metadata.as_deref().expect("normalized PNG has metadata");
-        assert_eq!(metadata.media_type(), "image/png");
-        assert_eq!(metadata.width(), expected.width());
-        assert_eq!(metadata.height(), expected.height());
-    }
-
-    let snapshot = session
-        .provider_transcript_snapshot()
-        .expect("provider snapshot should compile");
+    let snapshot = session.provider_transcript_snapshot();
     let [crate::session::TranscriptItemSnapshot::UserMessage { text, images, .. }] =
         snapshot.as_slice()
     else {
         panic!("provider snapshot should contain one user message");
     };
     assert_eq!(text, message.text());
-    assert_eq!(images.len(), 2);
-    assert_eq!(images[0].artifact().id().as_str(), "user-message-0-image-1");
-    assert_eq!(images[0].input(), &message.images()[0]);
-    assert_eq!(images[1].artifact().id().as_str(), "user-message-0-image-2");
-    assert_eq!(images[1].input(), &message.images()[1]);
+    assert_eq!(images.as_slice(), message.images());
 }
 
 #[test]
-fn user_image_artifact_collision_leaves_all_message_state_unchanged() {
-    let mut session = SessionState::new(session_id());
-    let turn_id = session.begin_model_turn().expect("model turn should begin");
-    let collision = ArtifactRef::new(artifact_id("user-message-0-image-2"), ArtifactKind::Image);
-    session
-        .record_artifact_state(collision, ArtifactContent::image(vec![9]))
-        .expect("collision fixture should record");
-    let transcript_before = session.transcript.persisted();
-    let artifacts_before = session.artifacts.persisted_records();
-
-    let error = session
-        .record_user_message(turn_id, &image_message())
-        .expect_err("second image collision should reject the whole message");
-
-    assert!(matches!(
-        error,
-        RuntimeError::Artifact {
-            source: ArtifactError::DuplicateId { .. }
-        }
-    ));
-    assert_eq!(session.transcript.persisted(), transcript_before);
-    assert_eq!(session.artifacts.persisted_records(), artifacts_before);
-}
-
-#[test]
-fn user_message_artifact_collision_leaves_session_state_unchanged() {
-    let mut session = SessionState::new(session_id());
-    let turn_id = session.begin_model_turn().expect("model turn should begin");
-    let artifact = ArtifactRef::new(artifact_id("user-message-0"), ArtifactKind::Text);
-    session
-        .record_artifact_state(artifact, ArtifactContent::text("existing"))
-        .expect("collision fixture artifact should record");
-    let transcript_before = session.transcript.persisted();
-    let artifacts_before = session.artifacts.persisted_records();
-
-    let error = session
-        .record_user_message_body(turn_id, "must not overwrite")
-        .expect_err("reserved user artifact collision should fail");
-
-    assert!(matches!(
-        error,
-        RuntimeError::Artifact {
-            source: ArtifactError::DuplicateId { .. }
-        }
-    ));
-    assert_eq!(session.transcript.persisted(), transcript_before);
-    assert_eq!(session.artifacts.persisted_records(), artifacts_before);
-}
-
-#[test]
-fn user_message_transcript_id_exhaustion_leaves_artifacts_and_ids_unchanged() {
+fn user_message_transcript_id_exhaustion_leaves_state_unchanged() {
     let mut session = SessionState::new(session_id());
     let turn_id = ModelTurnId::new(1);
     session.transcript = Transcript::from_persisted(PersistedTranscript {
@@ -313,7 +210,6 @@ fn user_message_transcript_id_exhaustion_leaves_artifacts_and_ids_unchanged() {
     })
     .expect("exhausted transcript fixture should restore");
     let transcript_before = session.transcript.persisted();
-    let artifacts_before = session.artifacts.persisted_records();
 
     let error = session
         .record_user_message_body(turn_id, "cannot allocate")
@@ -321,7 +217,6 @@ fn user_message_transcript_id_exhaustion_leaves_artifacts_and_ids_unchanged() {
 
     assert!(matches!(error, RuntimeError::TranscriptItemIdExhausted));
     assert_eq!(session.transcript.persisted(), transcript_before);
-    assert_eq!(session.artifacts.persisted_records(), artifacts_before);
 }
 
 #[test]
@@ -332,18 +227,10 @@ fn transcript_assigns_monotonic_ids_and_never_reuses_after_retain() {
         .expect("model turn should allocate");
 
     let first = transcript
-        .push_user_message(
-            turn_id,
-            artifact_id("first-user"),
-            UserInputOrigin::ExternalUser,
-        )
+        .push_user_message(turn_id, "first-user", UserInputOrigin::ExternalUser)
         .expect("first id should allocate");
     let second = transcript
-        .push_user_message(
-            turn_id,
-            artifact_id("second-user"),
-            UserInputOrigin::ExternalUser,
-        )
+        .push_user_message(turn_id, "second-user", UserInputOrigin::ExternalUser)
         .expect("second id should allocate");
 
     assert_eq!(first.as_u64(), 0);
@@ -352,11 +239,7 @@ fn transcript_assigns_monotonic_ids_and_never_reuses_after_retain() {
     transcript.retain_ids([second].into_iter().collect());
 
     let third = transcript
-        .push_user_message(
-            turn_id,
-            artifact_id("third-user"),
-            UserInputOrigin::ExternalUser,
-        )
+        .push_user_message(turn_id, "third-user", UserInputOrigin::ExternalUser)
         .expect("third id should allocate");
 
     assert_eq!(third.as_u64(), 2);
@@ -390,38 +273,24 @@ fn model_turn_grouping_keeps_full_batch_pairs_intact() {
     let result_b_id = transcript
         .push_tool_result(
             call_b.id().clone(),
-            ToolCallResult::succeeded(
-                call_b.id().clone(),
-                ArtifactRef::new(artifact_id("batch-b-result"), ArtifactKind::Json),
-            ),
-            artifact_id("batch-b-result"),
+            ToolCallResult::succeeded(call_b.id().clone()),
+            ToolResultPayload::new(ToolOutput::json(r#"{"b":true}"#), None, Vec::new()),
             ToolResultPromptProjection::Full,
-            None,
-            Vec::new(),
         )
         .expect("second result records first");
     let result_a_id = transcript
         .push_tool_result(
             call_a.id().clone(),
-            ToolCallResult::succeeded(
-                call_a.id().clone(),
-                ArtifactRef::new(artifact_id("batch-a-result"), ArtifactKind::Json),
-            ),
-            artifact_id("batch-a-result"),
+            ToolCallResult::succeeded(call_a.id().clone()),
+            ToolResultPayload::new(ToolOutput::json(r#"{"a":true}"#), None, Vec::new()),
             ToolResultPromptProjection::Full,
-            None,
-            Vec::new(),
         )
         .expect("first result records second");
     let tail_turn_id = transcript
         .begin_model_turn()
         .expect("tail model turn should allocate");
     let tail_id = transcript
-        .push_user_message(
-            tail_turn_id,
-            artifact_id("tail-user"),
-            UserInputOrigin::ExternalUser,
-        )
+        .push_user_message(tail_turn_id, "tail-user", UserInputOrigin::ExternalUser)
         .expect("tail records");
 
     let turns = transcript.model_turns().expect("model turns should group");
@@ -433,6 +302,18 @@ fn model_turn_grouping_keeps_full_batch_pairs_intact() {
     assert_eq!(turns[1].id(), tail_turn_id);
     assert_eq!(turns[1].status(), ModelTurnStatus::InProgress);
     assert_eq!(turns[1].items().len(), 1);
+    assert_eq!(
+        transcript
+            .tool_result_payload(call_a.id())
+            .map(|payload| payload.full()),
+        Some(&ToolOutput::json(r#"{"a":true}"#))
+    );
+    assert_eq!(
+        transcript
+            .tool_result_payload(call_b.id())
+            .map(|payload| payload.full()),
+        Some(&ToolOutput::json(r#"{"b":true}"#))
+    );
     assert_eq!(
         transcript
             .items()
@@ -466,10 +347,9 @@ fn session_records_user_tool_result_assistant_and_second_user_in_transcript_orde
     session
         .close_model_response(first_turn, true)
         .expect("tool response should close");
-    let artifact = ArtifactRef::new(artifact_id("tool-result-order"), ArtifactKind::Text);
-    let result = ToolCallResult::succeeded(call.id().clone(), artifact);
+    let result = ToolCallResult::succeeded(call.id().clone());
     session
-        .submit_tool_result(result, ArtifactContent::text("tool output"))
+        .submit_tool_result(result, ToolOutput::text("tool output"))
         .expect("tool result records");
     let assistant_turn = session
         .begin_model_turn()
