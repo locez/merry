@@ -30,6 +30,16 @@ pub(crate) fn highlight_code_to_lines(
         .unwrap_or_else(|| plain_code_lines(code))
 }
 
+pub(crate) fn has_syntax(token: &str) -> bool {
+    find_syntax(token).is_some()
+}
+
+pub(crate) fn detect_syntax_from_first_line(first_line: &str) -> Option<&'static str> {
+    syntax_set()
+        .find_syntax_by_first_line(first_line)
+        .map(|syntax| syntax.name.as_str())
+}
+
 fn highlight_to_line_spans(
     code: &str,
     lang: &str,
@@ -43,7 +53,10 @@ fn highlight_to_line_spans(
     }
 
     let syntax = find_syntax(lang)?;
-    let mut highlighter = HighlightLines::new(syntax, theme(code_theme));
+    let selected_theme = theme(code_theme);
+    let default_fg = selected_theme.settings.foreground;
+    let default_bg = selected_theme.settings.background;
+    let mut highlighter = HighlightLines::new(syntax, selected_theme);
     let mut lines = Vec::new();
     for line in LinesWithEndings::from(code) {
         let ranges = highlighter.highlight_line(line, syntax_set()).ok()?;
@@ -51,7 +64,12 @@ fn highlight_to_line_spans(
             .into_iter()
             .filter_map(|(style, text)| {
                 let text = text.trim_end_matches(['\n', '\r']);
-                (!text.is_empty()).then(|| Span::styled(text.to_owned(), convert_style(style)))
+                (!text.is_empty()).then(|| {
+                    Span::styled(
+                        text.to_owned(),
+                        convert_style(style, default_fg, default_bg),
+                    )
+                })
             })
             .collect::<Vec<_>>();
         lines.push(if spans.is_empty() {
@@ -95,31 +113,31 @@ fn embedded_theme(name: EmbeddedThemeName) -> Theme {
 }
 
 fn find_syntax(lang: &str) -> Option<&'static SyntaxReference> {
-    let syntax_set = syntax_set();
     let patched = match lang {
+        // `find_syntax_by_token` already checks extension and case-insensitive name.
         "csharp" | "c-sharp" => "c#",
         "golang" => "go",
         "python3" => "python",
         "shell" => "bash",
         _ => lang,
     };
-
-    syntax_set
-        .find_syntax_by_token(patched)
-        .or_else(|| syntax_set.find_syntax_by_name(patched))
-        .or_else(|| {
-            let lower = patched.to_ascii_lowercase();
-            syntax_set
-                .syntaxes()
-                .iter()
-                .find(|syntax| syntax.name.to_ascii_lowercase() == lower)
-        })
-        .or_else(|| syntax_set.find_syntax_by_extension(lang))
+    syntax_set().find_syntax_by_token(patched)
 }
 
-fn convert_style(style: SyntectStyle) -> Style {
+fn convert_style(
+    style: SyntectStyle,
+    default_fg: Option<SyntectColor>,
+    default_bg: Option<SyntectColor>,
+) -> Style {
     let mut tui_style = Style::default();
-    if let Some(color) = convert_color(style.foreground) {
+    let has_accent_bg = default_bg.is_some_and(|bg| style.background != bg);
+    let uses_default_fg = default_fg.is_some_and(|fg| style.foreground == fg);
+    if has_accent_bg
+        && uses_default_fg
+        && let Some(color) = convert_color(style.background)
+    {
+        tui_style = tui_style.fg(color).add_modifier(Modifier::BOLD);
+    } else if let Some(color) = convert_color(style.foreground) {
         tui_style = tui_style.fg(color);
     }
     if style.font_style.contains(FontStyle::BOLD) {

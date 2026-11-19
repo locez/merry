@@ -280,7 +280,10 @@ fn cancellation_removes_edge_scrolling_and_prevents_a_late_release_from_copying(
                 handle_mouse_input(MouseInput::Down(Position::new(0, 0)), size, &mut state),
                 ControllerEffect::None
             ),
-            Cancel::Wheel => handle_mouse_scroll_up(edge, size, &mut state),
+            Cancel::Wheel => assert_eq!(
+                handle_mouse_scroll_up(edge, size, &mut state),
+                ControllerEffect::None
+            ),
         }
         assert!(!state.text_selection_is_autoscrolling());
         assert_eq!(

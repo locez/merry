@@ -16,7 +16,7 @@ use crate::tui::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use merry_core::QueuedInputLane;
-use ratatui::layout::{Position, Size};
+use ratatui::layout::{Position, Rect, Size};
 
 pub(super) const TIMELINE_SCROLL_STEP: usize = 5;
 
@@ -464,6 +464,24 @@ fn overlay_pointer_effect(pointer: OverlayPointer, state: &mut TuiState) -> Cont
             }
             press_overlay(state, KeyCode::Enter)
         }
+        OverlayPointer::CommandPrevious => {
+            crate::tui::command_details::inspect_command(state, CommandNavigation::Previous)
+        }
+        OverlayPointer::CommandNext => {
+            crate::tui::command_details::inspect_command(state, CommandNavigation::Next)
+        }
+        OverlayPointer::CommandSelect(index) => {
+            crate::tui::command_details::inspect_command(state, CommandNavigation::Index(index))
+        }
+        OverlayPointer::CommandFocusPane(pane) => {
+            if let Some(Overlay::CommandDetails(details)) = state.overlay_mut() {
+                details.focus_pane(pane);
+            }
+            ControllerEffect::None
+        }
+        OverlayPointer::CommandCopyCommand => press_overlay(state, KeyCode::Char('c')),
+        OverlayPointer::CommandCopyOutput => press_overlay(state, KeyCode::Char('y')),
+        OverlayPointer::CommandClose => press_overlay(state, KeyCode::Esc),
     }
 }
 
@@ -633,17 +651,14 @@ pub(crate) fn handle_mouse_scroll_up(
     position: Position,
     terminal_size: Size,
     state: &mut TuiState,
-) {
+) -> ControllerEffect {
     state.clear_text_selection();
-    if let Some(crate::tui::overlay::Overlay::CommandDetails(details)) = state.overlay_mut() {
-        details.handle_key(KeyEvent::new(
-            KeyCode::PageUp,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        return;
+    if matches!(state.overlay(), Some(Overlay::CommandDetails(_))) {
+        let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+        return crate::tui::command_details::handle_mouse_scroll(state, area, position, true);
     }
     if state.overlay().is_some() {
-        return;
+        return ControllerEffect::None;
     }
     if position_in_plan_pane(position, terminal_size, state) {
         if state.plan().is_inspector_open() {
@@ -654,23 +669,21 @@ pub(crate) fn handle_mouse_scroll_up(
     } else {
         state.scroll_timeline_up_by(TIMELINE_SCROLL_STEP);
     }
+    ControllerEffect::None
 }
 
 pub(crate) fn handle_mouse_scroll_down(
     position: Position,
     terminal_size: Size,
     state: &mut TuiState,
-) {
+) -> ControllerEffect {
     state.clear_text_selection();
-    if let Some(crate::tui::overlay::Overlay::CommandDetails(details)) = state.overlay_mut() {
-        details.handle_key(KeyEvent::new(
-            KeyCode::PageDown,
-            crossterm::event::KeyModifiers::NONE,
-        ));
-        return;
+    if matches!(state.overlay(), Some(Overlay::CommandDetails(_))) {
+        let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+        return crate::tui::command_details::handle_mouse_scroll(state, area, position, false);
     }
     if state.overlay().is_some() {
-        return;
+        return ControllerEffect::None;
     }
     if position_in_plan_pane(position, terminal_size, state) {
         if state.plan().is_inspector_open() {
@@ -681,6 +694,7 @@ pub(crate) fn handle_mouse_scroll_down(
     } else {
         state.scroll_timeline_down_by(TIMELINE_SCROLL_STEP);
     }
+    ControllerEffect::None
 }
 
 pub(super) fn position_in_plan_pane(

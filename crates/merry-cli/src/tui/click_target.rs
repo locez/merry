@@ -43,6 +43,13 @@ pub(crate) enum OverlayPointer {
     Model(usize),
     ManualModel,
     Reasoning(usize),
+    CommandPrevious,
+    CommandNext,
+    CommandCopyCommand,
+    CommandCopyOutput,
+    CommandClose,
+    CommandSelect(usize),
+    CommandFocusPane(crate::tui::command_details::StreamPane),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

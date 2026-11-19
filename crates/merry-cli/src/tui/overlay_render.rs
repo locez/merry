@@ -618,7 +618,10 @@ pub(crate) fn overlay_pointer(
             super::provider_render::reasoning_row(area, picker, position)
                 .map(OverlayPointer::Reasoning)
         }
-        Overlay::ProviderForm(_) | Overlay::CommandDetails(_) | Overlay::Shortcuts(_) => None,
+        Overlay::CommandDetails(details) => {
+            super::command_details::details_pointer(state, area, details, position)
+        }
+        Overlay::ProviderForm(_) | Overlay::Shortcuts(_) => None,
     }
 }
 

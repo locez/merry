@@ -223,13 +223,13 @@ pub(crate) async fn run_controller(
                         }
                         TerminalEvent::MouseScrollUp(position) => {
                             let size = terminal.size().map_err(unexpected)?;
-                            handle_mouse_scroll_up(position, size, &mut state);
-                            None
+                            let effect = handle_mouse_scroll_up(position, size, &mut state);
+                            (effect != ControllerEffect::None).then_some(effect)
                         }
                         TerminalEvent::MouseScrollDown(position) => {
                             let size = terminal.size().map_err(unexpected)?;
-                            handle_mouse_scroll_down(position, size, &mut state);
-                            None
+                            let effect = handle_mouse_scroll_down(position, size, &mut state);
+                            (effect != ControllerEffect::None).then_some(effect)
                         }
                         TerminalEvent::Paste(text) => {
                             handle_paste_event(&text, &mut state);
