@@ -11,7 +11,6 @@ use crate::support::{
 };
 use merry_core::{ToolCallId, ToolCallResult, ToolOutput};
 use merry_llm::{FinishReason, ModelEvent, ModelOutput, testing::FakeModelProvider};
-use merry_runtime::{LedgerFactKind, LedgerProjection};
 use serde_json::{Map, json};
 
 #[tokio::test(flavor = "current_thread")]
@@ -154,7 +153,7 @@ async fn provider_completed_with_single_tool_call_emits_pending_without_completi
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn provider_tool_call_pending_preserves_id_name_arguments_and_ledger_fact() {
+async fn provider_tool_call_pending_preserves_id_name_and_arguments() {
     let arguments = Map::from_iter([
         ("query".to_owned(), json!("runtime tool calls")),
         ("limit".to_owned(), json!(3)),
@@ -189,28 +188,6 @@ async fn provider_tool_call_pending_preserves_id_name_arguments_and_ledger_fact(
     pending.clear();
     let pending_after_caller_mutation = runtime.pending_tool_calls().await;
     assert_eq!(pending_after_caller_mutation, vec![call.clone()]);
-
-    let projection = runtime.ledger_projection().await;
-    assert_eq!(
-        projection.entries(),
-        [
-            LedgerProjection::Lifecycle {
-                sequence: 0,
-                order: 0,
-                kind: LedgerFactKind::SessionStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 1,
-                order: 1,
-                kind: LedgerFactKind::StepStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 3,
-                order: 2,
-                kind: LedgerFactKind::ToolCallPending,
-            },
-        ]
-    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -277,38 +254,6 @@ async fn repeated_provider_tool_call_id_after_pending_fails_without_second_pendi
             .map(|call| call.id().as_str().to_owned())
             .collect::<Vec<_>>(),
         vec!["call-1".to_owned()]
-    );
-
-    let projection = runtime.ledger_projection().await;
-    assert_eq!(
-        projection.entries(),
-        [
-            LedgerProjection::Lifecycle {
-                sequence: 0,
-                order: 0,
-                kind: LedgerFactKind::SessionStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 1,
-                order: 1,
-                kind: LedgerFactKind::StepStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 3,
-                order: 2,
-                kind: LedgerFactKind::ToolCallPending,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 4,
-                order: 3,
-                kind: LedgerFactKind::StepStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 6,
-                order: 4,
-                kind: LedgerFactKind::Failed,
-            },
-        ]
     );
 
     let result = ToolCallResult::succeeded(ToolCallId::new("call-1").expect("valid call id"));

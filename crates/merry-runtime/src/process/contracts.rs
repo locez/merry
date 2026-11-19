@@ -428,24 +428,6 @@ impl ProcessActionIntent {
         self.stdin_text.as_deref()
     }
 
-    /// Returns the same intent identity without inline stdin payload.
-    ///
-    /// Internal action audit stores proposal identity for policy/debugging, but
-    /// not process input payloads.
-    #[must_use]
-    pub(crate) fn without_stdin_text(&self) -> Self {
-        Self {
-            summary: self.summary.clone(),
-            argv: self.argv.clone(),
-            cwd: self.cwd.clone(),
-            env_policy: self.env_policy,
-            stdin_text: None,
-            stdout_limit_bytes: self.stdout_limit_bytes,
-            stderr_limit_bytes: self.stderr_limit_bytes,
-            background: self.background,
-        }
-    }
-
     /// Returns whether the runner should retain the process after the tool returns.
     #[must_use]
     pub const fn background(&self) -> bool {

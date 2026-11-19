@@ -1,6 +1,5 @@
 use crate::{
     ActionExecutionEvidence, ActionProposal, ProcessPermissionProfileId, RuntimeError, ToolOutput,
-    action_audit::ActionAuditPolicy,
     action_policy::{
         ActionPolicyDecision, DefaultActionPolicy, classify_tool_action_risk,
         is_local_workspace_effect_process_action_proposal, is_low_risk_apply_patch_proposal,
@@ -26,7 +25,7 @@ use crate::{
 };
 use merry_core::{
     CoreError, ErrorInfo, PendingToolCall, RuntimeJournalEvent, SessionId, ToolCallId,
-    ToolCallResultStatus,
+    ToolCallResult, ToolCallResultStatus,
 };
 use std::sync::Arc;
 
@@ -442,9 +441,6 @@ pub(super) async fn execute_tool_call_with_active_permit(
                         reason: "denied tool action outcome must include a diagnostic",
                     },
                 })?;
-                let denied_policy_decision = policy_decision.with_risk_tier(
-                    classify_tool_action_risk(registered_tool.action_kind(), Some(&proposal)),
-                );
                 let events = {
                     let mut session = inner.session.lock().await;
                     if context.cancellation_token().is_cancelled() {
@@ -453,13 +449,8 @@ pub(super) async fn execute_tool_call_with_active_permit(
                             call_id: call_id.clone(),
                         });
                     }
-                    session.submit_denied_tool_action(
-                        &pending,
-                        &denied_policy_decision,
-                        Some(proposal),
-                        content,
-                        diagnostic,
-                    )?
+                    let result = ToolCallResult::failed(pending.id().clone(), diagnostic);
+                    session.submit_tool_result(result, content)?
                 };
                 trace_denied_tool_execution(inner.session_id.as_str(), &pending, &events);
                 return Ok(events);
@@ -477,10 +468,6 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     reason: "denied tool action outcome must include a diagnostic",
                 },
             })?;
-            let denied_policy_decision = policy_decision.with_risk_tier(classify_tool_action_risk(
-                registered_tool.action_kind(),
-                None,
-            ));
             let events = {
                 let mut session = inner.session.lock().await;
                 if context.cancellation_token().is_cancelled() {
@@ -489,13 +476,8 @@ pub(super) async fn execute_tool_call_with_active_permit(
                         call_id: call_id.clone(),
                     });
                 }
-                session.submit_denied_tool_action(
-                    &pending,
-                    &denied_policy_decision,
-                    None,
-                    content,
-                    diagnostic,
-                )?
+                let result = ToolCallResult::failed(pending.id().clone(), diagnostic);
+                session.submit_tool_result(result, content)?
             };
             trace_denied_tool_execution(inner.session_id.as_str(), &pending, &events);
             return Ok(events);
@@ -509,18 +491,12 @@ pub(super) async fn execute_tool_call_with_active_permit(
         allowed_proposal.as_ref(),
         &inner.session_id,
     ) {
-        let mut session = inner.session.lock().await;
         if context.cancellation_token().is_cancelled() {
             return Err(RuntimeError::ToolExecutionCancelled {
                 session_id: inner.session_id.clone(),
                 call_id: call_id.clone(),
             });
         }
-        session.record_guarded_tool_action(
-            &pending,
-            registered_tool.action_kind(),
-            ActionAuditPolicy::from_decision(&policy_decision),
-        )?;
         return Err(error);
     }
 
@@ -623,14 +599,8 @@ pub(super) async fn execute_tool_call_with_active_permit(
             }
         }
         let mut session = inner.session.lock().await;
-        session.submit_proposed_tool_execution_outcome(
-            proposal,
-            status,
-            content,
-            diagnostic,
-            execution_evidence,
-            ActionAuditPolicy::from_decision(&policy_decision),
-        )?
+        let result = ToolCallResult::new(proposal.tool_call_id().clone(), status, diagnostic)?;
+        session.submit_tool_result(result, content)?
     } else {
         let mut session = inner.session.lock().await;
         if context.cancellation_token().is_cancelled() && !preserves_control_state {

@@ -1,11 +1,10 @@
 use super::{ModelTurnId, SessionState};
-use crate::{RuntimeError, ledger::LedgerFactKind};
+use crate::RuntimeError;
 use merry_core::{
     ErrorInfo, PendingToolCall, PendingToolCallBatch, RuntimeJournalEvent, RuntimeJournalPayload,
     ToolCallBatchId, ToolCallId,
 };
 
-mod action;
 mod content;
 mod result;
 mod skill;
@@ -53,10 +52,7 @@ impl SessionState {
             .map_err(transcript_record_diagnostic)?;
         self.transcript = transcript;
         self.pending_tool_calls.push(call.clone());
-        Ok(self.record_event(
-            RuntimeJournalPayload::ToolCallPending { call },
-            LedgerFactKind::ToolCallPending,
-        ))
+        Ok(self.record_event(RuntimeJournalPayload::ToolCallPending { call }))
     }
 
     #[cfg(test)]
@@ -91,10 +87,7 @@ impl SessionState {
         self.transcript = transcript;
         self.pending_tool_calls
             .extend(batch.calls().iter().cloned());
-        Ok(self.record_event(
-            RuntimeJournalPayload::ToolCallBatchPending { batch },
-            LedgerFactKind::ToolCallPending,
-        ))
+        Ok(self.record_event(RuntimeJournalPayload::ToolCallBatchPending { batch }))
     }
 
     pub(crate) fn record_model_tool_call_response(
@@ -148,13 +141,9 @@ impl SessionState {
 
         self.transcript = transcript;
         self.pending_tool_calls.extend(calls);
-        let commentary_event = commentary.map(|text| {
-            self.record_event(
-                RuntimeJournalPayload::AssistantOutputRecorded { text },
-                LedgerFactKind::AssistantOutputRecorded,
-            )
-        });
-        let tool_event = self.record_event(tool_payload, LedgerFactKind::ToolCallPending);
+        let commentary_event = commentary
+            .map(|text| self.record_event(RuntimeJournalPayload::AssistantOutputRecorded { text }));
+        let tool_event = self.record_event(tool_payload);
         Ok((commentary_event, tool_event))
     }
 
@@ -162,10 +151,7 @@ impl SessionState {
         &mut self,
         call: PendingToolCall,
     ) -> RuntimeJournalEvent {
-        self.record_event(
-            RuntimeJournalPayload::BridgeToolCallRequested { call },
-            LedgerFactKind::BridgeToolCallRequested,
-        )
+        self.record_event(RuntimeJournalPayload::BridgeToolCallRequested { call })
     }
 }
 

@@ -1,5 +1,4 @@
 use super::SessionState;
-use crate::ledger::LedgerFactKind;
 use crate::token_estimate::{RequestTokenCalibration, RequestTokenObservation, TokenEstimateScale};
 use merry_core::{
     CompactionUsageWindow, ErrorInfo, ModelUsage, RuntimeJournalEvent, RuntimeJournalPayload,
@@ -62,9 +61,6 @@ impl SessionState {
         };
         self.usage = Some(snapshot.clone());
 
-        Ok(self.record_event(
-            RuntimeJournalPayload::SessionUsageUpdated { usage: snapshot },
-            LedgerFactKind::SessionUsageUpdated,
-        ))
+        Ok(self.record_event(RuntimeJournalPayload::SessionUsageUpdated { usage: snapshot }))
     }
 }

@@ -1,7 +1,5 @@
 use crate::{
-    RuntimeError,
-    ledger::{LedgerFactKind, LedgerProjection},
-    request_permissions_tool,
+    RuntimeError, request_permissions_tool,
     runtime::{
         DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, Runtime, RuntimeBuilder,
         TOOL_ACTION_POLICY_DENIED_MESSAGE,
@@ -243,45 +241,6 @@ pub(in crate::runtime::tests) async fn denied_action_content(
 ) -> serde_json::Value {
     let result = resolved_tool_result(events);
     resolved_artifact_json(runtime, result, "denial").await
-}
-
-pub(in crate::runtime::tests) async fn action_audit_records(
-    runtime: &Runtime,
-) -> Vec<crate::action_audit::ActionAuditRecord> {
-    let session = runtime.inner.session.lock().await;
-    session.action_audit_snapshot().records().to_vec()
-}
-
-pub(in crate::runtime::tests) fn lifecycle_kinds(
-    runtime_projection: &crate::LedgerProjectionSnapshot,
-) -> Vec<LedgerFactKind> {
-    runtime_projection
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            LedgerProjection::Lifecycle { kind, .. } => Some(*kind),
-            LedgerProjection::Fact { .. } => None,
-        })
-        .collect()
-}
-
-pub(in crate::runtime::tests) fn assert_lifecycle_order(
-    lifecycle_kinds: &[LedgerFactKind],
-    before: LedgerFactKind,
-    after: LedgerFactKind,
-) {
-    let before_index = lifecycle_kinds
-        .iter()
-        .position(|kind| *kind == before)
-        .expect("before lifecycle kind should exist");
-    let after_index = lifecycle_kinds
-        .iter()
-        .position(|kind| *kind == after)
-        .expect("after lifecycle kind should exist");
-    assert!(
-        before_index < after_index,
-        "{before:?} should be recorded before {after:?}"
-    );
 }
 
 pub(in crate::runtime::tests) fn assert_sanitized_policy_denial_content(

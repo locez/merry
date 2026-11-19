@@ -173,9 +173,9 @@ impl ToolExecutionOutcome {
 
     /// Borrows provider-invisible evidence produced by the actual execution.
     ///
-    /// Runtime records this only in internal action audit state. It must not be
-    /// rendered into tool results, provider continuations, or provider request
-    /// payloads.
+    /// Runtime validates this internally against the approved proposal. It must
+    /// not be rendered into tool results, provider continuations, or provider
+    /// request payloads.
     #[must_use]
     pub fn execution_evidence(&self) -> Option<&ActionExecutionEvidence> {
         self.execution_evidence.as_ref()

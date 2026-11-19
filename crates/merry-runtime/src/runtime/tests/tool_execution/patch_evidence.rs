@@ -1,28 +1,24 @@
 use crate::{
     RuntimeError,
-    action_audit::ActionAuditStatus,
-    action_policy::{ActionPolicyDisposition, ActionRiskTier},
-    ledger::LedgerFactKind,
     runtime::{
         APPLY_PATCH_TOOL_NAME,
         tests::support::{
             process::CancellingOptInPatchExecutor,
             tool_executors::ProposingToolExecutor,
             tool_helpers::{
-                action_audit_records, assert_sanitized_policy_denial_content,
-                denied_action_content, event_kind_names_for_tool_execution, lifecycle_kinds,
-                policy_tool_spec, register_policy_pending_registered_tool_with_builder,
-                resolved_tool_result,
+                assert_sanitized_policy_denial_content, denied_action_content,
+                event_kind_names_for_tool_execution, policy_tool_spec,
+                register_policy_pending_registered_tool_with_builder, resolved_tool_result,
             },
         },
     },
-    tool::{ActionExecutionEvidence, RegisteredTool, ToolActionKind, ToolExecutionContext},
+    tool::{RegisteredTool, ToolActionKind, ToolExecutionContext},
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test(flavor = "current_thread")]
-async fn opt_in_workspace_write_patch_proposal_executes_and_records_execution_audit() {
+async fn opt_in_workspace_write_patch_proposal_executes() {
     let executor = ProposingToolExecutor::immediate();
     let tool = RegisteredTool::new(
         policy_tool_spec(APPLY_PATCH_TOOL_NAME),
@@ -56,61 +52,6 @@ async fn opt_in_workspace_write_patch_proposal_executes_and_records_execution_au
         merry_core::ToolCallResultStatus::Succeeded
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
-
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 2);
-    assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
-    assert_eq!(audits[0].tool_call_id(), pending.id());
-    assert_eq!(audits[0].tool_name(), pending.name());
-    assert_eq!(audits[0].action_kind(), ToolActionKind::WorkspaceWrite);
-    assert!(audits[0].policy().is_none());
-    assert!(audits[0].proposal().is_some());
-    assert!(audits[0].execution_evidence().is_none());
-
-    assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
-    assert_eq!(audits[1].tool_call_id(), pending.id());
-    assert_eq!(audits[1].tool_name(), pending.name());
-    assert_eq!(audits[1].action_kind(), ToolActionKind::WorkspaceWrite);
-    assert!(audits[1].proposal().is_none());
-    let policy = audits[1]
-        .policy()
-        .expect("executed audit should include allow policy");
-    assert_eq!(policy.risk_tier(), ActionRiskTier::EditLow);
-    assert_eq!(policy.disposition(), ActionPolicyDisposition::Allow);
-    let ActionExecutionEvidence::WorkspacePatch(evidence) = audits[1]
-        .execution_evidence()
-        .expect("executed audit should include actual evidence")
-    else {
-        panic!("workspace patch execution should record workspace patch evidence");
-    };
-    assert_eq!(evidence.relative_path(), "notes/proposed.txt");
-    assert_eq!(evidence.preimage_bytes(), 3);
-    assert_eq!(evidence.replacement_bytes(), 7);
-    assert_eq!(evidence.file_bytes_before(), 20);
-    assert_eq!(evidence.file_bytes_after(), 24);
-    assert_eq!(
-        evidence.file_fingerprint_before(),
-        "fnv1a64:0000000000000001"
-    );
-    assert_eq!(
-        evidence.file_fingerprint_after(),
-        "fnv1a64:0000000000000002"
-    );
-
-    let projection = runtime.ledger_projection().await;
-    let lifecycle = lifecycle_kinds(&projection);
-    let audit_indexes = lifecycle
-        .iter()
-        .enumerate()
-        .filter_map(|(index, kind)| (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index))
-        .collect::<Vec<_>>();
-    assert_eq!(audit_indexes.len(), 2);
-    let resolved_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
-        .expect("resolution lifecycle should be recorded");
-    assert!(audit_indexes[0] < audit_indexes[1]);
-    assert!(audit_indexes[1] < resolved_index);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -150,16 +91,7 @@ async fn opt_in_workspace_write_patch_proposal_rejects_non_patch_tool_name() {
         &denied_action_content(&runtime, &events).await,
         "policy_write_opt_in",
     );
-
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 2);
-    assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
-    assert_eq!(audits[0].tool_call_id(), pending.id());
-    assert_eq!(audits[0].tool_name(), pending.name());
-    assert!(audits[0].proposal().is_some());
-    assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
-    assert_eq!(audits[1].tool_call_id(), pending.id());
-    assert_eq!(audits[1].tool_name(), pending.name());
+    assert!(runtime.pending_tool_calls().await.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -199,21 +131,6 @@ async fn opt_in_workspace_write_patch_records_outcome_when_cancelled_after_side_
         merry_core::ToolCallResultStatus::Succeeded
     );
     assert!(runtime.pending_tool_calls().await.is_empty());
-
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 2);
-    assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
-    assert_eq!(audits[0].tool_call_id(), pending.id());
-    assert_eq!(audits[0].tool_name(), pending.name());
-    assert_eq!(audits[0].action_kind(), ToolActionKind::WorkspaceWrite);
-    assert!(audits[0].policy().is_none());
-    assert!(audits[0].proposal().is_some());
-    assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
-    assert_eq!(audits[1].tool_call_id(), pending.id());
-    assert_eq!(audits[1].tool_name(), pending.name());
-    assert_eq!(audits[1].action_kind(), ToolActionKind::WorkspaceWrite);
-    assert!(audits[1].proposal().is_none());
-    assert!(audits[1].execution_evidence().is_some());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -233,7 +150,7 @@ async fn opt_in_workspace_write_patch_missing_execution_evidence_fails_closed() 
         |builder| builder.allow_low_risk_apply_patches().build(),
     )
     .await;
-    let projection_before = runtime.ledger_projection().await;
+    let sequence_before = runtime.inner.session.lock().await.next_sequence();
 
     let err = runtime
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
@@ -249,6 +166,8 @@ async fn opt_in_workspace_write_patch_missing_execution_evidence_fails_closed() 
     assert_eq!(executor.execute_count(), 1);
     assert_eq!(executor.approved_proposal_seen(), vec![true]);
     assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
-    assert_eq!(runtime.ledger_projection().await, projection_before);
-    assert!(action_audit_records(&runtime).await.is_empty());
+    assert_eq!(
+        runtime.inner.session.lock().await.next_sequence(),
+        sequence_before
+    );
 }

@@ -1,7 +1,6 @@
 use crate::{
     FINAL_OUTPUT_TOOL_NAME, FileSessionStore, RuntimeError, SessionTranscriptItem, StepContext,
     StepInput,
-    ledger::{LedgerFactKind, LedgerProjection},
     runtime::{
         Runtime,
         tests::{
@@ -184,16 +183,6 @@ async fn dropping_text_stream_while_savepoint_is_blocked_keeps_terminal_batch_co
         5,
         "StepCompleted must commit before the terminal batch becomes observable"
     );
-    assert!(session.ledger_projection().entries().iter().any(|entry| {
-        matches!(
-            entry,
-            LedgerProjection::Lifecycle {
-                sequence: 4,
-                kind: LedgerFactKind::StepCompleted,
-                ..
-            }
-        )
-    }));
 
     drop(stream);
     assert_eq!(session.next_sequence(), 5);

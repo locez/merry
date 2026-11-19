@@ -8,7 +8,7 @@ use crate::{
                 CancelDuringRuntimeControlExecutor, ProposingToolExecutor, SuccessfulToolExecutor,
             },
             tool_helpers::{
-                action_audit_records, event_kind_names_for_tool_execution, policy_tool_spec,
+                event_kind_names_for_tool_execution, policy_tool_spec,
                 register_policy_pending_registered_tool,
                 register_policy_pending_registered_tool_with_builder, register_policy_pending_tool,
                 required_query_tool_spec, resolved_artifact_json, resolved_tool_result,
@@ -278,7 +278,7 @@ async fn pre_cancelled_denied_tool_execution_keeps_pending_without_artifact() {
         executor.clone(),
     )
     .await;
-    let projection_before = runtime.ledger_projection().await;
+    let sequence_before = runtime.inner.session.lock().await.next_sequence();
     let token = CancellationToken::new();
     token.cancel();
 
@@ -294,8 +294,10 @@ async fn pre_cancelled_denied_tool_execution_keeps_pending_without_artifact() {
     ));
     assert_eq!(executor.call_count(), 0);
     assert_eq!(runtime.pending_tool_calls().await, vec![pending.clone()]);
-    assert_eq!(runtime.ledger_projection().await, projection_before);
-    assert!(action_audit_records(&runtime).await.is_empty());
+    assert_eq!(
+        runtime.inner.session.lock().await.next_sequence(),
+        sequence_before
+    );
     assert!(
         runtime
             .read_tool_output(pending.id())
@@ -307,7 +309,7 @@ async fn pre_cancelled_denied_tool_execution_keeps_pending_without_artifact() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn cancelling_before_proposal_commit_keeps_pending_without_audit_or_result_artifact() {
+async fn cancelling_before_proposal_commit_keeps_pending_without_result_artifact() {
     let executor = ProposingToolExecutor::cancelling();
     let tool = RegisteredTool::new(
         policy_tool_spec("policy_proposal_cancel"),
@@ -322,7 +324,7 @@ async fn cancelling_before_proposal_commit_keeps_pending_without_audit_or_result
         tool,
     )
     .await;
-    let projection_before = runtime.ledger_projection().await;
+    let sequence_before = runtime.inner.session.lock().await.next_sequence();
     let token = CancellationToken::new();
     let execute_runtime = runtime.clone();
     let execute_call_id = pending.id().clone();
@@ -349,8 +351,10 @@ async fn cancelling_before_proposal_commit_keeps_pending_without_audit_or_result
     ));
     assert_eq!(executor.execute_count(), 0);
     assert_eq!(runtime.pending_tool_calls().await, vec![pending.clone()]);
-    assert_eq!(runtime.ledger_projection().await, projection_before);
-    assert!(action_audit_records(&runtime).await.is_empty());
+    assert_eq!(
+        runtime.inner.session.lock().await.next_sequence(),
+        sequence_before
+    );
     assert!(
         runtime
             .read_tool_output(pending.id())

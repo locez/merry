@@ -99,15 +99,10 @@ impl ActionPolicyDecision {
     }
 
     /// Returns the policy disposition.
+    #[cfg(test)]
     #[must_use]
     pub(crate) const fn disposition(&self) -> ActionPolicyDisposition {
         self.disposition
-    }
-
-    /// Returns the compact hard-policy reason.
-    #[must_use]
-    pub(crate) const fn reason(&self) -> &'static str {
-        self.reason
     }
 
     pub(crate) const fn is_allowed(&self) -> bool {
@@ -171,18 +166,6 @@ impl ActionPolicyDecision {
             ActionRiskTier::ProcessHigh,
             ActionPolicyDisposition::Allow,
             "validated process actions are allowed by the configured process runner boundary",
-        )
-    }
-
-    /// Denies a high-risk process after its independent action review failed
-    /// or returned a denial.
-    #[must_use]
-    pub(crate) const fn deny_high_risk_process_action() -> Self {
-        Self::new(
-            ToolActionKind::CommandExec,
-            ActionRiskTier::ProcessHigh,
-            ActionPolicyDisposition::Deny,
-            "high-risk process actions require explicit action review approval",
         )
     }
 

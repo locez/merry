@@ -4,10 +4,7 @@
 //! is a `Header`; subsequent lines are incremental `Commit` deltas.
 
 use super::super::{ModelTurnId, ModelTurnStatus, transcript::UserInputOrigin};
-use crate::{
-    SessionStoreError, action_audit::ActionAuditRecord, ledger::PersistedLedgerEntry,
-    plan::PersistedPlanState, token_estimate::RequestTokenCalibration,
-};
+use crate::{SessionStoreError, plan::PersistedPlanState, token_estimate::RequestTokenCalibration};
 use merry_core::{
     PendingToolCall, PlanSnapshot, SessionId, SessionToolCatalog, SessionUsage, ToolCallId,
     ToolCallResult, ToolOutput,
@@ -178,10 +175,6 @@ pub(super) struct JournalStateDelta {
     pub(super) next_sequence: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) session_started: Option<bool>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(super) ledger_appended: Vec<PersistedLedgerEntry>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(super) action_audits_appended: Vec<ActionAuditRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) usage: Option<FieldPatch<SessionUsage>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,8 +207,6 @@ impl JournalStateDelta {
     pub(super) fn is_empty(&self) -> bool {
         self.next_sequence.is_none()
             && self.session_started.is_none()
-            && self.ledger_appended.is_empty()
-            && self.action_audits_appended.is_empty()
             && self.usage.is_none()
             && self.request_token_calibration.is_none()
             && self.task_anchor.is_none()

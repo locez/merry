@@ -2,11 +2,8 @@ use crate::{
     CompactedCheckpoint, ContextCompiler, ContextEntry, ContextSummary, FileSessionStore,
     ProjectRules, SkillCatalog, TaskAnchor,
     session::tests::{
-        ActionAuditPolicy, ActionAuditStatus, ActionExecutionEvidence, ActionPolicyDisposition,
-        ActionProposal, ActionProposalEvidence, ActionRiskTier, DefaultActionPolicy, ErrorInfo,
-        ModelTurnStatus, SessionState, SessionStateTestExt, WorkspacePatchExecutionEvidence,
-        WorkspacePatchProposal, pending_tool_call, persistence::persisted_image_message,
-        session_id, tool_call_id,
+        ModelTurnStatus, SessionState, SessionStateTestExt, pending_tool_call,
+        persistence::persisted_image_message, session_id, tool_call_id,
     },
 };
 use merry_core::{ToolCallResult, ToolCallResultStatus, ToolOutput};
@@ -199,112 +196,6 @@ async fn session_state_save_load_round_trips_next_reasoning_state() {
     assert!(snapshot.contains("resume-summary"));
     assert!(snapshot.contains("resume checkpoint text"));
     assert!(loaded.compacted_checkpoint_summary().is_some());
-}
-
-#[tokio::test]
-async fn session_state_save_load_round_trips_action_audit_registry() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let mut session = SessionState::new(session_id());
-
-    let executed_call = pending_tool_call("registry-executed-call");
-    session
-        .record_test_tool_call_pending(executed_call.clone())
-        .expect("pending executed call records");
-    let proposal_evidence = ActionProposalEvidence::WorkspacePatch(
-        WorkspacePatchProposal::new(
-            "note.txt",
-            3,
-            5,
-            16,
-            18,
-            "fnv1a64:0000000000000100",
-            "fnv1a64:0000000000000101",
-        )
-        .expect("valid workspace patch proposal"),
-    );
-    let proposal = ActionProposal::new(
-        &executed_call,
-        crate::ToolActionKind::WorkspaceWrite,
-        "workspace patch",
-        "note.txt",
-        "Replace one preimage in note.txt.",
-        proposal_evidence,
-    )
-    .expect("valid action proposal");
-    let execution_evidence = ActionExecutionEvidence::WorkspacePatch(
-        WorkspacePatchExecutionEvidence::new(
-            "note.txt",
-            3,
-            5,
-            16,
-            18,
-            "fnv1a64:0000000000000100",
-            "fnv1a64:0000000000000101",
-        )
-        .expect("valid execution evidence"),
-    );
-    let allow_policy = ActionAuditPolicy::new(
-        ActionRiskTier::EditLow,
-        ActionPolicyDisposition::Allow,
-        "test low-risk workspace patch allow",
-    );
-    session
-        .submit_proposed_tool_execution_outcome(
-            proposal,
-            merry_core::ToolCallResultStatus::Succeeded,
-            ToolOutput::json(r#"{"ok":true}"#),
-            None,
-            Some(execution_evidence.clone()),
-            allow_policy,
-        )
-        .expect("proposed execution records");
-
-    let call = pending_tool_call("registry-denied-call");
-    let decision = DefaultActionPolicy.decide(crate::ToolActionKind::WorkspaceWrite);
-    let diagnostic = ErrorInfo::new("action_policy_denied", "blocked by persistence test")
-        .expect("valid diagnostic");
-    session
-        .record_test_tool_call_pending(call.clone())
-        .expect("pending call records");
-    session
-        .submit_denied_tool_action(
-            &call,
-            &decision,
-            None,
-            ToolOutput::json(r#"{"ok":false}"#),
-            diagnostic,
-        )
-        .expect("denial records");
-
-    session.save_to(&store).await.expect("session saves");
-    let loaded = SessionState::load_from(&store, &session_id())
-        .await
-        .expect("session loads");
-
-    let audit_snapshot = loaded.action_audit_snapshot();
-    assert_eq!(audit_snapshot.records().len(), 3);
-    assert_eq!(
-        audit_snapshot.records()[0].status(),
-        ActionAuditStatus::Proposed
-    );
-    assert!(audit_snapshot.records()[0].proposal().is_some());
-    assert!(audit_snapshot.records()[0].execution_evidence().is_none());
-    assert_eq!(
-        audit_snapshot.records()[1].status(),
-        ActionAuditStatus::Executed
-    );
-    assert!(audit_snapshot.records()[1].proposal().is_none());
-    assert_eq!(
-        audit_snapshot.records()[1]
-            .execution_evidence()
-            .expect("executed audit should include evidence"),
-        &execution_evidence
-    );
-    assert_eq!(
-        audit_snapshot.records()[2].status(),
-        ActionAuditStatus::Denied
-    );
 }
 
 #[tokio::test]

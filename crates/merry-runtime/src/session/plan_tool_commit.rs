@@ -2,11 +2,7 @@ use super::{
     SessionState,
     transcript::{ToolResultPayload, ToolResultPromptProjection},
 };
-use crate::{
-    RuntimeError,
-    ledger::{LedgerFactKind, TaskLedger},
-    plan::PlanState,
-};
+use crate::{RuntimeError, plan::PlanState};
 use merry_core::{
     ErrorInfo, PendingToolCall, PlanSnapshot, RuntimeJournalEvent, RuntimeJournalPayload,
     ToolCallId, ToolCallResult, ToolCallResultStatus, ToolOutput,
@@ -16,7 +12,6 @@ use std::collections::BTreeSet;
 pub(crate) struct PreparedPlanToolCommit {
     next_sequence: u64,
     session_started: bool,
-    ledger: TaskLedger,
     active_plan: PlanState,
     terminal_plans: Vec<PlanSnapshot>,
     transcript: super::Transcript,
@@ -32,10 +27,6 @@ impl PreparedPlanToolCommit {
 
     pub(crate) fn session_started(&self) -> bool {
         self.session_started
-    }
-
-    pub(crate) fn ledger(&self) -> &TaskLedger {
-        &self.ledger
     }
 
     pub(crate) fn active_plan(&self) -> &PlanState {
@@ -102,25 +93,20 @@ impl SessionState {
 
         let mut next_sequence = self.next_sequence;
         let mut session_started = self.session_started;
-        let mut ledger = self.ledger.clone();
         let mut events = Vec::with_capacity(plan_payloads.len() + 2);
         if !session_started {
             session_started = true;
             events.push(record_candidate_event(
                 &self.session_id,
                 &mut next_sequence,
-                &mut ledger,
                 RuntimeJournalPayload::SessionStarted,
-                Some(LedgerFactKind::SessionStarted),
             ));
         }
         for payload in plan_payloads {
             events.push(record_candidate_event(
                 &self.session_id,
                 &mut next_sequence,
-                &mut ledger,
                 payload,
-                None,
             ));
         }
 
@@ -140,15 +126,12 @@ impl SessionState {
         events.push(record_candidate_event(
             &self.session_id,
             &mut next_sequence,
-            &mut ledger,
             RuntimeJournalPayload::ToolCallResolved { result },
-            Some(LedgerFactKind::ToolCallResolved),
         ));
 
         Ok(PreparedPlanToolCommit {
             next_sequence,
             session_started,
-            ledger,
             active_plan,
             terminal_plans,
             transcript,
@@ -161,7 +144,6 @@ impl SessionState {
     pub(crate) fn install_plan_tool_commit(&mut self, prepared: PreparedPlanToolCommit) {
         self.next_sequence = prepared.next_sequence;
         self.session_started = prepared.session_started;
-        self.ledger = prepared.ledger;
         self.active_plan = Some(prepared.active_plan);
         self.terminal_plans = prepared.terminal_plans;
         self.transcript = prepared.transcript;
@@ -173,14 +155,9 @@ impl SessionState {
 fn record_candidate_event(
     session_id: &merry_core::SessionId,
     next_sequence: &mut u64,
-    ledger: &mut TaskLedger,
     payload: RuntimeJournalPayload,
-    fact_kind: Option<LedgerFactKind>,
 ) -> RuntimeJournalEvent {
     let sequence = *next_sequence;
-    if let Some(fact_kind) = fact_kind {
-        ledger.record(sequence, fact_kind);
-    }
     *next_sequence += 1;
     RuntimeJournalEvent::new(session_id.clone(), sequence, payload)
 }

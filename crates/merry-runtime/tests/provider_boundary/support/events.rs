@@ -37,16 +37,6 @@ pub(crate) fn failed_code(events: &[RuntimeJournalEvent]) -> Option<&str> {
     })
 }
 
-pub(crate) fn failed_sequence(events: &[RuntimeJournalEvent]) -> u64 {
-    events
-        .iter()
-        .find_map(|event| match event.payload {
-            RuntimeJournalPayload::Failed { .. } => Some(event.sequence),
-            _ => None,
-        })
-        .expect("failed event should be present")
-}
-
 pub(crate) fn assert_no_completion(events: &[RuntimeJournalEvent]) {
     assert!(
         events

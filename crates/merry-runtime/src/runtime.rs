@@ -90,8 +90,8 @@ pub struct Runtime {
 impl Runtime {
     /// Creates a runtime builder for the provided session.
     ///
-    /// The session id defines the ownership boundary for artifacts, context,
-    /// ledger facts, pending tool calls, and emitted runtime events.
+    /// The session id defines the ownership boundary for transcript state,
+    /// context, pending tool calls, and emitted runtime events.
     #[must_use]
     pub fn builder(session_id: SessionId) -> RuntimeBuilder {
         RuntimeBuilder::new(session_id)
@@ -118,8 +118,8 @@ impl Runtime {
     /// transaction have dropped their permit handles.
     ///
     /// All events emitted by the step are provider-neutral [`RuntimeJournalEvent`]
-    /// values. The runtime records session, ledger, artifact, and pending-tool
-    /// state before the corresponding event becomes observable.
+    /// values. The runtime records session transcript and pending-tool state
+    /// before the corresponding event becomes observable.
     ///
     /// Cancellation records a cancelled event when the producer reaches a
     /// cancellation checkpoint. Pending tool calls remain pending unless a

@@ -1,8 +1,7 @@
 use super::{Runtime, RuntimeError, diagnostic_from_text};
 use crate::{
-    ContextEntry, ContextSummary, LedgerProjectionSnapshot, SessionContextSnapshot,
-    SessionTranscriptItem, events::ActiveStepPermit,
-    tool_input_validation::ToolInputValidationError,
+    ContextEntry, ContextSummary, SessionContextSnapshot, SessionTranscriptItem,
+    events::ActiveStepPermit, tool_input_validation::ToolInputValidationError,
 };
 use merry_core::{
     ErrorInfo, PendingToolCall, RuntimeJournalEvent, TOOL_CANCELLED_BY_USER_CODE, ToolCallId,
@@ -271,12 +270,6 @@ impl Runtime {
     pub async fn context_snapshot(&self) -> SessionContextSnapshot {
         let session = self.inner.session.lock().await;
         session.context_snapshot()
-    }
-
-    /// Builds a read-only deterministic projection of the task ledger.
-    pub async fn ledger_projection(&self) -> LedgerProjectionSnapshot {
-        let session = self.inner.session.lock().await;
-        session.ledger_projection()
     }
 
     /// Returns a snapshot of provider-neutral tool calls currently awaiting results.

@@ -7,23 +7,20 @@
 //!   provider-neutral runtime step at a time.
 //! - [`Tool`] defines the typed application-tool path; [`RegisteredTool`] and
 //!   [`ToolExecutor`] define the runtime-owned integration path.
-//! - [`Runtime::read_tool_output`], [`Runtime::read_tool_output_preview`], and
-//!   [`Runtime::ledger_projection`] expose session-owned tool outputs and
-//!   ledger reads without leaking provider wire formats.
+//! - [`Runtime::read_tool_output`] and [`Runtime::read_tool_output_preview`]
+//!   expose session-owned tool outputs without leaking provider wire formats.
 //!
 //! A few lower-level primitives are currently public because the in-memory MVP
 //! still needs explicit composition and tests around structured state:
-//! [`TaskLedger`], [`ContextCompiler`], context entries, and ledger updates.
+//! [`ContextCompiler`] and context entries.
 //! Treat these as unstable implementation-facing surfaces unless a [`Runtime`]
 //! method provides the same read or mutation path.
 //!
-//! Runtime state is structured and lifecycle facts are recorded before
-//! observable events are emitted. The crate boundary is intentionally
-//! provider-neutral. Provider adapters normalize requests and events in
-//! `merry-llm`/provider crates rather than storing provider response formats
-//! here.
+//! Runtime state is structured and recorded before observable events are
+//! emitted. The crate boundary is intentionally provider-neutral. Provider
+//! adapters normalize requests and events in `merry-llm`/provider crates
+//! rather than storing provider response formats here.
 
-mod action_audit;
 mod action_policy;
 mod agent_loop;
 mod bridge;
@@ -35,7 +32,6 @@ mod error;
 mod events;
 mod final_output;
 mod interactive;
-mod ledger;
 mod memory;
 mod model_completion;
 mod model_config;
@@ -96,10 +92,6 @@ pub use interactive::{
     AgentLoopControl, AgentLoopInput, InteractiveAgentRun, InteractiveError, InteractiveInputItem,
     InteractiveInputSnapshot, InteractivePrimaryModel, InteractiveRunEventStream, InteractiveRunId,
     InteractiveRunMessage, InteractiveSettingsUpdate, InteractiveSubagentSettings, InterruptReason,
-};
-pub use ledger::{
-    CompactLedgerText, LedgerFactKind, LedgerProjection, LedgerProjectionSnapshot, LedgerScope,
-    LedgerUpdate, LedgerUpdateKind, LedgerValidationError, LifecycleFact, TaskLedger,
 };
 pub use merry_core::{
     ContextWindowSource, ImageSummary, ToolOutput, ToolOutputKind, ToolOutputPreview, ToolSpec,

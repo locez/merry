@@ -1,5 +1,5 @@
 use super::{ModelTurnId, SessionState};
-use crate::{RuntimeError, ledger::LedgerFactKind};
+use crate::RuntimeError;
 use merry_core::{
     RuntimeJournalEvent, RuntimeJournalPayload, ToolCallId, ToolOutput, ToolOutputPreview,
 };
@@ -13,10 +13,7 @@ impl SessionState {
         let mut transcript = self.transcript.clone();
         transcript.push_assistant_text(turn_id, text.as_str().into())?;
         self.transcript = transcript;
-        Ok(self.record_event(
-            RuntimeJournalPayload::AssistantOutputRecorded { text },
-            LedgerFactKind::AssistantOutputRecorded,
-        ))
+        Ok(self.record_event(RuntimeJournalPayload::AssistantOutputRecorded { text }))
     }
 
     pub(crate) fn read_tool_output(&self, call_id: &ToolCallId) -> Option<ToolOutput> {

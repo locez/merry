@@ -1,9 +1,7 @@
 //! Runtime session state and state-before-event helpers.
 
 use crate::{
-    action_audit::ActionAuditRegistry,
     context::{CompactedCheckpoint, ContextEntry, ProjectRules, TaskAnchor},
-    ledger::TaskLedger,
     memory::{ActivatedMemory, MemoryStore},
     plan::PlanState,
     skill::SkillCatalog,
@@ -22,7 +20,6 @@ mod persistence;
 mod plan_tool_commit;
 mod recording;
 mod tool_calls;
-mod tool_result;
 mod transcript;
 mod usage;
 
@@ -34,7 +31,6 @@ pub(crate) use self::{
     model_turns::{ModelTurn, ModelTurnId, ModelTurnStatus, PromptHistoryProjection},
     persistence::{PersistableSessionBundle, journal_destination_has_header},
     plan_tool_commit::PreparedPlanToolCommit,
-    tool_result::{ProposedToolExecutionOutcome, ToolResultLedgerObservation},
     transcript::{Transcript, TranscriptItem, TranscriptItemSnapshot, UserInputOrigin},
 };
 
@@ -47,7 +43,6 @@ pub(crate) struct SessionState {
     session_id: SessionId,
     next_sequence: u64,
     session_started: bool,
-    ledger: TaskLedger,
     memory_store: MemoryStore,
     skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
@@ -57,7 +52,6 @@ pub(crate) struct SessionState {
     prompt_history_projection: PromptHistoryProjection,
     context_entries: Vec<ContextEntry>,
     activated_memories: Vec<ActivatedMemory>,
-    action_audits: ActionAuditRegistry,
     active_plan: Option<PlanState>,
     terminal_plans: Vec<PlanSnapshot>,
     transcript: Transcript,
@@ -87,7 +81,6 @@ impl SessionState {
             session_id,
             next_sequence: 0,
             session_started: false,
-            ledger: TaskLedger::default(),
             memory_store: MemoryStore::new(),
             skill_catalog: None,
             project_rules: None,
@@ -97,7 +90,6 @@ impl SessionState {
             prompt_history_projection: PromptHistoryProjection::new(),
             context_entries: Vec::new(),
             activated_memories: Vec::new(),
-            action_audits: ActionAuditRegistry::default(),
             active_plan: None,
             terminal_plans: Vec::new(),
             transcript: Transcript::new(),
@@ -153,10 +145,6 @@ impl SessionState {
         &self.external_tool_catalog
     }
 
-    pub(crate) fn ledger_projection(&self) -> crate::ledger::LedgerProjectionSnapshot {
-        self.ledger.project()
-    }
-
     pub(crate) fn active_plan(&self) -> Option<&PlanState> {
         self.active_plan.as_ref()
     }
@@ -183,11 +171,6 @@ impl SessionState {
             self.terminal_plans.remove(0);
         }
         self.terminal_plans.push(snapshot);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn action_audit_snapshot(&self) -> crate::action_audit::ActionAuditRegistrySnapshot {
-        self.action_audits.snapshot()
     }
 
     #[cfg(test)]

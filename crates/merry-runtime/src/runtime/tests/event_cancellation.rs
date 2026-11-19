@@ -8,11 +8,8 @@ async fn cancelled_event_send_returns_false_when_channel_is_closed() {
     drop(receiver);
 
     let sent = send_cancelled_event(&inner, &sender).await;
-    let projection = {
-        let session = inner.session.lock().await;
-        session.ledger_projection()
-    };
+    let next_sequence = inner.session.lock().await.next_sequence();
 
     assert!(!sent);
-    assert!(projection.entries().is_empty());
+    assert_eq!(next_sequence, 0);
 }

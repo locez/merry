@@ -1,7 +1,7 @@
 //! Incremental journal commit preparation and cursor tracking.
 //!
 //! Reads directly from borrowed runtime state without cloning previously flushed
-//! transcript items, ledger entries, action audits, or unchanging catalogs.
+//! transcript items or unchanging catalogs.
 
 use super::{
     images::{JournalImageFile, image_refs},
@@ -12,8 +12,7 @@ use super::{
     },
 };
 use crate::{
-    ContextEntry, SessionStoreError, TaskAnchor, TaskLedger,
-    action_audit::ActionAuditRegistry,
+    ContextEntry, SessionStoreError, TaskAnchor,
     plan::{PersistedPlanState, PlanState},
     session::{
         ModelTurnId, ModelTurnStatus, PromptHistoryProjection, SessionState,
@@ -35,8 +34,6 @@ pub(crate) struct JournalCursor {
     flushed_compacted_through: Option<ModelTurnId>,
     flushed_next_sequence: Option<u64>,
     flushed_session_started: Option<bool>,
-    flushed_ledger_len: usize,
-    flushed_action_audits_len: usize,
     flushed_usage: Option<SessionUsage>,
     flushed_calibration: Option<RequestTokenCalibration>,
     flushed_task_anchor: Option<String>,
@@ -83,10 +80,6 @@ impl JournalCursor {
             (Some(true), _) | (_, Some(true)) => Some(true),
             (left, right) => right.or(left),
         };
-        self.flushed_ledger_len = self.flushed_ledger_len.max(committed.flushed_ledger_len);
-        self.flushed_action_audits_len = self
-            .flushed_action_audits_len
-            .max(committed.flushed_action_audits_len);
         self.flushed_usage = committed.flushed_usage;
         self.flushed_calibration = committed.flushed_calibration;
         self.flushed_task_anchor = committed.flushed_task_anchor;
@@ -135,13 +128,11 @@ pub(crate) struct JournalAppendInput<'a> {
     pub(crate) compacted_checkpoint: Option<&'a crate::CompactedCheckpoint>,
     pub(crate) next_sequence: u64,
     pub(crate) session_started: bool,
-    pub(crate) ledger: &'a TaskLedger,
     pub(crate) active_plan: Option<&'a PlanState>,
     pub(crate) terminal_plans: &'a [PlanSnapshot],
     pub(crate) usage: Option<&'a SessionUsage>,
     pub(crate) request_token_calibration: Option<&'a RequestTokenCalibration>,
     pub(crate) task_anchor: Option<&'a TaskAnchor>,
-    pub(crate) action_audits: &'a ActionAuditRegistry,
     pub(crate) context_entries: &'a [ContextEntry],
     pub(crate) external_tool_catalog: &'a SessionToolCatalog,
     pub(crate) topic: Option<&'a str>,
@@ -246,8 +237,6 @@ pub(super) fn cursor_after_load(session: &SessionState) -> JournalCursor {
         flushed_compacted_through: session.prompt_history_projection.compacted_through(),
         flushed_next_sequence: Some(session.next_sequence),
         flushed_session_started: Some(session.session_started),
-        flushed_ledger_len: session.ledger.len(),
-        flushed_action_audits_len: session.action_audits.len(),
         flushed_usage: session.usage.clone(),
         flushed_calibration: session.request_token_calibration.clone(),
         flushed_task_anchor: session
@@ -285,20 +274,6 @@ fn build_state_delta(
         (cursor.flushed_next_sequence != Some(input.next_sequence)).then_some(input.next_sequence);
     let session_started = (cursor.flushed_session_started != Some(input.session_started))
         .then_some(input.session_started);
-
-    let ledger_start = if cursor.flushed_ledger_len <= input.ledger.len() {
-        cursor.flushed_ledger_len
-    } else {
-        0
-    };
-    let ledger_appended = input.ledger.persisted_entries_since(ledger_start);
-
-    let audit_start = if cursor.flushed_action_audits_len <= input.action_audits.len() {
-        cursor.flushed_action_audits_len
-    } else {
-        0
-    };
-    let action_audits_appended = input.action_audits.records_since(audit_start).to_vec();
 
     let usage_current = input.usage.cloned();
     let usage = optional_patch(&cursor.flushed_usage, &usage_current);
@@ -362,8 +337,6 @@ fn build_state_delta(
     let delta = JournalStateDelta {
         next_sequence,
         session_started,
-        ledger_appended,
-        action_audits_appended,
         usage,
         request_token_calibration,
         task_anchor,
@@ -385,8 +358,6 @@ fn build_state_delta(
         flushed_compacted_through,
         flushed_next_sequence: Some(input.next_sequence),
         flushed_session_started: Some(input.session_started),
-        flushed_ledger_len: input.ledger.len(),
-        flushed_action_audits_len: input.action_audits.len(),
         flushed_usage: usage_current,
         flushed_calibration: calibration_current,
         flushed_task_anchor: anchor_current,

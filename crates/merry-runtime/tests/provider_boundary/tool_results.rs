@@ -7,10 +7,9 @@ use crate::support::{
 };
 use merry_core::{RuntimeJournalPayload, ToolCallId, ToolCallResult, ToolOutput, ToolOutputKind};
 use merry_llm::{FinishReason, ModelOutput, testing::FakeModelProvider};
-use merry_runtime::{LedgerFactKind, LedgerProjection};
 
 #[tokio::test(flavor = "current_thread")]
-async fn submit_tool_result_records_success_output_resolves_pending_and_updates_ledger() {
+async fn submit_tool_result_records_success_output_and_resolves_pending() {
     let provider = ScriptedModelProvider::new(vec![
         vec![Ok(completed_outputs_event(
             vec![ModelOutput::tool_call(model_tool_call())],
@@ -49,33 +48,6 @@ async fn submit_tool_result_records_success_output_resolves_pending_and_updates_
         Some(ToolOutput::text("exact tool output\n"))
     );
 
-    let projection = runtime.ledger_projection().await;
-    assert_eq!(
-        projection.entries(),
-        [
-            LedgerProjection::Lifecycle {
-                sequence: 0,
-                order: 0,
-                kind: LedgerFactKind::SessionStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 1,
-                order: 1,
-                kind: LedgerFactKind::StepStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 3,
-                order: 2,
-                kind: LedgerFactKind::ToolCallPending,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 4,
-                order: 3,
-                kind: LedgerFactKind::ToolCallResolved,
-            },
-        ]
-    );
-
     let next_events = collect_step(&runtime, "after tool result").await;
     assert_eq!(
         event_kind_names(&next_events),
@@ -105,14 +77,20 @@ async fn duplicate_tool_result_after_resolved_does_not_mutate_session() {
         .submit_tool_result(first, ToolOutput::text("first result\n"))
         .await
         .expect("first result should resolve");
-    let projection_before_duplicate = runtime.ledger_projection().await;
+    let transcript_before_duplicate = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
     let duplicate = ToolCallResult::succeeded(call.id().clone());
 
     let err = runtime
         .submit_tool_result(duplicate, ToolOutput::text("duplicate result\n"))
         .await
         .expect_err("duplicate result should be rejected");
-    let projection_after_duplicate = runtime.ledger_projection().await;
+    let transcript_after_duplicate = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     assert!(matches!(
         err,
@@ -122,7 +100,7 @@ async fn duplicate_tool_result_after_resolved_does_not_mutate_session() {
         } if rejected_session == session_id("provider-tool-result-duplicate")
             && call_id == ToolCallId::new("call-1").expect("valid call id")
     ));
-    assert_eq!(projection_before_duplicate, projection_after_duplicate);
+    assert_eq!(transcript_before_duplicate, transcript_after_duplicate);
     assert!(runtime.pending_tool_calls().await.is_empty());
     assert_eq!(
         runtime
@@ -142,14 +120,20 @@ async fn blank_text_tool_result_keeps_call_pending_and_sequence_stable() {
     let runtime = runtime_with_provider("provider-tool-result-blank-text", provider);
     let pending_events = collect_step(&runtime, "Request a tool.").await;
     let call = pending_tool_call(&pending_events).clone();
-    let projection_before_error = runtime.ledger_projection().await;
+    let transcript_before_error = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
     let result = ToolCallResult::succeeded(call.id().clone());
 
     let err = runtime
         .submit_tool_result(result.clone(), ToolOutput::text(" \n\t "))
         .await
         .expect_err("blank text tool result should be rejected before resolution");
-    let projection_after_error = runtime.ledger_projection().await;
+    let transcript_after_error = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     assert!(matches!(
         err,
@@ -158,7 +142,7 @@ async fn blank_text_tool_result_keeps_call_pending_and_sequence_stable() {
             output_kind: ToolOutputKind::Text
         } if call_id == *result.call_id()
     ));
-    assert_eq!(projection_before_error, projection_after_error);
+    assert_eq!(transcript_before_error, transcript_after_error);
     assert_eq!(runtime.pending_tool_calls().await, vec![call.clone()]);
     assert_eq!(
         runtime
@@ -189,14 +173,20 @@ async fn blank_json_tool_result_keeps_call_pending_and_sequence_stable() {
     let runtime = runtime_with_provider("provider-tool-result-blank-json", provider);
     let pending_events = collect_step(&runtime, "Request a tool.").await;
     let call = pending_tool_call(&pending_events).clone();
-    let projection_before_error = runtime.ledger_projection().await;
+    let transcript_before_error = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
     let result = ToolCallResult::succeeded(call.id().clone());
 
     let err = runtime
         .submit_tool_result(result.clone(), ToolOutput::json(" \n\t "))
         .await
         .expect_err("blank json tool result should be rejected before resolution");
-    let projection_after_error = runtime.ledger_projection().await;
+    let transcript_after_error = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     assert!(matches!(
         err,
@@ -205,7 +195,7 @@ async fn blank_json_tool_result_keeps_call_pending_and_sequence_stable() {
             output_kind: ToolOutputKind::Json
         } if call_id == *result.call_id()
     ));
-    assert_eq!(projection_before_error, projection_after_error);
+    assert_eq!(transcript_before_error, transcript_after_error);
     assert_eq!(runtime.pending_tool_calls().await, vec![call.clone()]);
     assert_eq!(
         runtime

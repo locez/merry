@@ -1,22 +1,16 @@
 use crate::{
     RuntimeError,
-    action_audit::ActionAuditStatus,
-    action_policy::{ActionPolicyDisposition, ActionRiskTier},
-    ledger::LedgerProjection,
-    process::{ProcessPermissionProfileId, stable_process_input_fingerprint},
+    process::stable_process_input_fingerprint,
     runtime::tests::support::{
         common::capture_traces_for,
         process::{FakeProcessRunner, ProcessProposingToolExecutor},
         tool_helpers::{
-            action_audit_records, event_kind_names_for_tool_execution, policy_tool_spec,
+            event_kind_names_for_tool_execution, policy_tool_spec,
             register_policy_pending_registered_tool_with_builder, resolved_artifact_json,
             resolved_tool_result,
         },
     },
-    tool::{
-        ActionExecutionEvidence, ActionProposalEvidence, RegisteredTool, ToolActionKind,
-        ToolExecutionContext,
-    },
+    tool::{RegisteredTool, ToolActionKind, ToolExecutionContext},
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -61,16 +55,6 @@ async fn read_only_shell_process_requires_explicit_shell_runner_opt_in() {
         resolved_tool_result(&events).status(),
         merry_core::ToolCallResultStatus::Failed
     );
-
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 2);
-    assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
-    assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
-    let policy = audits[1]
-        .policy()
-        .expect("denied audit should include shell read-only policy");
-    assert_eq!(policy.risk_tier(), ActionRiskTier::ProcessShellReadOnly);
-    assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -132,56 +116,7 @@ async fn read_only_shell_process_executes_under_shell_profile_when_opted_in() {
     assert!(payload.get("input_artifact").is_none());
     assert!(payload.get("provider").is_none());
     assert!(payload.get("wire").is_none());
-
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 2);
-    assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
-    let policy = audits[1]
-        .policy()
-        .expect("executed audit should include shell allow policy");
-    assert_eq!(policy.risk_tier(), ActionRiskTier::ProcessShellReadOnly);
-    assert_eq!(policy.disposition(), ActionPolicyDisposition::Allow);
-    let ActionExecutionEvidence::ProcessAction(evidence) = audits[1]
-        .execution_evidence()
-        .expect("executed audit should include shell process evidence")
-    else {
-        panic!("shell process action should record process execution evidence");
-    };
-    assert_eq!(
-        evidence.permission_profile_id(),
-        ProcessPermissionProfileId::SHELL_READ_ONLY
-    );
-    let ActionProposalEvidence::ProcessAction(intent) = audits[0]
-        .proposal()
-        .expect("proposed audit should include shell process proposal")
-        .evidence()
-    else {
-        panic!("proposed audit should record shell process intent");
-    };
-    assert_eq!(runner.observed_intents(), vec![intent.clone()]);
-    assert!(evidence.matches_intent(intent));
-
-    let projection = runtime.ledger_projection().await;
-    let observation_text = projection
-        .entries()
-        .iter()
-        .find_map(|entry| match entry {
-            LedgerProjection::Fact { text, .. } if text.starts_with("shell process action ") => {
-                Some(text.as_str())
-            }
-            LedgerProjection::Fact { .. } | LedgerProjection::Lifecycle { .. } => None,
-        })
-        .expect("shell process result should reduce into a compact ledger observation");
-    assert!(observation_text.contains("permission_profile=process.shell.read_only"));
-    assert!(observation_text.contains("shell=bash"));
-    assert!(observation_text.contains("shell_flag=-lc"));
-    assert!(observation_text.contains("shell_script_bytes=24"));
-    assert!(observation_text.contains(&format!(
-        "shell_script_fingerprint={}",
-        stable_process_input_fingerprint("rg ProcessRunner | wc -l".as_bytes())
-    )));
-    assert!(observation_text.contains(&format!("call_id={}", result.call_id().as_str())));
-    assert!(!observation_text.contains("rg ProcessRunner | wc -l"));
+    assert_eq!(runner.observed_intents().len(), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -317,7 +252,6 @@ async fn read_only_shell_process_runner_cancel_keeps_pending_without_output() {
     assert_eq!(executor.execute_count(), 0);
     assert_eq!(runner.call_count(), 1);
     assert_eq!(runtime.pending_tool_calls().await, vec![pending.clone()]);
-    assert!(action_audit_records(&runtime).await.is_empty());
     assert!(
         runtime
             .read_tool_output(pending.id())
@@ -365,7 +299,6 @@ async fn read_only_shell_process_runner_failure_keeps_pending_without_output() {
     assert_eq!(executor.execute_count(), 0);
     assert_eq!(runner.call_count(), 1);
     assert_eq!(runtime.pending_tool_calls().await, vec![pending.clone()]);
-    assert!(action_audit_records(&runtime).await.is_empty());
     assert!(
         runtime
             .read_tool_output(pending.id())

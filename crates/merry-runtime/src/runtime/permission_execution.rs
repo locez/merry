@@ -321,13 +321,8 @@ pub(super) async fn review_process_action(
             })?;
             let events = {
                 let mut session = inner.session.lock().await;
-                session.submit_denied_tool_action(
-                    pending,
-                    &crate::action_policy::ActionPolicyDecision::deny_high_risk_process_action(),
-                    Some(proposal.clone()),
-                    content,
-                    diagnostic,
-                )?
+                let result = merry_core::ToolCallResult::failed(pending.id().clone(), diagnostic);
+                session.submit_tool_result(result, content)?
             };
             super::tool_execution::trace_review_denied_tool_execution(
                 inner.session_id.as_str(),
@@ -350,13 +345,8 @@ pub(super) async fn review_process_action(
         })?;
         let events = {
             let mut session = inner.session.lock().await;
-            session.submit_denied_tool_action(
-                pending,
-                &crate::action_policy::ActionPolicyDecision::deny_high_risk_process_action(),
-                Some(proposal.clone()),
-                content,
-                diagnostic,
-            )?
+            let result = merry_core::ToolCallResult::failed(pending.id().clone(), diagnostic);
+            session.submit_tool_result(result, content)?
         };
         super::tool_execution::trace_review_denied_tool_execution(
             inner.session_id.as_str(),

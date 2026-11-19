@@ -2,12 +2,13 @@ use super::{RuntimeInner, diagnostic_from_text};
 use crate::{
     ActionExecutionEvidence, ActionProposal, ProcessActionIntent, ProcessExitStatus,
     ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-    ProcessRunnerOutput, RuntimeError, action_audit::ActionAuditPolicy,
-    action_policy::ActionPolicyDecision, permission::PermissionAdmissionReview,
-    process::shell_process_input, session::ProposedToolExecutionOutcome,
-    session::ToolResultLedgerObservation, tool::ActionProposalEvidence, tool::ToolExecutionContext,
+    ProcessRunnerOutput, RuntimeError, action_policy::ActionPolicyDecision,
+    permission::PermissionAdmissionReview, process::shell_process_input,
+    tool::ActionProposalEvidence, tool::ToolExecutionContext,
 };
-use merry_core::{PendingToolCall, RuntimeJournalEvent, SessionId, ToolCallResultStatus};
+use merry_core::{
+    PendingToolCall, RuntimeJournalEvent, SessionId, ToolCallResult, ToolCallResultStatus,
+};
 use std::sync::Arc;
 
 mod output;
@@ -155,21 +156,11 @@ pub(super) async fn execute_admitted_process_action(
             ),
         ))
     };
-    let observation =
-        process_result_ledger_observation(&intent, &output, status, permission_profile_id);
-
-    let outcome = ProposedToolExecutionOutcome::new(
-        proposal,
-        status,
-        content,
-        diagnostic,
-        Some(execution_evidence),
-        ActionAuditPolicy::from_decision(&policy_decision),
-    )
-    .with_observation(observation);
+    let _ = (&policy_decision, &execution_evidence);
+    let result = ToolCallResult::new(proposal.tool_call_id().clone(), status, diagnostic)?;
     let result_events = {
         let mut session = inner.session.lock().await;
-        session.submit_proposed_tool_execution_outcome_record(outcome)?
+        session.submit_tool_result(result, content)?
     };
     Ok(result_events)
 }
@@ -257,55 +248,6 @@ fn trace_process_execution_finish(
         stderr_truncated = output.stderr_truncated(),
         "runtime process execution finish"
     );
-}
-
-fn process_result_ledger_observation(
-    intent: &ProcessActionIntent,
-    output: &ProcessRunnerOutput,
-    result_status: ToolCallResultStatus,
-    permission_profile_id: ProcessPermissionProfileId,
-) -> ToolResultLedgerObservation {
-    let mut summary = if let Some(shell_input) = shell_process_input(intent) {
-        format!(
-            "shell process action {}; permission_profile={}; result={}; shell={}; shell_flag={}; shell_script_bytes={}; shell_script_fingerprint={}; stdout_bytes={}; stderr_bytes={}",
-            process_status_label(output.status()),
-            permission_profile_id.as_str(),
-            process_result_status_label(result_status),
-            shell_input.shell(),
-            shell_input.flag(),
-            shell_input.script_bytes(),
-            shell_input.script_fingerprint(),
-            output.stdout_bytes(),
-            output.stderr_bytes(),
-        )
-    } else {
-        format!(
-            "process action `{}` {}; permission_profile={}; result={}; stdout_bytes={}; stderr_bytes={}",
-            intent.argv().join(" "),
-            process_status_label(output.status()),
-            permission_profile_id.as_str(),
-            process_result_status_label(result_status),
-            output.stdout_bytes(),
-            output.stderr_bytes(),
-        )
-    };
-
-    if output.stdout_truncated() {
-        summary.push_str("; stdout_truncated=true");
-    }
-    if output.stderr_truncated() {
-        summary.push_str("; stderr_truncated=true");
-    }
-
-    ToolResultLedgerObservation::new(crate::ledger::LedgerScope::Tool, summary)
-        .expect("process result ledger summary is built from a non-empty static prefix")
-}
-
-fn process_result_status_label(status: ToolCallResultStatus) -> &'static str {
-    match status {
-        ToolCallResultStatus::Succeeded => "succeeded",
-        ToolCallResultStatus::Failed => "failed",
-    }
 }
 
 fn process_status_label(status: ProcessExitStatus) -> String {

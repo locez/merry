@@ -8,9 +8,9 @@ use merry_llm::{
     ModelToolCallId, ToolArguments, testing::FakeModelProvider,
 };
 use merry_runtime::{
-    LedgerFactKind, LedgerProjection, RegisteredTool, Runtime, RuntimeError, StepContext,
-    StepInput, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
-    ToolExecutor, ToolExecutorFuture,
+    RegisteredTool, Runtime, RuntimeError, StepContext, StepInput, ToolActionKind,
+    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
+    ToolExecutorFuture,
 };
 use schemars::Schema;
 use serde_json::json;
@@ -305,27 +305,10 @@ async fn pre_cancelled_tool_execution_keeps_pending_and_releases_active_permit()
             .collect::<Vec<_>>(),
         vec![0, 1, 2, 3]
     );
-    let projection_before_cancel = runtime.ledger_projection().await;
-    assert_eq!(
-        projection_before_cancel.entries(),
-        [
-            LedgerProjection::Lifecycle {
-                sequence: 0,
-                order: 0,
-                kind: LedgerFactKind::SessionStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 1,
-                order: 1,
-                kind: LedgerFactKind::StepStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 3,
-                order: 2,
-                kind: LedgerFactKind::ToolCallPending,
-            },
-        ]
-    );
+    let transcript_before_cancel = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     let token = CancellationToken::new();
     token.cancel();
@@ -344,7 +327,13 @@ async fn pre_cancelled_tool_execution_keeps_pending_and_releases_active_permit()
     ));
     assert_eq!(executor.call_count(), 0);
     assert_eq!(runtime.pending_tool_calls().await.len(), 1);
-    assert_eq!(runtime.ledger_projection().await, projection_before_cancel);
+    assert_eq!(
+        runtime
+            .session_transcript()
+            .await
+            .expect("transcript should read"),
+        transcript_before_cancel
+    );
     assert_missing_tool_result_output(&runtime).await;
     let follow_up_events = start_step_after_cleanup(&runtime, "after pre-cancel").await;
     assert!(
@@ -367,7 +356,10 @@ async fn pre_cancelled_workspace_write_tool_execution_keeps_pending_without_deni
         event_kind_names(&events),
         ["SessionStarted", "StepStarted", "ToolCallPending"]
     );
-    let projection_before_cancel = runtime.ledger_projection().await;
+    let transcript_before_cancel = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     let token = CancellationToken::new();
     token.cancel();
@@ -386,7 +378,13 @@ async fn pre_cancelled_workspace_write_tool_execution_keeps_pending_without_deni
     ));
     assert_eq!(executor.call_count(), 0);
     assert_eq!(runtime.pending_tool_calls().await.len(), 1);
-    assert_eq!(runtime.ledger_projection().await, projection_before_cancel);
+    assert_eq!(
+        runtime
+            .session_transcript()
+            .await
+            .expect("transcript should read"),
+        transcript_before_cancel
+    );
     assert_missing_tool_result_output(&runtime).await;
 }
 
@@ -406,27 +404,10 @@ async fn cancelling_during_tool_execution_keeps_pending_and_releases_active_perm
             .collect::<Vec<_>>(),
         vec![0, 1, 2, 3]
     );
-    let projection_before_cancel = runtime.ledger_projection().await;
-    assert_eq!(
-        projection_before_cancel.entries(),
-        [
-            LedgerProjection::Lifecycle {
-                sequence: 0,
-                order: 0,
-                kind: LedgerFactKind::SessionStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 1,
-                order: 1,
-                kind: LedgerFactKind::StepStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 3,
-                order: 2,
-                kind: LedgerFactKind::ToolCallPending,
-            },
-        ]
-    );
+    let transcript_before_cancel = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
     let token = CancellationToken::new();
     let execute_runtime = runtime.clone();
     let execute_token = token.clone();
@@ -454,7 +435,13 @@ async fn cancelling_during_tool_execution_keeps_pending_and_releases_active_perm
             if call_id == tool_call_id("cancel-tool-call")
     ));
     assert_eq!(runtime.pending_tool_calls().await.len(), 1);
-    assert_eq!(runtime.ledger_projection().await, projection_before_cancel);
+    assert_eq!(
+        runtime
+            .session_transcript()
+            .await
+            .expect("transcript should read"),
+        transcript_before_cancel
+    );
     assert_missing_tool_result_output(&runtime).await;
     let follow_up_events = start_step_after_cleanup(&runtime, "after during-cancel").await;
     assert!(
@@ -482,27 +469,10 @@ async fn cancelling_after_successful_tool_execution_keeps_pending_and_releases_a
     );
     let pending_before_cancel = runtime.pending_tool_calls().await;
     assert_eq!(pending_before_cancel.len(), 1);
-    let projection_before_cancel = runtime.ledger_projection().await;
-    assert_eq!(
-        projection_before_cancel.entries(),
-        [
-            LedgerProjection::Lifecycle {
-                sequence: 0,
-                order: 0,
-                kind: LedgerFactKind::SessionStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 1,
-                order: 1,
-                kind: LedgerFactKind::StepStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 3,
-                order: 2,
-                kind: LedgerFactKind::ToolCallPending,
-            },
-        ]
-    );
+    let transcript_before_cancel = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     let err = runtime
         .execute_tool_call(
@@ -519,7 +489,13 @@ async fn cancelling_after_successful_tool_execution_keeps_pending_and_releases_a
     ));
     assert_eq!(executor.call_count(), 1);
     assert_eq!(runtime.pending_tool_calls().await, pending_before_cancel);
-    assert_eq!(runtime.ledger_projection().await, projection_before_cancel);
+    assert_eq!(
+        runtime
+            .session_transcript()
+            .await
+            .expect("transcript should read"),
+        transcript_before_cancel
+    );
     assert_missing_tool_result_output(&runtime).await;
     let follow_up_events = start_step_after_cleanup(&runtime, "after late-cancel").await;
     assert!(

@@ -125,32 +125,6 @@ impl ActionProposal {
         &self.evidence
     }
 
-    /// Returns a copy suitable for internal action audit storage.
-    ///
-    /// Proposal audits keep deterministic identity, but process proposals must
-    /// not retain inline stdin payloads.
-    #[must_use]
-    pub(crate) fn audit_sanitized(&self) -> Self {
-        let evidence = match &self.evidence {
-            ActionProposalEvidence::WorkspacePatch(patch) => {
-                ActionProposalEvidence::WorkspacePatch(patch.clone())
-            }
-            ActionProposalEvidence::ProcessAction(intent) => {
-                ActionProposalEvidence::ProcessAction(intent.without_stdin_text())
-            }
-        };
-
-        Self {
-            tool_call_id: self.tool_call_id.clone(),
-            tool_name: self.tool_name.clone(),
-            action_kind: self.action_kind,
-            label: self.label.clone(),
-            subject: self.subject.clone(),
-            summary: self.summary.clone(),
-            evidence,
-        }
-    }
-
     pub(crate) fn validate_for_call(
         &self,
         call: &PendingToolCall,

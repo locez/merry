@@ -1,16 +1,14 @@
 use crate::{
     RuntimeError,
-    action_audit::ActionAuditStatus,
-    process::ProcessExitStatus,
     runtime::tests::support::{
         process::{FakeProcessRunner, ProcessProposingToolExecutor},
         tool_helpers::{
-            action_audit_records, event_kind_names_for_tool_execution, policy_tool_spec,
+            event_kind_names_for_tool_execution, policy_tool_spec,
             register_policy_pending_registered_tool_with_builder, resolved_artifact_json,
             resolved_tool_result,
         },
     },
-    tool::{ActionExecutionEvidence, RegisteredTool, ToolActionKind, ToolExecutionContext},
+    tool::{RegisteredTool, ToolActionKind, ToolExecutionContext},
 };
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -61,26 +59,10 @@ async fn opt_in_process_action_commits_output_after_runner_cancels_token() {
             .expect("process stdout text should be present"),
         "runtime tests passed after token cancellation\n"
     );
-
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 2);
-    assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
-    assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
-    let ActionExecutionEvidence::ProcessAction(evidence) = audits[1]
-        .execution_evidence()
-        .expect("executed audit should include process evidence")
-    else {
-        panic!("process action should record execution evidence");
-    };
-    assert_eq!(evidence.status(), ProcessExitStatus::Exited(0));
-    assert_eq!(
-        evidence.stdout_bytes(),
-        "runtime tests passed after token cancellation\n".len()
-    );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn opt_in_process_action_pre_cancel_keeps_pending_without_audit_or_result_artifact() {
+async fn opt_in_process_action_pre_cancel_keeps_pending_without_result_output() {
     let executor = ProcessProposingToolExecutor::new();
     let runner = FakeProcessRunner::succeeding();
     let tool = RegisteredTool::new(
@@ -101,7 +83,7 @@ async fn opt_in_process_action_pre_cancel_keeps_pending_without_audit_or_result_
         },
     )
     .await;
-    let projection_before = runtime.ledger_projection().await;
+    let sequence_before = runtime.inner.session.lock().await.next_sequence();
     let token = CancellationToken::new();
     token.cancel();
 
@@ -118,8 +100,10 @@ async fn opt_in_process_action_pre_cancel_keeps_pending_without_audit_or_result_
     assert_eq!(executor.execute_count(), 0);
     assert_eq!(runner.call_count(), 0);
     assert_eq!(runtime.pending_tool_calls().await, vec![pending.clone()]);
-    assert_eq!(runtime.ledger_projection().await, projection_before);
-    assert!(action_audit_records(&runtime).await.is_empty());
+    assert_eq!(
+        runtime.inner.session.lock().await.next_sequence(),
+        sequence_before
+    );
     assert!(
         runtime
             .read_tool_output(pending.id())
@@ -131,7 +115,7 @@ async fn opt_in_process_action_pre_cancel_keeps_pending_without_audit_or_result_
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn opt_in_process_action_runner_cancel_keeps_pending_without_audit_or_result_artifact() {
+async fn opt_in_process_action_runner_cancel_keeps_pending_without_result_output() {
     let executor = ProcessProposingToolExecutor::new();
     let runner = FakeProcessRunner::cancelling();
     let tool = RegisteredTool::new(
@@ -152,7 +136,7 @@ async fn opt_in_process_action_runner_cancel_keeps_pending_without_audit_or_resu
         },
     )
     .await;
-    let projection_before = runtime.ledger_projection().await;
+    let sequence_before = runtime.inner.session.lock().await.next_sequence();
 
     let err = runtime
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
@@ -167,8 +151,10 @@ async fn opt_in_process_action_runner_cancel_keeps_pending_without_audit_or_resu
     assert_eq!(executor.execute_count(), 0);
     assert_eq!(runner.call_count(), 1);
     assert_eq!(runtime.pending_tool_calls().await, vec![pending.clone()]);
-    assert_eq!(runtime.ledger_projection().await, projection_before);
-    assert!(action_audit_records(&runtime).await.is_empty());
+    assert_eq!(
+        runtime.inner.session.lock().await.next_sequence(),
+        sequence_before
+    );
     assert!(
         runtime
             .read_tool_output(pending.id())

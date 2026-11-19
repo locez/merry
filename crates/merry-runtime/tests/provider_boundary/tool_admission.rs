@@ -11,10 +11,7 @@ use crate::support::{
 };
 use merry_core::{RuntimeJournalPayload, ToolCallResultStatus, ToolName, ToolOutputKind};
 use merry_llm::{FinishReason, ModelOutput};
-use merry_runtime::{
-    LedgerFactKind, LedgerProjection, RegisteredTool, Runtime, ToolActionKind, ToolAdmission,
-    ToolExecutionContext,
-};
+use merry_runtime::{RegisteredTool, Runtime, ToolActionKind, ToolAdmission, ToolExecutionContext};
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
@@ -81,32 +78,6 @@ async fn unregistered_pending_tool_name_resolves_failed_with_tool_not_registered
         .expect("unregistered tool failure output read")
         .expect("unregistered tool failure output should be stored");
     assert_eq!(output.kind(), ToolOutputKind::Json);
-    let projection = runtime.ledger_projection().await;
-    assert_eq!(
-        projection.entries(),
-        [
-            LedgerProjection::Lifecycle {
-                sequence: 0,
-                order: 0,
-                kind: LedgerFactKind::SessionStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 1,
-                order: 1,
-                kind: LedgerFactKind::StepStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 3,
-                order: 2,
-                kind: LedgerFactKind::ToolCallPending,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 4,
-                order: 3,
-                kind: LedgerFactKind::ToolCallResolved,
-            },
-        ]
-    );
 
     let continuation_events = collect_step(&runtime, "Continue after missing tool.").await;
     assert_eq!(

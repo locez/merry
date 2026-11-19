@@ -1,7 +1,7 @@
 use crate::support::{
     events::{
         assert_no_artifact_recorded, assert_no_completion, assert_no_failed, event_kind_names,
-        failed_code, failed_sequence,
+        failed_code,
     },
     models::{completed_event_with_finish, completed_outputs_event, model_tool_call},
     runtime::{collect_step, runtime_with_provider},
@@ -11,7 +11,6 @@ use merry_llm::{
     FinishReason, ModelError, ModelEvent, ModelOutput, ProviderErrorKind,
     testing::FakeModelProvider,
 };
-use merry_runtime::{LedgerFactKind, LedgerProjection};
 
 #[tokio::test(flavor = "current_thread")]
 async fn provider_stream_error_emits_failed_without_step_completed() {
@@ -30,14 +29,6 @@ async fn provider_stream_error_emits_failed_without_step_completed() {
     assert_eq!(failed_code(&events), Some("model_protocol"));
     assert_no_artifact_recorded(&events);
     assert_no_completion(&events);
-
-    let failed_sequence = failed_sequence(&events);
-    let projection = runtime.ledger_projection().await;
-    assert!(projection.entries().contains(&LedgerProjection::Lifecycle {
-        sequence: failed_sequence,
-        order: 2,
-        kind: LedgerFactKind::Failed
-    }));
 }
 
 #[tokio::test(flavor = "current_thread")]

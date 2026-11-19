@@ -11,7 +11,6 @@ use merry_core::{
     TrajectoryRecordDetails, TrajectoryRecordKind, TrajectoryRecordStatus,
 };
 use merry_llm::{FinishReason, ModelOutput, testing::FakeModelProvider};
-use merry_runtime::{LedgerFactKind, LedgerProjection};
 
 #[tokio::test(flavor = "current_thread")]
 async fn failed_tool_result_status_diagnostic_and_content_are_compiled_without_runtime_failed_event()
@@ -72,7 +71,7 @@ async fn failed_tool_result_status_diagnostic_and_content_are_compiled_without_r
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn t6_failure_links_journal_output_ledger_and_trajectory() {
+async fn t6_failure_links_journal_output_and_trajectory() {
     let provider = FakeModelProvider::new(vec![Ok(completed_outputs_event(
         vec![ModelOutput::tool_call(model_tool_call())],
         FinishReason::ToolCalls,
@@ -120,33 +119,6 @@ async fn t6_failure_links_journal_output_ledger_and_trajectory() {
             .await
             .expect("failure output read"),
         Some(ToolOutput::json(r#"{"stderr":"permission denied"}"#))
-    );
-
-    let projection = runtime.ledger_projection().await;
-    assert_eq!(
-        projection.entries(),
-        [
-            LedgerProjection::Lifecycle {
-                sequence: 0,
-                order: 0,
-                kind: LedgerFactKind::SessionStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 1,
-                order: 1,
-                kind: LedgerFactKind::StepStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 3,
-                order: 2,
-                kind: LedgerFactKind::ToolCallPending,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 4,
-                order: 3,
-                kind: LedgerFactKind::ToolCallResolved,
-            },
-        ]
     );
 
     let pending_sequence = pending_events

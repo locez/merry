@@ -10,10 +10,9 @@ use crate::support::{
 use merry_core::{RuntimeJournalPayload, ToolCallResultStatus, ToolName, ToolOutput};
 use merry_llm::{FinishReason, ModelOutput, ModelToolCall, testing::FakeModelProvider};
 use merry_runtime::{
-    LedgerFactKind, LedgerProjection, ProcessActionIntent, ProcessExitStatus, ProcessRunner,
-    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
-    RegisteredTool, Runtime, SkillCatalog, SkillMetadata, ToolExecutionContext,
-    process_command_tool,
+    ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
+    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, RegisteredTool, Runtime,
+    SkillCatalog, SkillMetadata, ToolExecutionContext, process_command_tool,
 };
 use serde_json::{Map, Value, json};
 use std::{path::PathBuf, sync::Arc};
@@ -167,32 +166,6 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
         Some(ToolOutput::text("search result\n"))
     );
     assert_eq!(executor.calls(), vec![pending.clone()]);
-    let projection = runtime.ledger_projection().await;
-    assert_eq!(
-        projection.entries(),
-        [
-            LedgerProjection::Lifecycle {
-                sequence: 0,
-                order: 0,
-                kind: LedgerFactKind::SessionStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 1,
-                order: 1,
-                kind: LedgerFactKind::StepStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 3,
-                order: 2,
-                kind: LedgerFactKind::ToolCallPending,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 4,
-                order: 3,
-                kind: LedgerFactKind::ToolCallResolved,
-            },
-        ]
-    );
 
     let continuation_events = collect_step(&runtime, "Continue with result.").await;
     assert_eq!(
@@ -351,31 +324,5 @@ async fn execute_tool_domain_failure_resolves_failed_without_runtime_failed() {
             .await
             .expect("domain failure output read"),
         Some(ToolOutput::json(r#"{"ok":false}"#))
-    );
-    let projection = runtime.ledger_projection().await;
-    assert_eq!(
-        projection.entries(),
-        [
-            LedgerProjection::Lifecycle {
-                sequence: 0,
-                order: 0,
-                kind: LedgerFactKind::SessionStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 1,
-                order: 1,
-                kind: LedgerFactKind::StepStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 3,
-                order: 2,
-                kind: LedgerFactKind::ToolCallPending,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 4,
-                order: 3,
-                kind: LedgerFactKind::ToolCallResolved,
-            },
-        ]
     );
 }

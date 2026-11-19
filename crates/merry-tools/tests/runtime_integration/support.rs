@@ -9,9 +9,7 @@ pub(super) use merry_llm::{
     ModelStreamContext, ModelToolCall, ModelToolCallId, ModelToolResultContent, ToolArguments,
     testing::FakeModelProvider,
 };
-pub(super) use merry_runtime::{
-    LedgerFactKind, LedgerProjection, Runtime, StepContext, StepInput, ToolExecutionContext,
-};
+pub(super) use merry_runtime::{Runtime, StepContext, StepInput, ToolExecutionContext};
 pub(super) use merry_tools::{
     APPLY_PATCH_TOOL, READ_TEXT_TOOL, WorkspaceTools, WorkspaceToolsConfig,
 };
@@ -371,19 +369,6 @@ pub(super) fn assert_succeeded_json_result(events: &[RuntimeJournalEvent]) {
     assert_tool_resolved_only(events, result);
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
     assert!(result.diagnostic().is_none());
-}
-
-pub(super) fn lifecycle_kinds(
-    projection: &merry_runtime::LedgerProjectionSnapshot,
-) -> Vec<LedgerFactKind> {
-    projection
-        .entries()
-        .iter()
-        .filter_map(|entry| match entry {
-            LedgerProjection::Lifecycle { kind, .. } => Some(*kind),
-            LedgerProjection::Fact { .. } => None,
-        })
-        .collect()
 }
 
 pub(super) fn assert_successful_patch_content_does_not_leak_internal_metadata(json: &str) {

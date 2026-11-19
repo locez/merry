@@ -31,7 +31,7 @@ async fn cancelling_unregistered_tool_while_waiting_to_submit_keeps_pending() {
     initial_session_guard
         .record_test_tool_call_pending(pending.clone())
         .expect("pending call should record");
-    let projection_before = initial_session_guard.ledger_projection();
+    let sequence_before = initial_session_guard.next_sequence();
 
     let token = CancellationToken::new();
     let execute_runtime = runtime.clone();
@@ -79,7 +79,10 @@ async fn cancelling_unregistered_tool_while_waiting_to_submit_keeps_pending() {
             if cancelled == call_id
     ));
     assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
-    assert_eq!(runtime.ledger_projection().await, projection_before);
+    assert_eq!(
+        runtime.inner.session.lock().await.next_sequence(),
+        sequence_before
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -105,7 +108,7 @@ async fn cancelling_registered_tool_after_success_before_submit_keeps_pending() 
     initial_session_guard
         .record_test_tool_call_pending(pending.clone())
         .expect("pending call should record");
-    let projection_before = initial_session_guard.ledger_projection();
+    let sequence_before = initial_session_guard.next_sequence();
 
     let token = CancellationToken::new();
     let execute_runtime = runtime.clone();
@@ -154,7 +157,10 @@ async fn cancelling_registered_tool_after_success_before_submit_keeps_pending() 
             if cancelled == call_id
     ));
     assert_eq!(runtime.pending_tool_calls().await, vec![pending]);
-    assert_eq!(runtime.ledger_projection().await, projection_before);
+    assert_eq!(
+        runtime.inner.session.lock().await.next_sequence(),
+        sequence_before
+    );
     assert!(
         runtime
             .read_tool_output(&call_id)

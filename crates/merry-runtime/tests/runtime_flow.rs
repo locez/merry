@@ -59,14 +59,6 @@ async fn collect_step(runtime: &Runtime, text: &str) -> Vec<RuntimeJournalEvent>
 }
 
 #[track_caller]
-fn assert_projection_unchanged(
-    before: &merry_runtime::LedgerProjectionSnapshot,
-    after: &merry_runtime::LedgerProjectionSnapshot,
-) {
-    assert_eq!(before, after);
-}
-
-#[track_caller]
 fn assert_sequences(events: &[RuntimeJournalEvent], expected: &[u64]) {
     assert_eq!(
         events
@@ -174,13 +166,19 @@ async fn submit_tool_result_for_unknown_call_does_not_mutate_session() {
         .build()
         .expect("runtime should build");
     let result = tool_result("unknown-call");
-    let before = runtime.ledger_projection().await;
+    let before = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     let err = runtime
         .submit_tool_result(result.clone(), ToolOutput::text("not recorded\n"))
         .await
         .expect_err("unknown tool call should be rejected");
-    let after = runtime.ledger_projection().await;
+    let after = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     assert!(matches!(
         err,
@@ -189,7 +187,7 @@ async fn submit_tool_result_for_unknown_call_does_not_mutate_session() {
             call_id
         } if rejected_session == session_id() && call_id == tool_call_id("unknown-call")
     ));
-    assert_projection_unchanged(&before, &after);
+    assert_eq!(before, after);
     assert!(runtime.pending_tool_calls().await.is_empty());
     assert!(
         runtime
@@ -236,14 +234,20 @@ async fn execute_tool_result_for_unknown_call_does_not_mutate_session() {
         ))
         .build()
         .expect("runtime should build");
-    let before = runtime.ledger_projection().await;
+    let before = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
     let unknown = tool_call_id("unknown-execute-call");
 
     let err = runtime
         .execute_tool_call(&unknown, ToolExecutionContext::default())
         .await
         .expect_err("unknown tool call should be rejected");
-    let after = runtime.ledger_projection().await;
+    let after = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     assert!(matches!(
         err,
@@ -252,7 +256,7 @@ async fn execute_tool_result_for_unknown_call_does_not_mutate_session() {
             call_id
         } if rejected_session == session_id() && call_id == unknown
     ));
-    assert_projection_unchanged(&before, &after);
+    assert_eq!(before, after);
     assert!(runtime.pending_tool_calls().await.is_empty());
 }
 

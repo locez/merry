@@ -105,19 +105,7 @@ async fn opt_in_apply_patch_tool_applies_patch_and_records_artifact_before_resol
         "alpha\nnew\nomega\n"
     );
     assert_succeeded_json_result(&execution_events);
-    let lifecycle = lifecycle_kinds(&runtime.ledger_projection().await);
-    let audit_indexes = lifecycle
-        .iter()
-        .enumerate()
-        .filter_map(|(index, kind)| (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index))
-        .collect::<Vec<_>>();
-    assert_eq!(audit_indexes.len(), 2);
-    let resolved_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
-        .expect("resolution lifecycle should exist");
-    assert!(audit_indexes[0] < audit_indexes[1]);
-    assert!(audit_indexes[1] < resolved_index);
+    assert!(runtime.pending_tool_calls().await.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -137,8 +125,6 @@ async fn opt_in_apply_patch_tool_adds_new_file_through_runtime() {
         "alpha\nbeta\n"
     );
     assert_succeeded_json_result(&execution_events);
-    let lifecycle = lifecycle_kinds(&runtime.ledger_projection().await);
-    assert!(lifecycle.contains(&LedgerFactKind::ToolCallResolved));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -327,8 +313,6 @@ async fn opt_in_apply_patch_tool_deletes_file_and_reports_the_operation() {
         temp.path().join("dir").is_dir(),
         "deleting a file must leave its parent directory in place"
     );
-    let lifecycle = lifecycle_kinds(&runtime.ledger_projection().await);
-    assert!(lifecycle.contains(&LedgerFactKind::ToolCallResolved));
 
     // The provider-visible result is what the model sees, so it must name the
     // removal instead of leaving a delete and an emptied file indistinguishable.

@@ -12,7 +12,7 @@ use merry_llm::{
     GenerationConfig, ModelEvent, ModelMessageRole, ModelRetryPolicy, ParallelToolCalls,
     testing::FakeModelProvider,
 };
-use merry_runtime::{LedgerFactKind, LedgerProjection, Runtime, StepContext, StepInput};
+use merry_runtime::{Runtime, StepContext, StepInput};
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::mpsc, time::timeout};
 use tokio_util::sync::CancellationToken;
@@ -49,33 +49,6 @@ async fn runtime_step_with_provider_compiles_user_text_request_and_records_assis
         vec![0, 1, 2, 3, 4, 5]
     );
     assert_eq!(assistant_output_text(&events), "model result");
-
-    let projection = runtime.ledger_projection().await;
-    assert_eq!(
-        projection.entries(),
-        [
-            LedgerProjection::Lifecycle {
-                sequence: 0,
-                order: 0,
-                kind: LedgerFactKind::SessionStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 1,
-                order: 1,
-                kind: LedgerFactKind::StepStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 4,
-                order: 2,
-                kind: LedgerFactKind::AssistantOutputRecorded,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 5,
-                order: 3,
-                kind: LedgerFactKind::StepCompleted,
-            },
-        ]
-    );
 
     let requests = provider.recorded_requests();
     assert_eq!(requests.len(), 1);

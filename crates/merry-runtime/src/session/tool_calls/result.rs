@@ -1,7 +1,6 @@
 use super::SessionState;
 use crate::{
     ActionExecutionEvidence, RuntimeError, ToolExecutionOutcome,
-    ledger::{LedgerFactKind, LedgerUpdateKind},
     session::transcript::{ToolResultPayload, ToolResultPromptProjection},
     tool::ToolResultContent,
 };
@@ -60,13 +59,12 @@ impl SessionState {
         if let Some(started) = self.record_session_started_if_needed() {
             events.push(started);
         }
-        events.push(self.record_event(
-            RuntimeJournalPayload::FinalOutputRecorded {
+        events.push(
+            self.record_event(RuntimeJournalPayload::FinalOutputRecorded {
                 call_id: call_id.clone(),
                 json: json.clone(),
-            },
-            LedgerFactKind::FinalOutputRecorded,
-        ));
+            }),
+        );
 
         Ok((crate::FinalOutput::new(call_id, json), events))
     }
@@ -118,12 +116,9 @@ impl SessionState {
             events.push(started);
         }
 
-        events.push(self.record_event(
-            RuntimeJournalPayload::ToolCallResolved {
-                result: result.clone(),
-            },
-            LedgerFactKind::ToolCallResolved,
-        ));
+        events.push(self.record_event(RuntimeJournalPayload::ToolCallResolved {
+            result: result.clone(),
+        }));
         if let Some(event) = self.skill_used_event_for_read(&pending_for_skill_event, &result) {
             events.push(event);
         }
@@ -234,9 +229,5 @@ impl SessionState {
             }
         }
         Ok(())
-    }
-
-    pub(super) fn record_tool_result_observation(&mut self, observation: LedgerUpdateKind) {
-        self.ledger.append(observation);
     }
 }

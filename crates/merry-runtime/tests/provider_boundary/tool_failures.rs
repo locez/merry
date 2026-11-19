@@ -7,8 +7,8 @@ use crate::support::{
 use merry_core::{PendingToolCall, ToolCallResult, ToolOutput, ToolOutputKind};
 use merry_llm::{FinishReason, ModelOutput};
 use merry_runtime::{
-    ContextSummary, LedgerFactKind, LedgerProjection, RegisteredTool, Runtime,
-    ToolExecutionContext, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+    ContextSummary, RegisteredTool, Runtime, ToolExecutionContext, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture,
 };
 use std::sync::{Arc, Mutex};
 
@@ -126,33 +126,19 @@ async fn executor_infrastructure_error_keeps_pending_without_artifact_or_result(
         vec![0, 1, 2, 3]
     );
     let pending = pending_tool_call(&pending_events).clone();
-    let before = runtime.ledger_projection().await;
-    assert_eq!(
-        before.entries(),
-        [
-            LedgerProjection::Lifecycle {
-                sequence: 0,
-                order: 0,
-                kind: LedgerFactKind::SessionStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 1,
-                order: 1,
-                kind: LedgerFactKind::StepStarted,
-            },
-            LedgerProjection::Lifecycle {
-                sequence: 3,
-                order: 2,
-                kind: LedgerFactKind::ToolCallPending,
-            },
-        ]
-    );
+    let before = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     let err = runtime
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
         .expect_err("infrastructure failure should not resolve the pending call");
-    let after = runtime.ledger_projection().await;
+    let after = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     assert!(matches!(
         err,
@@ -185,13 +171,19 @@ async fn execute_tool_blank_text_outcome_keeps_pending_without_output_or_result(
     );
     let pending_events = collect_step(&runtime, "Search notes.").await;
     let pending = pending_tool_call(&pending_events).clone();
-    let before = runtime.ledger_projection().await;
+    let before = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     let err = runtime
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
         .expect_err("blank executor text should not resolve the pending call");
-    let after = runtime.ledger_projection().await;
+    let after = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     assert!(matches!(
         err,
@@ -228,13 +220,19 @@ async fn execute_tool_blank_json_outcome_keeps_pending_without_output_or_result(
     );
     let pending_events = collect_step(&runtime, "Search notes.").await;
     let pending = pending_tool_call(&pending_events).clone();
-    let before = runtime.ledger_projection().await;
+    let before = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     let err = runtime
         .execute_tool_call(pending.id(), ToolExecutionContext::default())
         .await
         .expect_err("blank executor JSON should not resolve the pending call");
-    let after = runtime.ledger_projection().await;
+    let after = runtime
+        .session_transcript()
+        .await
+        .expect("transcript should read");
 
     assert!(matches!(
         err,

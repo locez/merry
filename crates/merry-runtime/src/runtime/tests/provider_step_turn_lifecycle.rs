@@ -1,5 +1,4 @@
 use crate::{
-    ledger::{LedgerFactKind, LedgerProjection},
     runtime::{
         Runtime,
         tests::support::{
@@ -127,26 +126,6 @@ async fn one_slot_commentary_observes_atomically_committed_tool_response() {
         3,
         "user input, commentary, and tool call must commit before commentary is observable"
     );
-    assert!(session.ledger_projection().entries().iter().any(|entry| {
-        matches!(
-            entry,
-            LedgerProjection::Lifecycle {
-                sequence: 3,
-                kind: LedgerFactKind::AssistantOutputRecorded,
-                ..
-            }
-        )
-    }));
-    assert!(session.ledger_projection().entries().iter().any(|entry| {
-        matches!(
-            entry,
-            LedgerProjection::Lifecycle {
-                sequence: 4,
-                kind: LedgerFactKind::ToolCallPending,
-                ..
-            }
-        )
-    }));
 
     drop(stream);
     drop(session);

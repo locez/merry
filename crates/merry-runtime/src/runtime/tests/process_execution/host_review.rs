@@ -1,8 +1,6 @@
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, PermissionReviewMode, RegisteredTool, RuntimeModelRole,
     ToolActionKind, ToolExecutionContext,
-    action_audit::ActionAuditStatus,
-    action_policy::{ActionPolicyDisposition, ActionRiskTier},
     runtime::tests::support::{
         common::{named_model, permission_review_completed_event},
         model_provider::{RecordingModelProvider, ScriptedModelProviderResponse},
@@ -10,8 +8,8 @@ use crate::{
             FakeProcessRunner, ProcessProposingToolExecutor, StaticPermissionAdmissionSource,
         },
         tool_helpers::{
-            action_audit_records, policy_tool_spec,
-            register_policy_pending_registered_tool_with_builder, resolved_tool_result,
+            policy_tool_spec, register_policy_pending_registered_tool_with_builder,
+            resolved_tool_result,
         },
     },
 };
@@ -60,14 +58,6 @@ async fn fully_trusted_host_process_allows_high_risk_argv_without_review() {
         resolved_tool_result(&events).status(),
         ToolCallResultStatus::Succeeded
     );
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 2);
-    assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
-    let policy = audits[1]
-        .policy()
-        .expect("trusted host execution should keep an action policy audit");
-    assert_eq!(policy.risk_tier(), ActionRiskTier::ProcessHigh);
-    assert_eq!(policy.disposition(), ActionPolicyDisposition::Allow);
 }
 
 #[tokio::test(flavor = "current_thread")]

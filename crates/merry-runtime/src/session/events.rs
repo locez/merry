@@ -1,5 +1,4 @@
 use super::SessionState;
-use crate::ledger::LedgerFactKind;
 use merry_core::{ErrorInfo, RuntimeJournalEvent, RuntimeJournalPayload};
 
 impl SessionState {
@@ -9,47 +8,33 @@ impl SessionState {
         }
 
         self.session_started = true;
-        Some(self.record_event(
-            RuntimeJournalPayload::SessionStarted,
-            LedgerFactKind::SessionStarted,
-        ))
+        Some(self.record_event(RuntimeJournalPayload::SessionStarted))
     }
 
     pub(crate) fn record_step_started(&mut self) -> RuntimeJournalEvent {
-        self.record_event(
-            RuntimeJournalPayload::StepStarted,
-            LedgerFactKind::StepStarted,
-        )
+        self.record_event(RuntimeJournalPayload::StepStarted)
     }
 
     pub(crate) fn record_model_retry_event(
         &mut self,
         payload: RuntimeJournalPayload,
     ) -> RuntimeJournalEvent {
-        self.record_event(payload, LedgerFactKind::ModelRetry)
+        self.record_event(payload)
     }
 
     pub(crate) fn record_transient_event(
         &mut self,
         payload: RuntimeJournalPayload,
     ) -> RuntimeJournalEvent {
-        let sequence = self.next_sequence;
-        self.next_sequence += 1;
-        RuntimeJournalEvent::new(self.session_id.clone(), sequence, payload)
+        self.record_event(payload)
     }
 
     pub(crate) fn record_step_completed(&mut self) -> RuntimeJournalEvent {
-        self.record_event(
-            RuntimeJournalPayload::StepCompleted,
-            LedgerFactKind::StepCompleted,
-        )
+        self.record_event(RuntimeJournalPayload::StepCompleted)
     }
 
     pub(crate) fn record_compaction_started(&mut self) -> RuntimeJournalEvent {
-        self.record_event(
-            RuntimeJournalPayload::CompactionStarted,
-            LedgerFactKind::CompactionStarted,
-        )
+        self.record_event(RuntimeJournalPayload::CompactionStarted)
     }
 
     pub(crate) fn record_compaction_completed(
@@ -57,36 +42,22 @@ impl SessionState {
         checkpoint_id: String,
         covered_history_item_count: usize,
     ) -> RuntimeJournalEvent {
-        self.record_event(
-            RuntimeJournalPayload::CompactionCompleted {
-                checkpoint_id,
-                covered_history_item_count,
-            },
-            LedgerFactKind::CompactionCompleted,
-        )
+        self.record_event(RuntimeJournalPayload::CompactionCompleted {
+            checkpoint_id,
+            covered_history_item_count,
+        })
     }
 
     pub(crate) fn record_cancelled(&mut self, diagnostic: ErrorInfo) -> RuntimeJournalEvent {
-        self.record_event(
-            RuntimeJournalPayload::Cancelled { diagnostic },
-            LedgerFactKind::Cancelled,
-        )
+        self.record_event(RuntimeJournalPayload::Cancelled { diagnostic })
     }
 
     pub(crate) fn record_failed(&mut self, diagnostic: ErrorInfo) -> RuntimeJournalEvent {
-        self.record_event(
-            RuntimeJournalPayload::Failed { diagnostic },
-            LedgerFactKind::Failed,
-        )
+        self.record_event(RuntimeJournalPayload::Failed { diagnostic })
     }
 
-    pub(super) fn record_event(
-        &mut self,
-        payload: RuntimeJournalPayload,
-        fact_kind: LedgerFactKind,
-    ) -> RuntimeJournalEvent {
+    pub(super) fn record_event(&mut self, payload: RuntimeJournalPayload) -> RuntimeJournalEvent {
         let sequence = self.next_sequence;
-        self.ledger.record(sequence, fact_kind);
         self.next_sequence += 1;
         RuntimeJournalEvent::new(self.session_id.clone(), sequence, payload)
     }

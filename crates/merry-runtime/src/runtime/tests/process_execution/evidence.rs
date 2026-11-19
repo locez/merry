@@ -1,16 +1,13 @@
 use crate::{
-    ActionExecutionEvidence, ActionProposalEvidence, ProcessActionIntent, ProcessEnvPolicy,
-    ProcessExecutionEvidence, ProcessExitStatus, ProcessPermissionProfileId, RegisteredTool,
-    ToolActionKind, ToolExecutionContext,
-    action_audit::ActionAuditStatus,
-    action_policy::{ActionPolicyDisposition, ActionRiskTier},
-    ledger::{LedgerFactKind, LedgerProjection, LedgerScope},
+    ActionExecutionEvidence, ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence,
+    ProcessExitStatus, ProcessPermissionProfileId, RegisteredTool, ToolActionKind,
+    ToolExecutionContext,
     runtime::tests::support::{
         process::{FakeProcessRunner, ProcessProposingToolExecutor},
         tool_helpers::{
-            action_audit_records, event_kind_names_for_tool_execution, lifecycle_kinds,
-            policy_tool_spec, register_policy_pending_registered_tool_with_builder,
-            resolved_artifact_json, resolved_tool_result,
+            event_kind_names_for_tool_execution, policy_tool_spec,
+            register_policy_pending_registered_tool_with_builder, resolved_artifact_json,
+            resolved_tool_result,
         },
     },
 };
@@ -94,96 +91,7 @@ async fn opt_in_process_action_uses_runner_and_records_execution_audit() {
     );
     assert!(payload.get("provider").is_none());
     assert!(payload.get("wire").is_none());
-
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 2);
-    assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
-    assert_eq!(audits[0].tool_call_id(), pending.id());
-    assert_eq!(audits[0].tool_name(), pending.name());
-    assert_eq!(audits[0].action_kind(), ToolActionKind::CommandExec);
-    assert!(audits[0].policy().is_none());
-    let proposal = audits[0]
-        .proposal()
-        .expect("proposed audit should include process proposal");
-    let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence() else {
-        panic!("proposed audit should record process action intent");
-    };
-    assert_eq!(runner.observed_intents(), vec![intent.clone()]);
-
-    assert_eq!(audits[1].status(), ActionAuditStatus::Executed);
-    assert_eq!(audits[1].tool_call_id(), pending.id());
-    assert_eq!(audits[1].tool_name(), pending.name());
-    assert_eq!(audits[1].action_kind(), ToolActionKind::CommandExec);
-    assert!(audits[1].proposal().is_none());
-    let policy = audits[1]
-        .policy()
-        .expect("executed audit should include process allow policy");
-    assert_eq!(policy.risk_tier(), ActionRiskTier::ProcessLow);
-    assert_eq!(policy.disposition(), ActionPolicyDisposition::Allow);
-    let ActionExecutionEvidence::ProcessAction(evidence) = audits[1]
-        .execution_evidence()
-        .expect("executed audit should include process evidence")
-    else {
-        panic!("process action should record process execution evidence");
-    };
-    assert_eq!(evidence.status(), ProcessExitStatus::Exited(0));
-    assert_eq!(evidence.stdout_bytes(), "runtime tests passed\n".len());
-    assert!(!evidence.stdout_truncated());
-    assert_eq!(evidence.stderr_bytes(), 0);
-    assert!(!evidence.stderr_truncated());
-    assert_eq!(
-        evidence.permission_profile_id().as_str(),
-        "process.read_only"
-    );
-    assert!(evidence.matches_intent(intent));
-
-    let projection = runtime.ledger_projection().await;
-    let lifecycle = lifecycle_kinds(&projection);
-    let audit_indexes = lifecycle
-        .iter()
-        .enumerate()
-        .filter_map(|(index, kind)| (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index))
-        .collect::<Vec<_>>();
-    assert_eq!(audit_indexes.len(), 2);
-    let resolved_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
-        .expect("resolution lifecycle should be recorded");
-    assert!(audit_indexes[0] < audit_indexes[1]);
-    assert!(audit_indexes[1] < resolved_index);
-
-    let resolved_order = projection
-        .entries()
-        .iter()
-        .find_map(|entry| match entry {
-            LedgerProjection::Lifecycle {
-                kind: LedgerFactKind::ToolCallResolved,
-                order,
-                ..
-            } => Some(*order),
-            LedgerProjection::Lifecycle { .. } | LedgerProjection::Fact { .. } => None,
-        })
-        .expect("resolution lifecycle should be projected");
-    let (observation_order, observation_scope, observation_text) = projection
-        .entries()
-        .iter()
-        .find_map(|entry| match entry {
-            LedgerProjection::Fact {
-                order, scope, text, ..
-            } if text.starts_with("process action `rustc --version`") => {
-                Some((*order, *scope, text.as_str()))
-            }
-            LedgerProjection::Fact { .. } | LedgerProjection::Lifecycle { .. } => None,
-        })
-        .expect("process result should be reduced into a compact ledger observation");
-    assert_eq!(observation_scope, LedgerScope::Tool);
-    assert!(observation_order < resolved_order);
-    assert!(observation_text.contains("exit code 0"));
-    assert!(observation_text.contains("permission_profile=process.read_only"));
-    assert!(observation_text.contains("stdout_bytes=21"));
-    assert!(observation_text.contains("stderr_bytes=0"));
-    assert!(observation_text.contains(&format!("call_id={}", result.call_id().as_str())));
-    assert!(!observation_text.contains("runtime tests passed"));
+    assert_eq!(runner.observed_intents().len(), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]

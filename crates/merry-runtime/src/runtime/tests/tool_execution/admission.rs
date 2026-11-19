@@ -1,11 +1,6 @@
 use crate::{
     PermissionReviewMode,
-    action_audit::ActionAuditStatus,
-    action_policy::{
-        ActionPolicyDecision, ActionPolicyDisposition, ActionRiskTier, DefaultActionPolicy,
-    },
-    ledger::LedgerFactKind,
-    process::ProcessEnvPolicy,
+    action_policy::{ActionPolicyDecision, ActionRiskTier, DefaultActionPolicy},
     runtime::{
         APPLY_PATCH_TOOL_NAME, DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
         admit_action_to_generic_executor,
@@ -13,10 +8,9 @@ use crate::{
             process::ProcessProposingToolExecutor,
             tool_executors::{ProposingToolExecutor, SuccessfulToolExecutor},
             tool_helpers::{
-                action_audit_records, assert_lifecycle_order,
                 assert_sanitized_policy_denial_content, denied_action_content,
-                event_kind_names_for_tool_execution, lifecycle_kinds, policy_pending_tool_call,
-                policy_tool_spec, register_policy_pending_registered_tool,
+                event_kind_names_for_tool_execution, policy_pending_tool_call, policy_tool_spec,
+                register_policy_pending_registered_tool,
                 register_policy_pending_registered_tool_with_builder, register_policy_pending_tool,
                 resolved_tool_result,
             },
@@ -315,35 +309,10 @@ async fn workspace_write_tool_is_denied_before_executor_and_records_sanitized_fa
 
     let content = denied_action_content(&runtime, &events).await;
     assert_sanitized_policy_denial_content(&content, "policy_write");
-
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 1);
-    let audit = &audits[0];
-    assert_eq!(audit.id().as_str(), "action-audit-00000000000000000000");
-    assert_eq!(audit.order(), 0);
-    assert_eq!(audit.tool_call_id(), pending.id());
-    assert_eq!(audit.tool_name(), pending.name());
-    assert_eq!(audit.action_kind(), ToolActionKind::WorkspaceWrite);
-    assert_eq!(audit.status(), ActionAuditStatus::Denied);
-    let policy = audit.policy().expect("denied audit should include policy");
-    assert_eq!(policy.disposition(), ActionPolicyDisposition::Deny);
-    assert_eq!(policy.risk_tier(), ActionRiskTier::EditElevated);
-    assert_eq!(
-        policy.reason(),
-        "workspace write tool actions are denied by default policy"
-    );
-
-    let projection = runtime.ledger_projection().await;
-    let lifecycle = lifecycle_kinds(&projection);
-    assert_lifecycle_order(
-        &lifecycle,
-        LedgerFactKind::ActionAuditRecorded,
-        LedgerFactKind::ToolCallResolved,
-    );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn workspace_write_tool_with_proposal_records_proposed_before_denied_and_resolution() {
+async fn workspace_write_tool_with_proposal_is_denied_without_execute() {
     let executor = ProposingToolExecutor::immediate();
     let tool = RegisteredTool::new(
         policy_tool_spec("policy_write_proposed"),
@@ -374,58 +343,7 @@ async fn workspace_write_tool_with_proposal_records_proposed_before_denied_and_r
         &denied_action_content(&runtime, &events).await,
         "policy_write_proposed",
     );
-
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 2);
-    assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
-    assert_eq!(audits[0].tool_call_id(), pending.id());
-    assert_eq!(audits[0].tool_name(), pending.name());
-    assert_eq!(audits[0].action_kind(), ToolActionKind::WorkspaceWrite);
-    assert!(audits[0].policy().is_none());
-    let proposal = audits[0]
-        .proposal()
-        .expect("proposed audit should include proposal evidence");
-    assert_eq!(proposal.tool_call_id(), pending.id());
-    assert_eq!(proposal.tool_name(), pending.name());
-    assert_eq!(proposal.action_kind(), ToolActionKind::WorkspaceWrite);
-    assert_eq!(proposal.label(), "workspace patch");
-    assert_eq!(proposal.subject(), "notes/proposed.txt");
-    assert!(proposal.summary().contains("notes/proposed.txt"));
-    let ActionProposalEvidence::WorkspacePatch(patch) = proposal.evidence() else {
-        panic!("workspace write proposal should record workspace patch evidence");
-    };
-    assert_eq!(patch.relative_path(), "notes/proposed.txt");
-    assert_eq!(patch.preimage_bytes(), 3);
-    assert_eq!(patch.replacement_bytes(), 7);
-    assert_eq!(patch.file_bytes_before(), 20);
-    assert_eq!(patch.file_bytes_after(), 24);
-    assert_eq!(patch.file_fingerprint_before(), "fnv1a64:0000000000000001");
-    assert_eq!(patch.file_fingerprint_after(), "fnv1a64:0000000000000002");
-
-    assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
-    assert_eq!(audits[1].tool_call_id(), pending.id());
-    assert_eq!(audits[1].tool_name(), pending.name());
-    assert!(audits[1].proposal().is_none());
-    let denied_policy = audits[1]
-        .policy()
-        .expect("denied audit should include policy");
-    assert_eq!(denied_policy.risk_tier(), ActionRiskTier::EditLow);
-    assert_eq!(denied_policy.disposition(), ActionPolicyDisposition::Deny);
-
-    let projection = runtime.ledger_projection().await;
-    let lifecycle = lifecycle_kinds(&projection);
-    let audit_indexes = lifecycle
-        .iter()
-        .enumerate()
-        .filter_map(|(index, kind)| (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index))
-        .collect::<Vec<_>>();
-    assert_eq!(audit_indexes.len(), 2);
-    let resolved_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
-        .expect("resolution lifecycle should be recorded");
-    assert!(audit_indexes[0] < audit_indexes[1]);
-    assert!(audit_indexes[1] < resolved_index);
+    assert!(runtime.pending_tool_calls().await.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -451,11 +369,7 @@ async fn workspace_write_tool_without_proposal_opt_in_does_not_call_propose() {
         &denied_action_content(&runtime, &events).await,
         "policy_write_proposal_disabled",
     );
-
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 1);
-    assert_eq!(audits[0].status(), ActionAuditStatus::Denied);
-    assert!(audits[0].proposal().is_none());
+    assert!(runtime.pending_tool_calls().await.is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -477,17 +391,6 @@ async fn command_exec_tool_is_denied_before_executor() {
 
     assert_eq!(executor.propose_count(), 0);
     assert_eq!(executor.execute_count(), 0);
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 1);
-    assert_eq!(audits[0].action_kind(), ToolActionKind::CommandExec);
-    assert_eq!(audits[0].status(), ActionAuditStatus::Denied);
-    assert_eq!(
-        audits[0]
-            .policy()
-            .expect("denied audit should include policy")
-            .disposition(),
-        ActionPolicyDisposition::Deny
-    );
     let content = denied_action_content(&runtime, &events).await;
     assert_sanitized_policy_denial_content(&content, "policy_command");
     assert_eq!(
@@ -501,7 +404,7 @@ async fn command_exec_tool_is_denied_before_executor() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn command_exec_with_process_proposal_records_proposed_then_denied_without_execute() {
+async fn command_exec_with_process_proposal_is_denied_without_execute() {
     let executor =
         ProcessProposingToolExecutor::with_argv(["cargo", "test", "-p", "merry-runtime"]);
     let tool = RegisteredTool::new(
@@ -540,57 +443,6 @@ async fn command_exec_with_process_proposal_records_proposed_then_denied_without
             .code(),
         DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED
     );
-
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 2);
-    assert_eq!(audits[0].status(), ActionAuditStatus::Proposed);
-    assert_eq!(audits[0].tool_call_id(), pending.id());
-    assert_eq!(audits[0].tool_name(), pending.name());
-    assert_eq!(audits[0].action_kind(), ToolActionKind::CommandExec);
-    assert!(audits[0].policy().is_none());
-    let proposal = audits[0]
-        .proposal()
-        .expect("proposed audit should include process proposal");
-    assert_eq!(proposal.action_kind(), ToolActionKind::CommandExec);
-    let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence() else {
-        panic!("command exec proposal should record process action evidence");
-    };
-    assert_eq!(intent.argv(), ["cargo", "test", "-p", "merry-runtime"]);
-    assert_eq!(intent.cwd(), Some("."));
-    assert_eq!(intent.env_policy(), ProcessEnvPolicy::Empty);
-
-    assert_eq!(audits[1].status(), ActionAuditStatus::Denied);
-    assert_eq!(audits[1].tool_call_id(), pending.id());
-    assert_eq!(audits[1].tool_name(), pending.name());
-    assert_eq!(audits[1].action_kind(), ToolActionKind::CommandExec);
-    assert!(audits[1].proposal().is_none());
-    let denied_policy = audits[1]
-        .policy()
-        .expect("denied audit should include policy");
-    assert_eq!(
-        denied_policy.risk_tier(),
-        ActionRiskTier::ProcessLocalWorkspaceEffect
-    );
-    assert_eq!(denied_policy.disposition(), ActionPolicyDisposition::Deny);
-    assert_eq!(
-        denied_policy.reason(),
-        "command execution tool actions are denied by default policy"
-    );
-
-    let projection = runtime.ledger_projection().await;
-    let lifecycle = lifecycle_kinds(&projection);
-    let audit_indexes = lifecycle
-        .iter()
-        .enumerate()
-        .filter_map(|(index, kind)| (*kind == LedgerFactKind::ActionAuditRecorded).then_some(index))
-        .collect::<Vec<_>>();
-    assert_eq!(audit_indexes.len(), 2);
-    let resolved_index = lifecycle
-        .iter()
-        .position(|kind| *kind == LedgerFactKind::ToolCallResolved)
-        .expect("resolution lifecycle should be recorded");
-    assert!(audit_indexes[0] < audit_indexes[1]);
-    assert!(audit_indexes[1] < resolved_index);
     assert!(runtime.pending_tool_calls().await.is_empty());
 }
 
@@ -613,17 +465,6 @@ async fn network_tool_is_denied_before_executor() {
 
     assert_eq!(executor.propose_count(), 0);
     assert_eq!(executor.execute_count(), 0);
-    let audits = action_audit_records(&runtime).await;
-    assert_eq!(audits.len(), 1);
-    assert_eq!(audits[0].action_kind(), ToolActionKind::Network);
-    assert_eq!(audits[0].status(), ActionAuditStatus::Denied);
-    assert_eq!(
-        audits[0]
-            .policy()
-            .expect("denied audit should include policy")
-            .disposition(),
-        ActionPolicyDisposition::Deny
-    );
     let content = denied_action_content(&runtime, &events).await;
     assert_sanitized_policy_denial_content(&content, "policy_network");
     assert_eq!(

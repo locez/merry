@@ -1,5 +1,4 @@
 use super::SessionState;
-use crate::ledger::LedgerFactKind;
 use merry_core::{
     PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, ToolCallResult,
     ToolCallResultStatus,
@@ -32,13 +31,10 @@ impl SessionState {
             )
         };
 
-        Some(self.record_event(
-            RuntimeJournalPayload::SkillUsed {
-                skill_name,
-                skill_md_path,
-                tool_call_id: pending.id().clone(),
-            },
-            LedgerFactKind::SkillUsed,
-        ))
+        Some(self.record_event(RuntimeJournalPayload::SkillUsed {
+            skill_name,
+            skill_md_path,
+            tool_call_id: pending.id().clone(),
+        }))
     }
 }

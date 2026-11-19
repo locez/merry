@@ -10,8 +10,6 @@ use super::{
 };
 use crate::{
     ContextEntry, ContextSummary, PlanPersistenceLocation, SessionStoreError, TaskAnchor,
-    TaskLedger,
-    action_audit::ActionAuditRegistry,
     plan::{PersistedPlanState, PlanState},
     session::{
         ModelTurnId, ModelTurnStatus, PromptHistoryProjection, SessionState,
@@ -48,10 +46,6 @@ pub(crate) struct JournalSearchSnapshot {
 struct ReplayedSideState {
     next_sequence: u64,
     session_started: bool,
-    ledger: Vec<crate::ledger::PersistedLedgerEntry>,
-    seen_ledger_orders: BTreeSet<u64>,
-    action_audits: Vec<crate::action_audit::ActionAuditRecord>,
-    seen_audit_orders: BTreeSet<u64>,
     usage: Option<SessionUsage>,
     request_token_calibration: Option<RequestTokenCalibration>,
     task_anchor: Option<JournalTaskAnchor>,
@@ -73,16 +67,6 @@ impl ReplayedSideState {
         }
         if let Some(session_started) = delta.session_started {
             self.session_started = session_started;
-        }
-        for entry in delta.ledger_appended {
-            if self.seen_ledger_orders.insert(entry.order()) {
-                self.ledger.push(entry);
-            }
-        }
-        for record in delta.action_audits_appended {
-            if self.seen_audit_orders.insert(record.order()) {
-                self.action_audits.push(record);
-            }
         }
         if let Some(patch) = delta.usage {
             patch.apply(&mut self.usage);
@@ -289,8 +273,6 @@ pub(crate) async fn session_from_journal(
         session_id: session_id.clone(),
         next_sequence: state.next_sequence,
         session_started: state.session_started,
-        ledger: TaskLedger::from_persisted_entries(state.ledger)
-            .map_err(|_| invalid_document("stored ledger entry is invalid"))?,
         memory_store: crate::memory::MemoryStore::new(),
         skill_catalog: None,
         project_rules: None,
@@ -304,7 +286,6 @@ pub(crate) async fn session_from_journal(
             .map(context_entry_from_journal)
             .collect::<Result<Vec<_>, _>>()?,
         activated_memories: Vec::new(),
-        action_audits: ActionAuditRegistry::from_records(state.action_audits),
         active_plan,
         terminal_plans: state.terminal_plans,
         transcript,
