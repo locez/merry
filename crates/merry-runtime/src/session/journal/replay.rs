@@ -22,7 +22,9 @@ use crate::{
     },
     token_estimate::RequestTokenCalibration,
 };
-use merry_core::{PlanSnapshot, SessionId, SessionToolCatalog, SessionUsage, ToolOutput};
+use merry_core::{
+    PlanSnapshot, SessionId, SessionToolCatalog, SessionUsage, ToolCallResult, ToolOutput,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -45,18 +47,17 @@ pub(crate) struct JournalSearchSnapshot {
 #[derive(Default)]
 struct ReplayedSideState {
     next_sequence: u64,
-    session_started: bool,
+    session_started: Option<bool>,
     usage: Option<SessionUsage>,
     request_token_calibration: Option<RequestTokenCalibration>,
     task_anchor: Option<JournalTaskAnchor>,
     active_plan: Option<PersistedPlanState>,
     terminal_plans: Vec<PlanSnapshot>,
-    external_tool_catalog: Option<SessionToolCatalog>,
     context_entries: Vec<JournalContextEntry>,
-    next_item_id: u64,
+    next_item_id: Option<u64>,
     model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
     model_turn_sequences: BTreeMap<ModelTurnId, u64>,
-    next_model_turn_id: u64,
+    next_model_turn_id: Option<u64>,
     topic: Option<String>,
 }
 
@@ -66,7 +67,7 @@ impl ReplayedSideState {
             self.next_sequence = next_sequence;
         }
         if let Some(session_started) = delta.session_started {
-            self.session_started = session_started;
+            self.session_started = Some(session_started);
         }
         if let Some(patch) = delta.usage {
             patch.apply(&mut self.usage);
@@ -83,14 +84,11 @@ impl ReplayedSideState {
         if let Some(terminal_plans) = delta.terminal_plans {
             self.terminal_plans = terminal_plans;
         }
-        if let Some(catalog) = delta.external_tool_catalog {
-            self.external_tool_catalog = Some(catalog);
-        }
         if let Some(context_entries) = delta.context_entries {
             self.context_entries = context_entries;
         }
         if let Some(next_item_id) = delta.next_item_id {
-            self.next_item_id = next_item_id;
+            self.next_item_id = Some(next_item_id);
         }
         let mut commit_turn_ids = BTreeSet::new();
         for turn in delta.model_turns {
@@ -103,7 +101,7 @@ impl ReplayedSideState {
             }
         }
         if let Some(next_model_turn_id) = delta.next_model_turn_id {
-            self.next_model_turn_id = next_model_turn_id;
+            self.next_model_turn_id = Some(next_model_turn_id);
         }
         if let Some(patch) = delta.topic {
             patch.apply(&mut self.topic);
@@ -144,10 +142,7 @@ pub(crate) async fn session_from_journal(
     let mut transcript_items = Vec::new();
     let mut seen_item_ids = BTreeSet::new();
     let mut compactions = Vec::new();
-    let mut state = ReplayedSideState {
-        next_model_turn_id: 1,
-        ..ReplayedSideState::default()
-    };
+    let mut state = ReplayedSideState::default();
     let mut saw_commit = false;
 
     for record in records.into_iter().skip(1) {
@@ -198,12 +193,31 @@ pub(crate) async fn session_from_journal(
         }
     }
 
+    let derived_next_item_id = transcript_items
+        .iter()
+        .map(|item| item.id().as_u64() + 1)
+        .max()
+        .unwrap_or(0);
+    let next_item_id = state.next_item_id.unwrap_or(derived_next_item_id);
+    let derived_next_model_turn_id = state
+        .model_turns
+        .keys()
+        .map(|id| id.as_u64() + 1)
+        .max()
+        .unwrap_or(1);
+    let next_model_turn_id = state
+        .next_model_turn_id
+        .unwrap_or(derived_next_model_turn_id);
+    let session_started = state
+        .session_started
+        .unwrap_or(state.next_sequence > 0 || !transcript_items.is_empty());
+
     let mut transcript = Transcript::from_journal_parts(
         transcript_items,
-        state.next_item_id,
+        next_item_id,
         state.model_turns,
         state.model_turn_sequences,
-        state.next_model_turn_id,
+        next_model_turn_id,
     )
     .map_err(runtime_error_to_invalid_document)?;
 
@@ -256,11 +270,6 @@ pub(crate) async fn session_from_journal(
         .map_err(runtime_error_to_invalid_document)?;
     let archived_ref_manifest = ArchivedRefManifest::new(archived_refs)
         .map_err(|_| invalid_document("stored archived ref manifest is invalid"))?;
-    let Some(external_tool_catalog) = state.external_tool_catalog else {
-        return Err(invalid_document(
-            "session journal is missing external tool catalog",
-        ));
-    };
     let active_plan = state
         .active_plan
         .map(|persisted| {
@@ -272,7 +281,7 @@ pub(crate) async fn session_from_journal(
     let mut session = SessionState {
         session_id: session_id.clone(),
         next_sequence: state.next_sequence,
-        session_started: state.session_started,
+        session_started,
         memory_store: crate::memory::MemoryStore::new(),
         skill_catalog: None,
         project_rules: None,
@@ -285,6 +294,7 @@ pub(crate) async fn session_from_journal(
             .into_iter()
             .map(context_entry_from_journal)
             .collect::<Result<Vec<_>, _>>()?,
+        construction_context_ids: BTreeSet::new(),
         activated_memories: Vec::new(),
         active_plan,
         terminal_plans: state.terminal_plans,
@@ -293,9 +303,10 @@ pub(crate) async fn session_from_journal(
         resolved_tool_calls,
         usage: state.usage,
         request_token_calibration: state.request_token_calibration,
-        external_tool_catalog,
+        external_tool_catalog: SessionToolCatalog::default(),
         topic: state.topic,
         topic_task: None,
+        tracked_store_dir: None,
         journal_cursor: JournalCursor::default(),
     };
     if let Some(anchor) = state.task_anchor {
@@ -453,12 +464,15 @@ async fn transcript_item_from_journal(
             id,
             model_turn_id,
             call_id,
-            result,
+            status,
+            diagnostic,
             full_output,
             model_output,
             images,
             final_output,
         } => {
+            let result = ToolCallResult::new(call_id.clone(), status, diagnostic)
+                .map_err(|_| invalid_document("stored tool call result is invalid"))?;
             let model_output = model_output.or_else(|| {
                 crate::process::derived_process_model_text(full_output.as_str())
                     .map(ToolOutput::text)

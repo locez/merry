@@ -20,6 +20,7 @@ impl SessionState {
             .iter()
             .any(|entry| entry.as_summary().id() == id && entry.as_summary().text() == text)
         {
+            self.construction_context_ids.insert(id.to_owned());
             return Ok(());
         }
 
@@ -39,6 +40,7 @@ impl SessionState {
         ContextCompiler::new().compile(&candidate_snapshot)?;
 
         self.context_entries = candidate_entries;
+        self.construction_context_ids.insert(id.to_owned());
         Ok(())
     }
 
@@ -67,7 +69,10 @@ impl SessionState {
     }
 
     pub(crate) fn record_context_entry(&mut self, entry: ContextEntry) -> Result<(), ContextError> {
-        self.record_checked_context_entry(entry)
+        let id = entry.as_summary().id().to_owned();
+        self.record_checked_context_entry(entry)?;
+        self.construction_context_ids.remove(&id);
+        Ok(())
     }
 
     pub(super) fn record_checked_context_entry(

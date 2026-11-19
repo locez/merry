@@ -92,7 +92,7 @@ impl RuntimeInner {
     }
 }
 
-async fn write_resume_safe_savepoint(
+pub(super) async fn write_resume_safe_savepoint(
     inner: &RuntimeInner,
 ) -> Option<crate::session::JournalCursor> {
     if inner.tool_batch_active.load(Ordering::Acquire) {
@@ -118,6 +118,9 @@ async fn write_resume_safe_savepoint(
             return None;
         }
     };
+    if bundle.document_bytes.is_empty() {
+        return Some(cursor);
+    }
     if let Err(error) = store.write_bundle(bundle).await {
         tracing::warn!(
             session_id = %inner.session_id,

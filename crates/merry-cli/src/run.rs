@@ -9,7 +9,7 @@ use crate::{
     },
     config::{MerryConfig, XdgPaths},
     headless_review::{HeadlessPermissionReviewer, ReviewInputChannel},
-    mcp_tools::{McpSession, discover_configured_mcp_tools, write_startup_warnings},
+    mcp_tools::{discover_configured_mcp_tools, write_startup_warnings},
     provider_config::{
         RuntimePrimaryProviderConfig, RuntimeProviderBundle, runtime_provider_bundle_from_config,
     },
@@ -233,13 +233,7 @@ pub(crate) async fn run(
                 .map_err(|error| unexpected(format!("could not resume session {id}: {error}")))?,
         ),
     };
-    let mcp_session =
-        loaded_session
-            .as_ref()
-            .map_or(McpSession::New, |loaded| McpSession::Resumed {
-                catalog: loaded.external_tool_catalog(),
-            });
-    let mcp = discover_configured_mcp_tools(merry_config, mcp_session).await?;
+    let mcp = discover_configured_mcp_tools(merry_config).await?;
     write_startup_warnings(&mut tokio::io::stderr(), &mcp.warnings)
         .await
         .map_err(unexpected)?;
@@ -281,20 +275,18 @@ pub(crate) async fn run(
             runtime_input,
             permission_policy,
             permission_review_rules,
+            Some(session_store.clone()),
         )?,
         Some(loaded) => resume_headless_coding_composition_with_loaded_session(
             runtime_input,
             loaded,
             permission_policy,
             permission_review_rules,
+            Some(session_store.clone()),
         )?,
     };
     let loop_config = coding_runtime.loop_config();
     let runtime = coding_runtime.into_runtime();
-    runtime
-        .save_session_to(session_store.clone())
-        .await
-        .map_err(unexpected)?;
     let input = StepInput::user_text(&task).map_err(unexpected)?;
     let context = StepContext::default()
         .with_generation_config(generation_config(merry_config).map_err(unexpected)?);

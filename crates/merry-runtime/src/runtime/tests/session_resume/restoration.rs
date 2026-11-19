@@ -117,6 +117,18 @@ async fn resumed_runtime_replaces_changed_construction_context_seed() {
         .save_session_to(store.clone())
         .await
         .expect("old session saves");
+    let raw_journal =
+        tokio::fs::read_to_string(temp.path().join(session_id.as_str()).join("journal.jsonl"))
+            .await
+            .expect("journal reads");
+    assert!(
+        !raw_journal.contains(OLD),
+        "construction-time context seeds must not be persisted into journal.jsonl"
+    );
+    assert!(
+        !raw_journal.contains("context_entries"),
+        "journal should omit empty context_entries when only construction seeds exist"
+    );
 
     let resumed = Runtime::builder(session_id.clone())
         .initial_context_summary("project-capabilities", NEW)
@@ -264,6 +276,96 @@ async fn save_into_a_fresh_store_rewrites_a_complete_journal() {
             },
             SessionTranscriptItem::UserMessage {
                 text: "second turn".to_owned(),
+                images: Vec::new(),
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn save_session_to_without_configured_store_adopts_cursor_and_skips_noop_saves() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let id = session_id("runtime-unconfigured-store-incremental");
+    let runtime = Runtime::builder(id.clone())
+        .build()
+        .expect("runtime builds without configured store");
+    {
+        let mut session = runtime.inner.session.lock().await;
+        session.record_session_started_if_needed();
+        session
+            .record_test_user_message_body("first turn message")
+            .expect("first turn records");
+    }
+
+    runtime
+        .save_session_to(store.clone())
+        .await
+        .expect("first save writes header and commit");
+    let journal_path = temp.path().join(id.as_str()).join("journal.jsonl");
+    let after_first = tokio::fs::read_to_string(&journal_path)
+        .await
+        .expect("journal reads");
+    assert_eq!(after_first.lines().count(), 2, "header + first commit");
+
+    // Repeated no-op save (e.g. save on exit after turn save) must not append a duplicate line.
+    runtime
+        .save_session_to(store.clone())
+        .await
+        .expect("no-op save succeeds");
+    let after_noop = tokio::fs::read_to_string(&journal_path)
+        .await
+        .expect("journal reads");
+    assert_eq!(
+        after_noop, after_first,
+        "unchanged save_session_to must not rewrite or append anything"
+    );
+
+    // Next turn must append only the new delta without repeating turn 1.
+    {
+        let mut session = runtime.inner.session.lock().await;
+        session
+            .record_test_user_message_body("second turn message")
+            .expect("second turn records");
+    }
+    runtime
+        .save_session_to(store.clone())
+        .await
+        .expect("second save appends delta");
+    let after_second = tokio::fs::read_to_string(&journal_path)
+        .await
+        .expect("journal reads");
+    let lines = after_second.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 3, "header + 2 incremental commits");
+    assert!(
+        !lines[2].contains("first turn message"),
+        "second commit must not repeat already-flushed turn 1 items"
+    );
+    assert!(lines[2].contains("second turn message"));
+
+    // Saving to a different copy directory must still produce a complete standalone journal.
+    let copy_dir = tempfile::tempdir().expect("copy tempdir");
+    let copy_store = FileSessionStore::new(copy_dir.path());
+    runtime
+        .save_session_to(copy_store.clone())
+        .await
+        .expect("copy save writes full journal");
+    let resumed_copy = Runtime::builder(id)
+        .resume_from_store(copy_store)
+        .await
+        .expect("copy resumes");
+    assert_eq!(
+        resumed_copy
+            .session_transcript()
+            .await
+            .expect("copy transcript"),
+        vec![
+            SessionTranscriptItem::UserMessage {
+                text: "first turn message".to_owned(),
+                images: Vec::new(),
+            },
+            SessionTranscriptItem::UserMessage {
+                text: "second turn message".to_owned(),
                 images: Vec::new(),
             },
         ]

@@ -219,7 +219,7 @@ async fn session_state_load_rejects_mismatched_tool_result_identity() {
         .await
         .expect("state reads");
     let mismatched = rewrite_journal_commit(&saved, |commit| {
-        commit["items"][1]["result"]["call_id"] =
+        commit["items"][1]["call_id"] =
             serde_json::Value::String("different-result-call".to_owned());
     });
     store

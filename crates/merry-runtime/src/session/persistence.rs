@@ -69,10 +69,11 @@ impl SessionState {
         match store.read_journal_bytes(session_id).await {
             Ok(bytes) => {
                 let ReplayedJournal {
-                    session,
+                    mut session,
                     truncate_to_len,
                 } = session_from_journal(session_id, &bytes, &images_dir(store, session_id))
                     .await?;
+                session.set_tracked_store_dir(store.sessions_dir().to_path_buf());
                 if let Some(valid_len) = truncate_to_len
                     && let Err(error) = store.truncate_journal_tail(session_id, valid_len).await
                 {
@@ -247,6 +248,15 @@ impl SessionState {
             )?;
         }
 
+        let persisted_context_entries = self
+            .context_entries
+            .iter()
+            .filter(|entry| {
+                !self
+                    .construction_context_ids
+                    .contains(entry.as_summary().id())
+            })
+            .collect::<Vec<_>>();
         let PreparedJournalAppend {
             header_bytes,
             commit_bytes,
@@ -266,8 +276,7 @@ impl SessionState {
             usage: self.usage.as_ref(),
             request_token_calibration: self.request_token_calibration.as_ref(),
             task_anchor: self.task_anchor.as_ref(),
-            context_entries: &self.context_entries,
-            external_tool_catalog: &self.external_tool_catalog,
+            context_entries: &persisted_context_entries,
             topic: self.topic.as_deref(),
         })?;
         Ok(PersistableSessionBundle {
@@ -283,7 +292,12 @@ impl SessionState {
     pub(crate) fn persistable_bundle_if_resume_safe(
         &self,
     ) -> Result<Option<PersistableSessionBundle>, SessionStoreError> {
-        if self.pending_tool_calls.is_empty() {
+        let has_open_turn = self
+            .transcript
+            .model_turn_statuses()
+            .values()
+            .any(|status| status.is_open());
+        if self.pending_tool_calls.is_empty() && !has_open_turn {
             self.persistable_bundle().map(Some)
         } else {
             Ok(None)

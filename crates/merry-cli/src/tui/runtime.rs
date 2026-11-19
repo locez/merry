@@ -5,7 +5,7 @@ use crate::coding::{
     coding_agent_process_admission, resume_headless_coding_composition_with_loaded_session,
 };
 use crate::config::MerryConfig;
-use crate::mcp_tools::{McpSession, discover_configured_mcp_tools};
+use crate::mcp_tools::discover_configured_mcp_tools;
 use crate::provider_config::{
     RuntimePrimaryProviderConfig, RuntimeProviderBundle,
     runtime_primary_provider_from_config_with_override,
@@ -125,13 +125,7 @@ pub(crate) async fn start_tui_runtime_session(
     } else {
         None
     };
-    let mcp_session =
-        loaded_session
-            .as_ref()
-            .map_or(McpSession::New, |loaded| McpSession::Resumed {
-                catalog: loaded.external_tool_catalog(),
-            });
-    let mcp = discover_configured_mcp_tools(merry_config, mcp_session).await?;
+    let mcp = discover_configured_mcp_tools(merry_config).await?;
     let subagents = subagents_config(merry_config)
         .map_err(unexpected)?
         .with_overrides(
@@ -183,19 +177,17 @@ pub(crate) async fn start_tui_runtime_session(
             loaded,
             permission_policy,
             permission_review_rules,
+            Some(state_store),
         )?,
         None => build_headless_coding_with_policy_composition(
             runtime_input,
             permission_policy,
             permission_review_rules,
+            Some(state_store),
         )?,
     };
     let loop_config = coding_runtime.loop_config();
     let runtime = coding_runtime.into_runtime();
-    runtime
-        .save_session_to(state_store)
-        .await
-        .map_err(unexpected)?;
     let skills = runtime.skills().await;
     let interactive = runtime
         .start_interactive_agent_run(
@@ -374,6 +366,24 @@ impl TuiRuntimeSession {
 
     pub(crate) fn set_topic_if_empty(&mut self, topic: Option<String>) {
         self.metadata.set_topic_if_empty(topic);
+    }
+
+    /// Refreshes picker metadata after an automatic runtime turn savepoint
+    /// without blocking the TUI loop on background topic generation.
+    pub(crate) async fn sync_metadata_on_turn_settled(&mut self, fallback_topic: Option<String>) {
+        if let Some(topic) = self.runtime.cached_session_topic().await {
+            self.metadata.topic = Some(topic);
+        } else {
+            self.metadata.set_topic_if_empty(fallback_topic);
+        }
+        self.metadata.mark_active(now_unix_ms());
+        if let Err(error) = write_session_metadata(&self.session_store, &self.metadata).await {
+            tracing::warn!(
+                session_id = %self.metadata.session_id,
+                error = ?error,
+                "could not refresh TUI session metadata after turn"
+            );
+        }
     }
 
     pub(crate) async fn save_on_exit(&mut self) -> Result<(), CliError> {

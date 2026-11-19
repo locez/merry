@@ -125,41 +125,44 @@ fn plan_apply_patch_blocking_checked(
     }
 
     if args.patch.trim().is_empty() {
-        return Ok(WorkspacePatchPlanOutcome::Failure(Box::new(failed_outcome(
-            APPLY_PATCH_TOOL,
-            ERROR_INVALID_ARGUMENTS,
-            "workspace patch must not be empty",
-            None::<String>,
-        ))));
+        return Ok(WorkspacePatchPlanOutcome::Failure(Box::new(
+            failed_outcome(
+                APPLY_PATCH_TOOL,
+                ERROR_INVALID_ARGUMENTS,
+                "workspace patch must not be empty",
+                None::<String>,
+            ),
+        )));
     }
 
     if args.patch.contains('\0') {
-        return Ok(WorkspacePatchPlanOutcome::Failure(Box::new(failed_outcome(
-            APPLY_PATCH_TOOL,
-            ERROR_INVALID_ARGUMENTS,
-            "workspace patch must not contain NUL bytes",
-            None::<String>,
-        ))));
+        return Ok(WorkspacePatchPlanOutcome::Failure(Box::new(
+            failed_outcome(
+                APPLY_PATCH_TOOL,
+                ERROR_INVALID_ARGUMENTS,
+                "workspace patch must not contain NUL bytes",
+                None::<String>,
+            ),
+        )));
     }
 
     if args.patch.len() > state.limits.max_patch_bytes {
-        return Ok(WorkspacePatchPlanOutcome::Failure(Box::new(failed_outcome(
-            APPLY_PATCH_TOOL,
-            ERROR_INVALID_ARGUMENTS,
-            "workspace patch payload exceeds the configured byte limit; retry with the smallest unique hunk needed for the edit",
-            None::<String>,
-        ))));
+        return Ok(WorkspacePatchPlanOutcome::Failure(Box::new(
+            failed_outcome(
+                APPLY_PATCH_TOOL,
+                ERROR_INVALID_ARGUMENTS,
+                "workspace patch payload exceeds the configured byte limit; retry with the smallest unique hunk needed for the edit",
+                None::<String>,
+            ),
+        )));
     }
 
     let patch = match parse_apply_patch(&args.patch) {
         Ok(patch) => patch,
         Err(error) => {
-            return Ok(WorkspacePatchPlanOutcome::Failure(Box::new(failed_outcome(
-                APPLY_PATCH_TOOL,
-                error.code,
-                error.message,
-                error.path,
-            ))));
+            return Ok(WorkspacePatchPlanOutcome::Failure(Box::new(
+                failed_outcome(APPLY_PATCH_TOOL, error.code, error.message, error.path),
+            )));
         }
     };
 
@@ -171,20 +174,14 @@ fn plan_apply_patch_blocking_checked(
         match plan_apply_patch_file(state, file_patch, is_cancelled) {
             Ok(change) => changes.push(change),
             Err(WorkspacePatchFilePlanError::Domain { error, path }) => {
-                return Ok(WorkspacePatchPlanOutcome::Failure(Box::new(failed_outcome(
-                    APPLY_PATCH_TOOL,
-                    error.code,
-                    error.message,
-                    Some(path),
-                ))));
+                return Ok(WorkspacePatchPlanOutcome::Failure(Box::new(
+                    failed_outcome(APPLY_PATCH_TOOL, error.code, error.message, Some(path)),
+                )));
             }
             Err(WorkspacePatchFilePlanError::Path(error)) => {
-                return Ok(WorkspacePatchPlanOutcome::Failure(Box::new(failed_outcome(
-                    APPLY_PATCH_TOOL,
-                    error.code,
-                    error.message,
-                    error.path,
-                ))));
+                return Ok(WorkspacePatchPlanOutcome::Failure(Box::new(
+                    failed_outcome(APPLY_PATCH_TOOL, error.code, error.message, error.path),
+                )));
             }
             Err(WorkspacePatchFilePlanError::Cancelled) => {
                 return Err(ToolExecutionError::Cancelled);

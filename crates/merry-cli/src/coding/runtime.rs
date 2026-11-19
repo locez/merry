@@ -7,10 +7,10 @@ use merry::profiles::{
 };
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 #[cfg(test)]
-use merry_runtime::FileSessionStore;
-#[cfg(test)]
 use merry_runtime::Runtime;
-use merry_runtime::{CompactionConfig, LoadedSession, PermissionReviewRules, RegisteredTool};
+use merry_runtime::{
+    CompactionConfig, FileSessionStore, LoadedSession, PermissionReviewRules, RegisteredTool,
+};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -64,6 +64,7 @@ pub(crate) fn build_headless_coding_composition(
         input,
         CodingPermissionPolicy::default(),
         PermissionReviewRules::default(),
+        None,
     )
 }
 
@@ -71,10 +72,13 @@ pub(crate) fn build_headless_coding_with_policy_composition(
     input: HeadlessCodingRuntimeInput<'_>,
     permission: CodingPermissionPolicy,
     review_rules: PermissionReviewRules,
+    session_store: Option<FileSessionStore>,
 ) -> Result<SharedCodingRuntime, CodingRuntimeError> {
-    build_coding_runtime_from_headless_input(input, permission, review_rules)?
-        .build()
-        .map_err(CodingRuntimeError::from)
+    let mut builder = build_coding_runtime_from_headless_input(input, permission, review_rules)?;
+    if let Some(store) = session_store {
+        builder = builder.session_store(store);
+    }
+    builder.build().map_err(CodingRuntimeError::from)
 }
 
 #[cfg(test)]
@@ -94,11 +98,14 @@ pub(crate) fn resume_headless_coding_composition_with_loaded_session(
     loaded: LoadedSession,
     permission: CodingPermissionPolicy,
     review_rules: PermissionReviewRules,
+    session_store: Option<FileSessionStore>,
 ) -> Result<SharedCodingRuntime, CodingRuntimeError> {
-    build_coding_runtime_from_headless_input(input, permission, review_rules)?
-        .with_loaded_session(loaded)
-        .build()
-        .map_err(CodingRuntimeError::from)
+    let mut builder = build_coding_runtime_from_headless_input(input, permission, review_rules)?
+        .with_loaded_session(loaded);
+    if let Some(store) = session_store {
+        builder = builder.session_store(store);
+    }
+    builder.build().map_err(CodingRuntimeError::from)
 }
 
 #[allow(dead_code)]

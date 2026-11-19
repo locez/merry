@@ -1,50 +1,13 @@
 use super::*;
-use crate::config::XdgPaths;
 use merry_core::{SessionId, ToolSourceId};
 use merry_mcp::{McpDiscoveryStage, McpFailureKind, McpServerIssue};
 use merry_runtime::{FileSessionStore, LoadedSession, Runtime, RuntimeError};
 
 #[tokio::test]
 async fn a_new_session_without_mcp_has_no_warnings_or_tools() {
-    let result = discover_configured_mcp_tools(None, McpSession::New)
-        .await
-        .unwrap();
+    let result = discover_configured_mcp_tools(None).await.unwrap();
     assert!(result.tools.is_empty());
     assert!(result.warnings.is_empty());
-}
-
-#[tokio::test]
-async fn resume_uses_the_empty_saved_catalog_instead_of_new_configured_servers() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = FileSessionStore::new(temp.path().join("sessions"));
-    let id = SessionId::new("empty-saved").unwrap();
-    Runtime::builder(id.clone())
-        .build()
-        .unwrap()
-        .save_session_to(store.clone())
-        .await
-        .unwrap();
-    let paths = XdgPaths::from_parts(temp.path().to_path_buf(), None, None);
-    let config = MerryConfig::load_optional_from_text(
-        Some("[mcp.new]\nurl = 'http://127.0.0.1:9/mcp'"),
-        &paths,
-    )
-    .unwrap()
-    .unwrap();
-    let loaded = LoadedSession::load(&store, &id).await.unwrap();
-    let result = discover_configured_mcp_tools(
-        Some(&config),
-        McpSession::Resumed {
-            catalog: loaded.external_tool_catalog(),
-        },
-    )
-    .await
-    .unwrap();
-    assert!(result.tools.is_empty());
-    assert_eq!(
-        result.warnings[0].issue(),
-        &McpServerIssue::NotInSessionCatalog
-    );
 }
 
 #[tokio::test]

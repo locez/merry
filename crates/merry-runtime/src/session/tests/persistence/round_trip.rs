@@ -298,12 +298,47 @@ async fn subsequent_journal_commits_only_append_deltas_and_strip_process_admissi
         second_commit["state"]
             .get("external_tool_catalog")
             .is_none(),
-        "unchanged external_tool_catalog must not repeat on later commits"
+        "external_tool_catalog must not be written to journal.jsonl"
     );
     assert!(
         second_commit["state"].get("active_plan").is_none(),
         "unchanged active_plan must not repeat on later commits"
     );
+    assert!(
+        second_commit["state"].get("terminal_plans").is_none(),
+        "empty terminal_plans must not be serialized"
+    );
+    assert!(
+        second_commit["state"].get("context_entries").is_none(),
+        "empty context_entries must not be serialized"
+    );
+    assert!(
+        second_commit["state"].get("session_started").is_none(),
+        "derivable session_started must not be serialized"
+    );
+    assert!(
+        second_commit["state"].get("next_item_id").is_none(),
+        "derivable next_item_id must not be serialized"
+    );
+    assert!(
+        second_commit["state"].get("next_model_turn_id").is_none(),
+        "derivable next_model_turn_id must not be serialized"
+    );
+    let tool_result_item = second_commit["items"]
+        .as_array()
+        .expect("items array")
+        .iter()
+        .find(|item| item["type"] == "tool_result")
+        .expect("tool_result item");
+    assert!(
+        tool_result_item.get("result").is_none(),
+        "tool_result must flatten status/diagnostic without duplicating call_id"
+    );
+    assert!(
+        tool_result_item.get("diagnostic").is_none(),
+        "succeeded tool_result must omit null diagnostic"
+    );
+    assert_eq!(tool_result_item["status"], "succeeded");
     let turns = second_commit["state"]["model_turns"]
         .as_array()
         .expect("turn delta array");

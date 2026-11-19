@@ -36,7 +36,7 @@ fn external_tool(name: &str, description: &str) -> RegisteredTool {
 }
 
 #[tokio::test]
-async fn external_catalog_round_trip_keeps_actual_provider_tools_and_prefix() {
+async fn external_catalog_is_not_persisted_and_resume_uses_live_tools() {
     let temp = tempfile::tempdir().unwrap();
     let store = FileSessionStore::new(temp.path());
     let id = session_id("external-catalog");
@@ -49,14 +49,15 @@ async fn external_catalog_round_trip_keeps_actual_provider_tools_and_prefix() {
         .unwrap();
     collect_step(&runtime, "before resume", StepContext::default()).await;
     runtime.save_session_to(store.clone()).await.unwrap();
-    assert_eq!(
-        LoadedSession::load(&store, &id)
-            .await
-            .unwrap()
-            .external_tool_catalog()
-            .clone(),
-        runtime.external_tool_catalog().await
+
+    let journal = tokio::fs::read_to_string(temp.path().join(id.as_str()).join("journal.jsonl"))
+        .await
+        .unwrap();
+    assert!(
+        !journal.contains("external_tool_catalog"),
+        "external_tool_catalog must not be persisted in journal.jsonl"
     );
+
     let resumed = Runtime::builder(id)
         .model_provider(Arc::new(provider.clone()), model_name())
         .register_tool(external_tool("zeta", "Stable zeta"))
@@ -75,7 +76,7 @@ async fn external_catalog_round_trip_keeps_actual_provider_tools_and_prefix() {
 }
 
 #[tokio::test]
-async fn resume_rejects_catalog_removal_addition_reordering_and_definition_changes() {
+async fn resume_accepts_live_external_tool_changes_without_mismatch_error() {
     let temp = tempfile::tempdir().unwrap();
     let store = FileSessionStore::new(temp.path());
     let id = session_id("catalog-drift");
@@ -87,6 +88,7 @@ async fn resume_rejects_catalog_removal_addition_reordering_and_definition_chang
         .unwrap();
     runtime.save_session_to(store.clone()).await.unwrap();
     let variants = [
+        vec![],
         vec![external_tool("one", "One")],
         vec![
             external_tool("one", "One"),
@@ -97,90 +99,17 @@ async fn resume_rejects_catalog_removal_addition_reordering_and_definition_chang
         vec![external_tool("one", "Changed"), external_tool("two", "Two")],
     ];
     for tools in variants {
-        let result = tools
+        let expected_len = tools.len();
+        let resumed = tools
             .into_iter()
             .fold(Runtime::builder(id.clone()), RuntimeBuilder::register_tool)
             .resume_from_store(store.clone())
-            .await;
-        assert!(matches!(
-            result,
-            Err(RuntimeError::ExternalToolCatalogMismatch)
-        ));
-    }
-}
-
-#[tokio::test]
-async fn an_empty_catalog_stays_empty_after_resume() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = FileSessionStore::new(temp.path());
-    let id = session_id("empty-catalog");
-    let runtime = Runtime::builder(id.clone()).build().unwrap();
-    runtime.save_session_to(store.clone()).await.unwrap();
-    assert!(
-        LoadedSession::load(&store, &id)
             .await
-            .unwrap()
-            .external_tool_catalog()
-            .entries()
-            .is_empty()
-    );
-    let result = Runtime::builder(id)
-        .register_tool(external_tool("late", "Late"))
-        .resume_from_store(store)
-        .await;
-    assert!(matches!(
-        result,
-        Err(RuntimeError::ExternalToolCatalogMismatch)
-    ));
-}
-
-#[tokio::test]
-async fn catalog_loader_rejects_missing_or_null_catalogs_instead_of_rediscovering() {
-    let temp = tempfile::tempdir().unwrap();
-    let store = FileSessionStore::new(temp.path());
-    let id = session_id("corrupt-catalog");
-    Runtime::builder(id.clone())
-        .build()
-        .unwrap()
-        .save_session_to(store.clone())
-        .await
-        .unwrap();
-    let path = temp.path().join(id.as_str()).join("journal.jsonl");
-    let original = tokio::fs::read_to_string(&path).await.unwrap();
-    for catalog in [None, Some(serde_json::Value::Null)] {
-        let mut lines = original
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let mut commit: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
-        match &catalog {
-            None => {
-                commit["state"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("external_tool_catalog");
-            }
-            Some(catalog) => commit["state"]["external_tool_catalog"] = catalog.clone(),
-        }
-        *lines.last_mut().unwrap() = serde_json::to_string(&commit).unwrap();
-        tokio::fs::write(&path, format!("{}\n", lines.join("\n")))
-            .await
-            .unwrap();
-        assert!(matches!(
-            LoadedSession::load(&store, &id).await,
-            Err(RuntimeError::SessionStore {
-                source: SessionStoreError::Json { .. } | SessionStoreError::InvalidDocument { .. }
-            })
-        ));
-        assert!(matches!(
-            Runtime::builder(id.clone())
-                .resume_from_store(store.clone())
-                .await,
-            Err(RuntimeError::SessionStore {
-                source: SessionStoreError::Json { .. } | SessionStoreError::InvalidDocument { .. }
-            })
-        ));
+            .expect("resume should accept live external tool changes");
+        assert_eq!(
+            resumed.external_tool_catalog().await.entries().len(),
+            expected_len
+        );
     }
 }
 

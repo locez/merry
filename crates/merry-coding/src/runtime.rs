@@ -388,6 +388,7 @@ pub struct CodingRuntimeBuilder {
     variant: CodingRuntimeVariant,
     permission: CodingPermissionPolicy,
     loaded_session: Option<LoadedSession>,
+    session_store: Option<FileSessionStore>,
 }
 
 impl CodingRuntimeBuilder {
@@ -399,6 +400,7 @@ impl CodingRuntimeBuilder {
             variant: CodingRuntimeVariant::FullCoding,
             permission: CodingPermissionPolicy::default(),
             loaded_session: None,
+            session_store: None,
         }
     }
 
@@ -415,6 +417,7 @@ impl CodingRuntimeBuilder {
             variant: CodingRuntimeVariant::ReadOnlyCommandGeneration,
             permission: CodingPermissionPolicy::default(),
             loaded_session: None,
+            session_store: None,
         }
     }
 
@@ -429,6 +432,13 @@ impl CodingRuntimeBuilder {
     #[must_use]
     pub fn with_loaded_session(mut self, loaded: LoadedSession) -> Self {
         self.loaded_session = Some(loaded);
+        self
+    }
+
+    /// Configures automatic incremental session persistence into `store`.
+    #[must_use]
+    pub fn session_store(mut self, store: FileSessionStore) -> Self {
+        self.session_store = Some(store);
         self
     }
 
@@ -472,6 +482,7 @@ impl CodingRuntimeBuilder {
             variant,
             permission,
             loaded_session,
+            session_store,
         } = self;
         let CodingRuntimeInput {
             session_id,
@@ -610,6 +621,9 @@ impl CodingRuntimeBuilder {
         }
         if let Some(loaded_session) = loaded_session {
             runtime_builder = runtime_builder.with_loaded_session(loaded_session);
+        }
+        if let Some(store) = session_store {
+            runtime_builder = runtime_builder.session_store(store);
         }
 
         Ok((runtime_builder, profile))

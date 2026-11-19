@@ -5,7 +5,7 @@ use merry_core::{
     ToolBindingName, ToolCallResultStatus, ToolSourceFingerprint, ToolSourceId,
 };
 use merry_llm::ModelName;
-use merry_runtime::{FileSessionStore, LoadedSession, Runtime, ToolExecutionContext};
+use merry_runtime::{FileSessionStore, Runtime, ToolExecutionContext};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -26,8 +26,7 @@ async fn offline_resume_restores_saved_request_tools_and_stable_prefix() {
     );
     step(&original).await;
     original.save_session_to(store.clone()).await.unwrap();
-    let loaded = LoadedSession::load(&store, &id).await.unwrap();
-    let catalog = loaded.external_tool_catalog().clone();
+    let catalog = original.external_tool_catalog().await;
     server.set_mode(Mode::Status(503));
     let discovery = restore_mcp_tools(&[config], &catalog).await.unwrap();
     assert_eq!(discovery.diagnostics()[0].retained_tools(), 2);
@@ -71,10 +70,7 @@ async fn initially_empty_catalog_does_not_gain_tools_after_recovery() {
         &text_provider(),
     );
     original.save_session_to(store.clone()).await.unwrap();
-    let loaded = LoadedSession::load(&store, original.session_id())
-        .await
-        .unwrap();
-    let catalog = loaded.external_tool_catalog().clone();
+    let catalog = original.external_tool_catalog().await;
     assert!(catalog.entries().is_empty());
     server.set_mode(Mode::Online);
     let requests = server.requests();

@@ -20,9 +20,7 @@ use crate::{
     },
     token_estimate::RequestTokenCalibration,
 };
-use merry_core::{
-    PlanSnapshot, SessionId, SessionToolCatalog, SessionUsage, ToolCallId, ToolOutput,
-};
+use merry_core::{PlanSnapshot, SessionId, SessionUsage, ToolCallId, ToolOutput};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -32,15 +30,14 @@ pub(crate) struct JournalCursor {
     flushed_collapsed: BTreeSet<ToolCallId>,
     flushed_summary: Option<String>,
     flushed_compacted_through: Option<ModelTurnId>,
-    flushed_next_sequence: Option<u64>,
+    flushed_next_sequence: u64,
     flushed_session_started: Option<bool>,
     flushed_usage: Option<SessionUsage>,
     flushed_calibration: Option<RequestTokenCalibration>,
     flushed_task_anchor: Option<String>,
     flushed_active_plan: Option<PersistedPlanState>,
-    flushed_terminal_plans: Option<Vec<PlanSnapshot>>,
-    flushed_external_tool_catalog: Option<SessionToolCatalog>,
-    flushed_context_entries: Option<Vec<JournalContextEntry>>,
+    flushed_terminal_plans: Vec<PlanSnapshot>,
+    flushed_context_entries: Vec<JournalContextEntry>,
     flushed_next_item_id: Option<u64>,
     flushed_model_turns: BTreeMap<ModelTurnId, (ModelTurnStatus, Option<u64>)>,
     flushed_next_model_turn_id: Option<u64>,
@@ -84,15 +81,8 @@ impl JournalCursor {
         self.flushed_calibration = committed.flushed_calibration;
         self.flushed_task_anchor = committed.flushed_task_anchor;
         self.flushed_active_plan = committed.flushed_active_plan;
-        if committed.flushed_terminal_plans.is_some() {
-            self.flushed_terminal_plans = committed.flushed_terminal_plans;
-        }
-        if committed.flushed_external_tool_catalog.is_some() {
-            self.flushed_external_tool_catalog = committed.flushed_external_tool_catalog;
-        }
-        if committed.flushed_context_entries.is_some() {
-            self.flushed_context_entries = committed.flushed_context_entries;
-        }
+        self.flushed_terminal_plans = committed.flushed_terminal_plans;
+        self.flushed_context_entries = committed.flushed_context_entries;
         self.flushed_next_item_id = self
             .flushed_next_item_id
             .max(committed.flushed_next_item_id);
@@ -133,8 +123,7 @@ pub(crate) struct JournalAppendInput<'a> {
     pub(crate) usage: Option<&'a SessionUsage>,
     pub(crate) request_token_calibration: Option<&'a RequestTokenCalibration>,
     pub(crate) task_anchor: Option<&'a TaskAnchor>,
-    pub(crate) context_entries: &'a [ContextEntry],
-    pub(crate) external_tool_catalog: &'a SessionToolCatalog,
+    pub(crate) context_entries: &'a [&'a ContextEntry],
     pub(crate) topic: Option<&'a str>,
 }
 
@@ -235,7 +224,7 @@ pub(super) fn cursor_after_load(session: &SessionState) -> JournalCursor {
         flushed_collapsed: collapsed_call_ids(&session.transcript),
         flushed_summary: summary,
         flushed_compacted_through: session.prompt_history_projection.compacted_through(),
-        flushed_next_sequence: Some(session.next_sequence),
+        flushed_next_sequence: session.next_sequence,
         flushed_session_started: Some(session.session_started),
         flushed_usage: session.usage.clone(),
         flushed_calibration: session.request_token_calibration.clone(),
@@ -244,15 +233,12 @@ pub(super) fn cursor_after_load(session: &SessionState) -> JournalCursor {
             .as_ref()
             .map(|anchor| anchor.objective().to_owned()),
         flushed_active_plan: session.active_plan.as_ref().map(PlanState::persisted),
-        flushed_terminal_plans: Some(session.terminal_plans.clone()),
-        flushed_external_tool_catalog: Some(session.external_tool_catalog.clone()),
-        flushed_context_entries: Some(
-            session
-                .context_entries
-                .iter()
-                .map(journal_context_entry)
-                .collect(),
-        ),
+        flushed_terminal_plans: session.terminal_plans.clone(),
+        flushed_context_entries: session
+            .context_entries
+            .iter()
+            .map(journal_context_entry)
+            .collect(),
         flushed_next_item_id: Some(session.transcript.next_id().as_u64()),
         flushed_model_turns: snapshot_model_turns(&session.transcript),
         flushed_next_model_turn_id: Some(session.transcript.next_model_turn_id().as_u64()),
@@ -271,9 +257,11 @@ fn build_state_delta(
 ) -> (JournalStateDelta, JournalCursor) {
     let cursor = input.cursor;
     let next_sequence =
-        (cursor.flushed_next_sequence != Some(input.next_sequence)).then_some(input.next_sequence);
-    let session_started = (cursor.flushed_session_started != Some(input.session_started))
-        .then_some(input.session_started);
+        (cursor.flushed_next_sequence != input.next_sequence).then_some(input.next_sequence);
+    let derived_started = input.next_sequence > 0 || !input.transcript.items().is_empty();
+    let session_started = (input.session_started != derived_started
+        && cursor.flushed_session_started != Some(input.session_started))
+    .then_some(input.session_started);
 
     let usage_current = input.usage.cloned();
     let usage = optional_patch(&cursor.flushed_usage, &usage_current);
@@ -295,26 +283,28 @@ fn build_state_delta(
     let active_plan = optional_patch(&cursor.flushed_active_plan, &active_plan_current);
 
     let terminal_plans_current = input.terminal_plans.to_vec();
-    let terminal_plans = (cursor.flushed_terminal_plans.as_ref() != Some(&terminal_plans_current))
+    let terminal_plans = (cursor.flushed_terminal_plans != terminal_plans_current)
         .then(|| terminal_plans_current.clone());
-
-    let external_tool_catalog_changed =
-        cursor.flushed_external_tool_catalog.as_ref() != Some(input.external_tool_catalog);
-    let external_tool_catalog =
-        external_tool_catalog_changed.then(|| input.external_tool_catalog.clone());
 
     let context_entries_current = input
         .context_entries
         .iter()
-        .map(journal_context_entry)
+        .map(|entry| journal_context_entry(entry))
         .collect::<Vec<_>>();
-    let context_entries = (cursor.flushed_context_entries.as_ref()
-        != Some(&context_entries_current))
-    .then(|| context_entries_current.clone());
+    let context_entries = (cursor.flushed_context_entries != context_entries_current)
+        .then(|| context_entries_current.clone());
 
+    let derived_next_item_id = input
+        .transcript
+        .items()
+        .iter()
+        .map(|item| item.id().as_u64() + 1)
+        .max()
+        .unwrap_or(0);
     let next_item_id_val = input.transcript.next_id().as_u64();
-    let next_item_id =
-        (cursor.flushed_next_item_id != Some(next_item_id_val)).then_some(next_item_id_val);
+    let next_item_id = (next_item_id_val != derived_next_item_id
+        && cursor.flushed_next_item_id != Some(next_item_id_val))
+    .then_some(next_item_id_val);
 
     let current_model_turns = snapshot_model_turns(input.transcript);
     let model_turns = current_model_turns
@@ -327,9 +317,15 @@ fn build_state_delta(
         })
         .collect::<Vec<_>>();
 
+    let derived_next_turn_id = current_model_turns
+        .keys()
+        .map(|id| id.as_u64() + 1)
+        .max()
+        .unwrap_or(1);
     let next_model_turn_id_val = input.transcript.next_model_turn_id().as_u64();
-    let next_model_turn_id = (cursor.flushed_next_model_turn_id != Some(next_model_turn_id_val))
-        .then_some(next_model_turn_id_val);
+    let next_model_turn_id = (next_model_turn_id_val != derived_next_turn_id
+        && cursor.flushed_next_model_turn_id != Some(next_model_turn_id_val))
+    .then_some(next_model_turn_id_val);
 
     let topic_current = input.topic.map(str::to_owned);
     let topic = optional_patch(&cursor.flushed_topic, &topic_current);
@@ -342,7 +338,6 @@ fn build_state_delta(
         task_anchor,
         active_plan,
         terminal_plans,
-        external_tool_catalog,
         context_entries,
         next_item_id,
         model_turns,
@@ -356,21 +351,14 @@ fn build_state_delta(
         flushed_collapsed,
         flushed_summary,
         flushed_compacted_through,
-        flushed_next_sequence: Some(input.next_sequence),
+        flushed_next_sequence: input.next_sequence,
         flushed_session_started: Some(input.session_started),
         flushed_usage: usage_current,
         flushed_calibration: calibration_current,
         flushed_task_anchor: anchor_current,
         flushed_active_plan: active_plan_current,
-        flushed_terminal_plans: Some(terminal_plans_current),
-        flushed_external_tool_catalog: Some(
-            cursor
-                .flushed_external_tool_catalog
-                .clone()
-                .filter(|_| !external_tool_catalog_changed)
-                .unwrap_or_else(|| input.external_tool_catalog.clone()),
-        ),
-        flushed_context_entries: Some(context_entries_current),
+        flushed_terminal_plans: terminal_plans_current,
+        flushed_context_entries: context_entries_current,
         flushed_next_item_id: Some(next_item_id_val),
         flushed_model_turns: current_model_turns,
         flushed_next_model_turn_id: Some(next_model_turn_id_val),
@@ -464,7 +452,8 @@ fn journal_item_from_transcript(
                 id: id.as_u64(),
                 model_turn_id: *model_turn_id,
                 call_id: call_id.clone(),
-                result: result.clone(),
+                status: result.status(),
+                diagnostic: result.diagnostic().cloned(),
                 full_output,
                 model_output,
                 images: image_refs(payload.images(), images),

@@ -213,6 +213,12 @@ impl Runtime {
         self::session_topic::topic(&self.inner).await
     }
 
+    /// Returns the already-recorded session topic without waiting on an
+    /// in-flight background topic generation call.
+    pub async fn cached_session_topic(&self) -> Option<String> {
+        self.inner.session.lock().await.topic().map(str::to_owned)
+    }
+
     #[cfg(test)]
     pub(crate) fn session_for_tests(
         &self,
@@ -248,22 +254,32 @@ impl Runtime {
         store: FileSessionStore,
         _active_permit: &ActiveStepPermit,
     ) -> Result<(), RuntimeError> {
-        let tracked = self
-            .inner
-            .session_store
-            .as_ref()
-            .is_some_and(|existing| existing.sessions_dir() == store.sessions_dir());
         let has_header =
             crate::session::journal_destination_has_header(&store, &self.inner.session_id).await?;
-        let bundle = {
+        let (bundle, tracked, adopt_destination) = {
             let session = self.inner.session.lock().await;
+            let tracked_dir = self
+                .inner
+                .session_store
+                .as_ref()
+                .map(FileSessionStore::sessions_dir)
+                .or_else(|| session.tracked_store_dir());
+            let adopt_destination = tracked_dir.is_none();
+            let tracked = adopt_destination || tracked_dir == Some(store.sessions_dir());
             let cursor = session.cursor_for_destination(tracked, has_header);
-            session.persistable_bundle_with_cursor(&cursor)?
+            let bundle = session.persistable_bundle_with_cursor(&cursor)?;
+            (bundle, tracked, adopt_destination)
         };
         let cursor = bundle.cursor.clone();
-        store.write_bundle(bundle).await?;
+        if !bundle.document_bytes.is_empty() {
+            store.write_bundle(bundle).await?;
+        }
         if tracked {
-            self.inner.session.lock().await.adopt_journal_cursor(cursor);
+            let mut session = self.inner.session.lock().await;
+            if adopt_destination {
+                session.set_tracked_store_dir(store.sessions_dir().to_path_buf());
+            }
+            session.adopt_journal_cursor(cursor);
         }
         Ok(())
     }

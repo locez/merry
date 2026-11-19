@@ -348,11 +348,7 @@ struct CdpRpcError {
     message: String,
 }
 
-fn handle_cdp_message(
-    raw: &str,
-    pending: &CdpPending,
-    telemetry: &Arc<Mutex<TelemetryState>>,
-) {
+fn handle_cdp_message(raw: &str, pending: &CdpPending, telemetry: &Arc<Mutex<TelemetryState>>) {
     let Ok(msg) = serde_json::from_str::<CdpInbound>(raw) else {
         return;
     };

@@ -1,10 +1,10 @@
 use crate::{FileSessionStore, RuntimeError, session::SessionState};
-use merry_core::{SessionId, SessionToolCatalog};
+use merry_core::SessionId;
 
-/// A validated persisted session loaded once before adapter-specific rebinding.
+/// A validated persisted session loaded once before runtime construction.
 ///
-/// The runtime owns the complete session state. Surface adapters may inspect the
-/// frozen external catalog before building tools, then transfer this handle into
+/// The runtime owns the complete session state. Surface adapters may load and
+/// validate a session before transferring this handle into
 /// [`crate::RuntimeBuilder`] without loading the session a second time.
 pub struct LoadedSession {
     state: SessionState,
@@ -19,12 +19,6 @@ impl LoadedSession {
         Ok(Self {
             state: SessionState::load_from(store, session_id).await?,
         })
-    }
-
-    /// Returns the frozen external definitions, independently of availability.
-    #[must_use]
-    pub fn external_tool_catalog(&self) -> &SessionToolCatalog {
-        self.state.external_tool_catalog()
     }
 
     pub(crate) fn into_state(self) -> SessionState {

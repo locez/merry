@@ -700,10 +700,8 @@ impl RuntimeBuilder {
         let loaded_from_store = self.loaded_session.is_some();
         let external_tool_catalog = tool_registry.external_tool_catalog()?;
         let mut session = match self.loaded_session {
-            Some(session) => {
-                if session.external_tool_catalog() != &external_tool_catalog {
-                    return Err(RuntimeError::ExternalToolCatalogMismatch);
-                }
+            Some(mut session) => {
+                session.set_external_tool_catalog(external_tool_catalog);
                 session
             }
             None => {
@@ -717,6 +715,9 @@ impl RuntimeBuilder {
                 session
             }
         };
+        if let Some(store) = self.session_store.as_ref() {
+            session.set_tracked_store_dir(store.sessions_dir().to_path_buf());
+        }
         if loaded_from_store
             && let Some(plan) = session.active_plan_mut()
             && plan.abandon_unresumed_execution(crate::plan::unix_time_ms())

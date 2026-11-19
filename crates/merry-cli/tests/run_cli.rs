@@ -55,9 +55,9 @@ fn mcp_outage_warns_on_stderr_but_reaches_the_runtime_and_preserves_jsonl_output
             .expect("journal has a commit"),
     )
     .unwrap();
-    assert_eq!(
-        commit["state"]["external_tool_catalog"]["entries"],
-        serde_json::json!([])
+    assert!(
+        commit["state"].get("external_tool_catalog").is_none(),
+        "external_tool_catalog must not be persisted into journal.jsonl"
     );
 }
 

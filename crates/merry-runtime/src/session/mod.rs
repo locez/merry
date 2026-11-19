@@ -7,7 +7,10 @@ use crate::{
     skill::SkillCatalog,
 };
 use merry_core::{PendingToolCall, PlanSnapshot, SessionId, ToolCallId};
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 mod checkpoint_window;
 mod context_state;
@@ -51,6 +54,8 @@ pub(crate) struct SessionState {
     archived_ref_manifest: checkpoint_window::ArchivedRefManifest,
     prompt_history_projection: PromptHistoryProjection,
     context_entries: Vec<ContextEntry>,
+    /// Context summary ids seeded by runtime construction; rebuilt on resume and not persisted.
+    construction_context_ids: BTreeSet<String>,
     activated_memories: Vec<ActivatedMemory>,
     active_plan: Option<PlanState>,
     terminal_plans: Vec<PlanSnapshot>,
@@ -64,6 +69,8 @@ pub(crate) struct SessionState {
     topic: Option<String>,
     /// In-flight topic call. Not persisted; aborted on drop.
     topic_task: Option<crate::runtime::TopicTask>,
+    /// Store directory that `journal_cursor` is currently tracking incrementally.
+    tracked_store_dir: Option<PathBuf>,
     journal_cursor: journal::JournalCursor,
 }
 
@@ -89,6 +96,7 @@ impl SessionState {
             archived_ref_manifest: checkpoint_window::ArchivedRefManifest::default(),
             prompt_history_projection: PromptHistoryProjection::new(),
             context_entries: Vec::new(),
+            construction_context_ids: BTreeSet::new(),
             activated_memories: Vec::new(),
             active_plan: None,
             terminal_plans: Vec::new(),
@@ -100,8 +108,17 @@ impl SessionState {
             external_tool_catalog,
             topic: None,
             topic_task: None,
+            tracked_store_dir: None,
             journal_cursor: journal::JournalCursor::default(),
         }
+    }
+
+    pub(crate) fn tracked_store_dir(&self) -> Option<&Path> {
+        self.tracked_store_dir.as_deref()
+    }
+
+    pub(crate) fn set_tracked_store_dir(&mut self, dir: PathBuf) {
+        self.tracked_store_dir = Some(dir);
     }
 
     pub(crate) fn topic(&self) -> Option<&str> {
@@ -143,6 +160,10 @@ impl SessionState {
 
     pub(crate) fn external_tool_catalog(&self) -> &merry_core::SessionToolCatalog {
         &self.external_tool_catalog
+    }
+
+    pub(crate) fn set_external_tool_catalog(&mut self, catalog: merry_core::SessionToolCatalog) {
+        self.external_tool_catalog = catalog;
     }
 
     pub(crate) fn active_plan(&self) -> Option<&PlanState> {

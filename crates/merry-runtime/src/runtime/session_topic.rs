@@ -136,6 +136,9 @@ async fn generate(
         return;
     };
     inner.session.lock().await.set_generated_topic(topic);
+    if let Some(cursor) = super::journal_persistence::write_resume_safe_savepoint(&inner).await {
+        inner.session.lock().await.adopt_journal_cursor(cursor);
+    }
 }
 
 async fn request_topic(

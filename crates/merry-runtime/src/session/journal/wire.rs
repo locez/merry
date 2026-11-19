@@ -6,8 +6,8 @@
 use super::super::{ModelTurnId, ModelTurnStatus, transcript::UserInputOrigin};
 use crate::{SessionStoreError, plan::PersistedPlanState, token_estimate::RequestTokenCalibration};
 use merry_core::{
-    PendingToolCall, PlanSnapshot, SessionId, SessionToolCatalog, SessionUsage, ToolCallId,
-    ToolCallResult, ToolOutput,
+    ErrorInfo, PendingToolCall, PlanSnapshot, SessionId, SessionUsage, ToolCallId,
+    ToolCallResultStatus, ToolOutput,
 };
 use serde::{Deserialize, Serialize};
 
@@ -99,7 +99,9 @@ pub(super) enum JournalItem {
         id: u64,
         model_turn_id: ModelTurnId,
         call_id: ToolCallId,
-        result: ToolCallResult,
+        status: ToolCallResultStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<ErrorInfo>,
         full_output: ToolOutput,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_output: Option<ToolOutput>,
@@ -185,12 +187,6 @@ pub(super) struct JournalStateDelta {
     pub(super) active_plan: Option<FieldPatch<PersistedPlanState>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) terminal_plans: Option<Vec<PlanSnapshot>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_non_null_option"
-    )]
-    pub(super) external_tool_catalog: Option<SessionToolCatalog>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) context_entries: Option<Vec<JournalContextEntry>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,7 +208,6 @@ impl JournalStateDelta {
             && self.task_anchor.is_none()
             && self.active_plan.is_none()
             && self.terminal_plans.is_none()
-            && self.external_tool_catalog.is_none()
             && self.context_entries.is_none()
             && self.next_item_id.is_none()
             && self.model_turns.is_empty()
@@ -253,12 +248,4 @@ pub(super) fn complete_journal_prefix(bytes: &[u8]) -> (&[u8], Option<u64>) {
 pub(super) fn complete_journal_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     let (complete, _) = complete_journal_prefix(bytes);
     complete.split(|byte| *byte == b'\n')
-}
-
-fn deserialize_non_null_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    T::deserialize(deserializer).map(Some)
 }

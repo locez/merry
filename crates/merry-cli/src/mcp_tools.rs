@@ -1,13 +1,7 @@
 use crate::{cli_error::CliError, config::MerryConfig};
-use merry_core::SessionToolCatalog;
 use merry_mcp::{McpFailureKind, McpServerDiagnostic, McpServerIssue};
 use merry_runtime::RegisteredTool;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
-
-pub(crate) enum McpSession<'a> {
-    New,
-    Resumed { catalog: &'a SessionToolCatalog },
-}
 
 pub(crate) struct ConfiguredMcpTools {
     pub(crate) tools: Vec<RegisteredTool>,
@@ -23,18 +17,15 @@ impl ConfiguredMcpTools {
 /// Discovers trusted MCP tools from user config and returns runtime tools.
 pub(crate) async fn discover_configured_mcp_tools(
     config: Option<&MerryConfig>,
-    session: McpSession<'_>,
 ) -> Result<ConfiguredMcpTools, CliError> {
     let servers = config
         .map(MerryConfig::mcp_servers)
         .transpose()
         .map_err(crate::cli_error::unexpected)?
         .unwrap_or_default();
-    let discovery = match session {
-        McpSession::New => merry_mcp::discover_mcp_tools(&servers).await,
-        McpSession::Resumed { catalog } => merry_mcp::restore_mcp_tools(&servers, catalog).await,
-    }
-    .map_err(crate::cli_error::unexpected)?;
+    let discovery = merry_mcp::discover_mcp_tools(&servers)
+        .await
+        .map_err(crate::cli_error::unexpected)?;
     let (registrations, warnings) = discovery.into_parts();
     for warning in &warnings {
         tracing::warn!(event = "mcp.startup.degraded", diagnostic = %format_mcp_warning(warning), "MCP startup requires attention");

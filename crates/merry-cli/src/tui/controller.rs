@@ -276,11 +276,17 @@ pub(crate) async fn run_controller(
                     };
                     match message {
                         InteractiveRunMessage::Event(event) => {
+                            let was_active = state.is_active_run();
                             let stream_progress = matches!(event,
                                 merry_core::RuntimeEvent::AssistantMessageDelta { .. }
                                 | merry_core::RuntimeEvent::ReasoningDelta { .. }
                                 | merry_core::RuntimeEvent::ModelOutputRateUpdated { .. });
                             projector.apply(event, &mut state);
+                            if was_active && !state.is_active_run() {
+                                session
+                                    .sync_metadata_on_turn_settled(state.first_user_input_topic())
+                                    .await;
+                            }
                             if !stream_progress || !state.is_active_run() {
                                 render_once(&mut terminal, &mut state)?;
                             }

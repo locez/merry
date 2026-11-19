@@ -7,7 +7,7 @@ use merry_runtime::{
     ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use url::Url;
@@ -153,23 +153,6 @@ impl ToolExecutor for WebFetchTool {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct WebFetchArtifact {
-    ok: bool,
-    requested_url: String,
-    final_url: String,
-    status_code: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    redirect_url: Option<String>,
-    body_bytes: usize,
-    truncated: bool,
-    content: String,
-}
-
 async fn execute_fetch(config: &WebFetchConfig, input: WebFetchInput) -> ToolExecutionOutcome {
     let mut url = match Url::parse(input.url.trim()) {
         Ok(url) => url,
@@ -213,29 +196,7 @@ async fn execute_fetch(config: &WebFetchConfig, input: WebFetchInput) -> ToolExe
             let summary = format!(
                 "Stopped at cross-host redirect ({status_code}) from {current_url} to {redirect_url}. Inspect the destination URL and fetch it directly if intended."
             );
-            let artifact = WebFetchArtifact {
-                ok: true,
-                requested_url: input.url,
-                final_url: current_url.to_string(),
-                status_code,
-                content_type: None,
-                title: None,
-                redirect_url: Some(redirect_url),
-                body_bytes: 0,
-                truncated: false,
-                content: summary.clone(),
-            };
-            let json = match serde_json::to_string(&artifact) {
-                Ok(json) => json,
-                Err(error) => {
-                    return web_fetch_failed(
-                        "web_fetch_encode_failed",
-                        error.to_string(),
-                        Some(current_url.as_str()),
-                    );
-                }
-            };
-            return ToolExecutionOutcome::succeeded_json(json).with_model_text(summary);
+            return ToolExecutionOutcome::succeeded_text(summary);
         }
         Err(outcome) => return *outcome,
     };
@@ -279,29 +240,7 @@ async fn execute_fetch(config: &WebFetchConfig, input: WebFetchInput) -> ToolExe
         model_summary.push_str("\n\n[truncated]");
     }
 
-    let artifact = WebFetchArtifact {
-        ok: true,
-        requested_url: input.url,
-        final_url: current_url.to_string(),
-        status_code,
-        content_type,
-        title,
-        redirect_url: None,
-        body_bytes: raw_bytes.len(),
-        truncated,
-        content: full_extracted,
-    };
-    let json = match serde_json::to_string(&artifact) {
-        Ok(json) => json,
-        Err(error) => {
-            return web_fetch_failed(
-                "web_fetch_encode_failed",
-                error.to_string(),
-                Some(current_url.as_str()),
-            );
-        }
-    };
-    ToolExecutionOutcome::succeeded_json(json).with_model_text(model_summary)
+    ToolExecutionOutcome::succeeded_text(model_summary)
 }
 
 enum RedirectStep {
@@ -584,10 +523,11 @@ mod tests {
             .await
             .expect("fetch succeeds");
         assert_eq!(ok.status(), ToolCallResultStatus::Succeeded);
-        let model_text = ok.model_content().map(|c| c.as_str()).expect("model text");
-        assert!(model_text.contains("Title: Test Page"));
-        assert!(model_text.contains("# Hello"));
-        assert!(!model_text.contains("bad()"));
+        assert!(ok.model_content().is_none());
+        let text = ok.content().as_str();
+        assert!(text.contains("Title: Test Page"));
+        assert!(text.contains("# Hello"));
+        assert!(!text.contains("bad()"));
 
         let cross_host = local_tool
             .execute(
@@ -597,9 +537,13 @@ mod tests {
             .await
             .expect("cross-host redirect returns cleanly");
         assert_eq!(cross_host.status(), ToolCallResultStatus::Succeeded);
-        let output: serde_json::Value =
-            serde_json::from_str(cross_host.content().as_str()).expect("valid json");
-        assert_eq!(output["redirect_url"], "https://other.example.com/target");
+        assert!(cross_host.model_content().is_none());
+        assert!(
+            cross_host
+                .content()
+                .as_str()
+                .contains("https://other.example.com/target")
+        );
 
         server.abort();
     }
