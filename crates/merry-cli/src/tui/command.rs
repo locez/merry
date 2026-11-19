@@ -85,7 +85,7 @@ const COMMANDS: &[CommandSpec] = &[
         None,
     ),
     CommandSpec::new(PaletteCommand::ShowHelp, "Merry", "Command help", None)
-        .with_slash("help", "List slash commands and essential keys"),
+        .with_slash("help", "List slash commands and keys"),
     #[cfg(feature = "web")]
     CommandSpec::new(
         PaletteCommand::OpenSessionInBrowser,
@@ -149,7 +149,8 @@ const COMMANDS: &[CommandSpec] = &[
         "Session",
         "Quit Merry",
         Some(KeyAction::Quit),
-    ),
+    )
+    .with_slash("exit", "Quit Merry"),
     CommandSpec::new(
         PaletteCommand::EnterPlanMode,
         "Plan",
@@ -287,7 +288,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["save"]
         );
-        assert_eq!(find_slash_prefix("").len(), 5);
+        assert_eq!(find_slash_prefix("").len(), 6);
         assert_eq!(
             find_slash_exact("tasks").map(|command| command.command),
             Some(PaletteCommand::ShowTasks)

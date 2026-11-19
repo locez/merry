@@ -99,7 +99,7 @@ fn slash_completion_uses_the_shared_registry_only_at_the_input_start() {
     let all = sources
         .menu_for_input("/", 1, None)
         .expect("slash completion");
-    assert_eq!(all.items().len(), 5);
+    assert_eq!(all.items().len(), 6);
     assert!(
         all.items()
             .iter()
@@ -110,7 +110,7 @@ fn slash_completion_uses_the_shared_registry_only_at_the_input_start() {
             .iter()
             .map(|item| item.value())
             .collect::<Vec<_>>(),
-        vec!["/help", "/save", "/status", "/stop", "/tasks"]
+        vec!["/exit", "/help", "/save", "/status", "/stop", "/tasks"]
     );
 
     let save = sources
@@ -807,7 +807,7 @@ fn slash_completion_renders_all_commands_at_compact_and_standard_sizes() {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        for command in ["/help", "/save", "/status", "/stop", "/tasks"] {
+        for command in ["/exit", "/help", "/save", "/status", "/stop", "/tasks"] {
             assert!(
                 text.contains(command),
                 "{command} should render at {width}x{height}"
