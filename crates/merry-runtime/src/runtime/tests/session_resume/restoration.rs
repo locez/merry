@@ -1,5 +1,6 @@
 use crate::{
-    CitationCompactionPolicy, ContextCompiler, FileSessionStore, ProjectRules, TaskAnchor,
+    CitationCompactionPolicy, ContextCompiler, FileSessionStore, ProjectRules,
+    SessionTranscriptItem, TaskAnchor,
     runtime::{
         Runtime,
         tests::support::common::{RuntimeSessionStateTestExt, session_id},
@@ -43,20 +44,16 @@ async fn resumed_runtime_reopens_persisted_trajectory_for_append() {
         .session_store(store.clone())
         .build()
         .expect("runtime builds");
-    let call = PendingToolCall::new(
-        merry_core::ToolCallId::new("trajectory-call").expect("valid call id"),
-        ToolName::new("lookup").expect("valid tool name"),
-        ToolCallArguments::try_from(json!({"query": "value"})).expect("valid arguments"),
-    );
-    let event = RuntimeJournalEvent::new(
-        session_id.clone(),
-        7,
-        RuntimeJournalPayload::ToolCallPending { call },
-    );
-    runtime
-        .inner
-        .project_journal_events(std::slice::from_ref(&event));
-    runtime.close_trajectory();
+    {
+        let mut session = runtime.inner.session.lock().await;
+        let turn_id = session.begin_model_turn().expect("turn begins");
+        session
+            .record_user_message_body(turn_id, "resume trajectory text")
+            .expect("user message records");
+        session
+            .close_model_response(turn_id, false)
+            .expect("turn closes");
+    }
     runtime
         .save_session()
         .await
@@ -71,10 +68,17 @@ async fn resumed_runtime_reopens_persisted_trajectory_for_append() {
         .await
         .expect("trajectory snapshot reads");
 
-    assert_eq!(snapshot.latest_sequence(), 7);
+    assert!(
+        snapshot.records().iter().any(|record| {
+            record
+                .summary()
+                .is_some_and(|summary| summary.contains("resume trajectory text"))
+        }),
+        "resume seeds the in-memory trajectory from the transcript"
+    );
     assert!(!snapshot.is_closed());
-    assert_eq!(snapshot.records().len(), 1);
-    assert_eq!(snapshot.records()[0].start_sequence(), 7);
+    let seeded_len = snapshot.records().len();
+    assert!(seeded_len >= 1);
 
     let next_call = PendingToolCall::new(
         merry_core::ToolCallId::new("trajectory-call-after-resume").expect("valid call id"),
@@ -93,8 +97,8 @@ async fn resumed_runtime_reopens_persisted_trajectory_for_append() {
         .trajectory_snapshot()
         .await
         .expect("appended trajectory reads");
-    assert_eq!(appended.records().len(), 2);
-    assert_eq!(appended.latest_sequence(), 8);
+    assert_eq!(appended.records().len(), seeded_len + 1);
+    assert!(appended.latest_sequence() > snapshot.latest_sequence());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -190,4 +194,78 @@ async fn runtime_resume_uses_default_store_constructor_shape() {
     let session_id = session_id("runtime-resume-default-shape");
     let _resume_fn = Runtime::resume;
     let _builder = Runtime::builder(session_id);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn save_into_a_fresh_store_rewrites_a_complete_journal() {
+    let origin = tempfile::tempdir().expect("tempdir");
+    let origin_store = FileSessionStore::new(origin.path());
+    let session_id = session_id("runtime-cross-store-journal");
+    let runtime = Runtime::builder(session_id.clone())
+        .session_store(origin_store.clone())
+        .build()
+        .expect("runtime builds");
+    {
+        let mut session = runtime.inner.session.lock().await;
+        session.record_session_started_if_needed();
+        session
+            .record_test_user_message_body("keep this turn")
+            .expect("user message records");
+    }
+    runtime.save_session().await.expect("origin saves");
+
+    let copy = tempfile::tempdir().expect("tempdir");
+    let copy_store = FileSessionStore::new(copy.path());
+    runtime
+        .save_session_to(copy_store.clone())
+        .await
+        .expect("copy saves");
+    let resumed = Runtime::builder(session_id.clone())
+        .resume_from_store(copy_store)
+        .await
+        .expect("copy resumes");
+    assert_eq!(
+        resumed.session_transcript().await.expect("copy transcript"),
+        vec![SessionTranscriptItem::UserMessage {
+            text: "keep this turn".to_owned(),
+            images: Vec::new(),
+        }]
+    );
+
+    {
+        let mut session = runtime.inner.session.lock().await;
+        session
+            .record_test_user_message_body("second turn")
+            .expect("second user message records");
+    }
+    runtime
+        .save_session()
+        .await
+        .expect("origin accepts the next delta");
+    let second_copy = tempfile::tempdir().expect("tempdir");
+    let second_store = FileSessionStore::new(second_copy.path());
+    runtime
+        .save_session_to(second_store.clone())
+        .await
+        .expect("second copy saves");
+    let resumed = Runtime::builder(session_id)
+        .resume_from_store(second_store)
+        .await
+        .expect("second copy resumes");
+    assert_eq!(
+        resumed
+            .session_transcript()
+            .await
+            .expect("second copy transcript"),
+        vec![
+            SessionTranscriptItem::UserMessage {
+                text: "keep this turn".to_owned(),
+                images: Vec::new(),
+            },
+            SessionTranscriptItem::UserMessage {
+                text: "second turn".to_owned(),
+                images: Vec::new(),
+            },
+        ]
+    );
 }

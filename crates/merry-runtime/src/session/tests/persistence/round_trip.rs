@@ -78,27 +78,25 @@ async fn session_state_round_trip_preserves_turns_user_text_and_projections() {
     let transcript_before = session.transcript.persisted();
 
     session.save_to(&store).await.expect("session should save");
-    let stored: serde_json::Value = serde_json::from_slice(
-        &store
-            .read_state_bytes(&session_id())
-            .await
-            .expect("saved state should read"),
-    )
-    .expect("saved state should be JSON");
-    assert_eq!(stored["format_version"], 6);
+    let stored_bytes = store
+        .read_state_bytes(&session_id())
+        .await
+        .expect("saved state should read");
+    let stored = crate::session::last_commit_json(&stored_bytes);
+    let stored_text = String::from_utf8_lossy(&stored_bytes);
+    assert!(stored_text.contains("\"format_version\":1"));
     assert!(
-        stored.get("artifacts").is_none(),
-        "v6 state.json must not contain a top-level artifacts table"
+        !stored_text.contains("trajectory_snapshot"),
+        "the journal does not persist a trajectory snapshot"
     );
-    assert_eq!(
-        stored["prompt_history_projection"]["compacted_through"],
-        serde_json::Value::Null
-    );
+    assert!(stored.get("prompt_history_projection").is_none());
     assert!(
-        stored["transcript"]
-            .get("prompt_history_projection")
-            .is_none(),
-        "the provider projection belongs to session state, not the transcript"
+        stored["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .all(|item| item.get("prompt_projection").is_none()),
+        "prompt projections are derived on load"
     );
     let loaded = SessionState::load_from(&store, &session_id())
         .await
@@ -330,4 +328,115 @@ async fn session_state_saved_document_omits_construction_context_and_memory_stor
     assert!(!json.contains("memory_store"));
     assert!(!json.contains("activated_memories"));
     assert!(json.contains("resume task"));
+}
+
+#[tokio::test]
+async fn subsequent_journal_commits_only_append_deltas_and_strip_process_admission_metadata() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut session = SessionState::new(session_id());
+
+    let turn1 = session.begin_model_turn().expect("turn 1 begins");
+    session
+        .record_user_message_body(turn1, "turn one input")
+        .expect("turn 1 user");
+    session
+        .record_assistant_text_output(turn1, "turn one answer".to_owned())
+        .expect("turn 1 assistant");
+    session
+        .close_model_response(turn1, false)
+        .expect("turn 1 closes");
+    session.save_to(&store).await.expect("first commit saves");
+
+    let turn2 = session.begin_model_turn().expect("turn 2 begins");
+    session
+        .record_user_message_body(turn2, "turn two input")
+        .expect("turn 2 user");
+    let call = pending_tool_call("call-proc-sanitize");
+    let batch = merry_core::PendingToolCallBatch::new(
+        merry_core::ToolCallBatchId::new("batch-proc-sanitize").expect("batch id"),
+        vec![call.clone()],
+    )
+    .expect("batch");
+    session
+        .record_tool_call_batch_pending(turn2, batch)
+        .expect("tool call records");
+    session
+        .close_model_response(turn2, true)
+        .expect("turn 2 awaits tool");
+    let full_process = ToolOutput::json(
+        serde_json::json!({
+            "kind": "process_action",
+            "ok": true,
+            "permission_profile_id": "process.read_only",
+            "permission_review": {"rationale": "secret policy note"},
+            "status": {"kind": "exited", "code": 0},
+            "stdout": {"text": "clean output\n", "bytes": 13, "truncated": false, "utf8": true},
+            "stderr": {"text": "", "bytes": 0, "truncated": false, "utf8": true},
+            "input_evidence": {
+                "kind": "shell_command_script",
+                "shell": "bash",
+                "flag": "-lc",
+                "script": "echo clean output",
+                "script_bytes": 17,
+                "script_fingerprint": "fnv1a64:deadbeef"
+            }
+        })
+        .to_string(),
+    );
+    let model_process = ToolOutput::text("exit 0\nstdout:\nclean output\n");
+    session
+        .submit_tool_result(
+            ToolCallResult::succeeded(call.id().clone()),
+            crate::tool::ToolResultContent::from(full_process).with_model(model_process.clone()),
+        )
+        .expect("process result records");
+    session.save_to(&store).await.expect("second commit saves");
+
+    let bytes = store
+        .read_journal_bytes(&session_id())
+        .await
+        .expect("journal reads");
+    let text = String::from_utf8(bytes).expect("utf8");
+    let lines = text.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 3, "expected header + 2 commits");
+
+    let second_commit: serde_json::Value =
+        serde_json::from_str(lines[2]).expect("second commit is JSON");
+    assert!(
+        second_commit["state"]
+            .get("external_tool_catalog")
+            .is_none(),
+        "unchanged external_tool_catalog must not repeat on later commits"
+    );
+    assert!(
+        second_commit["state"].get("active_plan").is_none(),
+        "unchanged active_plan must not repeat on later commits"
+    );
+    let turns = second_commit["state"]["model_turns"]
+        .as_array()
+        .expect("turn delta array");
+    assert_eq!(turns.len(), 1, "only new/changed model turn is written");
+    assert_eq!(turns[0]["id"], 2);
+    assert!(
+        !lines[2].contains("permission_profile_id")
+            && !lines[2].contains("permission_review")
+            && !lines[2].contains("input_evidence")
+            && !lines[2].contains("script_fingerprint"),
+        "non-durable process admission/fingerprint metadata must not enter journal.jsonl"
+    );
+    assert!(
+        !lines[2].contains("\"model_output\""),
+        "derivable process model_output must not be duplicated in journal.jsonl"
+    );
+
+    let loaded = SessionState::load_from(&store, &session_id())
+        .await
+        .expect("journal reloads cleanly");
+    assert_eq!(
+        loaded
+            .read_model_tool_preview(call.id(), 4096)
+            .map(|preview| preview.content().to_owned()),
+        Some(model_process.as_str().to_owned())
+    );
 }

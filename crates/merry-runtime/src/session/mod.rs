@@ -8,17 +8,17 @@ use crate::{
     plan::PlanState,
     skill::SkillCatalog,
 };
-use merry_core::{PendingToolCall, PlanSnapshot, SessionId, ToolCallId, TrajectorySnapshot};
+use merry_core::{PendingToolCall, PlanSnapshot, SessionId, ToolCallId};
 use std::collections::BTreeSet;
 
 mod checkpoint_window;
 mod context_state;
 mod events;
 mod history;
+mod journal;
 mod messages;
 mod model_turns;
 mod persistence;
-mod plan_persistence;
 mod plan_tool_commit;
 mod recording;
 mod tool_calls;
@@ -27,17 +27,19 @@ mod transcript;
 mod usage;
 
 pub(crate) use self::checkpoint_window::PreparedCompactionInstall;
+pub(crate) use self::journal::{
+    JournalCursor, JournalImageFile, extract_search_snapshot, is_image_id,
+};
 pub(crate) use self::{
     model_turns::{ModelTurn, ModelTurnId, ModelTurnStatus, PromptHistoryProjection},
-    persistence::PersistableSessionBundle,
+    persistence::{PersistableSessionBundle, journal_destination_has_header},
     plan_tool_commit::PreparedPlanToolCommit,
     tool_result::{ProposedToolExecutionOutcome, ToolResultLedgerObservation},
-    transcript::{Transcript, TranscriptItemSnapshot, UserInputOrigin},
+    transcript::{Transcript, TranscriptItem, TranscriptItemSnapshot, UserInputOrigin},
 };
-pub(crate) use crate::session_projection::{SessionTrajectory, SessionTrajectoryItem};
 
 #[cfg(test)]
-pub(crate) use self::transcript::TranscriptItem;
+pub(crate) use self::journal::last_commit_json;
 
 /// Mutable runtime state for one session.
 #[derive(Debug)]
@@ -63,11 +65,16 @@ pub(crate) struct SessionState {
     resolved_tool_calls: BTreeSet<ToolCallId>,
     usage: Option<merry_core::SessionUsage>,
     request_token_calibration: Option<crate::token_estimate::RequestTokenCalibration>,
-    trajectory_snapshot: Option<TrajectorySnapshot>,
     external_tool_catalog: merry_core::SessionToolCatalog,
+    /// Model-written list label. Empty until the first-turn side call succeeds.
+    topic: Option<String>,
+    /// In-flight topic call. Not persisted; aborted on drop.
+    topic_task: Option<crate::runtime::TopicTask>,
+    journal_cursor: journal::JournalCursor,
 }
 
 impl SessionState {
+    #[cfg(test)]
     pub(crate) fn new(session_id: SessionId) -> Self {
         Self::with_external_tool_catalog(session_id, merry_core::SessionToolCatalog::default())
     }
@@ -98,21 +105,52 @@ impl SessionState {
             resolved_tool_calls: BTreeSet::new(),
             usage: None,
             request_token_calibration: None,
-            trajectory_snapshot: None,
             external_tool_catalog,
+            topic: None,
+            topic_task: None,
+            journal_cursor: journal::JournalCursor::default(),
         }
     }
 
-    pub(crate) fn trajectory_snapshot(&self) -> Option<TrajectorySnapshot> {
-        self.trajectory_snapshot.clone()
+    pub(crate) fn topic(&self) -> Option<&str> {
+        self.topic.as_deref()
+    }
+
+    pub(crate) fn set_generated_topic(&mut self, topic: String) {
+        if self.topic.is_none() {
+            self.topic = Some(topic);
+        }
+    }
+
+    pub(crate) fn set_topic_task(&mut self, task: crate::runtime::TopicTask) {
+        self.topic_task = Some(task);
+    }
+
+    pub(crate) fn take_topic_task(&mut self) -> Option<crate::runtime::TopicTask> {
+        self.topic_task.take()
+    }
+
+    pub(crate) fn user_message_count(&self) -> usize {
+        self.transcript
+            .items()
+            .iter()
+            .filter(|item| matches!(item, transcript::TranscriptItem::UserMessage { .. }))
+            .count()
+    }
+
+    pub(crate) fn first_user_message_text(&self) -> Option<String> {
+        self.transcript.items().iter().find_map(|item| match item {
+            transcript::TranscriptItem::UserMessage { text, .. } => Some(text.to_string()),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn transcript(&self) -> &Transcript {
+        &self.transcript
     }
 
     pub(crate) fn external_tool_catalog(&self) -> &merry_core::SessionToolCatalog {
         &self.external_tool_catalog
-    }
-
-    pub(crate) fn set_trajectory_snapshot(&mut self, snapshot: TrajectorySnapshot) {
-        self.trajectory_snapshot = Some(snapshot);
     }
 
     pub(crate) fn ledger_projection(&self) -> crate::ledger::LedgerProjectionSnapshot {

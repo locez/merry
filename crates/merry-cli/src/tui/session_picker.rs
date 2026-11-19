@@ -10,7 +10,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
 };
-use std::path::Path;
+use std::{collections::BTreeSet, path::Path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionPickerSelection {
@@ -21,15 +21,21 @@ pub(crate) enum SessionPickerSelection {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SessionPickerState {
+    all_sessions: Vec<TuiSessionMetadata>,
     sessions: Vec<TuiSessionMetadata>,
     selected: usize,
+    query: String,
+    filtering: bool,
 }
 
 impl SessionPickerState {
     pub(crate) fn new(sessions: Vec<TuiSessionMetadata>) -> Self {
         Self {
+            all_sessions: sessions.clone(),
             sessions,
             selected: 0,
+            query: String::new(),
+            filtering: false,
         }
     }
 
@@ -59,6 +65,26 @@ pub(crate) fn handle_picker_key(
 ) -> Option<SessionPickerSelection> {
     match key.code {
         KeyCode::Enter => Some(state.accept()),
+        KeyCode::Char('/') if !state.filtering => {
+            state.filtering = true;
+            None
+        }
+        KeyCode::Char(character) if state.filtering => {
+            state.query.push(character);
+            None
+        }
+        KeyCode::Backspace if state.filtering => {
+            state.query.pop();
+            if state.query.is_empty() {
+                state.filtering = false;
+            }
+            None
+        }
+        KeyCode::Esc if state.filtering => {
+            state.query.clear();
+            state.filtering = false;
+            None
+        }
         KeyCode::Char('n') | KeyCode::Char('N') => Some(SessionPickerSelection::New),
         KeyCode::Char('q') | KeyCode::Esc => Some(SessionPickerSelection::Quit),
         KeyCode::Down => {
@@ -70,6 +96,32 @@ pub(crate) fn handle_picker_key(
             None
         }
         _ => None,
+    }
+}
+
+async fn apply_picker_query(state: &mut SessionPickerState, store: &TuiSessionStore) {
+    if state.query.is_empty() {
+        state.sessions = state.all_sessions.clone();
+    } else {
+        let matches = store
+            .session_state_store()
+            .search_session_ids(&state.query)
+            .await;
+        let allowed = matches
+            .into_iter()
+            .map(|session_id| session_id.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        state.sessions = state
+            .all_sessions
+            .iter()
+            .filter(|session| allowed.contains(session.session_id.as_str()))
+            .cloned()
+            .collect();
+    }
+    if state.sessions.is_empty() {
+        state.selected = 0;
+    } else if state.selected >= state.sessions.len() {
+        state.selected = state.sessions.len() - 1;
     }
 }
 
@@ -92,8 +144,12 @@ pub(crate) async fn pick_session(
         };
         match event {
             TerminalEvent::Key(key) => {
+                let previous_query = state.query.clone();
                 if let Some(selection) = handle_picker_key(key, &mut state) {
                     return Ok(selection);
+                }
+                if state.query != previous_query {
+                    apply_picker_query(&mut state, store).await;
                 }
                 terminal
                     .draw(|frame| render_session_picker(frame, &state, workspace_root))
@@ -152,7 +208,11 @@ fn render_session_picker(frame: &mut Frame<'_>, state: &SessionPickerState, work
                     Style::default().fg(Color::White),
                 ),
             ]),
-            Line::from("Enter resume  n new  q quit"),
+            Line::from(if state.filtering {
+                format!("filter: {query}  Esc clear", query = state.query)
+            } else {
+                "Enter resume  n new  q quit  / filter".to_owned()
+            }),
         ])
         .style(Style::default().fg(Color::LightMagenta)),
         header,
@@ -193,16 +253,19 @@ fn render_session_picker(frame: &mut Frame<'_>, state: &SessionPickerState, work
 }
 
 fn session_line(session: &TuiSessionMetadata) -> Line<'static> {
-    let title = session
-        .title
+    let label = session
+        .topic
         .as_deref()
-        .filter(|title| !title.trim().is_empty())
+        .filter(|topic| !topic.trim().is_empty())
         .unwrap_or("Untitled session");
     let model = session.model.as_deref().unwrap_or("model -");
     let effort = session.reasoning_effort.as_deref().unwrap_or("-");
     let origin = if session.headless { "headless" } else { "TUI" };
-    Line::from(vec![
-        Span::styled(title.to_owned(), Style::default().fg(Color::White)),
+    let mut spans = vec![Span::styled(
+        label.to_owned(),
+        Style::default().fg(Color::White),
+    )];
+    spans.extend([
         Span::raw("  "),
         Span::styled(
             session.session_id.as_str().to_owned(),
@@ -214,7 +277,8 @@ fn session_line(session: &TuiSessionMetadata) -> Line<'static> {
         Span::styled(effort.to_owned(), Style::default().fg(Color::LightMagenta)),
         Span::raw("  "),
         Span::styled(origin.to_owned(), Style::default().fg(Color::DarkGray)),
-    ])
+    ]);
+    Line::from(spans)
 }
 
 #[cfg(test)]
@@ -252,7 +316,7 @@ mod tests {
             PathBuf::from("/repo"),
             active,
         );
-        metadata.title = Some(format!("session {id}"));
+        metadata.topic = Some(format!("session {id}"));
         metadata.model = Some("gpt-test".to_owned());
         metadata.reasoning_effort = Some("medium".to_owned());
         metadata

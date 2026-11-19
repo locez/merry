@@ -218,9 +218,9 @@ async fn execute_tool_blank_json_outcome_keeps_pending_without_output_or_result(
         vec![ModelOutput::tool_call(call)],
         FinishReason::ToolCalls,
     ))]]);
-    let executor = ScriptedToolExecutor::new(ToolExecutorResponse::Outcome(
+    let executor = ScriptedToolExecutor::new(ToolExecutorResponse::Outcome(Box::new(
         ToolExecutionOutcome::succeeded_json(" \n\t "),
-    ));
+    )));
     let runtime = runtime_with_registered_tool(
         "provider-execute-tool-blank-json-outcome",
         provider,

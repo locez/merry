@@ -1,6 +1,9 @@
-use crate::session_store::{
-    FileSessionStore, OsStr, SessionId, SessionStoreError, SessionStoreStagePause,
-    sessions_dir_from_env,
+use crate::{
+    session::SessionState,
+    session_store::{
+        FileSessionStore, OsStr, SessionId, SessionStoreError, SessionStoreStagePause,
+        sessions_dir_from_env,
+    },
 };
 use std::path::PathBuf;
 
@@ -32,197 +35,94 @@ fn session_store_default_sessions_dir_falls_back_to_local_state_home() {
 }
 
 #[tokio::test]
-async fn session_store_writes_state_json_with_atomic_replace() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let session_id = SessionId::new("session-store-test").expect("valid session id");
-
-    store
-        .write_state_bytes(&session_id, br#"{"format_version":1}"#)
-        .await
-        .expect("state write succeeds");
-    store
-        .write_state_bytes(&session_id, br#"{"format_version":1,"second":true}"#)
-        .await
-        .expect("state rewrite succeeds");
-
-    let bytes = store
-        .read_state_bytes(&session_id)
-        .await
-        .expect("state reads");
-    assert_eq!(bytes, br#"{"format_version":1,"second":true}"#);
-    assert!(store.state_path(&session_id).ends_with("state.json"));
-}
-
-#[tokio::test]
-async fn staged_state_bytes_do_not_replace_committed_state() {
+async fn staged_journal_append_does_not_mutate_disk_until_commit_and_discard_is_clean() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     let session_id = SessionId::new("session-store-stage").expect("valid session id");
-    let old_bytes = br#"{"format_version":1,"value":"old"}"#;
-    let new_bytes = br#"{"format_version":1,"value":"new"}"#;
+    let header =
+        b"{\"type\":\"header\",\"format_version\":1,\"session_id\":\"session-store-stage\"}\n";
+    let first = b"{\"type\":\"commit\",\"state\":{\"next_sequence\":1}}\n";
+    let discarded = b"{\"type\":\"commit\",\"state\":{\"next_sequence\":2}}\n";
+
     store
-        .write_state_bytes(&session_id, old_bytes)
+        .stage_journal_append(&session_id, header.to_vec(), first.to_vec(), &[], None)
         .await
-        .expect("initial state write succeeds");
-
-    let staged = store
-        .stage_state_bytes(&session_id, new_bytes)
-        .await
-        .expect("state staging succeeds");
-
-    assert_eq!(
-        store
-            .read_state_bytes(&session_id)
-            .await
-            .expect("committed state reads"),
-        old_bytes
-    );
-    assert!(staged.temp_path.exists());
-    staged.discard().await.expect("staged state discards");
-}
-
-#[tokio::test]
-async fn discarding_staged_state_keeps_committed_state() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let session_id = SessionId::new("session-store-discard").expect("valid session id");
-    let old_bytes = br#"{"format_version":1,"value":"old"}"#;
-    store
-        .write_state_bytes(&session_id, old_bytes)
-        .await
-        .expect("initial state write succeeds");
-    let staged = store
-        .stage_state_bytes(&session_id, br#"{"format_version":1,"value":"discarded"}"#)
-        .await
-        .expect("state staging succeeds");
-    let temp_path = staged.temp_path.clone();
-
-    staged.discard().await.expect("staged state discards");
-
-    assert_eq!(
-        store
-            .read_state_bytes(&session_id)
-            .await
-            .expect("committed state reads"),
-        old_bytes
-    );
-    assert!(!temp_path.exists());
-}
-
-#[tokio::test]
-async fn committing_staged_state_replaces_committed_state() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store = FileSessionStore::new(temp.path());
-    let session_id = SessionId::new("session-store-commit").expect("valid session id");
-    let new_bytes = br#"{"format_version":1,"value":"committed"}"#;
-    store
-        .write_state_bytes(&session_id, br#"{"format_version":1,"value":"old"}"#)
-        .await
-        .expect("initial state write succeeds");
-    let staged = store
-        .stage_state_bytes(&session_id, new_bytes)
-        .await
-        .expect("state staging succeeds");
-    let temp_path = staged.temp_path.clone();
-
-    staged
+        .expect("first append stages")
         .commit()
         .await
-        .expect("staged state renames")
+        .expect("first append commits")
         .require_durable()
-        .expect("committed state is durable");
+        .expect("first append is durable");
 
+    let staged = store
+        .stage_journal_append(&session_id, header.to_vec(), discarded.to_vec(), &[], None)
+        .await
+        .expect("second append stages");
+
+    let expected = [header.as_slice(), first.as_slice()].concat();
     assert_eq!(
         store
-            .read_state_bytes(&session_id)
+            .read_journal_bytes(&session_id)
             .await
-            .expect("committed state reads"),
-        new_bytes
+            .expect("committed journal reads"),
+        expected
     );
-    assert!(!temp_path.exists());
-}
 
-#[tokio::test]
-async fn independent_stages_for_one_session_do_not_share_temp_files() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let store_a = FileSessionStore::new(temp.path());
-    let store_b = FileSessionStore::new(temp.path());
-    let session_id = SessionId::new("session-store-independent-stages").expect("valid id");
-    let bytes_a = br#"{"format_version":1,"writer":"a"}"#;
-    let bytes_b = br#"{"format_version":1,"writer":"b"}"#;
-
-    let staged_a = store_a
-        .stage_state_bytes(&session_id, bytes_a)
-        .await
-        .expect("first state stages");
-    let staged_b = store_b
-        .stage_state_bytes(&session_id, bytes_b)
-        .await
-        .expect("second state stages");
-
-    assert_ne!(staged_a.temp_path, staged_b.temp_path);
-    staged_a
-        .commit()
-        .await
-        .expect("first state renames")
-        .require_durable()
-        .expect("first state is durable");
+    staged.discard().await.expect("staged append discards");
     assert_eq!(
-        store_a
-            .read_state_bytes(&session_id)
+        store
+            .read_journal_bytes(&session_id)
             .await
-            .expect("first committed state reads"),
-        bytes_a
-    );
-    staged_b
-        .commit()
-        .await
-        .expect("second state renames")
-        .require_durable()
-        .expect("second state is durable");
-    assert_eq!(
-        store_b
-            .read_state_bytes(&session_id)
-            .await
-            .expect("second committed state reads"),
-        bytes_b
+            .expect("committed journal remains unchanged after discard"),
+        expected
     );
 }
 
 #[tokio::test]
-async fn injected_commit_failure_keeps_committed_state() {
+async fn injected_commit_failure_keeps_committed_journal_unchanged() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     let session_id = SessionId::new("session-store-commit-failure").expect("valid session id");
-    let old_bytes = br#"{"format_version":1,"value":"old"}"#;
+    let header = b"{\"type\":\"header\"}\n";
+    let old_commit = b"{\"type\":\"commit\",\"v\":1}\n";
     store
-        .write_state_bytes(&session_id, old_bytes)
+        .stage_journal_append(&session_id, header.to_vec(), old_commit.to_vec(), &[], None)
         .await
-        .expect("initial state write succeeds");
+        .expect("initial append stages")
+        .commit()
+        .await
+        .expect("initial append commits")
+        .require_durable()
+        .expect("initial append is durable");
+
     let failing_store = store.clone().with_commit_failure_for_tests();
     let staged = failing_store
-        .stage_state_bytes(&session_id, br#"{"format_version":1,"value":"new"}"#)
+        .stage_journal_append(
+            &session_id,
+            header.to_vec(),
+            b"{\"type\":\"commit\",\"v\":2}\n".to_vec(),
+            &[],
+            None,
+        )
         .await
-        .expect("state staging succeeds");
+        .expect("failing append stages");
 
     staged
         .commit()
         .await
-        .expect_err("injected commit failure must fail before rename");
+        .expect_err("injected commit failure must fail before appending");
 
     assert_eq!(
         store
-            .read_state_bytes(&session_id)
+            .read_journal_bytes(&session_id)
             .await
-            .expect("committed state reads"),
-        old_bytes
+            .expect("committed journal reads"),
+        [header.as_slice(), old_commit.as_slice()].concat()
     );
-    assert!(store.staged_state_paths_for_tests(&session_id).is_empty());
 }
 
 #[tokio::test]
-async fn stage_pause_blocks_after_sync_and_only_once() {
+async fn stage_pause_blocks_before_commit_and_only_once() {
     let temp = tempfile::tempdir().expect("tempdir");
     let pause = SessionStoreStagePause::new();
     let store = FileSessionStore::new(temp.path()).with_stage_pause_for_tests(pause.clone());
@@ -231,35 +131,40 @@ async fn stage_pause_blocks_after_sync_and_only_once() {
     let staged_session_id = session_id.clone();
     let staging = tokio::spawn(async move {
         staged_store
-            .stage_state_bytes(
+            .stage_journal_append(
                 &staged_session_id,
-                br#"{"format_version":1,"value":"first"}"#,
+                b"{\"type\":\"header\"}\n".to_vec(),
+                b"{\"type\":\"commit\",\"v\":1}\n".to_vec(),
+                &[],
+                None,
             )
             .await
     });
 
     pause.wait_until_staged().await;
-    assert!(
-        store.staged_state_paths_for_tests(&session_id).len() == 1,
-        "pause must become observable after the temporary file is synced"
-    );
-    assert!(!store.state_path(&session_id).exists());
+    assert!(!store.journal_path(&session_id).exists());
     pause.resume();
     staging
         .await
         .expect("staging task joins")
-        .expect("first state staging succeeds")
+        .expect("first staging succeeds")
         .discard()
         .await
-        .expect("first staged state discards");
+        .expect("first staged append discards");
 
     store
-        .stage_state_bytes(&session_id, br#"{"format_version":1,"value":"second"}"#)
+        .stage_journal_append(
+            &session_id,
+            b"{\"type\":\"header\"}\n".to_vec(),
+            b"{\"type\":\"commit\",\"v\":2}\n".to_vec(),
+            &[],
+            None,
+        )
         .await
         .expect("pause is consumed after the first stage")
         .discard()
         .await
-        .expect("second staged state discards");
+        .expect("second staged append discards");
 }
 
 #[tokio::test]
@@ -277,21 +182,27 @@ async fn contains_session_reports_only_committed_state() {
     );
 
     let staged = store
-        .stage_state_bytes(&session_id, br#"{"format_version":1,"value":"staged"}"#)
+        .stage_journal_append(
+            &session_id,
+            b"{\"type\":\"header\"}\n".to_vec(),
+            b"{\"type\":\"commit\"}\n".to_vec(),
+            &[],
+            None,
+        )
         .await
-        .expect("state should stage");
+        .expect("journal append should stage");
     assert!(
         !store
             .contains_session(&session_id)
             .await
             .expect("a staged store should be readable"),
-        "staged state is not yet a session another run could destroy"
+        "staged state is not yet a committed session"
     );
 
     staged
         .commit()
         .await
-        .expect("staged state should commit")
+        .expect("staged append should commit")
         .require_durable()
         .expect("commit should be durable");
     assert!(
@@ -299,7 +210,7 @@ async fn contains_session_reports_only_committed_state() {
             .contains_session(&session_id)
             .await
             .expect("a committed store should be readable"),
-        "committed state must be reported so a new run cannot replace it"
+        "committed state must be reported so a new run cannot reuse the id"
     );
 }
 
@@ -338,4 +249,115 @@ async fn concurrent_session_reservations_have_one_winner() {
         left.as_ref().err().or_else(|| right.as_ref().err()),
         Some(SessionStoreError::SessionAlreadyReserved { .. })
     ));
+}
+
+#[tokio::test]
+async fn journal_appends_write_header_once_and_serialize_concurrent_commits() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store_a = FileSessionStore::new(temp.path());
+    let store_b = store_a.clone();
+    let session_id = SessionId::new("session-journal-append").expect("valid session id");
+    let header =
+        b"{\"type\":\"header\",\"format_version\":1,\"session_id\":\"session-journal-append\"}\n";
+    let first = b"{\"type\":\"commit\",\"v\":1}\n";
+    let second = b"{\"type\":\"commit\",\"v\":2}\n";
+
+    let staged_a = store_a
+        .stage_journal_append(&session_id, header.to_vec(), first.to_vec(), &[], None)
+        .await
+        .expect("first append stages");
+    let staged_b = store_b
+        .stage_journal_append(&session_id, header.to_vec(), second.to_vec(), &[], None)
+        .await
+        .expect("second append stages");
+
+    let (res_a, res_b) = tokio::join!(staged_a.commit(), staged_b.commit());
+    res_a
+        .expect("first commit succeeds")
+        .require_durable()
+        .expect("first commit durable");
+    res_b
+        .expect("second commit succeeds")
+        .require_durable()
+        .expect("second commit durable");
+
+    let text = String::from_utf8(
+        store_a
+            .read_journal_bytes(&session_id)
+            .await
+            .expect("journal reads"),
+    )
+    .expect("journal is UTF-8");
+    let lines = text.lines().collect::<Vec<_>>();
+    assert_eq!(
+        lines.len(),
+        3,
+        "expected exactly 1 header + 2 commits: {text}"
+    );
+    assert_eq!(
+        lines[0],
+        std::str::from_utf8(header).expect("utf8").trim_end()
+    );
+    assert!(
+        lines
+            .iter()
+            .filter(|line| line.contains("\"type\":\"header\""))
+            .count()
+            == 1
+    );
+    assert!(lines.contains(&"{\"type\":\"commit\",\"v\":1}"));
+    assert!(lines.contains(&"{\"type\":\"commit\",\"v\":2}"));
+}
+
+#[tokio::test]
+async fn load_truncates_incomplete_trailing_line_so_subsequent_append_stays_valid() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let session_id = SessionId::new("session-truncated-tail").expect("valid session id");
+    let mut session = SessionState::new(session_id.clone());
+    let turn1 = session.begin_model_turn().expect("turn 1 begins");
+    session
+        .record_user_message_body(turn1, "first message")
+        .expect("turn 1 user message");
+    session
+        .close_model_response(turn1, false)
+        .expect("turn 1 closes");
+    session.save_to(&store).await.expect("initial save");
+
+    // Simulate a crash mid-append: half a JSON object with no trailing newline.
+    let mut corrupted = store
+        .read_journal_bytes(&session_id)
+        .await
+        .expect("journal reads");
+    corrupted.extend_from_slice(b"{\"type\":\"commit\",\"items\":[{\"type\":\"user_mes");
+    store
+        .overwrite_journal_bytes(&session_id, &corrupted)
+        .await
+        .expect("corrupted tail writes");
+
+    let mut resumed = SessionState::load_from(&store, &session_id)
+        .await
+        .expect("load ignores incomplete trailing line and truncates it");
+    let turn2 = resumed.begin_model_turn().expect("turn 2 begins");
+    resumed
+        .record_user_message_body(turn2, "second message after recovery")
+        .expect("turn 2 user message");
+    resumed
+        .close_model_response(turn2, false)
+        .expect("turn 2 closes");
+    resumed
+        .save_to(&store)
+        .await
+        .expect("append after recovery succeeds");
+
+    let reloaded = SessionState::load_from(&store, &session_id)
+        .await
+        .expect("reloaded journal after recovery append must remain valid");
+    assert_eq!(
+        reloaded.transcript_items_for_tests(),
+        vec![
+            "user:first message".to_owned(),
+            "user:second message after recovery".to_owned()
+        ]
+    );
 }

@@ -30,9 +30,9 @@ async fn provider_replays_only_model_body_while_artifact_remains_exact() {
         vec![Ok(completed_text_event("used result"))],
         vec![Ok(completed_text_event("still using result"))],
     ]);
-    let executor = ScriptedToolExecutor::new(ToolExecutorResponse::Outcome(
+    let executor = ScriptedToolExecutor::new(ToolExecutorResponse::Outcome(Box::new(
         ToolExecutionOutcome::succeeded_text(&full).with_model_text(body),
-    ));
+    )));
     let runtime = runtime_with_registered_tool("model-body-replay", provider.clone(), executor);
     let events = collect_step(&runtime, "lookup").await;
     let pending = pending_tool_call(&events);
@@ -279,24 +279,22 @@ async fn binary_process_results_keep_lossless_artifacts_and_textual_model_bodies
                         );
                     }
                     assert_eq!(text.contains("Output is incomplete"), truncated);
-                    if truncated {
-                        let key = if status == ProcessExitStatus::Exited(0) {
-                            "guidance"
-                        } else {
-                            "output_guidance"
-                        };
-                        let warning = payload[key]["message"]
-                            .as_str()
-                            .expect("truncation warning");
-                        assert!(warning.contains("Output is incomplete"));
-                        assert!(warning.contains("Do not repeat a side-effecting command"));
-                        assert!(text.contains(warning));
-                    }
+                    // Recovery keeps `guidance`. Truncation uses that field only
+                    // when there is no recovery text; a non-zero exit has none.
                     if let Some(recovery) = recovery {
                         assert_eq!(payload["guidance"]["message"], recovery);
                         assert!(text.contains(recovery));
-                    } else if !truncated || status != ProcessExitStatus::Exited(0) {
+                        if truncated {
+                            assert_truncation_warning(&payload["output_guidance"], text);
+                        } else {
+                            assert!(payload.get("output_guidance").is_none());
+                        }
+                    } else if truncated {
+                        assert_truncation_warning(&payload["guidance"], text);
+                        assert!(payload.get("output_guidance").is_none());
+                    } else {
                         assert!(payload.get("guidance").is_none());
+                        assert!(payload.get("output_guidance").is_none());
                     }
                 }
             }
@@ -342,4 +340,13 @@ async fn small_and_large_binary_streams_never_replay_the_json_envelope() {
             }
         }
     }
+}
+
+fn assert_truncation_warning(record: &Value, model_text: &str) {
+    let warning = record["message"]
+        .as_str()
+        .expect("truncation warning is stored on the full result");
+    assert!(warning.contains("Output is incomplete"));
+    assert!(warning.contains("Do not repeat a side-effecting command"));
+    assert!(model_text.contains(warning));
 }

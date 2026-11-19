@@ -245,12 +245,6 @@ pub struct CompactedCheckpoint {
     text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PersistedCompactedCheckpoint {
-    text: String,
-}
-
 /// Payload-free notice that a prose checkpoint is installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactedCheckpointSummary;
@@ -275,17 +269,5 @@ impl CompactedCheckpoint {
     #[must_use]
     pub fn summary(&self) -> CompactedCheckpointSummary {
         CompactedCheckpointSummary
-    }
-
-    pub(crate) fn persisted(&self) -> PersistedCompactedCheckpoint {
-        PersistedCompactedCheckpoint {
-            text: self.text.clone(),
-        }
-    }
-
-    pub(crate) fn from_persisted(
-        persisted: PersistedCompactedCheckpoint,
-    ) -> Result<Self, ContextError> {
-        Self::new(persisted.text)
     }
 }

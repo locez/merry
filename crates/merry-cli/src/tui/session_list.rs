@@ -13,8 +13,7 @@ use thiserror::Error;
 use std::{fs::File, os::unix::fs::OpenOptionsExt};
 
 const META_FILE: &str = "meta.json";
-const SESSION_STATE_FILE: &str = "state.json";
-const PLAN_STATE_FILE: &str = "plan-state.json";
+const SESSION_JOURNAL_FILE: &str = "journal.jsonl";
 const METADATA_TEMP_PREFIX: &str = ".meta.json.tmp-";
 static METADATA_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -41,7 +40,8 @@ pub(crate) struct TuiSessionMetadata {
     pub(crate) workspace_root: PathBuf,
     pub(crate) created_at_unix_ms: u128,
     pub(crate) last_active_at_unix_ms: u128,
-    pub(crate) title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) topic: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) reasoning_effort: Option<String>,
     #[serde(default)]
@@ -55,7 +55,7 @@ impl TuiSessionMetadata {
             workspace_root,
             created_at_unix_ms: now_unix_ms,
             last_active_at_unix_ms: now_unix_ms,
-            title: None,
+            topic: None,
             model: None,
             reasoning_effort: None,
             headless: false,
@@ -65,6 +65,26 @@ impl TuiSessionMetadata {
     pub(crate) fn mark_active(&mut self, now_unix_ms: u128) {
         self.last_active_at_unix_ms = now_unix_ms;
     }
+
+    pub(crate) fn set_topic_if_empty(&mut self, topic: Option<String>) {
+        if self.topic.is_some() {
+            return;
+        }
+        if let Some(topic) = topic.filter(|topic| !topic.is_empty()) {
+            self.topic = Some(topic);
+        }
+    }
+}
+
+pub(crate) fn compact_session_text(text: &str) -> String {
+    const MAX_CHARS: usize = 60;
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= MAX_CHARS {
+        return compact;
+    }
+    let mut bounded = compact.chars().take(MAX_CHARS - 3).collect::<String>();
+    bounded.push_str("...");
+    bounded
 }
 
 #[derive(Debug, Clone)]
@@ -156,9 +176,7 @@ impl TuiSessionStore {
 
         for entry in entries {
             let entry = entry.map_err(|source| io_error(self.sessions_dir.clone(), source))?;
-            if !entry.path().join(SESSION_STATE_FILE).is_file()
-                && !entry.path().join(PLAN_STATE_FILE).is_file()
-            {
+            if !entry.path().join(SESSION_JOURNAL_FILE).is_file() {
                 continue;
             }
             let meta_path = entry.path().join(META_FILE);
@@ -215,19 +233,9 @@ mod tests {
             .session_state_store()
             .sessions_dir()
             .join(session_id.as_str())
-            .join(SESSION_STATE_FILE);
+            .join(SESSION_JOURNAL_FILE);
         fs::create_dir_all(path.parent().expect("state parent")).expect("state parent exists");
         fs::write(path, "{}").expect("state placeholder writes");
-    }
-
-    fn write_plan_state_placeholder(store: &TuiSessionStore, session_id: &SessionId) {
-        let path = store
-            .session_state_store()
-            .sessions_dir()
-            .join(session_id.as_str())
-            .join(PLAN_STATE_FILE);
-        fs::create_dir_all(path.parent().expect("state parent")).expect("state parent exists");
-        fs::write(path, "{}").expect("plan state placeholder writes");
     }
 
     #[test]
@@ -293,7 +301,7 @@ mod tests {
         let store = TuiSessionStore::new(temp.path().to_path_buf());
         let workspace = PathBuf::from("/repo");
         let session_id = session_id("plan-only-session");
-        write_plan_state_placeholder(&store, &session_id);
+        write_state_placeholder(&store, &session_id);
         store
             .write_metadata(&TuiSessionMetadata::new(
                 session_id.clone(),
@@ -320,7 +328,7 @@ mod tests {
         store
             .write_metadata(&metadata)
             .expect("initial metadata writes");
-        metadata.title = Some("updated title".to_owned());
+        metadata.topic = Some("updated topic".to_owned());
         metadata.mark_active(20);
         store
             .write_metadata(&metadata)

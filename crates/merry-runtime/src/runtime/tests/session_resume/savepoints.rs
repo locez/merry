@@ -269,11 +269,27 @@ async fn terminal_journal_batch_waits_for_resume_savepoint_before_delivery() {
         .trajectory_snapshot()
         .await
         .expect("trajectory snapshot reads");
-    assert_eq!(snapshot.latest_sequence(), 3);
     assert!(snapshot.records().iter().any(|record| {
-        record.start_sequence() == 3
-            && record.status() == merry_core::TrajectoryRecordStatus::Succeeded
+        record.status() == merry_core::TrajectoryRecordStatus::Succeeded
+            && record
+                .summary()
+                .is_some_and(|summary| summary.contains("durable terminal response"))
     }));
+    assert_eq!(
+        resumed
+            .session_transcript()
+            .await
+            .expect("transcript resumes"),
+        vec![
+            SessionTranscriptItem::UserMessage {
+                text: "wait for durable terminal output".to_owned(),
+                images: Vec::new(),
+            },
+            SessionTranscriptItem::AssistantText {
+                text: "durable terminal response".to_owned(),
+            },
+        ]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

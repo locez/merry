@@ -6,10 +6,12 @@ use crate::{
         RunExitStatus, RunSession,
         output::{RunOutput, SettledRun, settle_agent_loop_output},
     },
-    tui::session_list::{TuiSessionMetadata, TuiSessionStore, now_unix_ms},
+    tui::session_list::{TuiSessionMetadata, TuiSessionStore, compact_session_text, now_unix_ms},
 };
 use merry_core::SessionId;
-use merry_runtime::{AgentLoopConfig, FileSessionStore, Runtime, StepContext, StepInput};
+use merry_runtime::{
+    AgentLoopConfig, FileSessionStore, Runtime, SessionTranscriptItem, StepContext, StepInput,
+};
 use std::future::Future;
 use tokio::io::AsyncWrite;
 
@@ -100,7 +102,7 @@ pub(super) async fn persist_settled_session(
     runtime: &Runtime,
     session_store: FileSessionStore,
     session_id: &SessionId,
-    metadata: TuiSessionMetadata,
+    mut metadata: TuiSessionMetadata,
 ) -> Result<(), CliError> {
     runtime
         .abandon_pending_tool_calls(ABANDONED_TOOL_CALL_REASON)
@@ -110,6 +112,22 @@ pub(super) async fn persist_settled_session(
                 "run finished but session {session_id} could not be made resume-safe: {error}"
             ))
         })?;
+    // Wait for the side call before the journal commit so the topic is in
+    // the side state this save writes. A miss here is not retried.
+    if let Some(topic) = runtime.session_topic().await {
+        metadata.topic = Some(topic);
+    } else if metadata.topic.is_none()
+        && let Ok(items) = runtime.session_transcript().await
+    {
+        let topic = items.into_iter().find_map(|item| match item {
+            SessionTranscriptItem::UserMessage { text, .. } => {
+                let topic = compact_session_text(&text);
+                (!topic.is_empty()).then_some(topic)
+            }
+            _ => None,
+        });
+        metadata.set_topic_if_empty(topic);
+    }
     runtime
         .save_session_to(session_store.clone())
         .await
@@ -146,9 +164,6 @@ pub(super) async fn headless_session_metadata(
     metadata.workspace_root = workspace_root.to_path_buf();
     if matches!(session, RunSession::New(_)) {
         metadata.headless = true;
-        if metadata.title.is_none() {
-            metadata.title = Some("Headless run".to_owned());
-        }
     }
     metadata.mark_active(now_unix_ms());
     Ok(metadata)
@@ -159,8 +174,14 @@ pub(super) async fn write_headless_session_metadata(
     metadata: TuiSessionMetadata,
 ) -> Result<(), CliError> {
     let store = TuiSessionStore::new(session_store.sessions_dir().to_path_buf());
+    let session_id = metadata.session_id.clone();
+    let topic = metadata.topic.clone();
     tokio::task::spawn_blocking(move || store.write_metadata(&metadata))
         .await
         .map_err(unexpected)?
-        .map_err(unexpected)
+        .map_err(unexpected)?;
+    session_store
+        .update_session_search_labels(&session_id, topic.as_deref())
+        .await;
+    Ok(())
 }

@@ -7,8 +7,8 @@ use crate::{
     session::tests::{
         SessionState,
         persistence::{
-            current_document, persisted_plan_leaf, persisted_plan_node_id, persisted_test_plan,
-            session_id_with_suffix,
+            persisted_plan_leaf, persisted_plan_node_id, persisted_test_plan,
+            rewrite_journal_commit, session_id_with_suffix,
         },
         session_id,
     },
@@ -23,31 +23,31 @@ use merry_core::{
 async fn session_state_current_format_without_plan_round_trips_current_format() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
-    let document = current_document();
-    store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("current document serializes"),
-        )
+    SessionState::new(session_id())
+        .save_to(&store)
         .await
-        .expect("current state writes");
+        .expect("current state saves");
 
-    let loaded = SessionState::load_from(&store, &session_id())
+    let mut loaded = SessionState::load_from(&store, &session_id())
         .await
         .expect("current state loads without a plan");
     assert!(loaded.active_plan().is_none());
-    loaded.save_to(&store).await.expect("current state saves");
-
-    let rewritten: serde_json::Value = serde_json::from_slice(
-        &store
-            .read_state_bytes(&session_id())
-            .await
-            .expect("rewritten state reads"),
-    )
-    .expect("rewritten state is JSON");
-    assert_eq!(rewritten["format_version"], 6);
-    assert_eq!(rewritten["active_plan"], serde_json::Value::Null);
-    assert_eq!(rewritten["terminal_plans"], serde_json::json!([]));
+    let before = store
+        .read_state_bytes(&session_id())
+        .await
+        .expect("journal reads");
+    loaded
+        .save_to(&store)
+        .await
+        .expect("current state saves again");
+    let rewritten = store
+        .read_state_bytes(&session_id())
+        .await
+        .expect("rewritten journal reads");
+    assert_eq!(rewritten, before);
+    let header = String::from_utf8(rewritten).expect("journal is utf-8");
+    assert!(header.contains("\"format_version\":1"));
+    assert!(!header.contains("\"active_plan\""));
 }
 
 #[tokio::test]
@@ -79,20 +79,18 @@ async fn session_load_preserves_typed_plan_validation_error_context() {
     session.set_active_plan(persisted_test_plan());
     session.save_to(&store).await.expect("plan session saves");
 
-    let mut document: serde_json::Value = serde_json::from_slice(
+    let bytes = rewrite_journal_commit(
         &store
             .read_state_bytes(&session_id())
             .await
             .expect("state reads"),
-    )
-    .expect("state is JSON");
-    document["active_plan"]["snapshot"]["nodes"][0]["recovery_policy"]["max_transient_attempts"] =
-        serde_json::json!(9);
+        |commit| {
+            commit["state"]["active_plan"]["value"]["snapshot"]["nodes"][0]["recovery_policy"]["max_transient_attempts"] =
+                serde_json::json!(9);
+        },
+    );
     store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("corrupt state serializes"),
-        )
+        .write_state_bytes(&session_id(), &bytes)
         .await
         .expect("corrupt state writes");
 
@@ -122,20 +120,18 @@ async fn session_load_preserves_oversized_plan_snapshot_error_context() {
     session.set_active_plan(persisted_test_plan());
     session.save_to(&store).await.expect("plan session saves");
 
-    let mut document: serde_json::Value = serde_json::from_slice(
+    let bytes = rewrite_journal_commit(
         &store
             .read_state_bytes(&session_id())
             .await
             .expect("state reads"),
-    )
-    .expect("state is JSON");
-    document["active_plan"]["snapshot"]["execution_authorization_refs"] =
-        serde_json::to_value(vec!["x".repeat(1024); 300]).expect("refs serialize");
+        |commit| {
+            commit["state"]["active_plan"]["value"]["snapshot"]["execution_authorization_refs"] =
+                serde_json::to_value(vec!["x".repeat(1024); 300]).expect("refs serialize");
+        },
+    );
     store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("corrupt state serializes"),
-        )
+        .write_state_bytes(&session_id(), &bytes)
         .await
         .expect("corrupt state writes");
 

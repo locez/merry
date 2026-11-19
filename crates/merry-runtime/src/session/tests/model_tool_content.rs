@@ -40,7 +40,7 @@ fn result_body(snapshot: &[TranscriptItemSnapshot]) -> &ToolOutput {
 #[tokio::test]
 async fn model_body_replays_after_save_without_changing_full_output() {
     let full = "full display details ".repeat(200);
-    let (session, result) = completed_result(&full, Some(MODEL_BODY));
+    let (mut session, result) = completed_result(&full, Some(MODEL_BODY));
     let store_dir = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(store_dir.path());
     session.save_to(&store).await.expect("save");
@@ -66,14 +66,14 @@ async fn model_body_replays_after_save_without_changing_full_output() {
 #[tokio::test]
 async fn omitted_or_equal_model_body_elides_model_output_in_state_json() {
     for model in [None, Some(MODEL_BODY)] {
-        let (session, _) = completed_result(MODEL_BODY, model);
+        let (mut session, _) = completed_result(MODEL_BODY, model);
         let dir = tempfile::tempdir().expect("tempdir");
         let store = FileSessionStore::new(dir.path());
         session.save_to(&store).await.expect("save");
-        let document: serde_json::Value =
-            serde_json::from_slice(&store.read_state_bytes(&session_id()).await.expect("read"))
-                .expect("JSON");
-        let result = document["transcript"]["items"]
+        let document = crate::session::last_commit_json(
+            &store.read_state_bytes(&session_id()).await.expect("read"),
+        );
+        let result = document["items"]
             .as_array()
             .expect("items")
             .iter()

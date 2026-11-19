@@ -61,24 +61,24 @@ pub(crate) struct ScriptedToolExecutor {
 
 #[derive(Clone)]
 pub(crate) enum ToolExecutorResponse {
-    Outcome(ToolExecutionOutcome),
+    Outcome(Box<ToolExecutionOutcome>),
     Error(Arc<dyn Fn() -> ToolExecutionError + Send + Sync>),
 }
 
 impl ScriptedToolExecutor {
     pub(crate) fn succeeding_text(text: &str) -> Self {
-        Self::new(ToolExecutorResponse::Outcome(
+        Self::new(ToolExecutorResponse::Outcome(Box::new(
             ToolExecutionOutcome::succeeded_text(text),
-        ))
+        )))
     }
 
     pub(crate) fn failing_json(code: &str, content: &str) -> Self {
-        Self::new(ToolExecutorResponse::Outcome(
+        Self::new(ToolExecutorResponse::Outcome(Box::new(
             ToolExecutionOutcome::failed_json(
                 content,
                 ErrorInfo::new(code, "tool domain failure").expect("valid diagnostic"),
             ),
-        ))
+        )))
     }
 
     pub(crate) fn infrastructure_error(message: &str) -> Self {
@@ -116,7 +116,7 @@ impl ToolExecutor for ScriptedToolExecutor {
                 .push(call);
 
             match &self.response {
-                ToolExecutorResponse::Outcome(outcome) => Ok(outcome.clone()),
+                ToolExecutorResponse::Outcome(outcome) => Ok((**outcome).clone()),
                 ToolExecutorResponse::Error(error) => Err(error()),
             }
         })

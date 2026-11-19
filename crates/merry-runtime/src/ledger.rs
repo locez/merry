@@ -486,9 +486,22 @@ enum LedgerEntryRef {
     Lifecycle(usize),
 }
 
+impl PersistedLedgerEntry {
+    pub(crate) const fn order(&self) -> u64 {
+        self.order
+    }
+}
+
 impl TaskLedger {
-    pub(crate) fn persisted_entries(&self) -> Vec<PersistedLedgerEntry> {
+    #[must_use]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn persisted_entries_since(&self, start_index: usize) -> Vec<PersistedLedgerEntry> {
         self.entries
+            .get(start_index..)
+            .unwrap_or(&[])
             .iter()
             .map(|entry| match entry {
                 LedgerEntryRef::Update(index) => {

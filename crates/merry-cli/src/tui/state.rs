@@ -370,13 +370,13 @@ impl TuiState {
         &self.timeline
     }
 
-    pub(crate) fn latest_user_input_title(&self) -> Option<String> {
-        self.timeline.iter().rev().find_map(|item| {
+    pub(crate) fn first_user_input_topic(&self) -> Option<String> {
+        self.timeline.iter().find_map(|item| {
             let TimelineItem::User { text, .. } = item else {
                 return None;
             };
-            let title = compact_title(text);
-            (!title.is_empty()).then_some(title)
+            let topic = super::session_list::compact_session_text(text);
+            (!topic.is_empty()).then_some(topic)
         })
     }
 
@@ -855,19 +855,6 @@ fn run_stopped_item() -> TimelineItem {
         title: "Run stopped".to_owned(),
         body: "The active run reached a cancellation boundary.".to_owned(),
     }
-}
-
-fn compact_title(text: &str) -> String {
-    const MAX_CHARS: usize = 60;
-    let title = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if title.chars().count() <= MAX_CHARS {
-        return title;
-    }
-    title
-        .chars()
-        .take(MAX_CHARS.saturating_sub(1))
-        .collect::<String>()
-        + "..."
 }
 
 fn merry_motion(elapsed: Duration) -> &'static str {

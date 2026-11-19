@@ -3,8 +3,7 @@ use merry_core::{
     PendingToolCall, PendingToolCallBatch, QueuedInputLane, QueuedInputView, RuntimeJournalEvent,
     RuntimeJournalPayload, SessionId, ToolCallArguments, ToolCallBatchId, ToolCallId,
     ToolCallResult, ToolInputSchema, ToolName, ToolOutput, ToolSpec, TrajectoryEvent,
-    TrajectoryLane, TrajectoryPayload, TrajectoryRecord, TrajectoryRecordDetails,
-    TrajectoryRecordId, TrajectoryRecordKind, TrajectoryRecordStatus, TrajectorySnapshot,
+    TrajectoryPayload, TrajectoryRecordDetails, TrajectoryRecordKind, TrajectoryRecordStatus,
     TrajectoryTurnId,
 };
 use merry_llm::{
@@ -372,13 +371,13 @@ fn compaction_completion_closes_the_active_compaction_record() {
 }
 
 #[test]
-fn restoring_snapshot_hydrates_stripped_tool_output_from_session() {
-    let session_id = SessionId::new("trajectory-test").expect("valid session");
+fn seeding_from_session_uses_model_view_preview_instead_of_raw_full_json() {
+    let session_id = SessionId::new("trajectory-seed-model-view").expect("valid session");
     let mut session = SessionState::new(session_id.clone());
     let turn = session.begin_model_turn().expect("turn begins");
     let call = tool_call();
     let batch = PendingToolCallBatch::new(
-        ToolCallBatchId::new("hydrate-batch").expect("valid batch id"),
+        ToolCallBatchId::new("seed-batch").expect("valid batch id"),
         vec![call.clone()],
     )
     .expect("valid batch");
@@ -391,222 +390,25 @@ fn restoring_snapshot_hydrates_stripped_tool_output_from_session() {
     session
         .submit_tool_result(
             ToolCallResult::succeeded(call.id().clone()),
-            ToolOutput::text("hydrated tool output"),
+            crate::tool::ToolResultContent::from(ToolOutput::json(
+                r#"{"kind":"process_action","stdout":{"text":"raw json body"}}"#,
+            ))
+            .with_model(ToolOutput::text("exit 0\nstdout:\ncompact model view")),
         )
         .expect("tool result records");
 
-    let mut snapshot = TrajectorySnapshot::new(session_id.clone());
-    let mut record = TrajectoryRecord::new(
-        TrajectoryRecordId::new("tool-record").expect("valid record id"),
-        TrajectoryLane::Tools,
-        TrajectoryRecordKind::ToolCall,
-        "read_file".to_owned(),
-        TrajectoryRecordStatus::Succeeded,
-        401,
-    );
-    record.set_relationship(None, Some(call.id().clone()));
-    record.set_tool_details(Some(call.name().clone()), call.arguments().clone());
-    snapshot.upsert_record(record);
-
     let observability = RuntimeObservability::new(session_id, Vec::new());
-    observability.restore_snapshot(snapshot, &session);
+    observability.seed_from_session(&session);
 
     let snapshot = observability.snapshot();
-    let record = snapshot.records().first().expect("restored tool record");
+    let record = snapshot.records().first().expect("seeded tool record");
     let TrajectoryRecordDetails::Tool { tool } = record.details() else {
-        panic!("restored record should have tool details");
+        panic!("seeded record should have tool details");
     };
     assert_eq!(
         tool.output().map(TrajectoryPayload::content),
-        Some("hydrated tool output")
+        Some("exit 0\nstdout:\ncompact model view")
     );
-}
-
-#[test]
-fn restoring_snapshot_replays_transcript_tail_with_durable_sequences() {
-    let session_id = SessionId::new("trajectory-replay-test").expect("valid session id");
-    let mut session = SessionState::new(session_id.clone());
-    let old_turn = session.begin_model_turn().expect("old turn begins");
-    session
-        .record_user_message_body(old_turn, "old input")
-        .expect("old input records");
-    let old_step = session.record_step_started();
-    let old_assistant = session
-        .record_assistant_text_output(old_turn, "old answer".to_owned())
-        .expect("old assistant records");
-
-    let observability = RuntimeObservability::new(session_id.clone(), Vec::new());
-    observability.record_queued_input_accepted(&[QueuedInputView {
-        text: "old input".to_owned(),
-        lane: QueuedInputLane::Next,
-        position: 0,
-    }]);
-    observability.observe_journal_event(&old_step);
-    observability.observe_journal_event_with_assistant_text(&old_assistant, Some("old answer"));
-    observability.close();
-    let mut persisted_snapshot = observability.snapshot();
-    for (index, mut record) in persisted_snapshot
-        .records()
-        .to_vec()
-        .into_iter()
-        .enumerate()
-    {
-        record.set_start_sequence(u64::try_from(index + 1).expect("test sequence fits"));
-        persisted_snapshot.upsert_record(record);
-    }
-
-    let new_turn = session.begin_model_turn().expect("new turn begins");
-    session
-        .record_user_message_body(new_turn, "new input")
-        .expect("new input records");
-    let new_step = session.record_step_started();
-    let _retry =
-        session.record_model_retry_event(RuntimeJournalPayload::ModelRetryAttemptStarted {
-            attempt: 1,
-            max_attempts: 2,
-        });
-    let call = PendingToolCall::new(
-        ToolCallId::new("replay-call").expect("valid call id"),
-        ToolName::new("read_file").expect("valid tool name"),
-        ToolCallArguments::try_from(json!({"path": "README.md"})).expect("valid arguments"),
-    );
-    let second_call = PendingToolCall::new(
-        ToolCallId::new("replay-call-2").expect("valid call id"),
-        ToolName::new("read_file").expect("valid tool name"),
-        ToolCallArguments::try_from(json!({"path": "Cargo.toml"})).expect("valid arguments"),
-    );
-    let batch = PendingToolCallBatch::new(
-        ToolCallBatchId::new("replay-batch").expect("valid batch id"),
-        vec![call.clone(), second_call.clone()],
-    )
-    .expect("valid tool call batch");
-    let pending = session
-        .record_tool_call_batch_pending(new_turn, batch)
-        .expect("new tool call records");
-    session
-        .close_model_response(new_turn, true)
-        .expect("new tool response closes");
-    let first_result = ToolCallResult::succeeded(call.id().clone());
-    let first_resolved = session
-        .submit_tool_result(first_result, ToolOutput::json(r#"{"ok":true}"#))
-        .expect("tool result records");
-    let second_result = ToolCallResult::succeeded(second_call.id().clone());
-    let second_resolved = session
-        .submit_tool_result(second_result, ToolOutput::json(r#"{"ok":false}"#))
-        .expect("second tool result records");
-    let continuation = session.begin_model_turn().expect("continuation begins");
-    let assistant = session
-        .record_assistant_text_output(continuation, "new answer".to_owned())
-        .expect("new assistant records");
-
-    let session_trajectory = session.trajectory_items();
-    let ledger = session.ledger_projection();
-    let resumed = RuntimeObservability::new(session_id, Vec::new());
-    resumed.restore_snapshot(persisted_snapshot, &session);
-    resumed.reconcile_from_session(&session_trajectory, &ledger);
-
-    let snapshot = resumed.snapshot();
-    assert!(!snapshot.is_closed());
-    assert_eq!(snapshot.latest_sequence(), assistant.sequence);
-    assert_eq!(snapshot.records().len(), 7);
-    let old_user = snapshot
-        .records()
-        .iter()
-        .find(|record| record.summary() == Some("old input"))
-        .expect("legacy user input is normalized");
-    assert_eq!(old_user.start_sequence(), old_step.sequence);
-    let old_assistant_record = snapshot
-        .records()
-        .iter()
-        .find(|record| record.summary() == Some("old answer"))
-        .expect("legacy assistant message is normalized");
-    assert_eq!(
-        old_assistant_record.start_sequence(),
-        old_assistant.sequence
-    );
-    let new_user = snapshot
-        .records()
-        .iter()
-        .find(|record| {
-            record.kind() == TrajectoryRecordKind::UserInput
-                && record.summary() == Some("new input")
-        })
-        .expect("replayed user input");
-    assert_eq!(new_user.start_sequence(), new_step.sequence);
-    assert!(snapshot.records().iter().any(|record| {
-        record.kind() == TrajectoryRecordKind::Lifecycle && record.start_sequence() == 3
-    }));
-    let tool = snapshot
-        .records()
-        .iter()
-        .find(|record| record.tool_call_id().is_some_and(|id| id == call.id()))
-        .expect("replayed tool record");
-    assert_eq!(tool.start_sequence(), pending.sequence);
-    assert_eq!(
-        tool.end_sequence(),
-        first_resolved.last().map(|event| event.sequence)
-    );
-    let TrajectoryRecordDetails::Tool { tool } = tool.details() else {
-        panic!("replayed tool should retain tool details");
-    };
-    assert_eq!(
-        tool.output().map(TrajectoryPayload::content),
-        Some(r#"{"ok":true}"#)
-    );
-    let second_tool = snapshot
-        .records()
-        .iter()
-        .find(|record| {
-            record
-                .tool_call_id()
-                .is_some_and(|id| id == second_call.id())
-        })
-        .expect("second replayed tool record");
-    assert_eq!(second_tool.start_sequence(), pending.sequence);
-    assert_eq!(
-        second_tool.end_sequence(),
-        second_resolved.last().map(|event| event.sequence)
-    );
-    assert!(snapshot.records().iter().any(|record| {
-        record.kind() == TrajectoryRecordKind::AssistantMessage
-            && record.summary() == Some("new answer")
-    }));
-}
-
-#[test]
-fn replay_uses_model_turn_sequence_after_step_fails_before_turn_begins() {
-    let session_id = SessionId::new("trajectory-pre-turn-failure").expect("valid session id");
-    let mut session = SessionState::new(session_id.clone());
-
-    let first_step = session.record_step_started();
-    let first_turn = session
-        .begin_model_turn_at_sequence(first_step.sequence)
-        .expect("first turn begins");
-    session
-        .record_user_message_body(first_turn, "first input")
-        .expect("first input records");
-
-    let failed_step = session.record_step_started();
-    let second_step = session.record_step_started();
-    let second_turn = session
-        .begin_model_turn_at_sequence(second_step.sequence)
-        .expect("second turn begins");
-    session
-        .record_user_message_body(second_turn, "second input")
-        .expect("second input records");
-
-    let trajectory = session.trajectory_items();
-    let observability = RuntimeObservability::new(session_id, Vec::new());
-    observability.reconcile_from_session(&trajectory, &session.ledger_projection());
-
-    let snapshot = observability.snapshot();
-    let second = snapshot
-        .records()
-        .iter()
-        .find(|record| record.summary() == Some("second input"))
-        .expect("second input is replayed");
-    assert_eq!(second.start_sequence(), second_step.sequence);
-    assert_ne!(second.start_sequence(), failed_step.sequence);
 }
 
 #[test]

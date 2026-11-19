@@ -17,11 +17,11 @@ pub use budget::{
     CheckpointDecision, ContextBudget, ResolvedContextWindow, decide_checkpoint,
     resolve_context_window,
 };
+pub(crate) use input::stable_content_hash;
 pub use input::{
     CompactedCheckpoint, CompactedCheckpointSummary, ContextEntry, ContextSummary, ProjectRules,
     SessionContextSnapshot, TaskAnchor,
 };
-pub(crate) use input::{PersistedCompactedCheckpoint, stable_content_hash};
 pub(crate) use projection::compacted_checkpoint_wrapper_token_ceiling;
 pub use projection::{CompiledContext, CompiledContextSection, ContextCompiler};
 

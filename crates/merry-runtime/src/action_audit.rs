@@ -192,7 +192,6 @@ impl ActionAuditRecord {
         &self.id
     }
 
-    #[cfg(test)]
     pub(crate) const fn order(&self) -> u64 {
         self.order
     }
@@ -238,12 +237,6 @@ impl ActionAuditRecord {
 pub(crate) struct ActionAuditRegistry {
     records: Vec<ActionAuditRecord>,
     next_order: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PersistedActionAuditRegistry {
-    records: Vec<ActionAuditRecord>,
 }
 
 impl ActionAuditRegistry {
@@ -304,21 +297,23 @@ impl ActionAuditRegistry {
     }
 
     #[must_use]
-    pub(crate) fn persisted(&self) -> PersistedActionAuditRegistry {
-        PersistedActionAuditRegistry {
-            records: self.records.clone(),
-        }
+    pub(crate) fn len(&self) -> usize {
+        self.records.len()
     }
 
-    pub(crate) fn from_persisted(persisted: PersistedActionAuditRegistry) -> Self {
-        let next_order = persisted
-            .records
+    #[must_use]
+    pub(crate) fn records_since(&self, start_index: usize) -> &[ActionAuditRecord] {
+        self.records.get(start_index..).unwrap_or(&[])
+    }
+
+    pub(crate) fn from_records(records: Vec<ActionAuditRecord>) -> Self {
+        let next_order = records
             .iter()
             .map(|record| record.order.saturating_add(1))
             .max()
             .unwrap_or(0);
         Self {
-            records: persisted.records,
+            records,
             next_order,
         }
     }

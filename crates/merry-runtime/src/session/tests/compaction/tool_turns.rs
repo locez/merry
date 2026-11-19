@@ -417,26 +417,26 @@ async fn installing_compaction_preserves_hidden_final_output_in_full_and_stored_
             if text == "retained visible tail"
     ));
 
-    let stored: serde_json::Value = serde_json::from_slice(
+    let stored = crate::session::last_commit_json(
         &session
             .persistable_bundle()
             .expect("post-compaction session is persistable")
             .document_bytes,
-    )
-    .expect("stored session is JSON");
-    let stored_items = stored["transcript"]["items"]
+    );
+    let stored_items = stored["items"]
         .as_array()
-        .expect("stored transcript items are an array");
+        .expect("stored journal items are an array");
     assert_eq!(stored_items.len(), 4);
     assert_eq!(stored_items[0]["type"], "user_message");
     assert_eq!(stored_items[1]["type"], "tool_call");
     assert_eq!(stored_items[2]["type"], "tool_result");
     assert_eq!(stored_items[3]["type"], "user_message");
-    assert_eq!(stored["prompt_history_projection"]["compacted_through"], 2);
+    assert_eq!(stored["compaction"]["compacted_through"], 2);
+    assert!(stored.get("trajectory_snapshot").is_none());
     assert!(
-        stored["transcript"]
-            .get("prompt_history_projection")
-            .is_none()
+        stored_items
+            .iter()
+            .all(|item| item.get("prompt_projection").is_none())
     );
 
     let temp = tempfile::tempdir().expect("tempdir");

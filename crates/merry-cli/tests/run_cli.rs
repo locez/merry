@@ -46,11 +46,17 @@ fn mcp_outage_warns_on_stderr_but_reaches_the_runtime_and_preserves_jsonl_output
         events.iter().any(|event| event["type"] == "step_started"),
         "{events:?}"
     );
-    let state: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(session_state_path(&temp, "mcp-outage")).unwrap())
-            .unwrap();
+    let journal = std::fs::read_to_string(session_state_path(&temp, "mcp-outage")).unwrap();
+    let commit: serde_json::Value = serde_json::from_str(
+        journal
+            .lines()
+            .rev()
+            .find(|line| !line.is_empty())
+            .expect("journal has a commit"),
+    )
+    .unwrap();
     assert_eq!(
-        state["external_tool_catalog"]["entries"],
+        commit["state"]["external_tool_catalog"]["entries"],
         serde_json::json!([])
     );
 }
@@ -181,12 +187,12 @@ fn run_reports_an_unknown_resume_id_without_starting_a_session() {
     );
 }
 
-/// `state.json` under the store layout `XDG_STATE_HOME` selects.
+/// `journal.jsonl` under the store layout `XDG_STATE_HOME` selects.
 fn session_state_path(temp: &tempfile::TempDir, session_id: &str) -> std::path::PathBuf {
     temp.path()
         .join("state/merry/sessions")
         .join(session_id)
-        .join("state.json")
+        .join("journal.jsonl")
 }
 
 fn session_metadata_path(temp: &tempfile::TempDir, session_id: &str) -> std::path::PathBuf {
@@ -224,6 +230,11 @@ fn a_headless_run_writes_picker_metadata_with_headless_origin() {
     .expect("headless metadata should be valid JSON");
     assert_eq!(metadata["headless"], true);
     assert_eq!(metadata["session_id"], "picker-visible");
+    assert!(metadata.get("title").is_none(), "{metadata}");
+    assert_eq!(
+        metadata["topic"], "a task",
+        "when the topic call cannot reach a model, the list label is the first user line: {metadata}"
+    );
 }
 
 #[test]

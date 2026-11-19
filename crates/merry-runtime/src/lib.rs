@@ -64,7 +64,6 @@ mod tool_catalog;
 mod tool_input;
 mod tool_input_validation;
 mod trajectory;
-mod trajectory_replay;
 mod user_input;
 mod workspace_scope;
 

@@ -372,11 +372,12 @@ impl TuiRuntimeSession {
         Ok(())
     }
 
-    pub(crate) fn set_title(&mut self, title: Option<String>) {
-        self.metadata.title = title;
+    pub(crate) fn set_topic_if_empty(&mut self, topic: Option<String>) {
+        self.metadata.set_topic_if_empty(topic);
     }
 
     pub(crate) async fn save_on_exit(&mut self) -> Result<(), CliError> {
+        self.apply_generated_topic().await;
         self.metadata.mark_active(now_unix_ms());
         self.runtime
             .save_session_to(self.session_store.session_state_store())
@@ -387,6 +388,7 @@ impl TuiRuntimeSession {
     }
 
     pub(crate) async fn save_now(&mut self) -> Result<(), CliError> {
+        self.apply_generated_topic().await;
         self.metadata.mark_active(now_unix_ms());
         self.control
             .save_session_to(self.session_store.session_state_store())
@@ -394,6 +396,12 @@ impl TuiRuntimeSession {
             .map_err(unexpected)?;
         write_session_metadata(&self.session_store, &self.metadata).await?;
         Ok(())
+    }
+
+    async fn apply_generated_topic(&mut self) {
+        if let Some(topic) = self.runtime.session_topic().await {
+            self.metadata.topic = Some(topic);
+        }
     }
 
     pub(crate) async fn session_transcript(&self) -> Result<Vec<SessionTranscriptItem>, CliError> {
@@ -409,12 +417,17 @@ async fn write_session_metadata(
     store: &TuiSessionStore,
     metadata: &TuiSessionMetadata,
 ) -> Result<(), CliError> {
-    let store = store.clone();
-    let metadata = metadata.clone();
-    tokio::task::spawn_blocking(move || store.write_metadata(&metadata))
+    let stored = store.clone();
+    let recorded = metadata.clone();
+    tokio::task::spawn_blocking(move || stored.write_metadata(&recorded))
         .await
         .map_err(unexpected)?
-        .map_err(unexpected)
+        .map_err(unexpected)?;
+    store
+        .session_state_store()
+        .update_session_search_labels(&metadata.session_id, metadata.topic.as_deref())
+        .await;
+    Ok(())
 }
 
 fn permission_review_view(

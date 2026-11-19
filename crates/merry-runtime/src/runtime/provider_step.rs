@@ -516,7 +516,7 @@ pub(super) async fn run_provider_step(
     };
     let _model_turn_guard = InProgressModelTurnGuard::new(Arc::clone(inner), turn_id);
 
-    let user_record_result = {
+    let (first_user_turn, user_record_result) = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
             let _ = session.abort_model_turn(turn_id);
@@ -525,15 +525,20 @@ pub(super) async fn run_provider_step(
             let _ = send_cancelled_event(inner, sender).await;
             return;
         }
-        input
+        let first_user_turn = session.user_message_count() == 0;
+        let recorded = input
             .user_messages_for_history()
             .iter()
-            .try_for_each(|message| session.record_user_message(turn_id, message))
+            .try_for_each(|message| session.record_user_message(turn_id, message));
+        (first_user_turn, recorded)
     };
     if let Err(error) = user_record_result {
         let diagnostic = diagnostic_from_text("transcript_record", error.to_string());
         fail_model_turn(inner, sender, token, turn_id, diagnostic).await;
         return;
+    }
+    if first_user_turn {
+        super::session_topic::schedule(inner).await;
     }
 
     let stream_context =

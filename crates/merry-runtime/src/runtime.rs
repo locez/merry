@@ -48,6 +48,8 @@ mod provider_request;
 mod provider_step;
 mod provider_stream;
 mod session_access;
+mod session_topic;
+pub(crate) use self::session_topic::TopicTask;
 mod state;
 mod step;
 mod tool_batch;
@@ -205,6 +207,12 @@ impl Runtime {
         &self.inner.session_id
     }
 
+    /// Returns the model-written session topic, waiting briefly for the
+    /// first-turn side call when it is still running.
+    pub async fn session_topic(&self) -> Option<String> {
+        self::session_topic::topic(&self.inner).await
+    }
+
     #[cfg(test)]
     pub(crate) fn session_for_tests(
         &self,
@@ -225,6 +233,10 @@ impl Runtime {
     }
 
     /// Saves the current resume-safe session state to the provided store.
+    ///
+    /// The in-memory cursor tracks the runtime's configured store. Another
+    /// directory is written as a complete journal when it has no header, and
+    /// that write does not move the cursor.
     pub async fn save_session_to(&self, store: FileSessionStore) -> Result<(), RuntimeError> {
         let active_permit = self.acquire_active_step_permit()?;
         self.save_session_to_with_active_permit(store, &active_permit)
@@ -236,13 +248,23 @@ impl Runtime {
         store: FileSessionStore,
         _active_permit: &ActiveStepPermit,
     ) -> Result<(), RuntimeError> {
-        let trajectory = self.inner.trajectory.snapshot();
+        let tracked = self
+            .inner
+            .session_store
+            .as_ref()
+            .is_some_and(|existing| existing.sessions_dir() == store.sessions_dir());
+        let has_header =
+            crate::session::journal_destination_has_header(&store, &self.inner.session_id).await?;
         let bundle = {
-            let mut session = self.inner.session.lock().await;
-            session.set_trajectory_snapshot(trajectory);
-            session.persistable_bundle()?
+            let session = self.inner.session.lock().await;
+            let cursor = session.cursor_for_destination(tracked, has_header);
+            session.persistable_bundle_with_cursor(&cursor)?
         };
+        let cursor = bundle.cursor.clone();
         store.write_bundle(bundle).await?;
+        if tracked {
+            self.inner.session.lock().await.adopt_journal_cursor(cursor);
+        }
         Ok(())
     }
 

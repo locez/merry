@@ -1,7 +1,6 @@
 use crate::{
     UserImageInput, UserMessageInput,
     plan::{PlanChangeInput, PlanExecutionIntent, PlanNodeInput, PlanState, UpdatePlanInput},
-    session::tests::session_id,
 };
 use merry_core::{
     PlanActivationSource, PlanExecutorPolicy, PlanHarnessSnapshot, PlanId,
@@ -32,33 +31,23 @@ fn persisted_image_message() -> UserMessageInput {
     .expect("valid image message")
 }
 
-fn current_document() -> serde_json::Value {
-    serde_json::json!({
-        "format_version": 6,
-        "external_tool_catalog": { "format_version": 1, "entries": [] },
-        "session_id": session_id(),
-        "next_sequence": 0,
-        "session_started": false,
-        "ledger": [],
-        "compacted_checkpoint": null,
-        "archived_ref_manifest": [],
-        "prompt_history_projection": { "compacted_through": null },
-        "context_entries": [],
-        "transcript": {
-            "items": [],
-            "next_id": 0,
-            "model_turns": {},
-            "next_model_turn_id": 1
-        },
-        "resolved_tool_calls": [],
-        "usage": null,
-        "task_anchor": null,
-        "registries": {
-            "action_audits": { "records": [] }
-        },
-        "active_plan": null,
-        "terminal_plans": []
-    })
+pub(super) fn rewrite_journal_commit(
+    bytes: &[u8],
+    mutate: impl FnOnce(&mut serde_json::Value),
+) -> Vec<u8> {
+    let text = String::from_utf8(bytes.to_vec()).expect("journal is utf-8");
+    let mut lines = text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let last = lines.last_mut().expect("journal has a commit");
+    let mut commit: serde_json::Value = serde_json::from_str(last).expect("commit is json");
+    mutate(&mut commit);
+    *last = serde_json::to_string(&commit).expect("commit serializes");
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out.into_bytes()
 }
 
 fn persisted_test_plan() -> PlanState {

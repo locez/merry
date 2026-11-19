@@ -59,6 +59,7 @@ pulldown-cmark = "0.13"
 ratatui = "0.30"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 regex = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
 rustix = { version = "1", features = ["fs", "process"] }
 proc-macro2 = "1"
 proc-macro-crate = "3"

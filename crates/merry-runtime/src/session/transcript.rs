@@ -2,27 +2,20 @@ use super::{
     SessionState,
     model_turns::{ModelTurnId, ModelTurnStatus, invalid_turn_transition},
 };
-use crate::{
-    RuntimeError, UserImageInput,
-    compaction::CompactionError,
-    session_projection::{SessionTrajectory, SessionTrajectoryItem},
-};
+use crate::{RuntimeError, UserImageInput, compaction::CompactionError};
 use merry_core::{PendingToolCall, ToolCallId, ToolCallResult, ToolOutput};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolCallPromptProjection {
     Full,
     Hidden,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolResultPromptProjection {
     /// Complete tool-authored model body, or the full output when absent.
     Full,
@@ -149,8 +142,8 @@ pub(crate) enum TranscriptItem {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PersistedUserImage {
     pub(crate) label: String,
     pub(crate) png_bytes: Arc<[u8]>,
@@ -158,6 +151,7 @@ pub(crate) struct PersistedUserImage {
     pub(crate) height: u32,
 }
 
+#[cfg(test)]
 impl From<&UserImageInput> for PersistedUserImage {
     fn from(image: &UserImageInput) -> Self {
         Self {
@@ -169,6 +163,7 @@ impl From<&UserImageInput> for PersistedUserImage {
     }
 }
 
+#[cfg(test)]
 impl TryFrom<PersistedUserImage> for UserImageInput {
     type Error = RuntimeError;
 
@@ -177,25 +172,23 @@ impl TryFrom<PersistedUserImage> for UserImageInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PersistedTranscript {
     pub(crate) items: Vec<PersistedTranscriptItem>,
     pub(crate) next_id: u64,
     pub(crate) model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
-    #[serde(default)]
     pub(crate) model_turn_sequences: BTreeMap<ModelTurnId, u64>,
     pub(crate) next_model_turn_id: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PersistedTranscriptItem {
     UserMessage {
         id: u64,
         model_turn_id: ModelTurnId,
         text: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<PersistedUserImage>,
         origin: PersistedUserInputOrigin,
     },
@@ -216,16 +209,14 @@ pub(crate) enum PersistedTranscriptItem {
         call_id: ToolCallId,
         result: ToolCallResult,
         full_output: ToolOutput,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         model_output: Option<ToolOutput>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<PersistedUserImage>,
         prompt_projection: ToolResultPromptProjection,
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PersistedUserInputOrigin {
     ExternalUser,
     RuntimeControl,
@@ -305,6 +296,45 @@ impl Transcript {
     #[must_use]
     pub(crate) const fn next_id(&self) -> TranscriptItemId {
         self.next_id
+    }
+
+    #[must_use]
+    pub(crate) const fn next_model_turn_id(&self) -> ModelTurnId {
+        self.next_model_turn_id
+    }
+
+    #[must_use]
+    pub(crate) fn model_turn_statuses(&self) -> &BTreeMap<ModelTurnId, ModelTurnStatus> {
+        &self.model_turns
+    }
+
+    pub(crate) fn from_journal_parts(
+        items: Vec<TranscriptItem>,
+        next_id: u64,
+        model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
+        model_turn_sequences: BTreeMap<ModelTurnId, u64>,
+        next_model_turn_id: u64,
+    ) -> Result<Self, RuntimeError> {
+        let mut tool_result_index = BTreeMap::new();
+        for (index, item) in items.iter().enumerate() {
+            if let TranscriptItem::ToolResult { call_id, .. } = item
+                && tool_result_index.insert(call_id.clone(), index).is_some()
+            {
+                return Err(RuntimeError::InvalidStepInput {
+                    reason: "persisted transcript contains duplicate tool result call_id",
+                });
+            }
+        }
+        let transcript = Self {
+            items,
+            tool_result_index,
+            next_id: TranscriptItemId::new(next_id),
+            model_turns,
+            model_turn_sequences,
+            next_model_turn_id: ModelTurnId::new(next_model_turn_id),
+        };
+        transcript.validate_persisted_turns()?;
+        Ok(transcript)
     }
 
     #[must_use]
@@ -510,6 +540,7 @@ impl Transcript {
         Ok(id)
     }
 
+    #[cfg(test)]
     pub(crate) fn persisted(&self) -> PersistedTranscript {
         PersistedTranscript {
             items: self
@@ -524,32 +555,20 @@ impl Transcript {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_persisted(persisted: PersistedTranscript) -> Result<Self, RuntimeError> {
         let items = persisted
             .items
             .into_iter()
             .map(TranscriptItem::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        let mut tool_result_index = BTreeMap::new();
-        for (index, item) in items.iter().enumerate() {
-            if let TranscriptItem::ToolResult { call_id, .. } = item
-                && tool_result_index.insert(call_id.clone(), index).is_some()
-            {
-                return Err(RuntimeError::InvalidStepInput {
-                    reason: "persisted transcript contains duplicate tool result call_id",
-                });
-            }
-        }
-        let transcript = Self {
+        Self::from_journal_parts(
             items,
-            tool_result_index,
-            next_id: TranscriptItemId::new(persisted.next_id),
-            model_turns: persisted.model_turns,
-            model_turn_sequences: persisted.model_turn_sequences,
-            next_model_turn_id: ModelTurnId::new(persisted.next_model_turn_id),
-        };
-        transcript.validate_persisted_turns()?;
-        Ok(transcript)
+            persisted.next_id,
+            persisted.model_turns,
+            persisted.model_turn_sequences,
+            persisted.next_model_turn_id,
+        )
     }
 }
 
@@ -559,6 +578,7 @@ impl Default for Transcript {
     }
 }
 
+#[cfg(test)]
 impl From<UserInputOrigin> for PersistedUserInputOrigin {
     fn from(value: UserInputOrigin) -> Self {
         match value {
@@ -568,6 +588,7 @@ impl From<UserInputOrigin> for PersistedUserInputOrigin {
     }
 }
 
+#[cfg(test)]
 impl From<PersistedUserInputOrigin> for UserInputOrigin {
     fn from(value: PersistedUserInputOrigin) -> Self {
         match value {
@@ -577,6 +598,7 @@ impl From<PersistedUserInputOrigin> for UserInputOrigin {
     }
 }
 
+#[cfg(test)]
 impl From<&TranscriptItem> for PersistedTranscriptItem {
     fn from(value: &TranscriptItem) -> Self {
         match value {
@@ -638,6 +660,7 @@ impl From<&TranscriptItem> for PersistedTranscriptItem {
     }
 }
 
+#[cfg(test)]
 impl TryFrom<PersistedTranscriptItem> for TranscriptItem {
     type Error = RuntimeError;
 
@@ -708,69 +731,6 @@ impl TryFrom<PersistedTranscriptItem> for TranscriptItem {
 }
 
 impl SessionState {
-    pub(crate) fn trajectory_items(&self) -> SessionTrajectory {
-        let items = self
-            .transcript
-            .items()
-            .iter()
-            .map(|item| match item {
-                TranscriptItem::UserMessage {
-                    id,
-                    model_turn_id,
-                    text,
-                    ..
-                } => SessionTrajectoryItem::UserMessage {
-                    item_id: id.as_u64(),
-                    model_turn_id: model_turn_id.as_u64(),
-                    text: text.to_string(),
-                },
-                TranscriptItem::AssistantText {
-                    id,
-                    model_turn_id,
-                    text,
-                } => SessionTrajectoryItem::AssistantText {
-                    item_id: id.as_u64(),
-                    model_turn_id: model_turn_id.as_u64(),
-                    text: text.to_string(),
-                },
-                TranscriptItem::ToolCall {
-                    id,
-                    model_turn_id,
-                    call,
-                    ..
-                } => SessionTrajectoryItem::ToolCall {
-                    item_id: id.as_u64(),
-                    model_turn_id: model_turn_id.as_u64(),
-                    call: call.clone(),
-                },
-                TranscriptItem::ToolResult {
-                    id,
-                    model_turn_id,
-                    call_id,
-                    result,
-                    payload,
-                    ..
-                } => SessionTrajectoryItem::ToolResult {
-                    item_id: id.as_u64(),
-                    model_turn_id: model_turn_id.as_u64(),
-                    call_id: call_id.clone(),
-                    result: result.clone(),
-                    output: Some(payload.model_or_full().clone()),
-                },
-            })
-            .collect();
-        let model_turn_sequences = self
-            .transcript
-            .model_turn_sequences()
-            .iter()
-            .map(|(turn_id, sequence)| (turn_id.as_u64(), *sequence))
-            .collect();
-        SessionTrajectory {
-            items,
-            model_turn_sequences,
-        }
-    }
-
     pub(crate) fn full_transcript_snapshot(&self) -> Vec<TranscriptItemSnapshot> {
         self.build_transcript_snapshot(false)
     }

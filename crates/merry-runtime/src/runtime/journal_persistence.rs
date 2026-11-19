@@ -16,7 +16,9 @@ impl RuntimeInner {
     /// Projects events and refreshes the resume savepoint after session state is recorded.
     pub(super) async fn commit_journal_events(&self, events: &[RuntimeJournalEvent]) {
         self.project_journal_events_with_tool_outputs(events).await;
-        persist_resume_safe_savepoint_if_configured(self).await;
+        if let Some(cursor) = write_resume_safe_savepoint(self).await {
+            self.session.lock().await.adopt_journal_cursor(cursor);
+        }
     }
 
     pub(super) fn project_journal_batch(&self, batch: &RuntimeJournalEventBatch) {
@@ -40,8 +42,11 @@ impl RuntimeInner {
         let mut events = Vec::new();
         batch.for_each(|event| events.push(event.clone()));
         self.project_journal_events_with_tool_outputs(&events).await;
-        persist_resume_safe_savepoint_if_configured(self).await;
+        let cursor = write_resume_safe_savepoint(self).await;
         permit.send(batch);
+        if let Some(cursor) = cursor {
+            self.session.lock().await.adopt_journal_cursor(cursor);
+        }
     }
 }
 
@@ -87,29 +92,30 @@ impl RuntimeInner {
     }
 }
 
-async fn persist_resume_safe_savepoint_if_configured(inner: &RuntimeInner) {
+async fn write_resume_safe_savepoint(
+    inner: &RuntimeInner,
+) -> Option<crate::session::JournalCursor> {
     if inner.tool_batch_active.load(Ordering::Acquire) {
-        return;
+        return None;
     }
-    let Some(store) = inner.session_store.clone() else {
-        return;
-    };
-    let trajectory = inner.trajectory.snapshot();
-    let bundle = {
-        let mut session = inner.session.lock().await;
-        session.set_trajectory_snapshot(trajectory);
+    let store = inner.session_store.clone()?;
+    let prepared = {
+        let session = inner.session.lock().await;
         session.persistable_bundle_if_resume_safe()
     };
-    let bundle = match bundle {
-        Ok(Some(bundle)) => bundle,
-        Ok(None) => return,
+    let (bundle, cursor) = match prepared {
+        Ok(Some(bundle)) => {
+            let cursor = bundle.cursor.clone();
+            (bundle, cursor)
+        }
+        Ok(None) => return None,
         Err(error) => {
             tracing::warn!(
                 session_id = %inner.session_id,
                 error = %error,
                 "automatic session resume savepoint skipped"
             );
-            return;
+            return None;
         }
     };
     if let Err(error) = store.write_bundle(bundle).await {
@@ -118,5 +124,7 @@ async fn persist_resume_safe_savepoint_if_configured(inner: &RuntimeInner) {
             error = %error,
             "automatic session resume savepoint failed"
         );
+        return None;
     }
+    Some(cursor)
 }

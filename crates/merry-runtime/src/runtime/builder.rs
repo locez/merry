@@ -746,28 +746,14 @@ impl RuntimeBuilder {
         for (id, text) in self.initial_context_summaries {
             session.reconcile_construction_context_seed(&id, &text)?;
         }
-        let restored_trajectory = session.trajectory_snapshot();
-        let has_restored_trajectory = restored_trajectory.is_some();
-        let trajectory_replay = if has_restored_trajectory {
-            Some((session.trajectory_items(), session.ledger_projection()))
-        } else {
-            None
-        };
         let trajectory =
             RuntimeObservability::new(self.session_id.clone(), tool_registry.tool_specs());
-        if let Some(snapshot) = restored_trajectory {
-            trajectory.restore_snapshot(snapshot, &session);
-            if let Some((session_trajectory, ledger)) = trajectory_replay.as_ref() {
-                trajectory.reconcile_from_session(session_trajectory, ledger);
-            }
-        } else {
-            trajectory.seed_prompt_profile(
-                &self.prompt_profile,
-                self.progress_commentary,
-                self.skill_catalog.as_ref(),
-                self.project_rules.as_ref(),
-            );
-        }
+        trajectory.seed_prompt_profile(
+            &self.prompt_profile,
+            self.progress_commentary,
+            self.skill_catalog.as_ref(),
+            self.project_rules.as_ref(),
+        );
         if let Some(project_rules) = self.project_rules {
             session.set_project_rules(project_rules);
         }
@@ -778,14 +764,7 @@ impl RuntimeBuilder {
             session.set_task_anchor(task_anchor);
         }
 
-        if !has_restored_trajectory {
-            let transcript = session
-                .full_transcript_snapshot()
-                .into_iter()
-                .map(crate::SessionTranscriptItem::from)
-                .collect::<Vec<_>>();
-            trajectory.seed_from_transcript(&transcript);
-        }
+        trajectory.seed_from_session(&session);
 
         let memory_context = match &self.durable_memory {
             Some(memory) => match memory.render_context() {

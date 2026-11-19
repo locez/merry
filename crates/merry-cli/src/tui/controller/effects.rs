@@ -211,7 +211,7 @@ pub(super) async fn dispatch_effect(
             Ok(false)
         }
         ControllerEffect::SaveSession => {
-            session.set_title(state.latest_user_input_title());
+            session.set_topic_if_empty(state.first_user_input_topic());
             match session.save_now().await {
                 Ok(()) => state.push_timeline_item(TimelineItem::LocalCommand {
                     title: "Session saved".to_owned(),
@@ -251,7 +251,7 @@ pub(super) async fn dispatch_effect(
         | ControllerEffect::RetryPlanNode(_)
         | ControllerEffect::CancelPlan => unreachable!("plan effect handled above"),
         ControllerEffect::Quit => {
-            session.set_title(state.latest_user_input_title());
+            session.set_topic_if_empty(state.first_user_input_topic());
             session.control.close().await.map_err(unexpected)?;
             session
                 .stream

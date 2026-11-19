@@ -99,7 +99,7 @@ impl RequestTokenObservation {
 }
 
 /// Bounded to one active request profile; unrelated models and contracts start uncalibrated.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RequestTokenCalibration {
     profile: RequestTokenProfile,

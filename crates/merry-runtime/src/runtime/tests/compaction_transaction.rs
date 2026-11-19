@@ -71,7 +71,7 @@ async fn transactional_compaction_fixture(
         )
         .build()
         .expect("runtime builds");
-    let before_memory = {
+    let bundle = {
         let mut session = runtime.inner.session.lock().await;
         for text in ["old turn for durable compaction", "retained raw tail"] {
             let turn_id = session.begin_model_turn().expect("turn begins");
@@ -85,23 +85,27 @@ async fn transactional_compaction_fixture(
         session
             .persistable_bundle()
             .expect("fixture state is persistable")
-            .document_bytes
     };
-    let bundle = {
-        let session = runtime.inner.session.lock().await;
-        session
-            .persistable_bundle()
-            .expect("fixture state is persistable")
-    };
+    let cursor = bundle.cursor.clone();
     durable_store
         .write_bundle(bundle)
         .await
         .expect("old state saves");
+    runtime
+        .inner
+        .session
+        .lock()
+        .await
+        .adopt_journal_cursor(cursor);
     let before_disk = durable_store
         .read_state_bytes(&id)
         .await
         .expect("old state reads");
-    assert_eq!(before_disk, before_memory);
+    let before_memory = runtime_persistable_bytes(&runtime).await;
+    assert!(
+        before_memory.is_empty(),
+        "a flushed session has no pending journal append"
+    );
     (runtime, id, before_memory, before_disk)
 }
 
@@ -152,7 +156,7 @@ async fn directory_sync_failure_keeps_renamed_disk_and_memory_in_step() {
     let failing_store = durable_store
         .clone()
         .with_directory_sync_failure_for_tests();
-    let (runtime, id, before_memory, before_disk) = transactional_compaction_fixture(
+    let (runtime, id, _before_memory, before_disk) = transactional_compaction_fixture(
         "runtime-compaction-directory-sync-failure",
         &durable_store,
         failing_store,
@@ -169,11 +173,24 @@ async fn directory_sync_failure_keeps_renamed_disk_and_memory_in_step() {
     let after_disk = durable_store
         .read_state_bytes(&id)
         .await
-        .expect("renamed state remains readable");
-    assert_ne!(after_memory, before_memory);
+        .expect("appended state remains readable");
+    // The journal append already landed on disk and memory adopted both the
+    // compaction and its cursor, leaving no unflushed delta.
+    assert!(
+        after_memory.is_empty(),
+        "cursor must advance after append even when directory sync fails"
+    );
     assert_ne!(after_disk, before_disk);
-    assert_eq!(after_memory, after_disk);
+    assert!(after_disk.starts_with(&before_disk));
     assert!(runtime.compacted_checkpoint_summary().await.is_some());
+    let resumed = Runtime::builder(id)
+        .resume_from_store(durable_store)
+        .await
+        .expect("appended journal remains resumable");
+    assert_eq!(
+        resumed.compacted_checkpoint_summary().await,
+        runtime.compacted_checkpoint_summary().await
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -289,7 +306,6 @@ async fn aborting_cancelled_compaction_while_staged_discards_temp_state() {
             .expect("old disk state remains after staged abort"),
         before_disk
     );
-    assert!(durable_store.staged_state_paths_for_tests(&id).is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -362,7 +378,11 @@ async fn successful_compaction_commit_resumes_exact_transactional_state() {
         .await
         .expect("committed state reads");
     assert_ne!(after_disk, before_disk);
-    assert_eq!(after_disk, after_memory);
+    assert!(after_disk.starts_with(&before_disk));
+    assert!(
+        after_memory.is_empty(),
+        "a durable compaction adopts the journal cursor"
+    );
 
     let resumed = Runtime::builder(id)
         .resume_from_store(store)
@@ -483,7 +503,7 @@ async fn aborting_compaction_after_rename_still_installs_memory_state() {
     let paused_store = durable_store
         .clone()
         .with_commit_pause_for_tests(pause.clone());
-    let (runtime, id, before_memory, before_disk) = transactional_compaction_fixture(
+    let (runtime, id, _before_memory, before_disk) = transactional_compaction_fixture(
         "runtime-compaction-post-rename-abort",
         &durable_store,
         paused_store,
@@ -520,11 +540,10 @@ async fn aborting_compaction_after_rename_still_installs_memory_state() {
     ));
 
     pause.resume();
-    let after_memory = tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            let bytes = runtime_persistable_bytes(&runtime).await;
-            if bytes != before_memory {
-                break bytes;
+            if runtime.compacted_checkpoint_summary().await.is_some() {
+                break;
             }
             tokio::task::yield_now().await;
         }
@@ -536,7 +555,8 @@ async fn aborting_compaction_after_rename_still_installs_memory_state() {
         .await
         .expect("committed disk state reads");
 
-    assert_eq!(after_memory, after_disk);
+    assert!(after_disk.len() > before_disk.len());
+    assert!(after_disk.starts_with(&before_disk));
     assert!(runtime.compacted_checkpoint_summary().await.is_some());
     assert!(runtime.acquire_active_step_permit().is_ok());
 }

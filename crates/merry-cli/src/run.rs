@@ -118,10 +118,10 @@ fn parse_session_id(flag: &str, value: &str) -> Result<SessionId, CliError> {
 
 /// Reserves a run's session id and refuses a new run that already has state.
 ///
-/// Saving a session is an atomic replace of its `state.json`, so starting a new
-/// run under an existing id destroys that session's transcript, ledger,
-/// artifacts, and checkpoints with nothing left to resume. A typo or a reused
-/// id has to fail here, before the run consumes its task or starts a runtime.
+/// Saving a session appends `journal.jsonl`, so starting a new run under an
+/// existing id would mix a fresh transcript into that session. A typo or a
+/// reused id has to fail here, before the run consumes its task or starts a
+/// runtime. A legacy `state.json` still occupies the id.
 async fn reserve_run_session(
     session: &RunSession,
     store: &FileSessionStore,

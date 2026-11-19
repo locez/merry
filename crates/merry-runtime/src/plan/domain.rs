@@ -32,7 +32,7 @@ pub(crate) struct PlanState {
     pub(super) next_directive_sequence: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PersistedPlanState {
     snapshot: PlanSnapshot,

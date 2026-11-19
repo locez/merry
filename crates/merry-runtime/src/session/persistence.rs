@@ -2,100 +2,33 @@ use super::{
     ModelTurnId, ModelTurnStatus, PreparedCompactionInstall, PreparedPlanToolCommit,
     PromptHistoryProjection, SessionState,
     checkpoint_window::ArchivedRefManifest,
+    journal::{
+        JournalAppendInput, JournalCursor, JournalImageFile, PreparedJournalAppend,
+        ReplayedJournal, images_dir, journal_file_has_header, prepare_journal_append,
+        session_from_journal,
+    },
     transcript::{
-        PersistedTranscript, ToolCallPromptProjection, ToolResultPromptProjection, Transcript,
-        TranscriptItem,
+        ToolCallPromptProjection, ToolResultPromptProjection, Transcript, TranscriptItem,
     },
 };
 use crate::{
     FileSessionStore, PlanPersistenceLocation, RuntimeError, SessionStoreError, UserMessageInput,
-    action_audit::{ActionAuditRegistry, PersistedActionAuditRegistry},
-    checkpoint::{CheckpointRef, CheckpointRefId, CheckpointSequenceRange, CheckpointSourceKind},
-    context::{
-        CompactedCheckpoint, ContextCompiler, ContextEntry, ContextSummary,
-        PersistedCompactedCheckpoint, SessionContextSnapshot,
-    },
-    ledger::{PersistedLedgerEntry, TaskLedger},
-    memory::MemoryStore,
-    plan::{PersistedPlanState, PlanState},
+    context::{CompactedCheckpoint, ContextCompiler, SessionContextSnapshot},
+    plan::PlanState,
 };
-use merry_core::{
-    PendingToolCall, PlanSnapshot, SessionId, SessionUsage, ToolCallId, TrajectoryRecordDetails,
-    TrajectorySnapshot,
-};
-use serde::{Deserialize, Serialize};
+use merry_core::{PendingToolCall, PlanSnapshot, SessionId, ToolCallId};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Wire version of the persisted session document.
-///
-/// Format 6 removed the global artifact registry and stores message/tool
-/// payloads directly inside the transcript. Older documents are rejected with
-/// [`SessionStoreError::UnsupportedFormatVersion`] instead of migrated.
-const CURRENT_SESSION_STATE_FORMAT_VERSION: u32 = 6;
-
-#[derive(Debug, Serialize, Deserialize)]
-struct StoredSessionDocumentHeader {
-    format_version: u32,
-    session_id: SessionId,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredSessionDocument {
-    format_version: u32,
-    session_id: SessionId,
-    next_sequence: u64,
-    session_started: bool,
-    ledger: Vec<PersistedLedgerEntry>,
-    compacted_checkpoint: Option<PersistedCompactedCheckpoint>,
-    archived_ref_manifest: Vec<StoredArchivedRef>,
-    prompt_history_projection: PromptHistoryProjection,
-    context_entries: Vec<StoredContextEntry>,
-    transcript: PersistedTranscript,
-    resolved_tool_calls: Vec<ToolCallId>,
-    usage: Option<SessionUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    request_token_calibration: Option<crate::token_estimate::RequestTokenCalibration>,
-    task_anchor: Option<StoredTaskAnchor>,
-    registries: StoredRegistries,
-    active_plan: Option<PersistedPlanState>,
-    terminal_plans: Vec<PlanSnapshot>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    trajectory_snapshot: Option<TrajectorySnapshot>,
-    external_tool_catalog: merry_core::SessionToolCatalog,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredTaskAnchor {
-    objective: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredArchivedRef {
-    id: String,
-    source_kind: CheckpointSourceKind,
-    sequence_start: u64,
-    sequence_end: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredRegistries {
-    action_audits: PersistedActionAuditRegistry,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum StoredContextEntry {
-    Summary { id: String, text: String },
-}
-
-#[derive(Debug, Clone)]
+/// Bytes that append one durable journal commit, plus the cursor to adopt after
+/// that append is durable.
+#[derive(Debug)]
 pub(crate) struct PersistableSessionBundle {
     pub(crate) session_id: SessionId,
+    pub(crate) header_bytes: Vec<u8>,
     pub(crate) document_bytes: Vec<u8>,
+    pub(crate) images: Vec<JournalImageFile>,
+    pub(crate) cursor: JournalCursor,
+    pub(crate) search_user_text: Option<String>,
 }
 
 struct PersistableSessionView<'a> {
@@ -105,123 +38,187 @@ struct PersistableSessionView<'a> {
     archived_ref_manifest: &'a ArchivedRefManifest,
     next_sequence: u64,
     session_started: bool,
-    ledger: &'a TaskLedger,
+    ledger: &'a crate::ledger::TaskLedger,
     pending_tool_calls: &'a [PendingToolCall],
     resolved_tool_calls: &'a BTreeSet<ToolCallId>,
     active_plan: Option<&'a PlanState>,
     terminal_plans: &'a [PlanSnapshot],
-    trajectory_snapshot: Option<&'a TrajectorySnapshot>,
 }
 
 impl SessionState {
-    #[allow(dead_code)]
-    pub(crate) async fn save_to(&self, store: &FileSessionStore) -> Result<(), SessionStoreError> {
-        let bundle = self.persistable_bundle()?;
-        store.write_bundle(bundle).await
+    #[cfg(test)]
+    pub(crate) async fn save_to(
+        &mut self,
+        store: &FileSessionStore,
+    ) -> Result<(), SessionStoreError> {
+        // `save_to` adopts the destination, so this store becomes the tracked one.
+        let has_header = journal_destination_has_header(store, &self.session_id).await?;
+        let cursor = self.cursor_for_destination(true, has_header);
+        let bundle = self.persistable_bundle_with_cursor(&cursor)?;
+        let cursor = bundle.cursor.clone();
+        if !bundle.document_bytes.is_empty() {
+            store.write_bundle(bundle).await?;
+        }
+        self.adopt_journal_cursor(cursor);
+        Ok(())
     }
 
     pub(crate) async fn load_from(
         store: &FileSessionStore,
         session_id: &SessionId,
     ) -> Result<Self, SessionStoreError> {
-        let overlay_bytes = store.read_plan_overlay_bytes(session_id).await?;
-        let bytes = match store.read_state_bytes(session_id).await {
-            Ok(bytes) => bytes,
-            Err(SessionStoreError::Io { source, .. })
-                if source.kind() == std::io::ErrorKind::NotFound =>
-            {
-                let overlay_bytes = overlay_bytes.ok_or_else(|| SessionStoreError::Io {
-                    path: store.state_path(session_id),
-                    source,
-                })?;
-                let mut session = Self::new(session_id.clone());
-                session.apply_plan_overlay(&overlay_bytes, true)?;
+        match store.read_journal_bytes(session_id).await {
+            Ok(bytes) => {
+                let ReplayedJournal {
+                    session,
+                    truncate_to_len,
+                } = session_from_journal(session_id, &bytes, &images_dir(store, session_id))
+                    .await?;
+                if let Some(valid_len) = truncate_to_len
+                    && let Err(error) = store.truncate_journal_tail(session_id, valid_len).await
+                {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %error,
+                        "could not truncate incomplete trailing journal line"
+                    );
+                }
                 return Ok(session);
             }
+            Err(SessionStoreError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
-        };
-        let header: StoredSessionDocumentHeader = serde_json::from_slice(&bytes)?;
-        if header.format_version != CURRENT_SESSION_STATE_FORMAT_VERSION {
-            return Err(SessionStoreError::UnsupportedFormatVersion {
-                actual: header.format_version,
-            });
         }
-        if &header.session_id != session_id {
-            return Err(SessionStoreError::SessionIdMismatch {
-                requested: session_id.clone(),
-                actual: header.session_id,
-            });
+        if let Some(bytes) = store.read_legacy_bytes(session_id, "state.json").await? {
+            let actual = legacy_format_version(&bytes).unwrap_or(6);
+            return Err(SessionStoreError::UnsupportedFormatVersion { actual });
         }
-
-        let document: StoredSessionDocument = serde_json::from_slice(&bytes)?;
-        let mut session = Self::from_stored_document(document)?;
-        if let Some(overlay_bytes) = overlay_bytes {
-            session.apply_plan_overlay(&overlay_bytes, false)?;
+        if store
+            .read_legacy_bytes(session_id, "plan-state.json")
+            .await?
+            .is_some()
+        {
+            return Err(SessionStoreError::UnsupportedFormatVersion { actual: 2 });
         }
-        Ok(session)
+        Err(SessionStoreError::Io {
+            path: store.journal_path(session_id),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "session journal is missing"),
+        })
     }
 
     pub(crate) fn persistable_bundle(&self) -> Result<PersistableSessionBundle, SessionStoreError> {
-        self.persistable_bundle_for(PersistableSessionView {
-            transcript: &self.transcript,
-            prompt_history_projection: self.prompt_history_projection,
-            compacted_checkpoint: self.compacted_checkpoint.as_ref(),
-            archived_ref_manifest: &self.archived_ref_manifest,
-            next_sequence: self.next_sequence,
-            session_started: self.session_started,
-            ledger: &self.ledger,
-            pending_tool_calls: &self.pending_tool_calls,
-            resolved_tool_calls: &self.resolved_tool_calls,
-            active_plan: self.active_plan.as_ref(),
-            terminal_plans: &self.terminal_plans,
-            trajectory_snapshot: self.trajectory_snapshot.as_ref(),
-        })
+        self.persistable_bundle_with_cursor(&self.journal_cursor)
+    }
+
+    /// The cursor tracks one store. A destination with no header needs a
+    /// complete journal, even when this process already flushed a commit
+    /// somewhere else.
+    pub(crate) fn cursor_for_destination(
+        &self,
+        tracked_store: bool,
+        destination_has_header: bool,
+    ) -> JournalCursor {
+        if tracked_store && destination_has_header {
+            self.journal_cursor.clone()
+        } else {
+            JournalCursor::untracked()
+        }
+    }
+
+    pub(crate) fn persistable_bundle_with_cursor(
+        &self,
+        cursor: &JournalCursor,
+    ) -> Result<PersistableSessionBundle, SessionStoreError> {
+        self.persistable_bundle_for(
+            PersistableSessionView {
+                transcript: &self.transcript,
+                prompt_history_projection: self.prompt_history_projection,
+                compacted_checkpoint: self.compacted_checkpoint.as_ref(),
+                archived_ref_manifest: &self.archived_ref_manifest,
+                next_sequence: self.next_sequence,
+                session_started: self.session_started,
+                ledger: &self.ledger,
+                pending_tool_calls: &self.pending_tool_calls,
+                resolved_tool_calls: &self.resolved_tool_calls,
+                active_plan: self.active_plan.as_ref(),
+                terminal_plans: &self.terminal_plans,
+            },
+            cursor,
+        )
     }
 
     pub(crate) fn persistable_bundle_with_compaction(
         &self,
         prepared: &PreparedCompactionInstall,
-        trajectory_snapshot: &TrajectorySnapshot,
     ) -> Result<PersistableSessionBundle, SessionStoreError> {
-        self.persistable_bundle_for(PersistableSessionView {
-            transcript: prepared.transcript(),
-            prompt_history_projection: prepared.prompt_history_projection(),
-            compacted_checkpoint: prepared.compacted_checkpoint(),
-            archived_ref_manifest: prepared.archived_ref_manifest(),
-            next_sequence: self.next_sequence,
-            session_started: self.session_started,
-            ledger: &self.ledger,
-            pending_tool_calls: &self.pending_tool_calls,
-            resolved_tool_calls: &self.resolved_tool_calls,
-            active_plan: self.active_plan.as_ref(),
-            terminal_plans: &self.terminal_plans,
-            trajectory_snapshot: Some(trajectory_snapshot),
-        })
+        self.persistable_bundle_for(
+            PersistableSessionView {
+                transcript: prepared.transcript(),
+                prompt_history_projection: prepared.prompt_history_projection(),
+                compacted_checkpoint: prepared.compacted_checkpoint(),
+                archived_ref_manifest: prepared.archived_ref_manifest(),
+                next_sequence: self.next_sequence,
+                session_started: self.session_started,
+                ledger: &self.ledger,
+                pending_tool_calls: &self.pending_tool_calls,
+                resolved_tool_calls: &self.resolved_tool_calls,
+                active_plan: self.active_plan.as_ref(),
+                terminal_plans: &self.terminal_plans,
+            },
+            &self.journal_cursor,
+        )
     }
 
     pub(crate) fn persistable_bundle_with_plan_tool_commit(
         &self,
         prepared: &PreparedPlanToolCommit,
     ) -> Result<PersistableSessionBundle, SessionStoreError> {
-        self.persistable_bundle_for(PersistableSessionView {
-            transcript: prepared.transcript(),
-            prompt_history_projection: self.prompt_history_projection,
-            compacted_checkpoint: self.compacted_checkpoint.as_ref(),
-            archived_ref_manifest: &self.archived_ref_manifest,
-            next_sequence: prepared.next_sequence(),
-            session_started: prepared.session_started(),
-            ledger: prepared.ledger(),
-            pending_tool_calls: prepared.pending_tool_calls(),
-            resolved_tool_calls: prepared.resolved_tool_calls(),
-            active_plan: Some(prepared.active_plan()),
-            terminal_plans: prepared.terminal_plans(),
-            trajectory_snapshot: self.trajectory_snapshot.as_ref(),
-        })
+        self.persistable_bundle_for(
+            PersistableSessionView {
+                transcript: prepared.transcript(),
+                prompt_history_projection: self.prompt_history_projection,
+                compacted_checkpoint: self.compacted_checkpoint.as_ref(),
+                archived_ref_manifest: &self.archived_ref_manifest,
+                next_sequence: prepared.next_sequence(),
+                session_started: prepared.session_started(),
+                ledger: prepared.ledger(),
+                pending_tool_calls: prepared.pending_tool_calls(),
+                resolved_tool_calls: prepared.resolved_tool_calls(),
+                active_plan: Some(prepared.active_plan()),
+                terminal_plans: prepared.terminal_plans(),
+            },
+            &self.journal_cursor,
+        )
+    }
+
+    pub(crate) fn persistable_bundle_with_plan(
+        &self,
+        active_plan: &PlanState,
+        terminal_plans: &[PlanSnapshot],
+        next_sequence: u64,
+    ) -> Result<PersistableSessionBundle, SessionStoreError> {
+        self.persistable_bundle_for(
+            PersistableSessionView {
+                transcript: &self.transcript,
+                prompt_history_projection: self.prompt_history_projection,
+                compacted_checkpoint: self.compacted_checkpoint.as_ref(),
+                archived_ref_manifest: &self.archived_ref_manifest,
+                next_sequence,
+                session_started: self.session_started,
+                ledger: &self.ledger,
+                pending_tool_calls: &self.pending_tool_calls,
+                resolved_tool_calls: &self.resolved_tool_calls,
+                active_plan: Some(active_plan),
+                terminal_plans,
+            },
+            &self.journal_cursor,
+        )
     }
 
     fn persistable_bundle_for(
         &self,
         view: PersistableSessionView<'_>,
+        cursor: &JournalCursor,
     ) -> Result<PersistableSessionBundle, SessionStoreError> {
         if !view.pending_tool_calls.is_empty() {
             return Err(SessionStoreError::UnsafePendingToolCalls {
@@ -255,50 +252,38 @@ impl SessionState {
             )?;
         }
 
-        let trajectory_snapshot = view.trajectory_snapshot.map(|snapshot| {
-            strip_redundant_tool_outputs_for_persistence(snapshot, view.transcript)
-        });
-
-        let document = StoredSessionDocument {
-            format_version: CURRENT_SESSION_STATE_FORMAT_VERSION,
-            session_id: self.session_id.clone(),
+        let PreparedJournalAppend {
+            header_bytes,
+            commit_bytes,
+            images,
+            cursor,
+            search_user_text,
+        } = prepare_journal_append(JournalAppendInput {
+            session_id: &self.session_id,
+            cursor,
+            transcript: view.transcript,
+            prompt_history_projection: view.prompt_history_projection,
+            compacted_checkpoint: view.compacted_checkpoint,
             next_sequence: view.next_sequence,
             session_started: view.session_started,
-            ledger: view.ledger.persisted_entries(),
-            compacted_checkpoint: view
-                .compacted_checkpoint
-                .map(CompactedCheckpoint::persisted),
-            archived_ref_manifest: view
-                .archived_ref_manifest
-                .refs()
-                .iter()
-                .map(StoredArchivedRef::from)
-                .collect(),
-            prompt_history_projection: view.prompt_history_projection,
-            context_entries: self
-                .context_entries
-                .iter()
-                .map(StoredContextEntry::from)
-                .collect(),
-            transcript: view.transcript.persisted(),
-            resolved_tool_calls: view.resolved_tool_calls.iter().cloned().collect(),
-            usage: self.usage.clone(),
-            request_token_calibration: self.request_token_calibration.clone(),
-            task_anchor: self.task_anchor.as_ref().map(|anchor| StoredTaskAnchor {
-                objective: anchor.objective().to_owned(),
-            }),
-            registries: StoredRegistries {
-                action_audits: self.action_audits.persisted(),
-            },
-            active_plan: view.active_plan.map(PlanState::persisted),
-            terminal_plans: view.terminal_plans.to_vec(),
-            trajectory_snapshot,
-            external_tool_catalog: self.external_tool_catalog.clone(),
-        };
-        let document_bytes = serde_json::to_vec_pretty(&document)?;
+            ledger: view.ledger,
+            active_plan: view.active_plan,
+            terminal_plans: view.terminal_plans,
+            usage: self.usage.as_ref(),
+            request_token_calibration: self.request_token_calibration.as_ref(),
+            task_anchor: self.task_anchor.as_ref(),
+            action_audits: &self.action_audits,
+            context_entries: &self.context_entries,
+            external_tool_catalog: &self.external_tool_catalog,
+            topic: self.topic.as_deref(),
+        })?;
         Ok(PersistableSessionBundle {
             session_id: self.session_id.clone(),
-            document_bytes,
+            header_bytes,
+            document_bytes: commit_bytes,
+            images,
+            cursor,
+            search_user_text,
         })
     }
 
@@ -312,101 +297,7 @@ impl SessionState {
         }
     }
 
-    fn from_stored_document(document: StoredSessionDocument) -> Result<Self, SessionStoreError> {
-        if document.format_version != CURRENT_SESSION_STATE_FORMAT_VERSION {
-            return Err(SessionStoreError::UnsupportedFormatVersion {
-                actual: document.format_version,
-            });
-        }
-
-        let compacted_checkpoint = document
-            .compacted_checkpoint
-            .map(CompactedCheckpoint::from_persisted)
-            .transpose()
-            .map_err(|_| invalid_document("stored compacted checkpoint is invalid"))?;
-        let prompt_history_projection = document.prompt_history_projection;
-        let archived_ref_manifest = ArchivedRefManifest::new(
-            document
-                .archived_ref_manifest
-                .into_iter()
-                .map(CheckpointRef::try_from)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| invalid_document("stored archived ref manifest is invalid"))?,
-        )
-        .map_err(|_| invalid_document("stored archived ref manifest is invalid"))?;
-
-        let active_plan = document
-            .active_plan
-            .map(|persisted| {
-                PlanState::from_persisted(persisted).map_err(|source| {
-                    crate::session_store::invalid_plan(PlanPersistenceLocation::Active, source)
-                })
-            })
-            .transpose()?;
-        let mut session = Self {
-            session_id: document.session_id,
-            next_sequence: document.next_sequence,
-            session_started: document.session_started,
-            ledger: TaskLedger::from_persisted_entries(document.ledger)
-                .map_err(|_| invalid_document("stored ledger entry is invalid"))?,
-            memory_store: MemoryStore::new(),
-            skill_catalog: None,
-            project_rules: None,
-            task_anchor: None,
-            compacted_checkpoint,
-            archived_ref_manifest,
-            prompt_history_projection,
-            context_entries: document
-                .context_entries
-                .into_iter()
-                .map(ContextEntry::try_from)
-                .collect::<Result<Vec<_>, _>>()?,
-            activated_memories: Vec::new(),
-            action_audits: ActionAuditRegistry::from_persisted(document.registries.action_audits),
-            active_plan,
-            terminal_plans: document.terminal_plans,
-            transcript: Transcript::from_persisted(document.transcript)
-                .map_err(runtime_error_to_invalid_document)?,
-            pending_tool_calls: Vec::new(),
-            resolved_tool_calls: document
-                .resolved_tool_calls
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-            usage: document.usage,
-            request_token_calibration: document.request_token_calibration,
-            trajectory_snapshot: document.trajectory_snapshot,
-            external_tool_catalog: document.external_tool_catalog,
-        };
-
-        if let Some(anchor) = document.task_anchor {
-            session.set_task_anchor(
-                crate::TaskAnchor::new(anchor.objective)
-                    .map_err(|_| invalid_document("stored task anchor is invalid"))?,
-            );
-        }
-
-        session.validate_persisted_transcript_for(
-            &session.transcript,
-            session.prompt_history_projection,
-            session.compacted_checkpoint.as_ref(),
-            &session.resolved_tool_calls,
-        )?;
-        session.validate_persisted_context_entries_with_checkpoint(
-            session.compacted_checkpoint.as_ref(),
-        )?;
-        session
-            .validate_archived_ref_manifest()
-            .map_err(runtime_error_to_invalid_document)?;
-        for (index, terminal) in session.terminal_plans.iter().enumerate() {
-            crate::session_store::validate_plan_snapshot(
-                terminal,
-                PlanPersistenceLocation::Terminal { index },
-            )?;
-        }
-        Ok(session)
-    }
-
-    fn validate_persisted_context_entries_with_checkpoint(
+    pub(super) fn validate_persisted_context_entries_with_checkpoint(
         &self,
         compacted_checkpoint: Option<&CompactedCheckpoint>,
     ) -> Result<(), SessionStoreError> {
@@ -421,7 +312,7 @@ impl SessionState {
             .map_err(|_| invalid_document("stored context entry is invalid"))
     }
 
-    fn validate_persisted_transcript_for(
+    pub(super) fn validate_persisted_transcript_for(
         &self,
         transcript: &Transcript,
         prompt_history_projection: PromptHistoryProjection,
@@ -500,7 +391,7 @@ impl SessionState {
             }
         }
 
-        for (turn_id, status) in transcript.persisted().model_turns {
+        for (&turn_id, &status) in transcript.model_turn_statuses() {
             let calls = calls_by_turn.get(&turn_id);
             let results = results_by_turn.get(&turn_id);
             match status {
@@ -558,40 +449,28 @@ impl SessionState {
     }
 }
 
-/// Drops duplicated tool outputs from persisted trajectory snapshots whenever the
-/// same output is already stored in `transcript`, avoiding double persistence.
-fn strip_redundant_tool_outputs_for_persistence(
-    snapshot: &TrajectorySnapshot,
-    transcript: &Transcript,
-) -> TrajectorySnapshot {
-    let mut stripped = snapshot.clone();
-    for mut record in stripped.records().to_vec() {
-        let Some(call_id) = record.tool_call_id().cloned() else {
-            continue;
-        };
-        if matches!(record.details(), TrajectoryRecordDetails::Tool { tool } if tool.output().is_some())
-            && transcript.tool_result_payload(&call_id).is_some()
-        {
-            record.set_tool_output(None);
-            stripped.upsert_record(record);
-        }
-    }
-    stripped
-}
-
 impl FileSessionStore {
     pub(crate) async fn stage_bundle(
         &self,
         bundle: PersistableSessionBundle,
     ) -> Result<crate::session_store::StagedSessionBundle, SessionStoreError> {
-        self.stage_state_bytes(&bundle.session_id, &bundle.document_bytes)
-            .await
+        self.stage_journal_append(
+            &bundle.session_id,
+            bundle.header_bytes,
+            bundle.document_bytes,
+            &bundle.images,
+            bundle.search_user_text,
+        )
+        .await
     }
 
     pub(crate) async fn write_bundle(
         &self,
         bundle: PersistableSessionBundle,
     ) -> Result<(), SessionStoreError> {
+        if bundle.document_bytes.is_empty() {
+            return Ok(());
+        }
         self.stage_bundle(bundle)
             .await?
             .commit()
@@ -600,56 +479,34 @@ impl FileSessionStore {
     }
 }
 
-impl From<&CheckpointRef> for StoredArchivedRef {
-    fn from(reference: &CheckpointRef) -> Self {
-        Self {
-            id: reference.id().as_str().to_owned(),
-            source_kind: reference.source_kind(),
-            sequence_start: reference.sequence_range().start(),
-            sequence_end: reference.sequence_range().end(),
+pub(crate) async fn journal_destination_has_header(
+    store: &FileSessionStore,
+    session_id: &SessionId,
+) -> Result<bool, SessionStoreError> {
+    match store.read_journal_bytes(session_id).await {
+        Ok(bytes) => journal_file_has_header(&bytes, session_id),
+        Err(SessionStoreError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Ok(false)
         }
+        Err(error) => Err(error),
     }
 }
 
-impl TryFrom<StoredArchivedRef> for CheckpointRef {
-    type Error = crate::CheckpointError;
-
-    fn try_from(reference: StoredArchivedRef) -> Result<Self, Self::Error> {
-        Ok(Self::new(
-            CheckpointRefId::new(&reference.id)?,
-            reference.source_kind,
-            CheckpointSequenceRange::new(reference.sequence_start, reference.sequence_end)?,
-        ))
-    }
-}
-
-impl From<&ContextEntry> for StoredContextEntry {
-    fn from(value: &ContextEntry) -> Self {
-        let summary = value.as_summary();
-        Self::Summary {
-            id: summary.id().to_owned(),
-            text: summary.text().to_owned(),
-        }
-    }
-}
-
-impl TryFrom<StoredContextEntry> for ContextEntry {
-    type Error = SessionStoreError;
-
-    fn try_from(value: StoredContextEntry) -> Result<Self, Self::Error> {
-        match value {
-            StoredContextEntry::Summary { id, text } => Ok(ContextEntry::summary(
-                ContextSummary::new(id, text)
-                    .map_err(|_| invalid_document("stored context summary is invalid"))?,
-            )),
-        }
-    }
-}
-
-fn invalid_document(reason: &'static str) -> SessionStoreError {
+pub(super) fn invalid_document(reason: &'static str) -> SessionStoreError {
     SessionStoreError::InvalidDocument { reason }
 }
 
-fn runtime_error_to_invalid_document(_error: RuntimeError) -> SessionStoreError {
+pub(super) fn runtime_error_to_invalid_document(_error: RuntimeError) -> SessionStoreError {
     invalid_document("stored transcript is invalid")
+}
+
+fn legacy_format_version(bytes: &[u8]) -> Option<u32> {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()?
+        .get("format_version")?
+        .as_u64()?
+        .try_into()
+        .ok()
 }

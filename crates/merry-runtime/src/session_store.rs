@@ -5,10 +5,10 @@ use std::{
     fmt,
     fs::{File, OpenOptions as StdOpenOptions},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::Arc,
 };
 use thiserror::Error;
-use tokio::{fs::OpenOptions, io::AsyncWriteExt};
+use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -18,8 +18,6 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 pub enum PlanPersistenceLocation {
     Active,
     Terminal { index: usize },
-    OverlayActive,
-    OverlayTerminal { index: usize },
 }
 
 impl fmt::Display for PlanPersistenceLocation {
@@ -27,29 +25,20 @@ impl fmt::Display for PlanPersistenceLocation {
         match self {
             Self::Active => formatter.write_str("active plan"),
             Self::Terminal { index } => write!(formatter, "terminal plan {index}"),
-            Self::OverlayActive => formatter.write_str("plan overlay active plan"),
-            Self::OverlayTerminal { index } => {
-                write!(formatter, "plan overlay terminal plan {index}")
-            }
         }
     }
 }
 
-const TEMP_FILE_CREATE_ATTEMPTS: u32 = 1_024;
+const JOURNAL_FILE_NAME: &str = "journal.jsonl";
 
-const TEMP_FILE_PREFIX: &str = ".state.json.tmp-";
+const LEGACY_STATE_FILE_NAME: &str = "state.json";
 
-const PLAN_OVERLAY_TEMP_FILE_PREFIX: &str = ".plan-state.json.tmp-";
-
-const PLAN_OVERLAY_FILE_NAME: &str = "plan-state.json";
+const LEGACY_PLAN_FILE_NAME: &str = "plan-state.json";
 
 const SESSION_LOCK_FILE_NAME: &str = ".session.lock";
 
 #[cfg(test)]
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(test)]
 use tokio::sync::Notify;
@@ -111,14 +100,16 @@ pub(crate) fn validate_plan_snapshot(
     crate::plan::validate_snapshot_limits(snapshot).map_err(|source| invalid_plan(location, source))
 }
 
-/// File-backed session state storage with atomic replacement per write.
+/// File-backed session storage. Durable session facts append directly to `journal.jsonl`.
 ///
-/// Store clones are safe to use through one runtime's serialized session
-/// lifecycle. Callers that create or resume a live run should hold a
-/// [`SessionReservation`] for the session id while it is active.
+/// Store clones share an in-process append lock so runtime savepoints,
+/// compaction, and plan updates cannot interleave bytes or write duplicate
+/// headers. Callers that create or resume a live run should also hold a
+/// [`SessionReservation`] for cross-process exclusion.
 #[derive(Debug, Clone)]
 pub struct FileSessionStore {
     sessions_dir: PathBuf,
+    write_lock: Arc<Mutex<()>>,
     #[cfg(test)]
     stage_pause: Option<SessionStoreStagePause>,
     #[cfg(test)]
@@ -137,10 +128,18 @@ pub struct SessionReservation {
     _lock_file: File,
 }
 
+/// Prepared in-memory journal append awaiting final transactional commit.
+///
+/// No temporary file is written for append-only commits: discarding simply
+/// drops the prepared bytes, while committing appends directly to
+/// `journal.jsonl` under the store's write lock and fsyncs once.
 #[derive(Debug)]
 pub(crate) struct StagedSessionBundle {
-    temp_path: PathBuf,
     final_path: PathBuf,
+    header_bytes: Vec<u8>,
+    commit_bytes: Vec<u8>,
+    write_lock: Arc<Mutex<()>>,
+    search: Option<search::SessionSearchUpdate>,
     #[cfg(test)]
     commit_pause: Option<SessionStoreCommitPause>,
     #[cfg(test)]
@@ -150,17 +149,17 @@ pub(crate) struct StagedSessionBundle {
 }
 
 #[derive(Debug)]
-#[must_use = "a renamed session bundle must be checked for directory durability"]
+#[must_use = "an appended session commit must be checked for directory durability"]
 pub(crate) enum StagedSessionCommit {
     Durable,
-    RenamedButNotSynced(SessionStoreError),
+    AppendedButNotSynced(SessionStoreError),
 }
 
 impl StagedSessionCommit {
     pub(crate) fn require_durable(self) -> Result<(), SessionStoreError> {
         match self {
             Self::Durable => Ok(()),
-            Self::RenamedButNotSynced(error) => Err(error),
+            Self::AppendedButNotSynced(error) => Err(error),
         }
     }
 }
@@ -169,28 +168,29 @@ impl StagedSessionBundle {
     pub(crate) async fn commit(self) -> Result<StagedSessionCommit, SessionStoreError> {
         #[cfg(test)]
         if self.fail_commit {
-            let error = io_error(
-                self.final_path.clone(),
+            return Err(io_error(
+                self.final_path,
                 std::io::Error::other("injected session store commit failure"),
-            );
-            let _ = tokio::fs::remove_file(&self.temp_path).await;
-            return Err(error);
+            ));
         }
 
-        if let Err(source) = tokio::fs::rename(&self.temp_path, &self.final_path).await {
-            let error = io_error(self.final_path.clone(), source);
-            let _ = tokio::fs::remove_file(&self.temp_path).await;
-            return Err(error);
-        }
+        let created = {
+            let _guard = self.write_lock.lock().await;
+            append_journal_bytes(&self.final_path, &self.header_bytes, &self.commit_bytes).await?
+        };
 
         #[cfg(test)]
         if let Some(pause) = &self.commit_pause {
             pause.pause_once().await;
         }
 
+        if let Some(search) = self.search {
+            search::upsert_user_text(search).await;
+        }
+
         #[cfg(test)]
         if self.fail_directory_sync {
-            return Ok(StagedSessionCommit::RenamedButNotSynced(io_error(
+            return Ok(StagedSessionCommit::AppendedButNotSynced(io_error(
                 self.final_path
                     .parent()
                     .unwrap_or(self.final_path.as_path())
@@ -199,18 +199,18 @@ impl StagedSessionBundle {
             )));
         }
 
-        match sync_parent_directory(&self.final_path).await {
-            Ok(()) => Ok(StagedSessionCommit::Durable),
-            Err(error) => Ok(StagedSessionCommit::RenamedButNotSynced(error)),
+        if created {
+            match sync_parent_directory(&self.final_path).await {
+                Ok(()) => Ok(StagedSessionCommit::Durable),
+                Err(error) => Ok(StagedSessionCommit::AppendedButNotSynced(error)),
+            }
+        } else {
+            Ok(StagedSessionCommit::Durable)
         }
     }
 
     pub(crate) async fn discard(self) -> Result<(), SessionStoreError> {
-        match tokio::fs::remove_file(&self.temp_path).await {
-            Ok(()) => Ok(()),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(io_error(self.temp_path, source)),
-        }
+        Ok(())
     }
 }
 
@@ -314,11 +314,12 @@ impl FileSessionStore {
 
     /// Creates a store rooted at a directory.
     ///
-    /// Each session is stored below `<root>/<session_id>/state.json`.
+    /// Each session is stored below `<root>/<session_id>/journal.jsonl`.
     #[must_use]
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
             sessions_dir: root.as_ref().to_path_buf(),
+            write_lock: Arc::new(Mutex::new(())),
             #[cfg(test)]
             stage_pause: None,
             #[cfg(test)]
@@ -338,7 +339,7 @@ impl FileSessionStore {
     /// Reserves exclusive write ownership of a session id until the returned
     /// guard is dropped.
     ///
-    /// The lock is acquired before callers inspect or write `state.json`, so
+    /// The lock is acquired before callers inspect or write `journal.jsonl`, so
     /// independent runs cannot both pass a check-then-save collision window.
     /// The lock file is intentionally retained as an empty per-session inode;
     /// it is not session state and is ignored by session discovery.
@@ -390,30 +391,53 @@ impl FileSessionStore {
 
     /// Reports whether this store already holds committed state for a session id.
     ///
-    /// Saving is an atomic replace of `state.json`, so a new run that reuses an
-    /// id would silently overwrite that session's transcript, ledger,
-    /// artifacts, and checkpoints. Callers that start a session check this
-    /// first and refuse the id instead of destroying resumable state.
+    /// Saving appends `journal.jsonl`, so a new run that reuses an id would
+    /// mix its transcript into an existing session. Callers that start a
+    /// session check this first and refuse the id. A legacy `state.json` or
+    /// `plan-state.json` still occupies the id; those sessions are not resumed.
     pub async fn contains_session(
         &self,
         session_id: &SessionId,
     ) -> Result<bool, SessionStoreError> {
-        let path = self.state_path(session_id);
-        tokio::fs::try_exists(&path)
-            .await
-            .map_err(|source| io_error(path, source))
+        for name in [
+            JOURNAL_FILE_NAME,
+            LEGACY_STATE_FILE_NAME,
+            LEGACY_PLAN_FILE_NAME,
+        ] {
+            let path = self.session_dir(session_id).join(name);
+            if tokio::fs::try_exists(&path)
+                .await
+                .map_err(|source| io_error(path.clone(), source))?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub(crate) fn session_dir(&self, session_id: &SessionId) -> PathBuf {
         self.sessions_dir.join(session_id.as_str())
     }
 
-    pub(crate) fn state_path(&self, session_id: &SessionId) -> PathBuf {
-        self.session_dir(session_id).join("state.json")
+    pub(crate) fn journal_path(&self, session_id: &SessionId) -> PathBuf {
+        self.session_dir(session_id).join(JOURNAL_FILE_NAME)
     }
 
-    pub(crate) fn plan_overlay_path(&self, session_id: &SessionId) -> PathBuf {
-        self.session_dir(session_id).join(PLAN_OVERLAY_FILE_NAME)
+    #[cfg(test)]
+    pub(crate) async fn overwrite_journal_bytes(
+        &self,
+        session_id: &SessionId,
+        bytes: &[u8],
+    ) -> Result<(), SessionStoreError> {
+        let session_dir = self.session_dir(session_id);
+        tokio::fs::create_dir_all(&session_dir)
+            .await
+            .map_err(|source| io_error(session_dir.clone(), source))?;
+        let path = self.journal_path(session_id);
+        let _guard = self.write_lock.lock().await;
+        tokio::fs::write(&path, bytes)
+            .await
+            .map_err(|source| io_error(path, source))
     }
 
     #[cfg(test)]
@@ -422,50 +446,22 @@ impl FileSessionStore {
         session_id: &SessionId,
         bytes: &[u8],
     ) -> Result<(), SessionStoreError> {
-        self.stage_state_bytes(session_id, bytes)
-            .await?
-            .commit()
-            .await?
-            .require_durable()
+        self.overwrite_journal_bytes(session_id, bytes).await
     }
 
-    pub(crate) async fn stage_state_bytes(
+    pub(crate) async fn stage_journal_append(
         &self,
         session_id: &SessionId,
-        bytes: &[u8],
-    ) -> Result<StagedSessionBundle, SessionStoreError> {
-        self.stage_named_bytes(session_id, bytes, "state.json", TEMP_FILE_PREFIX)
-            .await
-    }
-
-    pub(crate) async fn stage_plan_overlay_bytes(
-        &self,
-        session_id: &SessionId,
-        bytes: &[u8],
-    ) -> Result<StagedSessionBundle, SessionStoreError> {
-        self.stage_named_bytes(
-            session_id,
-            bytes,
-            PLAN_OVERLAY_FILE_NAME,
-            PLAN_OVERLAY_TEMP_FILE_PREFIX,
-        )
-        .await
-    }
-
-    async fn stage_named_bytes(
-        &self,
-        session_id: &SessionId,
-        bytes: &[u8],
-        file_name: &str,
-        temp_file_prefix: &str,
+        header_bytes: Vec<u8>,
+        commit_bytes: Vec<u8>,
+        images: &[crate::session::JournalImageFile],
+        search_user_text: Option<String>,
     ) -> Result<StagedSessionBundle, SessionStoreError> {
         let session_dir = self.session_dir(session_id);
         tokio::fs::create_dir_all(&session_dir)
             .await
             .map_err(|source| io_error(session_dir.clone(), source))?;
-
-        let temp_path = write_temp_file(&session_dir, bytes, temp_file_prefix).await?;
-        let final_path = session_dir.join(file_name);
+        self.write_journal_images(session_id, images).await?;
 
         #[cfg(test)]
         if let Some(pause) = &self.stage_pause {
@@ -473,8 +469,15 @@ impl FileSessionStore {
         }
 
         Ok(StagedSessionBundle {
-            temp_path,
-            final_path,
+            final_path: session_dir.join(JOURNAL_FILE_NAME),
+            header_bytes,
+            commit_bytes,
+            write_lock: Arc::clone(&self.write_lock),
+            search: search_user_text.map(|user_text| search::SessionSearchUpdate {
+                sessions_dir: self.sessions_dir.clone(),
+                session_id: session_id.clone(),
+                user_text,
+            }),
             #[cfg(test)]
             commit_pause: self.commit_pause.clone(),
             #[cfg(test)]
@@ -484,21 +487,98 @@ impl FileSessionStore {
         })
     }
 
-    pub(crate) async fn read_state_bytes(
+    async fn write_journal_images(
+        &self,
+        session_id: &SessionId,
+        images: &[crate::session::JournalImageFile],
+    ) -> Result<(), SessionStoreError> {
+        if images.is_empty() {
+            return Ok(());
+        }
+        let directory = self.session_dir(session_id).join("images");
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .map_err(|source| io_error(directory.clone(), source))?;
+        for image in images {
+            if !crate::session::is_image_id(&image.id) {
+                return Err(SessionStoreError::InvalidDocument {
+                    reason: "session journal image id is invalid",
+                });
+            }
+            let path = directory.join(format!("{}.png", image.id));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = match options.open(&path).await {
+                Ok(file) => file,
+                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(source) => return Err(io_error(path, source)),
+            };
+            file.write_all(&image.bytes)
+                .await
+                .map_err(|source| io_error(path.clone(), source))?;
+            file.sync_all()
+                .await
+                .map_err(|source| io_error(path, source))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn read_journal_bytes(
         &self,
         session_id: &SessionId,
     ) -> Result<Vec<u8>, SessionStoreError> {
-        let path = self.state_path(session_id);
+        let path = self.journal_path(session_id);
         tokio::fs::read(&path)
             .await
             .map_err(|source| io_error(path, source))
     }
 
-    pub(crate) async fn read_plan_overlay_bytes(
+    /// Truncates an incomplete trailing line after a crash so the next append
+    /// starts cleanly on a new line instead of gluing onto torn bytes.
+    pub(crate) async fn truncate_journal_tail(
         &self,
         session_id: &SessionId,
+        valid_len: u64,
+    ) -> Result<(), SessionStoreError> {
+        let path = self.journal_path(session_id);
+        let _guard = self.write_lock.lock().await;
+        let file = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .await
+            .map_err(|source| io_error(path.clone(), source))?;
+        let current_len = file
+            .metadata()
+            .await
+            .map_err(|source| io_error(path.clone(), source))?
+            .len();
+        if current_len > valid_len {
+            file.set_len(valid_len)
+                .await
+                .map_err(|source| io_error(path.clone(), source))?;
+            file.sync_all()
+                .await
+                .map_err(|source| io_error(path, source))?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn read_state_bytes(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<u8>, SessionStoreError> {
+        self.read_journal_bytes(session_id).await
+    }
+
+    pub(crate) async fn read_legacy_bytes(
+        &self,
+        session_id: &SessionId,
+        file_name: &str,
     ) -> Result<Option<Vec<u8>>, SessionStoreError> {
-        let path = self.plan_overlay_path(session_id);
+        let path = self.session_dir(session_id).join(file_name);
         match tokio::fs::read(&path).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -529,25 +609,6 @@ impl FileSessionStore {
         self.fail_directory_sync = true;
         self
     }
-
-    #[cfg(test)]
-    pub(crate) fn staged_state_paths_for_tests(&self, session_id: &SessionId) -> Vec<PathBuf> {
-        let Ok(entries) = std::fs::read_dir(self.session_dir(session_id)) else {
-            return Vec::new();
-        };
-        let mut paths = entries
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(TEMP_FILE_PREFIX)
-            })
-            .map(|entry| entry.path())
-            .collect::<Vec<_>>();
-        paths.sort();
-        paths
-    }
 }
 
 pub(crate) fn sessions_dir_from_env(
@@ -569,6 +630,44 @@ fn non_empty_os_str(value: Option<&OsStr>) -> Option<&OsStr> {
     value.filter(|value| !value.is_empty())
 }
 
+/// Appends one commit directly to `journal.jsonl`, prepending the header line
+/// atomically when the file is empty. Returns `true` when the journal started
+/// empty so the caller can sync the parent directory once.
+async fn append_journal_bytes(
+    final_path: &Path,
+    header_bytes: &[u8],
+    commit_bytes: &[u8],
+) -> Result<bool, SessionStoreError> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(final_path)
+        .await
+        .map_err(|source| io_error(final_path.to_path_buf(), source))?;
+    let empty = file
+        .metadata()
+        .await
+        .map_err(|source| io_error(final_path.to_path_buf(), source))?
+        .len()
+        == 0;
+    if empty && !header_bytes.is_empty() {
+        file.write_all(header_bytes)
+            .await
+            .map_err(|source| io_error(final_path.to_path_buf(), source))?;
+    }
+    if !commit_bytes.is_empty() {
+        file.write_all(commit_bytes)
+            .await
+            .map_err(|source| io_error(final_path.to_path_buf(), source))?;
+    }
+    file.sync_all()
+        .await
+        .map_err(|source| io_error(final_path.to_path_buf(), source))?;
+    Ok(empty)
+}
+
 #[cfg(unix)]
 async fn sync_parent_directory(path: &Path) -> Result<(), SessionStoreError> {
     let parent = path
@@ -588,62 +687,14 @@ async fn sync_parent_directory(path: &Path) -> Result<(), SessionStoreError> {
 
 #[cfg(not(unix))]
 async fn sync_parent_directory(_path: &Path) -> Result<(), SessionStoreError> {
-    // Windows does not support opening a directory through Tokio's file API
-    // for the Unix-style directory fsync used above. The temporary file is
-    // synced before rename, and rename remains the atomic commit point.
     Ok(())
-}
-
-async fn write_temp_file(
-    session_dir: &Path,
-    bytes: &[u8],
-    temp_file_prefix: &str,
-) -> Result<PathBuf, SessionStoreError> {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    for attempt in 0..TEMP_FILE_CREATE_ATTEMPTS {
-        let path = session_dir.join(format!(
-            "{temp_file_prefix}{}-{nonce}-{attempt}",
-            std::process::id()
-        ));
-        let mut file = match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .await
-        {
-            Ok(file) => file,
-            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(source) => return Err(io_error(path, source)),
-        };
-        let write_result = async {
-            file.write_all(bytes).await?;
-            file.sync_all().await
-        }
-        .await;
-        drop(file);
-        if let Err(source) = write_result {
-            let _ = tokio::fs::remove_file(&path).await;
-            return Err(io_error(path, source));
-        }
-        return Ok(path);
-    }
-
-    let path = session_dir.join(format!("{TEMP_FILE_PREFIX}{}-{nonce}", std::process::id()));
-    Err(io_error(
-        path,
-        std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "could not allocate a unique session state temp file",
-        ),
-    ))
 }
 
 fn io_error(path: PathBuf, source: std::io::Error) -> SessionStoreError {
     SessionStoreError::Io { path, source }
 }
+
+mod search;
 
 #[cfg(test)]
 mod tests;

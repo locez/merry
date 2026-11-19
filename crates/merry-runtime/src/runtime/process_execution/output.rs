@@ -1,16 +1,19 @@
 use crate::{
-    ProcessActionIntent, ProcessExitStatus, ProcessOutputEnvelope, ProcessPermissionProfileId,
-    ProcessRunnerOutput, permission::PermissionAdmissionReview, process::shell_process_input,
+    ProcessActionIntent, ProcessOutputEnvelope, ProcessPermissionProfileId, ProcessRunnerOutput,
+    permission::PermissionAdmissionReview,
+    process::{
+        OUTPUT_RECOVERY_GUIDANCE, TRUNCATION_GUIDANCE, recovery_guidance,
+        render_process_model_text, shell_process_input,
+    },
     tool::ToolResultContent,
+};
+#[cfg(test)]
+use crate::{
+    ProcessExitStatus,
+    process::{NON_UTF8_GUIDANCE, STILL_RUNNING_GUIDANCE},
 };
 use merry_core::ToolOutput;
 use serde::Serialize;
-
-const TRUNCATION_GUIDANCE: &str =
-    "Output is incomplete; inspect a narrower range before drawing conclusions.";
-const NON_UTF8_GUIDANCE: &str = "Non-UTF-8 bytes are shown as �; inspect the source with xxd or a format-aware tool for exact bytes.";
-const OUTPUT_RECOVERY_GUIDANCE: &str = "Do not repeat a side-effecting command to recover output.";
-const STILL_RUNNING_GUIDANCE: &str = "The process is still running, so this turn can continue. Ending this tool call does not stop it. Use read_background_process with this id for later output and stop_background_process to stop it. Merry keeps it until the session ends or that stop.";
 
 pub(super) fn result_content(
     intent: &ProcessActionIntent,
@@ -24,93 +27,12 @@ pub(super) fn result_content(
         permission_profile_id,
         permission_review,
     ))
-    .with_model(ToolOutput::text(model_text(output)))
+    .with_model(ToolOutput::text(render_process_model_text(output)))
 }
 
+#[cfg(test)]
 fn model_text(output: &ProcessRunnerOutput) -> String {
-    let stdout_utf8 = output.stdout_is_utf8();
-    let stderr_utf8 = output.stderr_is_utf8();
-    let mut text = match output.status() {
-        ProcessExitStatus::Exited(code) => format!("exit {code}"),
-        ProcessExitStatus::Cancelled => "cancelled".to_owned(),
-        ProcessExitStatus::FailedToStart => "not started".to_owned(),
-        ProcessExitStatus::DomainFailed => "failed before normal exit".to_owned(),
-        ProcessExitStatus::Running => {
-            match (output.running_pid(), output.background_process_id()) {
-                (Some(pid), Some(id)) => format!("still running pid {pid} id {id}"),
-                (Some(pid), None) => format!("still running pid {pid}"),
-                (None, Some(id)) => format!("still running id {id}"),
-                (None, None) => "still running".to_owned(),
-            }
-        }
-    };
-    append_stream(
-        &mut text,
-        "stdout",
-        output.stdout_text(),
-        output.stdout_truncated(),
-        stdout_utf8,
-    );
-    append_stream(
-        &mut text,
-        "stderr",
-        output.stderr_text(),
-        output.stderr_truncated(),
-        stderr_utf8,
-    );
-    let mut guidance = Vec::with_capacity(4);
-    let non_utf8 = !stdout_utf8 || !stderr_utf8;
-    let truncated = output.stdout_truncated() || output.stderr_truncated();
-    if non_utf8 {
-        guidance.push(NON_UTF8_GUIDANCE);
-    }
-    if truncated {
-        guidance.push(TRUNCATION_GUIDANCE);
-    }
-    if non_utf8 || truncated {
-        guidance.push(OUTPUT_RECOVERY_GUIDANCE);
-    }
-    if let Some(recovery) = recovery_guidance(output.status()) {
-        guidance.push(recovery);
-    }
-    if !guidance.is_empty() {
-        append_section(&mut text, "guidance", &guidance.join(" "));
-    }
-    text
-}
-
-fn recovery_guidance(status: ProcessExitStatus) -> Option<&'static str> {
-    match status {
-        ProcessExitStatus::Cancelled | ProcessExitStatus::DomainFailed => {
-            Some("Execution may have had side effects; verify its state before retrying.")
-        }
-        ProcessExitStatus::FailedToStart => {
-            Some("The command did not start; check the error before retrying.")
-        }
-        ProcessExitStatus::Running => Some(STILL_RUNNING_GUIDANCE),
-        ProcessExitStatus::Exited(_) => None,
-    }
-}
-
-fn append_stream(text: &mut String, name: &str, content: &str, truncated: bool, utf8: bool) {
-    if content.is_empty() && !truncated {
-        return;
-    }
-    match (truncated, utf8) {
-        (false, true) => append_section(text, name, content),
-        (true, true) => append_section(text, &format!("{name} (truncated)"), content),
-        (false, false) => append_section(text, &format!("{name} (non-UTF-8)"), content),
-        (true, false) => append_section(text, &format!("{name} (truncated, non-UTF-8)"), content),
-    }
-}
-
-fn append_section(text: &mut String, name: &str, content: &str) {
-    if !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text.push_str(name);
-    text.push_str(":\n");
-    text.push_str(content);
+    render_process_model_text(output)
 }
 
 fn full_output(
@@ -324,7 +246,7 @@ mod tests {
             assert_eq!(
                 model_text(&output),
                 format!(
-                    "exit 0\n{stream} (non-UTF-8):\n�\nguidance:\n{NON_UTF8_GUIDANCE} {OUTPUT_RECOVERY_GUIDANCE}"
+                    "exit 0\n{stream} (non-UTF-8):\n\u{FFFD}\nguidance:\n{NON_UTF8_GUIDANCE} {OUTPUT_RECOVERY_GUIDANCE}"
                 )
             );
         }
@@ -381,5 +303,62 @@ mod tests {
                 _ => assert!(text.contains("verify its state before retrying")),
             }
         }
+    }
+
+    #[test]
+    fn derived_model_text_matches_exited_output_and_skips_running_pids() {
+        let shell_intent = ProcessActionIntent::new(
+            vec!["bash".to_owned(), "-lc".to_owned(), "echo hello".to_owned()],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            4096,
+            4096,
+        )
+        .expect("valid shell intent");
+        let exited = ProcessRunnerOutput::new(
+            &shell_intent,
+            ProcessExitStatus::Exited(0),
+            "hello\n",
+            false,
+            "warn\n",
+            false,
+        )
+        .expect("output");
+        let content = result_content(
+            &shell_intent,
+            &exited,
+            crate::ProcessPermissionProfileId::READ_ONLY,
+            None,
+        );
+        let sanitized = crate::process::sanitize_process_output_for_journal(content.full());
+        assert!(!sanitized.as_str().contains("permission_profile_id"));
+        assert!(!sanitized.as_str().contains("input_evidence"));
+        assert!(!sanitized.as_str().contains("script_fingerprint"));
+        assert_eq!(
+            crate::process::derived_process_model_text(sanitized.as_str()).as_deref(),
+            Some(model_text(&exited).as_str())
+        );
+
+        let running = ProcessRunnerOutput::new(
+            &intent(),
+            ProcessExitStatus::Running,
+            "listening",
+            false,
+            "",
+            false,
+        )
+        .expect("output")
+        .with_running_pid(42);
+        let running_content = result_content(
+            &intent(),
+            &running,
+            crate::ProcessPermissionProfileId::READ_ONLY,
+            None,
+        );
+        assert_eq!(
+            crate::process::derived_process_model_text(running_content.full().as_str()),
+            None
+        );
     }
 }

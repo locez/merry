@@ -52,7 +52,7 @@ pub(crate) struct ScriptedToolExecutor {
 
 #[derive(Clone)]
 pub(crate) enum ToolExecutorResponse {
-    Outcome(ToolExecutionOutcome),
+    Outcome(Box<ToolExecutionOutcome>),
     ScriptedOutcomes(Arc<Mutex<Vec<ToolExecutionOutcome>>>),
     InfrastructureError(String),
 }
@@ -61,7 +61,9 @@ impl ScriptedToolExecutor {
     pub(crate) fn succeeding_text(text: &str) -> Self {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
-            response: ToolExecutorResponse::Outcome(ToolExecutionOutcome::succeeded_text(text)),
+            response: ToolExecutorResponse::Outcome(Box::new(
+                ToolExecutionOutcome::succeeded_text(text),
+            )),
         }
     }
 
@@ -106,7 +108,7 @@ impl ToolExecutor for ScriptedToolExecutor {
                 .push(call);
 
             match &self.response {
-                ToolExecutorResponse::Outcome(outcome) => Ok(outcome.clone()),
+                ToolExecutorResponse::Outcome(outcome) => Ok((**outcome).clone()),
                 ToolExecutorResponse::ScriptedOutcomes(outcomes) => outcomes
                     .lock()
                     .expect("scripted outcomes mutex should not be poisoned")

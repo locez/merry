@@ -29,6 +29,12 @@ pub use contracts::{
     ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
     StaticPermissionedProcessRunnerFactory,
 };
+#[cfg(test)]
+pub(crate) use output::{NON_UTF8_GUIDANCE, STILL_RUNNING_GUIDANCE};
+pub(crate) use output::{
+    OUTPUT_RECOVERY_GUIDANCE, TRUNCATION_GUIDANCE, derived_process_model_text, recovery_guidance,
+    render_process_model_text, sanitize_process_output_for_journal,
+};
 pub use output::{ProcessOutputEnvelope, ProcessOutputStream};
 pub use session_permissions::{
     PreparedProcessPermission, ProcessPathGrant, ProcessPathGrantConstraint,

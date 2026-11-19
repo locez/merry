@@ -154,6 +154,10 @@ fn build_coding_runtime_from_headless_input(
     review_rules: PermissionReviewRules,
 ) -> Result<CodingRuntimeBuilder, CodingRuntimeError> {
     let session_id = merry_core::SessionId::new(input.session_id)?;
+    #[cfg(not(test))]
+    let summary_provider = Arc::clone(&input.provider);
+    #[cfg(not(test))]
+    let summary_model = input.model.clone();
     let mut coding_input = CodingRuntimeInput::new(
         session_id,
         input.root,
@@ -179,6 +183,16 @@ fn build_coding_runtime_from_headless_input(
         coding_input = coding_input.with_model_role(role);
     }
     if let Some(role) = input.browser {
+        coding_input = coding_input.with_model_role(role);
+    }
+    // Library tests keep the primary provider's script for the coding turn.
+    // The product binary names the session with a separate summary call.
+    #[cfg(not(test))]
+    if let Ok(role) = merry::profiles::CodingModelRoleConfig::new(
+        merry_runtime::RuntimeModelRole::SummaryMemory,
+        summary_provider,
+        summary_model,
+    ) {
         coding_input = coding_input.with_model_role(role);
     }
     if !input.workspace_writable {

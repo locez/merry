@@ -14,6 +14,7 @@ mod provider_step_flow;
 mod provider_step_turn_lifecycle;
 mod rolling_compaction;
 mod session_resume;
+mod session_topic;
 mod support;
 mod tool_catalog;
 mod tool_execution;

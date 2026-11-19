@@ -58,15 +58,17 @@ async fn unsupported_session_format_fails_without_discovery_or_migration() {
         .save_session_to(store.clone())
         .await
         .unwrap();
-    let path = temp.path().join(id.as_str()).join("state.json");
-    let mut document: serde_json::Value =
-        serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
-    document["format_version"] = serde_json::json!(3);
-    document
-        .as_object_mut()
-        .unwrap()
-        .remove("external_tool_catalog");
-    let bytes = serde_json::to_vec(&document).unwrap();
+    let path = temp.path().join(id.as_str()).join("journal.jsonl");
+    let original = tokio::fs::read_to_string(&path).await.unwrap();
+    let mut lines = original
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut header: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    header["format_version"] = serde_json::json!(3);
+    lines[0] = serde_json::to_string(&header).unwrap();
+    let bytes = format!("{}\n", lines.join("\n"));
     tokio::fs::write(&path, &bytes).await.unwrap();
     let error = LoadedSession::load(&store, &id)
         .await
@@ -75,7 +77,7 @@ async fn unsupported_session_format_fails_without_discovery_or_migration() {
     assert!(
         matches!(error, RuntimeError::SessionStore { source } if source.to_string().contains("session document format version 3 is not supported"))
     );
-    assert_eq!(tokio::fs::read(&path).await.unwrap(), bytes);
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), bytes.as_bytes());
 }
 
 #[tokio::test]
@@ -86,9 +88,12 @@ async fn corrupt_resume_state_does_not_fall_back_to_discovery() {
     tokio::fs::create_dir(temp.path().join(id.as_str()))
         .await
         .unwrap();
-    tokio::fs::write(temp.path().join(id.as_str()).join("state.json"), b"broken")
-        .await
-        .unwrap();
+    tokio::fs::write(
+        temp.path().join(id.as_str()).join("journal.jsonl"),
+        b"broken\n",
+    )
+    .await
+    .unwrap();
     let error = LoadedSession::load(&store, &id)
         .await
         .err()

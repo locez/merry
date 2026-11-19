@@ -2,7 +2,7 @@ use crate::{
     FileSessionStore,
     session::tests::{
         SessionId, SessionState, SessionStateTestExt, pending_tool_call,
-        persistence::current_document, session_id,
+        persistence::rewrite_journal_commit, session_id,
     },
 };
 use merry_core::{ToolCallResult, ToolOutput};
@@ -28,7 +28,7 @@ async fn session_state_save_rejects_pending_tool_calls() {
 async fn session_state_load_rejects_session_id_mismatch() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
-    let session = SessionState::new(session_id());
+    let mut session = SessionState::new(session_id());
     session.save_to(&store).await.expect("session saves");
 
     let other = SessionId::new("other-session").expect("valid session id");
@@ -99,28 +99,37 @@ async fn session_state_load_rejects_unreachable_model_turn_sequences() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     let cases = [
-        ("empty map with advanced counter", serde_json::json!({}), 2),
+        ("empty map with advanced counter", serde_json::json!([]), 2),
         (
             "gap in positive turn ids",
-            serde_json::json!({ "1": "completed", "3": "completed" }),
+            serde_json::json!([
+                {"id": 1, "status": "completed"},
+                {"id": 3, "status": "completed"}
+            ]),
             4,
         ),
         (
             "counter jump after contiguous turns",
-            serde_json::json!({ "1": "completed" }),
+            serde_json::json!([{"id": 1, "status": "completed"}]),
             3,
         ),
     ];
 
+    SessionState::new(session_id())
+        .save_to(&store)
+        .await
+        .expect("empty session saves");
+    let saved = store
+        .read_state_bytes(&session_id())
+        .await
+        .expect("journal reads");
     for (case, model_turns, next_model_turn_id) in cases {
-        let mut document = current_document();
-        document["transcript"]["model_turns"] = model_turns;
-        document["transcript"]["next_model_turn_id"] = serde_json::Value::from(next_model_turn_id);
+        let bytes = rewrite_journal_commit(&saved, |commit| {
+            commit["state"]["model_turns"] = model_turns.clone();
+            commit["state"]["next_model_turn_id"] = serde_json::Value::from(next_model_turn_id);
+        });
         store
-            .write_state_bytes(
-                &session_id(),
-                &serde_json::to_vec_pretty(&document).expect("current document serializes"),
-            )
+            .write_state_bytes(&session_id(), &bytes)
             .await
             .expect("corrupted current state writes");
 
@@ -144,26 +153,17 @@ async fn session_state_load_rejects_nonterminal_or_unresolved_turns() {
         .save_to(&store)
         .await
         .expect("empty session saves");
-    let base: serde_json::Value = serde_json::from_slice(
-        &store
-            .read_state_bytes(&session_id())
-            .await
-            .expect("state reads"),
-    )
-    .expect("state is json");
+    let saved = store
+        .read_state_bytes(&session_id())
+        .await
+        .expect("state reads");
 
-    let mut in_progress = base.clone();
-    in_progress["transcript"] = serde_json::json!({
-        "items": [],
-        "next_id": 0,
-        "model_turns": { "1": "in_progress" },
-        "next_model_turn_id": 2
+    let in_progress = rewrite_journal_commit(&saved, |commit| {
+        commit["state"]["model_turns"] = serde_json::json!([{"id": 1, "status": "in_progress"}]);
+        commit["state"]["next_model_turn_id"] = serde_json::json!(2);
     });
     store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&in_progress).expect("document serializes"),
-        )
+        .write_state_bytes(&session_id(), &in_progress)
         .await
         .expect("in-progress state writes");
     assert!(matches!(
@@ -174,24 +174,19 @@ async fn session_state_load_rejects_nonterminal_or_unresolved_turns() {
     ));
 
     let call = pending_tool_call("unresolved-completed-call");
-    let mut unresolved = base;
-    unresolved["transcript"] = serde_json::json!({
-        "items": [{
+    let unresolved = rewrite_journal_commit(&saved, |commit| {
+        commit["items"] = serde_json::json!([{
             "type": "tool_call",
             "id": 0,
             "model_turn_id": 1,
             "call": call,
-            "prompt_projection": "full"
-        }],
-        "next_id": 1,
-        "model_turns": { "1": "completed" },
-        "next_model_turn_id": 2
+        }]);
+        commit["state"]["next_item_id"] = serde_json::json!(1);
+        commit["state"]["model_turns"] = serde_json::json!([{"id": 1, "status": "completed"}]);
+        commit["state"]["next_model_turn_id"] = serde_json::json!(2);
     });
     store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&unresolved).expect("document serializes"),
-        )
+        .write_state_bytes(&session_id(), &unresolved)
         .await
         .expect("unresolved state writes");
     assert!(matches!(
@@ -219,21 +214,16 @@ async fn session_state_load_rejects_mismatched_tool_result_identity() {
         .expect("result records");
     session.save_to(&store).await.expect("session saves");
 
-    let mut document: serde_json::Value = serde_json::from_slice(
-        &store
-            .read_state_bytes(&session_id())
-            .await
-            .expect("state reads"),
-    )
-    .expect("state is json");
-    let valid_document = document.clone();
-    document["transcript"]["items"][1]["result"]["call_id"] =
-        serde_json::Value::String("different-result-call".to_owned());
+    let saved = store
+        .read_state_bytes(&session_id())
+        .await
+        .expect("state reads");
+    let mismatched = rewrite_journal_commit(&saved, |commit| {
+        commit["items"][1]["result"]["call_id"] =
+            serde_json::Value::String("different-result-call".to_owned());
+    });
     store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&document).expect("document serializes"),
-        )
+        .write_state_bytes(&session_id(), &mismatched)
         .await
         .expect("mismatched result state writes");
 
@@ -244,19 +234,17 @@ async fn session_state_load_rejects_mismatched_tool_result_identity() {
         crate::SessionStoreError::InvalidDocument { .. }
     ));
 
-    let mut duplicate_result = valid_document;
-    let mut repeated = duplicate_result["transcript"]["items"][1].clone();
-    repeated["id"] = serde_json::Value::from(2);
-    duplicate_result["transcript"]["items"]
-        .as_array_mut()
-        .expect("transcript items are an array")
-        .push(repeated);
-    duplicate_result["transcript"]["next_id"] = serde_json::Value::from(3);
+    let duplicate_result = rewrite_journal_commit(&saved, |commit| {
+        let mut repeated = commit["items"][1].clone();
+        repeated["id"] = serde_json::Value::from(2);
+        commit["items"]
+            .as_array_mut()
+            .expect("journal items are an array")
+            .push(repeated);
+        commit["state"]["next_item_id"] = serde_json::Value::from(3);
+    });
     store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec_pretty(&duplicate_result).expect("document serializes"),
-        )
+        .write_state_bytes(&session_id(), &duplicate_result)
         .await
         .expect("duplicate result state writes");
     assert!(matches!(
@@ -272,14 +260,14 @@ async fn session_state_rejects_unsupported_format_before_body_decode() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
     let document = serde_json::json!({
+        "type": "header",
         "format_version": 99,
         "session_id": session_id()
     });
+    let mut bytes = serde_json::to_vec(&document).expect("header serializes");
+    bytes.push(b'\n');
     store
-        .write_state_bytes(
-            &session_id(),
-            &serde_json::to_vec(&document).expect("header serializes"),
-        )
+        .write_state_bytes(&session_id(), &bytes)
         .await
         .expect("unsupported state writes");
 

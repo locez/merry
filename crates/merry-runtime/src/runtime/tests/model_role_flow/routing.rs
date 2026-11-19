@@ -117,7 +117,7 @@ fn role_scoped_retry_policy_does_not_rewrite_existing_model_configs() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn step_uses_primary_model_and_does_not_call_any_non_primary_role_provider() {
+async fn step_uses_primary_model_and_names_the_session_once_with_summary_memory() {
     let primary = RecordingModelProvider::new();
     let approval_review = RecordingModelProvider::new();
     let summary_memory = RecordingModelProvider::new();
@@ -165,7 +165,17 @@ async fn step_uses_primary_model_and_does_not_call_any_non_primary_role_provider
         primary_requests[0].model(),
         &named_model("fake/primary-step")
     );
-    for provider in [&approval_review, &summary_memory, &context_compaction] {
+    // The first user message names the session through SummaryMemory. Join
+    // that task here so the call count is not a race with the step.
+    let _topic = runtime.session_topic().await;
+    let summary_requests = summary_memory.recorded_requests();
+    assert_eq!(summary_memory.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(summary_requests.len(), 1);
+    assert_eq!(
+        summary_requests[0].model(),
+        &named_model("fake/summary-memory-step")
+    );
+    for provider in [&approval_review, &context_compaction] {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
         assert!(provider.recorded_requests().is_empty());
     }

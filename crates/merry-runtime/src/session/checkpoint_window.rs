@@ -572,23 +572,20 @@ impl SessionState {
     pub(crate) fn compaction_window_fingerprint(
         &self,
     ) -> Result<CompactionWindowFingerprint, RuntimeError> {
-        let bytes = serde_json::to_vec(&(
-            self.transcript.persisted(),
+        let mut hash = 0xcbf29ce484222325_u64;
+        hash_transcript(&self.transcript, &mut hash)?;
+        let side_bytes = serde_json::to_vec(&(
             self.prompt_history_projection,
             self.compacted_checkpoint
                 .as_ref()
-                .map(CompactedCheckpoint::persisted),
+                .map(CompactedCheckpoint::text),
             self.task_anchor.as_ref().map(|anchor| anchor.objective()),
             self.archived_ref_manifest.fingerprint_material(),
         ))
         .map_err(|error| CompactionError::PayloadSerialization {
             message: error.to_string(),
         })?;
-        let mut hash = 0xcbf29ce484222325_u64;
-        for byte in bytes {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
+        fnv_update(&mut hash, &side_bytes);
         Ok(CompactionWindowFingerprint::new(hash))
     }
 
@@ -618,26 +615,156 @@ impl SessionState {
         transcript: &Transcript,
         prompt_history_projection: PromptHistoryProjection,
     ) -> Result<Vec<CheckpointRef>, RuntimeError> {
-        let compacted_through = prompt_history_projection.compacted_through();
-        let mut refs = Vec::new();
-        for item in transcript.items() {
-            let TranscriptItem::ToolResult {
-                id,
-                model_turn_id,
-                prompt_projection: ToolResultPromptProjection::Collapsed,
-                ..
-            } = item
-            else {
-                continue;
-            };
-            if compacted_through.is_some_and(|boundary| *model_turn_id <= boundary) {
-                continue;
-            }
-            refs.push(history_checkpoint_ref(
-                *id,
-                CheckpointSourceKind::ToolResult,
-            )?);
-        }
-        Ok(refs)
+        archived_refs_after_projection(transcript, prompt_history_projection)
     }
+}
+
+pub(super) fn archived_refs_after_projection(
+    transcript: &Transcript,
+    prompt_history_projection: PromptHistoryProjection,
+) -> Result<Vec<CheckpointRef>, RuntimeError> {
+    let compacted_through = prompt_history_projection.compacted_through();
+    let mut refs = Vec::new();
+    for item in transcript.items() {
+        let TranscriptItem::ToolResult {
+            id,
+            model_turn_id,
+            prompt_projection: ToolResultPromptProjection::Collapsed,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        if compacted_through.is_some_and(|boundary| *model_turn_id <= boundary) {
+            continue;
+        }
+        refs.push(history_checkpoint_ref(
+            *id,
+            CheckpointSourceKind::ToolResult,
+        )?);
+    }
+    Ok(refs)
+}
+
+fn fnv_update(hash: &mut u64, bytes: &[u8]) {
+    for &byte in bytes {
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
+}
+
+fn fnv_u64(hash: &mut u64, value: u64) {
+    fnv_update(hash, &value.to_le_bytes());
+}
+
+fn hash_transcript(transcript: &Transcript, hash: &mut u64) -> Result<(), RuntimeError> {
+    fnv_u64(hash, transcript.next_id().as_u64());
+    fnv_u64(hash, transcript.next_model_turn_id().as_u64());
+    fnv_u64(hash, transcript.items().len() as u64);
+    for item in transcript.items() {
+        fnv_u64(hash, item.id().as_u64());
+        fnv_u64(hash, item.model_turn_id().as_u64());
+        match item {
+            TranscriptItem::UserMessage {
+                text,
+                images,
+                origin,
+                ..
+            } => {
+                fnv_update(hash, &[1]);
+                fnv_update(hash, text.as_bytes());
+                fnv_u64(hash, images.len() as u64);
+                for image in images {
+                    fnv_update(hash, image.label().as_bytes());
+                    fnv_update(hash, image.png_bytes());
+                    fnv_u64(hash, u64::from(image.width()));
+                    fnv_u64(hash, u64::from(image.height()));
+                }
+                fnv_update(
+                    hash,
+                    &[match origin {
+                        super::transcript::UserInputOrigin::ExternalUser => 1,
+                        super::transcript::UserInputOrigin::RuntimeControl => 2,
+                    }],
+                );
+            }
+            TranscriptItem::AssistantText { text, .. } => {
+                fnv_update(hash, &[2]);
+                fnv_update(hash, text.as_bytes());
+            }
+            TranscriptItem::ToolCall {
+                call,
+                prompt_projection,
+                ..
+            } => {
+                fnv_update(hash, &[3]);
+                let call_bytes = serde_json::to_vec(call).map_err(|error| {
+                    CompactionError::PayloadSerialization {
+                        message: error.to_string(),
+                    }
+                })?;
+                fnv_update(hash, &call_bytes);
+                fnv_update(
+                    hash,
+                    &[match prompt_projection {
+                        super::transcript::ToolCallPromptProjection::Full => 1,
+                        super::transcript::ToolCallPromptProjection::Hidden => 2,
+                    }],
+                );
+            }
+            TranscriptItem::ToolResult {
+                call_id,
+                result,
+                payload,
+                prompt_projection,
+                ..
+            } => {
+                fnv_update(hash, &[4]);
+                fnv_update(hash, call_id.as_str().as_bytes());
+                let result_bytes = serde_json::to_vec(result).map_err(|error| {
+                    CompactionError::PayloadSerialization {
+                        message: error.to_string(),
+                    }
+                })?;
+                fnv_update(hash, &result_bytes);
+                fnv_update(hash, payload.full().as_str().as_bytes());
+                if let Some(model) = payload.model() {
+                    fnv_update(hash, &[1]);
+                    fnv_update(hash, model.as_str().as_bytes());
+                } else {
+                    fnv_update(hash, &[0]);
+                }
+                fnv_u64(hash, payload.images().len() as u64);
+                for image in payload.images() {
+                    fnv_update(hash, image.label().as_bytes());
+                    fnv_update(hash, image.png_bytes());
+                }
+                fnv_update(
+                    hash,
+                    &[match prompt_projection {
+                        ToolResultPromptProjection::Full => 1,
+                        ToolResultPromptProjection::Collapsed => 2,
+                        ToolResultPromptProjection::Hidden => 3,
+                    }],
+                );
+            }
+        }
+    }
+    for (turn_id, status) in transcript.model_turn_statuses() {
+        fnv_u64(hash, turn_id.as_u64());
+        fnv_update(
+            hash,
+            &[match status {
+                super::ModelTurnStatus::InProgress => 1,
+                super::ModelTurnStatus::AwaitingToolResults => 2,
+                super::ModelTurnStatus::Completed => 3,
+                super::ModelTurnStatus::Aborted => 4,
+            }],
+        );
+    }
+    for (turn_id, seq) in transcript.model_turn_sequences() {
+        fnv_u64(hash, turn_id.as_u64());
+        fnv_u64(hash, *seq);
+    }
+    Ok(())
 }

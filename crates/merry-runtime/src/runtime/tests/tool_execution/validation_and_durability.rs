@@ -1,5 +1,5 @@
 use crate::{
-    FileSessionStore, RuntimeError,
+    FileSessionStore, RuntimeError, SessionTranscriptItem,
     runtime::{
         Runtime,
         tests::support::{
@@ -44,6 +44,7 @@ async fn tool_execution_persists_trajectory_before_returning_events() {
     )
     .await;
     let call_id = pending.id().clone();
+    let expected_call_id = call_id.clone();
     let task_runtime = runtime.clone();
     let task = tokio::spawn(async move {
         task_runtime
@@ -58,33 +59,53 @@ async fn tool_execution_persists_trajectory_before_returning_events() {
         .await
         .expect("tool execution task joins")
         .expect("tool execution succeeds");
-    let resolved_sequence = events
-        .iter()
-        .find(|event| {
+    assert!(
+        events.iter().any(|event| {
             matches!(
                 event.payload,
                 RuntimeJournalPayload::ToolCallResolved { .. }
             )
-        })
-        .expect("tool call resolves")
-        .sequence;
+        }),
+        "tool call resolves"
+    );
 
     let resumed = Runtime::builder(session_id(session))
         .resume_from_store(resume_store)
         .await
         .expect("runtime resumes after tool savepoint");
+    let transcript = resumed
+        .session_transcript()
+        .await
+        .expect("transcript resumes");
+    let result_index = transcript
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                SessionTranscriptItem::ToolResult {
+                    call_id: id,
+                    result,
+                    ..
+                } if id == &expected_call_id && result.status() == ToolCallResultStatus::Succeeded
+            )
+        })
+        .expect("resolved tool result resumes");
     let snapshot = resumed
         .trajectory_snapshot()
         .await
         .expect("trajectory snapshot reads");
-    assert_eq!(snapshot.latest_sequence(), resolved_sequence);
     let tool_record = snapshot
         .records()
         .iter()
-        .find(|record| record.tool_call_id().is_some())
+        .find(|record| record.tool_call_id() == Some(&expected_call_id))
         .expect("tool trajectory record resumes");
     assert_eq!(tool_record.status(), TrajectoryRecordStatus::Succeeded);
-    assert_eq!(tool_record.end_sequence(), Some(resolved_sequence));
+    // Resume seeds the trajectory from transcript order. The end sequence is
+    // that item's position, not the live journal event sequence.
+    assert_eq!(
+        tool_record.end_sequence(),
+        Some(u64::try_from(result_index).expect("result index fits") + 1)
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

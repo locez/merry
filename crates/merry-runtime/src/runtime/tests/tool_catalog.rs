@@ -145,26 +145,32 @@ async fn catalog_loader_rejects_missing_or_null_catalogs_instead_of_rediscoverin
         .save_session_to(store.clone())
         .await
         .unwrap();
-    let path = temp.path().join(id.as_str()).join("state.json");
-    let mut document: serde_json::Value =
-        serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+    let path = temp.path().join(id.as_str()).join("journal.jsonl");
+    let original = tokio::fs::read_to_string(&path).await.unwrap();
     for catalog in [None, Some(serde_json::Value::Null)] {
-        match catalog {
+        let mut lines = original
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut commit: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+        match &catalog {
             None => {
-                document
+                commit["state"]
                     .as_object_mut()
                     .unwrap()
                     .remove("external_tool_catalog");
             }
-            Some(catalog) => document["external_tool_catalog"] = catalog,
+            Some(catalog) => commit["state"]["external_tool_catalog"] = catalog.clone(),
         }
-        tokio::fs::write(&path, serde_json::to_vec(&document).unwrap())
+        *lines.last_mut().unwrap() = serde_json::to_string(&commit).unwrap();
+        tokio::fs::write(&path, format!("{}\n", lines.join("\n")))
             .await
             .unwrap();
         assert!(matches!(
             LoadedSession::load(&store, &id).await,
             Err(RuntimeError::SessionStore {
-                source: SessionStoreError::Json { .. }
+                source: SessionStoreError::Json { .. } | SessionStoreError::InvalidDocument { .. }
             })
         ));
         assert!(matches!(
@@ -172,7 +178,7 @@ async fn catalog_loader_rejects_missing_or_null_catalogs_instead_of_rediscoverin
                 .resume_from_store(store.clone())
                 .await,
             Err(RuntimeError::SessionStore {
-                source: SessionStoreError::Json { .. }
+                source: SessionStoreError::Json { .. } | SessionStoreError::InvalidDocument { .. }
             })
         ));
     }
@@ -189,16 +195,18 @@ async fn resume_rejects_unsupported_formats_without_migrating_the_document() {
         .save_session_to(store.clone())
         .await
         .unwrap();
-    let path = temp.path().join(id.as_str()).join("state.json");
-    let mut document: serde_json::Value =
-        serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
-    document
-        .as_object_mut()
-        .unwrap()
-        .remove("external_tool_catalog");
+    let path = temp.path().join(id.as_str()).join("journal.jsonl");
+    let original = tokio::fs::read_to_string(&path).await.unwrap();
+    let mut lines = original
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut header: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
     for version in [3, 4, 5] {
-        document["format_version"] = json!(version);
-        let bytes = serde_json::to_vec(&document).unwrap();
+        header["format_version"] = json!(version);
+        lines[0] = serde_json::to_string(&header).unwrap();
+        let bytes = format!("{}\n", lines.join("\n"));
         tokio::fs::write(&path, &bytes).await.unwrap();
         assert!(matches!(
             LoadedSession::load(&store, &id).await,
@@ -212,6 +220,6 @@ async fn resume_rejects_unsupported_formats_without_migrating_the_document() {
                 source: SessionStoreError::UnsupportedFormatVersion { actual }
             }) if actual == version
         ));
-        assert_eq!(tokio::fs::read(&path).await.unwrap(), bytes);
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), bytes.as_bytes());
     }
 }
