@@ -450,13 +450,13 @@ pub(super) fn tool_keyword_title_line(
     Line::from(spans)
 }
 
-const USER_BAR: &str = "▌ ";
+const USER_LEFT_PAD: &str = " ";
 const USER_PROMPT_MARK: &str = "\u{276F} ";
 const USER_PROMPT_INDENT: &str = "  ";
 
 /// User-turn anchor band framed with two subtle gray hairlines (matching the
-/// composer without the `M` badge), solid left accent bar `▌`, soft
-/// `UserBackground`, and `❯` prompt mark.
+/// composer without the `🎀` badge), soft `UserBackground`, and clean `❯`
+/// prompt mark.
 pub(super) fn user_lines(
     state: &TuiState,
     text: &str,
@@ -472,9 +472,6 @@ pub(super) fn user_lines(
     let hairline = Line::from(Span::styled("─".repeat(usize::from(width)), border_style));
     let band = state.theme().bg_color(SemanticColor::UserBackground);
     let bg_style = band.map_or_else(Style::default, |color| Style::default().bg(color));
-    let bar_style = semantic_style(state, SemanticColor::Focus)
-        .add_modifier(Modifier::BOLD)
-        .patch(bg_style);
     let mark_style = semantic_style(state, SemanticColor::Focus)
         .add_modifier(Modifier::BOLD)
         .patch(bg_style);
@@ -494,7 +491,7 @@ pub(super) fn user_lines(
     }
     for (index, segment) in segments.into_iter().enumerate() {
         let mut spans = vec![
-            Span::styled(USER_BAR.to_owned(), bar_style),
+            Span::styled(USER_LEFT_PAD.to_owned(), bg_style),
             Span::styled(
                 if index == 0 {
                     USER_PROMPT_MARK
@@ -521,7 +518,7 @@ pub(super) fn user_lines(
             line.style.bg = Some(color);
         }
         pad_user_line(&mut line, width, bg_style);
-        rows.push(TranscriptRow::new(line, SelectionPolicy::StripPrefix(4)));
+        rows.push(TranscriptRow::new(line, SelectionPolicy::StripPrefix(3)));
     }
     if width > 0 {
         rows.push(TranscriptRow::new(hairline, SelectionPolicy::Skip));

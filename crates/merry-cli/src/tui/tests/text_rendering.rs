@@ -541,7 +541,8 @@ fn renderer_uses_user_turn_card_instead_of_dashed_assistant_separator() {
         !text.lines().any(|line| line.contains("--------")),
         "assistant replies should not emit dashed hyphen separators:\n{text}"
     );
-    assert!(text.contains("▌ ❯ first question"), "{text}");
+    assert!(text.contains(" ❯ first question"), "{text}");
+    assert!(!text.contains('▌'), "{text}");
     assert!(
         !text.contains('▔') && !text.contains('▁'),
         "compact user band should not add floating cage hairlines:\n{text}"
