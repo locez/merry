@@ -124,3 +124,135 @@ fn viewport_marks_image_placeholders_and_clear_releases_payloads() {
     input.clear();
     assert_eq!(Arc::strong_count(&bytes), 1);
 }
+
+#[test]
+fn ctrl_a_and_cmd_a_select_all_and_edits_replace_selection() {
+    let mut input = TextInput::default();
+    input.insert_str("hello world");
+
+    input.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(input.selection_range(), Some(0..11));
+    assert_eq!(input.selected_text().as_deref(), Some("hello world"));
+
+    // Typing replaces the selected range.
+    input.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+    assert_eq!(input.text(), "X");
+    assert_eq!(input.selection_range(), None);
+
+    // Cmd+A (SUPER) also selects all and Backspace deletes it.
+    input.insert_str("yz");
+    input.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SUPER));
+    assert_eq!(input.selection_range(), Some(0..3));
+    input.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    assert_eq!(input.text(), "");
+    assert_eq!(input.selection_range(), None);
+}
+
+#[test]
+fn shift_arrows_extend_selection_and_plain_arrows_collapse_to_bounds() {
+    let mut input = TextInput::default();
+    input.insert_str("alpha beta");
+
+    input.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+    input.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+    assert_eq!(input.selected_text().as_deref(), Some("ta"));
+
+    // Plain Left collapses to selection start.
+    input.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(input.selection_range(), None);
+    assert_eq!(input.cursor_byte_index(), "alpha be".len());
+
+    // Shift+Home selects to line start, plain Right collapses to selection end.
+    input.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT));
+    assert_eq!(input.selected_text().as_deref(), Some("alpha be"));
+    input.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(input.selection_range(), None);
+    assert_eq!(input.cursor_byte_index(), "alpha be".len());
+}
+
+#[test]
+fn word_navigation_and_deletion_respect_boundaries_and_atoms() {
+    let mut input = TextInput::default();
+    input.insert_str("foo bar ");
+    input
+        .insert_image(draft_image(3))
+        .expect("image should insert");
+    input.insert_str(" baz");
+
+    // Jump left over "baz", then over [Image #1], then over "bar".
+    input.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+    assert_eq!(&input.text()[input.cursor_byte_index()..], "baz");
+    input.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+    assert_eq!(&input.text()[input.cursor_byte_index()..], "[Image #1] baz");
+    input.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+    assert_eq!(
+        &input.text()[input.cursor_byte_index()..],
+        "bar [Image #1] baz"
+    );
+
+    // Alt+Delete removes "bar", leaving the trailing space + image.
+    input.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::ALT));
+    assert_eq!(input.text(), "foo  [Image #1] baz");
+
+    // Jump to end and Ctrl+Backspace removes "baz".
+    input.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    input.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+    assert_eq!(input.text(), "foo  [Image #1] ");
+}
+
+#[test]
+fn undo_and_redo_restore_edits_and_atomic_images() {
+    let mut input = TextInput::default();
+    input.insert_str("hello ");
+    input
+        .insert_image(draft_image(5))
+        .expect("image should insert");
+    assert_eq!(input.text(), "hello [Image #1]");
+
+    input.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    input.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    assert_eq!(input.text(), "");
+    assert!(input.image_elements().is_empty());
+
+    // Ctrl+Z restores the full text + atomic image.
+    input.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(input.text(), "hello [Image #1]");
+    assert_eq!(input.image_elements().len(), 1);
+
+    // Ctrl+Shift+Z (or Ctrl+Y) redoes the deletion.
+    input.handle_key(KeyEvent::new(
+        KeyCode::Char('Z'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert_eq!(input.text(), "");
+
+    // Cmd+Z undoes again.
+    input.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::SUPER));
+    assert_eq!(input.text(), "hello [Image #1]");
+}
+
+#[test]
+fn super_and_alt_ascii_chords_never_leak_literal_characters() {
+    let mut input = TextInput::default();
+    input.insert_str("keep");
+    input.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER));
+    input.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT));
+    assert_eq!(input.text(), "keep");
+}
+
+#[test]
+fn viewport_exposes_row_selections_and_maps_clicks() {
+    let mut input = TextInput::default();
+    input.insert_str("abcdef\nghijkl");
+    input.select_all();
+
+    let viewport = input.viewport_rows(16, 4);
+    assert_eq!(viewport.row_selections, vec![Some(0..6), Some(0..6)]);
+
+    input.move_to_viewport_position(16, 4, 0, 2, false);
+    assert_eq!(input.selection_range(), None);
+    assert_eq!(input.cursor_byte_index(), 2);
+
+    input.move_to_viewport_position(16, 4, 1, 3, true);
+    assert_eq!(input.selected_text().as_deref(), Some("cdef\nghi"));
+}

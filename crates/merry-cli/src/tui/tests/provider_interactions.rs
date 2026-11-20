@@ -275,13 +275,16 @@ fn provider_surfaces_fit_supported_terminal_sizes_without_secret_exposure() {
         Some("deepseek-v4-pro"),
     )]);
     let manager = render_to_text(&state, 100, 30);
-    assert!(manager.contains("Protocol"));
-    assert!(manager.contains("Chat completions"));
-    assert!(manager.contains("N Add"));
-    assert!(manager.contains("Enter Switch"));
-    assert!(manager.contains("M Models"));
-    assert!(manager.contains("E Edit"));
-    assert!(manager.contains("D Delete"));
+    assert!(manager.contains("PROVIDERS"), "{manager}");
+    assert!(manager.contains("+ Add provider"), "{manager}");
+    assert!(manager.contains("API protocol"), "{manager}");
+    assert!(manager.contains("Chat Completions"), "{manager}");
+    assert!(manager.contains("[Save provider]"), "{manager}");
+    assert!(manager.contains("N Add"), "{manager}");
+    assert!(manager.contains("Enter Switch"), "{manager}");
+    assert!(manager.contains("M Models"), "{manager}");
+    assert!(manager.contains("E Edit"), "{manager}");
+    assert!(manager.contains("D Delete"), "{manager}");
     for (width, height) in [(100, 30), (80, 24), (40, 16)] {
         let text = render_to_text(&state, width, height);
         assert!(text.contains("Providers"));
@@ -436,4 +439,146 @@ fn provider_form_model_picker_escape_preserves_unsaved_form() {
         form.field(crate::tui::provider_overlay::ProviderFormField::DisplayName),
         "Unsaved Provider"
     );
+}
+
+#[test]
+fn provider_workbench_supports_inline_two_column_editing_adding_and_close_click() {
+    use crate::tui::{
+        controller::{handle_mouse_input, handle_mouse_scroll_down, handle_mouse_scroll_up},
+        render::render_to_buffer,
+        tests::find_text_position,
+        text_interaction::MouseInput,
+    };
+    use ratatui::layout::{Position, Size};
+
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.open_provider_manager(vec![
+        ProviderListItem::new(
+            "alpha",
+            "Alpha Managed",
+            ConfiguredProviderKind::OpenAiCompatible,
+            ProviderConfigSource::Managed,
+            Some(merry_provider_openai::OpenAiProtocol::Responses),
+            Some("gpt-5"),
+        )
+        .with_details(
+            Some("https://alpha.example/v1".to_owned()),
+            Some("medium".to_owned()),
+        ),
+        ProviderListItem::new(
+            "cfg",
+            "User Config",
+            ConfiguredProviderKind::Anthropic,
+            ProviderConfigSource::User,
+            None,
+            Some("claude-sonnet"),
+        )
+        .with_details(Some("https://api.anthropic.com".to_owned()), None),
+    ]);
+
+    let size = Size::new(104, 28);
+    let buffer = render_to_buffer(&state, size.width, size.height);
+    let text = rendered_buffer_text(&buffer);
+    assert!(text.contains("https://alpha.example/v1"), "{text}");
+    assert!(text.contains("Edit provider"), "{text}");
+
+    // Clicking the Base URL row in the right pane focuses the inline editor directly.
+    let (url_x, url_y) = find_text_position(&buffer, "Base URL").expect("Base URL field");
+    assert_eq!(
+        handle_mouse_input(
+            MouseInput::Down(Position::new(url_x, url_y)),
+            size,
+            &mut state
+        ),
+        ControllerEffect::None
+    );
+    handle_paste_event("/beta", &mut state);
+    let edited = render_to_text(&state, size.width, size.height);
+    assert!(edited.contains("https://alpha.example/v1/beta"), "{edited}");
+
+    // Clicking "+ Add provider" switches the right column to a fresh Add provider form.
+    let buffer = render_to_buffer(&state, size.width, size.height);
+    let (add_x, add_y) = find_text_position(&buffer, "+ Add provider").expect("+ Add provider");
+    assert_eq!(
+        handle_mouse_input(
+            MouseInput::Down(Position::new(add_x, add_y)),
+            size,
+            &mut state
+        ),
+        ControllerEffect::None
+    );
+    let adding = render_to_text(&state, size.width, size.height);
+    assert!(adding.contains("Add provider"), "{adding}");
+
+    // Clicking the read-only config.toml provider switches the right pane to read-only details.
+    let buffer = render_to_buffer(&state, size.width, size.height);
+    let (cfg_x, cfg_y) = find_text_position(&buffer, "User Config").expect("User Config");
+    assert_eq!(
+        handle_mouse_input(
+            MouseInput::Down(Position::new(cfg_x, cfg_y)),
+            size,
+            &mut state
+        ),
+        ControllerEffect::None
+    );
+    let readonly = render_to_text(&state, size.width, size.height);
+    assert!(readonly.contains("config.toml"), "{readonly}");
+
+    // Mouse-wheel scroll navigates by exactly 1 item per notch (never jumping straight to bottom).
+    let four_items: Vec<ProviderListItem> = (1..=4)
+        .map(|idx| {
+            ProviderListItem::new(
+                &format!("p{idx}"),
+                &format!("Provider {idx}"),
+                ConfiguredProviderKind::OpenAiCompatible,
+                ProviderConfigSource::Managed,
+                Some(merry_provider_openai::OpenAiProtocol::Responses),
+                Some(&format!("m{idx}")),
+            )
+        })
+        .collect();
+    state.open_provider_manager(four_items);
+    assert_eq!(
+        handle_mouse_scroll_down(Position::new(10, 10), size, &mut state),
+        ControllerEffect::None
+    );
+    match state.overlay() {
+        Some(Overlay::ProviderManager(manager)) => {
+            assert_eq!(
+                manager.selected(),
+                1,
+                "single wheel notch must step by 1 item, not jump to bottom"
+            );
+        }
+        other => panic!("expected ProviderManager overlay, got {other:?}"),
+    }
+    assert_eq!(
+        handle_mouse_scroll_up(Position::new(10, 10), size, &mut state),
+        ControllerEffect::None
+    );
+    match state.overlay() {
+        Some(Overlay::ProviderManager(manager)) => assert_eq!(manager.selected(), 0),
+        other => panic!("expected ProviderManager overlay, got {other:?}"),
+    }
+
+    // Clicking top-right [×] closes the workbench back to command palette / closes modal.
+    let buffer = render_to_buffer(&state, size.width, size.height);
+    let (close_x, close_y) = find_text_position(&buffer, "[×]").expect("[×] close button");
+    assert_eq!(
+        handle_mouse_input(
+            MouseInput::Down(Position::new(close_x + 1, close_y)),
+            size,
+            &mut state
+        ),
+        ControllerEffect::None
+    );
+    assert!(!matches!(
+        state.overlay(),
+        Some(Overlay::ProviderManager(_))
+    ));
 }

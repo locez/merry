@@ -182,23 +182,22 @@ async fn runtime_process_stays_running_and_animates_until_the_backend_completes(
 
         assert!(active_before_completion);
         assert!(
-            first
-                .lines()
-                .any(|line| line.trim_start_matches('┃').starts_with("Running ")),
+            first.lines().any(|line| line.contains("Running ")
+                && line.contains("pwd (.)")
+                && !line.contains('┃')),
             "{first}"
         );
-        assert!(first.contains("pwd (.)"), "{first}");
         assert!(!first.contains(" Ran pwd"));
         assert_ne!(first, second);
         assert!(
-            second
-                .lines()
-                .any(|line| line.trim_start_matches('┃').starts_with("Running ")),
+            second.lines().any(|line| line.contains("Running ")
+                && line.contains("pwd (.)")
+                && !line.contains('┃')),
             "{second}"
         );
         assert!(finished.contains("Ran pwd (.)"), "{finished}");
         assert!(finished.contains('▸'), "{finished}");
-        assert!(!finished.lines().any(|line| line.starts_with(" Running ")));
+        assert!(!finished.lines().any(|line| line.contains("Running pwd")));
     })
     .await
     .expect("runtime command lifecycle should finish within the deadline");

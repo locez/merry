@@ -5,9 +5,8 @@
 //! the same words after the terminal width changes.
 
 use super::sticky::{TimelineScrollSplit, split_timeline_content, timeline_scroll_split};
-use super::timeline_layout::{
-    TimelineLayout, timeline_content_region, timeline_layout, timeline_scroll_start,
-};
+use super::timeline_cache::TimelineLayoutSnapshot;
+use super::timeline_layout::{timeline_content_region, timeline_layout, timeline_scroll_start};
 use crate::tui::{
     state::{CommentHighlight, TuiState},
     text_wrap::semantic_style,
@@ -67,7 +66,7 @@ pub(super) struct CommentOverlay {
 
 pub(super) fn comment_overlay(
     state: &TuiState,
-    timeline: &TimelineLayout,
+    timeline: &TimelineLayoutSnapshot,
     width: u16,
 ) -> CommentOverlay {
     CommentOverlay {
@@ -117,14 +116,7 @@ pub(crate) fn comment_mark_at(
     }
     let timeline = timeline_layout(state, content);
     let scroll = timeline_scroll_start(state, &timeline, content);
-    let split = timeline_scroll_split(
-        state,
-        &timeline.item_starts,
-        &timeline.row_starts,
-        &timeline.rows,
-        content.height,
-        scroll,
-    );
+    let split = timeline_scroll_split(state, &timeline, content.height, scroll);
     let (header, body) = split_timeline_content(content, split.header_rows);
     let (visual_row, column, in_sticky_header) = document_cell(&split, header, body, position)?;
     let marks = placed_marks(state, &timeline, content.width);
@@ -163,7 +155,11 @@ pub(crate) fn quote_occurrence(
     occurrence_at(&stream, &ranges, visual_row, column)
 }
 
-fn placed_marks(state: &TuiState, timeline: &TimelineLayout, width: u16) -> Vec<PlacedMark> {
+fn placed_marks(
+    state: &TuiState,
+    timeline: &TimelineLayoutSnapshot,
+    width: u16,
+) -> Vec<PlacedMark> {
     let highlights = state.comment_highlights();
     let mut streams: Vec<(usize, ItemStream)> = Vec::new();
     let mut marks = Vec::new();
@@ -205,26 +201,22 @@ fn place_mark(stream: &ItemStream, highlight: &CommentHighlight) -> Option<Place
     })
 }
 
-fn item_stream(timeline: &TimelineLayout, item_index: usize, width: u16) -> Option<ItemStream> {
+fn item_stream(
+    timeline: &TimelineLayoutSnapshot,
+    item_index: usize,
+    width: u16,
+) -> Option<ItemStream> {
     if width == 0 {
         return None;
     }
-    let start = *timeline.item_starts.get(item_index)?;
-    let end = timeline
-        .item_starts
-        .get(item_index.saturating_add(1))
-        .copied()
-        .unwrap_or(timeline.rows.len());
-    if end < start {
-        return None;
-    }
-    let visual_start = *timeline.row_starts.get(start)?;
-    let visual_end = *timeline.row_starts.get(end)?;
-    let height = visual_end.saturating_sub(visual_start);
+    let item = timeline.items.get(item_index)?;
+    let visual_start = *timeline.item_visual_starts.get(item_index)?;
+    let height = item.visual_height();
     if height == 0 {
         return None;
     }
-    let lines = timeline.rows[start..end]
+    let lines = item
+        .rows
         .iter()
         .map(|row| row.display.clone())
         .collect::<Vec<_>>();
@@ -242,13 +234,12 @@ fn item_stream(timeline: &TimelineLayout, item_index: usize, width: u16) -> Opti
             .scroll((scroll, 0))
             .render(area, &mut buffer);
         for row in 0..rows_u16 {
-            let visual_row = visual_start
-                .saturating_add(offset)
-                .saturating_add(usize::from(row));
-            let Some(logical) = logical_row(&timeline.row_starts, visual_row) else {
+            let local_visual = offset.saturating_add(usize::from(row));
+            let visual_row = visual_start.saturating_add(local_visual);
+            let Some(logical) = item.logical_at_local_visual(local_visual) else {
                 continue;
             };
-            let Some(source) = timeline.rows.get(logical) else {
+            let Some(source) = item.rows.get(logical) else {
                 continue;
             };
             append_row(
@@ -557,13 +548,6 @@ fn sticky_rect(header: Rect, split: &TimelineScrollSplit) -> Rect {
         width: header.width,
         height: split.content_rows.min(header.height),
     }
-}
-
-fn logical_row(row_starts: &[usize], visual_row: usize) -> Option<usize> {
-    let index = row_starts
-        .partition_point(|start| *start <= visual_row)
-        .saturating_sub(1);
-    (index.saturating_add(1) < row_starts.len()).then_some(index)
 }
 
 fn next_column(column: u16, symbol: &str, width: u16) -> u16 {

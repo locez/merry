@@ -1,17 +1,15 @@
 use crate::tui::{
     completion::{CompletionMenu, CompletionSources},
-    input::{DraftImage, InputHistory, TextInput, TuiSubmission},
+    input::{InputHistory, TextInput},
     keymap::Keymap,
     output_rate::OutputRate,
     plan::PlanUiState,
     preferences::{TuiPreferences, TuiSettingsDefaults},
-    status::{format_header_status_parts, format_session_usage_full},
     text_interaction::TextSelection,
     theme::TuiTheme,
 };
 use clipboard::ClipboardFeedback;
 use merry_core::{InteractiveRunState, QueuedInputLane, RuntimeEvent, SessionUsage};
-use merry_runtime::SkillMetadata;
 use overlays::OverlayState;
 use std::{
     path::PathBuf,
@@ -19,14 +17,19 @@ use std::{
 };
 pub(crate) use timeline::TimelineAnchor;
 pub(crate) use views::{
-    CommandFailure, CommandView, PatchChangeView, PatchLineKind, PatchLineView, PatchOperationView,
-    QueuePreview, QueuePreviewItem, QueuePreviewState, TimelineItem, ToolOutputPreview,
+    CommandFailure, CommandView, LiveCommandOutput, PatchChangeView, PatchLineKind, PatchLineView,
+    PatchOperationView, QueuePreview, QueuePreviewItem, QueuePreviewState, TimelineItem,
+    ToolOutputPreview,
 };
 
 mod comments;
 pub(crate) use comments::CommentHighlight;
 mod history_search;
+mod input;
 mod overlays;
+mod status;
+mod subagents;
+pub(crate) use subagents::SubagentUpdate;
 
 mod views;
 
@@ -46,13 +49,24 @@ pub(crate) struct TuiState {
     input: TextInput,
     /// Inner composer width from the last layout. Zero means keys use logical lines.
     composer_columns: usize,
+    composer_mouse_selecting: bool,
     completion_sources: CompletionSources,
     completion_menu: Option<CompletionMenu>,
     input_history: InputHistory,
     history_search: Option<crate::tui::input::HistorySearch>,
     queue_preview: QueuePreviewState,
     timeline: Vec<TimelineItem>,
+    timeline_versions: Vec<u64>,
+    next_timeline_version: u64,
+    timeline_cache: crate::tui::render::timeline_cache::TimelineRenderCache,
     show_successful_command_output: bool,
+    mouse_scroll_lines: usize,
+    animations: bool,
+    max_reading_width: u16,
+    text_sizing_active: bool,
+    header_items: Vec<crate::config::HeaderItemKind>,
+    subagents: Vec<crate::tui::subagent_view::SubagentEntry>,
+    task_dock: crate::tui::task_dock::TaskDockState,
     command_details_generation: u64,
     timeline_scroll_offset: usize,
     timeline_review_user_index: Option<usize>,
@@ -108,13 +122,24 @@ impl TuiState {
             theme,
             input: TextInput::default(),
             composer_columns: 0,
+            composer_mouse_selecting: false,
             completion_sources: CompletionSources::new(workspace_root.clone(), Vec::new()),
             completion_menu: None,
             input_history: InputHistory::default(),
             history_search: None,
             queue_preview: QueuePreviewState::from_preview(QueuePreview::empty()),
             timeline: Vec::new(),
+            timeline_versions: Vec::new(),
+            next_timeline_version: 1,
+            timeline_cache: crate::tui::render::timeline_cache::TimelineRenderCache::default(),
             show_successful_command_output: true,
+            mouse_scroll_lines: crate::config::DEFAULT_MOUSE_SCROLL_LINES,
+            animations: true,
+            max_reading_width: crate::config::DEFAULT_MAX_READING_WIDTH,
+            text_sizing_active: false,
+            header_items: crate::config::HeaderItemKind::DEFAULT_ITEMS.to_vec(),
+            subagents: Vec::new(),
+            task_dock: crate::tui::task_dock::TaskDockState::default(),
             command_details_generation: 0,
             timeline_scroll_offset: 0,
             timeline_review_user_index: None,
@@ -145,6 +170,116 @@ impl TuiState {
         self
     }
 
+    pub(crate) fn task_dock(&self) -> &crate::tui::task_dock::TaskDockState {
+        &self.task_dock
+    }
+
+    pub(crate) fn task_dock_mut(&mut self) -> &mut crate::tui::task_dock::TaskDockState {
+        &mut self.task_dock
+    }
+
+    pub(crate) fn sync_background_processes(
+        &mut self,
+        processes: Vec<merry_runtime::BackgroundProcessSummary>,
+    ) -> bool {
+        self.task_dock.set_background_processes(processes)
+    }
+
+    pub(crate) fn has_running_background_processes(&self) -> bool {
+        self.task_dock.has_running_background_processes()
+    }
+
+    /// Sets how many lines each coalesced mouse-wheel notch moves a scrollable pane.
+    pub(crate) fn with_mouse_scroll_lines(mut self, lines: usize) -> Self {
+        self.mouse_scroll_lines = lines.max(1);
+        self
+    }
+
+    pub(crate) fn mouse_scroll_lines(&self) -> usize {
+        self.mouse_scroll_lines
+    }
+
+    pub(crate) fn with_animations(mut self, animations: bool) -> Self {
+        self.animations = animations;
+        self
+    }
+
+    pub(crate) fn animations_enabled(&self) -> bool {
+        self.animations
+    }
+
+    pub(crate) fn with_max_reading_width(mut self, width: u16) -> Self {
+        self.max_reading_width = width;
+        self
+    }
+
+    pub(crate) fn max_reading_width(&self) -> u16 {
+        self.max_reading_width
+    }
+
+    pub(crate) fn with_text_sizing(mut self, mode: crate::config::TextSizingMode) -> Self {
+        self.text_sizing_active = crate::tui::text_sizing::is_text_sizing_active(mode);
+        self
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn text_sizing_active(&self) -> bool {
+        self.text_sizing_active
+    }
+
+    pub(crate) fn with_header_items(mut self, items: Vec<crate::config::HeaderItemKind>) -> Self {
+        self.header_items = items;
+        self
+    }
+
+    pub(crate) fn header_items(&self) -> &[crate::config::HeaderItemKind] {
+        &self.header_items
+    }
+
+    pub(crate) fn usage(&self) -> Option<&SessionUsage> {
+        self.usage.as_ref()
+    }
+
+    pub(crate) fn output_rate_label(&self) -> String {
+        self.output_rate.label()
+    }
+
+    pub(crate) fn workspace_root(&self) -> &std::path::Path {
+        &self.workspace_root
+    }
+
+    pub(crate) fn model_display_label(&self) -> String {
+        self.model_status_label()
+    }
+
+    pub(crate) fn timeline_item_version(&self, index: usize) -> u64 {
+        self.timeline_versions.get(index).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn timeline_cache(
+        &self,
+    ) -> &crate::tui::render::timeline_cache::TimelineRenderCache {
+        &self.timeline_cache
+    }
+
+    #[cfg(test)]
+    pub(crate) fn layout_cache_misses(&self) -> u64 {
+        self.timeline_cache.misses()
+    }
+
+    fn alloc_timeline_version(&mut self) -> u64 {
+        let version = self.next_timeline_version;
+        self.next_timeline_version = self.next_timeline_version.saturating_add(1);
+        version
+    }
+
+    fn bump_timeline_version(&mut self, index: usize) {
+        let version = self.alloc_timeline_version();
+        if let Some(slot) = self.timeline_versions.get_mut(index) {
+            *slot = version;
+        }
+    }
+
     /// Whether successful process commands and file reads show their bounded output preview.
     pub(crate) fn show_successful_command_output(&self) -> bool {
         self.show_successful_command_output
@@ -156,191 +291,6 @@ impl TuiState {
 
     pub(crate) fn plan_mut(&mut self) -> &mut PlanUiState {
         &mut self.plan
-    }
-
-    #[cfg(test)]
-    pub(crate) fn input_mut(&mut self) -> &mut TextInput {
-        &mut self.input
-    }
-
-    pub(crate) fn set_completion_skills(&mut self, skills: Vec<SkillMetadata>) {
-        self.completion_sources = CompletionSources::new(self.workspace_root.clone(), skills);
-        self.refresh_completion_menu();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn input_text(&self) -> &str {
-        self.input.text()
-    }
-
-    pub(crate) fn plain_input_text(&self) -> Option<&str> {
-        self.input.plain_text()
-    }
-
-    pub(crate) fn clear_input(&mut self) {
-        self.input.clear();
-        self.completion_menu = None;
-        self.pending_empty_input_quit = false;
-    }
-
-    pub(crate) fn input_viewport_rows(
-        &self,
-        max_width: usize,
-        max_rows: usize,
-    ) -> super::input::TextInputViewport {
-        self.input.viewport_rows(max_width, max_rows)
-    }
-
-    pub(crate) fn take_input_for_submit(&mut self) -> Option<TuiSubmission> {
-        self.completion_menu = None;
-        self.pending_empty_input_quit = false;
-        match self.input.take_submission() {
-            Ok(submission) => submission,
-            Err(error) => {
-                self.push_timeline_item(TimelineItem::Diagnostic {
-                    title: "user_input".to_owned(),
-                    body: error.to_string(),
-                });
-                None
-            }
-        }
-    }
-
-    pub(crate) fn previous_input_history(&mut self) {
-        self.pending_empty_input_quit = false;
-        self.input_history.previous(&mut self.input);
-        self.refresh_completion_menu();
-    }
-
-    pub(crate) fn next_input_history(&mut self) {
-        self.pending_empty_input_quit = false;
-        self.input_history.next(&mut self.input);
-        self.refresh_completion_menu();
-    }
-
-    pub(crate) fn set_input_history(&mut self, entries: Vec<String>) {
-        self.input_history.replace_entries(entries);
-    }
-
-    pub(crate) fn record_input_history(&mut self, text: &str) {
-        self.input_history.record(text);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn input_history_entries(&self) -> &[String] {
-        self.input_history.entries()
-    }
-
-    pub(crate) fn handle_input_key(&mut self, key: crossterm::event::KeyEvent) {
-        self.pending_empty_input_quit = false;
-        self.input.handle_key(key);
-        self.refresh_completion_menu();
-    }
-
-    pub(crate) fn set_composer_columns(&mut self, columns: usize) {
-        self.composer_columns = columns;
-    }
-
-    /// Moves within the draft. False means the caret is already on the first or last visual row.
-    pub(crate) fn move_input_line(&mut self, forward: bool) -> bool {
-        let width = if self.composer_columns == 0 {
-            10_000
-        } else {
-            self.composer_columns
-        };
-        let moved = self
-            .input
-            .move_vertical(if forward { 1 } else { -1 }, width);
-        if moved {
-            self.pending_empty_input_quit = false;
-            self.refresh_completion_menu();
-        }
-        moved
-    }
-
-    #[cfg(test)]
-    pub(crate) fn insert_input_str(&mut self, text: &str) {
-        self.pending_empty_input_quit = false;
-        self.input.insert_str(text);
-        self.refresh_completion_menu();
-    }
-
-    pub(crate) fn insert_input_paste(&mut self, text: &str) {
-        self.pending_empty_input_quit = false;
-        self.input.insert_paste(text);
-        self.refresh_completion_menu();
-    }
-
-    pub(crate) fn insert_input_image(
-        &mut self,
-        image: DraftImage,
-    ) -> Result<(), merry_runtime::RuntimeError> {
-        self.pending_empty_input_quit = false;
-        self.input.insert_image(image)?;
-        self.refresh_completion_menu();
-        Ok(())
-    }
-
-    pub(crate) fn insert_input_newline(&mut self) {
-        self.pending_empty_input_quit = false;
-        self.input.insert_newline();
-        self.close_completion_menu();
-    }
-
-    pub(crate) fn completion_menu(&self) -> Option<&CompletionMenu> {
-        self.completion_menu.as_ref()
-    }
-
-    pub(crate) fn close_completion_menu(&mut self) {
-        self.completion_menu = None;
-    }
-
-    pub(crate) fn select_next_completion(&mut self) -> bool {
-        let Some(menu) = self.completion_menu.as_mut() else {
-            return false;
-        };
-        menu.select_next();
-        true
-    }
-
-    pub(crate) fn select_previous_completion(&mut self) -> bool {
-        let Some(menu) = self.completion_menu.as_mut() else {
-            return false;
-        };
-        menu.select_previous();
-        true
-    }
-
-    pub(crate) fn select_completion(&mut self, index: usize) -> bool {
-        self.completion_menu
-            .as_mut()
-            .is_some_and(|menu| menu.select_index(index))
-    }
-
-    pub(crate) fn accept_completion(&mut self) -> bool {
-        let Some(menu) = self.completion_menu.take() else {
-            return false;
-        };
-        let Some(replacement) = menu.replacement_text() else {
-            return false;
-        };
-        self.pending_empty_input_quit = false;
-        self.input
-            .replace_range(menu.replacement_range(), &replacement);
-        if !menu.is_slash() {
-            self.refresh_completion_menu();
-        }
-        true
-    }
-
-    fn refresh_completion_menu(&mut self) {
-        let menu = self.completion_sources.menu_for_input(
-            self.input.text(),
-            self.input.cursor_byte_index(),
-            self.completion_menu.as_ref(),
-        );
-        self.completion_menu =
-            menu.filter(|menu| !menu.is_slash() || self.input.plain_text().is_some());
     }
 
     pub(crate) fn keymap(&self) -> &Keymap {
@@ -382,7 +332,9 @@ impl TuiState {
 
     pub(crate) fn push_timeline_item(&mut self, item: TimelineItem) {
         self.note_timeline_update();
+        let version = self.alloc_timeline_version();
         self.timeline.push(item);
+        self.timeline_versions.push(version);
     }
 
     pub(crate) fn append_assistant_delta(&mut self, index: Option<usize>, delta: &str) -> usize {
@@ -391,11 +343,14 @@ impl TuiState {
             && let Some(TimelineItem::Assistant { text }) = self.timeline.get_mut(index)
         {
             text.push_str(delta);
+            self.bump_timeline_version(index);
             index
         } else {
+            let version = self.alloc_timeline_version();
             self.timeline.push(TimelineItem::Assistant {
                 text: delta.to_owned(),
             });
+            self.timeline_versions.push(version);
             self.timeline.len().saturating_sub(1)
         }
     }
@@ -433,6 +388,7 @@ impl TuiState {
                 }) = self.timeline.get_mut(echo.timeline_index)
             {
                 *timeline_lane = lane;
+                self.bump_timeline_version(echo.timeline_index);
             }
             return;
         }
@@ -444,6 +400,7 @@ impl TuiState {
         self.note_timeline_update();
         if let Some(slot) = self.timeline.get_mut(index) {
             *slot = item;
+            self.bump_timeline_version(index);
         }
     }
 
@@ -460,28 +417,38 @@ impl TuiState {
         }) = self.timeline.last_mut()
         {
             text.push_str(delta);
+            let last_index = self.timeline.len().saturating_sub(1);
+            self.bump_timeline_version(last_index);
             return;
         }
+        let version = self.alloc_timeline_version();
         self.timeline.push(TimelineItem::Thinking {
             text: delta.to_owned(),
             started_at: tokio::time::Instant::now(),
             elapsed: None,
             expanded: false,
         });
+        self.timeline_versions.push(version);
     }
 
-    /// Closes the current thinking block so it can collapse to a duration header.
+    /// Closes every open thinking block so timers and animations stop cleanly
+    /// even when another item (such as stop feedback) was appended after it.
     pub(crate) fn finish_reasoning(&mut self) {
-        let Some(TimelineItem::Thinking {
-            started_at,
-            elapsed,
-            ..
-        }) = self.timeline.last_mut()
-        else {
-            return;
-        };
-        if elapsed.is_none() {
-            *elapsed = Some(started_at.elapsed());
+        let mut closed_any = false;
+        for index in 0..self.timeline.len() {
+            if let Some(TimelineItem::Thinking {
+                started_at,
+                elapsed,
+                ..
+            }) = self.timeline.get_mut(index)
+                && elapsed.is_none()
+            {
+                *elapsed = Some(started_at.elapsed());
+                self.bump_timeline_version(index);
+                closed_any = true;
+            }
+        }
+        if closed_any {
             self.note_timeline_update();
         }
     }
@@ -494,42 +461,70 @@ impl TuiState {
             && elapsed.is_some()
         {
             *expanded = !*expanded;
+            self.bump_timeline_version(index);
         }
     }
 
-    /// Opens or closes a finished command header. Running commands stay visible.
+    /// Opens or closes a command's output fold (both running live output and finished previews).
     pub(crate) fn toggle_command_expanded(&mut self, index: usize) {
+        match self.timeline.get_mut(index) {
+            Some(TimelineItem::Command {
+                view: CommandView::Finished { expanded, .. },
+            }) => {
+                *expanded = !*expanded;
+                self.bump_timeline_version(index);
+            }
+            Some(TimelineItem::Command {
+                view: CommandView::Running { expanded, .. },
+            })
+            | Some(TimelineItem::ToolRunning { expanded, .. })
+            | Some(TimelineItem::Read { expanded, .. })
+            | Some(TimelineItem::Expanded { expanded, .. })
+            | Some(TimelineItem::Patch { expanded, .. }) => {
+                *expanded = !*expanded;
+                self.bump_timeline_version(index);
+            }
+            _ => {}
+        }
+    }
+
+    /// Appends a live stdout/stderr chunk to an active running command's rolling preview.
+    pub(crate) fn append_running_command_output(&mut self, index: usize, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
         if let Some(TimelineItem::Command {
-            view: CommandView::Finished { expanded, .. },
+            view: CommandView::Running { live_preview, .. },
         }) = self.timeline.get_mut(index)
         {
-            *expanded = !*expanded;
+            live_preview.append(delta);
+            self.bump_timeline_version(index);
         }
     }
 
     pub(crate) fn begin_stop_feedback(&mut self) {
         self.set_run_state(InteractiveRunState::Interrupting);
         if self.stop_feedback == StopFeedbackState::Idle {
-            self.push_pending_stop_feedback("Stopping", "Interrupt requested for the active run.");
+            self.push_pending_stop_feedback("⊘ Stopping…", "");
         }
     }
 
     pub(crate) fn repeat_stop_feedback(&mut self) {
         match self.stop_feedback {
-            StopFeedbackState::Idle => self.push_pending_stop_feedback(
-                "Stop already requested",
-                "Waiting for the active run to reach a cancellation boundary.",
-            ),
+            StopFeedbackState::Idle => {
+                self.push_pending_stop_feedback("⊘ Stopping…", "waiting for current step")
+            }
             StopFeedbackState::Pending(index) => self.replace_or_append_stop_feedback(
                 index,
-                "Stop already requested",
-                "Waiting for the active run to reach a cancellation boundary.",
+                "⊘ Stopping…",
+                "waiting for current step",
             ),
             StopFeedbackState::Completed => {}
         }
     }
 
     pub(crate) fn complete_stop_feedback(&mut self) -> bool {
+        self.finish_reasoning();
         match self.stop_feedback {
             StopFeedbackState::Idle if !self.is_interrupting() => false,
             StopFeedbackState::Idle => {
@@ -551,29 +546,29 @@ impl TuiState {
         }
     }
 
-    fn push_pending_stop_feedback(&mut self, title: &str, body: &str) {
+    fn push_pending_stop_feedback(&mut self, title: &str, detail: &str) {
         let index = self.timeline.len();
-        self.push_timeline_item(TimelineItem::LocalCommand {
+        self.push_timeline_item(TimelineItem::Muted {
             title: title.to_owned(),
-            body: body.to_owned(),
+            detail: detail.to_owned(),
         });
         self.stop_feedback = StopFeedbackState::Pending(index);
     }
 
-    fn replace_or_append_stop_feedback(&mut self, index: usize, title: &str, body: &str) {
+    fn replace_or_append_stop_feedback(&mut self, index: usize, title: &str, detail: &str) {
         if index.saturating_add(1) == self.timeline.len() {
             self.replace_timeline_item(
                 index,
-                TimelineItem::LocalCommand {
+                TimelineItem::Muted {
                     title: title.to_owned(),
-                    body: body.to_owned(),
+                    detail: detail.to_owned(),
                 },
             );
             return;
         }
 
         self.replace_timeline_item(index, stop_requested_item());
-        self.push_pending_stop_feedback(title, body);
+        self.push_pending_stop_feedback(title, detail);
     }
 
     pub(crate) fn timeline_scroll_offset(&self) -> usize {
@@ -682,6 +677,7 @@ impl TuiState {
             self.stop_feedback = StopFeedbackState::Idle;
             self.active_run_started_at = Some(now);
         } else if !is_active {
+            self.finish_reasoning();
             if was_active && let Some(started_at) = self.active_run_started_at.take() {
                 self.last_completed_run_elapsed = Some(now.saturating_duration_since(started_at));
             } else {
@@ -738,100 +734,6 @@ impl TuiState {
         self.pending_empty_input_quit = true;
         false
     }
-
-    #[cfg(test)]
-    pub(crate) fn status_text(&self) -> String {
-        self.status_parts().join("  ")
-    }
-
-    pub(crate) fn command_status_body(&self) -> String {
-        let [workspace, model, usage] = self.status_parts();
-        let plan = self
-            .plan
-            .snapshot()
-            .map(|snapshot| match snapshot.phase {
-                merry_core::PlanPhase::Planning => "planning",
-                merry_core::PlanPhase::AwaitingApproval => "awaiting approval",
-                merry_core::PlanPhase::Executing => "executing",
-                merry_core::PlanPhase::Completed => "completed",
-                merry_core::PlanPhase::Blocked => "blocked",
-                merry_core::PlanPhase::Cancelled => "cancelled",
-            })
-            .unwrap_or("none");
-        let run = match self.run_state {
-            InteractiveRunState::WaitingForInput => "ready",
-            InteractiveRunState::RunningModel => "running model",
-            InteractiveRunState::RunningTool => "running tool",
-            InteractiveRunState::Interrupting => "interrupting",
-            InteractiveRunState::Closed => "closed",
-        };
-        format!("Run: {run}\nModel: {model}\nUsage: {usage}\nPlan: {plan}\nWorkspace: {workspace}")
-    }
-
-    pub(crate) fn status_parts(&self) -> [String; 3] {
-        let rate = self.output_rate.label();
-        let usage = format_session_usage_full(self.usage.as_ref(), &rate);
-        let model = self.model_status_label();
-        [self.workspace_root.display().to_string(), model, usage]
-    }
-
-    pub(crate) fn header_status_parts(&self, width: u16) -> [String; 3] {
-        let model = self.model_status_label();
-        let rate = self.output_rate.label();
-        format_header_status_parts(
-            &self.workspace_root,
-            &model,
-            self.usage.as_ref(),
-            &rate,
-            width,
-        )
-    }
-
-    pub(crate) fn interaction_status_text(&self) -> String {
-        self.interaction_status_text_at(Instant::now())
-    }
-
-    pub(crate) fn interaction_status_text_at(&self, now: Instant) -> String {
-        if let Some(status) = self.history_search_status() {
-            return status;
-        }
-        match self.run_state {
-            InteractiveRunState::WaitingForInput => self
-                .comment_status_text()
-                .unwrap_or_else(|| self.ready_status_text()),
-            InteractiveRunState::RunningModel => self.active_status_text("Running model", now),
-            InteractiveRunState::RunningTool => self.active_status_text("Running tool", now),
-            InteractiveRunState::Interrupting => self.active_status_text("Interrupting", now),
-            InteractiveRunState::Closed => "Closed".to_owned(),
-        }
-    }
-
-    fn ready_status_text(&self) -> String {
-        self.last_completed_run_elapsed
-            .map(|elapsed| format!("Ready  last run {}", format_elapsed(elapsed)))
-            .unwrap_or_else(|| "Ready".to_owned())
-    }
-
-    fn active_status_text(&self, label: &str, now: Instant) -> String {
-        let elapsed = self
-            .active_run_started_at
-            .map(|started_at| now.saturating_duration_since(started_at))
-            .unwrap_or_default();
-        format!(
-            "{} {} ({})",
-            merry_motion(elapsed),
-            label,
-            format_elapsed(elapsed)
-        )
-    }
-
-    fn model_status_label(&self) -> String {
-        self.reasoning_effort_label
-            .as_deref()
-            .filter(|label| !label.is_empty())
-            .map(|label| format!("{} {}", self.model_label, label))
-            .unwrap_or_else(|| self.model_label.clone())
-    }
 }
 
 fn is_active_run_state(state: InteractiveRunState) -> bool {
@@ -844,39 +746,15 @@ fn is_active_run_state(state: InteractiveRunState) -> bool {
 }
 
 fn stop_requested_item() -> TimelineItem {
-    TimelineItem::LocalCommand {
-        title: "Stop requested".to_owned(),
-        body: "The interrupt request remains active.".to_owned(),
+    TimelineItem::Muted {
+        title: "⊘ Stop requested".to_owned(),
+        detail: String::new(),
     }
 }
 
 fn run_stopped_item() -> TimelineItem {
-    TimelineItem::LocalCommand {
-        title: "Run stopped".to_owned(),
-        body: "The active run reached a cancellation boundary.".to_owned(),
-    }
-}
-
-fn merry_motion(elapsed: Duration) -> &'static str {
-    const FRAMES: [&str; 4] = ["[M··]", "[·M·]", "[··M]", "[·M·]"];
-    const FRAME_MS: u128 = 100;
-    let frame = (elapsed.as_millis() / FRAME_MS) as usize % FRAMES.len();
-    FRAMES[frame]
-}
-
-fn format_elapsed(elapsed: Duration) -> String {
-    let total_seconds = elapsed.as_secs();
-    let seconds = total_seconds % 60;
-    let total_minutes = total_seconds / 60;
-    if total_minutes == 0 {
-        return format!("{seconds}s");
-    }
-
-    let minutes = total_minutes % 60;
-    let hours = total_minutes / 60;
-    if hours == 0 {
-        format!("{total_minutes}m {seconds:02}s")
-    } else {
-        format!("{hours}h {minutes:02}m {seconds:02}s")
+    TimelineItem::Muted {
+        title: "⊘ Stopped".to_owned(),
+        detail: String::new(),
     }
 }

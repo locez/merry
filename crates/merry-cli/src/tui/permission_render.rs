@@ -45,7 +45,7 @@ pub(crate) fn render_permission_review(
     let mut block = Block::default()
         .title(Line::from(vec![
             Span::styled(
-                " M ",
+                " 🎀 ",
                 semantic_style(state, SemanticColor::Status).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -173,23 +173,23 @@ fn render_footer(frame: &mut Frame<'_>, state: &TuiState, footer: Rect, scrollab
         return;
     }
     let chip_row = footer.bottom().saturating_sub(1);
+    let divider_style = semantic_style(state, SemanticColor::Border);
     if footer.height >= 2 {
         let divider = "─".repeat(usize::from(footer.width));
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                divider,
-                semantic_style(state, SemanticColor::Muted).add_modifier(Modifier::DIM),
-            ))),
+            Paragraph::new(Line::from(Span::styled(divider, divider_style))),
             Rect::new(footer.x, footer.y, footer.width, 1),
         );
     }
 
-    let allow_style = semantic_style(state, SemanticColor::Success)
-        .add_modifier(Modifier::BOLD)
-        .add_modifier(Modifier::UNDERLINED);
-    let reject_style = semantic_style(state, SemanticColor::Error)
-        .add_modifier(Modifier::BOLD)
-        .add_modifier(Modifier::UNDERLINED);
+    let chip_bg = state.theme().bg_color(SemanticColor::ChipBackground);
+    let mut allow_style =
+        semantic_style(state, SemanticColor::Success).add_modifier(Modifier::BOLD);
+    let mut reject_style = semantic_style(state, SemanticColor::Error).add_modifier(Modifier::BOLD);
+    if let Some(bg) = chip_bg {
+        allow_style = allow_style.bg(bg);
+        reject_style = reject_style.bg(bg);
+    }
     let mut spans = vec![
         Span::styled(format!("[{}]", PERMISSION_CHIPS[0]), allow_style),
         Span::raw("  "),

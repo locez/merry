@@ -42,6 +42,8 @@ mod input_layout;
 pub(crate) mod keymap;
 mod layout;
 mod markdown;
+mod modal_frame;
+mod motion;
 mod output_rate;
 mod overlay;
 mod overlay_render;
@@ -63,9 +65,12 @@ pub(crate) mod session_list;
 mod session_picker;
 mod state;
 mod status;
+mod subagent_view;
+mod task_dock;
 mod tasks;
 mod terminal;
 mod text_interaction;
+mod text_sizing;
 mod text_wrap;
 pub(crate) mod theme;
 mod tool_error;
@@ -94,11 +99,12 @@ pub(crate) enum LaunchMode {
 async fn open_workspace(
     terminal: &mut TerminalSession,
     launch: WorkspaceLaunch,
+    theme: &TuiTheme,
 ) -> Result<Option<workspace_trust::ResolvedWorkspace>, CliError> {
     match launch {
         WorkspaceLaunch::Ready(workspace) => Ok(Some(workspace)),
         WorkspaceLaunch::Ask(pending) => {
-            let choice = trust_dialog::ask(terminal, pending.root()).await?;
+            let choice = trust_dialog::ask(terminal, pending.root(), theme).await?;
             pending.complete(choice)
         }
     }
@@ -145,7 +151,7 @@ pub(crate) async fn run(
             });
         }
     };
-    let Some(workspace) = open_workspace(&mut terminal, launch).await? else {
+    let Some(workspace) = open_workspace(&mut terminal, launch, &theme).await? else {
         return Ok(());
     };
     let workspace_root = workspace.root;
@@ -180,7 +186,8 @@ pub(crate) async fn run(
     let selection = match launch_mode {
         LaunchMode::New => SessionPickerSelection::New,
         LaunchMode::ResumePicker => {
-            session_picker::pick_session(&mut terminal, &session_store, &workspace_root).await?
+            session_picker::pick_session(&mut terminal, &session_store, &workspace_root, &theme)
+                .await?
         }
     };
     if matches!(selection, SessionPickerSelection::Quit) {
@@ -206,7 +213,12 @@ pub(crate) async fn run(
         keymap,
         theme,
     )
-    .with_successful_command_output(tui_config.show_successful_command_output);
+    .with_successful_command_output(tui_config.show_successful_command_output)
+    .with_mouse_scroll_lines(tui_config.mouse_scroll_lines)
+    .with_animations(tui_config.animations)
+    .with_max_reading_width(tui_config.max_reading_width)
+    .with_text_sizing(tui_config.text_sizing)
+    .with_header_items(tui_config.header_items);
     let input_history_store =
         InputHistoryStore::for_workspace(paths.state_dir(), &session.workspace_root);
     state.set_input_history(input_history_store.load().await);

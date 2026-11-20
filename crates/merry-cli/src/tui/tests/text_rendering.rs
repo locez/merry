@@ -5,7 +5,7 @@ use crate::tui::{
         PatchChangeView, PatchLineView, PatchOperationView, QueuePreview, TimelineItem, TuiState,
     },
     tests::{find_cell_color, find_cell_style, find_text_position, rendered_buffer_text},
-    theme::{SemanticColor, TuiTheme, dim_color},
+    theme::{SemanticColor, TuiTheme},
 };
 use merry_core::{QueuedInputLane, QueuedInputView};
 use ratatui::style::{Color, Modifier};
@@ -83,6 +83,7 @@ fn renderer_applies_configured_semantic_theme_colors() {
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Ran cargo test --package 'hello world' && printf $HOME (.)".to_owned(),
         body: "ok".to_owned(),
+        expanded: true,
     });
     state.push_timeline_item(TimelineItem::Patch {
         changes: vec![PatchChangeView {
@@ -100,6 +101,7 @@ fn renderer_applies_configured_semantic_theme_colors() {
                 PatchLineView::add("added", Some(1)),
             ],
         }],
+        expanded: false,
     });
     state.update_queue_preview(QueuePreview {
         next: vec![QueuedInputView {
@@ -112,7 +114,7 @@ fn renderer_applies_configured_semantic_theme_colors() {
     });
     let buffer = render_to_buffer(&state, 180, 24);
 
-    assert_eq!(find_cell_color(&buffer, "merry"), Some(Color::Red));
+    assert_eq!(find_cell_color(&buffer, "🐾"), Some(Color::Red));
     assert_eq!(find_cell_color(&buffer, "/repo"), Some(Color::LightBlue));
     assert_eq!(find_cell_color(&buffer, "gpt-test"), Some(Color::Cyan));
     assert_eq!(find_cell_color(&buffer, "tool"), Some(Color::Blue));
@@ -145,14 +147,17 @@ fn renderer_uses_colored_header_bar_and_branded_input() {
     let path_style = find_cell_style(&buffer, "/repo").expect("workspace path should render");
     let model_style = find_cell_style(&buffer, "gpt-test").expect("model should render");
     let usage_style = find_cell_style(&buffer, "usage -").expect("usage should render");
-    let input_brand_style = find_cell_style(&buffer, "M").expect("input brand should render");
+    let input_brand_style = find_cell_style(&buffer, "🎀").expect("input brand should render");
     let input_style = find_cell_style(&buffer, "draft").expect("input text should render");
 
     assert!(!text.contains("input"));
     assert_eq!(path_style.fg, Some(Color::LightBlue));
     assert_eq!(model_style.fg, Some(Color::LightCyan));
     assert!(model_style.add_modifier.contains(Modifier::BOLD));
-    assert_eq!(usage_style.fg, Some(Color::White));
+    assert_eq!(
+        usage_style.fg,
+        TuiTheme::default().color(SemanticColor::TextSecondary)
+    );
     assert!(usage_style.add_modifier.contains(Modifier::DIM));
     assert_eq!(path_style.bg, Some(Color::Rgb(54, 26, 58)));
     assert_eq!(model_style.bg, Some(Color::Rgb(54, 26, 58)));
@@ -211,16 +216,25 @@ fn renderer_preserves_historical_emphasis_across_user_and_assistant_text() {
         let user_style =
             find_cell_style(&buffer, "user_keyword").expect("user keyword should render");
         assert_eq!(user_style.fg, Some(expected_color));
-        assert_eq!(user_style.bg, Some(dim_color(expected_color)));
+        assert_eq!(
+            user_style.bg,
+            state.theme().bg_color(SemanticColor::UserBackground)
+        );
         assert!(user_style.add_modifier.contains(Modifier::BOLD));
         assert!(!user_style.add_modifier.contains(Modifier::DIM));
-        for text in ["important", "assistant_keyword"] {
-            let style = find_cell_style(&buffer, text).expect("emphasized text should render");
-            assert_eq!(style.fg, Some(expected_color), "{text}");
-            assert_eq!(style.bg, Some(Color::Reset), "{text}");
-            assert!(style.add_modifier.contains(Modifier::BOLD), "{text}");
-            assert!(!style.add_modifier.contains(Modifier::DIM), "{text}");
-        }
+
+        let bold_style = find_cell_style(&buffer, "important").expect("bold text should render");
+        assert_eq!(bold_style.fg, Some(expected_color));
+        assert_eq!(bold_style.bg, Some(Color::Reset));
+        assert!(bold_style.add_modifier.contains(Modifier::BOLD));
+        assert!(!bold_style.add_modifier.contains(Modifier::DIM));
+
+        let code_style =
+            find_cell_style(&buffer, "assistant_keyword").expect("code text should render");
+        assert_eq!(code_style.fg, Some(expected_color));
+        assert_eq!(code_style.bg, Some(Color::Reset));
+        assert!(code_style.add_modifier.contains(Modifier::BOLD));
+        assert!(!code_style.add_modifier.contains(Modifier::DIM));
     }
 }
 
@@ -415,7 +429,7 @@ fn renderer_preserves_assistant_message_newlines() {
 
     let text = render_to_text(&state, 80, 18);
     assert!(text.contains("Done:"));
-    assert!(text.contains("- changed  hello_world.py"));
+    assert!(text.contains("- changed hello_world.py"));
     assert!(text.contains("- verified output"));
     assert!(!text.contains("Done:- changed"));
 }
@@ -442,13 +456,11 @@ fn renderer_renders_assistant_fenced_code_blocks_without_fence_markers() {
     let rail_style = find_cell_style(&buffer, "▎").expect("code rail should render");
     let code_style = find_cell_style(&buffer, "hello world").expect("code should render");
     let (_, code_row) = find_text_position(&buffer, "hello world").expect("code should render");
+    let code_bg = TuiTheme::default().bg_color(SemanticColor::CodeBackground);
     assert_eq!(rail_style.fg, Some(Color::LightMagenta));
-    assert_eq!(rail_style.bg, Some(Color::Rgb(40, 36, 42)));
-    assert_eq!(code_style.bg, Some(Color::Rgb(40, 36, 42)));
-    assert_eq!(
-        buffer[(40, code_row)].style().bg,
-        Some(Color::Rgb(40, 36, 42))
-    );
+    assert_eq!(rail_style.bg, code_bg);
+    assert_eq!(code_style.bg, code_bg);
+    assert_eq!(buffer[(40, code_row)].style().bg, code_bg);
 }
 
 #[test]
@@ -485,7 +497,7 @@ fn renderer_keeps_inline_code_atomic_when_wrapping_assistant_text() {
     });
 
     let text = render_to_text(&state, 24, 18);
-    assert!(text.contains(" hello world "));
+    assert!(text.contains("hello world"));
     assert!(!text.contains("hello \nworld"));
 }
 
@@ -509,20 +521,181 @@ fn renderer_wraps_assistant_text_on_word_boundaries() {
 }
 
 #[test]
-fn renderer_draws_assistant_separator_across_timeline_content_width() {
+fn renderer_uses_user_turn_card_instead_of_dashed_assistant_separator() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
         Keymap::default(),
         TuiTheme::default(),
     );
+    state.push_timeline_item(TimelineItem::User {
+        text: "first question".to_owned(),
+        lane: QueuedInputLane::Next,
+    });
     state.push_timeline_item(TimelineItem::Assistant {
         text: "done".to_owned(),
     });
 
-    let text = render_to_text(&state, 40, 12);
+    let text = render_to_text(&state, 40, 14);
     assert!(
-        text.lines()
-            .any(|line| line == format!(" {}", "-".repeat(39)))
+        !text.lines().any(|line| line.contains("--------")),
+        "assistant replies should not emit dashed hyphen separators:\n{text}"
+    );
+    assert!(text.contains("▌ ❯ first question"), "{text}");
+    assert!(
+        !text.contains('▔') && !text.contains('▁'),
+        "compact user band should not add floating cage hairlines:\n{text}"
+    );
+}
+
+#[test]
+fn markdown_list_continuation_lines_keep_hanging_indent_and_multiline_gap() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    )
+    .with_max_reading_width(36);
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "- first bullet item with enough words to wrap onto a second line cleanly\n- second bullet item".to_owned(),
+    });
+
+    let rendered = render_to_text(&state, 60, 18);
+    let list_lines: Vec<&str> = rendered
+        .lines()
+        .skip_while(|line| !line.contains("- first bullet"))
+        .take(5)
+        .collect();
+    assert!(list_lines.len() >= 4, "{rendered}");
+    let bullet_col = list_lines[0].find("- ").expect("bullet marker");
+    let wrap_col = list_lines[1]
+        .find(|ch: char| !ch.is_whitespace())
+        .expect("wrapped text");
+    assert_eq!(
+        wrap_col,
+        bullet_col + 2,
+        "wrapped bullet continuation should align past `- `:\n{rendered}"
+    );
+    let second_index = list_lines
+        .iter()
+        .position(|line| line.contains("- second bullet"))
+        .expect("second bullet should render");
+    assert!(
+        second_index >= 3 && list_lines[second_index - 1].trim().is_empty(),
+        "multi-line bullet should breathe before next bullet:\n{rendered}"
+    );
+}
+
+#[test]
+fn composer_renders_horizontal_padding_surface_and_prompt() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    // Empty composer shows a subtle placeholder without a redundant left rail.
+    let empty_text = render_to_text(&state, 80, 24);
+    assert!(empty_text.contains("Message Merry…"), "{empty_text}");
+
+    state.insert_input_str("hello world");
+
+    let buffer = render_to_buffer(&state, 80, 24);
+    let (text_x, text_y) =
+        find_text_position(&buffer, "hello world").expect("composer text should render");
+    // Insets: cols 0..2 indent, cols 2..4 "❯ ", col 4 text (aligned with 🎀).
+    assert_eq!(text_x, 4);
+    assert_eq!(buffer[(2, text_y)].symbol(), "❯");
+    assert_ne!(buffer[(1, text_y)].symbol(), "┃");
+    assert_eq!(
+        buffer[(text_x, text_y)].style().bg,
+        TuiTheme::default().bg_color(SemanticColor::SurfaceSubtle)
+    );
+}
+
+#[test]
+fn header_respects_configured_items_including_cache_and_rate() {
+    use crate::config::HeaderItemKind;
+    use merry_core::{ContextWindowSource, ModelUsage, SessionUsage, UsageContextWindow};
+
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    )
+    .with_header_items(vec![
+        HeaderItemKind::Model,
+        HeaderItemKind::Context,
+        HeaderItemKind::Cache,
+        HeaderItemKind::Rate,
+    ]);
+    let last = ModelUsage::with_details(10_000, Some(7_500), 400, None, 10_400);
+    state.set_usage(SessionUsage {
+        last,
+        total: last,
+        context: Some(UsageContextWindow {
+            effective_window_tokens: 100_000,
+            resolved_model_window_tokens: 128_000,
+            source: ContextWindowSource::BundledCatalog,
+        }),
+        compaction: None,
+    });
+
+    let text = render_to_text(&state, 100, 16);
+    let header_line = text.lines().next().expect("header line should exist");
+    assert!(
+        !header_line.contains("/repo"),
+        "workspace excluded: {header_line}"
+    );
+    assert!(header_line.contains("gpt-test"), "{header_line}");
+    assert!(header_line.contains("ctx 10k/100k"), "{header_line}");
+    assert!(header_line.contains("cache 75%"), "{header_line}");
+    assert!(header_line.contains("tok/s"), "{header_line}");
+}
+
+#[test]
+fn markdown_renders_block_gaps_heading_hierarchy_and_code_card_header() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    )
+    .with_max_reading_width(50);
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "# Primary Title\n\nParagraph one with enough words to verify max reading width clamping across wide terminals.\n\n```rust\nfn main() {}\n```".to_owned(),
+    });
+
+    let buffer = render_to_buffer(&state, 120, 24);
+    let text = rendered_buffer_text(&buffer);
+    assert!(text.contains("Primary Title"), "{text}");
+    assert!(
+        text.contains('━'),
+        "H1 should render subtle accent underline:\n{text}"
+    );
+    assert!(
+        text.contains("rust"),
+        "code block card header should show language:\n{text}"
+    );
+    assert!(
+        text.contains("⧉ Copy"),
+        "code block card header should show copy chip:\n{text}"
+    );
+    let heading_style = find_cell_style(&buffer, "Primary").expect("heading should render");
+    assert_eq!(
+        heading_style.fg,
+        TuiTheme::default().color(SemanticColor::Heading)
+    );
+    assert!(heading_style.add_modifier.contains(Modifier::BOLD));
+    // Prose line should wrap within max_reading_width (50 cols) even on a 120-col terminal.
+    let prose_line = text
+        .lines()
+        .find(|line| line.contains("Paragraph one"))
+        .expect("prose line should render");
+    assert!(
+        prose_line.trim().len() <= 50,
+        "prose should wrap within max_reading_width: {prose_line:?}"
     );
 }

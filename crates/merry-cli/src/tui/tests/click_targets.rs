@@ -199,8 +199,15 @@ fn provider_and_model_and_reasoning_rows_activate_on_click() {
     ]);
     let size = Size::new(100, 30);
     let buffer = draw(&mut state, size);
+    // In the two-column Provider Workbench, clicking a provider in the left list
+    // selects it into the right-hand inline editor; clicking [Set active] activates it.
     assert_eq!(
         click(&mut state, size, point(&buffer, "Beta Provider")),
+        ControllerEffect::None
+    );
+    let updated = draw(&mut state, size);
+    assert_eq!(
+        click(&mut state, size, point(&updated, "[Set active]")),
         ControllerEffect::SelectProvider {
             alias: "beta".to_owned(),
         }

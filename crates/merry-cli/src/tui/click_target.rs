@@ -23,6 +23,7 @@ use super::{text_wrap::semantic_style, theme::SemanticColor};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusAction {
     Commands,
+    Agents,
     Plan,
     Follow,
     Stop,
@@ -32,6 +33,7 @@ pub(crate) enum StatusAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OverlayPointer {
+    CloseModal,
     Palette(usize),
     Setting(crate::tui::overlay::SettingItem),
     PlanApprove,
@@ -39,7 +41,7 @@ pub(crate) enum OverlayPointer {
     PermissionAllow,
     PermissionReject,
     DialogClose,
-    Provider(usize),
+    ProviderWorkbench(crate::tui::provider_render::ProviderWorkbenchPointer),
     Model(usize),
     ManualModel,
     Reasoning(usize),
@@ -50,6 +52,8 @@ pub(crate) enum OverlayPointer {
     CommandClose,
     CommandSelect(usize),
     CommandFocusPane(crate::tui::command_details::StreamPane),
+    Subagent(crate::tui::subagent_view::SubagentTakeoverPointer),
+    BackgroundTask(crate::tui::task_dock::BackgroundTaskPointer),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,9 +81,7 @@ pub(crate) fn pointer_target(state: &TuiState, size: Size, position: Position) -
     if let Some(action) = status_action_at(state, rects.status, position) {
         return PointerTarget::Status(action);
     }
-    if header_model_rect(rects.header, &state.header_status_parts(rects.header.width))
-        .is_some_and(|model| model.contains(position))
-    {
+    if header_model_rect(rects.header, state).is_some_and(|model| model.contains(position)) {
         return PointerTarget::Model;
     }
     if let Some(plan) = rects.plan
@@ -119,6 +121,9 @@ fn cockpit_rects(size: Size, state: &TuiState) -> TimelineRects {
 
 pub(crate) fn status_actions(state: &TuiState) -> Vec<StatusAction> {
     let mut actions = vec![StatusAction::Commands, StatusAction::Comment];
+    if !state.subagents().is_empty() {
+        actions.push(StatusAction::Agents);
+    }
     if state.plan().snapshot().is_some() {
         actions.push(StatusAction::Plan);
     }
@@ -137,6 +142,14 @@ pub(crate) fn status_actions(state: &TuiState) -> Vec<StatusAction> {
 pub(crate) fn status_action_label(state: &TuiState, action: &StatusAction) -> String {
     match action {
         StatusAction::Commands => "commands".to_owned(),
+        StatusAction::Agents => {
+            let count = state.subagents().len();
+            if count == 1 {
+                "1 agent".to_owned()
+            } else {
+                format!("{count} agents")
+            }
+        }
         StatusAction::Plan => "plan".to_owned(),
         StatusAction::Follow => "follow".to_owned(),
         StatusAction::Stop => "stop".to_owned(),
@@ -165,19 +178,19 @@ pub(crate) fn status_chips(
     if region.height == 0 || region.width == 0 {
         return Vec::new();
     }
+    let right_pad: u16 = if region.width >= 40 { 1 } else { 0 };
+    let usable_width = region.width.saturating_sub(right_pad);
     let mut shown = actions.to_vec();
     while !shown.is_empty()
-        && chip_row_width(&chip_labels(state, &shown)) > usize::from(region.width)
+        && chip_row_width(&chip_labels(state, &shown)) > usize::from(usable_width)
     {
         shown.remove(0);
     }
     let labels = chip_labels(state, &shown);
     let width = chip_row_width(&labels);
-    let origin_x = region.x.saturating_add(
-        region
-            .width
-            .saturating_sub(u16::try_from(width).unwrap_or(region.width)),
-    );
+    let origin_x = region
+        .x
+        .saturating_add(usable_width.saturating_sub(u16::try_from(width).unwrap_or(usable_width)));
     chip_rects(origin_x, region.y, &labels)
         .into_iter()
         .zip(shown)
@@ -199,34 +212,39 @@ pub(crate) fn status_action_at(
         .map(|(action, _)| action)
 }
 
-pub(crate) fn header_model_rect(region: Rect, parts: &[String; 3]) -> Option<Rect> {
-    let model = parts[1].as_str();
-    if model.is_empty() || region.height == 0 {
+pub(crate) fn header_model_rect(region: Rect, state: &TuiState) -> Option<Rect> {
+    if region.height == 0 || region.width == 0 {
         return None;
     }
-    let prefix =
-        UnicodeWidthStr::width("merry") + 2 + UnicodeWidthStr::width(parts[0].as_str()) + 2;
-    if prefix >= usize::from(region.width) {
+    let model = state.model_display_label();
+    let rate = state.output_rate_label();
+    let layout = crate::tui::status::build_header_layout(
+        state.workspace_root(),
+        &model,
+        state.usage(),
+        &rate,
+        state.is_active_run(),
+        state.header_items(),
+        region.width,
+    );
+    let (offset, width) = layout.model_range?;
+    if offset >= region.width || width == 0 {
         return None;
     }
-    let width = UnicodeWidthStr::width(model).min(usize::from(region.width) - prefix);
-    if width == 0 {
-        return None;
-    }
+    let clamped = width.min(region.width.saturating_sub(offset));
     Some(Rect::new(
-        region
-            .x
-            .saturating_add(u16::try_from(prefix).unwrap_or(u16::MAX)),
+        region.x.saturating_add(offset),
         region.y,
-        u16::try_from(width).unwrap_or(0),
+        clamped,
         1,
     ))
 }
 
 pub(crate) fn chip_line(state: &TuiState, labels: &[impl AsRef<str>]) -> Line<'static> {
-    let style = semantic_style(state, SemanticColor::Focus)
-        .add_modifier(Modifier::BOLD)
-        .add_modifier(Modifier::UNDERLINED);
+    let mut style = semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD);
+    if let Some(bg) = state.theme().bg_color(SemanticColor::ChipBackground) {
+        style = style.bg(bg);
+    }
     let mut spans = Vec::new();
     for (index, label) in labels.iter().enumerate() {
         if index > 0 {
@@ -303,6 +321,11 @@ fn chip_row_width(labels: &[impl AsRef<str>]) -> usize {
 }
 
 fn completion_index(state: &TuiState, region: Rect, position: Position) -> Option<usize> {
+    if let Some(search) = state.history_search() {
+        let index = usize::from(position.y.saturating_sub(region.y));
+        let (start, end) = search.visible_window(usize::from(region.height).max(1));
+        return (index < usize::from(region.height) && start + index < end).then_some(index);
+    }
     let menu = state.completion_menu()?;
     let index = usize::from(position.y.saturating_sub(region.y));
     (index < usize::from(region.height) && index < menu.items().len()).then_some(index)

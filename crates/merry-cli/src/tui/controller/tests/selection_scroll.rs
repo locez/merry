@@ -400,3 +400,59 @@ fn wrapped_unicode_snapshot_matches_the_visible_transcript_and_copies_whole_glyp
         ControllerEffect::CopyText("界".into())
     );
 }
+
+#[test]
+fn large_context_drag_selection_hits_layout_cache_with_zero_rebuilds() {
+    let size = Size::new(80, 24);
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "test".into(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    for index in 0..200 {
+        state.push_timeline_item(TimelineItem::Assistant {
+            text: format!(
+                "Paragraph {index} with details.\n```rust\nfn item_{index}() -> usize {{ {index} }}\n```"
+            ),
+        });
+    }
+
+    let buffer = draw(&mut state, size);
+    let misses_after_initial_draw = state.layout_cache_misses();
+    assert_eq!(misses_after_initial_draw, 200);
+
+    let start = point(&buffer, "Paragraph 199");
+    assert_eq!(
+        handle_mouse_input(MouseInput::Down(start), size, &mut state),
+        ControllerEffect::None
+    );
+    for offset in 1..=20 {
+        let drag_pos = Position::new(start.x + offset, start.y);
+        assert_eq!(
+            handle_mouse_input(MouseInput::Drag(drag_pos), size, &mut state),
+            ControllerEffect::None
+        );
+        let _ = draw(&mut state, size);
+    }
+    let copied = handle_mouse_input(
+        MouseInput::Up(Position::new(start.x + 12, start.y)),
+        size,
+        &mut state,
+    );
+    assert_eq!(copied, ControllerEffect::CopyText("Paragraph 199".into()));
+    assert_eq!(
+        state.layout_cache_misses(),
+        misses_after_initial_draw,
+        "dragging and copying across a large context must not recompute cached item layouts"
+    );
+
+    // Mutating only the last item via streaming delta should invalidate only that 1 item.
+    state.append_assistant_delta(Some(199), "\nextra streamed line");
+    let _ = draw(&mut state, size);
+    assert_eq!(
+        state.layout_cache_misses(),
+        misses_after_initial_draw + 1,
+        "streaming a delta into the last item should only recompute that single item"
+    );
+}

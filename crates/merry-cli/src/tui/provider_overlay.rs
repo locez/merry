@@ -6,7 +6,7 @@ pub(crate) use super::provider_selection::ModelPickerTarget;
 pub(crate) use form::{
     ProviderDraftMode, ProviderFormField, ProviderFormOverlay, ProviderFormSeed, ProviderFormValues,
 };
-pub(crate) use manager::{ProviderListItem, ProviderManagerOverlay};
+pub(crate) use manager::{ProviderListItem, ProviderManagerOverlay, ProviderWorkbenchFocus};
 use merry_llm::ReasoningEffort;
 pub(crate) use model_picker::{ModelListItem, ModelPickerOverlay};
 

@@ -1,21 +1,27 @@
 //! Coordinates focused renderers over the single TUI state snapshot.
 
-use crate::tui::{
-    click_target::{
-        chip_line, status_action_label, status_actions, status_chips, truncate_columns,
+use crate::{
+    config::HeaderItemKind,
+    tui::{
+        click_target::{
+            chip_line, status_action_label, status_actions, status_chips, truncate_columns,
+        },
+        layout::{BottomPaneHeights, cockpit_layout},
+        motion::{self, MotionClock},
+        overlay_render, plan_render,
+        render::composer::{
+            completion_lines, composer_inner_columns, pane_heights, queue_lines, render_input,
+        },
+        state::TuiState,
+        status::build_header_layout,
+        text_wrap::semantic_style,
+        theme::SemanticColor,
     },
-    layout::{BottomPaneHeights, cockpit_layout},
-    overlay_render, plan_render,
-    render::{
-        composer::{completion_lines, pane_heights, queue_lines, render_input},
-        timeline::render_timeline_pane,
-    },
-    state::TuiState,
-    text_wrap::semantic_style,
-    theme::{SemanticColor, dim_color},
 };
 pub(crate) use comment_marks::{comment_mark_at, quote_occurrence};
-pub(crate) use composer::pane_heights_for_area;
+pub(crate) use composer::{
+    composer_text_rect_for_region, pane_heights_for_area, styled_input_lines,
+};
 #[cfg(test)]
 use ratatui::layout::Position;
 use ratatui::{
@@ -25,18 +31,26 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Paragraph},
 };
+use std::time::Instant;
+pub(crate) use timeline::render_timeline_pane;
 #[cfg(test)]
 pub(crate) use timeline_layout::timeline_content_region;
-pub(crate) use timeline_pointer::{TimelineMouseDown, timeline_mouse_down, timeline_text_area};
+pub(crate) use timeline_pointer::{
+    TimelineMouseDown, timeline_mouse_down, timeline_task_dock_rect, timeline_text_area,
+};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 mod activity;
+mod command_rows;
 mod command_style;
 mod comment_marks;
 mod sticky;
+pub(crate) mod task_dock;
 
 mod composer;
 
 mod timeline;
+pub(crate) mod timeline_cache;
 mod timeline_layout;
 mod timeline_pointer;
 
@@ -46,7 +60,7 @@ const HEADER_HEIGHT: u16 = 1;
 
 /// Captures the visible timeline anchor before drawing or processing subsequent updates.
 pub(crate) fn prepare_viewport(state: &mut TuiState, size: ratatui::layout::Size) {
-    state.set_composer_columns(usize::from(size.width.saturating_sub(2)));
+    state.set_composer_columns(composer_inner_columns(size.width));
     let area = Rect::new(0, 0, size.width, size.height);
     super::command_details::prepare_viewport(state, area);
     let heights = pane_heights_for_area(state, area);
@@ -61,7 +75,16 @@ pub(crate) fn prepare_viewport(state: &mut TuiState, size: ratatui::layout::Size
         state.plan().is_open(),
         state.plan().is_focused(),
     );
-    state.validate_text_selection_area(timeline_pointer::timeline_text_area(state, rects.timeline));
+    let selection_matches_size = state.overlay().is_none()
+        && state
+            .text_selection()
+            .is_some_and(|selection| selection.terminal_size() == size);
+    if !selection_matches_size {
+        state.validate_text_selection_area(timeline_pointer::timeline_text_area(
+            state,
+            rects.timeline,
+        ));
+    }
     if state.text_selection().is_none() {
         timeline::prepare_timeline_viewport(state, rects.timeline);
     }
@@ -81,6 +104,13 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
         state.plan().is_focused(),
     );
 
+    if let Some(bg) = state.theme().bg_color(SemanticColor::Background) {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(bg)),
+            frame.area(),
+        );
+    }
+
     render_header(frame, state, rects.header);
     if rects.timeline.width > 0 && rects.timeline.height > 0 {
         render_timeline_pane(frame, state, rects.timeline);
@@ -90,12 +120,14 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
     }
 
     if let Some(queue_region) = rects.queue {
+        let mut queue_block = Block::default()
+            .title(" queue ")
+            .border_style(semantic_style(state, SemanticColor::Border));
+        if let Some(bg) = state.theme().bg_color(SemanticColor::SurfaceSubtle) {
+            queue_block = queue_block.style(Style::default().bg(bg));
+        }
         frame.render_widget(
-            Paragraph::new(queue_lines(state, queue_region)).block(
-                Block::default()
-                    .title("queue")
-                    .border_style(semantic_style(state, SemanticColor::Muted)),
-            ),
+            Paragraph::new(queue_lines(state, queue_region)).block(queue_block),
             queue_region,
         );
     }
@@ -105,7 +137,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
             rects.completion,
         );
     }
-    render_input(frame, state, rects.input, pane_heights.input);
+    render_input(frame, state, rects.input, frame.area().height);
     render_status(frame, state, rects.status);
     overlay_render::render_overlay(frame, state);
 }
@@ -157,68 +189,105 @@ pub(crate) fn render_to_buffer_and_cursor(
     )
 }
 
-fn bordered_inner(region: Rect) -> Rect {
-    Rect {
-        x: region.x.saturating_add(1),
-        y: region.y.saturating_add(1),
-        width: region.width.saturating_sub(2),
-        height: region.height.saturating_sub(2),
-    }
-}
-
 fn render_header(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
-    let [workspace, model, usage] = state.header_status_parts(region.width);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                "merry",
-                semantic_style(state, SemanticColor::Status).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default()),
-            Span::styled(workspace, semantic_style(state, SemanticColor::Command)),
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                model,
-                semantic_style(state, SemanticColor::ToolKeyword)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            ),
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                usage,
-                semantic_style(state, SemanticColor::Assistant).add_modifier(Modifier::DIM),
-            ),
-        ]))
-        .style(header_background_style(state)),
-        region,
+    if region.is_empty() {
+        return;
+    }
+    let model = state.model_display_label();
+    let rate = state.output_rate_label();
+    let layout = build_header_layout(
+        state.workspace_root(),
+        &model,
+        state.usage(),
+        &rate,
+        state.is_active_run(),
+        state.header_items(),
+        region.width,
     );
+    let bg_style = header_background_style(state);
+    let sep_style = semantic_style(state, SemanticColor::Muted).patch(bg_style);
+    let mut spans = Vec::new();
+    if layout.left_pad > 0 {
+        spans.push(Span::styled(
+            " ".repeat(usize::from(layout.left_pad)),
+            bg_style,
+        ));
+    }
+    spans.push(Span::styled(
+        crate::tui::status::HEADER_BRAND_MARK,
+        semantic_style(state, SemanticColor::Status)
+            .add_modifier(Modifier::BOLD)
+            .patch(bg_style),
+    ));
+    let mut in_telemetry = false;
+    for segment in layout.segments {
+        let is_telemetry = matches!(
+            segment.kind,
+            HeaderItemKind::Context
+                | HeaderItemKind::Cache
+                | HeaderItemKind::Rate
+                | HeaderItemKind::Tokens
+        );
+        if is_telemetry && in_telemetry {
+            spans.push(Span::styled(" · ", sep_style));
+        } else {
+            spans.push(Span::styled("  ", bg_style));
+        }
+        if is_telemetry {
+            in_telemetry = true;
+        }
+        let mut style = semantic_style(state, segment.color).patch(bg_style);
+        if segment.bold {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        if segment.underlined {
+            style = style.add_modifier(Modifier::UNDERLINED);
+        }
+        if segment.dim {
+            style = style.add_modifier(Modifier::DIM);
+        }
+        spans.push(Span::styled(segment.text, style));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(bg_style), region);
 }
 
 fn header_background_style(state: &TuiState) -> Style {
     state
         .theme()
-        .color(SemanticColor::Status)
-        .map(dim_color)
+        .bg_color(SemanticColor::HeaderBackground)
+        .map_or_else(Style::default, |color| Style::default().bg(color))
+}
+
+fn status_background_style(state: &TuiState) -> Style {
+    state
+        .theme()
+        .bg_color(SemanticColor::StatusBackground)
         .map_or_else(Style::default, |color| Style::default().bg(color))
 }
 
 fn render_status(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
+    if region.is_empty() {
+        return;
+    }
+    let bg_style = status_background_style(state);
+    frame.render_widget(Block::default().style(bg_style), region);
+
+    let left_pad = if region.width >= 40 { " " } else { "" };
     if let Some(feedback) = state.clipboard_feedback() {
         let color = if feedback.failed {
             SemanticColor::Error
         } else {
             SemanticColor::Focus
         };
+        let text = format!("{left_pad}{}", feedback.message);
         frame.render_widget(
-            Paragraph::new(feedback.message.as_str()).style(semantic_style(state, color)),
+            Paragraph::new(truncate_columns(&text, usize::from(region.width)))
+                .style(semantic_style(state, color).patch(bg_style)),
             region,
         );
         return;
     }
-    let interaction_style = if state.is_active_run() {
-        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD)
-    } else {
-        semantic_style(state, SemanticColor::Muted)
-    };
+
     let chips = status_chips(state, region, &status_actions(state));
     let text_limit = chips
         .first()
@@ -227,12 +296,38 @@ fn render_status(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
         });
     let text_width = u16::try_from(text_limit).unwrap_or(0).min(region.width);
     if text_width > 0 {
+        let clock = MotionClock::now();
+        let mut spans = Vec::new();
+        if !left_pad.is_empty() {
+            spans.push(Span::styled(left_pad, bg_style));
+        }
+        if state.is_active_run() && state.history_search_status().is_none() {
+            spans.extend(motion::brand_status_spans(
+                state.active_phase_label(),
+                state.theme(),
+                clock,
+                state.animations_enabled(),
+            ));
+            if let Some(elapsed) = state.active_run_elapsed_label(Instant::now()) {
+                spans.push(Span::styled(
+                    format!(" · {elapsed}"),
+                    semantic_style(state, SemanticColor::TextSecondary).patch(bg_style),
+                ));
+            }
+        } else {
+            spans.extend(motion::brand_idle_spans(state.theme()));
+            let text_style = if state.is_commenting() {
+                semantic_style(state, SemanticColor::Warning)
+                    .add_modifier(Modifier::BOLD)
+                    .patch(bg_style)
+            } else {
+                semantic_style(state, SemanticColor::TextSecondary).patch(bg_style)
+            };
+            spans.push(Span::styled(state.interaction_status_text(), text_style));
+        }
+        let fitted = truncate_status_spans(spans, usize::from(text_width));
         frame.render_widget(
-            Paragraph::new(truncate_columns(
-                &state.interaction_status_text(),
-                usize::from(text_width),
-            ))
-            .style(interaction_style),
+            Paragraph::new(Line::from(fitted)).style(bg_style),
             Rect {
                 width: text_width,
                 ..region
@@ -245,7 +340,7 @@ fn render_status(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
             .map(|(action, _)| status_action_label(state, action))
             .collect::<Vec<_>>();
         frame.render_widget(
-            Paragraph::new(chip_line(state, &labels)),
+            Paragraph::new(chip_line(state, &labels)).style(bg_style),
             Rect {
                 x: first.x,
                 y: region.y,
@@ -254,4 +349,37 @@ fn render_status(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
             },
         );
     }
+}
+
+fn truncate_status_spans(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Span<'static>> {
+    let mut kept = Vec::new();
+    let mut used = 0usize;
+    for span in spans {
+        let width = UnicodeWidthStr::width(span.content.as_ref());
+        if used.saturating_add(width) <= max_width {
+            used = used.saturating_add(width);
+            kept.push(span);
+            continue;
+        }
+        let room = max_width.saturating_sub(used);
+        if room > 0 {
+            let mut out = String::new();
+            let mut w = 0usize;
+            let limit = room.saturating_sub(1);
+            for ch in span.content.chars() {
+                let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if w + cw > limit {
+                    break;
+                }
+                w += cw;
+                out.push(ch);
+            }
+            if room >= 1 {
+                out.push('…');
+            }
+            kept.push(Span::styled(out, span.style));
+        }
+        break;
+    }
+    kept
 }

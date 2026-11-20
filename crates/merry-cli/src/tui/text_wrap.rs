@@ -68,7 +68,7 @@ fn inline_code_parts(state: &TuiState, text: &str, base_style: Style) -> Vec<Sty
         };
         let code = &after_start[..end];
         spans.push(StyledTextPart {
-            text: format!(" {code} "),
+            text: inline_code_text(state, code),
             style: inline_code_style(state, base_style),
             atomic: true,
         });
@@ -275,11 +275,26 @@ fn push_long_token_by_char(
     }
 }
 
+pub(super) fn inline_code_text(state: &TuiState, code: &str) -> String {
+    if state
+        .theme()
+        .bg_color(SemanticColor::InlineCodeBackground)
+        .is_some()
+    {
+        format!(" {code} ")
+    } else {
+        code.to_owned()
+    }
+}
+
 pub(super) fn inline_code_style(state: &TuiState, base_style: Style) -> Style {
     let foreground = state.theme().color(SemanticColor::Focus);
     let mut style = base_style.add_modifier(Modifier::BOLD);
     if let Some(foreground) = foreground {
         style = style.fg(foreground);
+    }
+    if let Some(background) = state.theme().bg_color(SemanticColor::InlineCodeBackground) {
+        style = style.bg(background);
     }
     style
 }

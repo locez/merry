@@ -17,9 +17,11 @@ use ratatui::{
 use std::path::Path;
 use unicode_width::UnicodeWidthStr;
 
-use super::terminal::{TerminalEvent, TerminalSession};
+use super::{
+    terminal::{TerminalEvent, TerminalSession},
+    theme::{SemanticColor, TuiTheme},
+};
 
-const SURFACE: Color = Color::Rgb(40, 36, 42);
 const ROWS: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,10 +30,16 @@ pub(crate) struct TrustDialog {
     scope: String,
     selected: usize,
     remember: bool,
+    theme: TuiTheme,
 }
 
 impl TrustDialog {
+    #[cfg(test)]
     pub(crate) fn new(root: &Path) -> Self {
+        Self::with_theme(root, TuiTheme::default())
+    }
+
+    pub(crate) fn with_theme(root: &Path, theme: TuiTheme) -> Self {
         let git = root.join(".git");
         let scope = if git.is_dir() || git.is_file() {
             "Git repository root. This choice covers the whole repository."
@@ -43,6 +51,7 @@ impl TrustDialog {
             scope: scope.to_owned(),
             selected: 1,
             remember: false,
+            theme,
         }
     }
 
@@ -74,9 +83,31 @@ impl TrustDialog {
     }
 
     pub(crate) fn render(&self, frame: &mut Frame<'_>) {
+        let surface = self
+            .theme
+            .color(SemanticColor::Surface)
+            .unwrap_or(Color::Rgb(36, 32, 41));
+        let focus = self
+            .theme
+            .color(SemanticColor::BorderFocus)
+            .or_else(|| self.theme.color(SemanticColor::Focus))
+            .unwrap_or(Color::LightMagenta);
+        let text = self
+            .theme
+            .color(SemanticColor::Assistant)
+            .unwrap_or(Color::White);
+        let warning = self
+            .theme
+            .color(SemanticColor::Warning)
+            .unwrap_or(Color::LightYellow);
+        let muted = self
+            .theme
+            .color(SemanticColor::Muted)
+            .unwrap_or(Color::DarkGray);
+
         let area = frame.area();
         frame.render_widget(Clear, area);
-        frame.render_widget(Block::default().style(Style::default().bg(SURFACE)), area);
+        frame.render_widget(Block::default().style(Style::default().bg(surface)), area);
 
         let region = centered(area, 68, 16);
         frame.render_widget(Clear, region);
@@ -85,12 +116,8 @@ impl TrustDialog {
                 .title(" M  Trust this directory? ")
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .border_style(
-                    Style::default()
-                        .fg(Color::LightMagenta)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .style(Style::default().bg(SURFACE)),
+                .border_style(Style::default().fg(focus).add_modifier(Modifier::BOLD))
+                .style(Style::default().bg(surface)),
             region,
         );
 
@@ -105,21 +132,15 @@ impl TrustDialog {
             .split(inner);
         frame.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled(
-                    self.path.clone(),
-                    Style::default().fg(Color::White),
-                )),
+                Line::from(Span::styled(self.path.clone(), Style::default().fg(text))),
                 Line::from(""),
                 Line::from(Span::styled(
                     "Only continue if you trust the files in this directory.",
-                    Style::default().fg(Color::LightYellow),
+                    Style::default().fg(warning),
                 )),
-                Line::from(Span::styled(
-                    self.scope.clone(),
-                    Style::default().fg(Color::DarkGray),
-                )),
+                Line::from(Span::styled(self.scope.clone(), Style::default().fg(muted))),
             ])
-            .style(Style::default().fg(Color::White).bg(SURFACE))
+            .style(Style::default().fg(text).bg(surface))
             .wrap(Wrap { trim: false }),
             rows[0],
         );
@@ -134,13 +155,24 @@ impl TrustDialog {
         let lines = choices
             .into_iter()
             .enumerate()
-            .map(|(index, (label, note))| option_line(label, note, index == self.selected, width))
+            .map(|(index, (label, note))| {
+                option_line(
+                    label,
+                    note,
+                    index == self.selected,
+                    width,
+                    surface,
+                    focus,
+                    text,
+                    muted,
+                )
+            })
             .collect::<Vec<_>>();
         frame.render_widget(Paragraph::new(lines), rows[1]);
         frame.render_widget(
             Paragraph::new("↑ ↓ move    Enter confirm    Space toggles don't ask again")
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::DarkGray).bg(SURFACE)),
+                .style(Style::default().fg(muted).bg(surface)),
             rows[2],
         );
     }
@@ -163,8 +195,9 @@ impl TrustDialog {
 pub(crate) async fn ask(
     terminal: &mut TerminalSession,
     root: &Path,
+    theme: &TuiTheme,
 ) -> Result<PromptedChoice, CliError> {
-    let mut dialog = TrustDialog::new(root);
+    let mut dialog = TrustDialog::with_theme(root, theme.clone());
     loop {
         terminal
             .draw(|frame| dialog.render(frame))
@@ -187,10 +220,21 @@ pub(crate) async fn ask(
 /// Draws the dialog on its own screen, then restores the terminal.
 pub(crate) async fn prompt_owned(root: &Path) -> Result<PromptedChoice, CliError> {
     let mut terminal = TerminalSession::enter().map_err(|_| prompt_unavailable(root))?;
-    ask(&mut terminal, root).await
+    let theme = TuiTheme::default();
+    ask(&mut terminal, root, &theme).await
 }
 
-fn option_line(label: &str, note: &str, selected: bool, width: usize) -> Line<'static> {
+#[allow(clippy::too_many_arguments)]
+fn option_line(
+    label: &str,
+    note: &str,
+    selected: bool,
+    width: usize,
+    surface: Color,
+    focus: Color,
+    text: Color,
+    muted: Color,
+) -> Line<'static> {
     const LABEL_COLUMN: usize = 15;
     let mark = if selected { "▸ " } else { "  " };
     let label_pad = LABEL_COLUMN.saturating_sub(UnicodeWidthStr::width(label));
@@ -209,14 +253,14 @@ fn option_line(label: &str, note: &str, selected: bool, width: usize) -> Line<'s
             head,
             Style::default()
                 .fg(Color::Black)
-                .bg(Color::LightMagenta)
+                .bg(focus)
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    let plain = Style::default().fg(Color::White).bg(SURFACE);
+    let plain = Style::default().fg(text).bg(surface);
     Line::from(vec![
         Span::styled(head, plain),
-        Span::styled(note, Style::default().fg(Color::DarkGray).bg(SURFACE)),
+        Span::styled(note, Style::default().fg(muted).bg(surface)),
         Span::styled(tail, plain),
     ])
 }

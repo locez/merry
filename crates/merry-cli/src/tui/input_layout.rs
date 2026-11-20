@@ -139,6 +139,137 @@ fn atom_covering(atoms: &[Range<usize>], index: usize) -> Option<&Range<usize>> 
         .find(|atom| index >= atom.start && index < atom.end && atom.start < atom.end)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WordClass {
+    Whitespace,
+    Word,
+    Punct,
+}
+
+fn word_class(ch: char) -> WordClass {
+    if ch.is_whitespace() {
+        WordClass::Whitespace
+    } else if ch.is_alphanumeric() || ch == '_' {
+        WordClass::Word
+    } else {
+        WordClass::Punct
+    }
+}
+
+pub(crate) fn previous_char_boundary(text: &str, cursor: usize) -> usize {
+    text[..cursor]
+        .char_indices()
+        .last()
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+pub(crate) fn next_char_boundary(text: &str, cursor: usize) -> usize {
+    text[cursor..]
+        .char_indices()
+        .nth(1)
+        .map(|(index, _)| cursor + index)
+        .unwrap_or(text.len())
+}
+
+fn atom_before(atoms: &[Range<usize>], pos: usize) -> Option<&Range<usize>> {
+    atoms
+        .iter()
+        .find(|atom| pos > atom.start && pos <= atom.end)
+}
+
+fn atom_at(atoms: &[Range<usize>], pos: usize) -> Option<&Range<usize>> {
+    atoms
+        .iter()
+        .find(|atom| pos >= atom.start && pos < atom.end)
+}
+
+pub(crate) fn previous_word_boundary(text: &str, cursor: usize, atoms: &[Range<usize>]) -> usize {
+    let mut pos = cursor.min(text.len());
+    if pos == 0 {
+        return 0;
+    }
+    if let Some(atom) = atom_before(atoms, pos) {
+        return atom.start;
+    }
+
+    while pos > 0 && atom_before(atoms, pos).is_none() {
+        let prev = previous_char_boundary(text, pos);
+        let Some(ch) = text[prev..pos].chars().next() else {
+            break;
+        };
+        if word_class(ch) != WordClass::Whitespace {
+            break;
+        }
+        pos = prev;
+    }
+    if pos == 0 {
+        return 0;
+    }
+    if let Some(atom) = atom_before(atoms, pos) {
+        return atom.start;
+    }
+    let first_prev = previous_char_boundary(text, pos);
+    let Some(first_ch) = text[first_prev..pos].chars().next() else {
+        return pos;
+    };
+    let target_class = word_class(first_ch);
+    pos = first_prev;
+    while pos > 0 && atom_before(atoms, pos).is_none() {
+        let prev = previous_char_boundary(text, pos);
+        let Some(ch) = text[prev..pos].chars().next() else {
+            break;
+        };
+        if word_class(ch) != target_class {
+            break;
+        }
+        pos = prev;
+    }
+    pos
+}
+
+pub(crate) fn next_word_boundary(text: &str, cursor: usize, atoms: &[Range<usize>]) -> usize {
+    let len = text.len();
+    let mut pos = cursor.min(len);
+    if pos >= len {
+        return len;
+    }
+    if let Some(atom) = atom_at(atoms, pos) {
+        return atom.end;
+    }
+
+    while pos < len && atom_at(atoms, pos).is_none() {
+        let Some(ch) = text[pos..].chars().next() else {
+            break;
+        };
+        if word_class(ch) != WordClass::Whitespace {
+            break;
+        }
+        pos += ch.len_utf8();
+    }
+    if pos >= len {
+        return len;
+    }
+    if let Some(atom) = atom_at(atoms, pos) {
+        return atom.end;
+    }
+    let Some(first_ch) = text[pos..].chars().next() else {
+        return pos;
+    };
+    let target_class = word_class(first_ch);
+    pos += first_ch.len_utf8();
+    while pos < len && atom_at(atoms, pos).is_none() {
+        let Some(ch) = text[pos..].chars().next() else {
+            break;
+        };
+        if word_class(ch) != target_class {
+            break;
+        }
+        pos += ch.len_utf8();
+    }
+    pos
+}
+
 #[cfg(test)]
 mod tests {
     use super::{byte_at_column, locate_cursor, visual_rows};

@@ -85,13 +85,13 @@ fn render_inspector(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
 
 fn plan_block<'a>(state: &TuiState, snapshot: &PlanSnapshot, title: &'a str) -> Block<'a> {
     let border_color = if state.plan().is_focused() {
-        SemanticColor::Focus
+        SemanticColor::BorderFocus
     } else {
-        SemanticColor::Muted
+        SemanticColor::Border
     };
     Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
+        .border_type(BorderType::Rounded)
         .title(Line::from(vec![
             Span::styled(format!(" {title} "), style(state, SemanticColor::Assistant)),
             Span::styled(
@@ -912,7 +912,7 @@ fn duration(milliseconds: u64) -> String {
 
 fn selection_style(state: &TuiState) -> Style {
     let mut selected = style(state, SemanticColor::Assistant).add_modifier(Modifier::BOLD);
-    if let Some(background) = state.theme().color(SemanticColor::Selection) {
+    if let Some(background) = state.theme().bg_color(SemanticColor::SelectionBackground) {
         selected = selected.bg(background);
     }
     selected

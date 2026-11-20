@@ -57,8 +57,12 @@ fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
     );
 
     assert_eq!(state.timeline().len(), 2);
+    let collapsed = render_to_text(&state, 120, 24);
+    assert!(collapsed.contains("Read read_text"));
+    assert!(collapsed.contains('▸'), "{collapsed}");
+    assert!(!collapsed.contains("file contents"), "{collapsed}");
+    state.toggle_command_expanded(0);
     let rendered = render_to_text(&state, 120, 24);
-    assert!(rendered.contains("Read read_text"));
     assert!(rendered.contains("file contents"));
     assert!(matches!(state.timeline()[1], TimelineItem::Expanded { .. }));
 }
@@ -173,21 +177,34 @@ fn projector_describes_runtime_control_tools() {
         &mut state,
     );
 
-    assert_eq!(
-        state.timeline(),
-        [
-            TimelineItem::Muted {
-                title: "Delegated".to_owned(),
-                detail: "spawn_subagents max_concurrency=2 tasks=[{\"task\":\"inspect runtime\"},{\"task\":\"inspect TUI\"}]".to_owned(),
-            },
-            TimelineItem::Muted {
-                title: "Waited".to_owned(),
-                detail: "wait_subagents agent_ids=[\"a1\",\"a2\"] mode=all timeout_ms=30000".to_owned(),
-            },
-            TimelineItem::Muted {
-                title: "Cancelled".to_owned(),
-                detail: "cancel_subagents agent_ids=[\"a1\",\"a2\"]".to_owned(),
+    let summary: Vec<(&str, &str)> = state
+        .timeline()
+        .iter()
+        .map(|item| match item {
+            TimelineItem::ToolRunning {
+                title,
+                detail,
+                expanded,
+                ..
+            } => {
+                assert!(!expanded, "active tools start collapsed");
+                (title.as_str(), detail.as_str())
             }
+            other => panic!("expected ToolRunning, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        vec![
+            (
+                "Delegated",
+                "spawn_subagents max_concurrency=2 tasks=[{\"task\":\"inspect runtime\"},{\"task\":\"inspect TUI\"}]"
+            ),
+            (
+                "Waited",
+                "wait_subagents agent_ids=[\"a1\",\"a2\"] mode=all timeout_ms=30000"
+            ),
+            ("Cancelled", "cancel_subagents agent_ids=[\"a1\",\"a2\"]"),
         ]
     );
 }
@@ -214,13 +231,19 @@ fn projector_keeps_the_real_name_for_unknown_tools() {
         &mut state,
     );
 
-    assert_eq!(
-        state.timeline(),
-        [TimelineItem::Muted {
-            title: "Tool".to_owned(),
-            detail: "custom_lookup limit=2 source=docs".to_owned(),
-        }]
-    );
+    assert_eq!(state.timeline().len(), 1);
+    let TimelineItem::ToolRunning {
+        title,
+        detail,
+        expanded,
+        ..
+    } = &state.timeline()[0]
+    else {
+        panic!("unknown active tool should render as ToolRunning");
+    };
+    assert_eq!(title, "Tool");
+    assert_eq!(detail, "custom_lookup limit=2 source=docs");
+    assert!(!expanded);
 }
 
 #[test]
@@ -255,9 +278,15 @@ fn projector_renders_generic_tool_arguments_and_completed_result() {
         &mut state,
     );
 
-    let TimelineItem::Expanded { title, body } = &state.timeline()[0] else {
+    let TimelineItem::Expanded {
+        title,
+        body,
+        expanded,
+    } = &state.timeline()[0]
+    else {
         panic!("generic tool result should replace its pending row");
     };
+    assert!(!expanded, "finished generic tool should start collapsed");
     assert!(title.contains("custom_lookup"));
     assert!(title.contains("source=docs"));
     assert!(title.contains("limit=2"));
@@ -314,6 +343,7 @@ fn renderer_shows_tool_result_preview_below_tool_call() {
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Tool custom_lookup source=docs limit=2 -> succeeded".to_owned(),
         body: "2 matching documents".to_owned(),
+        expanded: true,
     });
 
     let rendered = render_to_text(&state, 120, 24);
@@ -336,6 +366,7 @@ fn renderer_limits_tool_result_preview_to_five_lines() {
         body:
             "first result\nsecond result\nthird result\nfourth result\nfifth result\nsixth result"
                 .to_owned(),
+        expanded: true,
     });
 
     let rendered = render_to_text(&state, 120, 24);
@@ -371,14 +402,21 @@ fn projector_renders_mcp_tools_with_server_and_tool_label() {
     );
 
     assert_eq!(state.timeline().len(), 1);
-    let TimelineItem::Muted { title, detail } = &state.timeline()[0] else {
-        panic!("MCP tool call should render as a compact muted line");
+    let TimelineItem::ToolRunning {
+        title,
+        detail,
+        expanded,
+        ..
+    } = &state.timeline()[0]
+    else {
+        panic!("MCP tool call should render as an active ToolRunning line");
     };
     assert_eq!(title, "MCP");
     assert_eq!(
         detail,
         "openaiDeveloperDocs/search_openai_docs query=\"Responses API streaming\""
     );
+    assert!(!expanded);
 }
 
 #[test]
@@ -497,6 +535,7 @@ fn renderer_colors_ran_title_and_shows_process_preview() {
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Ran python3 hello_world.py (.)".to_owned(),
         body: "hello world".to_owned(),
+        expanded: true,
     });
 
     let text = render_to_text(&state, 79, 16);
@@ -519,6 +558,7 @@ fn renderer_highlights_shell_syntax_in_ran_titles() {
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Ran git status --short --branch && git diff --check (.)".to_owned(),
         body: "  clean".to_owned(),
+        expanded: true,
     });
 
     let buffer = render_to_buffer(&state, 120, 16);
@@ -547,6 +587,7 @@ fn renderer_colors_common_tool_title_keywords() {
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Ran .".to_owned(),
         body: "Cargo.toml".to_owned(),
+        expanded: true,
     });
 
     let buffer = render_to_buffer(&state, 79, 18);

@@ -21,7 +21,7 @@ use tokio::time::Instant;
 
 mod tool_output;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) struct TuiProjector {
     started_tools: HashMap<ToolCallId, StartedToolView>,
@@ -29,7 +29,7 @@ pub(crate) struct TuiProjector {
     compaction_timeline_index: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct StartedToolView {
     name: ToolName,
     timeline_index: usize,
@@ -156,6 +156,13 @@ impl TuiProjector {
                     self.start_tool(call.clone(), state);
                 }
             }
+            RuntimeEvent::ToolCallOutputDelta { call_id, delta, .. } if !delta.is_empty() => {
+                if let Some(tool) = self.started_tools.get(&call_id)
+                    && tool.name.as_str() == "run_process"
+                {
+                    state.append_running_command_output(tool.timeline_index, &delta);
+                }
+            }
             RuntimeEvent::ToolCallFinished { result, output, .. } => {
                 let text = tool_output_text(output);
                 let tool = self.started_tools.remove(result.call_id());
@@ -213,6 +220,7 @@ impl TuiProjector {
                     .unwrap_or_else(|| TimelineItem::Expanded {
                         title: "patch".to_owned(),
                         body: compact_tool_output(&text),
+                        expanded: false,
                     });
                     if let Some(tool) = tool.as_ref() {
                         state.replace_timeline_item(tool.timeline_index, patch_item);
@@ -228,6 +236,7 @@ impl TuiProjector {
                             title: expanded_tool_title(tool),
                             preview: read_text_output_preview(&text)
                                 .unwrap_or_else(|| ToolOutputPreview::new(text.lines(), false)),
+                            expanded: false,
                         },
                     );
                 } else if let Some(tool) = tool.as_ref()
@@ -239,6 +248,7 @@ impl TuiProjector {
                         TimelineItem::Expanded {
                             title: expanded_tool_title(tool),
                             body: preview,
+                            expanded: false,
                         },
                     );
                 } else if let Some(tool) = tool.as_ref() {
@@ -247,31 +257,106 @@ impl TuiProjector {
                         TimelineItem::Expanded {
                             title: completed_tool_title(tool, "succeeded"),
                             body: compact_tool_output(&text),
+                            expanded: false,
                         },
                     );
                 }
             }
+            RuntimeEvent::SubagentSpawned {
+                agent_id, task_id, ..
+            } => {
+                state.upsert_subagent(crate::tui::state::SubagentUpdate {
+                    agent_id: agent_id.as_str().to_owned(),
+                    task_id: task_id.as_str().to_owned(),
+                    phase: crate::tui::subagent_view::SubagentPhase::Starting,
+                    summary: "spawned".to_owned(),
+                    changed_paths: None,
+                    output_paths: None,
+                    diagnostic: None,
+                });
+            }
+            RuntimeEvent::SubagentStarted {
+                agent_id, task_id, ..
+            } => {
+                state.upsert_subagent(crate::tui::state::SubagentUpdate {
+                    agent_id: agent_id.as_str().to_owned(),
+                    task_id: task_id.as_str().to_owned(),
+                    phase: crate::tui::subagent_view::SubagentPhase::Running,
+                    summary: "running".to_owned(),
+                    changed_paths: None,
+                    output_paths: None,
+                    diagnostic: None,
+                });
+            }
+            RuntimeEvent::SubagentStatusChanged {
+                agent_id,
+                task_id,
+                status,
+                ..
+            } => {
+                let phase: crate::tui::subagent_view::SubagentPhase = status.into();
+                state.upsert_subagent(crate::tui::state::SubagentUpdate {
+                    agent_id: agent_id.as_str().to_owned(),
+                    task_id: task_id.as_str().to_owned(),
+                    phase,
+                    summary: phase.label().to_ascii_lowercase(),
+                    changed_paths: None,
+                    output_paths: None,
+                    diagnostic: None,
+                });
+            }
             RuntimeEvent::SubagentCompleted {
+                agent_id,
+                task_id,
                 summary,
                 output_paths,
                 changed_paths,
                 ..
             } => {
-                state.push_timeline_item(TimelineItem::Expanded {
-                    title: "subagent completed".to_owned(),
-                    body: format!(
-                        "{summary}\nchanged: {}\noutputs: {}",
-                        changed_paths.join(", "),
-                        output_paths.join(", ")
-                    ),
+                state.upsert_subagent(crate::tui::state::SubagentUpdate {
+                    agent_id: agent_id.as_str().to_owned(),
+                    task_id: task_id.as_str().to_owned(),
+                    phase: crate::tui::subagent_view::SubagentPhase::Completed,
+                    summary,
+                    changed_paths: Some(changed_paths),
+                    output_paths: Some(output_paths),
+                    diagnostic: None,
                 });
             }
-            RuntimeEvent::SubagentFailed { diagnostic, .. }
-            | RuntimeEvent::SubagentCancelled { diagnostic, .. } => {
+            RuntimeEvent::SubagentFailed {
+                agent_id,
+                task_id,
+                diagnostic,
+                ..
+            } => {
                 self.streaming_assistant_index = None;
-                state.push_timeline_item(TimelineItem::Diagnostic {
-                    title: diagnostic.code().to_owned(),
-                    body: diagnostic.message().to_owned(),
+                let detail = format!("{}: {}", diagnostic.code(), diagnostic.message());
+                state.upsert_subagent(crate::tui::state::SubagentUpdate {
+                    agent_id: agent_id.as_str().to_owned(),
+                    task_id: task_id.as_str().to_owned(),
+                    phase: crate::tui::subagent_view::SubagentPhase::Failed,
+                    summary: detail.clone(),
+                    changed_paths: None,
+                    output_paths: None,
+                    diagnostic: Some(detail),
+                });
+            }
+            RuntimeEvent::SubagentCancelled {
+                agent_id,
+                task_id,
+                diagnostic,
+                ..
+            } => {
+                self.streaming_assistant_index = None;
+                let detail = format!("{}: {}", diagnostic.code(), diagnostic.message());
+                state.upsert_subagent(crate::tui::state::SubagentUpdate {
+                    agent_id: agent_id.as_str().to_owned(),
+                    task_id: task_id.as_str().to_owned(),
+                    phase: crate::tui::subagent_view::SubagentPhase::Cancelled,
+                    summary: detail.clone(),
+                    changed_paths: None,
+                    output_paths: None,
+                    diagnostic: Some(detail),
                 });
             }
             RuntimeEvent::PlanUpdated {
@@ -416,21 +501,17 @@ impl TuiProjector {
         }
     }
 
-    /// Stops command animations when the run ends before individual results arrive.
+    /// Stops running-tool animations when the run ends before individual results arrive.
     fn finish_pending_commands(&mut self, state: &mut TuiState, status: &str) {
-        self.started_tools.retain(|_, tool| {
-            if tool.name.as_str() != "run_process" {
-                return true;
-            }
+        for (_, tool) in self.started_tools.drain() {
             state.replace_timeline_item(
                 tool.timeline_index,
                 TimelineItem::Muted {
-                    title: completed_tool_title(tool, status),
+                    title: completed_tool_title(&tool, status),
                     detail: String::new(),
                 },
             );
-            false
-        });
+        }
     }
 
     fn start_tool(&mut self, call: merry_core::PendingToolCall, state: &mut TuiState) {
@@ -446,12 +527,16 @@ impl TuiProjector {
                 view: CommandView::Running {
                     detail: detail.clone(),
                     started_at,
+                    live_preview: crate::tui::state::LiveCommandOutput::default(),
+                    expanded: false,
                 },
             }
         } else {
-            TimelineItem::Muted {
+            TimelineItem::ToolRunning {
                 title: title.clone(),
                 detail: detail.clone(),
+                started_at,
+                expanded: false,
             }
         };
         state.push_timeline_item(item);

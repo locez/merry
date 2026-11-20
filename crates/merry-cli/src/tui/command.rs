@@ -245,7 +245,6 @@ pub(crate) fn slash_help_body(keymap: &Keymap) -> String {
             ))
         })
         .collect::<Vec<_>>();
-    lines.push(String::new());
     lines.push(format!(
         "Submit {}  Backlog {}  Commands {}  Stop {}",
         binding_label(keymap, KeyAction::SubmitNext),

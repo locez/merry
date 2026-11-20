@@ -44,6 +44,10 @@ fn the_latest_user_message_stays_at_the_top_while_the_reply_follows() {
     assert!(text.contains("reply-line-79"), "{text}");
     let (_, user_row) = find_text_position(&buffer, "PIN_THIS").expect("pinned user");
     let (_, tail_row) = find_text_position(&buffer, "reply-line-79").expect("reply tail");
+    assert!(
+        user_row >= 2,
+        "pinned user band should leave breathing space below the header bar (row {user_row})"
+    );
     assert!(user_row < tail_row, "user {user_row}, tail {tail_row}");
 
     state.scroll_timeline_up_by(usize::MAX);

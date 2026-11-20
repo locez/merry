@@ -3,6 +3,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 const TOOL_PREVIEW_MAX_LINES: usize = 5;
+const LIVE_OUTPUT_MAX_LINES: usize = 8;
 const TOOL_PREVIEW_MAX_LINE_CHARS: usize = 180;
 
 /// A bounded display preview; complete tool output remains in the runtime transcript.
@@ -43,12 +44,68 @@ pub(crate) enum CommandFailure {
     Failed,
 }
 
+/// Bounded rolling tail of live output while a command is still running.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LiveCommandOutput {
+    lines: Vec<String>,
+    partial: String,
+    older_lines_dropped: bool,
+}
+
+impl LiveCommandOutput {
+    pub(crate) fn append(&mut self, delta: &str) {
+        for ch in delta.chars() {
+            if ch == '\n' || ch == '\r' {
+                self.flush_partial();
+            } else if (!ch.is_control() || ch == '\t')
+                && self.partial.chars().count() < TOOL_PREVIEW_MAX_LINE_CHARS
+            {
+                self.partial.push(ch);
+            }
+        }
+    }
+
+    pub(crate) fn has_output(&self) -> bool {
+        !self.lines.is_empty() || !self.partial.trim().is_empty()
+    }
+
+    /// Returns `(latest_lines, older_lines_omitted)` in chronological order so
+    /// the newest output always stays at the bottom (matching live Thinking).
+    pub(crate) fn latest_tail(&self) -> (Vec<String>, bool) {
+        let mut lines = self.lines.clone();
+        let mut omitted = self.older_lines_dropped;
+        if !self.partial.trim().is_empty() {
+            if lines.len() >= LIVE_OUTPUT_MAX_LINES {
+                lines.remove(0);
+                omitted = true;
+            }
+            lines.push(self.partial.clone());
+        }
+        (lines, omitted)
+    }
+
+    fn flush_partial(&mut self) {
+        let line = std::mem::take(&mut self.partial);
+        if line.trim().is_empty() {
+            return;
+        }
+        if self.lines.len() >= LIVE_OUTPUT_MAX_LINES {
+            self.lines.remove(0);
+            self.older_lines_dropped = true;
+        }
+        self.lines.push(line);
+    }
+}
+
 /// Projects command lifecycle events without owning process execution or runtime state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CommandView {
     Running {
         detail: String,
         started_at: Instant,
+        live_preview: LiveCommandOutput,
+        /// Presentation fold. Starts collapsed and opens on click when live output exists.
+        expanded: bool,
     },
     Finished {
         detail: String,
@@ -232,9 +289,20 @@ pub(crate) enum TimelineItem {
     Command {
         view: CommandView,
     },
+    /// Active non-process tool call (`read_text`, `apply_patch`, `MCP`, etc.).
+    /// Shares the same spinner, soft lavender-pink flow shimmer, and single-line
+    /// collapse behavior as running shell commands.
+    ToolRunning {
+        title: String,
+        detail: String,
+        started_at: Instant,
+        expanded: bool,
+    },
     Read {
         title: String,
         preview: ToolOutputPreview,
+        /// Presentation fold. Starts collapsed to one line and opens on click.
+        expanded: bool,
     },
     LocalCommand {
         title: String,
@@ -243,6 +311,8 @@ pub(crate) enum TimelineItem {
     Expanded {
         title: String,
         body: String,
+        /// Presentation fold. Starts collapsed to one line and opens on click.
+        expanded: bool,
     },
     Diagnostic {
         title: String,
@@ -250,5 +320,12 @@ pub(crate) enum TimelineItem {
     },
     Patch {
         changes: Vec<PatchChangeView>,
+        /// Presentation fold. Starts collapsed to one line per file and opens on click to reveal the colored diff.
+        expanded: bool,
+    },
+    /// Clickable subagent summary card linked to the interactive Subagent Takeover View.
+    Subagent {
+        agent_id: String,
+        task_id: String,
     },
 }

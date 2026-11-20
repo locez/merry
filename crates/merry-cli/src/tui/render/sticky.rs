@@ -5,6 +5,7 @@
 //! then starts below the header so the bottom line of a followed transcript
 //! stays put.
 
+use super::timeline_cache::TimelineLayoutSnapshot;
 use crate::tui::{
     state::{TimelineItem, TuiState},
     transcript::TranscriptRow,
@@ -16,7 +17,17 @@ use ratatui::{
     widgets::{Paragraph, Wrap},
 };
 
-const MAX_STICKY_USER_LINES: usize = 3;
+const MAX_STICKY_USER_LINES: usize = 5;
+
+fn max_sticky_rows(viewport_height: u16) -> usize {
+    if viewport_height >= 12 {
+        MAX_STICKY_USER_LINES
+    } else if viewport_height >= 8 {
+        3
+    } else {
+        2
+    }
+}
 
 pub(super) struct TimelineScrollSplit {
     /// Header rows, including the blank gap under a pinned message.
@@ -31,20 +42,11 @@ pub(super) struct TimelineScrollSplit {
 
 pub(super) fn timeline_scroll_split(
     state: &TuiState,
-    item_starts: &[usize],
-    row_starts: &[usize],
-    rows: &[TranscriptRow],
+    timeline: &TimelineLayoutSnapshot,
     viewport_height: u16,
     scroll_start: usize,
 ) -> TimelineScrollSplit {
-    let Some(pin) = pin_user(
-        state,
-        item_starts,
-        row_starts,
-        rows,
-        viewport_height,
-        scroll_start,
-    ) else {
+    let Some(pin) = pin_user(state, timeline, viewport_height, scroll_start) else {
         return TimelineScrollSplit {
             header_rows: 0,
             content_rows: 0,
@@ -114,25 +116,26 @@ struct UserSection {
 
 fn pin_user(
     state: &TuiState,
-    item_starts: &[usize],
-    row_starts: &[usize],
-    rows: &[TranscriptRow],
+    timeline: &TimelineLayoutSnapshot,
     viewport_height: u16,
     scroll_start: usize,
 ) -> Option<PinnedUser> {
     if viewport_height <= 1 {
         return None;
     }
-    let sections = user_sections(state, item_starts, row_starts, rows);
+    let sections = user_sections(state, timeline);
     let position = sections
         .iter()
         .rposition(|section| section.y < scroll_start)?;
     let section = sections.get(position)?;
-    let budget = usize::from(viewport_height) - 1;
+    let budget = usize::from(viewport_height).saturating_sub(2);
     if budget == 0 || section.height == 0 {
         return None;
     }
-    let mut show = section.height.min(MAX_STICKY_USER_LINES).min(budget);
+    let mut show = section
+        .height
+        .min(max_sticky_rows(viewport_height))
+        .min(budget);
     let mut gap = usize::from(show < budget);
     if let Some(next) = sections.get(position + 1) {
         let next_row = next.y.saturating_sub(scroll_start);
@@ -149,56 +152,59 @@ fn pin_user(
     }
     let header_rows = u16::try_from(show + gap).unwrap_or(u16::MAX);
     let content_rows = u16::try_from(show).unwrap_or(header_rows);
+    let mut lines = section.lines.clone();
+    // Preserve the symmetric bottom hairline when a long multi-line user prompt
+    // is clipped to fit the sticky header budget.
+    if section.height > show
+        && show >= 3
+        && let Some(bottom_rule) = section.lines.last().cloned()
+    {
+        lines.truncate(show - 1);
+        lines.push(bottom_rule);
+    }
     Some(PinnedUser {
         header_rows,
         content_rows,
         origin: section.y,
-        lines: section.lines.clone(),
+        lines,
     })
 }
 
-fn user_sections(
-    state: &TuiState,
-    item_starts: &[usize],
-    row_starts: &[usize],
-    rows: &[TranscriptRow],
-) -> Vec<UserSection> {
+fn user_sections(state: &TuiState, timeline: &TimelineLayoutSnapshot) -> Vec<UserSection> {
     let mut sections = Vec::new();
     for (index, item) in state.timeline().iter().enumerate() {
         if !matches!(item, TimelineItem::User { .. }) {
             continue;
         }
-        let Some(&start) = item_starts.get(index) else {
+        let Some(layout) = timeline.items.get(index) else {
             continue;
         };
-        let item_end = item_starts.get(index + 1).copied().unwrap_or(rows.len());
-        let mut content_end = item_end;
-        while content_end > start && rows.get(content_end - 1).is_some_and(row_is_blank) {
+        let Some(&y) = timeline.item_visual_starts.get(index) else {
+            continue;
+        };
+        let mut content_end = layout.rows.len();
+        while content_end > 0 && layout.rows.get(content_end - 1).is_some_and(row_is_blank) {
             content_end -= 1;
         }
-        if content_end <= start {
+        if content_end == 0 {
             continue;
         }
-        let Some(&y) = row_starts.get(start) else {
-            continue;
-        };
-        let Some(&content_visual_end) = row_starts.get(content_end) else {
-            continue;
-        };
-        let height = content_visual_end.saturating_sub(y);
-        if height == 0 {
+        let mut lines = Vec::new();
+        let mut height = 0usize;
+        for (row_idx, row) in layout.rows[..content_end].iter().enumerate() {
+            let row_start = layout.local_row_starts.get(row_idx).copied().unwrap_or(0);
+            lines.push(row.display.clone());
+            let row_end = layout
+                .local_row_starts
+                .get(row_idx + 1)
+                .copied()
+                .unwrap_or(row_start.saturating_add(1));
+            height = height.saturating_add(row_end.saturating_sub(row_start));
+        }
+        if height == 0 || lines.is_empty() {
             continue;
         }
-        sections.push(UserSection {
-            y,
-            height,
-            lines: rows
-                .get(start..content_end)
-                .unwrap_or(&[])
-                .iter()
-                .map(|row| row.display.clone())
-                .collect(),
-        });
+        sections.push(UserSection { y, height, lines });
     }
     sections
 }
@@ -212,12 +218,14 @@ mod tests {
     use super::*;
     use crate::tui::{
         keymap::Keymap,
+        render::timeline_cache::CachedItemLayout,
         state::{TimelineItem, TuiState},
         theme::TuiTheme,
         transcript::{SelectionPolicy, TranscriptRow},
     };
     use merry_core::QueuedInputLane;
     use ratatui::text::Line;
+    use std::sync::Arc;
 
     fn state_with_users(count: usize) -> TuiState {
         let mut state = TuiState::new(
@@ -235,6 +243,11 @@ mod tests {
         state
     }
 
+    fn item_layout(rows: Vec<TranscriptRow>) -> Arc<CachedItemLayout> {
+        let local_row_starts = (0..=rows.len()).collect();
+        Arc::new(CachedItemLayout::new(rows, local_row_starts, Vec::new()))
+    }
+
     fn line(text: &str) -> TranscriptRow {
         TranscriptRow::new(Line::from(text.to_owned()), SelectionPolicy::Keep)
     }
@@ -246,8 +259,11 @@ mod tests {
     #[test]
     fn no_pin_when_the_user_message_is_still_inside_the_viewport() {
         let state = state_with_users(1);
-        let rows = vec![line("user-0"), blank(), line("answer")];
-        let split = timeline_scroll_split(&state, &[0, 2], &[0, 1, 2, 3], &rows, 10, 0);
+        let timeline = TimelineLayoutSnapshot::new(vec![
+            item_layout(vec![line("user-0"), blank()]),
+            item_layout(vec![line("answer")]),
+        ]);
+        let split = timeline_scroll_split(&state, &timeline, 10, 0);
         assert_eq!(split.header_rows, 0);
         assert_eq!(split.body_scroll, 0);
         assert_eq!(split.pinned_origin, None);
@@ -257,14 +273,12 @@ mod tests {
     #[test]
     fn pins_the_latest_user_message_above_the_viewport_and_keeps_a_gap() {
         let state = state_with_users(2);
-        let rows = vec![
-            line("user-0"),
-            blank(),
-            line("user-1"),
-            blank(),
-            line("tail"),
-        ];
-        let split = timeline_scroll_split(&state, &[0, 2, 4], &[0, 1, 2, 3, 4, 5], &rows, 10, 4);
+        let timeline = TimelineLayoutSnapshot::new(vec![
+            item_layout(vec![line("user-0"), blank()]),
+            item_layout(vec![line("user-1"), blank()]),
+            item_layout(vec![line("tail")]),
+        ]);
+        let split = timeline_scroll_split(&state, &timeline, 10, 4);
         assert_eq!(split.content_rows, 1);
         assert_eq!(split.header_rows, 2);
         assert_eq!(split.pinned_origin, Some(2));
@@ -275,8 +289,11 @@ mod tests {
     #[test]
     fn the_next_user_message_releases_the_pin_when_it_reaches_the_top() {
         let state = state_with_users(2);
-        let rows = vec![line("user-0"), blank(), line("user-1")];
-        let split = timeline_scroll_split(&state, &[0, 2], &[0, 1, 2, 3], &rows, 10, 2);
+        let timeline = TimelineLayoutSnapshot::new(vec![
+            item_layout(vec![line("user-0"), blank()]),
+            item_layout(vec![line("user-1")]),
+        ]);
+        let split = timeline_scroll_split(&state, &timeline, 10, 2);
         assert_eq!(split.header_rows, 0);
         assert_eq!(split.body_scroll, 2);
     }

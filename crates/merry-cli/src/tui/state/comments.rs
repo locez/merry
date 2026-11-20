@@ -239,7 +239,7 @@ impl TuiState {
             return title;
         }
         if !self.comments.is_active() {
-            return " M ".to_owned();
+            return " 🎀 ".to_owned();
         }
         if let Some(index) = self.comments.editing() {
             let quote = self.comments.pending_quote().unwrap_or("");

@@ -273,7 +273,10 @@ pub(super) fn parse_apply_patch_view(
             }
         })
         .collect::<Vec<_>>();
-    Some(TimelineItem::Patch { changes })
+    Some(TimelineItem::Patch {
+        changes,
+        expanded: false,
+    })
 }
 
 /// Maps one envelope line onto the timeline's line view.

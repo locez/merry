@@ -1,10 +1,6 @@
-use crate::tui::{
-    state::TuiState,
-    text_wrap::semantic_style,
-    theme::{SemanticColor, dim_color},
-};
+use crate::tui::{state::TuiState, text_wrap::semantic_style, theme::SemanticColor};
 use ratatui::{
-    style::Modifier,
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 use unicode_width::UnicodeWidthStr;
@@ -57,12 +53,14 @@ pub(crate) fn validate_copy_text(text: String) -> Result<String, CopyTextError> 
 }
 
 /// Code owns its parsed text; replies refer to the existing timeline instead of duplicating it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CopyContent {
     Text(String),
     AssistantMessage(usize),
 }
 
 /// Associates an actual copy control with its undecorated source and logical row.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CopyTarget {
     pub(crate) line_index: usize,
     pub(crate) column: u16,
@@ -71,36 +69,107 @@ pub(crate) struct CopyTarget {
 }
 
 impl CopyTarget {
-    pub(crate) fn new(line_index: usize, width: u16, content: CopyContent) -> Self {
+    pub(crate) fn new(line_index: usize, column: u16, width: u16, content: CopyContent) -> Self {
         Self {
             line_index,
-            column: 0,
+            column,
             width,
             content,
         }
     }
 }
 
-/// Renders the copy chip, or omits it when `⧉ Copy` cannot fit.
-pub(crate) fn copy_header(state: &TuiState, width: u16) -> Option<(Line<'static>, u16)> {
+/// Renders a quiet right-aligned copy chip for an assistant reply, or omits it
+/// when `⧉ Copy` cannot fit. Returns `(line, column, width)`.
+pub(crate) fn copy_header(state: &TuiState, width: u16) -> Option<(Line<'static>, u16, u16)> {
     let columns = UnicodeWidthStr::width(COPY_LABEL);
-    if usize::from(width) < columns {
+    let total = usize::from(width);
+    if total < columns {
         return None;
     }
     let (icon, rest) = COPY_LABEL.split_at(COPY_ICON.len());
-    let band = state.theme().color(SemanticColor::Focus).map(dim_color);
-    let mut icon_style = semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD);
-    let mut word_style =
-        semantic_style(state, SemanticColor::Assistant).add_modifier(Modifier::BOLD);
+    let band = state.theme().bg_color(SemanticColor::ChipBackground);
+    let mut icon_style = semantic_style(state, SemanticColor::Focus);
+    let mut word_style = semantic_style(state, SemanticColor::Muted);
     if let Some(color) = band {
         icon_style = icon_style.bg(color);
         word_style = word_style.bg(color);
     }
-    let line = Line::from(vec![
+    let col = total.saturating_sub(columns);
+    let mut spans = Vec::with_capacity(3);
+    if col > 0 {
+        spans.push(Span::raw(" ".repeat(col)));
+    }
+    spans.push(Span::styled(icon.to_owned(), icon_style));
+    spans.push(Span::styled(rest.to_owned(), word_style));
+    Some((
+        Line::from(spans),
+        u16::try_from(col).unwrap_or(0),
+        u16::try_from(columns).unwrap_or(u16::MAX),
+    ))
+}
+
+/// Renders a code-block card header with the language badge on the left and
+/// a right-aligned clickable `⧉ Copy` pill on `CodeBackground`.
+///
+/// Returns `(header_line, copy_column, copy_width)`.
+pub(crate) fn code_block_header(
+    state: &TuiState,
+    lang: Option<&str>,
+    width: u16,
+) -> Option<(Line<'static>, u16, u16)> {
+    let copy_columns = UnicodeWidthStr::width(COPY_LABEL);
+    let total = usize::from(width);
+    if total < copy_columns {
+        return None;
+    }
+    let code_bg = state.theme().bg_color(SemanticColor::CodeBackground);
+    let code_bg_style = code_bg.map_or_else(Style::default, |bg| Style::default().bg(bg));
+    let rail_style = semantic_style(state, SemanticColor::Status)
+        .add_modifier(Modifier::BOLD)
+        .patch(code_bg_style);
+    let (icon, rest) = COPY_LABEL.split_at(COPY_ICON.len());
+    let chip_bg = state.theme().bg_color(SemanticColor::ChipBackground);
+    let mut icon_style = semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD);
+    let mut word_style =
+        semantic_style(state, SemanticColor::Assistant).add_modifier(Modifier::BOLD);
+    if let Some(color) = chip_bg {
+        icon_style = icon_style.bg(color);
+        word_style = word_style.bg(color);
+    }
+
+    let label = lang
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("code");
+    let label_style = if lang.is_some_and(|value| !value.trim().is_empty()) {
+        semantic_style(state, SemanticColor::ToolKeyword)
+            .add_modifier(Modifier::BOLD)
+            .patch(code_bg_style)
+    } else {
+        semantic_style(state, SemanticColor::Muted).patch(code_bg_style)
+    };
+    let rail = "▎ ";
+    let left_width = UnicodeWidthStr::width(rail) + UnicodeWidthStr::width(label);
+    let right_pad = usize::from(total >= left_width + copy_columns + 3);
+    if total < left_width + copy_columns + 1 {
+        let (line, col, w) = copy_header(state, width)?;
+        return Some((line, col, w));
+    }
+    let gap = total.saturating_sub(left_width + copy_columns + right_pad);
+    let copy_col = u16::try_from(left_width + gap).unwrap_or(u16::MAX);
+    let copy_w = u16::try_from(copy_columns).unwrap_or(u16::MAX);
+    let mut spans = vec![
+        Span::styled(rail.to_owned(), rail_style),
+        Span::styled(label.to_owned(), label_style),
+        Span::styled(" ".repeat(gap), code_bg_style),
         Span::styled(icon.to_owned(), icon_style),
         Span::styled(rest.to_owned(), word_style),
-    ]);
-    Some((line, u16::try_from(columns).unwrap_or(u16::MAX)))
+    ];
+    if right_pad > 0 {
+        spans.push(Span::styled(" ".repeat(right_pad), code_bg_style));
+    }
+    Some((Line::from(spans), copy_col, copy_w))
 }
 
 /// Status text after a copy attempt. Either the system clipboard or the terminal write is enough.

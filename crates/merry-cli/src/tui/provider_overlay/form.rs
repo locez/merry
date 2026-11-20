@@ -208,8 +208,53 @@ impl ProviderFormOverlay {
         matches!(self.mode, ProviderFormMode::Edit { .. })
     }
 
+    pub(crate) fn editing_alias(&self) -> Option<&str> {
+        match &self.mode {
+            ProviderFormMode::Edit { original_alias } => Some(original_alias.as_str()),
+            ProviderFormMode::Add => None,
+        }
+    }
+
     pub(crate) fn selected_field(&self) -> ProviderFormField {
         ProviderFormField::ALL[self.selected.min(ProviderFormField::ALL.len() - 1)]
+    }
+
+    pub(crate) fn select_field(&mut self, field: ProviderFormField) {
+        if let Some(index) = ProviderFormField::ALL
+            .iter()
+            .position(|candidate| *candidate == field)
+        {
+            self.selected = index;
+        }
+    }
+
+    pub(crate) fn click_field(&mut self, field: ProviderFormField) -> ProviderOverlayAction {
+        self.notice = None;
+        self.select_field(field);
+        match field {
+            ProviderFormField::Kind => {
+                self.toggle_kind();
+                ProviderOverlayAction::Consumed
+            }
+            ProviderFormField::Protocol => {
+                self.toggle_protocol();
+                ProviderOverlayAction::Consumed
+            }
+            ProviderFormField::Save => self.save_action(),
+            ProviderFormField::Alias if self.is_editing() => {
+                self.notice = Some("Config alias is the stable provider ID".to_owned());
+                ProviderOverlayAction::Consumed
+            }
+            _ => ProviderOverlayAction::Consumed,
+        }
+    }
+
+    pub(crate) fn trigger_model_discovery(&self) -> ProviderOverlayAction {
+        let (original_alias, values) = self.discovery_request();
+        ProviderOverlayAction::DiscoverFormModels {
+            original_alias,
+            values,
+        }
     }
 
     pub(crate) fn kind(&self) -> ManagedProviderKind {

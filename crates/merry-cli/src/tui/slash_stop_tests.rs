@@ -89,7 +89,7 @@ fn tool_cancellation_finishes_stop_without_reporting_an_error() {
     ));
     assert!(matches!(
         state.timeline().last(),
-        Some(TimelineItem::LocalCommand { title, .. }) if title == "Run stopped"
+        Some(TimelineItem::Muted { title, .. }) if title == "⊘ Stopped"
     ));
     assert_eq!(
         state
@@ -97,7 +97,7 @@ fn tool_cancellation_finishes_stop_without_reporting_an_error() {
             .iter()
             .filter(|item| matches!(
                 item,
-                TimelineItem::LocalCommand { title, .. } if title == "Run stopped"
+                TimelineItem::Muted { title, .. } if title == "⊘ Stopped"
             ))
             .count(),
         1
@@ -133,16 +133,16 @@ fn batched_tool_cancellation_completes_stop_feedback_once() {
     projector.apply(tool_cancelled_event("call-one"), &mut state);
     assert!(matches!(
         state.timeline().last(),
-        Some(TimelineItem::LocalCommand { title, .. }) if title == "Stopping"
+        Some(TimelineItem::Muted { title, .. }) if title == "⊘ Stopping…"
     ));
     assert!(state.timeline().iter().all(|item| !matches!(
         item,
-        TimelineItem::LocalCommand { title, .. } if title == "Run stopped"
+        TimelineItem::Muted { title, .. } if title == "⊘ Stopped"
     )));
     projector.apply(tool_cancelled_event("call-two"), &mut state);
     assert!(state.timeline().iter().all(|item| !matches!(
         item,
-        TimelineItem::LocalCommand { title, .. } if title == "Run stopped"
+        TimelineItem::Muted { title, .. } if title == "⊘ Stopped"
     )));
     projector.apply(
         RuntimeEvent::InteractiveRunStateChanged {
@@ -168,7 +168,7 @@ fn batched_tool_cancellation_completes_stop_feedback_once() {
             .iter()
             .filter(|item| matches!(
                 item,
-                TimelineItem::LocalCommand { title, .. } if title == "Run stopped"
+                TimelineItem::Muted { title, .. } if title == "⊘ Stopped"
             ))
             .count(),
         1
@@ -200,12 +200,11 @@ fn compaction_cancellation_finishes_both_progress_and_stop_feedback() {
     ));
     assert!(matches!(
         state.timeline().last(),
-        Some(TimelineItem::LocalCommand { title, .. }) if title == "Run stopped"
+        Some(TimelineItem::Muted { title, .. }) if title == "⊘ Stopped"
     ));
     assert!(state.timeline().iter().all(|item| !matches!(
         item,
-        TimelineItem::LocalCommand { title, .. }
-            if matches!(title.as_str(), "Stopping" | "Stop already requested")
+        TimelineItem::Muted { title, .. } if title == "⊘ Stopping…"
     )));
 }
 
@@ -233,7 +232,7 @@ fn interleaved_stop_feedback_stays_chronological_and_finishes_latest() {
 
     assert!(matches!(
         state.timeline().first(),
-        Some(TimelineItem::LocalCommand { title, .. }) if title == "Stop requested"
+        Some(TimelineItem::Muted { title, .. }) if title == "⊘ Stop requested"
     ));
     assert!(matches!(
         state.timeline().get(1),
@@ -241,12 +240,11 @@ fn interleaved_stop_feedback_stays_chronological_and_finishes_latest() {
     ));
     assert!(matches!(
         state.timeline().last(),
-        Some(TimelineItem::LocalCommand { title, .. }) if title == "Run stopped"
+        Some(TimelineItem::Muted { title, .. }) if title == "⊘ Stopped"
     ));
     assert!(state.timeline().iter().all(|item| !matches!(
         item,
-        TimelineItem::LocalCommand { title, .. }
-            if matches!(title.as_str(), "Stopping" | "Stop already requested")
+        TimelineItem::Muted { title, .. } if title == "⊘ Stopping…"
     )));
 }
 
@@ -272,7 +270,7 @@ fn waiting_state_is_a_stop_completion_fallback_without_duplicates() {
 
     assert!(matches!(
         state.timeline().last(),
-        Some(TimelineItem::LocalCommand { title, .. }) if title == "Run stopped"
+        Some(TimelineItem::Muted { title, .. }) if title == "⊘ Stopped"
     ));
     assert_eq!(
         state
@@ -280,7 +278,7 @@ fn waiting_state_is_a_stop_completion_fallback_without_duplicates() {
             .iter()
             .filter(|item| matches!(
                 item,
-                TimelineItem::LocalCommand { title, .. } if title == "Run stopped"
+                TimelineItem::Muted { title, .. } if title == "⊘ Stopped"
             ))
             .count(),
         1
@@ -297,14 +295,14 @@ fn slash_stop_feedback_is_idempotent_when_the_effect_is_locally_projected() {
     assert_eq!(stop, ControllerEffect::Interrupt);
     assert!(matches!(
         state.timeline(),
-        [TimelineItem::LocalCommand { title, .. }] if title == "Stopping"
+        [TimelineItem::Muted { title, .. }] if title == "⊘ Stopping…"
     ));
 
     project_local_effect(&stop, &mut state);
 
     assert!(matches!(
         state.timeline(),
-        [TimelineItem::LocalCommand { title, .. }] if title == "Stopping"
+        [TimelineItem::Muted { title, .. }] if title == "⊘ Stopping…"
     ));
 }
 
@@ -331,7 +329,7 @@ fn stale_waiting_does_not_complete_stop_for_a_pending_local_run() {
     assert!(state.is_interrupting());
     assert!(matches!(
         state.timeline().last(),
-        Some(TimelineItem::LocalCommand { title, .. }) if title == "Stopping"
+        Some(TimelineItem::Muted { title, .. }) if title == "⊘ Stopping…"
     ));
 
     projector.apply(
@@ -361,7 +359,7 @@ fn stale_waiting_does_not_complete_stop_for_a_pending_local_run() {
 
     assert!(matches!(
         state.timeline().last(),
-        Some(TimelineItem::LocalCommand { title, .. }) if title == "Run stopped"
+        Some(TimelineItem::Muted { title, .. }) if title == "⊘ Stopped"
     ));
     assert_eq!(
         state
@@ -369,11 +367,46 @@ fn stale_waiting_does_not_complete_stop_for_a_pending_local_run() {
             .iter()
             .filter(|item| matches!(
                 item,
-                TimelineItem::LocalCommand { title, .. } if title == "Run stopped"
+                TimelineItem::Muted { title, .. } if title == "⊘ Stopped"
             ))
             .count(),
         1
     );
+}
+
+#[test]
+fn stopping_during_active_thinking_freezes_timer_and_collapses_thinking() {
+    let mut state = state();
+    let mut projector = TuiProjector::default();
+    state.set_run_state(InteractiveRunState::RunningModel);
+    state.append_reasoning_delta("analyzing what to do next...");
+    assert!(matches!(
+        state.timeline().first(),
+        Some(TimelineItem::Thinking { elapsed: None, .. })
+    ));
+
+    // Pressing Esc pushes pending stop feedback AFTER the open Thinking block.
+    let effect = handle_key_action(KeyAction::Interrupt, &mut state);
+    assert_eq!(effect, ControllerEffect::Interrupt);
+    project_local_effect(&effect, &mut state);
+    assert_eq!(state.timeline().len(), 2);
+
+    // RunCancelled must still seal the earlier Thinking block even though
+    // stop feedback sits at the tail of the timeline.
+    projector.apply(run_cancelled_event(), &mut state);
+    assert!(matches!(
+        state.timeline().first(),
+        Some(TimelineItem::Thinking {
+            elapsed: Some(_),
+            expanded: false,
+            ..
+        })
+    ));
+    let rendered = render::render_to_text(&state, 80, 16);
+    assert!(rendered.contains("Thought for"), "{rendered}");
+    assert!(!rendered.contains("Thinking..."), "{rendered}");
+    assert!(rendered.contains("⊘ Stopped"), "{rendered}");
+    assert!(!rendered.contains("cancellation boundary"), "{rendered}");
 }
 
 #[test]

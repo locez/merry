@@ -1,22 +1,17 @@
-//! Synchronous input-to-effect translation and local UI state updates; no external I/O.
+//! Synchronous keyboard and paste input-to-effect translation; pointer routing lives in `pointer.rs`.
 
 use crate::tui::{
-    click_target::{OverlayPointer, PointerTarget, StatusAction, pointer_target},
     command_details::CommandNavigation,
-    controller::{ControllerEffect, cockpit_rects, exit_review_if_active},
-    copy_controls::CopyTextError,
+    controller::{ControllerEffect, exit_review_if_active},
     input::{DraftImage, TuiSubmission},
     keymap::KeyAction,
     overlay::{Overlay, OverlayKeyResult},
-    plan_render::PlanPointer,
     preferences::TuiPreferences,
     provider_overlay::ModelPickerTarget,
     state::TuiState,
-    text_interaction::MouseInput,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use merry_core::QueuedInputLane;
-use ratatui::layout::{Position, Rect, Size};
 
 pub(super) const TIMELINE_SCROLL_STEP: usize = 5;
 
@@ -166,38 +161,59 @@ pub(super) fn submit_input(
 fn history_search_key(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let super_key = key.modifiers.contains(KeyModifiers::SUPER);
     match key.code {
-        KeyCode::Char('r') if control && !alt => {
+        KeyCode::Char('r' | 'R') if control && !alt && !super_key => {
             state.begin_or_older_history_search();
             ControllerEffect::None
         }
-        KeyCode::Char('s') if control && !alt => {
+        KeyCode::Char('s' | 'S') if control && !alt && !super_key => {
             state.newer_history_search();
             ControllerEffect::None
         }
-        KeyCode::Char('g' | 'c') if control && !alt => {
+        KeyCode::Down if !control && !alt && !shift && !super_key => {
+            state.begin_or_older_history_search();
+            ControllerEffect::None
+        }
+        KeyCode::Up if !control && !alt && !shift && !super_key => {
+            state.newer_history_search();
+            ControllerEffect::None
+        }
+        KeyCode::Char('c' | 'C') if (control || super_key) && !alt => {
+            if let Some(selected) = state.history_search_selected_text() {
+                ControllerEffect::CopyText(selected)
+            } else if super_key {
+                ControllerEffect::None
+            } else {
+                state.cancel_history_search();
+                ControllerEffect::None
+            }
+        }
+        KeyCode::Char('x' | 'X') if (control || super_key) && !alt => {
+            if let Some(cut) = state.history_search_cut_selection() {
+                ControllerEffect::CopyText(cut)
+            } else {
+                ControllerEffect::None
+            }
+        }
+        KeyCode::Char('g' | 'G') if control && !alt && !super_key => {
             state.cancel_history_search();
             ControllerEffect::None
         }
         KeyCode::Esc => {
-            state.cancel_history_search();
+            if !state.history_search_clear_selection() {
+                state.cancel_history_search();
+            }
             ControllerEffect::None
         }
-        KeyCode::Enter => {
+        KeyCode::Enter | KeyCode::Tab if !control && !alt && !shift && !super_key => {
             state.accept_history_search();
-            ControllerEffect::None
-        }
-        KeyCode::Backspace if !control && !alt => {
-            state.history_search_backspace();
-            ControllerEffect::None
-        }
-        KeyCode::Char(character) if !control && !alt => {
-            state.history_search_push(character);
             ControllerEffect::None
         }
         _ => {
-            state.accept_history_search();
-            handle_key_event(key, state)
+            state.history_search_handle_key(key);
+            ControllerEffect::None
         }
     }
 }
@@ -274,6 +290,50 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
     }
 
     if key.code == KeyCode::Backspace && key.modifiers.is_empty() && state.restore_last_comment() {
+        return ControllerEffect::None;
+    }
+
+    // Composer text-selection & modern editor shortcuts take precedence over
+    // global cancel/interrupt when a selection is active in the composer.
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let super_key = key.modifiers.contains(KeyModifiers::SUPER);
+
+    if key.code == KeyCode::Esc && key.modifiers.is_empty() && state.clear_input_selection() {
+        return ControllerEffect::None;
+    }
+
+    if matches!(key.code, KeyCode::Char('c' | 'C')) && (ctrl || super_key) && !alt {
+        let mapped = state.keymap().action_for(key.into());
+        let allow_copy = super_key || matches!(mapped, None | Some(KeyAction::CancelInputOrQuit));
+        if allow_copy && let Some(selected) = state.selected_input_text() {
+            return ControllerEffect::CopyText(selected);
+        }
+        if super_key {
+            return ControllerEffect::None;
+        }
+    }
+
+    if matches!(key.code, KeyCode::Char('x' | 'X')) && (ctrl || super_key) && !alt {
+        let mapped = state.keymap().action_for(key.into());
+        if (super_key || mapped.is_none())
+            && let Some(cut) = state.cut_input_selection()
+        {
+            return ControllerEffect::CopyText(cut);
+        }
+        if super_key {
+            return ControllerEffect::None;
+        }
+    }
+
+    if key.code == KeyCode::Enter && shift && !ctrl && !alt && !super_key {
+        state.insert_input_newline();
+        return ControllerEffect::None;
+    }
+
+    if matches!(key.code, KeyCode::Up | KeyCode::Down) && shift && !ctrl && !alt && !super_key {
+        state.select_input_line(key.code == KeyCode::Down);
         return ControllerEffect::None;
     }
 
@@ -411,10 +471,27 @@ fn overlay_key_effect(result: OverlayKeyResult, state: &mut TuiState) -> Control
         OverlayKeyResult::Provider(action) => {
             crate::tui::controller_provider::provider_overlay_effect(action)
         }
+        OverlayKeyResult::SubagentPrevious => {
+            state.step_subagent_inspect(-1);
+            ControllerEffect::RefreshSubagents
+        }
+        OverlayKeyResult::SubagentNext => {
+            state.step_subagent_inspect(1);
+            ControllerEffect::RefreshSubagents
+        }
+        OverlayKeyResult::SubagentRefresh => ControllerEffect::RefreshSubagents,
+        OverlayKeyResult::SubagentStop(agent_id) => ControllerEffect::CancelSubagent(agent_id),
+        OverlayKeyResult::SubagentSendMessage { agent_id, message } => {
+            ControllerEffect::SendSubagentMessage { agent_id, message }
+        }
+        OverlayKeyResult::RefreshBackgroundTask(id) => {
+            ControllerEffect::InspectBackgroundProcess(id)
+        }
+        OverlayKeyResult::StopBackgroundTask(id) => ControllerEffect::StopBackgroundProcess(id),
     }
 }
 
-fn press_overlay(state: &mut TuiState, code: KeyCode) -> ControllerEffect {
+pub(super) fn press_overlay(state: &mut TuiState, code: KeyCode) -> ControllerEffect {
     let Some(overlay) = state.overlay_mut() else {
         return ControllerEffect::None;
     };
@@ -422,289 +499,14 @@ fn press_overlay(state: &mut TuiState, code: KeyCode) -> ControllerEffect {
     overlay_key_effect(result, state)
 }
 
-fn overlay_pointer_effect(pointer: OverlayPointer, state: &mut TuiState) -> ControllerEffect {
-    match pointer {
-        OverlayPointer::Palette(index) => {
-            if let Some(Overlay::CommandPalette(palette)) = state.overlay_mut() {
-                palette.select(index);
-            }
-            press_overlay(state, KeyCode::Enter)
-        }
-        OverlayPointer::Setting(item) => {
-            if settings_editor_open(state) {
-                return ControllerEffect::None;
-            }
-            if let Some(Overlay::Settings(settings)) = state.overlay_mut() {
-                settings.select_item(item);
-            }
-            press_overlay(state, KeyCode::Enter)
-        }
-        OverlayPointer::PlanApprove
-        | OverlayPointer::DialogClose
-        | OverlayPointer::PermissionAllow => press_overlay(state, KeyCode::Enter),
-        OverlayPointer::PlanBack | OverlayPointer::PermissionReject => {
-            press_overlay(state, KeyCode::Esc)
-        }
-        OverlayPointer::Provider(index) => {
-            if let Some(Overlay::ProviderManager(manager)) = state.overlay_mut() {
-                manager.select(index);
-            }
-            press_overlay(state, KeyCode::Enter)
-        }
-        OverlayPointer::Model(index) => {
-            if let Some(Overlay::ModelPicker(picker)) = state.overlay_mut() {
-                picker.select(index);
-            }
-            press_overlay(state, KeyCode::Enter)
-        }
-        OverlayPointer::ManualModel => press_overlay(state, KeyCode::Enter),
-        OverlayPointer::Reasoning(index) => {
-            if let Some(Overlay::ReasoningPicker(picker)) = state.overlay_mut() {
-                picker.select(index);
-            }
-            press_overlay(state, KeyCode::Enter)
-        }
-        OverlayPointer::CommandPrevious => {
-            crate::tui::command_details::inspect_command(state, CommandNavigation::Previous)
-        }
-        OverlayPointer::CommandNext => {
-            crate::tui::command_details::inspect_command(state, CommandNavigation::Next)
-        }
-        OverlayPointer::CommandSelect(index) => {
-            crate::tui::command_details::inspect_command(state, CommandNavigation::Index(index))
-        }
-        OverlayPointer::CommandFocusPane(pane) => {
-            if let Some(Overlay::CommandDetails(details)) = state.overlay_mut() {
-                details.focus_pane(pane);
-            }
-            ControllerEffect::None
-        }
-        OverlayPointer::CommandCopyCommand => press_overlay(state, KeyCode::Char('c')),
-        OverlayPointer::CommandCopyOutput => press_overlay(state, KeyCode::Char('y')),
-        OverlayPointer::CommandClose => press_overlay(state, KeyCode::Esc),
-    }
-}
-
-fn settings_editor_open(state: &TuiState) -> bool {
-    state.settings_model_editor().is_some()
-        || state.settings_reasoning_editor().is_some()
-        || state.settings_context_window_editor().is_some()
-}
-
-fn open_model_from_header(state: &TuiState) -> ControllerEffect {
-    match state.current_provider_alias() {
-        Some(alias) => ControllerEffect::OpenModelPicker(alias.to_owned()),
-        None => ControllerEffect::OpenProviderManager,
-    }
-}
-
-fn status_click(action: StatusAction, state: &mut TuiState) -> ControllerEffect {
-    let key_action = match action {
-        StatusAction::Commands => KeyAction::OpenCommandPanel,
-        StatusAction::Plan => KeyAction::TogglePlan,
-        StatusAction::Follow => KeyAction::FollowLatest,
-        StatusAction::Stop => KeyAction::Interrupt,
-        StatusAction::Comment => KeyAction::ToggleComment,
-        StatusAction::SendComments => KeyAction::SendComments,
-    };
-    handle_key_action(key_action, state)
-}
-
-fn apply_plan_pointer(state: &mut TuiState, pointer: PlanPointer) {
-    match pointer {
-        PlanPointer::Fold(node_id) => {
-            state.plan_mut().focus();
-            state.plan_mut().toggle_collapse(&node_id);
-        }
-        PlanPointer::Row(node_id) => {
-            let inspect =
-                state.plan().is_focused() && state.plan().selected_node_id() == Some(&node_id);
-            state.plan_mut().focus();
-            if inspect {
-                state.plan_mut().open_inspector();
-            } else {
-                state.plan_mut().select_node(node_id);
-            }
-        }
-    }
-}
-
-fn accept_completion_at(state: &mut TuiState, index: usize) -> ControllerEffect {
-    let slash = state
-        .completion_menu()
-        .is_some_and(crate::tui::completion::CompletionMenu::is_slash);
-    if !state.select_completion(index) {
-        return ControllerEffect::None;
-    }
-    state.accept_completion();
-    if slash && input_is_known_slash(state) {
-        handle_key_action(KeyAction::SubmitNext, state)
-    } else {
-        ControllerEffect::None
-    }
-}
-
 pub(crate) fn handle_paste_event(text: &str, state: &mut TuiState) {
     state.clear_text_selection();
+    if state.overlay().is_none() && state.history_search_paste(text) {
+        return;
+    }
     if !state.insert_overlay_paste(text) {
         state.insert_input_paste(text);
     }
-}
-
-pub(crate) fn handle_mouse_input(
-    mouse: MouseInput,
-    terminal_size: Size,
-    state: &mut TuiState,
-) -> ControllerEffect {
-    if state.overlay().is_some() {
-        state.clear_text_selection();
-        return match mouse {
-            MouseInput::Down(position) => match pointer_target(state, terminal_size, position) {
-                PointerTarget::Overlay(pointer) => overlay_pointer_effect(pointer, state),
-                _ => ControllerEffect::None,
-            },
-            MouseInput::Drag(_) | MouseInput::Up(_) => ControllerEffect::None,
-        };
-    }
-    let rects = cockpit_rects(terminal_size, state);
-    state.validate_text_selection_area(crate::tui::render::timeline_text_area(
-        state,
-        rects.timeline,
-    ));
-    match mouse {
-        MouseInput::Down(position) => {
-            state.clear_text_selection();
-            match pointer_target(state, terminal_size, position) {
-                PointerTarget::Passthrough => {}
-                PointerTarget::Consumed => return ControllerEffect::None,
-                PointerTarget::Model => return open_model_from_header(state),
-                PointerTarget::Status(action) => return status_click(action, state),
-                PointerTarget::Composer => {
-                    state.plan_mut().leave_focus();
-                    return ControllerEffect::None;
-                }
-                PointerTarget::Plan(pointer) => {
-                    apply_plan_pointer(state, pointer);
-                    return ControllerEffect::None;
-                }
-                PointerTarget::Completion(index) => return accept_completion_at(state, index),
-                PointerTarget::Overlay(pointer) => return overlay_pointer_effect(pointer, state),
-            }
-            match crate::tui::render::timeline_mouse_down(state, rects.timeline, position) {
-                crate::tui::render::TimelineMouseDown::Copy(text) => {
-                    return ControllerEffect::CopyText(text);
-                }
-                crate::tui::render::TimelineMouseDown::CopyTooLarge => {
-                    return ControllerEffect::CopyTextTooLarge;
-                }
-                crate::tui::render::TimelineMouseDown::ToggleCommand(index) => {
-                    state.toggle_command_expanded(index);
-                    return ControllerEffect::None;
-                }
-                crate::tui::render::TimelineMouseDown::ToggleThinking(index) => {
-                    state.toggle_thinking_expanded(index);
-                    return ControllerEffect::None;
-                }
-                crate::tui::render::TimelineMouseDown::Select(selection) => {
-                    state.begin_text_selection(selection);
-                }
-                crate::tui::render::TimelineMouseDown::None => {}
-            }
-            ControllerEffect::None
-        }
-        MouseInput::Drag(position) => {
-            state.drag_text_selection(position);
-            ControllerEffect::None
-        }
-        MouseInput::Up(position) => {
-            let had_selection = state.text_selection().is_some();
-            match state.finish_text_selection(position) {
-                Ok(Some(captured)) if state.is_commenting() => {
-                    let occurrence = crate::tui::render::quote_occurrence(
-                        state,
-                        rects.timeline,
-                        captured.item_index,
-                        &captured.text,
-                        captured.visual_row,
-                        captured.column,
-                    );
-                    state.capture_comment_selection(captured.text, captured.item_index, occurrence);
-                    ControllerEffect::None
-                }
-                Ok(Some(captured)) => ControllerEffect::CopyText(captured.text),
-                Ok(None) => {
-                    if let Some(hit) =
-                        crate::tui::render::comment_mark_at(state, rects.timeline, position)
-                        && (had_selection || hit.in_sticky_header)
-                    {
-                        state.edit_comment(hit.index);
-                    }
-                    ControllerEffect::None
-                }
-                Err(CopyTextError::TooLarge) => ControllerEffect::CopyTextTooLarge,
-            }
-        }
-    }
-}
-
-pub(crate) fn handle_mouse_scroll_up(
-    position: Position,
-    terminal_size: Size,
-    state: &mut TuiState,
-) -> ControllerEffect {
-    state.clear_text_selection();
-    if matches!(state.overlay(), Some(Overlay::CommandDetails(_))) {
-        let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
-        return crate::tui::command_details::handle_mouse_scroll(state, area, position, true);
-    }
-    if state.overlay().is_some() {
-        return ControllerEffect::None;
-    }
-    if position_in_plan_pane(position, terminal_size, state) {
-        if state.plan().is_inspector_open() {
-            state.plan_mut().scroll_inspector_up_by(PLAN_SCROLL_STEP);
-        } else {
-            state.plan_mut().scroll_up_by(PLAN_SCROLL_STEP);
-        }
-    } else {
-        state.scroll_timeline_up_by(TIMELINE_SCROLL_STEP);
-    }
-    ControllerEffect::None
-}
-
-pub(crate) fn handle_mouse_scroll_down(
-    position: Position,
-    terminal_size: Size,
-    state: &mut TuiState,
-) -> ControllerEffect {
-    state.clear_text_selection();
-    if matches!(state.overlay(), Some(Overlay::CommandDetails(_))) {
-        let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
-        return crate::tui::command_details::handle_mouse_scroll(state, area, position, false);
-    }
-    if state.overlay().is_some() {
-        return ControllerEffect::None;
-    }
-    if position_in_plan_pane(position, terminal_size, state) {
-        if state.plan().is_inspector_open() {
-            state.plan_mut().scroll_inspector_down_by(PLAN_SCROLL_STEP);
-        } else {
-            state.plan_mut().scroll_down_by(PLAN_SCROLL_STEP);
-        }
-    } else {
-        state.scroll_timeline_down_by(TIMELINE_SCROLL_STEP);
-    }
-    ControllerEffect::None
-}
-
-pub(super) fn position_in_plan_pane(
-    position: Position,
-    terminal_size: Size,
-    state: &TuiState,
-) -> bool {
-    cockpit_rects(terminal_size, state)
-        .plan
-        .is_some_and(|plan| plan.contains(position))
 }
 
 pub(in crate::tui) fn project_local_effect(effect: &ControllerEffect, state: &mut TuiState) {

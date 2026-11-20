@@ -463,18 +463,40 @@ fn provider_list_items(
         .map_err(unexpected)?
         .into_iter()
         .map(|profile| {
+            let alias = profile.alias().as_str();
             let model = state
                 .preferences()
-                .model_for_provider(profile.alias().as_str())
+                .model_for_provider(alias)
                 .or_else(|| profile.default_model().map(merry_llm::ModelName::as_str));
+            let editable = provider_management.editable_provider(profile.alias()).ok();
+            let base_url = editable
+                .as_ref()
+                .map(|entry| entry.base_url.clone())
+                .or_else(|| {
+                    provider_management
+                        .config()
+                        .and_then(|config| config.provider_by_alias(alias).ok())
+                        .and_then(|effective| match effective {
+                            crate::config::EffectiveProviderConfig::OpenAiCompatible(cfg) => {
+                                cfg.base_url
+                            }
+                            crate::config::EffectiveProviderConfig::Anthropic(cfg) => cfg.base_url,
+                        })
+                });
+            let reasoning_effort = editable
+                .as_ref()
+                .and_then(|entry| entry.reasoning_effort.as_ref())
+                .or_else(|| profile.reasoning_effort())
+                .map(|effort| effort.as_str().to_owned());
             Ok(ProviderListItem::new(
-                profile.alias().as_str(),
+                alias,
                 profile.display_name(),
                 profile.kind(),
                 profile.source(),
                 profile.protocol(),
                 model,
-            ))
+            )
+            .with_details(base_url, reasoning_effort))
         })
         .collect()
 }

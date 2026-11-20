@@ -42,11 +42,19 @@ fn successful_read_output_follows_display_policy_live_and_on_resume() {
                     json!({"path": "notes.txt", "start_line": 2, "max_lines": 3}),
                 );
 
+                let collapsed = render_to_text(&state, 120, 24);
+                assert!(collapsed.contains("Read read_text"));
+                assert!(collapsed.contains("path=notes.txt"));
+                assert!(collapsed.contains("start_line=2"));
+                assert!(collapsed.contains("max_lines=3"));
+                assert!(
+                    !collapsed.contains("read-output-marker"),
+                    "read output stays folded until clicked open: replay={replay}"
+                );
+                assert_eq!(collapsed.contains('▸'), show_output);
+
+                state.toggle_command_expanded(0);
                 let rendered = render_to_text(&state, 120, 24);
-                assert!(rendered.contains("Read read_text"));
-                assert!(rendered.contains("path=notes.txt"));
-                assert!(rendered.contains("start_line=2"));
-                assert!(rendered.contains("max_lines=3"));
                 assert_eq!(
                     rendered.contains("read-output-marker"),
                     show_output,
@@ -88,9 +96,13 @@ fn failed_read_output_stays_visible_live_and_on_resume() {
             );
 
             let rendered = render_to_text(&state, 120, 24);
-            assert!(rendered.contains("path=notes.txt"));
-            assert!(rendered.contains("failed"));
-            assert!(rendered.contains("workspace file was not found"));
+            let normalized = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(normalized.contains("path=notes.txt"), "{rendered}");
+            assert!(normalized.contains("failed"), "{rendered}");
+            assert!(
+                normalized.contains("workspace file was not found"),
+                "{rendered}"
+            );
         }
     }
 }
@@ -131,6 +143,11 @@ fn read_preview_preserves_truncation_and_follows_render_time_settings() {
 
             assert!(!render_to_text(&state, 120, 24).contains("first"));
             state = state.with_successful_command_output(true);
+            assert!(
+                !render_to_text(&state, 120, 24).contains("first"),
+                "read preview stays collapsed until opened"
+            );
+            state.toggle_command_expanded(0);
             let rendered = render_to_text(&state, 120, 24);
             assert!(rendered.contains("first"));
             assert!(!rendered.contains("sixth"));
@@ -161,6 +178,10 @@ fn successful_read_shows_decoded_content_and_arguments_without_completion_noise(
         project_read_result(&mut state, false, result, output, arguments);
 
         assert_eq!(state.timeline().len(), 1);
+        let collapsed = render_to_text(&state, 120, 24);
+        assert!(collapsed.contains('▸'), "{collapsed}");
+        assert!(!collapsed.contains("large raw content"), "{collapsed}");
+        state.toggle_command_expanded(0);
         let rendered = render_to_text(&state, 120, 24);
         assert!(rendered.contains("Read read_text"));
         assert_eq!(rendered.contains("path=AGENTS.md"), has_path);
@@ -208,6 +229,7 @@ fn read_projection_retains_only_bounded_previews_for_json_text_and_empty_files()
             assert!(preview.truncated);
             assert!(!render_to_text(&state, 400, 24).contains('界'));
             state = state.with_successful_command_output(true);
+            state.toggle_command_expanded(0);
             let rendered = render_to_text(&state, 400, 24);
             assert!(rendered.contains('界'));
             assert!(rendered.contains("..."));

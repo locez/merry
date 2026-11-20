@@ -14,7 +14,7 @@ use crate::tui::{
     overlay_render::code_surface_style,
     state::{CommandFailure, CommandView, TimelineItem, TuiState},
     text_wrap::semantic_style,
-    theme::{SemanticColor, dim_color},
+    theme::SemanticColor,
 };
 use ratatui::{
     Frame,
@@ -94,7 +94,7 @@ pub(crate) fn render_details(frame: &mut Frame<'_>, state: &TuiState, details: &
     let mut block = Block::default()
         .title(Line::from(vec![
             Span::styled(
-                " M ",
+                " 🎀 ",
                 semantic_style(state, SemanticColor::Status).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -454,7 +454,7 @@ fn history_row_line(
         }
     }
 
-    let selected_bg = state.theme().color(SemanticColor::Selection).map(dim_color);
+    let selected_bg = state.theme().bg_color(SemanticColor::SelectionBackground);
     let apply_bg = |style: Style| match (selected, selected_bg) {
         (true, Some(bg)) => style.bg(bg),
         _ => style,

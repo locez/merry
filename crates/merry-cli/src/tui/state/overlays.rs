@@ -18,8 +18,15 @@ pub(super) struct OverlayState {
     overlay: Option<Overlay>,
     dialog_back: Option<Box<Overlay>>,
     provider_overlay_back: Option<ProviderOverlayBack>,
-    provider_form_back: Option<ProviderFormOverlay>,
+    provider_form_back: Option<ProviderFormBack>,
+    provider_workbench_items: Vec<ProviderListItem>,
     reasoning_picker_back: Option<Box<Overlay>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProviderFormBack {
+    Standalone(ProviderFormOverlay),
+    Workbench(ProviderManagerOverlay),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +75,128 @@ impl TuiState {
         self.overlays.overlay = Some(Overlay::CommandDetails(details));
     }
 
+    pub(crate) fn open_subagent_inspect(&mut self, agent_id: Option<&str>) {
+        let target = agent_id
+            .map(str::to_owned)
+            .or_else(|| {
+                self.subagents()
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.phase.is_active())
+                    .or_else(|| self.subagents().last())
+                    .map(|entry| entry.agent_id.clone())
+            })
+            .unwrap_or_default();
+        let overlay = crate::tui::subagent_view::SubagentTakeoverOverlay::new(target, self);
+        self.completion_menu = None;
+        self.overlays.dialog_back = None;
+        self.overlays.provider_overlay_back = None;
+        self.overlays.overlay = Some(Overlay::SubagentInspect(overlay));
+    }
+
+    pub(crate) fn select_subagent_inspect(&mut self, agent_id: String) {
+        let mut overlay = match self.overlays.overlay.take() {
+            Some(Overlay::SubagentInspect(view)) => view,
+            other => {
+                self.overlays.overlay = other;
+                return;
+            }
+        };
+        overlay.select_agent(agent_id, self);
+        self.overlays.overlay = Some(Overlay::SubagentInspect(overlay));
+    }
+
+    pub(crate) fn step_subagent_inspect(&mut self, delta: isize) {
+        let count = self.subagents().len();
+        if count == 0 {
+            return;
+        }
+        let current_id = match self.overlays.overlay.as_ref() {
+            Some(Overlay::SubagentInspect(view)) => view.selected_agent_id().to_owned(),
+            _ => return,
+        };
+        let current = self
+            .subagents()
+            .iter()
+            .position(|entry| entry.agent_id == current_id)
+            .unwrap_or(0);
+        let next = if delta < 0 {
+            if current == 0 { count - 1 } else { current - 1 }
+        } else {
+            (current + 1) % count
+        };
+        let next_id = self.subagents()[next].agent_id.clone();
+        self.select_subagent_inspect(next_id);
+    }
+
+    pub(crate) fn inspected_subagent_id(&self) -> Option<String> {
+        match self.overlays.overlay.as_ref() {
+            Some(Overlay::SubagentInspect(view)) => Some(view.selected_agent_id().to_owned()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn load_subagent_inspect_transcript(
+        &mut self,
+        agent_id: &str,
+        task: &str,
+        transcript: &[merry_runtime::SessionTranscriptItem],
+    ) {
+        let fallback = self.subagent_by_id(agent_id).cloned();
+        if let Some(Overlay::SubagentInspect(view)) = self.overlays.overlay.as_mut() {
+            view.load_transcript(agent_id, task, transcript, fallback.as_ref());
+        }
+    }
+
+    pub(crate) fn apply_subagent_live_event(
+        &mut self,
+        agent_id: &str,
+        event: merry_core::RuntimeEvent,
+    ) {
+        if let Some(Overlay::SubagentInspect(view)) = self.overlays.overlay.as_mut()
+            && view.selected_agent_id() == agent_id
+        {
+            view.apply_live_event(event);
+        }
+    }
+
+    pub(crate) fn open_background_task_inspect(&mut self, process_id: String) {
+        self.completion_menu = None;
+        self.overlays.dialog_back = None;
+        self.overlays.provider_overlay_back = None;
+        self.overlays.overlay = Some(Overlay::BackgroundTaskInspect(
+            crate::tui::task_dock::BackgroundTaskOverlay::loading(process_id),
+        ));
+    }
+
+    pub(crate) fn update_background_task_output(
+        &mut self,
+        output: merry_runtime::BackgroundProcessOutput,
+    ) {
+        if let Some(Overlay::BackgroundTaskInspect(inspector)) = self.overlays.overlay.as_mut()
+            && inspector.process_id() == output.summary().id().as_str()
+        {
+            inspector.set_output(output);
+        }
+    }
+
+    pub(crate) fn update_background_task_error(&mut self, process_id: &str, message: String) {
+        if let Some(Overlay::BackgroundTaskInspect(inspector)) = self.overlays.overlay.as_mut()
+            && inspector.process_id() == process_id
+        {
+            inspector.set_error(message);
+        }
+    }
+
+    pub(crate) fn inspected_background_process_id(&self) -> Option<String> {
+        match self.overlays.overlay.as_ref() {
+            Some(Overlay::BackgroundTaskInspect(inspector)) => {
+                Some(inspector.process_id().to_owned())
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn command_details_generation(&self) -> u64 {
         self.command_details_generation
     }
@@ -94,6 +223,8 @@ impl TuiState {
                 | Overlay::PermissionReview(_)
                 | Overlay::Dialog(_)
                 | Overlay::CommandDetails(_)
+                | Overlay::SubagentInspect(_)
+                | Overlay::BackgroundTaskInspect(_)
                 | Overlay::Shortcuts(_),
             )
             | None => {
@@ -103,10 +234,15 @@ impl TuiState {
             }
         }
         let current = self.current_provider_alias().map(str::to_owned);
+        self.overlays.provider_workbench_items = items.clone();
         self.overlays.overlay = Some(Overlay::ProviderManager(ProviderManagerOverlay::new(
             items,
             current.as_deref(),
         )));
+    }
+
+    pub(crate) fn provider_workbench_items(&self) -> &[ProviderListItem] {
+        &self.overlays.provider_workbench_items
     }
 
     pub(crate) fn open_provider_form(&mut self, alias: String, used_aliases: BTreeSet<String>) {
@@ -150,14 +286,17 @@ impl TuiState {
         alias: String,
         display_name: String,
     ) -> bool {
-        let form = match self.overlays.overlay.take() {
-            Some(Overlay::ProviderForm(form)) => form,
+        let back = match self.overlays.overlay.take() {
+            Some(Overlay::ProviderForm(form)) => ProviderFormBack::Standalone(form),
+            Some(Overlay::ProviderManager(manager)) if manager.detail_form().is_some() => {
+                ProviderFormBack::Workbench(manager)
+            }
             overlay => {
                 self.overlays.overlay = overlay;
                 return false;
             }
         };
-        self.overlays.provider_form_back = Some(form);
+        self.overlays.provider_form_back = Some(back);
         self.overlays.overlay = Some(Overlay::ModelPicker(ModelPickerOverlay::for_provider_form(
             alias,
             display_name,
@@ -185,10 +324,12 @@ impl TuiState {
     pub(crate) fn provider_form_discovery_request(
         &self,
     ) -> Option<(Option<String>, ProviderFormValues)> {
-        self.overlays
-            .provider_form_back
-            .as_ref()
-            .map(ProviderFormOverlay::discovery_request)
+        match self.overlays.provider_form_back.as_ref()? {
+            ProviderFormBack::Standalone(form) => Some(form.discovery_request()),
+            ProviderFormBack::Workbench(manager) => manager
+                .detail_form()
+                .map(ProviderFormOverlay::discovery_request),
+        }
     }
 
     pub(crate) fn select_provider_form_model_with_reasoning(
@@ -196,11 +337,21 @@ impl TuiState {
         model: &str,
         reasoning_effort: &str,
     ) -> bool {
-        let Some(mut form) = self.overlays.provider_form_back.take() else {
+        let Some(back) = self.overlays.provider_form_back.take() else {
             return false;
         };
-        form.set_model_and_reasoning(model, reasoning_effort);
-        self.overlays.overlay = Some(Overlay::ProviderForm(form));
+        match back {
+            ProviderFormBack::Standalone(mut form) => {
+                form.set_model_and_reasoning(model, reasoning_effort);
+                self.overlays.overlay = Some(Overlay::ProviderForm(form));
+            }
+            ProviderFormBack::Workbench(mut manager) => {
+                if let Some(form) = manager.detail_form_mut() {
+                    form.set_model_and_reasoning(model, reasoning_effort);
+                }
+                self.overlays.overlay = Some(Overlay::ProviderManager(manager));
+            }
+        }
         self.overlays.reasoning_picker_back = None;
         true
     }
@@ -349,11 +500,15 @@ impl TuiState {
             Some(Overlay::PlanApproval(_) | Overlay::PermissionReview(_) | Overlay::Dialog(_)) => {
                 self.overlays.dialog_back.take().map(|overlay| *overlay)
             }
-            Some(Overlay::ModelPicker(_)) => self
-                .overlays
-                .provider_form_back
-                .take()
-                .map(Overlay::ProviderForm),
+            Some(Overlay::ModelPicker(_)) => {
+                self.overlays
+                    .provider_form_back
+                    .take()
+                    .map(|back| match back {
+                        ProviderFormBack::Standalone(form) => Overlay::ProviderForm(form),
+                        ProviderFormBack::Workbench(manager) => Overlay::ProviderManager(manager),
+                    })
+            }
             Some(Overlay::ReasoningPicker(_)) => self
                 .overlays
                 .reasoning_picker_back

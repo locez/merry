@@ -186,14 +186,48 @@ max_model_turns = 2048
 # one, so local tmux does not need set-clipboard. A terminal copy request is
 # also sent for remote sessions.
 show_successful_command_output = true
+# Lines moved per coalesced mouse-wheel notch (1..=10). Keeps discrete wheels
+# responsive without jumping 15-20 lines when terminals amplify scroll bursts.
+mouse_scroll_lines = 3
+# Enable smooth shimmer, vertical thinking rail wave, and brand pulse motion.
+animations = true
+# Comfortable maximum prose line width on wide terminals (40..=240, or 0 for full width).
+# Code blocks and tables always use the full available timeline width.
+max_reading_width = 104
+# Optional Kitty OSC 66 text-sizing protocol for display titles: "off" (default), "auto", or "on".
+text_sizing = "off"
+
+[tui.header]
+# Ordered segments shown in the top bar. Supported values:
+#   "workspace", "model", "context", "cache", "rate", "tokens"
+items = ["workspace", "model", "context", "cache", "rate"]
 
 [tui.theme]
-# Semantic color names keep component styling configurable without changing
-# rendering code.
+# Every color slot accepts named ANSI colors ("light_magenta", "dark_gray", ...),
+# "default"/"reset" to inherit the terminal color, or hex ("#RRGGBB" / "#RGB").
+# Surfaces & backgrounds (omit to use Merry's built-in dark surface defaults):
+background = "default"
+surface = "#222228"
+surface_subtle = "#1e1e23"
+header_bg = "#361a3a"
+status_bg = "default"
+user_bg = "#2a2230"
+code_bg = "#202026"
+inline_code_bg = "#2a2a32"
+selection_bg = "#36283e"
+chip_bg = "default"
+border = "#46444e"
+border_focus = "light_magenta"
+diff_add_bg = "#182b22"
+diff_delete_bg = "#301920"
+# Typography & semantic accents:
 status = "light_magenta"
 muted = "dark_gray"
+text_secondary = "#a8a0b2"
 focus = "light_magenta"
 assistant = "white"
+heading = "light_magenta"
+link = "light_blue"
 selection = "magenta"
 tool_keyword = "light_cyan"
 command = "light_blue"

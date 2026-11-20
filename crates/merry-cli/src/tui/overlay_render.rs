@@ -1,24 +1,28 @@
 use super::{
     click_target::{OverlayPointer, chip_hit, chip_line},
     keymap::KeyAction,
+    modal_frame::{
+        ModalRects, modal_rects, modal_selection_style, modal_surface_style, render_divider,
+        render_modal_frame,
+    },
     overlay::SettingItem,
     overlay::{
         CommandPalette, CommandSpec, MessageDialogKind, MessageDialogOverlay, Overlay,
         PlanApprovalOverlay,
     },
     state::TuiState,
-    theme::{SemanticColor, dim_color},
+    theme::SemanticColor,
 };
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 
-const MAX_OVERLAY_WIDTH: u16 = 76;
+const MAX_OVERLAY_WIDTH: u16 = 80;
 
 enum CommandPaletteRow<'a> {
     Category(&'a str),
@@ -38,9 +42,16 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
             let visible = palette.visible_commands();
             let command_rows = command_palette_rows(&visible);
             let height = (command_rows.len() as u16 + 5).clamp(8, 22);
-            let region = centered_rect(frame.area(), MAX_OVERLAY_WIDTH, height);
-            render_surface(frame, state, region, " M  Commands ");
-            let inner = inset(region, 2, 1);
+            let modal = modal_rects(frame.area(), MAX_OVERLAY_WIDTH, height);
+            render_modal_frame(
+                frame,
+                state,
+                modal,
+                "Commands",
+                SemanticColor::BorderFocus,
+                true,
+            );
+            let inner = modal.inner;
             if inner.width == 0 || inner.height == 0 {
                 return;
             }
@@ -129,40 +140,49 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
         }
         Overlay::Dialog(dialog) => render_message_dialog(frame, state, dialog),
         Overlay::Shortcuts(_) => render_shortcuts(frame, state),
+        Overlay::SubagentInspect(takeover) => {
+            super::subagent_view::render_subagent_takeover(frame, state, takeover)
+        }
+        Overlay::BackgroundTaskInspect(inspector) => {
+            super::render::task_dock::render_background_task_overlay(frame, state, inspector)
+        }
     }
 }
 
 fn render_plan_approval(frame: &mut Frame<'_>, state: &TuiState, approval: &PlanApprovalOverlay) {
     let split = approval_split(frame.area(), approval.message());
-    let region = split.region;
-    frame.render_widget(Clear, region);
-    frame.render_widget(
-        Block::default()
-            .title(" M  Approve plan and execute? ")
-            .borders(Borders::ALL)
-            .border_type(BorderType::Plain)
-            .border_style(
-                semantic_style(state, SemanticColor::Warning).add_modifier(Modifier::BOLD),
-            )
-            .style(code_surface_style(state)),
-        region,
+    render_modal_frame(
+        frame,
+        state,
+        split.modal,
+        "Approve plan and execute?",
+        SemanticColor::Warning,
+        true,
     );
     frame.render_widget(
         Paragraph::new(approval.message().to_owned())
-            .style(semantic_style(state, SemanticColor::Assistant))
+            .style(semantic_style(state, SemanticColor::Assistant).patch(code_surface_style(state)))
             .wrap(Wrap { trim: false }),
         split.body,
     );
+    render_divider(frame, state, split.divider);
     frame.render_widget(
-        Paragraph::new(chip_line(state, &["Approve", "Back"])),
+        Paragraph::new(chip_line(state, &["Approve", "Back"])).style(code_surface_style(state)),
         split.footer,
     );
 }
 
 fn render_settings(frame: &mut Frame<'_>, state: &TuiState) {
-    let region = centered_rect(frame.area(), MAX_OVERLAY_WIDTH, 22);
-    render_surface(frame, state, region, " M  Settings ");
-    let inner = inset(region, 2, 1);
+    let modal = modal_rects(frame.area(), MAX_OVERLAY_WIDTH, 22);
+    render_modal_frame(
+        frame,
+        state,
+        modal,
+        "Settings",
+        SemanticColor::BorderFocus,
+        true,
+    );
+    let inner = modal.inner;
     let selected = state.selected_setting();
     let model_editor_viewport = state
         .settings_model_editor()
@@ -353,49 +373,46 @@ fn render_shortcuts(frame: &mut Frame<'_>, state: &TuiState) {
         shortcut_line_for_action(state, "Quit", KeyAction::Quit),
     ];
     let height = u16::try_from(lines.len()).unwrap_or(14).saturating_add(6);
-    let region = centered_rect(frame.area(), MAX_OVERLAY_WIDTH, height);
-    render_surface(frame, state, region, " M  Keyboard shortcuts ");
-    let inner = inset(region, 2, 1);
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-pub(super) fn render_surface(frame: &mut Frame<'_>, state: &TuiState, region: Rect, title: &str) {
-    frame.render_widget(Clear, region);
+    let modal = modal_rects(frame.area(), MAX_OVERLAY_WIDTH, height);
+    render_modal_frame(
+        frame,
+        state,
+        modal,
+        "Keyboard shortcuts",
+        SemanticColor::BorderFocus,
+        true,
+    );
     frame.render_widget(
-        Block::default()
-            .title(title.to_owned())
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD))
-            .style(code_surface_style(state)),
-        region,
+        Paragraph::new(lines).style(code_surface_style(state)),
+        modal.inner,
     );
 }
 
 fn render_message_dialog(frame: &mut Frame<'_>, state: &TuiState, dialog: &MessageDialogOverlay) {
     let split = dialog_split(frame.area(), dialog.message());
-    let region = split.region;
     let border_color = match dialog.kind() {
-        MessageDialogKind::Info => SemanticColor::Focus,
+        MessageDialogKind::Info => SemanticColor::BorderFocus,
         MessageDialogKind::Error => SemanticColor::Error,
     };
-    frame.render_widget(Clear, region);
-    frame.render_widget(
-        Block::default()
-            .title(format!(" M  {} ", dialog.title()))
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(semantic_style(state, border_color).add_modifier(Modifier::BOLD))
-            .style(code_surface_style(state)),
-        region,
+    render_modal_frame(
+        frame,
+        state,
+        split.modal,
+        dialog.title(),
+        border_color,
+        true,
     );
     frame.render_widget(
         Paragraph::new(dialog.message().to_owned())
-            .style(semantic_style(state, SemanticColor::Assistant))
+            .style(semantic_style(state, SemanticColor::Assistant).patch(code_surface_style(state)))
             .wrap(Wrap { trim: false }),
         split.body,
     );
-    frame.render_widget(Paragraph::new(chip_line(state, &["Close"])), split.footer);
+    render_divider(frame, state, split.divider);
+    frame.render_widget(
+        Paragraph::new(chip_line(state, &["Close"])).style(code_surface_style(state)),
+        split.footer,
+    );
 }
 
 fn estimated_wrapped_lines(message: &str, width: usize) -> usize {
@@ -523,26 +540,11 @@ pub(super) fn inset(region: Rect, horizontal: u16, vertical: u16) -> Rect {
 }
 
 pub(super) fn code_surface_style(state: &TuiState) -> Style {
-    state
-        .theme()
-        .color(SemanticColor::CodeBackground)
-        .map_or_else(Style::default, |color| Style::default().bg(color))
+    modal_surface_style(state)
 }
 
 pub(super) fn selection_style(state: &TuiState, selected: bool) -> Style {
-    if !selected {
-        return code_surface_style(state);
-    }
-    let foreground = state
-        .theme()
-        .color(SemanticColor::Assistant)
-        .unwrap_or(ratatui::style::Color::White);
-    let background = state
-        .theme()
-        .color(SemanticColor::Focus)
-        .map(dim_color)
-        .unwrap_or(ratatui::style::Color::Magenta);
-    Style::default().fg(foreground).bg(background)
+    modal_selection_style(state, selected)
 }
 
 fn foreground_on_base(state: &TuiState, slot: SemanticColor, base: Style) -> Style {
@@ -562,8 +564,9 @@ pub(super) fn semantic_style(state: &TuiState, slot: SemanticColor) -> Style {
 const SETTINGS_LINE_COUNT: usize = 19;
 
 struct OverlaySplit {
-    region: Rect,
+    modal: ModalRects,
     body: Rect,
+    divider: Rect,
     footer: Rect,
 }
 
@@ -574,15 +577,29 @@ pub(crate) fn overlay_pointer(
 ) -> Option<OverlayPointer> {
     match state.overlay()? {
         Overlay::CommandPalette(palette) => {
-            palette_command_at(area, palette, position).map(OverlayPointer::Palette)
+            let visible = palette.visible_commands();
+            let command_rows = command_palette_rows(&visible);
+            let height = (command_rows.len() as u16 + 5).clamp(8, 22);
+            let modal = modal_rects(area, MAX_OVERLAY_WIDTH, height);
+            if modal.close_hit(position) {
+                return Some(OverlayPointer::CloseModal);
+            }
+            palette_command_at(modal, &command_rows, palette, position).map(OverlayPointer::Palette)
         }
         Overlay::Settings(_) => {
-            settings_item_at(state, area, position).map(OverlayPointer::Setting)
+            let modal = modal_rects(area, MAX_OVERLAY_WIDTH, 22);
+            if modal.close_hit(position) {
+                return Some(OverlayPointer::CloseModal);
+            }
+            settings_item_at(state, modal.inner, position).map(OverlayPointer::Setting)
         }
         Overlay::PlanApproval(approval) => {
-            let footer = approval_split(area, approval.message()).footer;
+            let split = approval_split(area, approval.message());
+            if split.modal.close_hit(position) {
+                return Some(OverlayPointer::CloseModal);
+            }
             match chip_hit(
-                Position::new(footer.x, footer.y),
+                Position::new(split.footer.x, split.footer.y),
                 &["Approve", "Back"],
                 position,
             ) {
@@ -595,13 +612,24 @@ pub(crate) fn overlay_pointer(
             super::permission_render::permission_review_pointer(state, area, review, position)
         }
         Overlay::Dialog(dialog) => {
-            let footer = dialog_split(area, dialog.message()).footer;
-            chip_hit(Position::new(footer.x, footer.y), &["Close"], position)
-                .map(|_| OverlayPointer::DialogClose)
+            let split = dialog_split(area, dialog.message());
+            if split.modal.close_hit(position) {
+                return Some(OverlayPointer::DialogClose);
+            }
+            chip_hit(
+                Position::new(split.footer.x, split.footer.y),
+                &["Close"],
+                position,
+            )
+            .map(|_| OverlayPointer::DialogClose)
         }
         Overlay::ProviderManager(manager) => {
-            super::provider_render::provider_manager_row(area, manager, position)
-                .map(OverlayPointer::Provider)
+            super::provider_render::provider_manager_pointer(area, manager, position)
+                .map(OverlayPointer::ProviderWorkbench)
+        }
+        Overlay::ProviderForm(form) => {
+            super::provider_render::provider_form_pointer(area, state, form, position)
+                .map(OverlayPointer::ProviderWorkbench)
         }
         Overlay::ModelPicker(picker) => {
             match super::provider_render::model_picker_pointer(area, picker, position) {
@@ -611,25 +639,47 @@ pub(crate) fn overlay_pointer(
                 Some(super::provider_render::ModelPointer::Manual) => {
                     Some(OverlayPointer::ManualModel)
                 }
+                Some(super::provider_render::ModelPointer::Close) => {
+                    Some(OverlayPointer::CloseModal)
+                }
                 None => None,
             }
         }
         Overlay::ReasoningPicker(picker) => {
-            super::provider_render::reasoning_row(area, picker, position)
-                .map(OverlayPointer::Reasoning)
+            match super::provider_render::reasoning_pointer(area, picker, position) {
+                Some(Ok(index)) => Some(OverlayPointer::Reasoning(index)),
+                Some(Err(())) => Some(OverlayPointer::CloseModal),
+                None => None,
+            }
         }
         Overlay::CommandDetails(details) => {
             super::command_details::details_pointer(state, area, details, position)
         }
-        Overlay::ProviderForm(_) | Overlay::Shortcuts(_) => None,
+        Overlay::Shortcuts(_) => {
+            let height = 20u16;
+            let modal = modal_rects(area, MAX_OVERLAY_WIDTH, height);
+            modal
+                .close_hit(position)
+                .then_some(OverlayPointer::CloseModal)
+        }
+        Overlay::SubagentInspect(_) => {
+            super::subagent_view::subagent_takeover_pointer(state, area, position)
+                .map(OverlayPointer::Subagent)
+        }
+        Overlay::BackgroundTaskInspect(inspector) => {
+            super::render::task_dock::background_task_overlay_pointer(
+                state, inspector, area, position,
+            )
+            .map(OverlayPointer::BackgroundTask)
+        }
     }
 }
 
 fn approval_split(area: Rect, message: &str) -> OverlaySplit {
     let desired_width = area.width.saturating_sub(4).min(MAX_OVERLAY_WIDTH);
-    let content_width = usize::from(desired_width.saturating_sub(4)).max(1);
+    let content_width = usize::from(desired_width.saturating_sub(6)).max(1);
     let body_lines = estimated_wrapped_lines(message, content_width);
-    let desired_height = u16::try_from(body_lines.saturating_add(6))
+    let desired_height = u16::try_from(body_lines.saturating_add(7))
         .unwrap_or(24)
         .clamp(10, area.height.saturating_sub(2).min(24));
     split_overlay(area, desired_width, desired_height, 1)
@@ -639,32 +689,39 @@ fn dialog_split(area: Rect, message: &str) -> OverlaySplit {
     let desired_width = area.width.clamp(8, 72);
     let content_width = usize::from(desired_width.saturating_sub(6).max(1));
     let body_lines = estimated_wrapped_lines(message, content_width);
-    let desired_height = u16::try_from(body_lines.saturating_add(6))
+    let desired_height = u16::try_from(body_lines.saturating_add(7))
         .unwrap_or(20)
         .clamp(8, 20);
     split_overlay(area, desired_width, desired_height, 1)
 }
 
 fn split_overlay(area: Rect, width: u16, height: u16, footer_height: u16) -> OverlaySplit {
-    let region = centered_rect(area, width, height);
-    let inner = inset(region, 2, 1);
+    let modal = modal_rects(area, width, height);
+    let inner = modal.inner;
+    let divider_height = u16::from(inner.height >= footer_height.saturating_add(3));
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(footer_height)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(divider_height),
+            Constraint::Length(footer_height),
+        ])
         .split(inner);
     OverlaySplit {
-        region,
+        modal,
         body: rows[0],
-        footer: rows[1],
+        divider: rows[1],
+        footer: rows[2],
     }
 }
 
-fn palette_command_at(area: Rect, palette: &CommandPalette, position: Position) -> Option<usize> {
-    let visible = palette.visible_commands();
-    let command_rows = command_palette_rows(&visible);
-    let height = (command_rows.len() as u16 + 5).clamp(8, 22);
-    let region = centered_rect(area, MAX_OVERLAY_WIDTH, height);
-    let inner = inset(region, 2, 1);
+fn palette_command_at(
+    modal: ModalRects,
+    command_rows: &[CommandPaletteRow<'_>],
+    palette: &CommandPalette,
+    position: Position,
+) -> Option<usize> {
+    let inner = modal.inner;
     if inner.width == 0 || inner.height == 0 {
         return None;
     }
@@ -692,15 +749,13 @@ fn palette_command_at(area: Rect, palette: &CommandPalette, position: Position) 
     }
 }
 
-fn settings_item_at(state: &TuiState, area: Rect, position: Position) -> Option<SettingItem> {
+fn settings_item_at(state: &TuiState, inner: Rect, position: Position) -> Option<SettingItem> {
     if state.settings_model_editor().is_some()
         || state.settings_reasoning_editor().is_some()
         || state.settings_context_window_editor().is_some()
     {
         return None;
     }
-    let region = centered_rect(area, MAX_OVERLAY_WIDTH, 22);
-    let inner = inset(region, 2, 1);
     if !inner.contains(position) {
         return None;
     }

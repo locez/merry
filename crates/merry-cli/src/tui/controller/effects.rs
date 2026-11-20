@@ -32,6 +32,10 @@ pub(super) struct ControllerServices<'a> {
     #[cfg(feature = "web")]
     pub(super) web_service: &'a mut RuntimeWebService,
     pub(super) background_tasks: &'a mut JoinSet<()>,
+    pub(super) subagent_live_stream: &'a mut Option<(
+        String,
+        tokio::sync::broadcast::Receiver<merry_core::RuntimeEvent>,
+    )>,
 }
 
 pub(super) async fn dispatch_effect(
@@ -50,6 +54,7 @@ pub(super) async fn dispatch_effect(
         #[cfg(feature = "web")]
         web_service,
         background_tasks,
+        subagent_live_stream,
     } = services;
     if let Some(should_quit) =
         crate::tui::plan_controller::dispatch_effect(&effect, session, state).await
@@ -203,11 +208,97 @@ pub(super) async fn dispatch_effect(
         }
         ControllerEffect::ShowTasks => {
             let processes = session.runtime().background_processes();
+            state.sync_background_processes(processes.clone());
             let subagents = session.runtime().subagent_snapshot().await;
+            if let Some(views) = subagents.as_deref() {
+                state.apply_subagent_status_views(views);
+            }
             state.push_timeline_item(TimelineItem::LocalCommand {
                 title: "Tasks".to_owned(),
                 body: crate::tui::tasks::tasks_body(&processes, subagents.as_deref()),
             });
+            Ok(false)
+        }
+        ControllerEffect::RefreshSubagents => {
+            state.sync_background_processes(session.runtime().background_processes());
+            if let Some(views) = session.runtime().subagent_snapshot().await {
+                state.apply_subagent_status_views(&views);
+            }
+            if let Some(agent_id) = state.inspected_subagent_id()
+                && let Ok(id) = merry_core::SubagentId::new(&agent_id)
+                && let Some(inspect) = session.runtime().inspect_subagent(&id).await
+            {
+                state.load_subagent_inspect_transcript(
+                    &agent_id,
+                    &inspect.task,
+                    &inspect.transcript,
+                );
+                *subagent_live_stream = Some((agent_id, inspect.events));
+            }
+            Ok(false)
+        }
+        ControllerEffect::SendSubagentMessage { agent_id, message } => {
+            if let Ok(id) = merry_core::SubagentId::new(&agent_id) {
+                let already_subscribed = subagent_live_stream
+                    .as_ref()
+                    .is_some_and(|(current_id, _)| current_id == &agent_id);
+                if !already_subscribed
+                    && let Some(inspect) = session.runtime().inspect_subagent(&id).await
+                {
+                    *subagent_live_stream = Some((agent_id.clone(), inspect.events));
+                }
+                if let Err(error) = session.runtime().send_subagent_message(&id, message).await {
+                    state.apply_subagent_live_event(
+                        &agent_id,
+                        merry_core::RuntimeEvent::RunFailed {
+                            diagnostic: merry_core::ErrorInfo::new(
+                                "subagent_message_failed",
+                                &error.to_string(),
+                            )
+                            .expect("static diagnostic code is valid"),
+                            source: merry_core::RuntimeEventSource::new(
+                                session.metadata.session_id.clone(),
+                                0,
+                            ),
+                        },
+                    );
+                } else if let Some(views) = session.runtime().subagent_snapshot().await {
+                    state.apply_subagent_status_views(&views);
+                }
+            }
+            Ok(false)
+        }
+        ControllerEffect::CancelSubagent(agent_id) => {
+            if let Ok(id) = merry_core::SubagentId::new(&agent_id) {
+                let _ = session.runtime().cancel_subagent(&id).await;
+                if let Some(views) = session.runtime().subagent_snapshot().await {
+                    state.apply_subagent_status_views(&views);
+                }
+            }
+            Ok(false)
+        }
+        ControllerEffect::InspectBackgroundProcess(process_id) => {
+            state.sync_background_processes(session.runtime().background_processes());
+            match merry_runtime::BackgroundProcessId::new(process_id.clone()) {
+                Ok(id) => match session.runtime().read_background_process(&id) {
+                    Ok(output) => state.update_background_task_output(output),
+                    Err(err) => state.update_background_task_error(&process_id, err.message()),
+                },
+                Err(message) => state.update_background_task_error(&process_id, message),
+            }
+            Ok(false)
+        }
+        ControllerEffect::StopBackgroundProcess(process_id) => {
+            if let Ok(id) = merry_runtime::BackgroundProcessId::new(process_id.clone()) {
+                let _ = session.runtime().stop_background_process(&id);
+                if state.inspected_background_process_id().as_deref() == Some(process_id.as_str()) {
+                    match session.runtime().read_background_process(&id) {
+                        Ok(output) => state.update_background_task_output(output),
+                        Err(err) => state.update_background_task_error(&process_id, err.message()),
+                    }
+                }
+            }
+            state.sync_background_processes(session.runtime().background_processes());
             Ok(false)
         }
         ControllerEffect::SaveSession => {

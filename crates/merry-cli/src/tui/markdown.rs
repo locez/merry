@@ -1,20 +1,23 @@
+mod table;
+
+use self::table::{TableState, spans_width, table_lines};
 use super::{
-    copy_controls::{CopyContent, CopyTarget, copy_header},
+    copy_controls::{CopyContent, CopyTarget, code_block_header},
     highlight::highlight_code_to_lines,
     state::TuiState,
     text_wrap::{
-        StyledTextPart, inline_code_style, semantic_style, wrap_styled_parts,
+        StyledTextPart, inline_code_style, inline_code_text, semantic_style, wrap_styled_parts,
         wrap_styled_parts_preserving_leading_whitespace,
     },
     theme::SemanticColor,
     transcript::{SelectionPolicy, TranscriptRow},
 };
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 /// Display lines and source-backed controls produced by the same Markdown parse.
 pub(crate) struct RenderedMarkdown {
@@ -47,6 +50,7 @@ pub(crate) fn markdown_lines(
 struct MarkdownRenderer<'state> {
     state: &'state TuiState,
     region_width: u16,
+    prose_width: u16,
     rows: Vec<TranscriptRow>,
     copy_targets: Vec<CopyTarget>,
     parts: Vec<StyledTextPart>,
@@ -55,6 +59,8 @@ struct MarkdownRenderer<'state> {
     quote_depth: usize,
     list_stack: Vec<ListState>,
     pending_list_marker: Option<String>,
+    active_list_indent: usize,
+    prev_list_item_multiline: bool,
     code_block: Option<CodeBlockState>,
     table: Option<TableState>,
 }
@@ -76,25 +82,19 @@ struct LinkState {
     label: String,
 }
 
-#[derive(Debug, Default, Clone)]
-struct TableState {
-    rows: Vec<TableRow>,
-    current_row: Option<TableRow>,
-    current_cell: Option<Vec<StyledTextPart>>,
-    in_head: bool,
-}
-
-#[derive(Debug, Clone)]
-struct TableRow {
-    cells: Vec<Vec<StyledTextPart>>,
-    header: bool,
-}
-
 impl<'state> MarkdownRenderer<'state> {
     fn new(state: &'state TuiState, region_width: u16) -> Self {
+        let max_reading = state.max_reading_width();
+        let prose_width = if max_reading == 0 {
+            region_width
+        } else {
+            region_width.min(max_reading)
+        }
+        .max(1);
         Self {
             state,
             region_width,
+            prose_width,
             rows: Vec::new(),
             copy_targets: Vec::new(),
             parts: Vec::new(),
@@ -103,8 +103,23 @@ impl<'state> MarkdownRenderer<'state> {
             quote_depth: 0,
             list_stack: Vec::new(),
             pending_list_marker: None,
+            active_list_indent: 0,
+            prev_list_item_multiline: false,
             code_block: None,
             table: None,
+        }
+    }
+
+    fn push_block_gap(&mut self) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let last_is_blank = self
+            .rows
+            .last()
+            .is_some_and(|row| row.display.spans.iter().all(|span| span.content.is_empty()));
+        if !last_is_blank {
+            self.push_row(TranscriptRow::new(Line::from(""), SelectionPolicy::Keep));
         }
     }
 
@@ -122,16 +137,17 @@ impl<'state> MarkdownRenderer<'state> {
             Event::End(tag) => self.end_tag(tag),
             Event::Text(text) => self.push_text(text.as_ref()),
             Event::Code(code) => self.push_atomic_text(
-                format!(" {} ", code.as_ref()),
+                inline_code_text(self.state, code.as_ref()),
                 inline_code_style(self.state, self.current_style()),
             ),
             Event::SoftBreak | Event::HardBreak => self.flush_parts(),
             Event::Rule => {
                 self.flush_parts();
+                self.push_block_gap();
                 self.push_row(TranscriptRow::new(
                     Line::from(Span::styled(
-                        "-".repeat(usize::from(self.region_width).max(1)),
-                        semantic_style(self.state, SemanticColor::Muted),
+                        "─".repeat(usize::from(self.prose_width).max(1)),
+                        semantic_style(self.state, SemanticColor::Border),
                     )),
                     SelectionPolicy::Keep,
                 ));
@@ -168,25 +184,46 @@ impl<'state> MarkdownRenderer<'state> {
 
     fn start_tag(&mut self, tag: Tag<'_>) {
         match tag {
-            Tag::Paragraph => {}
-            Tag::Heading { .. } => {
+            Tag::Paragraph => {
+                if self.list_stack.is_empty() && self.quote_depth == 0 {
+                    self.push_block_gap();
+                }
+            }
+            Tag::Heading { level, .. } => {
                 self.flush_parts();
-                self.push_style(
-                    semantic_style(self.state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-                );
+                self.push_block_gap();
+                let style = match level {
+                    HeadingLevel::H1 | HeadingLevel::H2 => {
+                        semantic_style(self.state, SemanticColor::Heading)
+                            .add_modifier(Modifier::BOLD)
+                    }
+                    _ => semantic_style(self.state, SemanticColor::Assistant)
+                        .add_modifier(Modifier::BOLD),
+                };
+                self.push_style(style);
             }
             Tag::BlockQuote(_) => {
                 self.flush_parts();
+                if self.quote_depth == 0 {
+                    self.push_block_gap();
+                }
                 self.quote_depth = self.quote_depth.saturating_add(1);
             }
             Tag::CodeBlock(kind) => {
                 self.flush_parts();
+                self.push_block_gap();
                 self.code_block = Some(CodeBlockState {
                     lang: code_block_lang(kind),
                     text: String::new(),
                 });
             }
-            Tag::List(start) => self.list_stack.push(ListState { next_number: start }),
+            Tag::List(start) => {
+                if self.list_stack.is_empty() && self.quote_depth == 0 {
+                    self.flush_parts();
+                    self.push_block_gap();
+                }
+                self.list_stack.push(ListState { next_number: start });
+            }
             Tag::Item => self.start_list_item(),
             Tag::Emphasis => self.push_style(self.current_style().add_modifier(Modifier::ITALIC)),
             Tag::Strong => self.push_style(strong_style(self.state)),
@@ -203,6 +240,7 @@ impl<'state> MarkdownRenderer<'state> {
             Tag::HtmlBlock => {}
             Tag::Table(_) => {
                 self.flush_parts();
+                self.push_block_gap();
                 self.table = Some(TableState::default());
             }
             Tag::TableHead
@@ -221,14 +259,27 @@ impl<'state> MarkdownRenderer<'state> {
                 self.flush_parts();
                 self.quote_depth = self.quote_depth.saturating_sub(1);
             }
-            TagEnd::Heading(_) => {
+            TagEnd::Heading(level) => {
                 self.flush_parts();
                 self.pop_style();
+                if level == HeadingLevel::H1 {
+                    let rule_len = usize::from(self.prose_width).clamp(1, 36);
+                    self.push_row(TranscriptRow::new(
+                        Line::from(Span::styled(
+                            "━".repeat(rule_len),
+                            semantic_style(self.state, SemanticColor::Border),
+                        )),
+                        SelectionPolicy::Skip,
+                    ));
+                }
             }
             TagEnd::CodeBlock => {}
             TagEnd::List(_) => {
                 self.flush_parts();
                 self.list_stack.pop();
+                if self.list_stack.is_empty() {
+                    self.prev_list_item_multiline = false;
+                }
             }
             TagEnd::Item => self.flush_parts(),
             TagEnd::Emphasis
@@ -254,6 +305,10 @@ impl<'state> MarkdownRenderer<'state> {
     fn start_list_item(&mut self) {
         self.flush_parts();
         let depth = self.list_stack.len().saturating_sub(1);
+        if depth == 0 && self.prev_list_item_multiline {
+            self.push_block_gap();
+        }
+        self.prev_list_item_multiline = false;
         let indent = "  ".repeat(depth);
         let marker = match self.list_stack.last_mut() {
             Some(ListState {
@@ -333,7 +388,7 @@ impl<'state> MarkdownRenderer<'state> {
             }
             Event::Code(code) => {
                 self.push_table_part(StyledTextPart {
-                    text: format!(" {} ", code.as_ref()),
+                    text: inline_code_text(self.state, code.as_ref()),
                     style: inline_code_style(self.state, self.current_style()),
                     atomic: true,
                 });
@@ -400,6 +455,7 @@ impl<'state> MarkdownRenderer<'state> {
         let Some(marker) = self.pending_list_marker.take() else {
             return;
         };
+        self.active_list_indent = UnicodeWidthStr::width(marker.as_str());
         self.parts.push(StyledTextPart {
             text: marker,
             style: semantic_style(self.state, SemanticColor::Muted),
@@ -410,12 +466,42 @@ impl<'state> MarkdownRenderer<'state> {
     fn flush_parts(&mut self) {
         self.push_pending_list_marker();
         if self.parts.is_empty() {
+            self.active_list_indent = 0;
             return;
         }
         let parts = std::mem::take(&mut self.parts);
+        let list_indent = std::mem::take(&mut self.active_list_indent);
         if self.quote_depth == 0 {
+            if list_indent > 0 && parts.len() > 1 {
+                let mut iter = parts.into_iter();
+                let marker = iter.next().expect("non-empty parts");
+                let body: Vec<StyledTextPart> = iter.collect();
+                let body_width = self
+                    .prose_width
+                    .saturating_sub(u16::try_from(list_indent).unwrap_or(u16::MAX))
+                    .max(1);
+                let continuation = " ".repeat(list_indent);
+                let wrapped: Vec<Line<'static>> = wrap_styled_parts(body, body_width)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, mut line)| {
+                        if index == 0 {
+                            line.spans
+                                .insert(0, Span::styled(marker.text.clone(), marker.style));
+                        } else {
+                            line.spans.insert(0, Span::raw(continuation.clone()));
+                        }
+                        line
+                    })
+                    .collect();
+                if wrapped.len() > 1 {
+                    self.prev_list_item_multiline = true;
+                }
+                self.push_lines(wrapped, SelectionPolicy::Keep);
+                return;
+            }
             self.push_lines(
-                wrap_styled_parts(parts, self.region_width),
+                wrap_styled_parts(parts, self.prose_width),
                 SelectionPolicy::Keep,
             );
             return;
@@ -424,11 +510,11 @@ impl<'state> MarkdownRenderer<'state> {
         let prefix = quote_prefix(self.quote_depth);
         let prefix_width = UnicodeWidthStr::width(prefix.as_str());
         let content_width = self
-            .region_width
+            .prose_width
             .saturating_sub(u16::try_from(prefix_width).unwrap_or(u16::MAX))
             .max(1);
         let prefix_style =
-            semantic_style(self.state, SemanticColor::Focus).add_modifier(Modifier::BOLD);
+            semantic_style(self.state, SemanticColor::BorderFocus).add_modifier(Modifier::BOLD);
         self.push_lines(
             wrap_styled_parts(parts, content_width)
                 .into_iter()
@@ -444,11 +530,12 @@ impl<'state> MarkdownRenderer<'state> {
 
     fn flush_code_block(&mut self, block: CodeBlockState) {
         let copy_target = if !block.text.is_empty()
-            && let Some((header, width)) = copy_header(self.state, self.region_width)
+            && let Some((header, column, width)) =
+                code_block_header(self.state, block.lang.as_deref(), self.region_width)
         {
             let line_index = self.rows.len();
             self.push_row(TranscriptRow::new(header, SelectionPolicy::Skip));
-            Some((line_index, width))
+            Some((line_index, column, width))
         } else {
             None
         };
@@ -470,12 +557,13 @@ impl<'state> MarkdownRenderer<'state> {
                 );
             }
         }
-        if let Some((line_index, width)) = copy_target {
-            self.copy_targets.push(CopyTarget::new(
+        if let Some((line_index, column, width)) = copy_target {
+            self.copy_targets.push(CopyTarget {
                 line_index,
+                column,
                 width,
-                CopyContent::Text(block.text),
-            ));
+                content: CopyContent::Text(block.text),
+            });
         }
     }
 
@@ -563,216 +651,6 @@ impl<'state> MarkdownRenderer<'state> {
     }
 }
 
-impl TableState {
-    fn start_row(&mut self) {
-        self.current_row = Some(TableRow {
-            cells: Vec::new(),
-            header: self.in_head,
-        });
-    }
-
-    fn finish_row(&mut self) {
-        self.finish_cell();
-        if let Some(row) = self.current_row.take()
-            && !row.cells.is_empty()
-        {
-            self.rows.push(row);
-        }
-    }
-
-    fn start_cell(&mut self) {
-        self.current_cell = Some(Vec::new());
-    }
-
-    fn finish_cell(&mut self) {
-        let Some(cell) = self.current_cell.take() else {
-            return;
-        };
-        if let Some(row) = &mut self.current_row {
-            row.cells.push(cell);
-        }
-    }
-
-    fn push_part(&mut self, part: StyledTextPart) {
-        if self.current_cell.is_none() {
-            self.start_cell();
-        }
-        if let Some(cell) = &mut self.current_cell {
-            cell.push(part);
-        }
-    }
-}
-
-fn table_lines(state: &TuiState, rows: Vec<TableRow>, region_width: u16) -> Vec<Line<'static>> {
-    if rows.is_empty() {
-        return Vec::new();
-    }
-
-    let column_count = rows.iter().map(|row| row.cells.len()).max().unwrap_or(0);
-    if column_count == 0 {
-        return Vec::new();
-    }
-
-    let mut widths = vec![1; column_count];
-    for row in &rows {
-        for (index, cell) in row.cells.iter().enumerate() {
-            widths[index] = widths[index].max(styled_parts_width(cell));
-        }
-    }
-    fit_table_widths(&mut widths, usize::from(region_width).max(1));
-
-    let mut lines = Vec::new();
-    for row in rows {
-        lines.push(table_row_line(state, &row, &widths));
-        if row.header {
-            lines.push(table_separator_line(state, &widths));
-        }
-    }
-    lines
-}
-
-fn table_row_line(state: &TuiState, row: &TableRow, widths: &[usize]) -> Line<'static> {
-    let mut spans = Vec::new();
-    spans.push(Span::styled(
-        " ".to_owned(),
-        semantic_style(state, SemanticColor::Muted),
-    ));
-    for (index, width) in widths.iter().copied().enumerate() {
-        if index > 0 {
-            spans.push(Span::styled(
-                "  ".to_owned(),
-                semantic_style(state, SemanticColor::Muted),
-            ));
-        }
-        let cell = row.cells.get(index).map(Vec::as_slice).unwrap_or(&[]);
-        let cell_style = if row.header {
-            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD)
-        } else {
-            semantic_style(state, SemanticColor::Assistant)
-        };
-        let mut cell_spans = if row.header {
-            truncate_styled_parts_with_override(cell, width, cell_style)
-        } else {
-            truncate_styled_parts(cell, width, cell_style)
-        };
-        let cell_width = spans_width(&cell_spans);
-        spans.append(&mut cell_spans);
-        if cell_width < width {
-            spans.push(Span::styled(
-                " ".repeat(width - cell_width),
-                semantic_style(state, SemanticColor::Muted),
-            ));
-        }
-    }
-    Line::from(spans)
-}
-
-fn table_separator_line(state: &TuiState, widths: &[usize]) -> Line<'static> {
-    let mut text = String::from(" ");
-    for (index, width) in widths.iter().copied().enumerate() {
-        if index > 0 {
-            text.push_str("  ");
-        }
-        text.push_str(&"-".repeat(width.max(3)));
-    }
-    Line::from(Span::styled(
-        text,
-        semantic_style(state, SemanticColor::Muted),
-    ))
-}
-
-fn fit_table_widths(widths: &mut [usize], max_width: usize) {
-    if widths.is_empty() {
-        return;
-    }
-    let separators = widths.len().saturating_sub(1) * 2 + 1;
-    let available = max_width.saturating_sub(separators).max(widths.len());
-    let mut total: usize = widths.iter().sum();
-    while total > available {
-        let Some((index, width)) = widths
-            .iter()
-            .copied()
-            .enumerate()
-            .filter(|(_, width)| *width > 3)
-            .max_by_key(|(_, width)| *width)
-        else {
-            break;
-        };
-        widths[index] = width.saturating_sub(1);
-        total = total.saturating_sub(1);
-    }
-}
-
-fn styled_parts_width(parts: &[StyledTextPart]) -> usize {
-    parts
-        .iter()
-        .map(|part| UnicodeWidthStr::width(part.text.as_str()))
-        .sum()
-}
-
-fn spans_width(spans: &[Span<'static>]) -> usize {
-    spans
-        .iter()
-        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
-        .sum()
-}
-
-fn truncate_styled_parts(
-    parts: &[StyledTextPart],
-    max_width: usize,
-    fallback_style: Style,
-) -> Vec<Span<'static>> {
-    truncate_styled_parts_impl(parts, max_width, fallback_style, None)
-}
-
-fn truncate_styled_parts_with_override(
-    parts: &[StyledTextPart],
-    max_width: usize,
-    style: Style,
-) -> Vec<Span<'static>> {
-    truncate_styled_parts_impl(parts, max_width, style, Some(style))
-}
-
-fn truncate_styled_parts_impl(
-    parts: &[StyledTextPart],
-    max_width: usize,
-    fallback_style: Style,
-    style_override: Option<Style>,
-) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let mut used = 0;
-    for part in parts {
-        if used >= max_width {
-            break;
-        }
-        let remaining = max_width - used;
-        let text = truncate_to_width(&part.text, remaining);
-        if text.is_empty() {
-            continue;
-        }
-        used += UnicodeWidthStr::width(text.as_str());
-        spans.push(Span::styled(text, style_override.unwrap_or(part.style)));
-    }
-    if spans.is_empty() {
-        spans.push(Span::styled(String::new(), fallback_style));
-    }
-    spans
-}
-
-fn truncate_to_width(text: &str, max_width: usize) -> String {
-    let mut width = 0;
-    let mut result = String::new();
-    for character in text.chars() {
-        let char_width = character.width().unwrap_or(0);
-        if width + char_width > max_width {
-            break;
-        }
-        width += char_width;
-        result.push(character);
-    }
-    result
-}
-
 fn code_block_lang(kind: CodeBlockKind<'_>) -> Option<String> {
     match kind {
         CodeBlockKind::Fenced(lang) => {
@@ -839,7 +717,7 @@ fn strong_style(state: &TuiState) -> Style {
 }
 
 fn link_style(state: &TuiState, _url: &str) -> Style {
-    semantic_style(state, SemanticColor::Command).add_modifier(Modifier::UNDERLINED)
+    semantic_style(state, SemanticColor::Link).add_modifier(Modifier::UNDERLINED)
 }
 
 fn strikethrough_style(state: &TuiState) -> Style {

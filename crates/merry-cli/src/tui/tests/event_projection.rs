@@ -93,8 +93,12 @@ fn projector_rebuilds_resume_transcript_history() {
         &state.timeline()[1],
         TimelineItem::Assistant { text } if text == "我先读一下文件。"
     ));
+    let collapsed = render_to_text(&state, 120, 24);
+    assert!(collapsed.contains("Read read_text path=hello_world.py"));
+    assert!(collapsed.contains('▸'), "{collapsed}");
+    assert!(!collapsed.contains("print('hi')"), "{collapsed}");
+    state.toggle_command_expanded(2);
     let rendered = render_to_text(&state, 120, 24);
-    assert!(rendered.contains("Read read_text path=hello_world.py"));
     assert!(rendered.contains("print('hi')"));
 }
 

@@ -2,20 +2,49 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use merry_runtime::{
     MAX_USER_IMAGES, RuntimeError, UserImageInput, UserMessageInput, user_image_label,
 };
-use std::{ops::Range, sync::Arc};
+use std::ops::Range;
 use unicode_width::UnicodeWidthStr;
 
-pub(crate) const MAX_INPUT_HISTORY: usize = 200;
+#[path = "input_history.rs"]
+mod history;
+#[path = "input_types.rs"]
+mod types;
+
+use crate::tui::input_layout::{
+    next_char_boundary, next_word_boundary, previous_char_boundary, previous_word_boundary,
+};
+pub(crate) use history::{
+    HistorySearch, InputHistory, normalize_input_history, push_input_history_entry,
+};
+pub(crate) use types::{DraftImage, TuiSubmission};
+
 const PASTE_PLACEHOLDER_THRESHOLD_CHARS: usize = 256;
+const MAX_UNDO_HISTORY: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) struct TextInputViewport {
     pub(crate) text: String,
     pub(crate) image_placeholders: Vec<String>,
+    /// Optional byte range inside each visible row that is currently selected.
+    pub(crate) row_selections: Vec<Option<Range<usize>>>,
     pub(crate) cursor_column: usize,
     pub(crate) cursor_row: usize,
     pub(crate) visible_rows: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditKind {
+    InsertChar,
+    Delete,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TextInputSnapshot {
+    text: String,
+    cursor: usize,
+    elements: Vec<InputElement>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -23,9 +52,15 @@ pub(crate) struct TextInputViewport {
 pub(crate) struct TextInput {
     text: String,
     cursor: usize,
+    /// Anchor byte offset for active selection; when `Some(a)` and `a != cursor`,
+    /// `a.min(cursor)..a.max(cursor)` is selected.
+    selection_anchor: Option<usize>,
     /// Display column retained while moving across shorter visual rows.
     preferred_column: Option<usize>,
     elements: Vec<InputElement>,
+    undo_stack: Vec<TextInputSnapshot>,
+    redo_stack: Vec<TextInputSnapshot>,
+    last_edit_kind: Option<EditKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,64 +74,6 @@ struct InputElement {
 enum InputElementPayload {
     LargePaste { content: String },
     Image { image: DraftImage },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DraftImage {
-    png_bytes: Arc<[u8]>,
-    width: u32,
-    height: u32,
-}
-
-impl DraftImage {
-    pub(crate) fn new(
-        png_bytes: impl Into<Arc<[u8]>>,
-        width: u32,
-        height: u32,
-    ) -> Result<Self, RuntimeError> {
-        let image = UserImageInput::png("[Image #1]", png_bytes, width, height)?;
-        Ok(Self {
-            png_bytes: image.shared_png_bytes(),
-            width,
-            height,
-        })
-    }
-
-    #[must_use]
-    pub(crate) fn shared_png_bytes(&self) -> Arc<[u8]> {
-        Arc::clone(&self.png_bytes)
-    }
-
-    #[must_use]
-    pub(crate) fn width(&self) -> u32 {
-        self.width
-    }
-
-    #[must_use]
-    pub(crate) fn height(&self) -> u32 {
-        self.height
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TuiSubmission {
-    pub(crate) text: String,
-    pub(crate) history_text: String,
-    pub(crate) images: Vec<UserImageInput>,
-}
-
-impl TuiSubmission {
-    pub(crate) fn into_user_message_and_history(
-        self,
-    ) -> Result<(UserMessageInput, String), RuntimeError> {
-        let Self {
-            text,
-            history_text,
-            images,
-        } = self;
-        let message = UserMessageInput::new(&text, images)?;
-        Ok((message, history_text))
-    }
 }
 
 #[allow(dead_code)]
@@ -133,6 +110,58 @@ impl TextInput {
         UnicodeWidthStr::width(&self.text[..self.cursor])
     }
 
+    /// Returns the active selected byte range in `self.text`, if non-empty.
+    pub(crate) fn selection_range(&self) -> Option<Range<usize>> {
+        let anchor = self.selection_anchor?.min(self.text.len());
+        let cursor = self.cursor.min(self.text.len());
+        if anchor == cursor {
+            None
+        } else {
+            Some(anchor.min(cursor)..anchor.max(cursor))
+        }
+    }
+
+    pub(crate) fn has_selection(&self) -> bool {
+        self.selection_range().is_some()
+    }
+
+    /// Returns the currently selected text (expanding large-paste placeholders).
+    pub(crate) fn selected_text(&self) -> Option<String> {
+        let range = self.expanded_edit_range(self.selection_range()?);
+        Some(self.rendered_slice(range, true))
+    }
+
+    /// Selects the entire composer buffer when non-empty.
+    pub(crate) fn select_all(&mut self) {
+        self.preferred_column = None;
+        self.last_edit_kind = None;
+        if self.text.is_empty() {
+            self.selection_anchor = None;
+            self.cursor = 0;
+            return;
+        }
+        self.selection_anchor = Some(0);
+        self.cursor = self.text.len();
+    }
+
+    /// Clears any active selection without moving the cursor.
+    /// Returns `true` when a non-empty selection was cleared.
+    pub(crate) fn clear_selection(&mut self) -> bool {
+        let had = self.has_selection();
+        self.selection_anchor = None;
+        had
+    }
+
+    /// Copies and deletes the active selection, returning the cut text.
+    pub(crate) fn cut_selection(&mut self) -> Option<String> {
+        let range = self.selection_range()?;
+        let cut = self.rendered_slice(self.expanded_edit_range(range.clone()), true);
+        self.record_undo_checkpoint(EditKind::Other);
+        self.selection_anchor = None;
+        self.replace_range_atomic(range, "");
+        Some(cut)
+    }
+
     pub(crate) fn viewport(&self, max_width: usize) -> TextInputViewport {
         self.viewport_rows(max_width, usize::MAX)
     }
@@ -142,6 +171,7 @@ impl TextInput {
             return TextInputViewport {
                 text: String::new(),
                 image_placeholders: Vec::new(),
+                row_selections: vec![None],
                 cursor_column: 0,
                 cursor_row: 0,
                 visible_rows: 1,
@@ -155,18 +185,63 @@ impl TextInput {
         let column = crate::tui::input_layout::display_column(column, max_width);
         let start = row.saturating_add(1).saturating_sub(max_rows);
         let end = start.saturating_add(max_rows).min(rows.len());
-        let lines = rows[start..end]
-            .iter()
-            .map(|visual| self.text[visual.start..visual.end].to_owned())
-            .collect::<Vec<_>>();
+        let selection = self.selection_range();
+        let mut lines = Vec::with_capacity(end.saturating_sub(start));
+        let mut row_selections = Vec::with_capacity(end.saturating_sub(start));
+        for visual in &rows[start..end] {
+            lines.push(self.text[visual.start..visual.end].to_owned());
+            let row_sel = selection.as_ref().and_then(|sel| {
+                let s = sel.start.max(visual.start);
+                let e = sel.end.min(visual.end);
+                (s < e).then_some((s - visual.start)..(e - visual.start))
+            });
+            row_selections.push(row_sel);
+        }
         let text = lines.join("\n");
         TextInputViewport {
             image_placeholders: self.image_placeholders_in(&text),
+            row_selections,
             text,
             cursor_column: column,
             cursor_row: row.saturating_sub(start),
             visible_rows: lines.len().max(1),
         }
+    }
+
+    /// Positions the cursor at a clicked/dragged visual row and display column
+    /// inside the currently visible composer viewport.
+    pub(crate) fn move_to_viewport_position(
+        &mut self,
+        max_width: usize,
+        max_rows: usize,
+        visual_row: usize,
+        visual_column: usize,
+        extend_selection: bool,
+    ) {
+        if max_width == 0 {
+            return;
+        }
+        let max_rows = max_rows.max(1);
+        let atoms = self.atom_ranges();
+        let rows = crate::tui::input_layout::visual_rows(&self.text, max_width, &atoms);
+        if rows.is_empty() {
+            return;
+        }
+        let (cursor_row, _) =
+            crate::tui::input_layout::locate_cursor(&self.text, self.cursor, &rows);
+        let start = cursor_row.saturating_add(1).saturating_sub(max_rows);
+        let end = start.saturating_add(max_rows).min(rows.len());
+        let target_row = start.saturating_add(visual_row).min(end.saturating_sub(1));
+        let byte_index = crate::tui::input_layout::byte_at_column(
+            &self.text,
+            &rows[target_row],
+            visual_column,
+            &atoms,
+        );
+        self.prepare_move(extend_selection);
+        self.preferred_column = None;
+        self.last_edit_kind = None;
+        self.cursor = byte_index;
     }
 
     pub(crate) fn insert_char(&mut self, value: char) {
@@ -175,6 +250,22 @@ impl TextInput {
     }
 
     pub(crate) fn insert_str(&mut self, value: &str) {
+        if let Some(range) = self.selection_range() {
+            self.record_undo_checkpoint(EditKind::Other);
+            self.selection_anchor = None;
+            self.replace_range_atomic(range, value);
+            return;
+        }
+        let is_single_word_char = {
+            let mut chars = value.chars();
+            matches!((chars.next(), chars.next()), (Some(ch), None) if !ch.is_whitespace())
+        };
+        if is_single_word_char {
+            self.record_undo_checkpoint(EditKind::InsertChar);
+        } else {
+            self.record_undo_checkpoint(EditKind::Other);
+        }
+        self.selection_anchor = None;
         self.replace_range_atomic(self.cursor..self.cursor, value);
     }
 
@@ -185,8 +276,11 @@ impl TextInput {
             return;
         }
 
+        let target = self.selection_range().unwrap_or(self.cursor..self.cursor);
+        self.record_undo_checkpoint(EditKind::Other);
+        self.selection_anchor = None;
         let placeholder = format!("[pasted {char_count} chars]");
-        self.replace_range_atomic(self.cursor..self.cursor, &placeholder);
+        self.replace_range_atomic(target, &placeholder);
         let end = self.cursor;
         self.elements.push(InputElement {
             range: end - placeholder.len()..end,
@@ -208,8 +302,11 @@ impl TextInput {
                 reason: "one user message may contain at most 20 images".to_owned(),
             });
         }
+        let target = self.selection_range().unwrap_or(self.cursor..self.cursor);
+        self.record_undo_checkpoint(EditKind::Other);
+        self.selection_anchor = None;
         let placeholder = user_image_label(image_count + 1)?;
-        self.replace_range_atomic(self.cursor..self.cursor, &placeholder);
+        self.replace_range_atomic(target, &placeholder);
         let end = self.cursor;
         self.elements.push(InputElement {
             range: end - placeholder.len()..end,
@@ -225,9 +322,11 @@ impl TextInput {
 
     pub(crate) fn replace_text(&mut self, value: String) {
         self.cursor = value.len();
+        self.selection_anchor = None;
         self.preferred_column = None;
         self.text = value;
         self.elements.clear();
+        self.last_edit_kind = None;
     }
 
     pub(crate) fn replace_range(&mut self, range: std::ops::Range<usize>, value: &str) {
@@ -238,71 +337,156 @@ impl TextInput {
         {
             return;
         }
+        self.record_undo_checkpoint(EditKind::Other);
+        self.selection_anchor = None;
         self.replace_range_atomic(range, value);
     }
 
     pub(crate) fn backspace(&mut self) {
+        if self.delete_active_selection() {
+            return;
+        }
         if self.cursor == 0 {
             return;
         }
-        let previous = self.text[..self.cursor]
-            .char_indices()
-            .last()
-            .map(|(index, _)| index)
-            .unwrap_or(0);
+        self.record_undo_checkpoint(EditKind::Delete);
+        let previous = previous_char_boundary(&self.text, self.cursor);
         self.replace_range_atomic(previous..self.cursor, "");
     }
 
     pub(crate) fn delete(&mut self) {
+        if self.delete_active_selection() {
+            return;
+        }
         if self.cursor >= self.text.len() {
             return;
         }
+        self.record_undo_checkpoint(EditKind::Delete);
         let next = next_char_boundary(&self.text, self.cursor);
         self.replace_range_atomic(self.cursor..next, "");
     }
 
     pub(crate) fn delete_before_cursor(&mut self) {
-        self.replace_range_atomic(self.logical_line_start()..self.cursor, "");
+        if self.delete_active_selection() {
+            return;
+        }
+        let start = self.logical_line_start();
+        if start == self.cursor {
+            return;
+        }
+        self.record_undo_checkpoint(EditKind::Other);
+        self.replace_range_atomic(start..self.cursor, "");
     }
 
     pub(crate) fn delete_after_cursor(&mut self) {
-        self.replace_range_atomic(self.cursor..self.logical_line_end(), "");
+        if self.delete_active_selection() {
+            return;
+        }
+        let end = self.logical_line_end();
+        if end == self.cursor {
+            return;
+        }
+        self.record_undo_checkpoint(EditKind::Other);
+        self.replace_range_atomic(self.cursor..end, "");
     }
 
     pub(crate) fn delete_previous_word(&mut self) {
+        if self.delete_active_selection() {
+            return;
+        }
         if self.cursor == 0 {
             return;
         }
-
-        let mut start = self.cursor;
-        let mut seen_word = false;
-        for (index, value) in self.text[..self.cursor].char_indices().rev() {
-            if value.is_whitespace() {
-                if seen_word {
-                    break;
-                }
-            } else {
-                seen_word = true;
-            }
-            start = index;
+        let atoms = self.atom_ranges();
+        let start = previous_word_boundary(&self.text, self.cursor, &atoms);
+        if start == self.cursor {
+            return;
         }
-
+        self.record_undo_checkpoint(EditKind::Other);
         self.replace_range_atomic(start..self.cursor, "");
+    }
+
+    pub(crate) fn delete_next_word(&mut self) {
+        if self.delete_active_selection() {
+            return;
+        }
+        if self.cursor >= self.text.len() {
+            return;
+        }
+        let atoms = self.atom_ranges();
+        let end = next_word_boundary(&self.text, self.cursor, &atoms);
+        if end == self.cursor {
+            return;
+        }
+        self.record_undo_checkpoint(EditKind::Other);
+        self.replace_range_atomic(self.cursor..end, "");
+    }
+
+    fn delete_active_selection(&mut self) -> bool {
+        let Some(range) = self.selection_range() else {
+            return false;
+        };
+        self.record_undo_checkpoint(EditKind::Other);
+        self.selection_anchor = None;
+        self.replace_range_atomic(range, "");
+        true
+    }
+
+    /// Undoes the last composer edit, restoring text, cursor, and atomic elements.
+    pub(crate) fn undo(&mut self) -> bool {
+        let Some(previous) = self.undo_stack.pop() else {
+            return false;
+        };
+        let current = self.snapshot();
+        push_bounded(&mut self.redo_stack, current, MAX_UNDO_HISTORY);
+        self.restore_snapshot(previous);
+        true
+    }
+
+    /// Redoes the most recently undone composer edit.
+    pub(crate) fn redo(&mut self) -> bool {
+        let Some(next) = self.redo_stack.pop() else {
+            return false;
+        };
+        let current = self.snapshot();
+        push_bounded(&mut self.undo_stack, current, MAX_UNDO_HISTORY);
+        self.restore_snapshot(next);
+        true
     }
 
     /// Moves to the previous or next visual row, keeping the preferred column.
     /// Returns false on the first or last row so the caller can recall history.
     pub(crate) fn move_vertical(&mut self, delta: isize, max_width: usize) -> bool {
+        self.move_vertical_with_selection(delta, max_width, false)
+    }
+
+    /// Moves vertically by visual row, optionally starting or extending a text selection.
+    pub(crate) fn move_vertical_with_selection(
+        &mut self,
+        delta: isize,
+        max_width: usize,
+        extend_selection: bool,
+    ) -> bool {
         let max_width = if max_width == 0 { 10_000 } else { max_width };
         let atoms = self.atom_ranges();
         let rows = crate::tui::input_layout::visual_rows(&self.text, max_width, &atoms);
         let (row, column) = crate::tui::input_layout::locate_cursor(&self.text, self.cursor, &rows);
-        let Some(target) = row.checked_add_signed(delta) else {
+        let target = match row.checked_add_signed(delta) {
+            Some(target) if target < rows.len() => Some(target),
+            _ => None,
+        };
+        let Some(target) = target else {
+            if extend_selection {
+                self.prepare_move(true);
+                self.preferred_column = None;
+                self.last_edit_kind = None;
+                self.cursor = if delta < 0 { 0 } else { self.text.len() };
+                return true;
+            }
             return false;
         };
-        if target >= rows.len() {
-            return false;
-        }
+        self.prepare_move(extend_selection);
+        self.last_edit_kind = None;
         let preferred = *self.preferred_column.get_or_insert(column);
         self.cursor =
             crate::tui::input_layout::byte_at_column(&self.text, &rows[target], preferred, &atoms);
@@ -310,7 +494,18 @@ impl TextInput {
     }
 
     pub(crate) fn move_left(&mut self) {
+        self.move_left_with_selection(false);
+    }
+
+    pub(crate) fn move_left_with_selection(&mut self, extend_selection: bool) {
         self.preferred_column = None;
+        self.last_edit_kind = None;
+        if !extend_selection && let Some(range) = self.selection_range() {
+            self.cursor = range.start;
+            self.selection_anchor = None;
+            return;
+        }
+        self.prepare_move(extend_selection);
         if self.cursor == 0 {
             return;
         }
@@ -322,7 +517,18 @@ impl TextInput {
     }
 
     pub(crate) fn move_right(&mut self) {
+        self.move_right_with_selection(false);
+    }
+
+    pub(crate) fn move_right_with_selection(&mut self, extend_selection: bool) {
         self.preferred_column = None;
+        self.last_edit_kind = None;
+        if !extend_selection && let Some(range) = self.selection_range() {
+            self.cursor = range.end;
+            self.selection_anchor = None;
+            return;
+        }
+        self.prepare_move(extend_selection);
         if self.cursor >= self.text.len() {
             return;
         }
@@ -333,21 +539,73 @@ impl TextInput {
         self.cursor = next_char_boundary(&self.text, self.cursor);
     }
 
-    pub(crate) fn move_home(&mut self) {
+    pub(crate) fn move_word_left(&mut self, extend_selection: bool) {
         self.preferred_column = None;
+        self.last_edit_kind = None;
+        self.prepare_move(extend_selection);
+        if self.cursor == 0 {
+            return;
+        }
+        let atoms = self.atom_ranges();
+        self.cursor = previous_word_boundary(&self.text, self.cursor, &atoms);
+    }
+
+    pub(crate) fn move_word_right(&mut self, extend_selection: bool) {
+        self.preferred_column = None;
+        self.last_edit_kind = None;
+        self.prepare_move(extend_selection);
+        if self.cursor >= self.text.len() {
+            return;
+        }
+        let atoms = self.atom_ranges();
+        self.cursor = next_word_boundary(&self.text, self.cursor, &atoms);
+    }
+
+    pub(crate) fn move_home(&mut self) {
+        self.move_home_with_selection(false);
+    }
+
+    pub(crate) fn move_home_with_selection(&mut self, extend_selection: bool) {
+        self.preferred_column = None;
+        self.last_edit_kind = None;
+        self.prepare_move(extend_selection);
         self.cursor = self.logical_line_start();
     }
 
     pub(crate) fn move_end(&mut self) {
+        self.move_end_with_selection(false);
+    }
+
+    pub(crate) fn move_end_with_selection(&mut self, extend_selection: bool) {
         self.preferred_column = None;
+        self.last_edit_kind = None;
+        self.prepare_move(extend_selection);
         self.cursor = self.logical_line_end();
+    }
+
+    pub(crate) fn move_buffer_start(&mut self, extend_selection: bool) {
+        self.preferred_column = None;
+        self.last_edit_kind = None;
+        self.prepare_move(extend_selection);
+        self.cursor = 0;
+    }
+
+    pub(crate) fn move_buffer_end(&mut self, extend_selection: bool) {
+        self.preferred_column = None;
+        self.last_edit_kind = None;
+        self.prepare_move(extend_selection);
+        self.cursor = self.text.len();
     }
 
     pub(crate) fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.selection_anchor = None;
         self.preferred_column = None;
         self.elements.clear();
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.last_edit_kind = None;
     }
 
     pub(crate) fn take_trimmed(&mut self) -> Option<String> {
@@ -390,21 +648,70 @@ impl TextInput {
         Ok(Some(submission))
     }
 
+    fn prepare_move(&mut self, extend_selection: bool) {
+        if extend_selection {
+            self.selection_anchor.get_or_insert(self.cursor);
+        } else {
+            self.selection_anchor = None;
+        }
+    }
+
+    fn snapshot(&self) -> TextInputSnapshot {
+        TextInputSnapshot {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            elements: self.elements.clone(),
+        }
+    }
+
+    fn restore_snapshot(&mut self, snapshot: TextInputSnapshot) {
+        self.text = snapshot.text;
+        self.cursor = snapshot.cursor.min(self.text.len());
+        self.elements = snapshot.elements;
+        self.selection_anchor = None;
+        self.preferred_column = None;
+        self.last_edit_kind = None;
+    }
+
+    fn record_undo_checkpoint(&mut self, kind: EditKind) {
+        let coalesce = kind == EditKind::InsertChar
+            && self.last_edit_kind == Some(EditKind::InsertChar)
+            && !self.undo_stack.is_empty();
+        if !coalesce {
+            let snapshot = self.snapshot();
+            push_bounded(&mut self.undo_stack, snapshot, MAX_UNDO_HISTORY);
+        }
+        self.redo_stack.clear();
+        self.last_edit_kind = Some(kind);
+    }
+
     fn expanded_text(&self) -> String {
         self.rendered_text(true)
     }
 
     fn rendered_text(&self, include_images: bool) -> String {
+        self.rendered_slice(0..self.text.len(), include_images)
+    }
+
+    fn rendered_slice(&self, range: Range<usize>, include_images: bool) -> String {
         if self.elements.is_empty() {
-            return self.text.clone();
+            return self.text[range].to_owned();
         }
 
-        let mut elements = self.elements.iter().collect::<Vec<_>>();
+        let mut elements = self
+            .elements
+            .iter()
+            .filter(|element| ranges_overlap(&range, &element.range))
+            .collect::<Vec<_>>();
         elements.sort_by_key(|element| element.range.start);
-        let mut rendered = String::with_capacity(self.text.len());
-        let mut cursor = 0;
+        let mut rendered = String::with_capacity(range.len());
+        let mut cursor = range.start;
         for element in elements {
-            rendered.push_str(&self.text[cursor..element.range.start]);
+            let elem_start = element.range.start.max(range.start);
+            let elem_end = element.range.end.min(range.end);
+            if elem_start > cursor {
+                rendered.push_str(&self.text[cursor..elem_start]);
+            }
             match &element.payload {
                 InputElementPayload::LargePaste { content } => rendered.push_str(content),
                 InputElementPayload::Image { .. } if include_images => {
@@ -412,9 +719,11 @@ impl TextInput {
                 }
                 InputElementPayload::Image { .. } => {}
             }
-            cursor = element.range.end;
+            cursor = elem_end;
         }
-        rendered.push_str(&self.text[cursor..]);
+        if cursor < range.end {
+            rendered.push_str(&self.text[cursor..range.end]);
+        }
         rendered
     }
 
@@ -528,40 +837,83 @@ impl TextInput {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let super_key = key.modifiers.contains(KeyModifiers::SUPER);
+        let cmd_or_ctrl = ctrl || super_key;
+
         match key.code {
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_home();
+            KeyCode::Char('a' | 'A') if cmd_or_ctrl && !alt => {
+                self.select_all();
             }
-            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_end();
+            KeyCode::Char('z') if cmd_or_ctrl && !alt && !shift => {
+                let _ = self.undo();
             }
-            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_left();
+            KeyCode::Char('z' | 'Z') if cmd_or_ctrl && !alt && shift => {
+                let _ = self.redo();
             }
-            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_right();
+            KeyCode::Char('y' | 'Y') if cmd_or_ctrl && !alt => {
+                let _ = self.redo();
             }
-            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('e' | 'E') if ctrl && !alt && !super_key => {
+                self.move_end_with_selection(shift);
+            }
+            KeyCode::Char('b' | 'B') if alt && !ctrl && !super_key => {
+                self.move_word_left(shift);
+            }
+            KeyCode::Char('f' | 'F') if alt && !ctrl && !super_key => {
+                self.move_word_right(shift);
+            }
+            KeyCode::Char('b') if ctrl && !alt && !super_key => {
+                self.move_left_with_selection(shift);
+            }
+            KeyCode::Char('f') if ctrl && !alt && !super_key => {
+                self.move_right_with_selection(shift);
+            }
+            KeyCode::Char('d' | 'D') if alt && !ctrl && !super_key => {
+                self.delete_next_word();
+            }
+            KeyCode::Char('d') if ctrl && !alt && !super_key => {
                 self.delete();
             }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('u') if ctrl && !alt && !super_key => {
                 self.delete_before_cursor();
             }
-            KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('k') if ctrl && !alt && !super_key => {
                 self.delete_after_cursor();
             }
-            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('w') if ctrl && !alt && !super_key => {
                 self.delete_previous_word();
             }
-            KeyCode::Char(value) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(value)
+                if !ctrl
+                    && !super_key
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::HYPER | KeyModifiers::META)
+                    && !(alt && value.is_ascii()) =>
+            {
                 self.insert_char(value);
             }
+            KeyCode::Backspace if super_key => self.delete_before_cursor(),
+            KeyCode::Delete if super_key => self.delete_after_cursor(),
+            KeyCode::Backspace if ctrl || alt => self.delete_previous_word(),
+            KeyCode::Delete if ctrl || alt => self.delete_next_word(),
             KeyCode::Backspace => self.backspace(),
             KeyCode::Delete => self.delete(),
-            KeyCode::Left => self.move_left(),
-            KeyCode::Right => self.move_right(),
-            KeyCode::Home => self.move_home(),
-            KeyCode::End => self.move_end(),
+            KeyCode::Left if super_key && !ctrl && !alt => self.move_home_with_selection(shift),
+            KeyCode::Right if super_key && !ctrl && !alt => self.move_end_with_selection(shift),
+            KeyCode::Up if super_key && !ctrl && !alt => self.move_buffer_start(shift),
+            KeyCode::Down if super_key && !ctrl && !alt => self.move_buffer_end(shift),
+            KeyCode::Left if ctrl || alt => self.move_word_left(shift),
+            KeyCode::Right if ctrl || alt => self.move_word_right(shift),
+            KeyCode::Left => self.move_left_with_selection(shift),
+            KeyCode::Right => self.move_right_with_selection(shift),
+            KeyCode::Home if ctrl && !alt => self.move_buffer_start(shift),
+            KeyCode::End if ctrl && !alt => self.move_buffer_end(shift),
+            KeyCode::Home => self.move_home_with_selection(shift),
+            KeyCode::End => self.move_end_with_selection(shift),
             _ => {}
         }
     }
@@ -588,184 +940,11 @@ impl TextInput {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct InputHistory {
-    entries: Vec<String>,
-    navigation: Option<usize>,
-    draft: TextInput,
-}
-
-#[allow(dead_code)]
-impl InputHistory {
-    pub(crate) fn record(&mut self, text: &str) {
-        push_input_history_entry(&mut self.entries, text);
-        self.navigation = None;
-        self.draft.clear();
+fn push_bounded<T>(stack: &mut Vec<T>, item: T, limit: usize) {
+    if stack.len() >= limit {
+        stack.remove(0);
     }
-
-    pub(crate) fn replace_entries(&mut self, entries: Vec<String>) {
-        self.entries = normalize_input_history(entries);
-        self.navigation = None;
-        self.draft.clear();
-    }
-
-    pub(crate) fn entries(&self) -> &[String] {
-        &self.entries
-    }
-
-    pub(crate) fn previous(&mut self, input: &mut TextInput) {
-        if self.entries.is_empty() {
-            return;
-        }
-
-        let index = match self.navigation {
-            Some(index) => index.saturating_sub(1),
-            None => {
-                self.draft.replace_text(input.rendered_text(false));
-                self.entries.len() - 1
-            }
-        };
-        self.navigation = Some(index);
-        input.replace_text(self.entries[index].clone());
-    }
-
-    pub(crate) fn next(&mut self, input: &mut TextInput) {
-        let Some(index) = self.navigation else {
-            return;
-        };
-
-        if index + 1 < self.entries.len() {
-            let index = index + 1;
-            self.navigation = Some(index);
-            input.replace_text(self.entries[index].clone());
-            return;
-        }
-
-        self.navigation = None;
-        *input = std::mem::take(&mut self.draft);
-    }
-
-    /// Remembers where a history search landed so Down can restore the draft.
-    pub(crate) fn adopt_match(&mut self, index: usize, draft: String) {
-        self.draft.replace_text(draft);
-        self.navigation = Some(index);
-    }
-}
-
-/// Incremental history search. Ctrl+R walks older matches, like a shell.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HistorySearch {
-    query: String,
-    /// The next reverse step looks strictly before this entry.
-    before: usize,
-    draft: String,
-    matched: Option<usize>,
-    failed: bool,
-}
-
-impl HistorySearch {
-    pub(crate) fn query(&self) -> &str {
-        &self.query
-    }
-
-    pub(crate) fn failed(&self) -> bool {
-        self.failed
-    }
-
-    pub(crate) fn matched(&self) -> Option<usize> {
-        self.matched
-    }
-
-    pub(crate) fn into_draft(self) -> String {
-        self.draft
-    }
-
-    pub(crate) fn start(entries: &[String], draft: String) -> (Self, Option<String>) {
-        let mut search = Self {
-            query: String::new(),
-            before: entries.len(),
-            draft,
-            matched: None,
-            failed: false,
-        };
-        let text = search.search_older(entries);
-        (search, text)
-    }
-
-    pub(crate) fn older(&mut self, entries: &[String]) -> Option<String> {
-        self.before = self.matched.unwrap_or(entries.len());
-        self.search_older(entries)
-    }
-
-    pub(crate) fn newer(&mut self, entries: &[String]) -> Option<String> {
-        let start = self
-            .matched
-            .map(|index| index.saturating_add(1))
-            .unwrap_or(0);
-        let found = entries.get(start..).and_then(|rest| {
-            rest.iter()
-                .position(|entry| entry.contains(&self.query))
-                .map(|offset| start.saturating_add(offset))
-        });
-        self.apply_match(entries, found)
-    }
-
-    pub(crate) fn push_char(&mut self, character: char, entries: &[String]) -> Option<String> {
-        self.query.push(character);
-        self.before = self
-            .matched
-            .map(|index| index.saturating_add(1))
-            .unwrap_or(entries.len());
-        self.search_older(entries)
-    }
-
-    /// Removes one query character. `None` means the query was already empty.
-    pub(crate) fn pop_char(&mut self, entries: &[String]) -> Option<Option<String>> {
-        self.query.pop()?;
-        self.matched = None;
-        self.before = entries.len();
-        Some(self.search_older(entries))
-    }
-
-    fn search_older(&mut self, entries: &[String]) -> Option<String> {
-        let end = self.before.min(entries.len());
-        let found = entries[..end]
-            .iter()
-            .rposition(|entry| entry.contains(&self.query));
-        self.apply_match(entries, found)
-    }
-
-    fn apply_match(&mut self, entries: &[String], found: Option<usize>) -> Option<String> {
-        if let Some(index) = found {
-            self.matched = Some(index);
-            self.before = index;
-            self.failed = false;
-            entries.get(index).cloned()
-        } else {
-            self.failed = true;
-            None
-        }
-    }
-}
-
-pub(crate) fn normalize_input_history(entries: Vec<String>) -> Vec<String> {
-    let mut normalized = Vec::with_capacity(entries.len().min(MAX_INPUT_HISTORY));
-    for entry in entries {
-        push_input_history_entry(&mut normalized, &entry);
-    }
-    normalized
-}
-
-pub(crate) fn push_input_history_entry(entries: &mut Vec<String>, text: &str) {
-    if text.trim().is_empty() || entries.last().is_some_and(|entry| entry == text) {
-        return;
-    }
-    entries.push(text.to_owned());
-    let excess = entries.len().saturating_sub(MAX_INPUT_HISTORY);
-    if excess > 0 {
-        entries.drain(..excess);
-    }
+    stack.push(item);
 }
 
 fn edit_touches_element(edit: &Range<usize>, element: &Range<usize>) -> bool {
@@ -785,22 +964,6 @@ fn shifted_index(index: usize, old_len: usize, new_len: usize) -> usize {
     } else {
         index - (old_len - new_len)
     }
-}
-
-fn previous_char_boundary(text: &str, cursor: usize) -> usize {
-    text[..cursor]
-        .char_indices()
-        .last()
-        .map(|(index, _)| index)
-        .unwrap_or(0)
-}
-
-fn next_char_boundary(text: &str, cursor: usize) -> usize {
-    text[cursor..]
-        .char_indices()
-        .nth(1)
-        .map(|(index, _)| cursor + index)
-        .unwrap_or(text.len())
 }
 
 #[cfg(test)]

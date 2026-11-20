@@ -215,22 +215,28 @@ fn status_text_shows_compact_merry_shuttle_and_elapsed_while_running() {
     let now = Instant::now();
 
     state.set_run_state_at(InteractiveRunState::RunningModel, now);
-    let frames = [
-        (0, "[M··]"),
-        (100, "[·M·]"),
-        (200, "[··M]"),
-        (300, "[·M·]"),
-        (400, "[M··]"),
-    ];
-    for (elapsed_ms, expected) in frames {
-        let status = state.interaction_status_text_at(now + Duration::from_millis(elapsed_ms));
-        assert_eq!(status.split_whitespace().next(), Some(expected));
-    }
+    assert_eq!(
+        state.interaction_status_text_at(now + Duration::from_secs(37)),
+        "Working… · 37s"
+    );
 
-    assert!(
-        state
-            .interaction_status_text_at(now + Duration::from_secs(37))
-            .contains("Running model (37s)")
+    state.push_timeline_item(crate::tui::state::TimelineItem::Thinking {
+        text: "analyzing".to_owned(),
+        started_at: tokio::time::Instant::now(),
+        elapsed: None,
+        expanded: false,
+    });
+    assert_eq!(
+        state.interaction_status_text_at(now + Duration::from_secs(38)),
+        "Thinking… · 38s"
+    );
+
+    state.push_timeline_item(crate::tui::state::TimelineItem::Assistant {
+        text: "streaming".to_owned(),
+    });
+    assert_eq!(
+        state.interaction_status_text_at(now + Duration::from_secs(39)),
+        "Responding… · 39s"
     );
 }
 
@@ -265,5 +271,5 @@ fn interaction_status_keeps_completed_run_elapsed_after_returning_ready() {
         started + Duration::from_secs(42),
     );
 
-    assert_eq!(state.interaction_status_text(), "Ready  last run 42s");
+    assert_eq!(state.interaction_status_text(), "Ready · last 42s");
 }

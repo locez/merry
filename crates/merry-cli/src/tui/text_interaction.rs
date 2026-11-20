@@ -1,11 +1,12 @@
 use crate::tui::{
     copy_controls::{CopyTextBuilder, CopyTextError},
+    render::timeline_cache::TimelineLayoutSnapshot,
     state::TimelineAnchor,
-    transcript::{SelectionPolicy, TranscriptRow},
+    transcript::SelectionPolicy,
 };
 use ratatui::{
     buffer::Buffer,
-    layout::{Position, Rect},
+    layout::{Position, Rect, Size},
     style::Modifier,
     widgets::{Paragraph, Widget, Wrap},
 };
@@ -40,82 +41,38 @@ enum ScrollDirection {
     Down,
 }
 
-/// Freezes styled transcript lines, rendering only the rows needed for display or copying.
+/// Freezes immutable `Arc`-backed per-item layouts so starting a selection is
+/// O(N_items) pointer copies and renders only visible rows on drag/copy.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SelectionSnapshot {
-    rows: Vec<TranscriptRow>,
-    row_starts: Vec<usize>,
-    item_rows: Vec<usize>,
-}
+struct SelectionSnapshot(TimelineLayoutSnapshot);
 
 impl SelectionSnapshot {
-    fn new(
-        rows: Vec<TranscriptRow>,
-        item_starts: Vec<usize>,
-        row_starts: Vec<usize>,
-    ) -> Option<Self> {
-        if row_starts.len() != rows.len().saturating_add(1) {
-            return None;
-        }
-        let item_rows = item_starts
-            .into_iter()
-            .map(|index| row_starts.get(index).copied())
-            .collect::<Option<Vec<_>>>()?;
-        Some(Self {
-            rows,
-            row_starts,
-            item_rows,
-        })
-    }
-
     fn total_rows(&self) -> usize {
-        self.row_starts.last().copied().unwrap_or(0)
+        self.0.total_rows()
     }
 
     fn render_rows(&self, start: usize, area: Rect) -> Buffer {
         let mut buffer = Buffer::empty(area);
-        let first_line = self
-            .row_starts
-            .partition_point(|row| *row <= start)
-            .saturating_sub(1);
-        if first_line >= self.rows.len() || area.is_empty() {
+        if area.is_empty() {
             return buffer;
         }
-        let end = start.saturating_add(usize::from(area.height));
-        let last_line = self
-            .row_starts
-            .partition_point(|row| *row < end)
-            .min(self.rows.len());
-        let scroll =
-            u16::try_from(start.saturating_sub(self.row_starts[first_line])).unwrap_or(u16::MAX);
-        Paragraph::new(
-            self.rows[first_line..last_line]
-                .iter()
-                .map(|row| row.display.clone())
-                .collect::<Vec<_>>(),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0))
-        .render(area, &mut buffer);
+        let viewport = self.0.viewport_slice(start, area.height);
+        if viewport.lines.is_empty() {
+            return buffer;
+        }
+        Paragraph::new(viewport.lines)
+            .wrap(Wrap { trim: false })
+            .scroll((viewport.scroll, 0))
+            .render(area, &mut buffer);
         buffer
     }
 
     fn anchor_at(&self, row: usize) -> Option<TimelineAnchor> {
-        let index = self
-            .item_rows
-            .partition_point(|start| *start <= row)
-            .saturating_sub(1);
-        self.item_rows
-            .get(index)
-            .map(|start| TimelineAnchor::new(index, row.saturating_sub(*start)))
+        self.0.anchor_at(row)
     }
 
-    fn row_index_at(&self, visual_row: usize) -> Option<usize> {
-        let index = self
-            .row_starts
-            .partition_point(|start| *start <= visual_row)
-            .saturating_sub(1);
-        (index < self.rows.len()).then_some(index)
+    fn selection_policy_at(&self, visual_row: usize) -> Option<SelectionPolicy> {
+        self.0.selection_policy_at(visual_row)
     }
 }
 
@@ -133,6 +90,7 @@ pub(crate) struct CapturedText {
 pub(crate) struct TextSelection {
     snapshot: SelectionSnapshot,
     area: Rect,
+    terminal_size: Size,
     scroll: usize,
     anchor: SelectionPoint,
     cursor: SelectionPoint,
@@ -147,26 +105,25 @@ pub(crate) struct SelectionViewport {
 }
 
 impl TextSelection {
-    /// Takes the timeline renderer's bounded logical lines and current wrapped scroll origin.
+    /// Captures the cached per-item layout snapshot and current wrapped scroll origin.
     pub(crate) fn new(
-        rows: Vec<TranscriptRow>,
-        item_starts: Vec<usize>,
-        row_starts: Vec<usize>,
+        snapshot: TimelineLayoutSnapshot,
         area: Rect,
+        terminal_size: Size,
         scroll: usize,
         pointer: Position,
     ) -> Option<Self> {
         if area.is_empty() || !area.contains(pointer) {
             return None;
         }
-        let snapshot = SelectionSnapshot::new(rows, item_starts, row_starts)?;
         let anchor = SelectionPoint::new(
             scroll.saturating_add(usize::from(pointer.y - area.y)),
             pointer.x - area.x,
         );
         Some(Self {
-            snapshot,
+            snapshot: SelectionSnapshot(snapshot),
             area,
+            terminal_size,
             scroll,
             anchor,
             cursor: anchor,
@@ -177,6 +134,10 @@ impl TextSelection {
 
     pub(crate) fn area(&self) -> Rect {
         self.area
+    }
+
+    pub(crate) fn terminal_size(&self) -> Size {
+        self.terminal_size
     }
 
     pub(crate) fn drag_to(&mut self, position: Position) {
@@ -252,10 +213,9 @@ impl TextSelection {
             for row in 0..height {
                 let document_row = chunk_start + usize::from(row);
                 let columns = self.row_columns(document_row, start, end);
-                let Some(source_row) = self.snapshot.row_index_at(document_row) else {
+                let Some(selection) = self.snapshot.selection_policy_at(document_row) else {
                     continue;
                 };
-                let selection = self.snapshot.rows[source_row].selection;
                 let columns = match selection {
                     SelectionPolicy::Keep => columns,
                     SelectionPolicy::Skip => continue,

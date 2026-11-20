@@ -144,7 +144,10 @@ fn command_palette_uses_a_magenta_selection_surface() {
     let buffer = render_to_buffer(&state, 100, 30);
     let selected = find_cell_style(&buffer, "Settings").expect("selected command should render");
 
-    assert_eq!(selected.bg, Some(Color::Rgb(54, 26, 58)));
+    assert_eq!(
+        selected.bg,
+        TuiTheme::default().bg_color(crate::tui::theme::SemanticColor::SelectionBackground)
+    );
     assert_eq!(selected.fg, Some(Color::White));
 }
 

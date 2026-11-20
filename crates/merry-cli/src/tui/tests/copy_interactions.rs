@@ -258,10 +258,15 @@ fn dragging_strips_timeline_decoration_from_markdown_output() {
         effect => panic!("expected copied text, got {effect:?}"),
     };
     assert!(copied.contains("Title"));
-    assert_eq!(copied, "Request\n\nTitle\nprintf 'hello'\n\nnext");
+    assert_eq!(copied, "Request\n\nTitle\n\nprintf 'hello'\n\nnext");
     assert!(!copied.contains('❯'));
+    assert!(!copied.contains('▌'));
     assert!(!copied.contains('▎'));
+    assert!(!copied.contains('▔'));
+    assert!(!copied.contains('▁'));
+    assert!(!copied.contains('━'));
     assert!(!copied.contains("[Copy"));
+    assert!(!copied.contains("⧉ Copy"));
 }
 
 #[test]

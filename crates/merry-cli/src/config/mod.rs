@@ -530,10 +530,57 @@ struct RuntimeModelToml {
     model: String,
 }
 
+pub(crate) const DEFAULT_MOUSE_SCROLL_LINES: usize = 3;
+const MAX_MOUSE_SCROLL_LINES: usize = 10;
+pub(crate) const DEFAULT_MAX_READING_WIDTH: u16 = 104;
+const MIN_MAX_READING_WIDTH: u16 = 40;
+const MAX_MAX_READING_WIDTH: u16 = 240;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HeaderItemKind {
+    Workspace,
+    Model,
+    Context,
+    Cache,
+    Rate,
+    Tokens,
+}
+
+impl HeaderItemKind {
+    pub(crate) const DEFAULT_ITEMS: [Self; 5] = [
+        Self::Workspace,
+        Self::Model,
+        Self::Context,
+        Self::Cache,
+        Self::Rate,
+    ];
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TextSizingMode {
+    #[default]
+    Off,
+    Auto,
+    On,
+}
+
+#[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TuiHeaderToml {
+    pub(crate) items: Option<Vec<HeaderItemKind>>,
+}
+
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct TuiToml {
     show_successful_command_output: Option<bool>,
+    mouse_scroll_lines: Option<usize>,
+    animations: Option<bool>,
+    max_reading_width: Option<u16>,
+    text_sizing: Option<TextSizingMode>,
+    header: Option<TuiHeaderToml>,
     theme: Option<TuiThemeToml>,
     keymap: Option<TuiKeymapToml>,
 }
@@ -541,10 +588,27 @@ struct TuiToml {
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TuiThemeToml {
+    pub(crate) background: Option<String>,
+    pub(crate) surface: Option<String>,
+    pub(crate) surface_subtle: Option<String>,
+    pub(crate) header_bg: Option<String>,
+    pub(crate) status_bg: Option<String>,
+    pub(crate) user_bg: Option<String>,
+    pub(crate) code_bg: Option<String>,
+    pub(crate) inline_code_bg: Option<String>,
+    pub(crate) selection_bg: Option<String>,
+    pub(crate) chip_bg: Option<String>,
+    pub(crate) border: Option<String>,
+    pub(crate) border_focus: Option<String>,
+    pub(crate) diff_add_bg: Option<String>,
+    pub(crate) diff_delete_bg: Option<String>,
     pub(crate) status: Option<String>,
     pub(crate) muted: Option<String>,
+    pub(crate) text_secondary: Option<String>,
     pub(crate) focus: Option<String>,
     pub(crate) assistant: Option<String>,
+    pub(crate) heading: Option<String>,
+    pub(crate) link: Option<String>,
     pub(crate) selection: Option<String>,
     pub(crate) tool_keyword: Option<String>,
     pub(crate) command: Option<String>,
@@ -584,6 +648,11 @@ pub(crate) struct TuiKeymapToml {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TuiConfig {
     pub(crate) show_successful_command_output: bool,
+    pub(crate) mouse_scroll_lines: usize,
+    pub(crate) animations: bool,
+    pub(crate) max_reading_width: u16,
+    pub(crate) text_sizing: TextSizingMode,
+    pub(crate) header_items: Vec<HeaderItemKind>,
     pub(crate) theme: TuiThemeToml,
     pub(crate) keymap: TuiKeymapToml,
 }
@@ -592,6 +661,11 @@ impl Default for TuiConfig {
     fn default() -> Self {
         Self {
             show_successful_command_output: true,
+            mouse_scroll_lines: DEFAULT_MOUSE_SCROLL_LINES,
+            animations: true,
+            max_reading_width: DEFAULT_MAX_READING_WIDTH,
+            text_sizing: TextSizingMode::Off,
+            header_items: HeaderItemKind::DEFAULT_ITEMS.to_vec(),
             theme: TuiThemeToml::default(),
             keymap: TuiKeymapToml::default(),
         }
@@ -603,8 +677,18 @@ impl MerryConfig {
         let Some(tui) = self.raw.tui.as_ref() else {
             return Ok(TuiConfig::default());
         };
+        let header_items = tui
+            .header
+            .as_ref()
+            .and_then(|header| header.items.clone())
+            .unwrap_or_else(|| HeaderItemKind::DEFAULT_ITEMS.to_vec());
         let config = TuiConfig {
             show_successful_command_output: tui.show_successful_command_output.unwrap_or(true),
+            mouse_scroll_lines: tui.mouse_scroll_lines.unwrap_or(DEFAULT_MOUSE_SCROLL_LINES),
+            animations: tui.animations.unwrap_or(true),
+            max_reading_width: tui.max_reading_width.unwrap_or(DEFAULT_MAX_READING_WIDTH),
+            text_sizing: tui.text_sizing.unwrap_or(TextSizingMode::Off),
+            header_items,
             theme: tui.theme.clone().unwrap_or_default(),
             keymap: tui.keymap.clone().unwrap_or_default(),
         };
@@ -614,6 +698,20 @@ impl MerryConfig {
 }
 
 pub(crate) fn validate_tui_config(config: &TuiConfig) -> Result<(), ConfigError> {
+    if !(1..=MAX_MOUSE_SCROLL_LINES).contains(&config.mouse_scroll_lines) {
+        return Err(ConfigError::Invalid(format!(
+            "tui.mouse_scroll_lines must be between 1 and {MAX_MOUSE_SCROLL_LINES}, got {}",
+            config.mouse_scroll_lines
+        )));
+    }
+    if config.max_reading_width != 0
+        && !(MIN_MAX_READING_WIDTH..=MAX_MAX_READING_WIDTH).contains(&config.max_reading_width)
+    {
+        return Err(ConfigError::Invalid(format!(
+            "tui.max_reading_width must be 0 (unlimited) or between {MIN_MAX_READING_WIDTH} and {MAX_MAX_READING_WIDTH}, got {}",
+            config.max_reading_width
+        )));
+    }
     let _ = crate::tui::theme::TuiTheme::from_config(&config.theme)?;
     let _ = crate::tui::keymap::Keymap::from_config(&config.keymap)?;
     Ok(())

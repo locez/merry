@@ -1,6 +1,7 @@
 use super::{
     session_list::{TuiSessionMetadata, TuiSessionStore},
     terminal::{TerminalEvent, TerminalSession},
+    theme::{SemanticColor, TuiTheme},
 };
 use crate::cli_error::{CliError, unexpected};
 use crossterm::event::{KeyCode, KeyEvent};
@@ -129,6 +130,7 @@ pub(crate) async fn pick_session(
     terminal: &mut TerminalSession,
     store: &TuiSessionStore,
     workspace_root: &Path,
+    theme: &TuiTheme,
 ) -> Result<SessionPickerSelection, CliError> {
     let sessions = store
         .sessions_for_workspace(workspace_root)
@@ -136,7 +138,7 @@ pub(crate) async fn pick_session(
     let mut state = SessionPickerState::new(sessions);
 
     terminal
-        .draw(|frame| render_session_picker(frame, &state, workspace_root))
+        .draw(|frame| render_session_picker(frame, &state, workspace_root, theme))
         .map_err(unexpected)?;
     loop {
         let Some(event) = terminal.next_event().await.map_err(unexpected)? else {
@@ -152,24 +154,24 @@ pub(crate) async fn pick_session(
                     apply_picker_query(&mut state, store).await;
                 }
                 terminal
-                    .draw(|frame| render_session_picker(frame, &state, workspace_root))
+                    .draw(|frame| render_session_picker(frame, &state, workspace_root, theme))
                     .map_err(unexpected)?;
             }
             TerminalEvent::Resize => {
                 terminal
-                    .draw(|frame| render_session_picker(frame, &state, workspace_root))
+                    .draw(|frame| render_session_picker(frame, &state, workspace_root, theme))
                     .map_err(unexpected)?;
             }
             TerminalEvent::MouseScrollDown(_) => {
                 state.select_next();
                 terminal
-                    .draw(|frame| render_session_picker(frame, &state, workspace_root))
+                    .draw(|frame| render_session_picker(frame, &state, workspace_root, theme))
                     .map_err(unexpected)?;
             }
             TerminalEvent::MouseScrollUp(_) => {
                 state.select_previous();
                 terminal
-                    .draw(|frame| render_session_picker(frame, &state, workspace_root))
+                    .draw(|frame| render_session_picker(frame, &state, workspace_root, theme))
                     .map_err(unexpected)?;
             }
             TerminalEvent::Paste(_) | TerminalEvent::Mouse(_) => {}
@@ -177,18 +179,35 @@ pub(crate) async fn pick_session(
     }
 }
 
-fn render_session_picker(frame: &mut Frame<'_>, state: &SessionPickerState, workspace_root: &Path) {
+fn render_session_picker(
+    frame: &mut Frame<'_>,
+    state: &SessionPickerState,
+    workspace_root: &Path,
+    theme: &TuiTheme,
+) {
+    let surface = theme
+        .color(SemanticColor::Surface)
+        .unwrap_or(Color::Rgb(36, 32, 41));
+    let focus = theme
+        .color(SemanticColor::BorderFocus)
+        .or_else(|| theme.color(SemanticColor::Focus))
+        .unwrap_or(Color::LightMagenta);
+    let text = theme
+        .color(SemanticColor::Assistant)
+        .unwrap_or(Color::White);
+    let muted = theme.color(SemanticColor::Muted).unwrap_or(Color::DarkGray);
+    let selection_bg = theme
+        .color(SemanticColor::SelectionBackground)
+        .unwrap_or(Color::Rgb(54, 26, 58));
+
     let area = frame.area();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(Style::default().fg(Color::LightMagenta))
-        .title("Merry Sessions")
-        .title_style(
-            Style::default()
-                .fg(Color::LightMagenta)
-                .add_modifier(Modifier::BOLD),
-        );
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(focus))
+        .style(Style::default().bg(surface))
+        .title(" M  Merry Sessions ")
+        .title_style(Style::default().fg(focus).add_modifier(Modifier::BOLD));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -202,10 +221,10 @@ fn render_session_picker(frame: &mut Frame<'_>, state: &SessionPickerState, work
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("Workspace ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Workspace ", Style::default().fg(muted)),
                 Span::styled(
                     workspace_root.display().to_string(),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(text),
                 ),
             ]),
             Line::from(if state.filtering {
@@ -214,20 +233,20 @@ fn render_session_picker(frame: &mut Frame<'_>, state: &SessionPickerState, work
                 "Enter resume  n new  q quit  / filter".to_owned()
             }),
         ])
-        .style(Style::default().fg(Color::LightMagenta)),
+        .style(Style::default().fg(focus).bg(surface)),
         header,
     );
 
     let items = if state.sessions.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             "No saved sessions for this directory. Press n or Enter to start a new one.",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(muted),
         )))]
     } else {
         state
             .sessions
             .iter()
-            .map(session_line)
+            .map(|session| session_line(session, theme))
             .map(ListItem::new)
             .collect()
     };
@@ -236,23 +255,34 @@ fn render_session_picker(frame: &mut Frame<'_>, state: &SessionPickerState, work
         list_state.select(Some(state.selected));
     }
     frame.render_stateful_widget(
-        List::new(items).highlight_symbol("> ").highlight_style(
-            Style::default()
-                .fg(Color::LightMagenta)
-                .add_modifier(Modifier::BOLD),
-        ),
+        List::new(items)
+            .style(Style::default().bg(surface))
+            .highlight_symbol("▌ ")
+            .highlight_style(
+                Style::default()
+                    .fg(text)
+                    .bg(selection_bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
         list_area,
         &mut list_state,
     );
 
     frame.render_widget(
         Paragraph::new("Sessions are saved only on clean Ctrl-C Ctrl-C exit in this MVP.")
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(Style::default().fg(muted).bg(surface)),
         footer,
     );
 }
 
-fn session_line(session: &TuiSessionMetadata) -> Line<'static> {
+fn session_line(session: &TuiSessionMetadata, theme: &TuiTheme) -> Line<'static> {
+    let text = theme
+        .color(SemanticColor::Assistant)
+        .unwrap_or(Color::White);
+    let muted = theme.color(SemanticColor::Muted).unwrap_or(Color::DarkGray);
+    let accent = theme
+        .color(SemanticColor::ToolKeyword)
+        .unwrap_or(Color::LightCyan);
     let label = session
         .topic
         .as_deref()
@@ -261,22 +291,19 @@ fn session_line(session: &TuiSessionMetadata) -> Line<'static> {
     let model = session.model.as_deref().unwrap_or("model -");
     let effort = session.reasoning_effort.as_deref().unwrap_or("-");
     let origin = if session.headless { "headless" } else { "TUI" };
-    let mut spans = vec![Span::styled(
-        label.to_owned(),
-        Style::default().fg(Color::White),
-    )];
+    let mut spans = vec![Span::styled(label.to_owned(), Style::default().fg(text))];
     spans.extend([
         Span::raw("  "),
         Span::styled(
             session.session_id.as_str().to_owned(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(muted),
         ),
         Span::raw("  "),
-        Span::styled(model.to_owned(), Style::default().fg(Color::LightMagenta)),
+        Span::styled(model.to_owned(), Style::default().fg(accent)),
         Span::raw(" "),
-        Span::styled(effort.to_owned(), Style::default().fg(Color::LightMagenta)),
+        Span::styled(effort.to_owned(), Style::default().fg(accent)),
         Span::raw("  "),
-        Span::styled(origin.to_owned(), Style::default().fg(Color::DarkGray)),
+        Span::styled(origin.to_owned(), Style::default().fg(muted)),
     ]);
     Line::from(spans)
 }
@@ -290,8 +317,9 @@ pub(crate) fn render_picker_to_text(
 ) -> String {
     let backend = ratatui::backend::TestBackend::new(width, height);
     let mut terminal = ratatui::Terminal::new(backend).expect("test terminal should build");
+    let theme = TuiTheme::default();
     terminal
-        .draw(|frame| render_session_picker(frame, state, workspace_root))
+        .draw(|frame| render_session_picker(frame, state, workspace_root, &theme))
         .expect("picker should render");
     let buffer = terminal.backend().buffer().clone();
     let mut text = String::new();

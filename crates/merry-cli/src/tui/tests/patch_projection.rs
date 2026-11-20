@@ -46,9 +46,10 @@ fn projector_projects_apply_patch_using_patch_tool_format() {
     );
 
     assert_eq!(state.timeline().len(), 1);
-    let TimelineItem::Patch { changes } = &state.timeline()[0] else {
+    let TimelineItem::Patch { changes, expanded } = &state.timeline()[0] else {
         panic!("workspace patch result should render as a patch view");
     };
+    assert!(!expanded, "patch should start collapsed by default");
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].path, "crates/merry-cli/src/tui/render.rs");
     assert_eq!(changes[0].added, 1);
@@ -102,7 +103,7 @@ fn projector_projects_apply_patch_add_file_line_numbers() {
         &mut state,
     );
 
-    let TimelineItem::Patch { changes } = &state.timeline()[0] else {
+    let TimelineItem::Patch { changes, .. } = &state.timeline()[0] else {
         panic!("workspace add patch should render as a patch view");
     };
     assert_eq!(
@@ -147,7 +148,7 @@ fn projector_reads_delete_and_line_counts_from_the_envelope() {
         &mut state,
     );
 
-    let TimelineItem::Patch { changes } = &state.timeline()[0] else {
+    let TimelineItem::Patch { changes, .. } = &state.timeline()[0] else {
         panic!("workspace delete patch should render as a patch view");
     };
     assert_eq!(changes[0].operation, PatchOperationView::Delete);
@@ -159,6 +160,14 @@ fn projector_reads_delete_and_line_counts_from_the_envelope() {
     assert_eq!(changes[0].lines_before, Some(4));
     assert_eq!(changes[0].lines_after, Some(0));
 
+    let collapsed = render_to_text(&state, 180, 32);
+    assert!(
+        collapsed.contains("▸Deleted notes/old.md (-4)")
+            || collapsed.contains("Deleted notes/old.md (-4)")
+    );
+    assert!(!collapsed.contains("4 -> 0 lines, 30 -> 0 bytes"));
+
+    state.toggle_command_expanded(0);
     let text = render_to_text(&state, 180, 32);
     assert!(text.contains("Deleted notes/old.md (-4)"));
     assert!(text.contains("4 -> 0 lines, 30 -> 0 bytes"));
@@ -204,7 +213,7 @@ fn projector_derives_patch_line_numbers_from_hunk_headers() {
         &mut state,
     );
 
-    let TimelineItem::Patch { changes } = &state.timeline()[0] else {
+    let TimelineItem::Patch { changes, .. } = &state.timeline()[0] else {
         panic!("workspace patch result should render as a patch view");
     };
     assert_eq!(
@@ -318,12 +327,21 @@ fn renderer_shows_apply_patch_as_edited_block() {
                 PatchLineView::add("    lines.push(new);", Some(21)),
             ],
         }],
+        expanded: false,
     });
-    let text = render_to_text(&state, 180, 16);
+    let collapsed = render_to_text(&state, 180, 16);
 
-    assert!(text.contains("Edited crates/merry-cli/src/tui/render.rs (+1 -1)"));
-    assert!(text.contains("1 hunk(s), 810 -> 911 lines, 120 -> 121 bytes"));
-    assert!(!text.contains("\"changes\""));
+    assert!(collapsed.contains("Edited crates/merry-cli/src/tui/render.rs (+1 -1)"));
+    assert!(collapsed.contains('▸'), "{collapsed}");
+    assert!(!collapsed.contains("lines.push(old);"));
+    assert!(!collapsed.contains("\"changes\""));
+
+    state.toggle_command_expanded(0);
+    let expanded = render_to_text(&state, 180, 16);
+    assert!(expanded.contains('▾'), "{expanded}");
+    assert!(expanded.contains("1 hunk(s), 810 -> 911 lines, 120 -> 121 bytes"));
+    assert!(expanded.contains("-     lines.push(old);"));
+    assert!(expanded.contains("+     lines.push(new);"));
 }
 
 #[test]
@@ -389,13 +407,20 @@ fn projector_keeps_diff_like_non_patch_output_as_a_read_preview() {
 
     assert_eq!(state.timeline().len(), 1);
     assert!(!matches!(state.timeline()[0], TimelineItem::Patch { .. }));
+    let collapsed = render_to_text(&state, 120, 24);
+    assert!(collapsed.contains("Read read_text"));
+    assert!(collapsed.contains('▸'), "{collapsed}");
+    assert!(!collapsed.contains("+not a patch result"));
+    state.toggle_command_expanded(0);
     let rendered = render_to_text(&state, 120, 24);
-    assert!(rendered.contains("Read read_text"));
     assert!(rendered.contains("+not a patch result"));
 }
 
 #[test]
-fn renderer_shows_patch_summary_in_the_timeline() {
+fn renderer_shows_patch_summary_and_colored_diff_when_expanded() {
+    use crate::tui::{render::render_to_buffer, tests::find_cell_style, theme::SemanticColor};
+    use ratatui::style::Color;
+
     let mut state = TuiState::new(
         "/repo/merry".into(),
         "gpt-test".to_owned(),
@@ -418,11 +443,32 @@ fn renderer_shows_patch_summary_in_the_timeline() {
                 PatchLineView::add("print('new')", Some(7)),
             ],
         }],
+        expanded: false,
     });
-    let text = render_to_text(&state, 180, 32);
+    let collapsed = render_to_text(&state, 180, 32);
+    assert!(collapsed.contains("Edited hello_world.py (+1 -1)"));
+    assert!(collapsed.contains('▸'), "{collapsed}");
+    assert!(!collapsed.contains("print('old')"));
 
-    assert!(text.contains("Edited hello_world.py (+1 -1)"));
+    state.toggle_command_expanded(0);
+    let buffer = render_to_buffer(&state, 180, 32);
+    let text = render_to_text(&state, 180, 32);
     assert!(text.contains("1 hunk(s), 6 -> 6 lines, 20 -> 21 bytes"));
+    assert!(text.contains("- print('old')"));
+    assert!(text.contains("+ print('new')"));
+
+    let del_style = find_cell_style(&buffer, "print('old')").expect("removed line should render");
+    let add_style = find_cell_style(&buffer, "print('new')").expect("added line should render");
+    assert_eq!(
+        del_style.fg,
+        TuiTheme::default().color(SemanticColor::DiffDelete)
+    );
+    assert_eq!(
+        add_style.fg,
+        TuiTheme::default().color(SemanticColor::DiffAdd)
+    );
+    assert_eq!(del_style.bg, Some(Color::Reset));
+    assert_eq!(add_style.bg, Some(Color::Reset));
 }
 
 #[test]
@@ -460,6 +506,7 @@ fn renderer_names_created_and_deleted_files_instead_of_edits() {
                 lines: vec![],
             },
         ],
+        expanded: true,
     });
     let text = render_to_text(&state, 180, 32);
 
@@ -494,6 +541,7 @@ fn renderer_keeps_byte_only_envelopes_readable() {
             bytes_after: 33,
             lines: vec![PatchLineView::add("hello", Some(3))],
         }],
+        expanded: true,
     });
     let text = render_to_text(&state, 180, 32);
 

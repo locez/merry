@@ -68,6 +68,8 @@ pub(crate) enum Overlay {
     Dialog(MessageDialogOverlay),
     Shortcuts(ShortcutsBack),
     CommandDetails(super::command_details::CommandDetails),
+    SubagentInspect(super::subagent_view::SubagentTakeoverOverlay),
+    BackgroundTaskInspect(super::task_dock::BackgroundTaskOverlay),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,6 +249,13 @@ pub(crate) enum OverlayKeyResult {
     ApprovePermission(String),
     DenyPermission(String),
     Provider(ProviderOverlayAction),
+    SubagentPrevious,
+    SubagentNext,
+    SubagentRefresh,
+    SubagentStop(String),
+    SubagentSendMessage { agent_id: String, message: String },
+    RefreshBackgroundTask(String),
+    StopBackgroundTask(String),
 }
 
 impl CommandPalette {
@@ -603,6 +612,42 @@ impl Overlay {
                 KeyCode::Esc => OverlayKeyResult::Back,
                 _ => OverlayKeyResult::Consumed,
             },
+            Self::SubagentInspect(takeover) => match takeover.handle_key(key) {
+                super::subagent_view::SubagentTakeoverAction::Consumed => {
+                    OverlayKeyResult::Consumed
+                }
+                super::subagent_view::SubagentTakeoverAction::Back => OverlayKeyResult::Close,
+                super::subagent_view::SubagentTakeoverAction::Previous => {
+                    OverlayKeyResult::SubagentPrevious
+                }
+                super::subagent_view::SubagentTakeoverAction::Next => {
+                    OverlayKeyResult::SubagentNext
+                }
+                super::subagent_view::SubagentTakeoverAction::Refresh => {
+                    OverlayKeyResult::SubagentRefresh
+                }
+                super::subagent_view::SubagentTakeoverAction::CopyText(text) => {
+                    OverlayKeyResult::CopyText(text)
+                }
+                super::subagent_view::SubagentTakeoverAction::Stop(agent_id) => {
+                    OverlayKeyResult::SubagentStop(agent_id)
+                }
+                super::subagent_view::SubagentTakeoverAction::SendMessage { agent_id, message } => {
+                    OverlayKeyResult::SubagentSendMessage { agent_id, message }
+                }
+            },
+            Self::BackgroundTaskInspect(inspector) => match inspector.handle_key(key) {
+                super::task_dock::BackgroundTaskOverlayAction::Consumed => {
+                    OverlayKeyResult::Consumed
+                }
+                super::task_dock::BackgroundTaskOverlayAction::Close => OverlayKeyResult::Close,
+                super::task_dock::BackgroundTaskOverlayAction::Refresh(id) => {
+                    OverlayKeyResult::RefreshBackgroundTask(id)
+                }
+                super::task_dock::BackgroundTaskOverlayAction::Stop(id) => {
+                    OverlayKeyResult::StopBackgroundTask(id)
+                }
+            },
         }
     }
 
@@ -611,8 +656,10 @@ impl Overlay {
             Self::CommandPalette(palette) => palette.insert_paste(text),
             Self::Settings(settings) => settings.insert_paste(text),
             Self::ProviderForm(form) => form.insert_paste(text),
-            Self::ProviderManager(_)
-            | Self::CommandDetails(_)
+            Self::ProviderManager(manager) => manager.insert_paste(text),
+            Self::SubagentInspect(takeover) => takeover.insert_paste(text),
+            Self::CommandDetails(_)
+            | Self::BackgroundTaskInspect(_)
             | Self::ModelPicker(_)
             | Self::PlanApproval(_)
             | Self::PermissionReview(_)

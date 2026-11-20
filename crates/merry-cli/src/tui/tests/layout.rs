@@ -118,6 +118,7 @@ fn renderer_uses_one_timeline_without_permanent_side_rails() {
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Ran cargo test -p merry-cli".to_owned(),
         body: "ok".to_owned(),
+        expanded: true,
     });
     state.update_queue_preview(QueuePreview {
         next: vec![QueuedInputView {
@@ -135,6 +136,7 @@ fn renderer_uses_one_timeline_without_permanent_side_rails() {
 
     let text = render_to_text(&state, 180, 32);
 
+    assert!(text.contains('🐾'));
     assert!(text.contains("merry"));
     assert!(text.contains("make the TUI distinct"));
     assert!(text.contains("Ran cargo test -p merry-cli"));
@@ -209,6 +211,7 @@ fn narrow_chat_shows_read_result_preview() {
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Read hello_world.py".to_owned(),
         body: "print(\"Hello, Merry!\")".to_owned(),
+        expanded: true,
     });
 
     let text = render_to_text(&state, 79, 24);
@@ -228,6 +231,7 @@ fn standard_width_keeps_timeline_as_the_content_surface() {
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Read hello_world.py".to_owned(),
         body: "print(\"Hello, Merry!\")".to_owned(),
+        expanded: true,
     });
     let text = render_to_text(&state, 100, 24);
 
@@ -274,7 +278,8 @@ fn renderer_places_terminal_cursor_inside_input() {
 
     let (_buffer, cursor) = render_to_buffer_and_cursor(&state, 80, 16);
 
-    assert_eq!(cursor.x, 4);
+    // Composer insets: 2-space indent + "❯ " = col 4 (aligned with 🎀), plus "a你" (3 cols) = 7.
+    assert_eq!(cursor.x, 7);
     assert_eq!(cursor.y, 13);
 }
 
@@ -294,7 +299,8 @@ fn renderer_places_terminal_cursor_on_multiline_input_row() {
 
     assert!(rendered_buffer_text(&buffer).contains("first"));
     assert!(rendered_buffer_text(&buffer).contains("second"));
-    assert_eq!(cursor.x, 7);
+    // Col 4 text start + "second" (6 cols) = 10.
+    assert_eq!(cursor.x, 10);
     assert_eq!(cursor.y, 13);
 }
 
@@ -325,7 +331,7 @@ fn renderer_shows_user_input_in_timeline() {
     assert!(body_style.add_modifier.contains(Modifier::BOLD));
     assert_eq!(
         body_style.bg,
-        Some(crate::tui::theme::dim_color(Color::LightMagenta))
+        TuiTheme::default().bg_color(crate::tui::theme::SemanticColor::UserBackground)
     );
 }
 
@@ -449,7 +455,7 @@ fn cockpit_wide_cursor_remains_inside_input_with_cjk_text() {
     state.insert_input_str("你好 cockpit");
 
     let (buffer, cursor) = render_to_buffer_and_cursor(&state, 180, 24);
-    let input_label = find_text_position(&buffer, "M").expect("input brand should render");
+    let input_label = find_text_position(&buffer, "🎀").expect("input brand should render");
 
     assert!(cursor.y > input_label.1);
     assert!(cursor.x > input_label.0);

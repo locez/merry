@@ -1,7 +1,80 @@
-use super::{TUI_REFRESH_INTERVAL, drain_background_tasks, new_refresh_interval};
+use super::{
+    CoalescedTerminalEvent, TUI_REFRESH_INTERVAL, coalesce_terminal_events, drain_background_tasks,
+    new_refresh_interval,
+};
+use crate::tui::{terminal::TerminalEvent, text_interaction::MouseInput};
+use ratatui::layout::Position;
 use tokio::{sync::oneshot, task::JoinSet, time};
 
 mod selection_scroll;
+
+#[test]
+fn coalesces_wheel_bursts_into_single_notch_without_amplification() {
+    let pos = Position::new(10, 5);
+    let burst = vec![
+        TerminalEvent::MouseScrollUp(pos),
+        TerminalEvent::MouseScrollUp(pos),
+        TerminalEvent::MouseScrollUp(pos),
+    ];
+    assert_eq!(
+        coalesce_terminal_events(burst, 3),
+        vec![CoalescedTerminalEvent::MouseScroll {
+            position: pos,
+            up: true,
+            lines: 3,
+        }]
+    );
+
+    let four_events = vec![
+        TerminalEvent::MouseScrollUp(pos),
+        TerminalEvent::MouseScrollUp(pos),
+        TerminalEvent::MouseScrollUp(pos),
+        TerminalEvent::MouseScrollUp(pos),
+    ];
+    assert_eq!(
+        coalesce_terminal_events(four_events, 3),
+        vec![CoalescedTerminalEvent::MouseScroll {
+            position: pos,
+            up: true,
+            lines: 4,
+        }]
+    );
+
+    let cancelling = vec![
+        TerminalEvent::MouseScrollUp(pos),
+        TerminalEvent::MouseScrollDown(pos),
+    ];
+    assert!(coalesce_terminal_events(cancelling, 3).is_empty());
+}
+
+#[test]
+fn coalesces_consecutive_mouse_drags_and_resizes_while_preserving_barriers() {
+    let events = vec![
+        TerminalEvent::Mouse(MouseInput::Down(Position::new(1, 2))),
+        TerminalEvent::Mouse(MouseInput::Drag(Position::new(2, 2))),
+        TerminalEvent::Mouse(MouseInput::Drag(Position::new(5, 3))),
+        TerminalEvent::Mouse(MouseInput::Drag(Position::new(9, 4))),
+        TerminalEvent::Mouse(MouseInput::Up(Position::new(9, 4))),
+        TerminalEvent::Resize,
+        TerminalEvent::Resize,
+        TerminalEvent::Resize,
+    ];
+    assert_eq!(
+        coalesce_terminal_events(events, 3),
+        vec![
+            CoalescedTerminalEvent::Event(TerminalEvent::Mouse(MouseInput::Down(Position::new(
+                1, 2
+            )))),
+            CoalescedTerminalEvent::Event(TerminalEvent::Mouse(MouseInput::Drag(Position::new(
+                9, 4
+            )))),
+            CoalescedTerminalEvent::Event(TerminalEvent::Mouse(MouseInput::Up(Position::new(
+                9, 4
+            )))),
+            CoalescedTerminalEvent::Event(TerminalEvent::Resize),
+        ]
+    );
+}
 
 #[tokio::test(start_paused = true)]
 async fn refresh_interval_is_not_reset_by_unrelated_work() {

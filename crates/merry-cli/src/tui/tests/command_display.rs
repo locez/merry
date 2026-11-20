@@ -108,7 +108,9 @@ fn rendered_preview(state: &TuiState, title: &str) -> Vec<String> {
 }
 
 fn command_row_text(row: &str) -> &str {
-    let row = without_activity_gutter(row.trim_end());
+    let row = row.trim_end();
+    let row = row.strip_prefix(' ').unwrap_or(row);
+    let row = without_activity_gutter(row);
     row.strip_prefix(' ').unwrap_or(row)
 }
 
@@ -154,8 +156,15 @@ fn wrapped_command_continuations_align_with_the_command_body() {
                 0,
                 process_output(0, "", "", false, false),
             );
-            state.toggle_command_expanded(0);
         }
+        // Both running and finished long commands start collapsed to one line
+        // with a fold chevron, and expand to aligned wrapped lines on click.
+        let collapsed = render_to_text(&state, 36, 32);
+        assert!(collapsed.contains('▸'), "{collapsed}");
+        assert!(collapsed.contains('…'), "{collapsed}");
+        assert!(!collapsed.contains("end"), "{collapsed}");
+
+        state.toggle_command_expanded(0);
         let rendered = render_to_text(&state, 36, 32);
         let rows = rendered
             .lines()
@@ -194,8 +203,12 @@ async fn running_command_animates_and_completion_stops_the_animation() {
     assert!(first.contains("Running "));
     assert!(first.contains("git status (.)"));
     assert!(!first.contains("Ran "));
-    let buffer = render_to_buffer(&state, 120, 24);
-    assert_eq!(find_cell_color(&buffer, "Running"), Some(Color::LightCyan));
+    let static_state = state.clone().with_animations(false);
+    let buffer = render_to_buffer(&static_state, 120, 24);
+    assert_eq!(
+        find_cell_color(&buffer, "Running"),
+        Some(Color::LightMagenta)
+    );
     assert_eq!(find_cell_color(&buffer, "git"), Some(Color::LightBlue));
 
     tokio::time::advance(Duration::from_millis(100)).await;
@@ -260,7 +273,7 @@ fn successful_commands_show_output_by_default_and_stay_compact_when_hidden() {
     let rows = rendered.lines().map(str::trim_end).collect::<Vec<_>>();
     assert!(
         rows.windows(2)
-            .any(|rows| rows == [" Ran cmd1 (.)", " Ran cmd2 (.)"])
+            .any(|rows| rows == ["  Ran cmd1 (.)", "  Ran cmd2 (.)"])
     );
     assert!(!rendered.contains("hidden-stdout"));
     assert!(!rendered.contains("hidden-stderr"));
@@ -306,17 +319,21 @@ fn timeline_gutter_stays_empty_on_wrapped_command_rows() {
     let mut projector = TuiProjector::default();
     let command = format!("printf {} command-tail", "0123456789".repeat(20));
     start_command(&mut projector, &mut state, "process", &command);
+    state.toggle_command_expanded(0);
 
     let buffer = render_to_buffer(&state, 24, 28);
     let (_, first_row) = find_text_position(&buffer, "Running").expect("command should be visible");
     let (_, last_row) =
         find_text_position(&buffer, "command-tail").expect("command tail should be visible");
     assert!(last_row > first_row);
-    for row in first_row..=last_row {
+    // Expanded long running commands show the open chevron on row 0 and keep
+    // continuation gutters empty (no vertical rail).
+    assert_eq!(buffer[(0, first_row)].symbol(), "▾");
+    for row in first_row + 1..=last_row {
         assert_eq!(
             buffer[(0, row)].symbol(),
-            "┃",
-            "wrapped row {row} should show the running activity rail"
+            " ",
+            "wrapped row {row} should keep gutter empty for independent commands"
         );
     }
 }
@@ -461,15 +478,15 @@ fn long_commands_wrap_without_losing_arguments_or_the_working_directory() {
                 0,
                 process_output(0, "", "", false, false),
             );
-            let collapsed = render_to_text(&state, 40, 64);
-            assert!(collapsed.contains('▸'), "{collapsed}");
-            let collapsed_compact = compact_command_text(&collapsed);
-            assert!(
-                !collapsed_compact.contains(&expected),
-                "finished command should collapse until opened: {collapsed}"
-            );
-            state.toggle_command_expanded(0);
         }
+        let collapsed = render_to_text(&state, 40, 64);
+        assert!(collapsed.contains('▸'), "{collapsed}");
+        let collapsed_compact = compact_command_text(&collapsed);
+        assert!(
+            !collapsed_compact.contains(&expected),
+            "long command should collapse until opened while running={running}: {collapsed}"
+        );
+        state.toggle_command_expanded(0);
         let rendered = render_to_text(&state, 40, 64);
         let compact = compact_command_text(&rendered);
         assert!(
@@ -581,10 +598,20 @@ fn finished_long_commands_collapse_until_clicked_open() {
     start_command(&mut projector, &mut state, "process", &command);
 
     let size = Size::new(36, 32);
-    let running = render_to_text(&state, size.width, size.height);
-    assert!(running.contains("TAIL_TOKEN"), "{running}");
-    assert!(!running.contains('▸'), "{running}");
-    assert!(!running.contains('▾'), "{running}");
+    let running = render_to_buffer(&state, size.width, size.height);
+    let running_text = buffer_text(&running);
+    assert!(running_text.contains('▸'), "{running_text}");
+    assert!(running_text.contains('…'), "{running_text}");
+    assert!(!running_text.contains("TAIL_TOKEN"), "{running_text}");
+
+    click(&mut state, size, point(&running, "Running"));
+    let running_open = render_to_buffer(&state, size.width, size.height);
+    let running_open_text = buffer_text(&running_open);
+    assert!(
+        running_open_text.contains("TAIL_TOKEN"),
+        "{running_open_text}"
+    );
+    assert!(running_open_text.contains('▾'), "{running_open_text}");
 
     finish_command(
         &mut projector,

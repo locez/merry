@@ -274,7 +274,7 @@ fn renderer_shows_completion_candidates_above_input() {
 
     assert!(text.contains("> Cargo.toml"));
     assert!(!text.contains("> @ Cargo.toml"));
-    assert!(text.find("> Cargo.toml").unwrap() < text.find('M').unwrap());
+    assert!(text.find("> Cargo.toml").unwrap() < text.find('🎀').unwrap());
 }
 
 #[test]
@@ -306,7 +306,7 @@ fn text_input_supports_common_shell_line_editing_keys() {
     let mut input = TextInput::default();
 
     input.insert_str("alpha beta");
-    input.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    input.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
     input.insert_str("> ");
     input.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
     input.insert_str(" tail");
@@ -435,4 +435,142 @@ fn up_on_the_first_input_row_recalls_history() {
         ControllerEffect::None
     );
     assert_eq!(state.input_text(), "earlier");
+}
+
+#[test]
+fn controller_supports_select_all_copy_cut_esc_deselect_and_shift_enter() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "model".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("hello world");
+
+    // Ctrl+A selects all; Ctrl+C copies selection instead of clearing/quitting.
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            &mut state
+        ),
+        ControllerEffect::None
+    );
+    assert!(state.has_input_selection());
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut state
+        ),
+        ControllerEffect::CopyText("hello world".to_owned())
+    );
+    assert_eq!(state.input_text(), "hello world");
+
+    // Esc clears composer selection cleanly.
+    assert_eq!(
+        handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state),
+        ControllerEffect::None
+    );
+    assert!(!state.has_input_selection());
+
+    // Shift+Enter inserts a newline without submitting.
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            &mut state
+        ),
+        ControllerEffect::None
+    );
+    state.insert_input_str("second");
+    assert_eq!(state.input_text(), "hello world\nsecond");
+
+    // Cmd+A then Cmd+X cuts everything to clipboard; Ctrl+Z restores it.
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SUPER),
+            &mut state
+        ),
+        ControllerEffect::None
+    );
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SUPER),
+            &mut state
+        ),
+        ControllerEffect::CopyText("hello world\nsecond".to_owned())
+    );
+    assert_eq!(state.input_text(), "");
+
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL),
+            &mut state
+        ),
+        ControllerEffect::None
+    );
+    assert_eq!(state.input_text(), "hello world\nsecond");
+}
+
+#[test]
+fn composer_renders_selection_highlight_and_supports_mouse_click_and_drag() {
+    use crate::tui::{
+        controller::handle_mouse_input, render::render_to_buffer, text_interaction::MouseInput,
+        theme::SemanticColor,
+    };
+    use ratatui::layout::{Position, Size};
+
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "model".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.insert_input_str("hello");
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        &mut state,
+    );
+
+    let size = Size::new(80, 14);
+    let buffer = render_to_buffer(&state, size.width, size.height);
+    let expected_bg = state.theme().bg_color(SemanticColor::SelectionBackground);
+
+    // Find "hello" in the composer row and verify its cells have SelectionBackground.
+    let mut found = None;
+    for y in 0..buffer.area.height {
+        let mut row = String::new();
+        let mut cols = Vec::new();
+        for x in 0..buffer.area.width {
+            let start = row.len();
+            row.push_str(buffer[(x, y)].symbol());
+            cols.push((start, x));
+        }
+        if let Some(byte_idx) = row.find("hello")
+            && let Some((_, x)) = cols.into_iter().find(|(start, _)| *start == byte_idx)
+        {
+            found = Some((x, y));
+            for offset in 0..5u16 {
+                assert_eq!(buffer[(x + offset, y)].bg, expected_bg.unwrap());
+            }
+            break;
+        }
+    }
+    let (hx, hy) = found.expect("composer should render 'hello'");
+
+    // Clicking on 'l' (index 2) moves cursor there and clears selection.
+    handle_mouse_input(
+        MouseInput::Down(Position::new(hx + 2, hy)),
+        size,
+        &mut state,
+    );
+    assert_eq!(state.input_mut().cursor_byte_index(), 2);
+    assert!(!state.has_input_selection());
+
+    // Dragging to index 5 selects "llo".
+    handle_mouse_input(
+        MouseInput::Drag(Position::new(hx + 5, hy)),
+        size,
+        &mut state,
+    );
+    handle_mouse_input(MouseInput::Up(Position::new(hx + 5, hy)), size, &mut state);
+    assert_eq!(state.selected_input_text().as_deref(), Some("llo"));
 }

@@ -355,6 +355,8 @@ fn configured_navigation_bindings_take_precedence() {
 
 #[test]
 fn ctrl_r_searches_history_and_enter_keeps_the_line() {
+    use crate::tui::render::render_to_text;
+
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -367,12 +369,20 @@ fn ctrl_r_searches_history_and_enter_keeps_the_line() {
 
     let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
     assert_eq!(handle_key_event(ctrl_r, &mut state), ControllerEffect::None);
-    assert_eq!(state.input_text(), "newer cargo test");
-    assert!(state.interaction_status_text().contains("Ctrl+R older"));
+    // Draft stays untouched while the search filter and candidate list are shown.
+    assert_eq!(state.input_text(), "keep me");
+    assert_eq!(state.history_search().unwrap().query(), "");
+    assert_eq!(state.history_search().unwrap().selected_pos(), 0);
+    assert!(state.interaction_status_text().contains("Ctrl+R select"));
+    let open_view = render_to_text(&state, 90, 14);
+    assert!(open_view.contains("Search history · 1/2"), "{open_view}");
+    assert!(open_view.contains("> newer cargo test"), "{open_view}");
+    assert!(open_view.contains("older cargo"), "{open_view}");
+    assert!(open_view.contains("Type to filter history"), "{open_view}");
 
+    // Ctrl+R / Down steps to older match; Ctrl+S / Up steps back to newer match.
     assert_eq!(handle_key_event(ctrl_r, &mut state), ControllerEffect::None);
-    assert_eq!(state.input_text(), "older cargo");
-
+    assert_eq!(state.history_search().unwrap().selected_pos(), 1);
     assert_eq!(
         handle_key_event(
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
@@ -380,8 +390,9 @@ fn ctrl_r_searches_history_and_enter_keeps_the_line() {
         ),
         ControllerEffect::None
     );
-    assert_eq!(state.input_text(), "newer cargo test");
+    assert_eq!(state.history_search().unwrap().selected_pos(), 0);
 
+    // Typing edits the filter query directly in the composer (never the draft).
     assert_eq!(
         handle_key_event(
             KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
@@ -389,9 +400,16 @@ fn ctrl_r_searches_history_and_enter_keeps_the_line() {
         ),
         ControllerEffect::None
     );
-    assert_eq!(state.input_text(), "newer cargo test");
+    assert_eq!(state.history_search().unwrap().query(), "z");
     assert!(state.interaction_status_text().contains("No history match"));
+    let empty_view = render_to_text(&state, 90, 14);
+    assert!(
+        empty_view.contains("No matching history entries"),
+        "{empty_view}"
+    );
+    assert!(empty_view.contains("❯ z"), "{empty_view}");
 
+    // Backspace edits the filter query cleanly and restores matches.
     assert_eq!(
         handle_key_event(
             KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
@@ -399,18 +417,38 @@ fn ctrl_r_searches_history_and_enter_keeps_the_line() {
         ),
         ControllerEffect::None
     );
-    assert_eq!(state.input_text(), "newer cargo test");
+    assert_eq!(state.history_search().unwrap().query(), "");
 
-    assert_eq!(
-        handle_key_event(
-            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
-            &mut state
-        ),
-        ControllerEffect::None
+    // Filter with "test" (case-insensitive) and verify Ctrl+A selects the filter, not draft.
+    for ch in "TEST".chars() {
+        assert_eq!(
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &mut state
+            ),
+            ControllerEffect::None
+        );
+    }
+    assert_eq!(state.history_search().unwrap().matches().len(), 1);
+    assert!(state.interaction_status_text().contains("History · TEST"));
+
+    // Ctrl+A + Backspace clears the whole filter query while keeping search open.
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+        &mut state,
     );
-    assert_eq!(state.input_text(), "newer cargo test");
-    assert!(state.interaction_status_text().contains("History · t"));
+    handle_key_event(
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        &mut state,
+    );
+    assert!(state.history_search_active());
+    assert_eq!(state.history_search().unwrap().query(), "");
 
+    // Type 't' to match "newer cargo test" and press Enter to load into composer.
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+        &mut state,
+    );
     assert_eq!(
         handle_key_event(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -419,8 +457,9 @@ fn ctrl_r_searches_history_and_enter_keeps_the_line() {
         ControllerEffect::None
     );
     assert_eq!(state.input_text(), "newer cargo test");
-    assert!(!state.interaction_status_text().contains("History"));
+    assert!(!state.history_search_active());
 
+    // Down restores the original draft.
     assert_eq!(
         handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state),
         ControllerEffect::None
@@ -442,8 +481,10 @@ fn esc_and_empty_backspace_cancel_history_search() {
     let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
     let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     handle_key_event(ctrl_r, &mut state);
-    assert_eq!(state.input_text(), "alpha");
+    assert!(state.history_search_active());
+    assert_eq!(state.input_text(), "draft");
     handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+    assert!(!state.history_search_active());
     assert_eq!(state.input_text(), "draft");
 
     handle_key_event(ctrl_r, &mut state);
@@ -451,10 +492,12 @@ fn esc_and_empty_backspace_cancel_history_search() {
         KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
         &mut state,
     );
+    assert!(!state.history_search_active());
     assert_eq!(state.input_text(), "draft");
 
     handle_key_event(ctrl_r, &mut state);
     assert_eq!(handle_key_event(ctrl_c, &mut state), ControllerEffect::None);
+    assert!(!state.history_search_active());
     assert_eq!(state.input_text(), "draft");
     assert_eq!(handle_key_event(ctrl_c, &mut state), ControllerEffect::None);
     assert_eq!(state.input_text(), "");

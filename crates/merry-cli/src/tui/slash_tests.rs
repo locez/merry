@@ -336,7 +336,7 @@ fn palette_slash_commands_reveal_feedback_from_plan_focus() {
                 PaletteCommand::Interrupt,
                 InteractiveRunState::RunningModel,
                 ControllerEffect::Interrupt,
-                "Interrupt requested",
+                "⊘ Stopping…",
             ),
             (
                 PaletteCommand::SaveSession,
@@ -478,8 +478,7 @@ fn keyboard_stop_reveals_the_same_feedback_as_slash_stop() {
     assert!(!state.plan().is_focused());
     assert!(matches!(
         state.timeline().last(),
-        Some(TimelineItem::LocalCommand { title, body })
-            if title == "Stopping" && body.contains("Interrupt requested")
+        Some(TimelineItem::Muted { title, .. }) if title == "⊘ Stopping…"
     ));
 
     assert_eq!(
@@ -488,8 +487,8 @@ fn keyboard_stop_reveals_the_same_feedback_as_slash_stop() {
     );
     assert!(matches!(
         state.timeline().last(),
-        Some(TimelineItem::LocalCommand { title, body })
-            if title == "Stop already requested" && body.contains("cancellation boundary")
+        Some(TimelineItem::Muted { title, detail })
+            if title == "⊘ Stopping…" && detail == "waiting for current step"
     ));
 }
 
@@ -514,10 +513,7 @@ fn stop_and_save_respect_the_current_run_state() {
         handle_key_action(KeyAction::SubmitNext, &mut running_stop),
         ControllerEffect::Interrupt
     );
-    assert_timeline_feedback(
-        &running_stop,
-        &["Stopping", "Interrupt requested for the active run"],
-    );
+    assert_timeline_feedback(&running_stop, &["⊘ Stopping…"]);
 
     let mut cancelled_stop = state();
     cancelled_stop.set_run_state(InteractiveRunState::RunningModel);
@@ -529,8 +525,7 @@ fn stop_and_save_respect_the_current_run_state() {
     TuiProjector::default().apply(run_cancelled_event(), &mut cancelled_stop);
     assert!(matches!(
         cancelled_stop.timeline().last(),
-        Some(TimelineItem::LocalCommand { title, body })
-            if title == "Run stopped" && body.contains("cancellation boundary")
+        Some(TimelineItem::Muted { title, .. }) if title == "⊘ Stopped"
     ));
     assert!(
         cancelled_stop
@@ -538,10 +533,7 @@ fn stop_and_save_respect_the_current_run_state() {
             .iter()
             .all(|item| !matches!(item, TimelineItem::Diagnostic { .. }))
     );
-    assert_timeline_feedback(
-        &cancelled_stop,
-        &["Run stopped", "The active run reached", "boundary."],
-    );
+    assert_timeline_feedback(&cancelled_stop, &["⊘ Stopped"]);
 
     let mut unexpected_cancel = state();
     TuiProjector::default().apply(run_cancelled_event(), &mut unexpected_cancel);
@@ -558,22 +550,16 @@ fn stop_and_save_respect_the_current_run_state() {
     );
     assert!(matches!(
         running_stop.timeline().last(),
-        Some(TimelineItem::LocalCommand { title, .. }) if title == "Stop already requested"
+        Some(TimelineItem::Muted { title, detail })
+            if title == "⊘ Stopping…" && detail == "waiting for current step"
     ));
     assert_eq!(running_stop.timeline().len(), 1);
-    assert_timeline_feedback(
-        &running_stop,
-        &[
-            "Stop already requested",
-            "Waiting for the active run",
-            "boundary.",
-        ],
-    );
+    assert_timeline_feedback(&running_stop, &["⊘ Stopping…", "waiting for current step"]);
     TuiProjector::default().apply(run_cancelled_event(), &mut running_stop);
     assert_eq!(running_stop.timeline().len(), 1);
     assert!(matches!(
         running_stop.timeline().last(),
-        Some(TimelineItem::LocalCommand { title, .. }) if title == "Run stopped"
+        Some(TimelineItem::Muted { title, .. }) if title == "⊘ Stopped"
     ));
 
     let mut interrupting = state();
@@ -607,7 +593,7 @@ fn wrapped_command_feedback_stays_visible_at_the_bottom_of_a_full_timeline() {
         (
             "/stop",
             InteractiveRunState::Interrupting,
-            "cancellation boundary.",
+            "waiting for current step",
         ),
         (
             "/save",

@@ -71,7 +71,11 @@ async fn reasoning_stays_open_with_a_rail_then_collapses_for_the_reply() {
     assert!(running_text.contains("first thought"), "{running_text}");
     assert!(running_text.contains("second thought"), "{running_text}");
     let (_, row) = find_text_position(&running, "Thinking").expect("thinking header");
-    assert_eq!(running[(0, row)].symbol(), "┃");
+    assert!(
+        matches!(running[(0, row)].symbol(), "│" | "┃"),
+        "expected vertical thinking rail glyph, got {:?}",
+        running[(0, row)].symbol()
+    );
     assert!(matches!(
         running[(0, row)].style().fg,
         Some(Color::Rgb(_, _, _))
@@ -125,9 +129,9 @@ async fn running_thinking_keeps_only_the_latest_lines() {
     let rendered = render_to_text(&state, 40, 24);
     assert!(rendered.contains("Thinking…"), "{rendered}");
     assert!(
-        rendered
-            .lines()
-            .any(|line| { line.trim().trim_start_matches(['┃', '▸', '▾']).trim() == "…" }),
+        rendered.lines().any(|line| {
+            line.trim().trim_start_matches(['│', '┃', '▸', '▾']).trim() == "…"
+        }),
         "{rendered}"
     );
     assert!(rendered.contains("line-4"), "{rendered}");
@@ -198,6 +202,94 @@ fn successful_command_output_uses_a_terminal_panel_by_default() {
     let rendered = buffer_text(&buffer);
     assert!(rendered.contains("panel-line"), "{rendered}");
     let style = find_cell_style(&buffer, "panel-line").expect("output cell");
-    assert_eq!(style.fg, Some(Color::White));
-    assert_eq!(style.bg, Some(Color::Rgb(40, 36, 42)));
+    assert_eq!(
+        style.fg,
+        TuiTheme::default().color(crate::tui::theme::SemanticColor::TextSecondary)
+    );
+    assert_eq!(style.bg, Some(Color::Reset));
+}
+
+#[tokio::test(start_paused = true)]
+async fn running_command_stays_collapsed_until_clicked_to_reveal_live_output() {
+    let mut state = state();
+    let mut projector = TuiProjector::default();
+    let call = pending_call_with_args("live-cmd", "run_process", json!({ "command": "watch" }));
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call,
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let size = Size::new(80, 20);
+    let initial = render_to_buffer(&state, size.width, size.height);
+    let initial_text = buffer_text(&initial);
+    assert!(initial_text.contains("Running watch"), "{initial_text}");
+    assert!(
+        !initial_text.contains('▸'),
+        "no chevron before live output arrives:\n{initial_text}"
+    );
+
+    projector.apply(
+        RuntimeEvent::ToolCallOutputDelta {
+            call_id: ToolCallId::new("live-cmd").unwrap(),
+            stream: merry_core::ToolOutputStream::Stdout,
+            delta: "worker-1 tick 1\nworker-1 tick 2\n".to_owned(),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let collapsed = render_to_buffer(&state, size.width, size.height);
+    let collapsed_text = buffer_text(&collapsed);
+    assert!(
+        collapsed_text.contains('▸'),
+        "chevron should appear once live output arrives:\n{collapsed_text}"
+    );
+    assert!(
+        !collapsed_text.contains("worker-1 tick 1"),
+        "live output must stay collapsed by default:\n{collapsed_text}"
+    );
+
+    click(&mut state, size, point(&collapsed, "watch"));
+    let expanded = render_to_buffer(&state, size.width, size.height);
+    let expanded_text = buffer_text(&expanded);
+    assert!(expanded_text.contains('▾'), "{expanded_text}");
+    assert!(expanded_text.contains("worker-1 tick 1"), "{expanded_text}");
+    assert!(expanded_text.contains("worker-1 tick 2"), "{expanded_text}");
+
+    // Streaming more lines rolls forward to always show the newest tail with
+    // a leading `…` at the top (matching live Thinking), never a trailing `...`.
+    let more: String = (3..=12)
+        .map(|tick| format!("worker-1 tick {tick}\n"))
+        .collect();
+    projector.apply(
+        RuntimeEvent::ToolCallOutputDelta {
+            call_id: ToolCallId::new("live-cmd").unwrap(),
+            stream: merry_core::ToolOutputStream::Stdout,
+            delta: more,
+            source: source(),
+        },
+        &mut state,
+    );
+    let rolling = render_to_buffer(&state, size.width, size.height);
+    let rolling_text = buffer_text(&rolling);
+    assert!(
+        !rolling_text.contains("worker-1 tick 1\n") && !rolling_text.contains("worker-1 tick 2"),
+        "older lines should scroll off the top:\n{rolling_text}"
+    );
+    assert!(rolling_text.contains("worker-1 tick 12"), "{rolling_text}");
+    assert!(!rolling_text.contains("  ..."), "{rolling_text}");
+    let ellipsis_row = find_text_position(&rolling, "…").expect("leading ellipsis");
+    let newest_row = find_text_position(&rolling, "worker-1 tick 12").expect("newest line");
+    assert!(
+        ellipsis_row.1 < newest_row.1,
+        "leading `…` must sit above the newest live output:\n{rolling_text}"
+    );
+
+    click(&mut state, size, point(&rolling, "▾"));
+    let refolded = render_to_text(&state, size.width, size.height);
+    assert!(!refolded.contains("worker-1 tick 12"), "{refolded}");
+    assert!(refolded.contains('▸'), "{refolded}");
 }
