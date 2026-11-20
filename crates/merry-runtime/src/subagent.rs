@@ -12,7 +12,7 @@ mod tools;
 
 pub use activity::{SubagentActivityHub, SubagentActivityReceiver};
 pub(crate) use child::sanitize_diagnostic_message;
-pub use manager::SubagentManager;
+pub use manager::{SubagentInspectSession, SubagentManager};
 pub(crate) use plan_link::plan_link_runtime_for_controller;
 pub use plan_link::{PlanLinkRuntime, PlanSubagentScope};
 pub use protocol::{

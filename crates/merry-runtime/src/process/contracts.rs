@@ -205,23 +205,84 @@ pub type ProcessRunnerFuture<'a> = Pin<Box<dyn Future<Output = ProcessRunnerResu
 /// Result returned by a runtime-owned process runner.
 pub type ProcessRunnerResult = Result<ProcessRunnerOutput, ProcessRunnerError>;
 
+/// Live incremental output chunk emitted while a process action is running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessOutputChunk {
+    /// Tool call that owns the running process.
+    pub call_id: merry_core::ToolCallId,
+    /// Which output pipe produced the chunk.
+    pub stream: merry_core::ToolOutputStream,
+    /// Lossy UTF-8 text chunk.
+    pub delta: String,
+}
+
+/// Non-blocking sink for forwarding bounded live process output chunks to UI observers.
+#[derive(Debug, Clone)]
+pub struct ProcessOutputSink {
+    call_id: merry_core::ToolCallId,
+    sender: tokio::sync::mpsc::Sender<ProcessOutputChunk>,
+}
+
+impl ProcessOutputSink {
+    /// Creates a live output sink bound to one active tool call.
+    #[must_use]
+    pub fn new(
+        call_id: merry_core::ToolCallId,
+        sender: tokio::sync::mpsc::Sender<ProcessOutputChunk>,
+    ) -> Self {
+        Self { call_id, sender }
+    }
+
+    /// Emits a bounded chunk without ever blocking the process reader task.
+    pub fn emit(&self, stream: merry_core::ToolOutputStream, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        const MAX_LIVE_CHUNK_BYTES: usize = 4096;
+        let slice = &bytes[..bytes.len().min(MAX_LIVE_CHUNK_BYTES)];
+        let delta = String::from_utf8_lossy(slice).into_owned();
+        let _ = self.sender.try_send(ProcessOutputChunk {
+            call_id: self.call_id.clone(),
+            stream,
+            delta,
+        });
+    }
+}
+
 /// Context passed to a process runner.
 #[derive(Debug, Clone)]
 pub struct ProcessRunnerContext {
     cancellation_token: CancellationToken,
+    output_sink: Option<ProcessOutputSink>,
 }
 
 impl ProcessRunnerContext {
     /// Creates a process runner context with the provided cancellation token.
     #[must_use]
     pub fn new(cancellation_token: CancellationToken) -> Self {
-        Self { cancellation_token }
+        Self {
+            cancellation_token,
+            output_sink: None,
+        }
+    }
+
+    /// Attaches a non-blocking live output sink for streaming stdout/stderr progress.
+    #[must_use]
+    pub fn with_output_sink(mut self, sink: ProcessOutputSink) -> Self {
+        self.output_sink = Some(sink);
+        self
     }
 
     /// Returns the cancellation token for this process action.
     #[must_use]
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation_token
+    }
+
+    /// Returns the optional live output sink for streaming stdout/stderr progress.
+    #[must_use]
+    pub fn output_sink(&self) -> Option<&ProcessOutputSink> {
+        self.output_sink.as_ref()
     }
 }
 

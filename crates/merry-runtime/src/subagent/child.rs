@@ -17,7 +17,7 @@ use merry_core::{
 use merry_llm::GenerationConfig;
 pub(super) use projection::{ChildLoopProjection, apply_loop_result};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 mod projection;
@@ -26,10 +26,12 @@ pub(super) struct ChildLoopLaunch {
     pub(super) agent_id: SubagentId,
     pub(super) task_id: SubagentTaskId,
     pub(super) task: SubagentTaskSpec,
+    pub(super) prompt: String,
     pub(super) token: CancellationToken,
     pub(super) runtime: Runtime,
     pub(super) generation_config: GenerationConfig,
     pub(super) activity_hub: Option<Arc<SubagentActivityHub>>,
+    pub(super) event_tx: broadcast::Sender<merry_core::RuntimeEvent>,
 }
 
 struct ChildErrorTransition {
@@ -133,17 +135,58 @@ impl SubagentManager {
             self.mark_cancelled_and_schedule(&agent_id).await;
             return;
         }
+        let event_tx = {
+            let mut state = self.state.lock().await;
+            let Some(agent) = state.agents.get_mut(&agent_id) else {
+                return;
+            };
+            agent.runtime = Some(runtime.clone());
+            agent.generation_config = Some(generation_config.clone());
+            agent.event_tx.clone()
+        };
 
+        let prompt = task.task().to_owned();
         spawn_child_loop(
             self.child_scheduler(),
             ChildLoopLaunch {
                 agent_id,
                 task_id,
                 task,
+                prompt,
                 token,
                 runtime,
                 generation_config,
                 activity_hub,
+                event_tx,
+            },
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn resume_child_with_prompt(
+        &self,
+        agent_id: SubagentId,
+        task_id: SubagentTaskId,
+        task: SubagentTaskSpec,
+        token: CancellationToken,
+        runtime: Runtime,
+        generation_config: GenerationConfig,
+        event_tx: broadcast::Sender<merry_core::RuntimeEvent>,
+        prompt: String,
+    ) {
+        let activity_hub = self.attached_activity_hub();
+        spawn_child_loop(
+            self.child_scheduler(),
+            ChildLoopLaunch {
+                agent_id,
+                task_id,
+                task,
+                prompt,
+                token,
+                runtime,
+                generation_config,
+                activity_hub,
+                event_tx,
             },
         );
     }
@@ -278,17 +321,29 @@ pub(super) async fn spawn_reserved_child(
         return Ok(ReservedChildStartOutcome::Cancelled);
     }
 
+    let event_tx = {
+        let mut state = scheduler.state.lock().await;
+        let Some(agent) = state.agents.get_mut(&start.agent_id) else {
+            return Ok(ReservedChildStartOutcome::Cancelled);
+        };
+        agent.runtime = Some(runtime.clone());
+        agent.generation_config = Some(generation_config.clone());
+        agent.event_tx.clone()
+    };
+
     let activity_hub = scheduler.attached_activity_hub();
     spawn_child_loop(
         scheduler,
         ChildLoopLaunch {
             agent_id: start.agent_id.clone(),
             task_id: start.task_id.clone(),
+            prompt: start.task.task().to_owned(),
             task: start.task.clone(),
             token: start.cancellation_token.clone(),
             runtime,
             generation_config,
             activity_hub,
+            event_tx,
         },
     );
 
@@ -303,7 +358,7 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
             hub.publish(activity_reducer.starting(crate::plan::unix_time_ms()));
         }
 
-        let input = match StepInput::user_text(launch.task.task()) {
+        let input = match StepInput::user_text(&launch.prompt) {
             Ok(input) => input,
             Err(error) => {
                 let cancelled = launch.token.is_cancelled();
@@ -408,6 +463,7 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
         while let Ok(Some(message)) = stream.next_message().await {
             match message {
                 AgentRunMessage::Event(event) => {
+                    let _ = launch.event_tx.send(event.clone());
                     if let Some(hub) = launch.activity_hub.as_deref()
                         && let Some(snapshot) =
                             activity_reducer.reduce(&event, crate::plan::unix_time_ms())
@@ -499,6 +555,32 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                     }
                 }
             }
+        }
+        let next_follow_up = state_guard
+            .agents
+            .get_mut(&launch.agent_id)
+            .and_then(|agent| {
+                if loop_token.is_cancelled() || agent.status == SubagentStatusLabel::Cancelled {
+                    None
+                } else {
+                    agent.pending_follow_ups.pop_front()
+                }
+            });
+        if let Some(next_prompt) = next_follow_up {
+            if let Some(agent) = state_guard.agents.get_mut(&launch.agent_id) {
+                agent.status = SubagentStatusLabel::Running;
+                agent.summary = "handling follow-up".to_owned();
+                agent.diagnostics = None;
+            }
+            drop(state_guard);
+            spawn_child_loop(
+                scheduler,
+                ChildLoopLaunch {
+                    prompt: next_prompt,
+                    ..launch
+                },
+            );
+            return;
         }
         let (terminal_link, terminal_status, terminal_activity, terminal_notification) =
             state_guard

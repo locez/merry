@@ -94,7 +94,8 @@ pub use interactive::{
     InteractiveRunMessage, InteractiveSettingsUpdate, InteractiveSubagentSettings, InterruptReason,
 };
 pub use merry_core::{
-    ContextWindowSource, ImageSummary, ToolOutput, ToolOutputKind, ToolOutputPreview, ToolSpec,
+    ContextWindowSource, ImageSummary, ToolOutput, ToolOutputKind, ToolOutputPreview,
+    ToolOutputStream, ToolSpec,
 };
 pub use model_config::RuntimeModelRole;
 pub use permission::{
@@ -119,11 +120,11 @@ pub use process::{
     MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS, MAX_PROCESS_CWD_BYTES,
     MAX_PROCESS_OUTPUT_LIMIT_BYTES, MAX_PROCESS_STDIN_TEXT_BYTES, PermissionedProcessRunnerFactory,
     ProcessActionError, ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence,
-    ProcessExitStatus, ProcessOutputEnvelope, ProcessOutputStream, ProcessPermissionProfileId,
-    ProcessRunner, ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture,
-    ProcessRunnerOutput, ProcessRunnerResult, StaticPermissionedProcessRunnerFactory,
-    is_low_risk_process_action_intent, is_read_only_shell_process_action_intent,
-    shell_command_for_argv,
+    ProcessExitStatus, ProcessOutputChunk, ProcessOutputEnvelope, ProcessOutputSink,
+    ProcessOutputStream, ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext,
+    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
+    StaticPermissionedProcessRunnerFactory, is_low_risk_process_action_intent,
+    is_read_only_shell_process_action_intent, shell_command_for_argv,
 };
 pub use process::{
     PreparedProcessPermission, ProcessPathGrant, ProcessPathGrantConstraint,
@@ -152,9 +153,10 @@ pub use subagent::{
     DEFAULT_MAX_MODEL_TURNS, DEFAULT_MIN_MODEL_TURNS, PlanLinkRuntime, PlanSubagentScope,
     RejectedSubagentView, SpawnSubagentTaskInput, SpawnSubagentsInput, SpawnSubagentsOutput,
     SpawnedSubagentStatusLabel, SpawnedSubagentView, SubagentActivityHub, SubagentActivityReceiver,
-    SubagentConfig, SubagentError, SubagentManager, SubagentResultView, SubagentStatusLabel,
-    SubagentStatusView, SubagentTaskSpec, WaitMode, WaitSubagentsInput, WaitSubagentsOutput,
-    subagent_registered_tools, subagent_tool_specs, validate_no_write_scope_conflicts,
+    SubagentConfig, SubagentError, SubagentInspectSession, SubagentManager, SubagentResultView,
+    SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec, WaitMode, WaitSubagentsInput,
+    WaitSubagentsOutput, subagent_registered_tools, subagent_tool_specs,
+    validate_no_write_scope_conflicts,
 };
 pub use tool::{
     ActionExecutionEvidence, ActionProposal, ActionProposalError, ActionProposalEvidence,

@@ -25,9 +25,9 @@ pub use contracts::{
     MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS, MAX_PROCESS_CWD_BYTES,
     MAX_PROCESS_OUTPUT_LIMIT_BYTES, MAX_PROCESS_STDIN_TEXT_BYTES, PermissionedProcessRunnerFactory,
     ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
-    ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-    ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
-    StaticPermissionedProcessRunnerFactory,
+    ProcessOutputChunk, ProcessOutputSink, ProcessPermissionProfileId, ProcessRunner,
+    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+    ProcessRunnerResult, StaticPermissionedProcessRunnerFactory,
 };
 #[cfg(test)]
 pub(crate) use output::{NON_UTF8_GUIDANCE, STILL_RUNNING_GUIDANCE};

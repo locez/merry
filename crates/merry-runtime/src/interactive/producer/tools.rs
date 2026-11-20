@@ -262,21 +262,41 @@ impl InteractiveProducer {
         let call_id = call.id().clone();
         let execution_call_id = call_id.clone();
         let execution_permit = loop_permit.clone();
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(64);
         let execution = async move {
             runtime
                 .execute_tool_call_with_active_permit(
                     &execution_call_id,
-                    ToolExecutionContext::new(phase_token),
+                    ToolExecutionContext::new(phase_token).with_output_sender(output_tx),
                     &execution_permit,
                 )
                 .await
         };
         tokio::pin!(execution);
         let mut commands_open = true;
+        let mut output_open = true;
 
         let result = loop {
             tokio::select! {
                 result = &mut execution => break result,
+                chunk = output_rx.recv(), if output_open => {
+                    let Some(chunk) = chunk else {
+                        output_open = false;
+                        continue;
+                    };
+                    let event = merry_core::RuntimeEvent::ToolCallOutputDelta {
+                        call_id: chunk.call_id,
+                        stream: chunk.stream,
+                        delta: chunk.delta,
+                        source: merry_core::RuntimeEventSource::new(
+                            self.runtime.session_id().clone(),
+                            0,
+                        ),
+                    };
+                    if !self.send_event(event).await {
+                        return None;
+                    }
+                }
                 command = self.command_receiver.recv(), if commands_open => {
                     let Some(command) = command else {
                         commands_open = false;
@@ -362,21 +382,41 @@ impl InteractiveProducer {
             .map(|call| call.id().clone())
             .collect::<Vec<_>>();
         let execution_permit = loop_permit.clone();
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(64);
         let execution = async move {
             runtime
                 .execute_tool_call_batch_with_active_permit(
                     calls,
-                    ToolExecutionContext::new(phase_token),
+                    ToolExecutionContext::new(phase_token).with_output_sender(output_tx),
                     &execution_permit,
                 )
                 .await
         };
         tokio::pin!(execution);
         let mut commands_open = true;
+        let mut output_open = true;
 
         let result = loop {
             tokio::select! {
                 result = &mut execution => break result,
+                chunk = output_rx.recv(), if output_open => {
+                    let Some(chunk) = chunk else {
+                        output_open = false;
+                        continue;
+                    };
+                    let event = merry_core::RuntimeEvent::ToolCallOutputDelta {
+                        call_id: chunk.call_id,
+                        stream: chunk.stream,
+                        delta: chunk.delta,
+                        source: merry_core::RuntimeEventSource::new(
+                            self.runtime.session_id().clone(),
+                            0,
+                        ),
+                    };
+                    if !self.send_event(event).await {
+                        return None;
+                    }
+                }
                 command = self.command_receiver.recv(), if commands_open => {
                     let Some(command) = command else {
                         commands_open = false;

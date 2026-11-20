@@ -104,9 +104,27 @@ pub(super) async fn run_spawned_process(
     }
     let stdout_limit = intent.stdout_limit_bytes();
     let stderr_limit = intent.stderr_limit_bytes();
+    let stdout_sink = context.output_sink().cloned();
+    let stderr_sink = context.output_sink().cloned();
 
-    let stdout_task = tokio::spawn(async move { read_bounded_output(stdout, stdout_limit).await });
-    let stderr_task = tokio::spawn(async move { read_bounded_output(stderr, stderr_limit).await });
+    let stdout_task = tokio::spawn(async move {
+        read_bounded_output(
+            stdout,
+            stdout_limit,
+            stdout_sink,
+            merry_runtime::ToolOutputStream::Stdout,
+        )
+        .await
+    });
+    let stderr_task = tokio::spawn(async move {
+        read_bounded_output(
+            stderr,
+            stderr_limit,
+            stderr_sink,
+            merry_runtime::ToolOutputStream::Stderr,
+        )
+        .await
+    });
 
     let status = tokio::select! {
         biased;
@@ -165,6 +183,8 @@ struct BoundedOutput {
 async fn read_bounded_output<R>(
     mut reader: R,
     limit: usize,
+    output_sink: Option<merry_runtime::ProcessOutputSink>,
+    stream: merry_runtime::ToolOutputStream,
 ) -> Result<BoundedOutput, ProcessRunnerError>
 where
     R: AsyncRead + Unpin,
@@ -179,6 +199,9 @@ where
         })?;
         if count == 0 {
             break;
+        }
+        if let Some(sink) = &output_sink {
+            sink.emit(stream, &scratch[..count]);
         }
 
         if bytes.len() < limit {

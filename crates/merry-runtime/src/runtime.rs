@@ -303,11 +303,77 @@ impl Runtime {
             .unwrap_or_default()
     }
 
+    /// Reads captured output for one retained background process.
+    pub fn read_background_process(
+        &self,
+        id: &crate::BackgroundProcessId,
+    ) -> Result<crate::BackgroundProcessOutput, crate::BackgroundProcessLookupError> {
+        match &self.inner.background_process_control {
+            Some(control) => control.read(id),
+            None => Err(crate::BackgroundProcessLookupError::new(
+                id.clone(),
+                Vec::new(),
+            )),
+        }
+    }
+
+    /// Stops one retained background process group.
+    pub fn stop_background_process(
+        &self,
+        id: &crate::BackgroundProcessId,
+    ) -> Result<crate::BackgroundProcessStop, crate::BackgroundProcessLookupError> {
+        match &self.inner.background_process_control {
+            Some(control) => control.stop(id),
+            None => Err(crate::BackgroundProcessLookupError::new(
+                id.clone(),
+                Vec::new(),
+            )),
+        }
+    }
+
     /// Returns a compact snapshot of managed subagent statuses when configured.
     pub async fn subagent_snapshot(&self) -> Option<Vec<crate::SubagentStatusView>> {
         match &self.inner.subagent_manager {
             Some(manager) => Some(manager.snapshot().await),
             None => None,
+        }
+    }
+
+    /// Opens a lazy transcript & live event inspection session for one subagent.
+    pub async fn inspect_subagent(
+        &self,
+        agent_id: &merry_core::SubagentId,
+    ) -> Option<crate::SubagentInspectSession> {
+        match &self.inner.subagent_manager {
+            Some(manager) => manager.inspect(agent_id).await,
+            None => None,
+        }
+    }
+
+    /// Sends a follow-up user message directly to one managed subagent.
+    pub async fn send_subagent_message(
+        &self,
+        agent_id: &merry_core::SubagentId,
+        message: String,
+    ) -> Result<(), RuntimeError> {
+        match &self.inner.subagent_manager {
+            Some(manager) => manager.send_message(agent_id, message).await,
+            None => Err(RuntimeError::InvalidSubagentSelection {
+                operation: "send_subagent_message",
+            }),
+        }
+    }
+
+    /// Cancels one managed subagent.
+    pub async fn cancel_subagent(
+        &self,
+        agent_id: &merry_core::SubagentId,
+    ) -> Result<crate::WaitSubagentsOutput, RuntimeError> {
+        match &self.inner.subagent_manager {
+            Some(manager) => manager.cancel(std::slice::from_ref(agent_id)).await,
+            None => Err(RuntimeError::InvalidSubagentSelection {
+                operation: "cancel_subagents",
+            }),
         }
     }
 

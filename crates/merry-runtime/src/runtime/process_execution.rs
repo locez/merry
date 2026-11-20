@@ -83,7 +83,13 @@ pub(super) async fn execute_admitted_process_action(
             })?;
     }
 
-    let runner_context = ProcessRunnerContext::new(context.cancellation_token().clone());
+    let mut runner_context = ProcessRunnerContext::new(context.cancellation_token().clone());
+    if let Some(sender) = context.output_sender() {
+        runner_context = runner_context.with_output_sink(crate::ProcessOutputSink::new(
+            pending.id().clone(),
+            sender.clone(),
+        ));
+    }
     trace_process_execution_start(&inner.session_id, pending, &intent, permission_profile_id);
     let output = tokio::select! {
         biased;

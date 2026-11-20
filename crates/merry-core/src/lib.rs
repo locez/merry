@@ -37,7 +37,7 @@ pub use plan::{
 pub use runtime_event::{
     ImageSummary, InteractiveRunState, QueuedInputLane, QueuedInputView, QueuedInputsView,
     RuntimeEvent, RuntimeEventSource, SubagentStatus, ToolOutput, ToolOutputKind,
-    ToolOutputPreview,
+    ToolOutputPreview, ToolOutputStream,
 };
 pub use schema::ToolInputSchema;
 pub use subagent_activity::{SubagentActivityPhase, SubagentActivitySnapshot};

@@ -42,6 +42,7 @@ pub type ToolActionProposalResult = Result<ToolActionPreflight, ToolExecutionErr
 pub struct ToolExecutionContext {
     pub(super) cancellation_token: CancellationToken,
     pub(super) approved_apply_patch: Option<WorkspacePatchProposal>,
+    pub(super) output_sender: Option<tokio::sync::mpsc::Sender<crate::ProcessOutputChunk>>,
 }
 
 impl ToolExecutionContext {
@@ -51,6 +52,7 @@ impl ToolExecutionContext {
         Self {
             cancellation_token,
             approved_apply_patch: None,
+            output_sender: None,
         }
     }
 
@@ -76,6 +78,20 @@ impl ToolExecutionContext {
         self.approved_apply_patch = Some(patch);
         self
     }
+
+    pub(crate) fn with_output_sender(
+        mut self,
+        sender: tokio::sync::mpsc::Sender<crate::ProcessOutputChunk>,
+    ) -> Self {
+        self.output_sender = Some(sender);
+        self
+    }
+
+    pub(crate) fn output_sender(
+        &self,
+    ) -> Option<&tokio::sync::mpsc::Sender<crate::ProcessOutputChunk>> {
+        self.output_sender.as_ref()
+    }
 }
 
 impl Default for ToolExecutionContext {
@@ -83,6 +99,7 @@ impl Default for ToolExecutionContext {
         Self {
             cancellation_token: CancellationToken::new(),
             approved_apply_patch: None,
+            output_sender: None,
         }
     }
 }

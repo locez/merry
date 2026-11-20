@@ -27,8 +27,22 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, broadcast};
 use tokio_util::sync::CancellationToken;
+
+const SUBAGENT_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// Lazy inspection handle returned when a product surface drills into a subagent.
+pub struct SubagentInspectSession {
+    /// Current compact status snapshot for the subagent.
+    pub status: SubagentStatusView,
+    /// Original delegated task prompt.
+    pub task: String,
+    /// Durable transcript items recorded in the child runtime so far.
+    pub transcript: Vec<crate::SessionTranscriptItem>,
+    /// Live runtime event stream emitted while the child executes.
+    pub events: broadcast::Receiver<merry_core::RuntimeEvent>,
+}
 
 /// Runtime-owned manager for bounded child agent execution.
 #[derive(Clone)]
@@ -52,7 +66,7 @@ pub struct SubagentManager {
     pub(super) activity_hub: Arc<StdMutex<Option<Arc<SubagentActivityHub>>>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(super) struct SubagentManagerState {
     pub(super) agents: BTreeMap<SubagentId, ManagedSubagent>,
     pub(super) batches: BTreeMap<u64, SubagentBatch>,
@@ -85,7 +99,7 @@ pub(super) async fn enqueue_completion_notification_if_needed(
     drop(notifications);
     completion_notify.notify_one();
 }
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct ManagedSubagent {
     pub(super) batch_id: u64,
     pub(super) agent_id: SubagentId,
@@ -101,6 +115,10 @@ pub(super) struct ManagedSubagent {
     pub(super) cancellation_token: CancellationToken,
     pub(super) plan_link: Option<PlanLinkSnapshot>,
     pub(super) completion_notification_acknowledged: bool,
+    pub(super) runtime: Option<crate::Runtime>,
+    pub(super) generation_config: Option<merry_llm::GenerationConfig>,
+    pub(super) event_tx: broadcast::Sender<merry_core::RuntimeEvent>,
+    pub(super) pending_follow_ups: VecDeque<String>,
 }
 
 impl SubagentManager {
@@ -505,6 +523,7 @@ impl SubagentManager {
                 SubagentStatusLabel::Queued
             };
 
+            let (event_tx, _) = broadcast::channel(SUBAGENT_EVENT_CHANNEL_CAPACITY);
             let managed = ManagedSubagent {
                 batch_id,
                 agent_id: agent_id.clone(),
@@ -520,6 +539,10 @@ impl SubagentManager {
                 cancellation_token: child_token.clone(),
                 plan_link: plan_link.clone(),
                 completion_notification_acknowledged: false,
+                runtime: None,
+                generation_config: None,
+                event_tx,
+                pending_follow_ups: VecDeque::new(),
             };
             state.agents.insert(agent_id.clone(), managed);
 
@@ -552,6 +575,109 @@ impl SubagentManager {
             spawned,
             rejected: Vec::new(),
         })
+    }
+
+    /// Returns a lazy transcript snapshot and live event subscription for one subagent.
+    pub async fn inspect(&self, agent_id: &SubagentId) -> Option<SubagentInspectSession> {
+        let (status, task, runtime, events) = {
+            let state = self.state.lock().await;
+            let agent = state.agents.get(agent_id)?;
+            (
+                agent.status_view(),
+                agent.task.task().to_owned(),
+                agent.runtime.clone(),
+                agent.event_tx.subscribe(),
+            )
+        };
+        let transcript = match runtime {
+            Some(runtime) => runtime.session_transcript().await.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        Some(SubagentInspectSession {
+            status,
+            task,
+            transcript,
+            events,
+        })
+    }
+
+    /// Sends a follow-up user message directly to a subagent session.
+    ///
+    /// If the subagent is currently running or queued, the message is queued and
+    /// executes immediately after the current turn settles. If the subagent has
+    /// reached a terminal state with a retained runtime, a new turn is launched
+    /// on that same child session.
+    pub async fn send_message(
+        &self,
+        agent_id: &SubagentId,
+        message: String,
+    ) -> Result<(), RuntimeError> {
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
+            return Err(RuntimeError::InvalidSubagentSelection {
+                operation: "send_subagent_message",
+            });
+        }
+        let message = trimmed.to_owned();
+        let mut launch_now = None;
+        {
+            let mut state = self.state.lock().await;
+            let Some(agent) = state.agents.get_mut(agent_id) else {
+                return Err(RuntimeError::InvalidSubagentSelection {
+                    operation: "send_subagent_message",
+                });
+            };
+            let _ = agent
+                .event_tx
+                .send(merry_core::RuntimeEvent::QueuedInputAccepted {
+                    lane: merry_core::QueuedInputLane::Next,
+                    inputs: vec![merry_core::QueuedInputView {
+                        text: message.clone(),
+                        lane: merry_core::QueuedInputLane::Next,
+                        position: 0,
+                    }],
+                });
+            if !agent.status.is_terminal() {
+                agent.pending_follow_ups.push_back(message);
+            } else if let (Some(runtime), Some(generation_config)) =
+                (agent.runtime.clone(), agent.generation_config.clone())
+            {
+                let token = CancellationToken::new();
+                agent.cancellation_token = token.clone();
+                agent.status = SubagentStatusLabel::Running;
+                agent.summary = "handling follow-up".to_owned();
+                agent.diagnostics = None;
+                agent.completion_notification_acknowledged = false;
+                launch_now = Some((
+                    agent.task_id.clone(),
+                    agent.task.clone(),
+                    token,
+                    runtime,
+                    generation_config,
+                    agent.event_tx.clone(),
+                    message,
+                ));
+            } else {
+                return Err(RuntimeError::InvalidSubagentSelection {
+                    operation: "send_subagent_message",
+                });
+            }
+        }
+        if let Some((task_id, task, token, runtime, generation_config, event_tx, prompt)) =
+            launch_now
+        {
+            self.resume_child_with_prompt(
+                agent_id.clone(),
+                task_id,
+                task,
+                token,
+                runtime,
+                generation_config,
+                event_tx,
+                prompt,
+            );
+        }
+        Ok(())
     }
 
     /// Waits for selected children or returns their latest compact statuses on timeout.

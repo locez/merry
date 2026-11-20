@@ -76,6 +76,16 @@ pub enum RuntimeEvent {
         output: Option<ToolOutput>,
         source: RuntimeEventSource,
     },
+    /// Incremental live output chunk from an active tool call (e.g. `run_process`).
+    ///
+    /// Live progress only; durable tool output is recorded through
+    /// [`RuntimeEvent::ToolCallFinished`].
+    ToolCallOutputDelta {
+        call_id: ToolCallId,
+        stream: ToolOutputStream,
+        delta: String,
+        source: RuntimeEventSource,
+    },
     /// A final-output contract recorded structured terminal output.
     FinalOutputRecorded {
         call_id: ToolCallId,
@@ -237,6 +247,7 @@ impl RuntimeEvent {
             Self::ModelOutputRateUpdated { .. }
                 | Self::AssistantMessageDelta { .. }
                 | Self::ReasoningDelta { .. }
+                | Self::ToolCallOutputDelta { .. }
         )
     }
 }
@@ -268,6 +279,14 @@ pub enum SubagentStatus {
     Completed,
     Failed,
     Cancelled,
+}
+
+/// Output stream carrying a live [`RuntimeEvent::ToolCallOutputDelta`] chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutputStream {
+    Stdout,
+    Stderr,
 }
 
 /// Kind of recorded tool output.
