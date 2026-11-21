@@ -259,11 +259,15 @@ impl TuiProjector {
                 }
             }
             RuntimeEvent::SubagentSpawned {
-                agent_id, task_id, ..
+                agent_id,
+                task_id,
+                display_name,
+                ..
             } => {
                 state.upsert_subagent(crate::tui::state::SubagentUpdate {
                     agent_id: agent_id.as_str().to_owned(),
                     task_id: task_id.as_str().to_owned(),
+                    display_name,
                     phase: crate::tui::subagent_view::SubagentPhase::Starting,
                     summary: "spawned".to_owned(),
                     changed_paths: None,
@@ -277,6 +281,7 @@ impl TuiProjector {
                 state.upsert_subagent(crate::tui::state::SubagentUpdate {
                     agent_id: agent_id.as_str().to_owned(),
                     task_id: task_id.as_str().to_owned(),
+                    display_name: None,
                     phase: crate::tui::subagent_view::SubagentPhase::Running,
                     summary: "running".to_owned(),
                     changed_paths: None,
@@ -294,6 +299,7 @@ impl TuiProjector {
                 state.upsert_subagent(crate::tui::state::SubagentUpdate {
                     agent_id: agent_id.as_str().to_owned(),
                     task_id: task_id.as_str().to_owned(),
+                    display_name: None,
                     phase,
                     summary: phase.label().to_ascii_lowercase(),
                     changed_paths: None,
@@ -312,6 +318,7 @@ impl TuiProjector {
                 state.upsert_subagent(crate::tui::state::SubagentUpdate {
                     agent_id: agent_id.as_str().to_owned(),
                     task_id: task_id.as_str().to_owned(),
+                    display_name: None,
                     phase: crate::tui::subagent_view::SubagentPhase::Completed,
                     summary,
                     changed_paths: Some(changed_paths),
@@ -330,6 +337,7 @@ impl TuiProjector {
                 state.upsert_subagent(crate::tui::state::SubagentUpdate {
                     agent_id: agent_id.as_str().to_owned(),
                     task_id: task_id.as_str().to_owned(),
+                    display_name: None,
                     phase: crate::tui::subagent_view::SubagentPhase::Failed,
                     summary: detail.clone(),
                     changed_paths: None,
@@ -348,6 +356,7 @@ impl TuiProjector {
                 state.upsert_subagent(crate::tui::state::SubagentUpdate {
                     agent_id: agent_id.as_str().to_owned(),
                     task_id: task_id.as_str().to_owned(),
+                    display_name: None,
                     phase: crate::tui::subagent_view::SubagentPhase::Cancelled,
                     summary: detail.clone(),
                     changed_paths: None,

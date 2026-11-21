@@ -128,6 +128,7 @@ pub(crate) struct SubagentLogEntry {
 pub(crate) struct SubagentEntry {
     pub(crate) agent_id: String,
     pub(crate) task_id: String,
+    pub(crate) display_name: Option<String>,
     pub(crate) phase: SubagentPhase,
     pub(crate) summary: String,
     pub(crate) activity_log: Vec<SubagentLogEntry>,
@@ -148,6 +149,7 @@ impl SubagentEntry {
         let mut entry = Self {
             agent_id,
             task_id,
+            display_name: None,
             phase,
             summary: summary.clone(),
             activity_log: Vec::new(),
@@ -159,6 +161,25 @@ impl SubagentEntry {
         };
         entry.record_log(phase, summary);
         entry
+    }
+
+    /// Returns the preferred human-facing label (`display_name` when present,
+    /// falling back to `agent_id`).
+    pub(crate) fn display_label(&self) -> &str {
+        self.display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&self.agent_id)
+    }
+
+    pub(crate) fn set_display_name(&mut self, display_name: Option<String>) {
+        if let Some(name) = display_name
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            self.display_name = Some(name);
+        }
     }
 
     pub(crate) fn record_log(&mut self, phase: SubagentPhase, summary: String) {
@@ -191,6 +212,7 @@ impl SubagentEntry {
     }
 
     pub(crate) fn apply_status_view(&mut self, view: &SubagentStatusView) {
+        self.set_display_name(view.display_name.clone());
         self.phase = view.status.clone().into();
         if !view.summary.trim().is_empty() {
             self.summary = view.summary.clone();

@@ -146,12 +146,28 @@ pub(crate) fn render_subagent_takeover(
 
     frame.render_widget(Clear, layout.modal.region);
     let title_text = match current {
-        Some(entry) => format!(
-            "{} Subagent · {} ({})",
-            entry.phase.glyph(clock),
-            entry.agent_id,
-            entry.task_id
-        ),
+        Some(entry) => {
+            if let Some(display_name) = entry
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                format!(
+                    "{} Subagent · {} ({})",
+                    entry.phase.glyph(clock),
+                    display_name,
+                    entry.agent_id
+                )
+            } else {
+                format!(
+                    "{} Subagent · {} ({})",
+                    entry.phase.glyph(clock),
+                    entry.agent_id,
+                    entry.task_id
+                )
+            }
+        }
         None => "Subagents".to_owned(),
     };
     let mut block = Block::default()
@@ -260,10 +276,11 @@ fn render_subagent_composer(
     let label = current.map_or_else(
         || "Subagent input".to_owned(),
         |entry| {
+            let name = entry.display_label();
             if entry.phase.is_active() {
-                format!("Guide {}", entry.agent_id)
+                format!("Guide {name}")
             } else {
-                format!("Follow up with {}", entry.agent_id)
+                format!("Follow up with {name}")
             }
         },
     );
@@ -365,7 +382,7 @@ fn render_subagent_rail(
         let selected = index == selected_index;
         let base = modal_selection_style(state, selected);
         let glyph = entry.phase.glyph(clock);
-        let label = truncate_columns(&entry.agent_id, width.saturating_sub(5).max(1));
+        let label = truncate_columns(entry.display_label(), width.saturating_sub(5).max(1));
         let pad = width.saturating_sub(4 + UnicodeWidthStr::width(label.as_str()));
         let mut row_spans = vec![
             Span::styled(if selected { "▌ " } else { "  " }, base),

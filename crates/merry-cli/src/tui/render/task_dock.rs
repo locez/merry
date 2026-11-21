@@ -3,6 +3,7 @@
 //! interactive Background Process Output inspector modal.
 
 use crate::tui::{
+    click_target::truncate_columns,
     modal_frame::{modal_rects, modal_surface_style, render_modal_frame},
     motion::{self, MotionClock},
     state::TuiState,
@@ -346,15 +347,21 @@ fn compact_entry_preview(first: &TaskDockEntry, total: usize) -> String {
         }
         TaskDockEntry::Subagent {
             agent_id,
+            display_name,
             summary,
             phase,
             ..
         } => {
+            let label = display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(agent_id.as_str());
             let trimmed = summary.trim();
             if trimmed.is_empty() {
-                format!("{agent_id}: {}", phase.label().to_ascii_lowercase())
+                format!("{label}: {}", phase.label().to_ascii_lowercase())
             } else {
-                format!("{agent_id}: {trimmed}")
+                format!("{label}: {trimmed}")
             }
         }
     };
@@ -538,6 +545,7 @@ fn dock_entry_line(
         }
         TaskDockEntry::Subagent {
             agent_id,
+            display_name,
             phase,
             summary,
             ..
@@ -546,6 +554,14 @@ fn dock_entry_line(
             let color = phase.color();
             let action_text = "[Inspect ▸]";
             let action_w = UnicodeWidthStr::width(action_text);
+            let raw_label = display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(agent_id.as_str());
+            let truncated_label = truncate_columns(raw_label, 24);
+            let label_w = UnicodeWidthStr::width(truncated_label.as_str());
+            let label_pad = " ".repeat(10usize.saturating_sub(label_w));
             let mut spans = vec![
                 Span::raw("  "),
                 Span::styled(
@@ -553,7 +569,7 @@ fn dock_entry_line(
                     semantic_style(state, color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("{:<10}", truncate_chars(agent_id, 10)),
+                    format!("{truncated_label}{label_pad}"),
                     semantic_style(state, SemanticColor::Heading).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(" "),

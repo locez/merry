@@ -9,6 +9,7 @@ use crate::tui::{
 pub(crate) struct SubagentUpdate {
     pub(crate) agent_id: String,
     pub(crate) task_id: String,
+    pub(crate) display_name: Option<String>,
     pub(crate) phase: SubagentPhase,
     pub(crate) summary: String,
     pub(crate) changed_paths: Option<Vec<String>>,
@@ -42,6 +43,7 @@ impl TuiState {
             let timeline_index = {
                 let entry = &mut self.subagents[pos];
                 entry.task_id = update.task_id;
+                entry.set_display_name(update.display_name);
                 entry.phase = update.phase;
                 if !update.summary.trim().is_empty() {
                     entry.summary = update.summary.clone();
@@ -75,6 +77,7 @@ impl TuiState {
             update.phase,
             update.summary,
         );
+        entry.set_display_name(update.display_name);
         entry.timeline_index = Some(timeline_index);
         if let Some(paths) = update.changed_paths {
             entry.changed_paths = paths;

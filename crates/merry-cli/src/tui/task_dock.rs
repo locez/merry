@@ -29,6 +29,7 @@ pub(crate) enum TaskDockEntry {
     Background(BackgroundProcessSummary),
     Subagent {
         agent_id: String,
+        display_name: Option<String>,
         task_id: String,
         phase: SubagentPhase,
         summary: String,
@@ -164,6 +165,7 @@ impl TaskDockState {
         for subagent in subagents {
             all.push(TaskDockEntry::Subagent {
                 agent_id: subagent.agent_id.clone(),
+                display_name: subagent.display_name.clone(),
                 task_id: subagent.task_id.clone(),
                 phase: subagent.phase,
                 summary: subagent.summary.clone(),
@@ -420,6 +422,7 @@ mod tests {
             state.upsert_subagent(SubagentUpdate {
                 agent_id: format!("agent-{i:02}"),
                 task_id: format!("task-{i:02}"),
+                display_name: None,
                 phase: if i < 5 {
                     SubagentPhase::Running
                 } else {

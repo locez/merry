@@ -27,9 +27,16 @@ pub(crate) fn tasks_body(
     match subagents {
         Some(subagents) if !subagents.is_empty() => {
             for subagent in subagents {
+                let label = subagent
+                    .display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|name| format!("{name} ({})", subagent.agent_id.as_str()))
+                    .unwrap_or_else(|| subagent.agent_id.as_str().to_owned());
                 lines.push(format!(
                     "{}  {}  {}  {}",
-                    subagent.agent_id.as_str(),
+                    label,
                     subagent.task_id.as_str(),
                     subagent.status.as_str(),
                     subagent.summary

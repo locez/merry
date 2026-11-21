@@ -536,6 +536,10 @@ pub(super) fn subagent_lines(
     let inspect_label = "[Inspect ▸]";
     let inspect_width = unicode_width::UnicodeWidthStr::width(inspect_label);
 
+    let label = entry.map_or(
+        agent_id,
+        crate::tui::subagent_view::SubagentEntry::display_label,
+    );
     let prefix_text = format!("{glyph} {} Subagent ", crate::tui::glyphs::BRAND_PAW);
     let mut left_spans = vec![
         Span::styled(
@@ -543,7 +547,7 @@ pub(super) fn subagent_lines(
             semantic_style(state, phase.color()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            agent_id.to_owned(),
+            label.to_owned(),
             semantic_style(state, SemanticColor::Heading).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" · ", semantic_style(state, SemanticColor::Muted)),

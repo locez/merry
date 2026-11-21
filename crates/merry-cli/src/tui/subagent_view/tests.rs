@@ -196,3 +196,62 @@ fn subagent_card_and_status_chip_open_fullscreen_takeover_and_switch_agents() {
     );
     assert!(matches!(state.overlay(), Some(Overlay::SubagentInspect(_))));
 }
+
+#[test]
+fn subagent_display_name_renders_across_task_dock_timeline_and_takeover_while_routing_by_id() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+    let agent_id = SubagentId::new("agent-1").expect("agent id");
+    let task_id = SubagentTaskId::new("task-1").expect("task id");
+
+    projector.apply(
+        RuntimeEvent::SubagentSpawned {
+            agent_id: agent_id.clone(),
+            task_id: task_id.clone(),
+            task_anchor: "Audit workspace".to_owned(),
+            display_name: Some("Layout Audit".to_owned()),
+            role: Some("explore".to_owned()),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::SubagentStarted {
+            agent_id: agent_id.clone(),
+            task_id: task_id.clone(),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let size = Size::new(110, 26);
+    // Collapsed dock preview + timeline card show display_name instead of raw agent-1.
+    let collapsed = render_to_text(&state, size.width, size.height);
+    assert!(collapsed.contains("Layout Audit: running"), "{collapsed}");
+    assert!(collapsed.contains("Subagent Layout Audit"), "{collapsed}");
+
+    // Expanded Tasks dock shows display_name and routes clicks by agent_id.
+    state.task_dock_mut().toggle_expanded();
+    let expanded_buf = render_to_buffer(&state, size.width, size.height);
+    let expanded = rendered_buffer_text(&expanded_buf);
+    assert!(expanded.contains("Layout Audit"), "{expanded}");
+
+    let (dx, dy) = find_text_position(&expanded_buf, "Layout Audit").expect("dock row");
+    assert_eq!(
+        handle_mouse_input(MouseInput::Down(Position::new(dx, dy)), size, &mut state),
+        ControllerEffect::RefreshSubagents
+    );
+    assert_eq!(state.inspected_subagent_id().as_deref(), Some("agent-1"));
+
+    let takeover = render_to_text(&state, size.width, size.height);
+    assert!(
+        takeover.contains("Subagent · Layout Audit (agent-1)"),
+        "{takeover}"
+    );
+    assert!(takeover.contains("Guide Layout Audit"), "{takeover}");
+}
