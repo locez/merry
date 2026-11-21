@@ -59,7 +59,7 @@ pub(super) fn timeline_scroll_split(
         header_rows: pin.header_rows,
         content_rows: pin.content_rows,
         pinned_origin: Some(pin.origin),
-        body_scroll: scroll_start.saturating_add(usize::from(pin.header_rows)),
+        body_scroll: pin.body_scroll,
         lines: pin.lines,
     }
 }
@@ -105,11 +105,13 @@ struct PinnedUser {
     header_rows: u16,
     content_rows: u16,
     origin: usize,
+    body_scroll: usize,
     lines: Vec<Line<'static>>,
 }
 
 struct UserSection {
     y: usize,
+    next_item_y: usize,
     height: usize,
     lines: Vec<Line<'static>>,
 }
@@ -123,10 +125,11 @@ fn pin_user(
     if viewport_height <= 1 {
         return None;
     }
+    let has_task_dock = state.task_dock().counts(state.subagents()).total > 0;
     let sections = user_sections(state, timeline);
-    let position = sections
-        .iter()
-        .rposition(|section| section.y < scroll_start)?;
+    let position = sections.iter().rposition(|section| {
+        section.y < scroll_start || (has_task_dock && section.y == scroll_start)
+    })?;
     let section = sections.get(position)?;
     let budget = usize::from(viewport_height).saturating_sub(2);
     if budget == 0 || section.height == 0 {
@@ -162,10 +165,17 @@ fn pin_user(
         lines.truncate(show - 1);
         lines.push(bottom_rule);
     }
+    let base_body_scroll = scroll_start.saturating_add(usize::from(header_rows));
+    let body_scroll = if section.y == scroll_start {
+        base_body_scroll.max(section.next_item_y)
+    } else {
+        base_body_scroll
+    };
     Some(PinnedUser {
         header_rows,
         content_rows,
         origin: section.y,
+        body_scroll,
         lines,
     })
 }
@@ -182,6 +192,11 @@ fn user_sections(state: &TuiState, timeline: &TimelineLayoutSnapshot) -> Vec<Use
         let Some(&y) = timeline.item_visual_starts.get(index) else {
             continue;
         };
+        let next_item_y = timeline
+            .item_visual_starts
+            .get(index + 1)
+            .copied()
+            .unwrap_or_else(|| y.saturating_add(layout.visual_height()));
         let mut content_end = layout.rows.len();
         while content_end > 0 && layout.rows.get(content_end - 1).is_some_and(row_is_blank) {
             content_end -= 1;
@@ -204,7 +219,12 @@ fn user_sections(state: &TuiState, timeline: &TimelineLayoutSnapshot) -> Vec<Use
         if height == 0 || lines.is_empty() {
             continue;
         }
-        sections.push(UserSection { y, height, lines });
+        sections.push(UserSection {
+            y,
+            next_item_y,
+            height,
+            lines,
+        });
     }
     sections
 }

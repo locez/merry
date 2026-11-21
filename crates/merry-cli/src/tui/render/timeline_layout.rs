@@ -186,6 +186,21 @@ fn compute_item_layout(state: &TuiState, index: usize, width: u16) -> CachedItem
     CachedItemLayout::new(rows, local_row_starts, copy_targets)
 }
 
+fn max_timeline_scroll(
+    state: &TuiState,
+    timeline: &TimelineLayoutSnapshot,
+    visible: usize,
+) -> usize {
+    let bottom = timeline.total_rows().saturating_sub(visible);
+    let latest_user_start = state
+        .timeline()
+        .iter()
+        .rposition(|item| matches!(item, TimelineItem::User { .. }))
+        .and_then(|index| timeline.item_visual_starts.get(index).copied())
+        .unwrap_or(0);
+    bottom.max(latest_user_start)
+}
+
 pub(super) fn timeline_scroll_start(
     state: &TuiState,
     timeline: &TimelineLayoutSnapshot,
@@ -202,11 +217,8 @@ pub(super) fn timeline_scroll_start(
     {
         start
     } else {
-        let total = timeline.total_rows();
-        let visible = usize::from(region.height);
-        total
-            .saturating_sub(visible)
-            .saturating_sub(state.timeline_scroll_offset())
+        let max_scroll = max_timeline_scroll(state, timeline, usize::from(region.height));
+        max_scroll.saturating_sub(state.timeline_scroll_offset())
     }
 }
 
@@ -217,14 +229,9 @@ pub(super) fn prepare_timeline_viewport(state: &mut TuiState, region: Rect) {
     }
     let timeline = timeline_layout(state, content);
     let scroll = timeline_scroll_start(state, &timeline, content);
-    let total = timeline.total_rows();
+    let max_scroll = max_timeline_scroll(state, &timeline, usize::from(content.height));
     if let Some(anchor) = timeline.anchor_at(scroll) {
-        state.record_timeline_viewport(
-            anchor,
-            total
-                .saturating_sub(usize::from(content.height))
-                .saturating_sub(scroll),
-        );
+        state.record_timeline_viewport(anchor, max_scroll.saturating_sub(scroll));
     }
 }
 

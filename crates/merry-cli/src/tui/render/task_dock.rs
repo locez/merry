@@ -63,8 +63,8 @@ pub(crate) fn split_dock_region(state: &TuiState, available: Rect) -> (Rect, Rec
 }
 
 /// Advances the timeline body scroll by the rows consumed by the inline dock
-/// while keeping short conversations pinned at row 0 and followed conversations
-/// flush with the bottom of `body`.
+/// only when remaining rows overflow `body_height`, keeping newly anchored
+/// turns at the top of `body` and long followed turns flush with the bottom.
 pub(crate) fn adjust_body_scroll(
     base_body_scroll: usize,
     available_height: u16,
@@ -75,8 +75,9 @@ pub(crate) fn adjust_body_scroll(
     if reserved == 0 {
         return base_body_scroll;
     }
-    let max_scroll = total_rows.saturating_sub(usize::from(body_height));
-    base_body_scroll.saturating_add(reserved).min(max_scroll)
+    let overflow =
+        total_rows.saturating_sub(base_body_scroll.saturating_add(usize::from(body_height)));
+    base_body_scroll.saturating_add(reserved.min(overflow))
 }
 
 pub(crate) fn dock_visible_rows(state: &TuiState, available_height: u16) -> usize {

@@ -85,3 +85,46 @@ fn a_user_message_that_still_fits_is_drawn_once() {
     assert_eq!(text.matches("ONCE").count(), 1, "{text}");
     assert!(text.contains("short reply"), "{text}");
 }
+
+#[test]
+fn sending_a_new_user_message_immediately_anchors_it_at_the_top_above_the_task_dock() {
+    let mut state = state();
+    state.push_timeline_item(user("OLD_TURN"));
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: reply("old-line", 30),
+    });
+    state.push_timeline_item(user("NEW_TURN"));
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: "fresh short reply".to_owned(),
+    });
+    state.sync_background_processes(vec![
+        merry_runtime::BackgroundProcessSummary::new(
+            merry_runtime::BackgroundProcessId::new("bg-1").expect("id"),
+            "sleep 60",
+            None,
+            merry_runtime::BackgroundProcessState::Running { pid: 42 },
+        )
+        .with_display_name(Some("api server".to_owned())),
+    ]);
+
+    let buffer = render_to_buffer(&state, 90, 24);
+    let text = render_to_text(&state, 90, 24);
+    assert_eq!(text.matches("NEW_TURN").count(), 1, "{text}");
+    assert_eq!(
+        text.matches("OLD_TURN").count(),
+        0,
+        "previous user turn must not stay pinned once a new turn is sent:\n{text}"
+    );
+    let (_, new_user_row) = find_text_position(&buffer, "NEW_TURN").expect("new user at top");
+    let (_, dock_row) = find_text_position(&buffer, "api server").expect("task dock");
+    let (_, reply_row) = find_text_position(&buffer, "fresh short reply").expect("new reply");
+    assert!(
+        new_user_row < dock_row && dock_row < reply_row,
+        "expected NEW_TURN ({new_user_row}) < dock ({dock_row}) < reply ({reply_row}):\n{text}"
+    );
+
+    // Scrolling up smoothly reveals the previous turn's reply above NEW_TURN.
+    state.scroll_timeline_up_by(8);
+    let scrolled = render_to_text(&state, 90, 24);
+    assert!(scrolled.contains("old-line-29"), "{scrolled}");
+}
