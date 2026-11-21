@@ -255,7 +255,15 @@ pub(crate) fn render_subagent_takeover(
 
     render_divider(frame, state, layout.footer_divider);
     let is_active = current.is_some_and(|entry| entry.phase.is_active());
-    render_takeover_footer(frame, state, subagents.len() > 1, is_active, layout.footer);
+    let can_close = current.is_some_and(|entry| !entry.phase.is_active() && !entry.closed);
+    render_takeover_footer(
+        frame,
+        state,
+        subagents.len() > 1,
+        is_active,
+        can_close,
+        layout.footer,
+    );
 }
 
 fn render_subagent_composer(
@@ -417,6 +425,7 @@ fn render_takeover_footer(
     state: &TuiState,
     has_multiple: bool,
     is_active: bool,
+    can_close: bool,
     area: Rect,
 ) {
     if area.is_empty() {
@@ -435,6 +444,9 @@ fn render_takeover_footer(
     if is_active {
         spans.push(Span::styled("  ", surface));
         spans.push(make_chip("Stop agent", SemanticColor::Error));
+    } else if can_close {
+        spans.push(Span::styled("  ", surface));
+        spans.push(make_chip("Close", SemanticColor::Muted));
     }
     if has_multiple {
         spans.push(Span::styled("  ", surface));
@@ -512,14 +524,17 @@ pub(crate) fn subagent_takeover_pointer(
             }
             _ => "",
         };
-        let is_active = state
-            .subagent_by_id(selected_id)
-            .is_some_and(|entry| entry.phase.is_active());
+        let selected_entry = state.subagent_by_id(selected_id);
+        let is_active = selected_entry.is_some_and(|entry| entry.phase.is_active());
+        let can_close =
+            selected_entry.is_some_and(|entry| !entry.phase.is_active() && !entry.closed);
         let has_multiple = subagents.len() > 1;
         let mut chips: Vec<(&str, SubagentTakeoverPointer)> =
             vec![("← Back", SubagentTakeoverPointer::Back)];
         if is_active {
             chips.push(("Stop agent", SubagentTakeoverPointer::Stop));
+        } else if can_close {
+            chips.push(("Close", SubagentTakeoverPointer::Close));
         }
         if has_multiple {
             chips.push(("Prev", SubagentTakeoverPointer::Previous));

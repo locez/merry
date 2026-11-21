@@ -33,6 +33,7 @@ pub(crate) enum TaskDockPointer {
     InspectBackgroundProcess(String),
     StopBackgroundProcess(String),
     InspectSubagent(String),
+    CloseSubagent(String),
 }
 
 /// Splits the timeline area beneath any sticky user box into `(dock, body)`.
@@ -226,8 +227,14 @@ pub(crate) fn dock_mouse_down(
                 Some(TaskDockPointer::InspectBackgroundProcess(id))
             }
         }
-        TaskDockEntry::Subagent { agent_id, .. } => {
-            Some(TaskDockPointer::InspectSubagent(agent_id.clone()))
+        TaskDockEntry::Subagent {
+            agent_id, phase, ..
+        } => {
+            if !phase.is_active() && width >= 24 && rel_x >= width.saturating_sub(7) {
+                Some(TaskDockPointer::CloseSubagent(agent_id.clone()))
+            } else {
+                Some(TaskDockPointer::InspectSubagent(agent_id.clone()))
+            }
         }
     }
 }
@@ -343,7 +350,7 @@ fn compact_entry_preview(first: &TaskDockEntry, total: usize) -> String {
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
-            format!("{}: {}", summary.id().as_str(), cmd)
+            format!("{}: {}", summary.display_label(), cmd)
         }
         TaskDockEntry::Subagent {
             agent_id,
@@ -483,7 +490,12 @@ fn dock_entry_line(
             } else {
                 SemanticColor::Warning
             };
-            let id_text = format!("{:<8}", summary.id().as_str());
+            let truncated_label = truncate_columns(summary.display_label(), 20);
+            let label_w = UnicodeWidthStr::width(truncated_label.as_str());
+            let id_text = format!(
+                "{truncated_label}{}",
+                " ".repeat(8usize.saturating_sub(label_w))
+            );
             let state_text = format!("{:<18}", summary.state().label());
             let action_text = if running { "[View] [Stop]" } else { "[View]" };
             let action_w = UnicodeWidthStr::width(action_text);
@@ -552,7 +564,12 @@ fn dock_entry_line(
         } => {
             let glyph = phase.glyph(clock);
             let color = phase.color();
-            let action_text = "[Inspect ▸]";
+            let can_close = !phase.is_active();
+            let action_text = if can_close {
+                "[Inspect ▸] [Close]"
+            } else {
+                "[Inspect ▸]"
+            };
             let action_w = UnicodeWidthStr::width(action_text);
             let raw_label = display_name
                 .as_deref()
@@ -603,10 +620,18 @@ fn dock_entry_line(
                 spans.push(Span::raw(
                     " ".repeat(max_width.saturating_sub(used_after + action_w)),
                 ));
-                spans.push(Span::styled(
-                    action_text.to_owned(),
-                    semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-                ));
+                if can_close {
+                    spans.push(Span::styled(
+                        "[Inspect ▸] ".to_owned(),
+                        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::styled("[Close]".to_owned(), muted));
+                } else {
+                    spans.push(Span::styled(
+                        action_text.to_owned(),
+                        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
+                    ));
+                }
             }
             Line::from(spans)
         }
@@ -622,7 +647,13 @@ pub(crate) fn render_background_task_overlay(
     state: &TuiState,
     overlay: &BackgroundTaskOverlay,
 ) {
-    let title = format!("Background task {}", overlay.process_id());
+    let title = match overlay
+        .output()
+        .and_then(|output| output.summary().display_name())
+    {
+        Some(name) => format!("Background task {name} ({})", overlay.process_id()),
+        None => format!("Background task {}", overlay.process_id()),
+    };
     let modal = modal_rects(
         frame.area(),
         BACKGROUND_MODAL_MAX_WIDTH,

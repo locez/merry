@@ -32,6 +32,21 @@ impl TuiState {
         self.subagents.iter().any(|entry| entry.phase.is_active())
     }
 
+    /// Marks a finished subagent closed so it no longer occupies the top Tasks dock.
+    ///
+    /// Its timeline card remains clickable and re-waking the subagent automatically
+    /// reopens it in the dock.
+    pub(crate) fn close_subagent_from_dock(&mut self, agent_id: &str) {
+        if let Some(entry) = self
+            .subagents
+            .iter_mut()
+            .find(|entry| entry.agent_id == agent_id)
+            && !entry.phase.is_active()
+        {
+            entry.closed = true;
+        }
+    }
+
     /// Inserts or updates a projected subagent card and bumps its timeline
     /// version so the cached layout refreshes cleanly without rebuilding history.
     pub(crate) fn upsert_subagent(&mut self, update: SubagentUpdate) {
@@ -45,6 +60,9 @@ impl TuiState {
                 entry.task_id = update.task_id;
                 entry.set_display_name(update.display_name);
                 entry.phase = update.phase;
+                if update.phase.is_active() {
+                    entry.closed = false;
+                }
                 if !update.summary.trim().is_empty() {
                     entry.summary = update.summary.clone();
                     entry.record_log(update.phase, update.summary);

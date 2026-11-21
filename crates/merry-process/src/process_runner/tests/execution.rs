@@ -226,11 +226,12 @@ async fn foreground_command_wait_timeout_retains_running_process_without_killing
         .background_process_id()
         .expect("retained process has a background id")
         .clone();
-    assert_eq!(id.as_str(), "bg-1");
+    assert_eq!(id.as_str(), "proc-1");
 
     let control = runner.background_control().expect("background control");
     let read = control.read(&id).expect("read retained output");
     assert!(read.stdout().contains("started"));
+    assert_eq!(read.summary().display_name(), Some("echo started"));
     let stopped = control.stop(&id).expect("stop retained process");
     assert!(stopped.changed());
     wait_until_dead(pid).await;

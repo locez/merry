@@ -49,6 +49,7 @@ struct SupervisorInner {
 
 struct RetainedProcess {
     id: BackgroundProcessId,
+    display_name: Option<String>,
     command: String,
     cwd: Option<String>,
     pid: u32,
@@ -85,10 +86,11 @@ impl BackgroundSupervisor {
         }
     }
 
-    fn mint_id(&self) -> BackgroundProcessId {
+    fn mint_id(&self, explicit_background: bool) -> BackgroundProcessId {
         let number = self.inner.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        BackgroundProcessId::new(format!("bg-{number}"))
-            .expect("minted background process id bg-N is valid")
+        let prefix = if explicit_background { "bg" } else { "proc" };
+        BackgroundProcessId::new(format!("{prefix}-{number}"))
+            .expect("minted retained process id is valid")
     }
 
     fn retain(&self, process: RetainedProcess) {
@@ -233,7 +235,11 @@ pub(super) async fn finish_process(
                     "background process started without a pid",
                 ));
             };
-            let id = supervisor.mint_id();
+            let id = supervisor.mint_id(explicit_background);
+            let display_name = intent
+                .display_name()
+                .map(str::to_owned)
+                .or_else(|| fallback_display_name(&command));
             output = output
                 .with_running_pid(pid)
                 .with_background_process_id(id.clone());
@@ -242,6 +248,7 @@ pub(super) async fn finish_process(
             }
             supervisor.retain(RetainedProcess {
                 id,
+                display_name,
                 command,
                 cwd,
                 pid,
@@ -432,6 +439,7 @@ fn summary_of(process: &mut RetainedProcess) -> BackgroundProcessSummary {
             Life::Killed => BackgroundProcessState::Killed,
         },
     )
+    .with_display_name(process.display_name.clone())
 }
 
 fn refresh(process: &mut RetainedProcess) {
@@ -450,6 +458,33 @@ fn refresh(process: &mut RetainedProcess) {
 }
 
 const DISPLAY_COMMAND_LIMIT: usize = 240;
+const FALLBACK_DISPLAY_NAME_LIMIT: usize = 24;
+
+fn fallback_display_name(command: &str) -> Option<String> {
+    let first_segment = command
+        .split([';', '\n', '|'])
+        .next()
+        .unwrap_or(command)
+        .split("&&")
+        .next()
+        .unwrap_or(command)
+        .trim();
+    let tokens: Vec<&str> = first_segment.split_whitespace().take(2).collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    let candidate = tokens.join(" ");
+    if candidate.chars().count() <= FALLBACK_DISPLAY_NAME_LIMIT {
+        Some(candidate)
+    } else {
+        let mut truncated: String = candidate
+            .chars()
+            .take(FALLBACK_DISPLAY_NAME_LIMIT.saturating_sub(1))
+            .collect();
+        truncated.push('…');
+        Some(truncated)
+    }
+}
 
 fn display_command(intent: &ProcessActionIntent) -> String {
     let argv = intent.argv();

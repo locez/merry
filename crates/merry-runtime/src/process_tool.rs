@@ -61,11 +61,16 @@ struct ProcessCommandInput {
     #[serde(default)]
     background: bool,
     #[schemars(
-        description = "Optional foreground wait timeout in seconds (1..=3600, default 120). If the command is still running when this timeout elapses, it is NOT killed; Merry retains it in the background and returns its id and partial output so you can observe progress with read_background_process or terminate it with stop_background_process. Ignored when background is true.",
+        description = "Optional foreground wait timeout in seconds (1..=3600, default 120). Set this higher for intentionally slow finite commands (such as full builds, test suites, or large downloads). If the command is still running when this timeout elapses, it is NOT killed; Merry retains it in the background and returns its id and partial output so you can observe progress with read_background_process or terminate it with stop_background_process. Ignored when background is true.",
         range(min = 1, max = MAX_PROCESS_WAIT_TIMEOUT_SECS)
     )]
     #[serde(default)]
     timeout_secs: Option<u64>,
+    #[schemars(
+        description = "Optional short human-readable display name for a backgrounded process (recommended when background is true, e.g. \"web api server\" or \"dev watcher\"). If omitted and a foreground command hands off on timeout, Merry derives a short fallback label."
+    )]
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +88,8 @@ struct ProcessCommandInputWire {
     background: bool,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for ProcessCommandInput {
@@ -98,6 +105,7 @@ impl<'de> Deserialize<'de> for ProcessCommandInput {
             permissions: input.permissions,
             background: input.background,
             timeout_secs: input.timeout_secs,
+            display_name: input.display_name,
         })
     }
 }
@@ -232,6 +240,7 @@ fn process_intent_from_call(
     .and_then(|intent| {
         intent
             .with_background(input.background)
+            .with_display_name(input.display_name)
             .with_timeout_secs(input.timeout_secs)
     })
     .map_err(|error| InvalidProcessCommandArguments::new(error.to_string()))

@@ -130,6 +130,7 @@ pub(crate) struct SubagentEntry {
     pub(crate) task_id: String,
     pub(crate) display_name: Option<String>,
     pub(crate) phase: SubagentPhase,
+    pub(crate) closed: bool,
     pub(crate) summary: String,
     pub(crate) activity_log: Vec<SubagentLogEntry>,
     pub(crate) conclusion: Option<String>,
@@ -151,6 +152,7 @@ impl SubagentEntry {
             task_id,
             display_name: None,
             phase,
+            closed: false,
             summary: summary.clone(),
             activity_log: Vec::new(),
             conclusion: None,
@@ -205,6 +207,9 @@ impl SubagentEntry {
 
     pub(crate) fn apply_activity(&mut self, snapshot: &SubagentActivitySnapshot) {
         self.phase = snapshot.phase.into();
+        if self.phase.is_active() {
+            self.closed = false;
+        }
         if !snapshot.summary.trim().is_empty() {
             self.summary = snapshot.summary.clone();
             self.record_log(self.phase, snapshot.summary.clone());
@@ -214,6 +219,9 @@ impl SubagentEntry {
     pub(crate) fn apply_status_view(&mut self, view: &SubagentStatusView) {
         self.set_display_name(view.display_name.clone());
         self.phase = view.status.clone().into();
+        if self.phase.is_active() {
+            self.closed = false;
+        }
         if !view.summary.trim().is_empty() {
             self.summary = view.summary.clone();
             self.record_log(self.phase, view.summary.clone());
@@ -263,6 +271,7 @@ pub(crate) enum SubagentTakeoverAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SubagentTakeoverPointer {
     Back,
+    Close,
     Previous,
     Next,
     Refresh,

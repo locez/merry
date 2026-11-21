@@ -14,9 +14,13 @@ pub(crate) fn tasks_body(
         lines.push("(none)".to_owned());
     } else {
         for process in processes {
+            let label = process
+                .display_name()
+                .map(|name| format!("{name} ({})", process.id()))
+                .unwrap_or_else(|| process.id().to_string());
             lines.push(format!(
                 "{}  {}  {}",
-                process.id(),
+                label,
                 process.state().label(),
                 process.command()
             ));

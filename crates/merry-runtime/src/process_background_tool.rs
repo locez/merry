@@ -151,13 +151,19 @@ fn format_list(processes: &[BackgroundProcessSummary]) -> String {
     }
     processes
         .iter()
-        .map(|process| {
-            format!(
+        .map(|process| match process.display_name() {
+            Some(name) => format!(
+                "{} ({name}) {} {}",
+                process.id(),
+                process.state().label(),
+                process.command()
+            ),
+            None => format!(
                 "{} {} {}",
                 process.id(),
                 process.state().label(),
                 process.command()
-            )
+            ),
         })
         .collect::<Vec<_>>()
         .join("\n")

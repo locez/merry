@@ -83,6 +83,13 @@ fn overlay_pointer_effect(pointer: OverlayPointer, state: &mut TuiState) -> Cont
                     state.close_overlay();
                     ControllerEffect::None
                 }
+                SubagentTakeoverPointer::Close => {
+                    if let Some(agent_id) = state.inspected_subagent_id() {
+                        state.close_subagent_from_dock(&agent_id);
+                    }
+                    state.close_overlay();
+                    ControllerEffect::None
+                }
                 SubagentTakeoverPointer::Previous => {
                     state.step_subagent_inspect(-1);
                     ControllerEffect::RefreshSubagents
@@ -504,6 +511,10 @@ pub(crate) fn handle_mouse_input(
                         TaskDockPointer::InspectSubagent(agent_id) => {
                             state.open_subagent_inspect(Some(&agent_id));
                             return ControllerEffect::RefreshSubagents;
+                        }
+                        TaskDockPointer::CloseSubagent(agent_id) => {
+                            state.close_subagent_from_dock(&agent_id);
+                            return ControllerEffect::None;
                         }
                     }
                 }

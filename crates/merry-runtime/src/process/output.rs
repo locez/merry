@@ -250,7 +250,7 @@ pub(crate) fn recovery_guidance_for_output(
         && let Some(secs) = output.wait_timed_out_secs()
     {
         return Some(Cow::Owned(format!(
-            "The command did not exit within {secs}s and was NOT killed; it is still running in the background. Use read_background_process with this id to check whether it is still making progress or read later output, or use stop_background_process to terminate it and adjust/retry if it is stuck. For intentionally long-running commands, pass a larger timeout_secs on future run_process calls."
+            "The command did not exit within {secs}s and was NOT killed; it is still running in the background. Use read_background_process with this id to check whether it is still making progress or read later output, or use stop_background_process to terminate it and adjust/retry if it is stuck. If this is a long-lived service (such as a web API, dev server, or daemon), leave it running and use background=true with a short display_name next time; for slow finite commands, pass a larger timeout_secs on future run_process calls."
         )));
     }
     recovery_guidance(output.status()).map(Cow::Borrowed)

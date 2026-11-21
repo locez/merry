@@ -80,10 +80,16 @@ impl TaskDockState {
         &mut self,
         processes: Vec<BackgroundProcessSummary>,
     ) -> bool {
-        if self.background_processes == processes {
+        // Exited and killed one-shot processes are not resumable and should not
+        // linger in the top Tasks dock; runtime still retains them for read_background_process.
+        let running: Vec<BackgroundProcessSummary> = processes
+            .into_iter()
+            .filter(|process| matches!(process.state(), BackgroundProcessState::Running { .. }))
+            .collect();
+        if self.background_processes == running {
             return false;
         }
-        self.background_processes = processes;
+        self.background_processes = running;
         if self.background_processes.is_empty() {
             self.scroll = 0;
         }
@@ -141,10 +147,10 @@ impl TaskDockState {
             .iter()
             .filter(|process| matches!(process.state(), BackgroundProcessState::Running { .. }))
             .count();
-        let subagents_total = subagents.len();
+        let subagents_total = subagents.iter().filter(|entry| !entry.closed).count();
         let subagents_running = subagents
             .iter()
-            .filter(|entry| entry.phase.is_active())
+            .filter(|entry| !entry.closed && entry.phase.is_active())
             .count();
         TaskDockCounts {
             total: background_total + subagents_total,
@@ -162,7 +168,7 @@ impl TaskDockState {
         for process in &self.background_processes {
             all.push(TaskDockEntry::Background(process.clone()));
         }
-        for subagent in subagents {
+        for subagent in subagents.iter().filter(|entry| !entry.closed) {
             all.push(TaskDockEntry::Subagent {
                 agent_id: subagent.agent_id.clone(),
                 display_name: subagent.display_name.clone(),
@@ -330,26 +336,51 @@ mod tests {
     }
 
     #[test]
-    fn dock_prioritizes_running_tasks_and_bounds_scroll_for_thirty_plus_items() {
+    fn dock_hides_exited_background_processes_and_keeps_unclosed_subagents() {
         let mut dock = TaskDockState::default();
-        let processes: Vec<_> = (0..30)
-            .map(|i| bg(&format!("bg-{i}"), i % 5 == 0))
-            .collect();
+        let processes: Vec<_> = (0..10).map(|i| bg(&format!("bg-{i}"), i < 4)).collect();
         assert!(dock.set_background_processes(processes));
 
-        let counts = dock.counts(&[]);
-        assert_eq!(counts.total, 30);
-        assert_eq!(counts.running, 6);
+        let mut subagents = vec![
+            SubagentEntry::new(
+                "agent-run".to_owned(),
+                "task-1".to_owned(),
+                SubagentPhase::Running,
+                "working".to_owned(),
+            ),
+            SubagentEntry::new(
+                "agent-done".to_owned(),
+                "task-2".to_owned(),
+                SubagentPhase::Completed,
+                "finished".to_owned(),
+            ),
+        ];
 
-        let entries = dock.entries(&[]);
-        assert_eq!(entries.len(), 30);
-        assert!(entries[..6].iter().all(TaskDockEntry::is_running));
-        assert!(entries[6..].iter().all(|e| !e.is_running()));
+        // Only the 4 running background processes + 2 open subagents appear.
+        let counts = dock.counts(&subagents);
+        assert_eq!(counts.background_total, 4);
+        assert_eq!(counts.background_running, 4);
+        assert_eq!(counts.subagents_total, 2);
+        assert_eq!(counts.total, 6);
+        assert_eq!(counts.running, 5);
 
-        dock.set_filter(TaskDockFilter::Running);
-        assert_eq!(dock.entries(&[]).len(), 6);
+        let entries = dock.entries(&subagents);
+        assert_eq!(entries.len(), 6);
+        assert!(entries[..5].iter().all(TaskDockEntry::is_running));
+        assert!(!entries[5].is_running());
 
-        dock.set_filter(TaskDockFilter::All);
+        // Closing the completed subagent removes it from the top dock.
+        subagents[1].closed = true;
+        assert_eq!(dock.counts(&subagents).total, 5);
+        assert_eq!(dock.entries(&subagents).len(), 5);
+
+        // Exited/killed processes drop out completely, collapsing the dock when empty.
+        assert!(dock.set_background_processes(vec![bg("bg-dead", false)]));
+        assert_eq!(dock.counts(&[]).total, 0);
+
+        // Scroll stays bounded for 30+ running processes.
+        let many: Vec<_> = (0..30).map(|i| bg(&format!("bg-{i}"), true)).collect();
+        assert!(dock.set_background_processes(many));
         dock.scroll_by(100, 30, MAX_DOCK_VISIBLE_ROWS);
         assert_eq!(dock.scroll(), 25);
         dock.scroll_by(-10, 30, MAX_DOCK_VISIBLE_ROWS);
@@ -415,8 +446,18 @@ mod tests {
         let empty = render_to_text(&state, size.width, size.height);
         assert!(!empty.contains("[Tasks"), "{empty}");
 
-        // Populate 15 background processes + 15 subagents = 30 total tasks.
-        let processes: Vec<_> = (0..15).map(|i| bg(&format!("bg-{i:02}"), i < 5)).collect();
+        // Populate 5 running + 10 exited background processes (only 5 running appear)
+        // plus 15 subagents (5 running + 10 completed) = 20 dock tasks.
+        let processes: Vec<_> = (0..15)
+            .map(|i| {
+                let summary = bg(&format!("bg-{i:02}"), i < 5);
+                if i == 0 {
+                    summary.with_display_name(Some("api server".to_owned()))
+                } else {
+                    summary
+                }
+            })
+            .collect();
         state.sync_background_processes(processes);
         for i in 0..15 {
             state.upsert_subagent(SubagentUpdate {
@@ -442,10 +483,10 @@ mod tests {
             "{collapsed_text}"
         );
         assert!(
-            collapsed_text.contains("bg-00: cmd bg-00"),
+            collapsed_text.contains("api server: cmd bg-00"),
             "{collapsed_text}"
         );
-        assert!(collapsed_text.contains("[Tasks 30 ▸]"), "{collapsed_text}");
+        assert!(collapsed_text.contains("[Tasks 20 ▸]"), "{collapsed_text}");
         let (_, user_row) = find_text_position(&collapsed_buf, "USER_ANCHOR").expect("user");
         let (dock_x, dock_y) = find_text_position(&collapsed_buf, "10 running").expect("dock");
         assert!(
@@ -467,16 +508,16 @@ mod tests {
         assert!(state.task_dock().is_expanded());
         let expanded_buf = render_to_buffer(&state, size.width, size.height);
         let expanded_text = render_to_text(&state, size.width, size.height);
-        assert!(expanded_text.contains("1–5/30"), "{expanded_text}");
-        assert!(expanded_text.contains("bg-00"), "{expanded_text}");
+        assert!(expanded_text.contains("1–5/20"), "{expanded_text}");
+        assert!(expanded_text.contains("api server"), "{expanded_text}");
         assert!(expanded_text.contains("bg-04"), "{expanded_text}");
         assert!(
             !expanded_text.contains("bg-05"),
-            "drawer must stay bounded to 5 rows:\n{expanded_text}"
+            "exited processes must not appear in the top Tasks dock:\n{expanded_text}"
         );
 
         // Scroll inside expanded drawer scrolls tasks without moving timeline.
-        let (bg0_x, bg0_y) = find_text_position(&expanded_buf, "bg-00").expect("bg-00");
+        let (bg0_x, bg0_y) = find_text_position(&expanded_buf, "api server").expect("api server");
         assert_eq!(
             handle_mouse_scroll_down_by(Position::new(bg0_x, bg0_y), size, 1, &mut state),
             ControllerEffect::None

@@ -424,6 +424,8 @@ pub struct ProcessActionIntent {
     background: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
 }
 
 impl ProcessActionIntent {
@@ -453,6 +455,7 @@ impl ProcessActionIntent {
             stderr_limit_bytes,
             background: false,
             timeout_secs: None,
+            display_name: None,
         })
     }
 
@@ -477,6 +480,20 @@ impl ProcessActionIntent {
     ) -> Result<Self, ProcessActionError> {
         self.timeout_secs = validate_timeout_secs(timeout_secs)?;
         Ok(self)
+    }
+
+    /// Attaches an optional short human-readable label for a retained process.
+    #[must_use]
+    pub fn with_display_name(mut self, display_name: Option<String>) -> Self {
+        self.display_name = display_name.and_then(|value| {
+            let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized.chars().take(80).collect())
+            }
+        });
+        self
     }
 
     /// Returns a compact deterministic summary of the process intent.
@@ -528,6 +545,12 @@ impl ProcessActionIntent {
             Some(secs) => secs,
             None => DEFAULT_PROCESS_WAIT_TIMEOUT_SECS,
         }
+    }
+
+    /// Returns the optional human-readable display name for this process.
+    #[must_use]
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
     }
 
     /// Returns the stdout capture limit in bytes.

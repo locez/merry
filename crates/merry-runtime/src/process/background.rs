@@ -72,6 +72,7 @@ impl BackgroundProcessState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackgroundProcessSummary {
     id: BackgroundProcessId,
+    display_name: Option<String>,
     command: String,
     cwd: Option<String>,
     state: BackgroundProcessState,
@@ -88,16 +89,39 @@ impl BackgroundProcessSummary {
     ) -> Self {
         Self {
             id,
+            display_name: None,
             command: command.into(),
             cwd,
             state,
         }
     }
 
+    /// Attaches an optional short human-readable display name.
+    #[must_use]
+    pub fn with_display_name(mut self, display_name: Option<String>) -> Self {
+        self.display_name = display_name
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        self
+    }
+
     /// Returns the process id.
     #[must_use]
     pub fn id(&self) -> &BackgroundProcessId {
         &self.id
+    }
+
+    /// Returns the optional human-readable display name.
+    #[must_use]
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+
+    /// Returns the preferred human-facing label (`display_name` when present,
+    /// otherwise the process id).
+    #[must_use]
+    pub fn display_label(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(self.id.as_str())
     }
 
     /// Returns the command text shown to the model.
