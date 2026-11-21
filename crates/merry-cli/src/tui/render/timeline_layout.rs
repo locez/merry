@@ -218,18 +218,28 @@ pub(super) fn timeline_scroll_start(
         start
     } else {
         let max_scroll = max_timeline_scroll(state, timeline, usize::from(region.height));
+        if state.timeline_scroll_offset() == 0
+            && let Some(animated_row) = state.timeline_scroll_animation_row()
+        {
+            return animated_row.min(max_scroll);
+        }
         max_scroll.saturating_sub(state.timeline_scroll_offset())
     }
 }
 
 pub(super) fn prepare_timeline_viewport(state: &mut TuiState, region: Rect) {
     let content = timeline_content_region(region);
-    if !state.is_timeline_detached() || content.is_empty() {
+    if content.is_empty() {
         return;
     }
     let timeline = timeline_layout(state, content);
-    let scroll = timeline_scroll_start(state, &timeline, content);
     let max_scroll = max_timeline_scroll(state, &timeline, usize::from(content.height));
+    if !state.is_timeline_detached() {
+        state.sync_followed_timeline_scroll(max_scroll);
+        return;
+    }
+    let scroll = timeline_scroll_start(state, &timeline, content);
+    state.record_timeline_last_scroll(scroll);
     if let Some(anchor) = timeline.anchor_at(scroll) {
         state.record_timeline_viewport(anchor, max_scroll.saturating_sub(scroll));
     }

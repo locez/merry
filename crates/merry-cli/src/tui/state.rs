@@ -75,6 +75,9 @@ pub(crate) struct TuiState {
     timeline_review_user_index: Option<usize>,
     timeline_anchor: Option<TimelineAnchor>,
     timeline_has_updates: bool,
+    timeline_last_scroll: Option<usize>,
+    timeline_scroll_anim: Option<timeline::TimelineScrollAnimation>,
+    pending_turn_scroll_animation: bool,
     text_selection: Option<TextSelection>,
     clipboard_feedback: Option<ClipboardFeedback>,
     pending_local_echoes: Vec<String>,
@@ -143,6 +146,9 @@ impl TuiState {
             timeline_review_user_index: None,
             timeline_anchor: None,
             timeline_has_updates: false,
+            timeline_last_scroll: None,
+            timeline_scroll_anim: None,
+            pending_turn_scroll_animation: false,
             text_selection: None,
             clipboard_feedback: None,
             pending_local_echoes: Vec::new(),
@@ -363,6 +369,9 @@ impl TuiState {
     }
 
     pub(crate) fn push_user_timeline_item(&mut self, text: String) {
+        if self.animations && !self.is_timeline_detached() && self.timeline_last_scroll.is_some() {
+            self.pending_turn_scroll_animation = true;
+        }
         self.push_timeline_item(TimelineItem::User { text });
     }
 
@@ -580,6 +589,8 @@ impl TuiState {
         self.timeline_review_user_index = None;
         self.timeline_anchor = None;
         self.timeline_has_updates = false;
+        self.timeline_last_scroll = None;
+        self.clear_timeline_scroll_animation();
         self.pending_empty_input_quit = false;
     }
 
@@ -592,6 +603,7 @@ impl TuiState {
         self.pending_empty_input_quit = false;
         self.timeline_review_user_index = None;
         self.timeline_anchor = None;
+        self.clear_timeline_scroll_animation();
         self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_add(lines);
     }
 
@@ -599,6 +611,7 @@ impl TuiState {
         self.pending_empty_input_quit = false;
         self.timeline_review_user_index = None;
         self.timeline_anchor = None;
+        self.clear_timeline_scroll_animation();
         self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_sub(lines);
         if self.timeline_scroll_offset == 0 {
             self.follow_latest();
@@ -616,6 +629,7 @@ impl TuiState {
             self.pending_empty_input_quit = false;
             self.timeline_review_user_index = Some(index);
             self.timeline_anchor = None;
+            self.clear_timeline_scroll_animation();
         }
     }
 

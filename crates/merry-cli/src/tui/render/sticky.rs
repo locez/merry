@@ -148,7 +148,9 @@ fn pin_user(
             }
             gap = 1;
             show = next_row.saturating_sub(gap);
-            if show == 0 {
+            // Release a framed user box cleanly rather than flickering through
+            // a 1-2 row border-only fragment right before the next turn lands.
+            if show == 0 || (section.height >= 3 && show < 3) {
                 return None;
             }
         }

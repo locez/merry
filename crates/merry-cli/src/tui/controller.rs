@@ -617,6 +617,7 @@ fn needs_refresh(state: &TuiState) -> bool {
         || state.has_active_subagents()
         || state.has_running_background_processes()
         || state.inspected_background_process_id().is_some()
+        || state.has_active_timeline_scroll_animation()
         || state.clipboard_feedback().is_some()
         || state.text_selection_is_autoscrolling()
 }
