@@ -40,8 +40,8 @@ pub(in crate::runtime) async fn generate_and_install_compaction(
         if token.is_cancelled() {
             return Err(compaction_cancelled_before_request());
         }
-        let stream_context =
-            ModelStreamContext::new(token.clone()).with_prompt_cache_key(inner.session_id.clone());
+        let stream_context = ModelStreamContext::new(token.clone())
+            .with_prompt_cache_key(inner.prompt_cache_key.clone());
         match generate_validated_compaction_candidate(
             provider.clone(),
             plan.request.as_ref().clone(),

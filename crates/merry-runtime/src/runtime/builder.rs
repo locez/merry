@@ -53,6 +53,7 @@ const DEFAULT_MAX_PARALLEL_TOOL_CALLS: usize = 8;
 /// Provider integrations stay outside this crate behind [`ModelProvider`].
 pub struct RuntimeBuilder {
     session_id: SessionId,
+    prompt_cache_key: Option<SessionId>,
     event_buffer_size: NonZeroUsize,
     max_parallel_tool_calls: NonZeroUsize,
     model_configs: RuntimeModelConfigs,
@@ -98,6 +99,7 @@ impl RuntimeBuilder {
     pub(super) fn new(session_id: SessionId) -> Self {
         Self {
             session_id,
+            prompt_cache_key: None,
             event_buffer_size: NonZeroUsize::new(DEFAULT_EVENT_BUFFER_SIZE)
                 .expect("default event buffer size is non-zero"),
             max_parallel_tool_calls: NonZeroUsize::new(DEFAULT_MAX_PARALLEL_TOOL_CALLS)
@@ -160,6 +162,18 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn max_parallel_tool_calls(mut self, limit: NonZeroUsize) -> Self {
         self.max_parallel_tool_calls = limit;
+        self
+    }
+
+    /// Overrides the deterministic provider prompt-cache key used for model
+    /// requests in this runtime.
+    ///
+    /// When omitted, model requests default to this runtime's own `session_id`.
+    /// Child runtimes use this to share a deterministic cache partition across
+    /// sibling subagents running the same role under one parent session.
+    #[must_use]
+    pub fn prompt_cache_key(mut self, prompt_cache_key: SessionId) -> Self {
+        self.prompt_cache_key = Some(prompt_cache_key);
         self
     }
 
@@ -811,6 +825,9 @@ impl RuntimeBuilder {
         Ok(Runtime {
             inner: Arc::new(RuntimeInner {
                 session_id: self.session_id.clone(),
+                prompt_cache_key: self
+                    .prompt_cache_key
+                    .unwrap_or_else(|| self.session_id.clone()),
                 session,
                 active_step: Arc::new(AtomicBool::new(false)),
                 memory_projection_epoch: AtomicU64::new(0),

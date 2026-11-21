@@ -622,10 +622,10 @@ impl CodingRuntimeBuilder {
                     child_factory,
                     subagents.is_enabled(),
                 );
-                let [spawn_tool, wait_tool, cancel_tool] =
+                let [spawn_tool, send_tool, wait_tool, cancel_tool] =
                     subagent_registered_tools(manager.clone())?;
                 runtime_builder = runtime_builder.subagent_manager(manager);
-                profile_tools.extend([spawn_tool, wait_tool, cancel_tool]);
+                profile_tools.extend([spawn_tool, send_tool, wait_tool, cancel_tool]);
             }
         }
 

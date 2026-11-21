@@ -282,6 +282,7 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
             "browser_tab",
             "browser_network",
             "spawn_subagents",
+            "send_subagent_message",
             "wait_subagents",
             "cancel_subagents",
         ]

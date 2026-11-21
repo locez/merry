@@ -1,18 +1,19 @@
-use crate::{
-    plan::projection::{CHILD_LINKED_SCOPE_GUIDANCE, LINKED_CHILD_DECOMPOSITION_GUIDANCE},
-    subagent::{
-        CANCEL_SUBAGENTS_TOOL_NAME, SPAWN_SUBAGENTS_TOOL_NAME, WAIT_SUBAGENTS_TOOL_NAME,
-        protocol::{CancelSubagentsInput, SpawnSubagentsInput, WaitSubagentsInput},
+use crate::subagent::{
+    CANCEL_SUBAGENTS_TOOL_NAME, SEND_SUBAGENT_MESSAGE_TOOL_NAME, SPAWN_SUBAGENTS_TOOL_NAME,
+    WAIT_SUBAGENTS_TOOL_NAME,
+    protocol::{
+        CancelSubagentsInput, SendSubagentMessageInput, SpawnSubagentsInput, WaitSubagentsInput,
     },
 };
 use merry_core::{ToolInputSchema, ToolSpec};
 use serde_json::Value;
 
 pub(super) const WAIT_SEMANTIC_CHECKPOINT_GUIDANCE: &str = "Observe child statuses at semantic or terminal checkpoints; do not poll for high-frequency progress.";
-const CHILD_MODEL_TURN_GUIDANCE: &str = "max_model_turns covers the full child lifecycle, including tools, implementation, tests, verification, and reporting. Use enough turns for the task and never exceed the configured maximum. Omit it to use the configured default. If the limit is reached, the child is blocked but recoverable: inspect wait_subagents and spawn a replacement with the same plan_client_key and a larger budget within the configured maximum, continuing from the shared workspace.";
+const CHILD_MODEL_TURN_GUIDANCE: &str = "Omit max_model_turns to use the configured default. If a child reaches its turn limit or times out, it stops as blocked with its transcript intact: resume that same child with send_subagent_message(agent_id, extra_model_turns=...) instead of respawning from scratch.";
+const SEND_MESSAGE_ANTI_MICROMANAGE_GUIDANCE: &str = "Send a follow-up instruction to an active subagent or wake a completed, blocked, or cancelled subagent with its full prior transcript and agent_id intact. Use delivery=\"steer\" (default) to redirect at the next safe checkpoint or \"queue\" to append after buffered follow-ups, and set extra_model_turns when extending a blocked child. Do NOT send status checks, progress nudges, or \"hurry up / stop reading\" messages — use this only to supply new facts, correct a wrong target, extend a blocked child, or continue work with a finished child.";
 
 /// Returns provider-visible subagent tool specs.
-pub fn subagent_tool_specs() -> Result<[ToolSpec; 3], merry_core::CoreError> {
+pub fn subagent_tool_specs() -> Result<[ToolSpec; 4], merry_core::CoreError> {
     subagent_tool_specs_with_bounds(
         crate::subagent::DEFAULT_MIN_MODEL_TURNS,
         crate::subagent::DEFAULT_MAX_MODEL_TURNS,
@@ -22,9 +23,15 @@ pub fn subagent_tool_specs() -> Result<[ToolSpec; 3], merry_core::CoreError> {
 pub(super) fn subagent_tool_specs_with_bounds(
     min_model_turns: u32,
     max_model_turns: u32,
-) -> Result<[ToolSpec; 3], merry_core::CoreError> {
+) -> Result<[ToolSpec; 4], merry_core::CoreError> {
     let spawn_description = format!(
-        "Spawn bounded child agents for parallel delegated tasks. A terminal child result is delivered to the parent as a runtime update on the next model turn; it does not interrupt the current turn. Review that update before claiming the parent task is complete, and call wait_subagents when the compact result, diagnostics, or changed paths are needed. {CHILD_MODEL_TURN_GUIDANCE} The configured child model-turn range is {min_model_turns}..={max_model_turns}; explicit budgets outside it are rejected. Omit max_model_turns to use the configured default. Use the structured scope fields when a child needs narrower boundaries; keep tasks[].task focused on the work and do not repeat scope declarations in task text. When binding a child to an authored Plan node, set plan_client_key to one of the authored strings in update_plan.bindable_plan_client_keys, such as `agent1_task`; never pass a runtime node id such as `plan-node-2`. When plan_client_key binds a child: {CHILD_LINKED_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} In tasks[].allowed_tools, copy exact registered Merry tool names without provider namespace prefixes: use run_process, never functions.run_process."
+        "Spawn one or more bounded child agents for independent, parallel, or context-heavy tasks. \
+         Terminal child results are delivered automatically on the next model turn as a `<subagent-notification>` block with inlined conclusions and changed_paths; set `wait` to `all` or `any` only when you need results inline before continuing (if the foreground wait budget expires or the turn is interrupted, children keep running in the background — do not spawn duplicates). \
+         Use `role` to pick a specialist (`explore` for fast read-only search, `coder` for scoped implementation and checks, `review` for independent skeptical verification) and `context_files` to preload key file slices before turn 1. \
+         {CHILD_MODEL_TURN_GUIDANCE} Configured child model-turn range: {min_model_turns}..={max_model_turns}. \
+         Keep `tasks[].task` focused on the objective and ruled-out paths; declare path boundaries in `read_scope`, `write_scope`, and `forbidden_paths`. \
+         When binding to a Plan node, pass an authored `plan_client_key` from `update_plan.bindable_plan_client_keys` (never a runtime node id such as `plan-node-2`). \
+         In `tasks[].allowed_tools`, copy exact registered Merry tool names without provider namespace prefixes: use `run_process`, never `functions.run_process`."
     );
     let spawn_spec =
         SpawnSubagentsInput::tool_spec_with(SPAWN_SUBAGENTS_TOOL_NAME, &spawn_description)?;
@@ -39,10 +46,14 @@ pub(super) fn subagent_tool_specs_with_bounds(
 
     Ok([
         spawn_spec,
+        SendSubagentMessageInput::tool_spec_with(
+            SEND_SUBAGENT_MESSAGE_TOOL_NAME,
+            SEND_MESSAGE_ANTI_MICROMANAGE_GUIDANCE,
+        )?,
         WaitSubagentsInput::tool_spec_with(
             WAIT_SUBAGENTS_TOOL_NAME,
             format!(
-                "Inspect or wait for child agent statuses and compact results. {WAIT_SEMANTIC_CHECKPOINT_GUIDANCE} timeout_ms is an observation deadline, not a task budget; zero returns an immediate status snapshot, while omission waits for the selected completion condition. A timed_out=true result is only a status snapshot, never completion. Claim completion only when terminal=true and the relevant statuses are terminal."
+                "Inspect or wait for child agent statuses, stats, and full conclusions. {WAIT_SEMANTIC_CHECKPOINT_GUIDANCE} timeout_ms is an observation deadline, not a task budget; zero returns an immediate status snapshot, while omission waits for the selected completion condition. A timed_out=true result is only a status snapshot, never completion. Claim completion only when terminal=true and the relevant statuses are terminal."
             ),
         )?,
         CancelSubagentsInput::tool_spec_with(

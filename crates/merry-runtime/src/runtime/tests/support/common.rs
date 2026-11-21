@@ -119,6 +119,7 @@ pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
         runtime_session_and_plan_controller(session_id.clone(), event_buffer_size);
     RuntimeInner {
         session_id: session_id.clone(),
+        prompt_cache_key: session_id.clone(),
         session,
         active_step: Arc::new(AtomicBool::new(false)),
         memory_projection_epoch: AtomicU64::new(0),

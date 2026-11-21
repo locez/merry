@@ -1,10 +1,12 @@
 use super::{CapturingChildFactory, manager};
-use crate::plan::projection::{CHILD_LINKED_SCOPE_GUIDANCE, LINKED_CHILD_DECOMPOSITION_GUIDANCE};
 use crate::{
     SubagentConfig, SubagentManager, ToolActionKind,
     schema_contract::assert_provider_input_schema_fields_have_descriptions,
     subagent::tools::{subagent_registered_tools, subagent_tool_specs},
-    subagent::{CANCEL_SUBAGENTS_TOOL_NAME, SPAWN_SUBAGENTS_TOOL_NAME, WAIT_SUBAGENTS_TOOL_NAME},
+    subagent::{
+        CANCEL_SUBAGENTS_TOOL_NAME, SEND_SUBAGENT_MESSAGE_TOOL_NAME, SPAWN_SUBAGENTS_TOOL_NAME,
+        WAIT_SUBAGENTS_TOOL_NAME,
+    },
 };
 use merry_core::SessionId;
 use serde_json::{Value, json};
@@ -15,35 +17,33 @@ fn spawn_schema_accepts_an_optional_plan_client_key_reference() {
     let specs = subagent_tool_specs().expect("subagent tools build");
     let schema = serde_json::to_value(specs[0].input_schema()).expect("spawn schema serializes");
     assert!(schema.to_string().contains("plan_client_key"));
+    assert!(schema.to_string().contains("context_files"));
+    assert!(schema.to_string().contains("role"));
     assert!(!schema.to_string().contains("plan_task"));
-    assert!(
-        specs[0]
-            .description()
-            .contains("never pass a runtime node id")
-    );
+    assert!(specs[0].description().contains("never a runtime node id"));
 }
 
 #[test]
 fn wait_schema_accepts_zero_deadline_as_status_snapshot() {
     let specs = subagent_tool_specs().expect("subagent tools build");
-    let schema = serde_json::to_value(specs[1].input_schema()).expect("wait schema serializes");
+    let schema = serde_json::to_value(specs[2].input_schema()).expect("wait schema serializes");
     assert!(schema.to_string().contains("minimum"));
     assert!(schema.to_string().contains("\"minimum\":0"));
-    assert!(specs[1].description().contains("observation deadline"));
+    assert!(specs[2].description().contains("observation deadline"));
 
-    let validator = jsonschema::validator_for(specs[1].input_schema().as_schema().as_value())
+    let validator = jsonschema::validator_for(specs[2].input_schema().as_schema().as_value())
         .expect("wait schema compiles");
     assert!(validator.is_valid(&json!({
         "agent_ids": ["agent-1"],
         "timeout_ms": 0
     })));
     assert!(
-        specs[1]
+        specs[2]
             .description()
             .contains(crate::subagent::tools::schema::WAIT_SEMANTIC_CHECKPOINT_GUIDANCE)
     );
     assert!(
-        !specs[1]
+        !specs[2]
             .description()
             .contains("separate UI activity stream")
     );
@@ -61,9 +61,11 @@ fn provider_visible_subagent_schemas_describe_fields_and_match_runtime_bounds() 
     let valid_task = json!({
         "tasks": [{
             "task": "Review the runtime.",
+            "role": "explore",
             "max_model_turns": 20,
             "read_scope": ["crates/merry-runtime"],
-            "write_scope": ["tmp/output"]
+            "write_scope": ["tmp/output"],
+            "context_files": ["crates/merry-runtime/src/lib.rs:1-40"]
         }]
     });
     if let Err(error) = spawn_validator.validate(&valid_task) {
@@ -91,7 +93,7 @@ fn provider_visible_subagent_schemas_describe_fields_and_match_runtime_bounds() 
     invalid_scope["tasks"][0]["read_scope"] = json!(["../outside"]);
     assert!(!spawn_validator.is_valid(&invalid_scope));
 
-    for spec in &specs[1..] {
+    for spec in &specs[2..] {
         let validator = jsonschema::validator_for(spec.input_schema().as_schema().as_value())
             .expect("status operation schema compiles");
         assert!(!validator.is_valid(&json!({ "agent_ids": [] })));
@@ -99,37 +101,21 @@ fn provider_visible_subagent_schemas_describe_fields_and_match_runtime_bounds() 
 }
 
 #[test]
-fn subagent_tool_descriptions_explain_linked_child_and_checkpoint_contract() {
+fn subagent_tool_descriptions_explain_slimmed_contract_and_anti_micromanagement() {
     let specs = subagent_tool_specs().expect("subagent tools build");
-    assert!(specs[0].description().contains(CHILD_LINKED_SCOPE_GUIDANCE));
+    assert!(specs[0].description().contains("<subagent-notification>"));
+    assert!(specs[0].description().contains("send_subagent_message"));
+    assert!(specs[0].description().contains("explore"));
+    assert!(specs[0].description().contains("coder"));
+    assert!(specs[0].description().contains("review"));
+    assert!(specs[1].description().contains("Do NOT send status checks"));
     assert!(
-        specs[0]
-            .description()
-            .contains(LINKED_CHILD_DECOMPOSITION_GUIDANCE)
-    );
-    assert!(
-        specs[1]
+        specs[2]
             .description()
             .contains("semantic or terminal checkpoints")
     );
-    assert!(specs[0].description().contains("next model turn"));
-    assert!(
-        specs[0]
-            .description()
-            .contains("does not interrupt the current turn")
-    );
-    assert!(
-        specs[0]
-            .description()
-            .contains("keep tasks[].task focused on the work")
-    );
-    assert!(
-        specs[0]
-            .description()
-            .contains("do not repeat scope declarations in task text")
-    );
     let schema = serde_json::to_string(specs[0].input_schema()).expect("schema serializes");
-    assert!(schema.contains("An empty array makes the child read-only"));
+    assert!(schema.contains("Empty array makes the child read-only"));
 }
 
 #[test]
@@ -137,13 +123,18 @@ fn registered_subagent_tools_are_named_with_control_policy() {
     let tools = subagent_registered_tools(manager(Arc::new(CapturingChildFactory::default())))
         .expect("registered subagent tools should build");
 
-    assert_eq!(tools.len(), 3);
+    assert_eq!(tools.len(), 4);
     assert_eq!(tools[0].spec().name().as_str(), SPAWN_SUBAGENTS_TOOL_NAME);
-    assert_eq!(tools[1].spec().name().as_str(), WAIT_SUBAGENTS_TOOL_NAME);
-    assert_eq!(tools[2].spec().name().as_str(), CANCEL_SUBAGENTS_TOOL_NAME);
+    assert_eq!(
+        tools[1].spec().name().as_str(),
+        SEND_SUBAGENT_MESSAGE_TOOL_NAME
+    );
+    assert_eq!(tools[2].spec().name().as_str(), WAIT_SUBAGENTS_TOOL_NAME);
+    assert_eq!(tools[3].spec().name().as_str(), CANCEL_SUBAGENTS_TOOL_NAME);
     assert_eq!(tools[0].action_kind(), ToolActionKind::RuntimeControl);
-    assert_eq!(tools[1].action_kind(), ToolActionKind::ReadOnly);
-    assert_eq!(tools[2].action_kind(), ToolActionKind::RuntimeControl);
+    assert_eq!(tools[1].action_kind(), ToolActionKind::RuntimeControl);
+    assert_eq!(tools[2].action_kind(), ToolActionKind::ReadOnly);
+    assert_eq!(tools[3].action_kind(), ToolActionKind::RuntimeControl);
 }
 
 #[test]
@@ -176,7 +167,7 @@ fn registered_subagent_schema_uses_manager_configured_model_turn_default() {
         tools[0]
             .spec()
             .description()
-            .contains("configured child model-turn range is 1..=2048")
+            .contains("Configured child model-turn range: 1..=2048")
     );
 }
 

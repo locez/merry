@@ -120,6 +120,7 @@ fn spawned_status_serializes_as_typed_label() {
         agent_id: SubagentId::new("agent-1").expect("valid id"),
         task_id: SubagentTaskId::new("task-1").expect("valid id"),
         display_name: None,
+        role: None,
         status: SpawnedSubagentStatusLabel::Running,
         task_anchor: "Review runtime.".to_owned(),
         read_scope: vec!["src/runtime.rs".to_owned()],
@@ -164,7 +165,12 @@ fn subagent_tool_specs_are_stable_and_schema_backed() {
         .collect::<Vec<_>>();
     assert_eq!(
         names,
-        ["spawn_subagents", "wait_subagents", "cancel_subagents"]
+        [
+            "spawn_subagents",
+            "send_subagent_message",
+            "wait_subagents",
+            "cancel_subagents"
+        ]
     );
     assert!(
         specs[0]
@@ -172,6 +178,7 @@ fn subagent_tool_specs_are_stable_and_schema_backed() {
             .contains("exact registered Merry tool names")
     );
     assert!(specs[0].description().contains("functions.run_process"));
+    assert!(specs[1].description().contains("Do NOT send status checks"));
 
     for spec in &specs {
         let value = serde_json::to_value(spec.input_schema()).expect("schema serializes");
@@ -180,7 +187,7 @@ fn subagent_tool_specs_are_stable_and_schema_backed() {
 
     let spawn_schema =
         serde_json::to_string(specs[0].input_schema()).expect("spawn schema should serialize");
-    assert!(spawn_schema.contains("Exact registered Merry tool names"));
+    assert!(spawn_schema.contains("exact registered Merry tool names"));
     assert!(spawn_schema.contains("functions.run_process"));
     assert!(spawn_schema.contains("\"default\":1024"));
 }
@@ -206,7 +213,11 @@ fn wait_output_serializes_compact_status_and_paths() {
                 "result": null,
                 "output_paths": ["shared/subagents/agent-1/result.md"],
                 "changed_paths": [],
-                "diagnostics": null
+                "diagnostics": null,
+                "turns_used": 0,
+                "tool_calls": 0,
+                "elapsed_ms": 0,
+                "raw_output_bytes": 0
             }],
             "timed_out": false,
             "terminal": true,

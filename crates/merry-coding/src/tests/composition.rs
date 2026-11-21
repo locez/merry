@@ -60,6 +60,7 @@ async fn parent_builder_composes_full_coding_runtime_and_loop_policy() {
         "browser_tab",
         "browser_network",
         "spawn_subagents",
+        "send_subagent_message",
         "wait_subagents",
         "cancel_subagents",
     ] {
@@ -122,6 +123,7 @@ async fn command_generation_builder_is_read_only_even_with_full_policy_inputs() 
         "browser_tab",
         "browser_network",
         "spawn_subagents",
+        "send_subagent_message",
         "wait_subagents",
         "cancel_subagents",
     ] {

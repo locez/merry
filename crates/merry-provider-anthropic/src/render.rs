@@ -1,8 +1,9 @@
 use crate::{
     AnthropicProviderConfig, AnthropicProviderError,
     wire::{
-        AnthropicContentBlock, AnthropicImageSource, AnthropicMessage, AnthropicOutputConfig,
-        AnthropicOutputFormat, AnthropicRequest, AnthropicTool, AnthropicToolChoice,
+        AnthropicCacheControl, AnthropicContentBlock, AnthropicImageSource, AnthropicMessage,
+        AnthropicOutputConfig, AnthropicOutputFormat, AnthropicRequest, AnthropicSystemBlock,
+        AnthropicTool, AnthropicToolChoice,
     },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -18,30 +19,51 @@ pub(crate) fn render_anthropic_request(
     config: &AnthropicProviderConfig,
     request: &ModelRequest,
 ) -> Result<Value, AnthropicProviderError> {
-    let system = request
-        .input()
-        .iter()
-        .filter_map(|item| match item {
-            ModelInputItem::Message(message) if message.role() == ModelMessageRole::System => {
-                Some(message.content().as_text())
+    let stable_prefix_len = request.stable_prefix_item_count();
+    let mut stable_system = Vec::new();
+    let mut dynamic_system = Vec::new();
+    for (index, item) in request.input().iter().enumerate() {
+        if let ModelInputItem::Message(message) = item
+            && message.role() == ModelMessageRole::System
+        {
+            if index < stable_prefix_len {
+                stable_system.push(message.content().as_text());
+            } else {
+                dynamic_system.push(message.content().as_text());
             }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let system = (!system.is_empty()).then(|| system.join("\n\n"));
+        }
+    }
+    let mut system = Vec::new();
+    if !stable_system.is_empty() {
+        system.push(AnthropicSystemBlock {
+            kind: "text",
+            text: stable_system.join("\n\n"),
+            cache_control: Some(AnthropicCacheControl::ephemeral()),
+        });
+    }
+    if !dynamic_system.is_empty() {
+        system.push(AnthropicSystemBlock {
+            kind: "text",
+            text: dynamic_system.join("\n\n"),
+            cache_control: None,
+        });
+    }
     let messages = render_messages(request);
     if messages.is_empty() {
         return Err(AnthropicProviderError::invalid_request(
             "Anthropic request must contain at least one user or assistant message",
         ));
     }
+    let tool_count = request.tools().len();
     let tools = request
         .tools()
         .iter()
-        .map(|tool| AnthropicTool {
+        .enumerate()
+        .map(|(index, tool)| AnthropicTool {
             name: tool.name().as_str(),
             description: tool.description(),
             input_schema: tool.input_schema().as_schema(),
+            cache_control: (index + 1 == tool_count).then_some(AnthropicCacheControl::ephemeral()),
         })
         .collect::<Vec<_>>();
     let format = request.response_format().map(|format| match format {
@@ -220,7 +242,18 @@ mod tests {
         )
         .expect("request should render");
 
-        assert_eq!(rendered["system"], "Be concise");
+        assert_eq!(
+            rendered["system"],
+            json!([{
+                "type": "text",
+                "text": "Be concise",
+                "cache_control": { "type": "ephemeral" }
+            }])
+        );
+        assert_eq!(
+            rendered["tools"][0]["cache_control"],
+            json!({ "type": "ephemeral" })
+        );
         assert_eq!(rendered["max_tokens"], 777);
         assert_eq!(rendered["stream"], true);
         assert_eq!(rendered["messages"][1]["role"], "assistant");
@@ -318,6 +351,63 @@ mod tests {
                 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgoq"}},
                 {"type": "text", "text": "</image>"}
             ])
+        );
+    }
+
+    #[test]
+    fn splits_stable_and_dynamic_system_blocks_and_marks_last_tool_for_prompt_caching() {
+        let second_tool = ToolSpec::new(
+            ToolName::new("read_text").expect("valid name"),
+            "Read text",
+            ToolInputSchema::new(
+                Schema::try_from(json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }))
+                .expect("valid schema"),
+            )
+            .expect("valid schema"),
+        )
+        .expect("valid tool");
+        let request = ModelRequest::new_with_input_and_stable_prefix(
+            ModelName::new("claude-cache-test").expect("valid model"),
+            vec![
+                message(ModelMessageRole::System, "stable-1"),
+                message(ModelMessageRole::System, "stable-2"),
+                message(ModelMessageRole::System, "dynamic-handoff"),
+                message(ModelMessageRole::User, "Go"),
+            ],
+            vec![tool_spec(), second_tool],
+            GenerationConfig::default(),
+            2,
+        )
+        .expect("valid request");
+
+        let rendered = render_anthropic_request(
+            &AnthropicProviderConfig::new("key").expect("valid config"),
+            &request,
+        )
+        .expect("request should render");
+
+        assert_eq!(
+            rendered["system"],
+            json!([
+                {
+                    "type": "text",
+                    "text": "stable-1\n\nstable-2",
+                    "cache_control": { "type": "ephemeral" }
+                },
+                {
+                    "type": "text",
+                    "text": "dynamic-handoff"
+                }
+            ])
+        );
+        assert!(rendered["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            rendered["tools"][1]["cache_control"],
+            json!({ "type": "ephemeral" })
         );
     }
 

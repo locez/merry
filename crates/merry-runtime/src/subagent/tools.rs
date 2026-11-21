@@ -4,10 +4,13 @@ pub use schema::subagent_tool_specs;
 use schema::subagent_tool_specs_with_bounds;
 
 use super::{
-    CANCEL_SUBAGENTS_TOOL_NAME, SPAWN_SUBAGENTS_TOOL_NAME, SubagentError, SubagentManager,
+    BackgroundHandoffNotice, CANCEL_SUBAGENTS_TOOL_NAME, SEND_SUBAGENT_MESSAGE_TOOL_NAME,
+    SPAWN_SUBAGENTS_TOOL_NAME, SendSubagentMessageOptions, SubagentError, SubagentManager,
     SubagentTaskSpec, WAIT_SUBAGENTS_TOOL_NAME, WaitMode,
     protocol::{
-        CancelSubagentsInput, SpawnSubagentTaskInput, SpawnSubagentsInput, WaitSubagentsInput,
+        CancelSubagentsInput, SendSubagentMessageInput, SendSubagentMessageOutcome,
+        SpawnSubagentTaskInput, SpawnSubagentsInput, SpawnWaitMode, SubagentMessageDelivery,
+        WaitSubagentsInput, WaitSubagentsOutput,
     },
     sanitize_diagnostic_message, validate_task_max_model_turns,
 };
@@ -19,16 +22,24 @@ use merry_core::{ErrorInfo, PendingToolCall};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{sync::Arc, time::Duration};
 
+const BACKGROUND_HANDOFF_MESSAGE: &str = "Foreground wait ended before all subagents finished. They were NOT cancelled and are still running in the background — do not spawn them again. You will be notified automatically when they complete.";
+
 /// Returns provider-visible subagent tool specs with runtime-owned executors.
 pub fn subagent_registered_tools(
     manager: SubagentManager,
-) -> Result<[RegisteredTool; 3], merry_core::CoreError> {
-    let [spawn_spec, wait_spec, cancel_spec] =
+) -> Result<[RegisteredTool; 4], merry_core::CoreError> {
+    let [spawn_spec, send_spec, wait_spec, cancel_spec] =
         subagent_tool_specs_with_bounds(manager.min_model_turns(), manager.max_model_turns())?;
     Ok([
         RegisteredTool::new(
             spawn_spec,
             Arc::new(SpawnSubagentsExecutor::new(manager.clone())),
+            ToolActionKind::RuntimeControl,
+        )
+        .with_parallel_safe_execution(),
+        RegisteredTool::new(
+            send_spec,
+            Arc::new(SendSubagentMessageExecutor::new(manager.clone())),
             ToolActionKind::RuntimeControl,
         )
         .with_parallel_safe_execution(),
@@ -76,6 +87,19 @@ impl ToolExecutor for SpawnSubagentsExecutor {
                     ));
                 }
             };
+            let wait_mode = input.wait.unwrap_or(SpawnWaitMode::None);
+            let foreground_budget = match input.foreground_budget_secs {
+                Some(0) => {
+                    return Ok(invalid_subagent_arguments_outcome(
+                        call.name().as_str(),
+                        InvalidSubagentToolArguments::new(
+                            "foreground_budget_secs must be greater than zero",
+                        ),
+                    ));
+                }
+                Some(secs) => Duration::from_secs(secs),
+                None => self.manager.foreground_wait_budget(),
+            };
             let tasks = match input
                 .tasks
                 .into_iter()
@@ -84,6 +108,7 @@ impl ToolExecutor for SpawnSubagentsExecutor {
                         task,
                         self.manager.min_model_turns(),
                         self.manager.max_model_turns(),
+                        self.manager.default_timeout_secs(),
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()
@@ -99,7 +124,7 @@ impl ToolExecutor for SpawnSubagentsExecutor {
             if context.cancellation_token().is_cancelled() {
                 return Err(ToolExecutionError::Cancelled);
             }
-            let output = self
+            let mut output = self
                 .manager
                 .spawn(
                     tasks,
@@ -109,7 +134,142 @@ impl ToolExecutor for SpawnSubagentsExecutor {
                 .await
                 .map_err(infrastructure_error)?;
 
+            let wait_target_mode = match wait_mode {
+                SpawnWaitMode::None => None,
+                SpawnWaitMode::All => Some(WaitMode::All),
+                SpawnWaitMode::Any => Some(WaitMode::Any),
+            };
+            if let Some(mode) = wait_target_mode
+                && !output.spawned.is_empty()
+            {
+                let spawned_ids = output
+                    .spawned
+                    .iter()
+                    .map(|view| view.agent_id.clone())
+                    .collect::<Vec<_>>();
+                let wait = self
+                    .manager
+                    .wait(&spawned_ids, mode, Some(foreground_budget));
+                let (wait_result, handoff_reason) = tokio::select! {
+                    biased;
+                    () = context.cancellation_token().cancelled() => {
+                        let snapshot = self.manager.status_for(&spawned_ids).await;
+                        let wait_snapshot = WaitSubagentsOutput::with_wait_state(
+                            snapshot,
+                            false,
+                            true,
+                        );
+                        (wait_snapshot, Some("parent_turn_interrupted"))
+                    }
+                    result = wait => {
+                        let wait_output = result.map_err(infrastructure_error)?;
+                        let reason = (wait_output.timed_out && !wait_output.terminal)
+                            .then_some("foreground_budget_elapsed");
+                        (wait_output, reason)
+                    }
+                };
+                if let Some(reason) = handoff_reason
+                    && !wait_result.pending_agent_ids.is_empty()
+                {
+                    output.background_handoff = Some(BackgroundHandoffNotice {
+                        handed_off_agent_ids: wait_result.pending_agent_ids.clone(),
+                        reason: reason.to_owned(),
+                        message: BACKGROUND_HANDOFF_MESSAGE.to_owned(),
+                    });
+                }
+                output.wait_result = Some(wait_result);
+            }
+
             spawn_json_output(&output)
+        })
+    }
+}
+
+/// Runtime-owned executor for the provider-visible `send_subagent_message` tool.
+#[derive(Clone)]
+struct SendSubagentMessageExecutor {
+    manager: SubagentManager,
+}
+
+impl SendSubagentMessageExecutor {
+    #[must_use]
+    fn new(manager: SubagentManager) -> Self {
+        Self { manager }
+    }
+}
+
+impl ToolExecutor for SendSubagentMessageExecutor {
+    fn execute<'a>(
+        &'a self,
+        call: PendingToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            let input = match input_from_call::<SendSubagentMessageInput>(&call) {
+                Ok(input) => input,
+                Err(error) => {
+                    return Ok(invalid_subagent_arguments_outcome(
+                        call.name().as_str(),
+                        error,
+                    ));
+                }
+            };
+            if input.message.trim().is_empty() {
+                return Ok(invalid_subagent_arguments_outcome(
+                    call.name().as_str(),
+                    InvalidSubagentToolArguments::new("message must not be blank"),
+                ));
+            }
+            if let Some(extra_turns) = input.extra_model_turns
+                && let Err(error) =
+                    validate_task_max_model_turns(extra_turns, 1, self.manager.max_model_turns())
+            {
+                return Ok(invalid_subagent_arguments_outcome(
+                    call.name().as_str(),
+                    InvalidSubagentToolArguments::from(error),
+                ));
+            }
+            if context.cancellation_token().is_cancelled() {
+                return Err(ToolExecutionError::Cancelled);
+            }
+
+            let options = SendSubagentMessageOptions {
+                delivery: input.delivery.unwrap_or(SubagentMessageDelivery::Steer),
+                extra_model_turns: input.extra_model_turns,
+            };
+            let mut output = self
+                .manager
+                .send_message_with_options(&input.agent_id, input.message, options)
+                .await
+                .map_err(infrastructure_error)?;
+
+            if input.wait.unwrap_or(false)
+                && matches!(
+                    output.outcome,
+                    SendSubagentMessageOutcome::Accepted | SendSubagentMessageOutcome::Woken
+                )
+            {
+                let ids = [input.agent_id.clone()];
+                let timeout = input
+                    .timeout_ms
+                    .map(Duration::from_millis)
+                    .unwrap_or_else(|| self.manager.foreground_wait_budget());
+                let wait = self.manager.wait(&ids, WaitMode::All, Some(timeout));
+                let wait_result = tokio::select! {
+                    biased;
+                    () = context.cancellation_token().cancelled() => {
+                        let snapshot = self.manager.status_for(&ids).await;
+                        WaitSubagentsOutput::with_wait_state(snapshot, false, true)
+                    }
+                    result = wait => result.map_err(infrastructure_error)?,
+                };
+                if let Some(first) = wait_result.agents.first() {
+                    output.status = Some(first.status.clone());
+                }
+                output.wait_result = Some(wait_result);
+            }
+
+            succeeded_json_output(SEND_SUBAGENT_MESSAGE_TOOL_NAME, &output)
         })
     }
 }
@@ -233,15 +393,19 @@ fn task_spec_from_input(
     input: SpawnSubagentTaskInput,
     min_model_turns: u32,
     default_max_model_turns: u32,
+    default_timeout_secs: Option<u64>,
 ) -> Result<SubagentTaskSpec, InvalidSubagentToolArguments> {
     let SpawnSubagentTaskInput {
         task,
         display_name,
+        role,
         max_model_turns,
+        timeout_secs,
         allowed_tools,
         read_scope,
         write_scope,
         forbidden_paths,
+        context_files,
         expected_output,
         reasoning_effort,
         plan_client_key,
@@ -256,7 +420,11 @@ fn task_spec_from_input(
         .map_err(InvalidSubagentToolArguments::from)?;
     let mut task = SubagentTaskSpec::new(task, max_model_turns)
         .map_err(InvalidSubagentToolArguments::from)?
-        .with_display_name(display_name);
+        .with_display_name(display_name)
+        .with_role(role)
+        .map_err(InvalidSubagentToolArguments::from)?
+        .with_timeout_secs(timeout_secs.or(default_timeout_secs))
+        .map_err(InvalidSubagentToolArguments::from)?;
     if let Some(allowed_tools) = allowed_tools {
         task = task.with_allowed_tools(allowed_tools);
     }
@@ -273,6 +441,11 @@ fn task_spec_from_input(
     if let Some(forbidden_paths) = forbidden_paths {
         task = task
             .with_forbidden_paths(forbidden_paths)
+            .map_err(InvalidSubagentToolArguments::from)?;
+    }
+    if let Some(context_files) = context_files {
+        task = task
+            .with_context_files(context_files)
             .map_err(InvalidSubagentToolArguments::from)?;
     }
     Ok(task

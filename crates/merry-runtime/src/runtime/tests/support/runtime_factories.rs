@@ -34,6 +34,7 @@ where
     Runtime {
         inner: Arc::new(RuntimeInner {
             session_id: id.clone(),
+            prompt_cache_key: id.clone(),
             session: session_state,
             active_step: Arc::new(AtomicBool::new(false)),
             memory_projection_epoch: AtomicU64::new(0),
@@ -90,6 +91,7 @@ pub(in crate::runtime::tests) fn runtime_with_provider(
     Runtime {
         inner: Arc::new(RuntimeInner {
             session_id: id.clone(),
+            prompt_cache_key: id.clone(),
             session: session_state,
             active_step: Arc::new(AtomicBool::new(false)),
             memory_projection_epoch: AtomicU64::new(0),
@@ -149,6 +151,7 @@ where
     Runtime {
         inner: Arc::new(RuntimeInner {
             session_id: id.clone(),
+            prompt_cache_key: id.clone(),
             session: session_state,
             active_step: Arc::new(AtomicBool::new(false)),
             memory_projection_epoch: AtomicU64::new(0),

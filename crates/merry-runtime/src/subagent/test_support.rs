@@ -1,4 +1,6 @@
+#[allow(unused_imports)]
 pub(super) use super::activity::SubagentActivityReducer;
+#[allow(unused_imports)]
 pub(super) use super::{
     SubagentManager,
     activity::SubagentActivityHub,
@@ -20,18 +22,23 @@ pub(super) use super::{
     },
     tools::subagent_tool_specs,
 };
+#[allow(unused_imports)]
 pub(super) use crate::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopResult, AgentLoopStatus, AgentRunMessage,
     PlanSubagentControl, Runtime, RuntimeError, StepContext, StepInput, TaskAnchor,
     plan::{PlanController, SubagentPlanUpdateInput},
 };
+#[allow(unused_imports)]
 pub(super) use futures_util::future::BoxFuture;
+#[allow(unused_imports)]
 pub(super) use merry_core::{
     ErrorInfo, PlanBindingId, PlanLinkSnapshot, PlanLinkStatus, RuntimeJournalEvent,
     RuntimeJournalPayload, SubagentActivityPhase, SubagentId, SubagentTaskId, ToolCallResultStatus,
     ToolName,
 };
+#[allow(unused_imports)]
 pub(super) use merry_llm::GenerationConfig;
+#[allow(unused_imports)]
 pub(super) use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     path::{Path, PathBuf},
@@ -41,5 +48,7 @@ pub(super) use std::{
     },
     time::Duration,
 };
+#[allow(unused_imports)]
 pub(super) use tokio::sync::{Mutex, Notify};
+#[allow(unused_imports)]
 pub(super) use tokio_util::sync::CancellationToken;

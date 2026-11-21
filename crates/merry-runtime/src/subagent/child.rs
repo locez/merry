@@ -107,6 +107,7 @@ impl SubagentManager {
             return;
         };
         let runtime = match self.factory.build_child(ChildRuntimeInput {
+            parent_session_id: self.parent_session_id.clone(),
             session_id: child_session_id,
             task_anchor,
             task: task.clone(),
@@ -307,6 +308,7 @@ pub(super) async fn spawn_reserved_child(
     let runtime = scheduler
         .factory
         .build_child(ChildRuntimeInput {
+            parent_session_id: scheduler.parent_session_id.clone(),
             session_id: child_session_id,
             task_anchor: start.task_anchor.clone(),
             task: start.task.clone(),
@@ -332,6 +334,9 @@ pub(super) async fn spawn_reserved_child(
         };
         agent.runtime = Some(runtime.clone());
         agent.generation_config = Some(generation_config.clone());
+        if agent.started_at.is_none() {
+            agent.started_at = Some(tokio::time::Instant::now());
+        }
         agent.event_tx.clone()
     };
 
@@ -431,6 +436,24 @@ fn spawn_child_loop(
             }
         };
 
+        // If waking/resuming after a turn limit, timeout, or cancellation left
+        // unresolved tool calls in the child session, settle them cleanly so
+        // the next provider turn never sends an orphaned tool_use block.
+        let dangling = launch.runtime.pending_tool_calls().await;
+        for call in dangling {
+            let output = crate::ToolOutput::text(
+                "previous subagent turn ended before this tool call executed; continue with the coordinator's follow-up instruction",
+            );
+            let result = merry_core::ToolCallResult::failed(
+                call.id().clone(),
+                error_info(
+                    "subagent_turn_interrupted",
+                    "previous subagent turn ended before this tool call executed",
+                ),
+            );
+            let _ = launch.runtime.submit_tool_result(result, output).await;
+        }
+
         let loop_token = launch.token.clone();
         let mut stream = match launch.runtime.run_agent_loop_stream(
             input,
@@ -469,10 +492,39 @@ fn spawn_child_loop(
             }
         };
 
+        let timeout_deadline = launch
+            .task
+            .timeout_secs()
+            .map(|secs| tokio::time::Instant::now() + std::time::Duration::from_secs(secs));
+        let mut timed_out = false;
         let mut bridge_request = None;
-        while let Ok(Some(message)) = stream.next_message().await {
+        loop {
+            let next_msg = match timeout_deadline {
+                Some(deadline) => {
+                    match tokio::time::timeout_at(deadline, stream.next_message()).await {
+                        Ok(msg) => msg,
+                        Err(_) => {
+                            timed_out = true;
+                            loop_token.cancel();
+                            break;
+                        }
+                    }
+                }
+                None => stream.next_message().await,
+            };
+            let Ok(Some(message)) = next_msg else {
+                break;
+            };
             match message {
                 AgentRunMessage::Event(event) => {
+                    let delta_bytes = observed_event_output_bytes(&event);
+                    if delta_bytes > 0 {
+                        let mut guard = scheduler.state.lock().await;
+                        if let Some(agent) = guard.agents.get_mut(&launch.agent_id) {
+                            agent.raw_output_bytes =
+                                agent.raw_output_bytes.saturating_add(delta_bytes);
+                        }
+                    }
                     let _ = launch.event_tx.send(event.clone());
                     if let Some(hub) = launch.activity_hub.as_deref()
                         && let Some(snapshot) =
@@ -487,7 +539,10 @@ fn spawn_child_loop(
                 }
             }
         }
-        let (loop_result, loop_error) = if let Some(call) = bridge_request.as_ref() {
+        let (loop_result, loop_error) = if timed_out {
+            drop(stream);
+            (None, None)
+        } else if let Some(call) = bridge_request.as_ref() {
             tracing::warn!(
                 subagent_id = %launch.agent_id,
                 task_id = %launch.task_id,
@@ -522,7 +577,24 @@ fn spawn_child_loop(
             return;
         }
         if let Some(agent) = state_guard.agents.get_mut(&launch.agent_id) {
-            if let Some(error) = loop_error {
+            if let Some(started) = agent.started_at {
+                agent.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            }
+            if timed_out {
+                let secs = launch.task.timeout_secs().unwrap_or(0);
+                agent.status = SubagentStatusLabel::Blocked;
+                agent.summary = format!(
+                    "child timed out after {secs}s; resume with send_subagent_message if more time is needed"
+                );
+                agent.result = None;
+                agent.diagnostics = Some(error_info(
+                    "subagent_timeout",
+                    format!(
+                        "child exceeded wall-clock timeout of {secs}s. Call send_subagent_message(agent_id=\"{}\") to continue with its retained transcript.",
+                        launch.agent_id.as_str()
+                    ),
+                ));
+            } else if let Some(error) = loop_error {
                 agent.status = SubagentStatusLabel::Failed;
                 agent.summary = "child runtime stream failed".to_owned();
                 agent.result = None;
@@ -574,19 +646,26 @@ fn spawn_child_loop(
                 if loop_token.is_cancelled() || agent.status == SubagentStatusLabel::Cancelled {
                     None
                 } else {
-                    agent.pending_follow_ups.pop_front()
+                    let prompt = agent.pending_follow_ups.pop_front()?;
+                    let turn_override = agent.resume_turn_override.take();
+                    Some((prompt, turn_override))
                 }
             });
-        if let Some(next_prompt) = next_follow_up {
+        if let Some((next_prompt, turn_override)) = next_follow_up {
             if let Some(agent) = state_guard.agents.get_mut(&launch.agent_id) {
                 agent.status = SubagentStatusLabel::Running;
                 agent.summary = "handling follow-up".to_owned();
                 agent.diagnostics = None;
             }
             let handle_id = launch.agent_id.clone();
+            let mut next_task = launch.task;
+            if let Some(extra_turns) = turn_override {
+                next_task = next_task.with_max_model_turns_unchecked(extra_turns);
+            }
             let handle = spawn_child_loop(
                 scheduler.clone(),
                 ChildLoopLaunch {
+                    task: next_task,
                     prompt: next_prompt,
                     ..launch
                 },
@@ -806,6 +885,19 @@ async fn update_child_after_error(
 pub(super) fn error_info(code: &'static str, message: impl ToString) -> ErrorInfo {
     ErrorInfo::new(code, &sanitize_diagnostic_message(message.to_string()))
         .expect("static diagnostic code and sanitized message are valid")
+}
+
+fn observed_event_output_bytes(event: &merry_core::RuntimeEvent) -> u64 {
+    let bytes = match event {
+        merry_core::RuntimeEvent::AssistantMessageDelta { delta, .. }
+        | merry_core::RuntimeEvent::ReasoningDelta { delta, .. }
+        | merry_core::RuntimeEvent::ToolCallOutputDelta { delta, .. } => delta.len(),
+        merry_core::RuntimeEvent::ToolCallFinished { output, .. } => {
+            output.as_ref().map_or(0, |value| value.as_str().len())
+        }
+        _ => 0,
+    };
+    u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
 pub(crate) fn sanitize_diagnostic_message(message: String) -> String {

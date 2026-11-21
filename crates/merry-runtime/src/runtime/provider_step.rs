@@ -541,8 +541,8 @@ pub(super) async fn run_provider_step(
         super::session_topic::schedule(inner).await;
     }
 
-    let stream_context =
-        ModelStreamContext::new(token.clone()).with_prompt_cache_key(inner.session_id.clone());
+    let stream_context = ModelStreamContext::new(token.clone())
+        .with_prompt_cache_key(inner.prompt_cache_key.clone());
     let (retry_event_sender, mut retry_event_receiver) = mpsc::channel(8);
     trace_provider_request(
         inner.session_id.as_str(),

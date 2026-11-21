@@ -285,9 +285,9 @@ fn coding_agent_profile_owns_the_coding_prompt_and_hashes_its_exact_text() {
             .contains("Commit, push, merge, or publish only when the user asks")
     );
     assert!(
-        prompt.stable_blocks()[0]
-            .text()
-            .contains("Delegate with `spawn_subagents` only when")
+        prompt.stable_blocks()[0].text().contains(
+            "Subagent orchestration discipline (`spawn_subagents`, `send_subagent_message`"
+        )
     );
     assert!(
         prompt.stable_blocks()[0]

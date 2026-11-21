@@ -1,12 +1,16 @@
-use crate::CODING_LOOP_PROCESS_TOOL;
-use crate::{CodingAgentProfileBuilder, runtime::CodingRuntimePolicy};
-use merry_core::ToolName;
+use crate::{
+    CODING_LOOP_PROCESS_TOOL, CodingAgentProfileBuilder, builtin_subagent_role_instructions,
+    coding_subagent_policy_prompt, runtime::CodingRuntimePolicy,
+};
+use merry_core::{SessionId, ToolName};
 use merry_llm::{ModelName, ModelProvider};
 use merry_process::{ProcessBackend, ProcessSessionRequest};
 use merry_runtime::{
     ChildRuntimeFactory, ChildRuntimeInput, ChildWorkspaceScope, CompactionConfig,
-    LocalWorkspaceProcessSandboxProfile, ProcessSessionPermissionView, Runtime, RuntimeError,
-    RuntimeModelRole, SubagentConfig, SubagentManager, ToolAdmission, subagent_registered_tools,
+    LocalWorkspaceProcessSandboxProfile, ProcessSessionPermissionView, PromptBlock, PromptProfile,
+    Runtime, RuntimeError, RuntimeModelRole, SUBAGENT_HANDOFF_CONTEXT_ID, SubagentConfig,
+    SubagentManager, ToolAdmission, preload_context_files, render_subagent_handoff,
+    subagent_registered_tools,
 };
 use merry_tools::{BROWSER_NETWORK_TOOL, BROWSER_TAB_TOOL};
 use std::{num::NonZeroUsize, path::Path, sync::Arc};
@@ -78,8 +82,16 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
                 self.composition.model.clone(),
             )
         };
+        let effective_role = input.task.role().unwrap_or(if child_workspace_writable {
+            "coder"
+        } else {
+            "explore"
+        });
+        let cache_key = shared_child_prompt_cache_key(&input.parent_session_id, effective_role);
+        // Do not install `task_anchor` redundantly: the full delegated task is
+        // passed directly as the child's first User message.
         let mut builder = Runtime::builder(input.session_id.clone())
-            .task_anchor(input.task_anchor)
+            .prompt_cache_key(cache_key)
             .automatic_compaction(self.composition.automatic_compaction.clone())
             .model_provider(child_provider, child_model)
             .tool_admission(ToolAdmission::allow_only(input.allowed_tools.clone()));
@@ -88,6 +100,16 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
         }
         if let Some(activity_hub) = input.activity_hub.clone() {
             builder = builder.subagent_activity_hub(activity_hub);
+        }
+        let preloaded_files = preload_context_files(
+            self.composition.profile_builder.workspace_root(),
+            &workspace_scope,
+            input.task.context_files(),
+        );
+        if let Some(handoff) =
+            render_subagent_handoff(input.task.expected_output(), &preloaded_files)
+        {
+            builder = builder.initial_context_summary(SUBAGENT_HANDOFF_CONTEXT_ID, &handoff);
         }
         let parent_plan_link_runtime = input.plan_link_runtime.clone();
         let child_factory: Arc<dyn ChildRuntimeFactory> = Arc::new(self.clone());
@@ -101,7 +123,7 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
                 .any(|tool| tool.as_str() == "spawn_subagents"),
             input.depth,
         );
-        let [spawn_tool, wait_tool, cancel_tool] =
+        let [spawn_tool, send_tool, wait_tool, cancel_tool] =
             subagent_registered_tools(child_manager.clone()).map_err(RuntimeError::from)?;
         builder = builder
             .subagent_parent_scope(workspace_scope.clone())
@@ -115,14 +137,19 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
         if let Some(scope) = input.plan_subagent_scope {
             builder = builder.plan_subagent_scope(scope);
         }
+        let child_prompt_profile = build_child_prompt_profile(&input.allowed_tools, effective_role)
+            .map_err(|source| RuntimeError::ChildRuntimeBuild {
+                message: source.to_string(),
+            })?;
         let memory = self.composition.profile_builder.durable_memory_handle();
         let mut profile = self
             .composition
             .profile_builder
             .clone()
+            .prompt_profile(child_prompt_profile)
             .patch_write_scope(workspace_scope.write_scope().to_vec())
             .forbidden_paths(workspace_scope.forbidden_paths().to_vec())
-            .register_tools([spawn_tool, wait_tool, cancel_tool]);
+            .register_tools([spawn_tool, send_tool, wait_tool, cancel_tool]);
         if !workspace_scope
             .read_scope()
             .iter()
@@ -157,6 +184,42 @@ fn child_workspace_is_writable(
     write_scope_is_explicit: bool,
 ) -> bool {
     !(write_scope_is_explicit && workspace_scope.write_scope().is_empty())
+}
+
+fn build_child_prompt_profile(
+    allowed_tools: &[ToolName],
+    effective_role: &str,
+) -> Result<PromptProfile, merry_runtime::PromptError> {
+    let mut profile =
+        PromptProfile::for_subagent(allowed_tools).with_stable_block(PromptBlock::new(
+            "merry_coding_subagent_policy",
+            coding_subagent_policy_prompt(allowed_tools),
+        )?)?;
+    if let Some(role_text) = builtin_subagent_role_instructions(effective_role) {
+        profile = profile.with_stable_block(PromptBlock::new("merry_subagent_role", role_text)?)?;
+    }
+    Ok(profile)
+}
+
+fn shared_child_prompt_cache_key(parent_session_id: &SessionId, effective_role: &str) -> SessionId {
+    let sanitized_role: String = effective_role
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+        .take(32)
+        .collect();
+    let suffix = if sanitized_role.is_empty() {
+        "-role-default".to_owned()
+    } else {
+        format!("-role-{sanitized_role}")
+    };
+    let max_parent_chars = 128usize.saturating_sub(suffix.len());
+    let parent_prefix: String = parent_session_id
+        .as_str()
+        .chars()
+        .take(max_parent_chars)
+        .collect();
+    SessionId::new(&format!("{parent_prefix}{suffix}"))
+        .unwrap_or_else(|_| parent_session_id.clone())
 }
 
 fn is_browser_subagent_toolset(allowed_tools: &[ToolName]) -> bool {
@@ -272,6 +335,7 @@ mod tests {
         let task = SubagentTaskSpec::new("Exercise the child runtime.", 4)
             .expect("child task should be valid");
         ChildRuntimeInput {
+            parent_session_id: SessionId::new("parent-session").expect("parent session valid"),
             session_id: SessionId::new(session).expect("child session should be valid"),
             task_anchor: TaskAnchor::new("Exercise the child runtime.")
                 .expect("child task anchor should be valid"),
@@ -641,6 +705,7 @@ mod tests {
         let scope = ChildWorkspaceScope::from_task(&task);
         let runtime = factory
             .build_child(ChildRuntimeInput {
+                parent_session_id: SessionId::new("parent-writable-proc").expect("parent valid"),
                 session_id: SessionId::new("child-writable-proc").expect("session id valid"),
                 task_anchor: TaskAnchor::new("Run verification command.").expect("anchor valid"),
                 task,
@@ -673,6 +738,107 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(temp.path().join("out/ok.txt")).expect("child wrote file"),
             "subagent-ran"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn child_uses_dedicated_subagent_prompt_handoff_and_shared_role_cache_key() {
+        let temp = tempfile::tempdir().expect("tempdir should exist");
+        std::fs::create_dir_all(temp.path().join("src")).expect("src dir");
+        std::fs::write(
+            temp.path().join("src/lib.rs"),
+            "pub fn alpha() {}\npub fn beta() {}\npub fn gamma() {}\n",
+        )
+        .expect("seed file");
+
+        let provider = Arc::new(FakeModelProvider::new(vec![Ok(completed_text("done"))]));
+        let factory = build_factory(
+            temp.path(),
+            provider.clone(),
+            CodingRuntimePolicy::try_new(Vec::new(), CodingPermissionPolicy::default())
+                .expect("policy valid"),
+        );
+
+        let build_explore = |session: &str| {
+            let task = SubagentTaskSpec::new("Find beta definition.", 8)
+                .expect("valid task")
+                .with_role(Some("explore".to_owned()))
+                .expect("valid role")
+                .with_read_scope(["."])
+                .expect("read scope valid")
+                .with_write_scope(Vec::<&str>::new())
+                .expect("read-only scope")
+                .with_context_files(["src/lib.rs:2-3"])
+                .expect("valid context_files")
+                .with_expected_output(Some("Return path:line only.".to_owned()));
+            let scope = ChildWorkspaceScope::from_task(&task);
+            factory
+                .build_child(ChildRuntimeInput {
+                    parent_session_id: SessionId::new("parent-cache-session")
+                        .expect("parent session valid"),
+                    session_id: SessionId::new(session).expect("child session valid"),
+                    task_anchor: TaskAnchor::new("Find beta definition.").expect("anchor valid"),
+                    task,
+                    allowed_tools: vec![ToolName::new("read_text").expect("tool valid")],
+                    workspace_scope: scope,
+                    depth: 1,
+                    generation_config: GenerationConfig::default(),
+                    plan_subagent_control: None,
+                    plan_subagent_scope: None,
+                    plan_link: None,
+                    plan_link_runtime: None,
+                    activity_hub: None,
+                })
+                .expect("explore child should build")
+        };
+
+        let child_one = build_explore("child-explore-1");
+        let child_two = build_explore("child-explore-2");
+        run_text_step(&child_one, "Find beta definition.").await;
+        run_text_step(&child_two, "Find beta definition.").await;
+
+        let requests = provider.recorded_requests();
+        assert_eq!(requests.len(), 2);
+
+        let first_system_texts = requests[0]
+            .input()
+            .iter()
+            .filter_map(|item| match item {
+                merry_llm::ModelInputItem::Message(msg)
+                    if msg.role() == merry_llm::ModelMessageRole::System =>
+                {
+                    Some(msg.content().as_text())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        assert!(first_system_texts.contains("<merry_subagent_instructions>"));
+        assert!(!first_system_texts.contains("<merry_runtime_instructions>"));
+        assert!(first_system_texts.contains("<merry_coding_subagent_policy>"));
+        assert!(!first_system_texts.contains("Subagent orchestration discipline"));
+        assert!(first_system_texts.contains("<merry_subagent_role>"));
+        assert!(first_system_texts.contains("read-only codebase researcher"));
+        assert!(
+            !first_system_texts.contains("<merry_task_anchor>"),
+            "child must not duplicate task in task_anchor"
+        );
+        assert!(first_system_texts.contains("<merry_subagent_handoff>"));
+        assert!(
+            first_system_texts
+                .contains("<expected_output>\nReturn path:line only.\n</expected_output>")
+        );
+        assert!(first_system_texts.contains("<context_file path=\"src/lib.rs:2-3\">"));
+        assert!(first_system_texts.contains("2: pub fn beta() {}"));
+
+        // Stable prefixes of two sibling explore children must be byte-identical.
+        let prefix_len = requests[0].stable_prefix_item_count();
+        assert_eq!(prefix_len, requests[1].stable_prefix_item_count());
+        assert_eq!(
+            &requests[0].input()[..prefix_len],
+            &requests[1].input()[..prefix_len],
+            "sibling children of the same role must share a byte-identical stable prefix"
         );
     }
 }

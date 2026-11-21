@@ -95,7 +95,7 @@ async fn child_terminal_update_is_delivered_before_deferred_parent_input() {
         message
             .content()
             .as_text()
-            .contains("Runtime update: child agents reached terminal states")
+            .contains("<subagent-notification>")
     }));
     assert!(requests[0].messages().iter().any(|message| {
         message.content().as_text().contains(child_id.as_str())

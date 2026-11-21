@@ -1,3 +1,4 @@
+use super::handoff::{ContextFileRef, MAX_CONTEXT_FILE_REFS};
 use merry_core::ToolName;
 use merry_llm::ReasoningEffort;
 use std::{
@@ -5,6 +6,9 @@ use std::{
     path::{Path, PathBuf},
 };
 use thiserror::Error;
+
+/// Default foreground wait budget in seconds before handing off to background.
+pub const DEFAULT_FOREGROUND_WAIT_BUDGET_SECS: u64 = 120;
 
 /// Maximum UTF-8 task text size accepted for one child task.
 pub(crate) const MAX_TASK_BYTES: usize = 16 * 1024;
@@ -76,6 +80,27 @@ pub enum SubagentError {
     /// The subagent runtime was configured with no child depth.
     #[error("subagent max_depth must be greater than zero")]
     ZeroMaxDepth,
+    /// A context file reference was invalid or outside workspace-relative rules.
+    #[error("invalid context_files entry (expected relative path or path:start-end): {value}")]
+    InvalidContextFileRef {
+        /// Rejected context file reference.
+        value: String,
+    },
+    /// Too many context file references were supplied for one child task.
+    #[error("context_files exceeds maximum of {maximum} entries")]
+    TooManyContextFiles {
+        /// Configured entry cap.
+        maximum: usize,
+    },
+    /// A child timeout_secs value was zero.
+    #[error("timeout_secs must be greater than zero")]
+    ZeroTimeoutSecs,
+    /// A child role name contained invalid characters.
+    #[error("invalid subagent role name: {role}")]
+    InvalidRoleName {
+        /// Rejected role name.
+        role: String,
+    },
 }
 
 /// Runtime configuration for subagent delegation limits.
@@ -85,6 +110,8 @@ pub struct SubagentConfig {
     max_depth: u8,
     min_model_turns: u32,
     max_model_turns: u32,
+    default_timeout_secs: Option<u64>,
+    foreground_wait_budget_secs: u64,
 }
 
 impl SubagentConfig {
@@ -101,7 +128,34 @@ impl SubagentConfig {
             max_depth,
             min_model_turns: DEFAULT_MIN_MODEL_TURNS,
             max_model_turns: DEFAULT_MAX_MODEL_TURNS,
+            default_timeout_secs: None,
+            foreground_wait_budget_secs: DEFAULT_FOREGROUND_WAIT_BUDGET_SECS,
         })
+    }
+
+    /// Sets an optional default wall-clock timeout in seconds for child tasks.
+    pub fn with_default_timeout_secs(
+        mut self,
+        timeout_secs: Option<u64>,
+    ) -> Result<Self, SubagentError> {
+        if timeout_secs == Some(0) {
+            return Err(SubagentError::ZeroTimeoutSecs);
+        }
+        self.default_timeout_secs = timeout_secs;
+        Ok(self)
+    }
+
+    /// Sets the foreground wait budget in seconds before `wait: "all" | "any"`
+    /// gracefully hands off running children to the background.
+    pub fn with_foreground_wait_budget_secs(
+        mut self,
+        budget_secs: u64,
+    ) -> Result<Self, SubagentError> {
+        if budget_secs == 0 {
+            return Err(SubagentError::ZeroTimeoutSecs);
+        }
+        self.foreground_wait_budget_secs = budget_secs;
+        Ok(self)
     }
 
     /// Replaces the default model-turn budget inherited by child tasks that
@@ -186,6 +240,18 @@ impl SubagentConfig {
     pub fn max_model_turns(self) -> u32 {
         self.max_model_turns
     }
+
+    /// Returns the optional default wall-clock timeout in seconds for child tasks.
+    #[must_use]
+    pub fn default_timeout_secs(self) -> Option<u64> {
+        self.default_timeout_secs
+    }
+
+    /// Returns the foreground wait budget in seconds.
+    #[must_use]
+    pub fn foreground_wait_budget_secs(self) -> u64 {
+        self.foreground_wait_budget_secs
+    }
 }
 
 impl Default for SubagentConfig {
@@ -195,6 +261,8 @@ impl Default for SubagentConfig {
             max_depth: DEFAULT_MAX_DEPTH,
             min_model_turns: DEFAULT_MIN_MODEL_TURNS,
             max_model_turns: DEFAULT_MAX_MODEL_TURNS,
+            default_timeout_secs: None,
+            foreground_wait_budget_secs: DEFAULT_FOREGROUND_WAIT_BUDGET_SECS,
         }
     }
 }
@@ -203,8 +271,10 @@ impl Default for SubagentConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentTaskSpec {
     display_name: Option<String>,
+    role: Option<String>,
     task: String,
     max_model_turns: u32,
+    timeout_secs: Option<u64>,
     allowed_tools: Vec<ToolName>,
     allowed_tools_explicit: bool,
     read_scope: Vec<PathBuf>,
@@ -213,6 +283,7 @@ pub struct SubagentTaskSpec {
     write_scope_explicit: bool,
     forbidden_paths: Vec<PathBuf>,
     forbidden_paths_explicit: bool,
+    context_files: Vec<ContextFileRef>,
     expected_output: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
     plan_client_key: Option<String>,
@@ -245,8 +316,10 @@ impl SubagentTaskSpec {
         }
         Ok(Self {
             display_name: None,
+            role: None,
             task,
             max_model_turns,
+            timeout_secs: None,
             allowed_tools: Vec::new(),
             allowed_tools_explicit: false,
             read_scope: Vec::new(),
@@ -255,10 +328,34 @@ impl SubagentTaskSpec {
             write_scope_explicit: false,
             forbidden_paths: Vec::new(),
             forbidden_paths_explicit: false,
+            context_files: Vec::new(),
             expected_output: None,
             reasoning_effort: None,
             plan_client_key: None,
         })
+    }
+
+    pub(crate) fn with_max_model_turns_unchecked(mut self, max_model_turns: u32) -> Self {
+        self.max_model_turns = max_model_turns;
+        self
+    }
+
+    /// Returns the optional role name requested for this child task.
+    #[must_use]
+    pub fn role(&self) -> Option<&str> {
+        self.role.as_deref()
+    }
+
+    /// Returns the optional wall-clock timeout in seconds for this child task.
+    #[must_use]
+    pub const fn timeout_secs(&self) -> Option<u64> {
+        self.timeout_secs
+    }
+
+    /// Returns the validated workspace-relative `context_files` references to preload.
+    #[must_use]
+    pub fn context_files(&self) -> &[ContextFileRef] {
+        &self.context_files
     }
 
     /// Returns the child work description.
@@ -359,6 +456,54 @@ impl SubagentTaskSpec {
     pub fn with_display_name(mut self, display_name: Option<String>) -> Self {
         self.display_name = display_name.filter(|value| !value.trim().is_empty());
         self
+    }
+
+    /// Sets the optional role name after validating it contains safe identifier characters.
+    pub fn with_role(mut self, role: Option<String>) -> Result<Self, SubagentError> {
+        let Some(role) = role
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        else {
+            self.role = None;
+            return Ok(self);
+        };
+        if role.len() > 64
+            || !role
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(SubagentError::InvalidRoleName { role });
+        }
+        self.role = Some(role);
+        Ok(self)
+    }
+
+    /// Sets an optional wall-clock timeout in seconds for this child task.
+    pub fn with_timeout_secs(mut self, timeout_secs: Option<u64>) -> Result<Self, SubagentError> {
+        if timeout_secs == Some(0) {
+            return Err(SubagentError::ZeroTimeoutSecs);
+        }
+        self.timeout_secs = timeout_secs;
+        Ok(self)
+    }
+
+    /// Sets validated workspace-relative `context_files` to preload before turn 1.
+    pub fn with_context_files<I, S>(mut self, entries: I) -> Result<Self, SubagentError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut parsed = Vec::new();
+        for entry in entries {
+            if parsed.len() >= MAX_CONTEXT_FILE_REFS {
+                return Err(SubagentError::TooManyContextFiles {
+                    maximum: MAX_CONTEXT_FILE_REFS,
+                });
+            }
+            parsed.push(ContextFileRef::parse(entry.as_ref())?);
+        }
+        self.context_files = parsed;
+        Ok(self)
     }
 
     /// Replaces the read scope after validating each path.

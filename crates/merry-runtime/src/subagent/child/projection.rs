@@ -17,6 +17,7 @@ use std::{
 pub(in crate::subagent) struct ChildLoopProjection {
     pub(super) result: Option<SubagentResultView>,
     pub(super) changed_paths: Vec<String>,
+    pub(super) tool_calls: u32,
 }
 
 impl ChildLoopProjection {
@@ -29,10 +30,21 @@ impl ChildLoopProjection {
             | AgentLoopStatus::Cancelled { .. }
             | AgentLoopStatus::Blocked { .. } => None,
         };
+        let tool_calls = result
+            .events()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.payload,
+                    RuntimeJournalPayload::ToolCallResolved { .. }
+                )
+            })
+            .count();
 
         Self {
             result: explicit_result,
             changed_paths: changed_paths_from_child_events(runtime, result.events()).await,
+            tool_calls: u32::try_from(tool_calls).unwrap_or(u32::MAX),
         }
     }
 }
@@ -43,7 +55,23 @@ pub(in crate::subagent) fn apply_loop_result(
     projection: ChildLoopProjection,
 ) {
     agent.result = projection.result;
-    agent.changed_paths = projection.changed_paths;
+    if !projection.changed_paths.is_empty() {
+        let mut merged: BTreeSet<String> = agent.changed_paths.iter().cloned().collect();
+        merged.extend(projection.changed_paths);
+        agent.changed_paths = merged.into_iter().collect();
+    }
+    agent.turns_used = agent
+        .turns_used
+        .saturating_add(u32::try_from(result.model_turns_run()).unwrap_or(u32::MAX));
+    agent.tool_calls = agent.tool_calls.saturating_add(projection.tool_calls);
+    if let Some(session_usage) = result.session_usage() {
+        agent.usage = Some(session_usage.total);
+    }
+    if let Some(final_output) = result.final_output()
+        && agent.raw_output_bytes == 0
+    {
+        agent.raw_output_bytes = u64::try_from(final_output.len()).unwrap_or(u64::MAX);
+    }
 
     match result.status() {
         AgentLoopStatus::Completed => {
@@ -66,12 +94,14 @@ pub(in crate::subagent) fn apply_loop_result(
             match reason {
                 AgentLoopBlockedReason::MaxModelTurnsReached { max_model_turns } => {
                     agent.summary = format!(
-                        "child blocked after {max_model_turns} model turns; spawn a replacement with a larger budget"
+                        "child blocked after {max_model_turns} model turns; resume with send_subagent_message(agent_id=\"{}\", extra_model_turns=...)",
+                        agent.agent_id.as_str()
                     );
                     agent.diagnostics = Some(error_info(
                         "subagent_max_model_turns_reached",
                         format!(
-                            "child used all {max_model_turns} model turns. This is recoverable: inspect the returned status and spawn a replacement with the same plan_client_key and a larger budget within the configured maximum; use a larger value for complex tasks and continue from the shared workspace."
+                            "child used all {max_model_turns} model turns. This is recoverable: call send_subagent_message(agent_id=\"{}\", extra_model_turns=...) to wake this same subagent with its retained transcript and context.",
+                            agent.agent_id.as_str()
                         ),
                     ));
                 }

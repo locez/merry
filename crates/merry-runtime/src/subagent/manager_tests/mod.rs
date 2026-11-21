@@ -1,5 +1,4 @@
 pub(super) use super::test_support::*;
-pub(super) use super::test_support::*;
 use crate::{
     RegisteredTool, Runtime, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor,
     ToolExecutorFuture,
@@ -640,7 +639,6 @@ fn bridge_tool_spec() -> ToolSpec {
     .expect("valid tool spec")
 }
 
-
 mod plan_lifecycle;
 mod plan_runtime;
 mod policy;
@@ -718,13 +716,13 @@ async fn spawn_tool_decouples_child_cancellation_from_tool_phase_token() {
         SubagentConfig::new(2, 1).expect("valid config"),
         factory,
     );
-    let [spawn_tool, _, _] =
+    let [spawn_tool, _, _, _] =
         crate::subagent_registered_tools(manager.clone()).expect("subagent tools build");
     let phase_token = CancellationToken::new();
     let call = PendingToolCall::new(
         merry_core::ToolCallId::new("spawn-call-1").expect("valid call id"),
         ToolName::new("spawn_subagents").expect("valid tool name"),
-        ToolArguments::try_from(json!({
+        merry_core::ToolCallArguments::try_from(json!({
             "tasks": [{
                 "task": "Wait on gate.",
                 "write_scope": []
@@ -738,7 +736,10 @@ async fn spawn_tool_decouples_child_cancellation_from_tool_phase_token() {
         .execute(call, ToolExecutionContext::new(phase_token.clone()))
         .await
         .expect("spawn tool should succeed");
-    assert_eq!(outcome.status(), merry_core::ToolCallResultStatus::Succeeded);
+    assert_eq!(
+        outcome.status(),
+        merry_core::ToolCallResultStatus::Succeeded
+    );
 
     // Cancelling the tool phase token after spawn must NOT cancel the child.
     phase_token.cancel();
@@ -827,7 +828,7 @@ async fn non_interactive_agent_loop_waits_for_active_subagents_before_completing
         SubagentConfig::new(2, 1).expect("valid config"),
         child_factory,
     );
-    let [spawn_tool, wait_tool, cancel_tool] =
+    let [spawn_tool, send_tool, wait_tool, cancel_tool] =
         crate::subagent_registered_tools(manager.clone()).expect("subagent tools build");
     let runtime = Runtime::builder(session_id)
         .model_provider(
@@ -836,6 +837,7 @@ async fn non_interactive_agent_loop_waits_for_active_subagents_before_completing
         )
         .subagent_manager(manager)
         .register_tool(spawn_tool)
+        .register_tool(send_tool)
         .register_tool(wait_tool)
         .register_tool(cancel_tool)
         .build()

@@ -405,6 +405,17 @@ async fn startup_error_after_terminal_claim_does_not_republish_terminal_activity
                 cancellation_token: cancellation_token.clone(),
                 plan_link: None,
                 completion_notification_acknowledged: false,
+                runtime: None,
+                generation_config: None,
+                event_tx: tokio::sync::broadcast::channel(16).0,
+                pending_follow_ups: VecDeque::new(),
+                resume_turn_override: None,
+                started_at: None,
+                turns_used: 0,
+                tool_calls: 0,
+                elapsed_ms: 0,
+                usage: None,
+                raw_output_bytes: 0,
             },
         );
     }
@@ -428,11 +439,13 @@ async fn startup_error_after_terminal_claim_does_not_republish_terminal_activity
     let launch = ChildLoopLaunch {
         agent_id: agent_id.clone(),
         task_id: task_id.clone(),
+        prompt: task.task().to_owned(),
         task,
         token: cancellation_token,
         runtime,
         generation_config,
         activity_hub: Some(Arc::clone(&hub)),
+        event_tx: tokio::sync::broadcast::channel(16).0,
     };
     let mut reducer = SubagentActivityReducer::new(agent_id.clone(), task_id);
 
@@ -554,6 +567,17 @@ fn max_model_turns_result_is_exposed_as_recoverable_blocked_child() {
         cancellation_token: CancellationToken::new(),
         plan_link: None,
         completion_notification_acknowledged: false,
+        runtime: None,
+        generation_config: None,
+        event_tx: tokio::sync::broadcast::channel(16).0,
+        pending_follow_ups: VecDeque::new(),
+        resume_turn_override: None,
+        started_at: None,
+        turns_used: 0,
+        tool_calls: 0,
+        elapsed_ms: 0,
+        usage: None,
+        raw_output_bytes: 0,
     };
     let result = AgentLoopResult::new(
         AgentLoopStatus::Blocked {
@@ -575,6 +599,6 @@ fn max_model_turns_result_is_exposed_as_recoverable_blocked_child() {
         Some("subagent_max_model_turns_reached")
     );
     let diagnostic = agent.diagnostics.as_ref().expect("blocked diagnostic");
-    assert!(diagnostic.message().contains("same plan_client_key"));
-    assert!(diagnostic.message().contains("larger budget"));
+    assert!(diagnostic.message().contains("send_subagent_message"));
+    assert!(diagnostic.message().contains("extra_model_turns"));
 }

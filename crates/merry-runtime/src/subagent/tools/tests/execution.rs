@@ -401,3 +401,396 @@ async fn wait_tool_without_timeout_honors_cancellation() {
 
     assert!(matches!(error, ToolExecutionError::Cancelled));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn tolerant_deserialization_handles_sentinels_single_task_and_singular_agent_id() {
+    let factory = Arc::new(CapturingChildFactory::default());
+    let mgr = manager(factory.clone());
+    let spawn_executor = SpawnSubagentsExecutor::new(mgr.clone());
+
+    // Single-task shorthand + sentinel strings ("null", "none", "") + quoted path
+    let spawn_call = pending_call(
+        SPAWN_SUBAGENTS_TOOL_NAME,
+        json!({
+            "task": "Inspect single task shorthand.",
+            "display_name": "null",
+            "role": "explore",
+            "expected_output": "none",
+            "plan_client_key": "",
+            "read_scope": ["\"crates/merry-runtime\""],
+            "write_scope": "undefined"
+        }),
+    );
+    let outcome = spawn_executor
+        .execute(spawn_call, ToolExecutionContext::default())
+        .await
+        .expect("tolerant spawn should succeed");
+    assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+    let output: crate::subagent::SpawnSubagentsOutput =
+        serde_json::from_value(outcome_json(&outcome)).expect("spawn output parses");
+    assert_eq!(output.spawned.len(), 1);
+    assert_eq!(output.spawned[0].display_name, None);
+    assert_eq!(output.spawned[0].role.as_deref(), Some("explore"));
+    assert_eq!(output.spawned[0].read_scope, vec!["crates/merry-runtime"]);
+    let agent_id = output.spawned[0].agent_id.clone();
+
+    // Singular `agent_id` in wait_subagents
+    let wait_executor = WaitSubagentsExecutor::new(mgr.clone());
+    let wait_call = pending_call(
+        WAIT_SUBAGENTS_TOOL_NAME,
+        json!({ "agent_id": agent_id.as_str(), "timeout_ms": 0 }),
+    );
+    let wait_outcome = wait_executor
+        .execute(wait_call, ToolExecutionContext::default())
+        .await
+        .expect("singular wait should succeed");
+    assert_eq!(wait_outcome.status(), ToolCallResultStatus::Succeeded);
+
+    // Singular `agent_id` in cancel_subagents
+    let cancel_executor = CancelSubagentsExecutor::new(mgr);
+    let cancel_call = pending_call(
+        CANCEL_SUBAGENTS_TOOL_NAME,
+        json!({ "agent_id": agent_id.as_str() }),
+    );
+    let cancel_outcome = cancel_executor
+        .execute(cancel_call, ToolExecutionContext::default())
+        .await
+        .expect("singular cancel should succeed");
+    assert_eq!(cancel_outcome.status(), ToolCallResultStatus::Succeeded);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn spawn_wait_hands_off_to_background_on_interrupt_without_cancelling_child() {
+    use crate::{
+        ChildRuntimeFactory, ChildRuntimeInput, Runtime, RuntimeError,
+        subagent::tools::SendSubagentMessageExecutor,
+    };
+    use futures_util::stream;
+    use merry_core::ProviderName;
+    use merry_llm::{
+        FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
+        ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
+        ModelStreamContext,
+    };
+    use std::sync::Mutex;
+
+    #[derive(Clone)]
+    struct GatedChildProvider {
+        release: CancellationToken,
+        replies: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ModelProvider for GatedChildProvider {
+        fn name(&self) -> &ProviderName {
+            static NAME: std::sync::OnceLock<ProviderName> = std::sync::OnceLock::new();
+            NAME.get_or_init(|| ProviderName::new("gated-test").expect("valid"))
+        }
+
+        fn capabilities(&self) -> &ModelCapabilities {
+            static CAPS: std::sync::OnceLock<ModelCapabilities> = std::sync::OnceLock::new();
+            CAPS.get_or_init(|| {
+                ModelCapabilities::new(true, true, false, true, None, None).expect("valid")
+            })
+        }
+
+        fn stream_model<'a>(
+            &'a self,
+            _request: ModelRequest,
+            context: ModelStreamContext,
+        ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+            let release = self.release.clone();
+            let reply = self.replies.lock().expect("replies lock").remove(0);
+            Box::pin(async move {
+                let event_stream = stream::once(async move {
+                    tokio::select! {
+                        () = context.cancellation_token().cancelled() => Err(ModelError::Cancelled),
+                        () = release.cancelled() => Ok(ModelEvent::Completed {
+                            response: ModelResponse::new(
+                                vec![ModelOutput::text(&reply)],
+                                FinishReason::Stop,
+                                None,
+                            ),
+                        }),
+                    }
+                });
+                Ok(Box::pin(event_stream) as ModelEventStream)
+            })
+        }
+    }
+
+    struct GatedFactory {
+        release: CancellationToken,
+        replies: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ChildRuntimeFactory for GatedFactory {
+        fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
+            Runtime::builder(input.session_id)
+                .model_provider(
+                    Arc::new(GatedChildProvider {
+                        release: self.release.clone(),
+                        replies: Arc::clone(&self.replies),
+                    }),
+                    ModelName::new("fake/child").expect("valid"),
+                )
+                .build()
+        }
+    }
+
+    let release = CancellationToken::new();
+    let replies = Arc::new(Mutex::new(vec![
+        "first pass complete".to_owned(),
+        "second pass after wake".to_owned(),
+    ]));
+    let mgr = manager(Arc::new(GatedFactory {
+        release: release.clone(),
+        replies,
+    }));
+    let spawn_executor = SpawnSubagentsExecutor::new(mgr.clone());
+
+    let parent_turn_token = CancellationToken::new();
+    let interrupt_task = tokio::spawn({
+        let token = parent_turn_token.clone();
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            token.cancel();
+        }
+    });
+
+    let call = pending_call(
+        SPAWN_SUBAGENTS_TOOL_NAME,
+        json!({
+            "wait": "all",
+            "tasks": [{ "task": "Run gated work.", "role": "explore" }]
+        }),
+    );
+    let outcome = spawn_executor
+        .execute(call, ToolExecutionContext::new(parent_turn_token))
+        .await
+        .expect("interrupted foreground wait must hand off instead of failing");
+    interrupt_task.await.expect("interrupt task");
+
+    let output: crate::subagent::SpawnSubagentsOutput =
+        serde_json::from_value(outcome_json(&outcome)).expect("spawn output parses");
+    let handoff = output
+        .background_handoff
+        .expect("foreground wait interrupt must produce background_handoff");
+    assert_eq!(handoff.reason, "parent_turn_interrupted");
+    assert!(handoff.message.contains("NOT cancelled"));
+    let agent_id = output.spawned[0].agent_id.clone();
+
+    // Release the gate; child must still finish cleanly in the background.
+    release.cancel();
+    let waited = mgr
+        .wait(std::slice::from_ref(&agent_id), crate::WaitMode::All, None)
+        .await
+        .expect("child should complete in background");
+    assert_eq!(waited.agents[0].status, SubagentStatusLabel::Completed);
+    assert_eq!(
+        waited.agents[0]
+            .result
+            .as_ref()
+            .map(|r| r.conclusion.as_str()),
+        Some("first pass complete")
+    );
+    assert!(waited.agents[0].raw_output_bytes > 0);
+
+    // High-signal notification must inline conclusion and send_subagent_message hint.
+    let notification = crate::subagent::completion_notification_text(&waited.agents);
+    assert!(notification.contains("<subagent-notification>"));
+    assert!(notification.contains("first pass complete"));
+    assert!(notification.contains("send_subagent_message"));
+
+    // Wake the completed child with send_subagent_message and wait inline.
+    let send_executor = SendSubagentMessageExecutor::new(mgr);
+    let wake_call = pending_call(
+        crate::subagent::SEND_SUBAGENT_MESSAGE_TOOL_NAME,
+        json!({
+            "agent_id": agent_id.as_str(),
+            "message": "Now do pass two.",
+            "wait": true
+        }),
+    );
+    let wake_outcome = send_executor
+        .execute(wake_call, ToolExecutionContext::default())
+        .await
+        .expect("send_subagent_message wake should succeed");
+    let wake_output: crate::subagent::SendSubagentMessageOutput =
+        serde_json::from_value(outcome_json(&wake_outcome)).expect("wake output parses");
+    assert_eq!(
+        wake_output.outcome,
+        crate::subagent::SendSubagentMessageOutcome::Woken
+    );
+    assert_eq!(wake_output.status, Some(SubagentStatusLabel::Completed));
+    let wake_wait = wake_output.wait_result.expect("wait_result present");
+    assert_eq!(
+        wake_wait.agents[0]
+            .result
+            .as_ref()
+            .map(|r| r.conclusion.as_str()),
+        Some("second pass after wake")
+    );
+    assert_eq!(wake_wait.agents[0].turns_used, 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn send_subagent_message_wakes_blocked_max_turns_child_and_settles_dangling_tool_calls() {
+    use crate::{
+        ChildRuntimeFactory, ChildRuntimeInput, RegisteredTool, Runtime, RuntimeError,
+        ToolExecutionOutcome, subagent::tools::SendSubagentMessageExecutor,
+    };
+    use futures_util::stream;
+    use merry_core::{ProviderName, ToolInputSchema, ToolSpec};
+    use merry_llm::{
+        FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
+        ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
+        ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
+    };
+    use std::sync::Mutex;
+
+    struct NoopReadExecutor;
+    impl ToolExecutor for NoopReadExecutor {
+        fn execute<'a>(
+            &'a self,
+            _call: merry_core::PendingToolCall,
+            _context: ToolExecutionContext,
+        ) -> crate::ToolExecutorFuture<'a> {
+            Box::pin(async move { Ok(ToolExecutionOutcome::succeeded_text("ok")) })
+        }
+    }
+
+    #[derive(Clone)]
+    struct BlockedThenCompleteProvider {
+        steps: Arc<Mutex<Vec<ModelResponse>>>,
+    }
+
+    impl ModelProvider for BlockedThenCompleteProvider {
+        fn name(&self) -> &ProviderName {
+            static NAME: std::sync::OnceLock<ProviderName> = std::sync::OnceLock::new();
+            NAME.get_or_init(|| ProviderName::new("blocked-wake-test").expect("valid"))
+        }
+
+        fn capabilities(&self) -> &ModelCapabilities {
+            static CAPS: std::sync::OnceLock<ModelCapabilities> = std::sync::OnceLock::new();
+            CAPS.get_or_init(|| {
+                ModelCapabilities::new(true, true, false, true, None, None).expect("valid")
+            })
+        }
+
+        fn stream_model<'a>(
+            &'a self,
+            _request: ModelRequest,
+            _context: ModelStreamContext,
+        ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
+            let response = self.steps.lock().expect("steps lock").remove(0);
+            Box::pin(async move {
+                let event_stream =
+                    stream::once(async move { Ok(ModelEvent::Completed { response }) });
+                Ok(Box::pin(event_stream) as ModelEventStream)
+            })
+        }
+    }
+
+    struct BlockedChildFactory {
+        steps: Arc<Mutex<Vec<ModelResponse>>>,
+    }
+
+    impl ChildRuntimeFactory for BlockedChildFactory {
+        fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
+            let tool_spec = ToolSpec::new(
+                ToolName::new("read_text").expect("valid"),
+                "Read text",
+                ToolInputSchema::new(
+                    schemars::Schema::try_from(json!({
+                        "type": "object",
+                        "properties": { "path": { "type": "string" } }
+                    }))
+                    .expect("valid schema"),
+                )
+                .expect("valid schema"),
+            )
+            .expect("valid spec");
+            Runtime::builder(input.session_id)
+                .register_tool(RegisteredTool::read_only(
+                    tool_spec,
+                    Arc::new(NoopReadExecutor),
+                ))
+                .model_provider(
+                    Arc::new(BlockedThenCompleteProvider {
+                        steps: Arc::clone(&self.steps),
+                    }),
+                    ModelName::new("fake/child").expect("valid"),
+                )
+                .build()
+        }
+    }
+
+    // Turn 1 asks for a tool call, hitting max_model_turns=1 and leaving a pending tool call!
+    // Turn 2 (after wake with extra_model_turns=4) must settle the dangling call and finish cleanly.
+    let steps = Arc::new(Mutex::new(vec![
+        ModelResponse::new(
+            vec![ModelOutput::tool_call(ModelToolCall::new(
+                ModelToolCallId::new("call-dangling").expect("valid"),
+                ToolName::new("read_text").expect("valid"),
+                ToolArguments::try_from(json!({ "path": "src/lib.rs" })).expect("valid"),
+            ))],
+            FinishReason::ToolCalls,
+            None,
+        ),
+        ModelResponse::new(
+            vec![ModelOutput::text("recovered after extra turns")],
+            FinishReason::Stop,
+            None,
+        ),
+    ]));
+    let mgr = manager(Arc::new(BlockedChildFactory { steps }));
+    let spawn_executor = SpawnSubagentsExecutor::new(mgr.clone());
+    let spawn_call = pending_call(
+        SPAWN_SUBAGENTS_TOOL_NAME,
+        json!({
+            "wait": "all",
+            "tasks": [{
+                "task": "Work with 1 turn budget.",
+                "max_model_turns": 1
+            }]
+        }),
+    );
+    let spawn_outcome = spawn_executor
+        .execute(spawn_call, ToolExecutionContext::default())
+        .await
+        .expect("spawn should succeed");
+    let spawn_output: crate::subagent::SpawnSubagentsOutput =
+        serde_json::from_value(outcome_json(&spawn_outcome)).expect("spawn output parses");
+    let wait_res = spawn_output.wait_result.expect("wait_result present");
+    assert_eq!(wait_res.agents[0].status, SubagentStatusLabel::Blocked);
+    let agent_id = spawn_output.spawned[0].agent_id.clone();
+
+    let send_executor = SendSubagentMessageExecutor::new(mgr);
+    let wake_call = pending_call(
+        crate::subagent::SEND_SUBAGENT_MESSAGE_TOOL_NAME,
+        json!({
+            "agent_id": agent_id.as_str(),
+            "message": "Continue with more turns.",
+            "extra_model_turns": 4,
+            "wait": true
+        }),
+    );
+    let wake_outcome = send_executor
+        .execute(wake_call, ToolExecutionContext::default())
+        .await
+        .expect("wake blocked child should succeed");
+    let wake_output: crate::subagent::SendSubagentMessageOutput =
+        serde_json::from_value(outcome_json(&wake_outcome)).expect("wake output parses");
+    assert_eq!(
+        wake_output.outcome,
+        crate::subagent::SendSubagentMessageOutcome::Woken
+    );
+    assert_eq!(wake_output.status, Some(SubagentStatusLabel::Completed));
+    assert_eq!(
+        wake_output.wait_result.expect("wait_result").agents[0]
+            .result
+            .as_ref()
+            .map(|r| r.conclusion.as_str()),
+        Some("recovered after extra turns")
+    );
+}

@@ -6,8 +6,8 @@ use std::borrow::Cow;
 #[derive(Debug, Serialize)]
 pub(crate) struct AnthropicRequest<'a> {
     pub(crate) model: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) system: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) system: Vec<AnthropicSystemBlock>,
     pub(crate) messages: Vec<AnthropicMessage<'a>>,
     pub(crate) max_tokens: u64,
     pub(crate) stream: bool,
@@ -17,6 +17,27 @@ pub(crate) struct AnthropicRequest<'a> {
     pub(crate) tool_choice: Option<AnthropicToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) output_config: Option<AnthropicOutputConfig<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) struct AnthropicCacheControl {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+}
+
+impl AnthropicCacheControl {
+    pub(crate) const fn ephemeral() -> Self {
+        Self { kind: "ephemeral" }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cache_control: Option<AnthropicCacheControl>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,6 +80,8 @@ pub(crate) struct AnthropicTool<'a> {
     pub(crate) name: &'a str,
     pub(crate) description: &'a str,
     pub(crate) input_schema: &'a Schema,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cache_control: Option<AnthropicCacheControl>,
 }
 
 #[derive(Debug, Serialize)]

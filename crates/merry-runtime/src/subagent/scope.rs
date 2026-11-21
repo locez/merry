@@ -6,6 +6,8 @@ use std::{path::PathBuf, sync::Arc};
 
 #[derive(Clone)]
 pub struct ChildRuntimeInput {
+    /// Session id owned by the parent runtime (used for shared prompt-cache keys).
+    pub parent_session_id: merry_core::SessionId,
     /// Session id owned by the child runtime.
     pub session_id: merry_core::SessionId,
     /// Control-plane task anchor installed in the child runtime.

@@ -18,7 +18,9 @@ mod workspace;
 #[cfg(test)]
 mod tests;
 
-pub use policy_prompt::CODING_AGENT_POLICY_PROMPT;
+pub use policy_prompt::{
+    CODING_AGENT_POLICY_PROMPT, builtin_subagent_role_instructions, coding_subagent_policy_prompt,
+};
 pub use profile_hash::CodingAgentProfileHash;
 pub use project_rules::{
     MAX_ROOT_PROJECT_RULES_BYTES, ProjectRulesLoadError, ROOT_PROJECT_RULES_FILE,
@@ -59,10 +61,10 @@ pub const CODING_AGENT_DYNAMIC_CONTEXT_LAYOUT: &str =
     "checkpoint|task-anchor|plan-control|compiled-context|transcript|tool-results|user-input";
 
 /// Minimum model-turn budget for a coding-profile child agent.
-pub const MIN_CODING_SUBAGENT_MODEL_TURNS: u32 = 2048;
+pub const MIN_CODING_SUBAGENT_MODEL_TURNS: u32 = 1;
 
 /// Default coding-profile ceiling for one child agent.
-pub const DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS: u32 = 2048;
+pub const DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS: u32 = 80;
 
 /// Maximum model-turn ceiling for the coding-profile main agent.
 pub const DEFAULT_CODING_AGENT_MAX_MODEL_TURNS: usize = usize::MAX;
@@ -226,6 +228,7 @@ pub struct CodingAgentProfileBuilder {
     skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
     task_anchor: Option<TaskAnchor>,
+    prompt_profile_override: Option<PromptProfile>,
     tools: Vec<Tool>,
     registered_tools: Vec<RegisteredTool>,
 }
@@ -242,9 +245,25 @@ impl CodingAgentProfileBuilder {
             skill_catalog: None,
             project_rules: None,
             task_anchor: None,
+            prompt_profile_override: None,
             tools: Vec::new(),
             registered_tools: Vec::new(),
         }
+    }
+
+    /// Returns the configured workspace root path.
+    #[must_use]
+    pub fn workspace_root(&self) -> &std::path::Path {
+        &self.workspace.root
+    }
+
+    /// Replaces the default main-agent prompt profile with a custom profile
+    /// (used by child runtimes to install dedicated subagent instructions and
+    /// role blocks without carrying parent-only policy text).
+    #[must_use]
+    pub fn prompt_profile(mut self, prompt_profile: PromptProfile) -> Self {
+        self.prompt_profile_override = Some(prompt_profile);
+        self
     }
 
     /// Replaces the workspace root.
@@ -435,6 +454,7 @@ impl CodingAgentProfileBuilder {
             skill_catalog,
             project_rules,
             task_anchor,
+            prompt_profile_override,
             tools,
             registered_tools,
         } = self;
@@ -443,10 +463,13 @@ impl CodingAgentProfileBuilder {
             .durable_memory
             .as_deref()
             .map(DurableMemory::instructions);
-        let mut prompt_profile = PromptProfile::default().with_stable_block(PromptBlock::new(
-            "merry_coding_policy",
-            CODING_AGENT_POLICY_PROMPT,
-        )?)?;
+        let mut prompt_profile = match prompt_profile_override {
+            Some(profile) => profile,
+            None => PromptProfile::default().with_stable_block(PromptBlock::new(
+                "merry_coding_policy",
+                CODING_AGENT_POLICY_PROMPT,
+            )?)?,
+        };
         if let Some(instructions) = memory_instructions {
             prompt_profile = prompt_profile
                 .with_stable_block(PromptBlock::new("merry_memory", instructions)?)?;

@@ -30,6 +30,7 @@ use tokio::sync::{Mutex, RwLock};
 
 pub(super) struct RuntimeInner {
     pub(super) session_id: SessionId,
+    pub(super) prompt_cache_key: SessionId,
     pub(super) session: Arc<Mutex<SessionState>>,
     pub(super) active_step: Arc<AtomicBool>,
     pub(super) memory_projection_epoch: AtomicU64,

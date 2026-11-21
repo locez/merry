@@ -284,12 +284,13 @@ async fn interactive_subagent_setting_keeps_the_tool_profile_stable() {
         Arc::new(NoopChildFactory),
         false,
     );
-    let [spawn, wait, cancel] =
+    let [spawn, send, wait, cancel] =
         subagent_registered_tools(manager.clone()).expect("subagent tools build");
     let runtime = Runtime::builder(session_id("interactive-update-subagents"))
         .model_provider(Arc::new(provider.clone()), model_name())
         .subagent_manager(manager)
         .register_tool(spawn)
+        .register_tool(send)
         .register_tool(wait)
         .register_tool(cancel)
         .build()

@@ -33,6 +33,7 @@ pub(super) struct ReservedChildStart {
 
 #[derive(Clone)]
 pub(super) struct ChildScheduler {
+    pub(super) parent_session_id: merry_core::SessionId,
     pub(super) factory: Arc<dyn ChildRuntimeFactory>,
     pub(super) state: Arc<Mutex<SubagentManagerState>>,
     pub(super) notify: Arc<Notify>,

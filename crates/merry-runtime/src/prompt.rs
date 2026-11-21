@@ -4,6 +4,7 @@
 //! material. Higher-level compositions supply typed stable blocks without
 //! importing provider wire types or reaching into request compilation.
 
+use merry_core::ToolName;
 use thiserror::Error;
 
 /// Wraps provider-visible content in one runtime boundary tag.
@@ -119,7 +120,64 @@ pub struct PromptProfile {
     stable_blocks: Vec<PromptBlock>,
 }
 
+/// Builds dedicated base instructions for a bounded subagent runtime.
+///
+/// Unlike [`DEFAULT_RUNTIME_BASE_INSTRUCTIONS`], subagent instructions assume
+/// the caller is a parent coordinator rather than an interactive human user
+/// and conditionally include only the operational sections matching the
+/// child's actually admitted tools.
+#[must_use]
+pub fn subagent_base_instructions(allowed_tools: &[ToolName]) -> String {
+    let has_tool = |name: &str| allowed_tools.iter().any(|tool| tool.as_str() == name);
+    let can_edit = has_tool("apply_patch");
+    let can_run_process = has_tool("run_process");
+
+    let mut sections = vec![
+        "You are a dedicated Merry subagent executing a delegated task for a parent coordinator. You are not conversing with an end user: never ask clarifying questions, make small talk, or offer optional next steps.".to_owned(),
+        "Complete the delegated task directly from verifiable evidence. You are the specialist assigned to this work — do not re-delegate the whole task or bounce it back to the coordinator. Inspect relevant files, symbols, and outputs before concluding; never invent paths, line numbers, code, or command results.".to_owned(),
+        "Respect the authoritative workspace scope and allowed tool set declared by the runtime. Work within the stated boundaries and keep changes strictly scoped to the delegated objective.".to_owned(),
+    ];
+
+    if can_edit {
+        sections.push(
+            "Editing discipline: inspect surrounding code conventions, types, and error handling before editing with `apply_patch`. Preserve unrelated user work. If you observe unexpected edits, untracked conflicts, or broken state outside your task scope in a shared workspace, stop and report them rather than reverting or overwriting them.".to_owned(),
+        );
+    } else {
+        sections.push(
+            "Read-only discipline: do not attempt to modify workspace files or work around missing write tools. Gather exact, verified facts and report them clearly.".to_owned(),
+        );
+    }
+
+    if can_run_process {
+        sections.push(
+            "Process discipline: issue independent read-only inspection commands and file reads in parallel within one turn to minimize latency. Verify any claim or code change with concrete command output; never claim an unrun check passed. Never commit, push, switch branches, or run destructive git commands unless explicitly instructed.".to_owned(),
+        );
+    }
+
+    sections.push(
+        "Resumed execution discipline: if the coordinator wakes you with a follow-up message, your prior transcript and findings remain in context — build directly on them and do not re-read unchanged files already in context.".to_owned(),
+    );
+    sections.push(
+        "Failure escalation: if a required tool is unavailable, a permission or sandbox boundary blocks the task, or a core assumption in the brief is false, stop immediately and report the exact blocked action and evidence. Never repeat the same failing approach more than once.".to_owned(),
+    );
+    sections.push(
+        "Deliver your final response in two parts:\n1. Findings / Changes: concise, concrete evidence with exact `path:line` citations, modified paths, and actual commands/results run.\n2. Summary: one direct sentence summarizing the outcome so the coordinator can incorporate it immediately.".to_owned(),
+    );
+
+    render_prompt_block("merry_subagent_instructions", &sections.join("\n\n"))
+}
+
 impl PromptProfile {
+    /// Creates a subagent prompt profile tailored to the child's admitted tools.
+    #[must_use]
+    pub fn for_subagent(allowed_tools: &[ToolName]) -> Self {
+        Self {
+            base_instructions: subagent_base_instructions(allowed_tools),
+            progress_commentary_instructions: DEFAULT_PROGRESS_COMMENTARY_INSTRUCTIONS.to_owned(),
+            stable_blocks: Vec::new(),
+        }
+    }
+
     /// Creates a prompt profile with runtime instructions and commentary text.
     pub fn new(
         base_instructions: impl Into<String>,
@@ -260,5 +318,27 @@ mod tests {
             .expect_err("duplicate block should be rejected");
 
         assert!(matches!(error, PromptError::DuplicateBlockTag { .. }));
+    }
+
+    #[test]
+    fn subagent_base_instructions_adapt_to_admitted_tools() {
+        let read_only =
+            super::subagent_base_instructions(&[
+                merry_core::ToolName::new("read_text").expect("valid tool")
+            ]);
+        assert!(read_only.starts_with("<merry_subagent_instructions>\n"));
+        assert!(read_only.contains("Read-only discipline:"));
+        assert!(!read_only.contains("Editing discipline:"));
+        assert!(!read_only.contains("Process discipline:"));
+        assert!(read_only.contains("never ask clarifying questions"));
+
+        let coder = super::subagent_base_instructions(&[
+            merry_core::ToolName::new("read_text").expect("valid tool"),
+            merry_core::ToolName::new("apply_patch").expect("valid tool"),
+            merry_core::ToolName::new("run_process").expect("valid tool"),
+        ]);
+        assert!(coder.contains("Editing discipline:"));
+        assert!(coder.contains("Process discipline:"));
+        assert!(!coder.contains("Read-only discipline:"));
     }
 }

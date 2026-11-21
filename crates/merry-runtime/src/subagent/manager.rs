@@ -47,10 +47,13 @@ pub struct SubagentInspectSession {
 /// Runtime-owned manager for bounded child agent execution.
 #[derive(Clone)]
 pub struct SubagentManager {
+    pub(super) parent_session_id: merry_core::SessionId,
     pub(super) enabled: Arc<AtomicBool>,
     pub(super) max_threads: Arc<AtomicUsize>,
     pub(super) min_model_turns: Arc<AtomicU32>,
     pub(super) max_model_turns: Arc<AtomicU32>,
+    pub(super) default_timeout_secs: Arc<AtomicU64>,
+    pub(super) foreground_wait_budget_secs: Arc<AtomicU64>,
     pub(super) has_agents: Arc<AtomicBool>,
     pub(super) factory: Arc<dyn ChildRuntimeFactory>,
     pub(super) state: Arc<Mutex<SubagentManagerState>>,
@@ -121,6 +124,13 @@ pub(super) struct ManagedSubagent {
     pub(super) generation_config: Option<merry_llm::GenerationConfig>,
     pub(super) event_tx: broadcast::Sender<merry_core::RuntimeEvent>,
     pub(super) pending_follow_ups: VecDeque<String>,
+    pub(super) resume_turn_override: Option<u32>,
+    pub(super) started_at: Option<tokio::time::Instant>,
+    pub(super) turns_used: u32,
+    pub(super) tool_calls: u32,
+    pub(super) elapsed_ms: u64,
+    pub(super) usage: Option<merry_core::ModelUsage>,
+    pub(super) raw_output_bytes: u64,
 }
 
 impl SubagentManager {
@@ -148,17 +158,24 @@ impl SubagentManager {
     /// Creates a manager for a child runtime at a known delegation depth.
     #[must_use]
     pub fn runtime_controlled_at_depth(
-        _parent_session_id: merry_core::SessionId,
+        parent_session_id: merry_core::SessionId,
         config: SubagentConfig,
         factory: Arc<dyn ChildRuntimeFactory>,
         enabled: bool,
         depth: u8,
     ) -> Self {
         Self {
+            parent_session_id,
             enabled: Arc::new(AtomicBool::new(enabled)),
             max_threads: Arc::new(AtomicUsize::new(config.max_threads())),
             min_model_turns: Arc::new(AtomicU32::new(config.min_model_turns())),
             max_model_turns: Arc::new(AtomicU32::new(config.max_model_turns())),
+            default_timeout_secs: Arc::new(AtomicU64::new(
+                config.default_timeout_secs().unwrap_or(0),
+            )),
+            foreground_wait_budget_secs: Arc::new(AtomicU64::new(
+                config.foreground_wait_budget_secs(),
+            )),
             has_agents: Arc::new(AtomicBool::new(false)),
             factory,
             state: Arc::new(Mutex::new(SubagentManagerState::default())),
@@ -174,6 +191,23 @@ impl SubagentManager {
             activity_hub: Arc::new(StdMutex::new(None)),
             session_token: CancellationToken::new(),
         }
+    }
+
+    /// Returns the optional default wall-clock timeout in seconds for child tasks.
+    pub(crate) fn default_timeout_secs(&self) -> Option<u64> {
+        match self.default_timeout_secs.load(Ordering::Acquire) {
+            0 => None,
+            secs => Some(secs),
+        }
+    }
+
+    /// Returns the configured foreground wait budget before handing off to background.
+    pub(crate) fn foreground_wait_budget(&self) -> Duration {
+        Duration::from_secs(
+            self.foreground_wait_budget_secs
+                .load(Ordering::Acquire)
+                .max(1),
+        )
     }
 
     /// Returns the session-scoped cancellation token that owns all children
@@ -341,6 +375,12 @@ impl SubagentManager {
             .store(config.min_model_turns(), Ordering::Release);
         self.max_model_turns
             .store(config.max_model_turns(), Ordering::Release);
+        self.default_timeout_secs.store(
+            config.default_timeout_secs().unwrap_or(0),
+            Ordering::Release,
+        );
+        self.foreground_wait_budget_secs
+            .store(config.foreground_wait_budget_secs(), Ordering::Release);
         self.enabled.store(enabled, Ordering::Release);
         if enabled {
             let mut state = self.state.lock().await;
@@ -446,6 +486,8 @@ impl SubagentManager {
                         reason: "maximum subagent delegation depth reached".to_owned(),
                     })
                     .collect(),
+                wait_result: None,
+                background_handoff: None,
             });
         }
         if !self.enabled.load(Ordering::Acquire) {
@@ -457,6 +499,8 @@ impl SubagentManager {
                         reason: "subagent spawning is disabled".to_owned(),
                     })
                     .collect(),
+                wait_result: None,
+                background_handoff: None,
             });
         }
         let mut inherited_tasks = Vec::with_capacity(tasks.len());
@@ -498,6 +542,8 @@ impl SubagentManager {
             return Ok(SpawnSubagentsOutput {
                 spawned: Vec::new(),
                 rejected,
+                wait_result: None,
+                background_handoff: None,
             });
         }
 
@@ -550,6 +596,8 @@ impl SubagentManager {
             return Ok(SpawnSubagentsOutput {
                 spawned: Vec::new(),
                 rejected,
+                wait_result: None,
+                background_handoff: None,
             });
         }
 
@@ -597,6 +645,13 @@ impl SubagentManager {
                 generation_config: None,
                 event_tx,
                 pending_follow_ups: VecDeque::new(),
+                resume_turn_override: None,
+                started_at: starts_now.then(tokio::time::Instant::now),
+                turns_used: 0,
+                tool_calls: 0,
+                elapsed_ms: 0,
+                usage: None,
+                raw_output_bytes: 0,
             };
             state.agents.insert(agent_id.clone(), managed);
 
@@ -604,6 +659,7 @@ impl SubagentManager {
                 agent_id: agent_id.clone(),
                 task_id: task_id.clone(),
                 display_name: task.display_name().map(str::to_owned),
+                role: task.role().map(str::to_owned),
                 status: if starts_now {
                     SpawnedSubagentStatusLabel::Running
                 } else {
@@ -625,7 +681,12 @@ impl SubagentManager {
                 .await;
         }
 
-        Ok(SpawnSubagentsOutput { spawned, rejected })
+        Ok(SpawnSubagentsOutput {
+            spawned,
+            rejected,
+            wait_result: None,
+            background_handoff: None,
+        })
     }
 
     /// Returns a lazy transcript snapshot and live event subscription for one subagent.
@@ -650,85 +711,6 @@ impl SubagentManager {
             transcript,
             events,
         })
-    }
-
-    /// Sends a follow-up user message directly to a subagent session.
-    ///
-    /// If the subagent is currently running or queued, the message is queued and
-    /// executes immediately after the current turn settles. If the subagent has
-    /// reached a terminal state with a retained runtime, a new turn is launched
-    /// on that same child session.
-    pub async fn send_message(
-        &self,
-        agent_id: &SubagentId,
-        message: String,
-    ) -> Result<(), RuntimeError> {
-        let trimmed = message.trim();
-        if trimmed.is_empty() {
-            return Err(RuntimeError::InvalidSubagentSelection {
-                operation: "send_subagent_message",
-            });
-        }
-        let message = trimmed.to_owned();
-        let mut launch_now = None;
-        {
-            let mut state = self.state.lock().await;
-            let Some(agent) = state.agents.get_mut(agent_id) else {
-                return Err(RuntimeError::InvalidSubagentSelection {
-                    operation: "send_subagent_message",
-                });
-            };
-            let _ = agent
-                .event_tx
-                .send(merry_core::RuntimeEvent::QueuedInputAccepted {
-                    inputs: vec![merry_core::QueuedInputView {
-                        id: 0,
-                        text: message.clone(),
-                        position: 0,
-                    }],
-                });
-            if !agent.status.is_terminal() {
-                agent.pending_follow_ups.push_back(message);
-            } else if let (Some(runtime), Some(generation_config)) =
-                (agent.runtime.clone(), agent.generation_config.clone())
-            {
-                let token = self.session_token.child_token();
-                agent.cancellation_token = token.clone();
-                agent.status = SubagentStatusLabel::Running;
-                agent.summary = "handling follow-up".to_owned();
-                agent.diagnostics = None;
-                agent.completion_notification_acknowledged = false;
-                launch_now = Some((
-                    agent.task_id.clone(),
-                    agent.task.clone(),
-                    token,
-                    runtime,
-                    generation_config,
-                    agent.event_tx.clone(),
-                    message,
-                ));
-            } else {
-                return Err(RuntimeError::InvalidSubagentSelection {
-                    operation: "send_subagent_message",
-                });
-            }
-        }
-        if let Some((task_id, task, token, runtime, generation_config, event_tx, prompt)) =
-            launch_now
-        {
-            self.resume_child_with_prompt(
-                agent_id.clone(),
-                task_id,
-                task,
-                token,
-                runtime,
-                generation_config,
-                event_tx,
-                prompt,
-            )
-            .await;
-        }
-        Ok(())
     }
 
     /// Waits for selected children or returns their latest compact statuses on timeout.
@@ -841,6 +823,7 @@ impl SubagentManager {
 
     pub(super) fn child_scheduler(&self) -> ChildScheduler {
         ChildScheduler {
+            parent_session_id: self.parent_session_id.clone(),
             factory: Arc::clone(&self.factory),
             state: Arc::clone(&self.state),
             notify: Arc::clone(&self.notify),
@@ -928,16 +911,30 @@ impl ManagedSubagent {
         } else {
             self.summary.clone()
         };
+        let elapsed_ms = if self.status.is_terminal() {
+            self.elapsed_ms
+        } else {
+            self.started_at
+                .map(|started| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX))
+                .unwrap_or(self.elapsed_ms)
+        };
 
         SubagentStatusView {
             agent_id: self.agent_id.clone(),
             task_id: self.task_id.clone(),
+            display_name: self.task.display_name().map(str::to_owned),
+            role: self.task.role().map(str::to_owned),
             status: self.status.clone(),
             summary,
             result: self.result.clone(),
             output_paths: self.output_paths.clone(),
             changed_paths: self.changed_paths.clone(),
             diagnostics: self.diagnostics.clone(),
+            turns_used: self.turns_used,
+            tool_calls: self.tool_calls,
+            elapsed_ms,
+            usage: self.usage,
+            raw_output_bytes: self.raw_output_bytes,
         }
     }
 }
