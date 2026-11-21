@@ -23,6 +23,7 @@ fn usage_protocol_round_trips_and_preserves_unknown_subcounts() {
             body_budget_tokens: 90000,
             compact_at_tokens: 76500,
         }),
+        subagent_total: None,
     };
 
     assert_json_round_trip(&last);
@@ -91,6 +92,7 @@ fn usage_updated_events_round_trip_as_full_snapshots() {
         last: ModelUsage::new(10, 4),
         context: None,
         compaction: None,
+        subagent_total: Some(ModelUsage::new(4, 2)),
     };
     let source = RuntimeEventSource::new(
         SessionId::new("usage-event-session").expect("valid session id"),

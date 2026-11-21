@@ -137,10 +137,14 @@ impl RuntimeEventProjector {
                 agent_id,
                 task_id,
                 task_anchor,
+                display_name,
+                role,
             } => Ok(Some(RuntimeEvent::SubagentSpawned {
                 agent_id,
                 task_id,
                 task_anchor,
+                display_name,
+                role,
                 source,
             })),
             RuntimeJournalPayload::SubagentStarted { agent_id, task_id } => {
@@ -166,12 +170,14 @@ impl RuntimeEventProjector {
                 summary,
                 output_paths,
                 changed_paths,
+                usage,
             } => Ok(Some(RuntimeEvent::SubagentCompleted {
                 agent_id,
                 task_id,
                 summary,
                 output_paths,
                 changed_paths,
+                usage,
                 source,
             })),
             RuntimeJournalPayload::SubagentFailed {

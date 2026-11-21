@@ -193,7 +193,7 @@ async fn spawn_tool_uses_manager_configured_default_max_model_turns() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn spawn_tool_uses_random_child_session_ids() {
+async fn spawn_tool_uses_distinct_agent_scoped_child_session_ids() {
     let factory = Arc::new(CapturingChildFactory::default());
     let executor = SpawnSubagentsExecutor::new(manager(factory.clone()));
     let call = pending_call(
@@ -217,8 +217,14 @@ async fn spawn_tool_uses_random_child_session_ids() {
     let first = captured[0].session_id.as_str();
     let second = captured[1].session_id.as_str();
     assert_ne!(first, second);
-    assert_eq!(first.len(), 36);
-    assert_eq!(second.len(), 36);
+    assert_eq!(
+        Some(first),
+        captured[0].agent_id.as_ref().map(|id| id.as_str())
+    );
+    assert_eq!(
+        Some(second),
+        captured[1].agent_id.as_ref().map(|id| id.as_str())
+    );
     assert!(!first.starts_with("parent-agent-"));
     assert!(!second.starts_with("parent-agent-"));
 }

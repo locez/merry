@@ -1,8 +1,40 @@
 use super::{PlanLinkRuntime, PlanSubagentScope, SubagentActivityHub, SubagentTaskSpec};
-use crate::{PlanSubagentControl, Runtime, RuntimeError, TaskAnchor};
-use merry_core::{PlanLinkSnapshot, ToolName};
+use crate::{
+    FileSessionStore, LoadedSession, PlanSubagentControl, Runtime, RuntimeError, TaskAnchor,
+};
+use merry_core::{PlanLinkSnapshot, SubagentId, ToolName};
 use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex as StdMutex},
+};
+
+/// Cloneable single-take container carrying a persisted child [`LoadedSession`]
+/// across the synchronous [`ChildRuntimeFactory`] boundary when waking a
+/// subagent after parent session resume.
+#[derive(Clone)]
+pub struct ResumableChildSession {
+    inner: Arc<StdMutex<Option<LoadedSession>>>,
+}
+
+impl ResumableChildSession {
+    /// Wraps a loaded child session so the factory can take ownership once.
+    #[must_use]
+    pub fn new(loaded: LoadedSession) -> Self {
+        Self {
+            inner: Arc::new(StdMutex::new(Some(loaded))),
+        }
+    }
+
+    /// Takes the wrapped [`LoadedSession`], returning `None` if already consumed.
+    #[must_use]
+    pub fn take(&self) -> Option<LoadedSession> {
+        self.inner
+            .lock()
+            .expect("resumable child session mutex is not poisoned")
+            .take()
+    }
+}
 
 /// Snapshot of the parent runtime's currently active primary provider/model.
 #[derive(Clone)]
@@ -20,8 +52,15 @@ pub struct ParentPrimaryModel {
 pub struct ChildRuntimeInput {
     /// Session id owned by the parent runtime (used for shared prompt-cache keys).
     pub parent_session_id: merry_core::SessionId,
+    /// Stable subagent identifier assigned by the parent manager (used for actor
+    /// attribution and child journal storage).
+    pub agent_id: Option<SubagentId>,
     /// Session id owned by the child runtime.
     pub session_id: merry_core::SessionId,
+    /// Optional child-scoped session store rooted under `<sessions_dir>/<parent_id>/subagents`.
+    pub session_store: Option<FileSessionStore>,
+    /// Optional loaded child session when waking a persisted subagent after parent resume.
+    pub loaded_session: Option<ResumableChildSession>,
     /// Control-plane task anchor installed in the child runtime.
     pub task_anchor: TaskAnchor,
     /// Parent-authored child task contract.

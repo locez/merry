@@ -22,6 +22,8 @@ pub(super) struct InteractiveProducer {
     pub(super) queue: InteractiveInputQueue,
     pub(super) command_receiver: mpsc::Receiver<InteractiveCommand>,
     pub(super) plan_event_receiver: crate::plan::PlanControllerEventReceiver,
+    pub(super) subagent_event_receiver:
+        tokio::sync::broadcast::Receiver<merry_core::RuntimeJournalEvent>,
     pub(super) subagent_completion_notify: Option<Arc<Notify>>,
     pub(super) message_sender: mpsc::Sender<InteractiveRunMessage>,
     pub(super) rate_sender: watch::Sender<Option<merry_core::RuntimeEvent>>,
@@ -48,6 +50,8 @@ pub(super) struct InteractiveProducerInput {
     pub(super) runtime: Runtime,
     pub(super) command_receiver: mpsc::Receiver<InteractiveCommand>,
     pub(super) plan_event_receiver: crate::plan::PlanControllerEventReceiver,
+    pub(super) subagent_event_receiver:
+        tokio::sync::broadcast::Receiver<merry_core::RuntimeJournalEvent>,
     pub(super) subagent_completion_notify: Option<Arc<Notify>>,
     pub(super) message_sender: mpsc::Sender<InteractiveRunMessage>,
     pub(super) rate_sender: watch::Sender<Option<merry_core::RuntimeEvent>>,
@@ -65,6 +69,7 @@ impl InteractiveProducer {
             runtime,
             command_receiver,
             plan_event_receiver,
+            subagent_event_receiver,
             subagent_completion_notify,
             message_sender,
             rate_sender,
@@ -81,6 +86,7 @@ impl InteractiveProducer {
             queue: InteractiveInputQueue::default(),
             command_receiver,
             plan_event_receiver,
+            subagent_event_receiver,
             subagent_completion_notify,
             message_sender,
             rate_sender,

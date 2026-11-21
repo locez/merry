@@ -26,6 +26,32 @@ impl InteractiveProducer {
         }
     }
 
+    pub(super) async fn forward_subagent_event(
+        &mut self,
+        event: Result<RuntimeJournalEvent, tokio::sync::broadcast::error::RecvError>,
+    ) -> bool {
+        match event {
+            Ok(event) => {
+                if !self.seen_plan_sequences.insert(event.sequence) {
+                    return true;
+                }
+                if self.seen_plan_sequences.len() > 512
+                    && let Some(oldest) = self.seen_plan_sequences.first().copied()
+                {
+                    self.seen_plan_sequences.remove(&oldest);
+                }
+                let mut projector = RuntimeEventProjector::new();
+                self.project_and_send_runtime_event(&mut projector, event)
+                    .await
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::debug!(skipped, "interactive subagent event receiver lagged");
+                true
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => true,
+        }
+    }
+
     pub(super) async fn forward_plan_event(
         &mut self,
         event: Result<RuntimeJournalEvent, tokio::sync::broadcast::error::RecvError>,

@@ -2,6 +2,7 @@ use super::child::{
     error_info, publish_terminal_activity_snapshot, spawn_reserved_child,
     terminal_activity_for_agent, update_plan_link_with_scheduler,
 };
+use super::events::SubagentEventSink;
 use super::manager::{
     SubagentManagerState, enqueue_completion_notification_if_needed, initial_summary,
 };
@@ -9,7 +10,7 @@ use super::{
     ChildRuntimeFactory, ParentPrimaryModel, PlanLinkRuntime, SubagentActivityHub,
     SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec,
 };
-use crate::{RuntimeError, TaskAnchor};
+use crate::{FileSessionStore, RuntimeError, TaskAnchor};
 use merry_core::{ErrorInfo, PlanLinkSnapshot, PlanLinkStatus, SubagentId, SubagentTaskId};
 use merry_llm::GenerationConfig;
 use std::{
@@ -45,11 +46,26 @@ pub(super) struct ChildScheduler {
     pub(super) depth: u8,
     pub(super) plan_link_runtime: Arc<StdMutex<Option<Arc<dyn PlanLinkRuntime>>>>,
     pub(super) activity_hub: Arc<StdMutex<Option<Arc<SubagentActivityHub>>>>,
+    pub(super) event_sink: Arc<StdMutex<Option<SubagentEventSink>>>,
+    pub(super) child_session_store: Arc<StdMutex<Option<FileSessionStore>>>,
     pub(super) live_parent_model: Arc<StdMutex<Option<ParentPrimaryModel>>>,
     pub(super) live_parent_generation: Arc<StdMutex<GenerationConfig>>,
 }
 
 impl ChildScheduler {
+    pub(super) fn attached_event_sink(&self) -> Option<SubagentEventSink> {
+        self.event_sink
+            .lock()
+            .expect("subagent event sink mutex is not poisoned")
+            .clone()
+    }
+
+    pub(super) fn attached_child_session_store(&self) -> Option<FileSessionStore> {
+        self.child_session_store
+            .lock()
+            .expect("subagent child session store mutex is not poisoned")
+            .clone()
+    }
     pub(super) fn live_parent_model_snapshot(&self) -> Option<ParentPrimaryModel> {
         self.live_parent_model
             .lock()
@@ -237,6 +253,7 @@ async fn finish_reserved_child_start(
     let mut link = None;
     let mut terminal_activity = None;
     let mut terminal_notification = None;
+    let mut terminal_task = None;
     if let Some(agent) = state_guard.agents.get_mut(&start.agent_id)
         && !agent.status.is_terminal()
     {
@@ -245,6 +262,7 @@ async fn finish_reserved_child_start(
         agent.diagnostics = Some(diagnostics);
         link = agent.plan_link.clone();
         terminal_activity = terminal_activity_for_agent(agent);
+        terminal_task = Some(agent.task.task().to_owned());
         terminal_notification = Some(agent.status_view());
     }
     pending.extend(reserve_queued_starts_locked(
@@ -263,6 +281,13 @@ async fn finish_reserved_child_start(
         );
     }
     if let Some(status) = terminal_notification {
+        let sink = scheduler.attached_event_sink();
+        super::events::emit_terminal_event_and_persist(
+            sink.as_ref(),
+            terminal_task.unwrap_or_else(|| start.task.task().to_owned()),
+            &status,
+        )
+        .await;
         scheduler.enqueue_completion_notification(status).await;
     }
     scheduler.notify.notify_waiters();

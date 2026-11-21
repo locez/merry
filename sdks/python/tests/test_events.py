@@ -227,3 +227,88 @@ def test_event_parser_parses_single_pending_queue_events() -> None:
                 "inputs": [{"id": 1, "text": "legacy", "position": 0}],
             }
         )
+
+
+def test_event_parser_supports_enriched_subagent_events_and_usage_rollup() -> None:
+    from merry._models import parse_session_usage
+
+    spawned = parse_event(
+        {
+            "type": "subagent_spawned",
+            "agent_id": "subagent-1",
+            "task_id": "task-1",
+            "task_anchor": "Audit auth flow",
+            "display_name": "auditor",
+            "role": "explore",
+            "source": {"session_id": "session-1", "sequence": 3},
+        }
+    )
+    assert spawned.type is merry.EventType.SUBAGENT_SPAWNED
+    assert isinstance(spawned.payload, merry.SubagentSpawnedPayload)
+    assert spawned.payload.display_name == "auditor"
+    assert spawned.payload.role == "explore"
+
+    blocked = parse_event(
+        {
+            "type": "subagent_status_changed",
+            "agent_id": "subagent-1",
+            "task_id": "task-1",
+            "status": "blocked",
+            "source": {"session_id": "session-1", "sequence": 4},
+        }
+    )
+    assert isinstance(blocked.payload, merry.SubagentStatusChangedPayload)
+    assert blocked.payload.status is merry.SubagentStatus.BLOCKED
+
+    completed = parse_event(
+        {
+            "type": "subagent_completed",
+            "agent_id": "subagent-1",
+            "task_id": "task-1",
+            "summary": "Audit complete",
+            "output_paths": [],
+            "changed_paths": ["src/auth.rs"],
+            "usage": {
+                "input_tokens": 120,
+                "cached_input_tokens": 40,
+                "output_tokens": 30,
+                "reasoning_output_tokens": None,
+                "total_tokens": 150,
+            },
+            "source": {"session_id": "session-1", "sequence": 5},
+        }
+    )
+    assert isinstance(completed.payload, merry.SubagentCompletedPayload)
+    assert completed.payload.usage is not None
+    assert completed.payload.usage.total_tokens == 150
+
+    usage = parse_session_usage(
+        {
+            "total": {
+                "input_tokens": 620,
+                "cached_input_tokens": None,
+                "output_tokens": 80,
+                "reasoning_output_tokens": None,
+                "total_tokens": 700,
+            },
+            "last": {
+                "input_tokens": 500,
+                "cached_input_tokens": None,
+                "output_tokens": 50,
+                "reasoning_output_tokens": None,
+                "total_tokens": 550,
+            },
+            "context": None,
+            "compaction": None,
+            "subagent_total": {
+                "input_tokens": 120,
+                "cached_input_tokens": 40,
+                "output_tokens": 30,
+                "reasoning_output_tokens": None,
+                "total_tokens": 150,
+            },
+        }
+    )
+    assert usage.subagent_total is not None
+    assert usage.subagent_total.input_tokens == 120
+    assert usage.subagent_total.output_tokens == 30

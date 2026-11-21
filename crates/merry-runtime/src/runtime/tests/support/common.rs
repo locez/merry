@@ -117,6 +117,13 @@ pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
     let event_buffer_size = NonZeroUsize::new(1).expect("non-zero buffer");
     let (session, plan_controller) =
         runtime_session_and_plan_controller(session_id.clone(), event_buffer_size);
+    let trajectory = crate::trajectory::RuntimeObservability::new(session_id.clone(), Vec::new());
+    let subagent_event_sink = crate::subagent::SubagentEventSink::new(
+        Arc::clone(&session),
+        None,
+        Arc::clone(&trajectory),
+        64,
+    );
     RuntimeInner {
         session_id: session_id.clone(),
         prompt_cache_key: session_id.clone(),
@@ -143,6 +150,7 @@ pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
         permission_review_mode: PermissionReviewMode::DefaultForTrust,
         permission_review_rules: crate::PermissionReviewRules::default(),
         permission_review_workspace_root: None,
+        permission_actor: crate::PermissionActor::MainAgent,
         recorded_permission_decisions: tokio::sync::RwLock::new(std::collections::VecDeque::new()),
         permission_admission_source: None,
         permissioned_process_runner_factory: None,
@@ -155,7 +163,8 @@ pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
         session_store: None,
         tool_batch_active: AtomicBool::new(false),
         activity_hub: Arc::new(crate::SubagentActivityHub::new()),
-        trajectory: crate::trajectory::RuntimeObservability::new(session_id.clone(), Vec::new()),
+        subagent_event_sink,
+        trajectory,
         durable_memory: None,
         memory_maintenance: false,
         memory_context: None,

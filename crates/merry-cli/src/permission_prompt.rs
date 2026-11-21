@@ -1,7 +1,7 @@
 //! Structured presentation and plain-text formatting for permission reviews.
 
 use merry_runtime::{
-    HostFallbackReason, PathAccess, PermissionReviewRequest, PermissionReviewRisk,
+    HostFallbackReason, PathAccess, PermissionActor, PermissionReviewRequest, PermissionReviewRisk,
     PermissionUserAuthorization, RequestedCapability, shell_command_for_argv,
 };
 
@@ -49,6 +49,7 @@ pub(crate) enum PermissionFallbackNotice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PermissionReviewView {
     pub(crate) approval_id: String,
+    pub(crate) actor_label: Option<String>,
     pub(crate) command: String,
     pub(crate) cwd: String,
     pub(crate) capabilities: Vec<PermissionCapabilityBadge>,
@@ -102,8 +103,11 @@ impl PermissionReviewView {
             }
         });
 
+        let actor_label = format_permission_actor(request.actor());
+
         Self {
             approval_id: request.approval_id(),
+            actor_label,
             command,
             cwd,
             capabilities,
@@ -119,6 +123,7 @@ impl PermissionReviewView {
     pub(crate) fn from_plain_text(approval_id: String, body: String) -> Self {
         Self {
             approval_id,
+            actor_label: None,
             command: String::new(),
             cwd: ".".to_owned(),
             capabilities: Vec::new(),
@@ -135,6 +140,9 @@ impl PermissionReviewView {
 pub(crate) fn permission_review_lines(request: &PermissionReviewRequest) -> Vec<String> {
     let view = PermissionReviewView::from_request(request, 1);
     let mut lines = Vec::new();
+    if let Some(actor) = &view.actor_label {
+        lines.push(format!("Actor:    {actor}"));
+    }
     lines.push(format!("Command:  {}", view.command));
     lines.push(format!("Cwd:      {}", view.cwd));
     if !view.capabilities.is_empty() {
@@ -185,6 +193,41 @@ pub(crate) fn format_permission_prompt(request: &PermissionReviewRequest) -> Str
     lines.push(String::new());
     lines.push("Allow? [y/N] ".to_owned());
     lines.join("\n")
+}
+
+fn format_permission_actor(actor: &PermissionActor) -> Option<String> {
+    match actor {
+        PermissionActor::MainAgent => None,
+        PermissionActor::Subagent {
+            agent_id,
+            display_name,
+            role,
+        } => {
+            let mut label = String::from("subagent ");
+            match display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(name) => label.push_str(name),
+                None => label.push_str(agent_id.as_str()),
+            }
+            if let Some(role) = role.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                label.push_str(" [");
+                label.push_str(role);
+                label.push(']');
+            }
+            if display_name
+                .as_deref()
+                .is_some_and(|n| !n.trim().is_empty())
+            {
+                label.push_str(" (");
+                label.push_str(agent_id.as_str());
+                label.push(')');
+            }
+            Some(label)
+        }
+    }
 }
 
 fn capability_badge(capability: &RequestedCapability) -> PermissionCapabilityBadge {

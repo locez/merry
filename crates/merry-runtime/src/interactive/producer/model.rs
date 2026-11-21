@@ -97,6 +97,11 @@ impl InteractiveProducer {
                         return None;
                     }
                 }
+                subagent_event = self.subagent_event_receiver.recv() => {
+                    if !self.forward_subagent_event(subagent_event).await {
+                        return None;
+                    }
+                }
             }
         }
     }

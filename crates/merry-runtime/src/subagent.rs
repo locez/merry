@@ -2,6 +2,7 @@
 
 mod activity;
 mod child;
+mod events;
 mod handoff;
 mod manager;
 mod manager_helpers;
@@ -14,12 +15,13 @@ mod spec;
 mod tools;
 
 pub use activity::{SubagentActivityHub, SubagentActivityReceiver};
-pub(crate) use child::sanitize_diagnostic_message;
+pub(crate) use events::{PersistedSubagentRecord, SubagentEventSink};
 pub use handoff::{
     ContextFileRef, MAX_CONTEXT_FILE_REFS, MAX_CONTEXT_FILES_TOTAL_BYTES, PreloadedContextFile,
     preload_context_files, render_subagent_handoff,
 };
 pub use manager::{SubagentInspectSession, SubagentManager};
+pub(crate) use manager_helpers::sanitize_diagnostic_message;
 pub use messaging::SendSubagentMessageOptions;
 pub(crate) use plan_link::plan_link_runtime_for_controller;
 pub use plan_link::{PlanLinkRuntime, PlanSubagentScope};
@@ -32,7 +34,7 @@ pub use protocol::{
 };
 pub use scope::{
     BuiltChildRuntime, ChildRuntimeFactory, ChildRuntimeInput, ChildWorkspaceScope,
-    ParentPrimaryModel,
+    ParentPrimaryModel, ResumableChildSession,
 };
 use spec::validate_task_max_model_turns;
 pub use spec::{

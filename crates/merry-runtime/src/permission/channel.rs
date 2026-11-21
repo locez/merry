@@ -8,7 +8,7 @@
 //! the host and returns the host's answer.
 
 use super::{
-    HostFallbackReason, PermissionAdmissionContext, PermissionAdmissionDecision,
+    HostFallbackReason, PermissionActor, PermissionAdmissionContext, PermissionAdmissionDecision,
     PermissionAdmissionError, PermissionAdmissionFuture, PermissionAdmissionSource,
     PermissionRequest, validate_optional_reason,
 };
@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 pub struct PermissionReviewRequest {
     request: PermissionRequest,
     host_fallback_reason: Option<HostFallbackReason>,
+    actor: PermissionActor,
     cancellation_token: CancellationToken,
     response_sender: Option<oneshot::Sender<PermissionReviewResponse>>,
 }
@@ -30,6 +31,7 @@ impl std::fmt::Debug for PermissionReviewRequest {
             .debug_struct("PermissionReviewRequest")
             .field("approval_id", &self.approval_id())
             .field("fingerprint", &self.fingerprint())
+            .field("actor", &self.actor)
             .field("request", &self.request)
             .finish_non_exhaustive()
     }
@@ -40,6 +42,12 @@ impl PermissionReviewRequest {
     #[must_use]
     pub fn request(&self) -> &PermissionRequest {
         &self.request
+    }
+
+    /// Returns the actor identity (main agent or specific subagent) requesting permission.
+    #[must_use]
+    pub const fn actor(&self) -> &PermissionActor {
+        &self.actor
     }
 
     /// Returns the stable response correlation id.
@@ -182,6 +190,7 @@ impl PermissionAdmissionSource for ChannelPermissionAdmissionSource {
             let pending = PermissionReviewRequest {
                 request: request.clone(),
                 host_fallback_reason: context.host_fallback_reason().cloned(),
+                actor: context.actor().clone(),
                 cancellation_token: context.cancellation_token().clone(),
                 response_sender: Some(response_sender),
             };

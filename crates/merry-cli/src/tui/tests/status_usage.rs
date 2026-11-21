@@ -47,6 +47,7 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
                     body_budget_tokens: 56_792,
                     compact_at_tokens: 48_274,
                 }),
+                subagent_total: None,
             },
             source: source(),
         },
@@ -97,6 +98,7 @@ fn context_shows_actual_input_over_safe_window_regardless_of_compaction_metadata
                 source: ContextWindowSource::Fallback,
             }),
             compaction,
+            subagent_total: None,
         });
         let status = state.status_text();
         assert!(status.contains("ctx 20.8k/258.4k"));
@@ -130,6 +132,7 @@ fn narrow_header_preserves_context_pressure_before_secondary_usage() {
             body_budget_tokens: 56_792,
             compact_at_tokens: 48_274,
         }),
+        subagent_total: None,
     });
 
     let rendered = render_to_text(&state, 72, 16);
@@ -160,6 +163,7 @@ fn narrow_header_counts_wide_characters_when_preserving_context() {
             body_budget_tokens: 56_792,
             compact_at_tokens: 48_274,
         }),
+        subagent_total: None,
     });
 
     let rendered = render_to_text(&state, 48, 16);
@@ -181,6 +185,7 @@ fn status_text_compacts_large_usage_counts_but_keeps_last_in_out_visible() {
         last: ModelUsage::new(11_000, 1_000),
         context: None,
         compaction: None,
+        subagent_total: None,
     });
 
     assert!(

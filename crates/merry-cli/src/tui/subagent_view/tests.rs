@@ -89,6 +89,7 @@ fn subagent_card_and_status_chip_open_fullscreen_takeover_and_switch_agents() {
             summary: "Audit finished".to_owned(),
             output_paths: vec!["report.md".to_owned()],
             changed_paths: vec!["src/lib.rs".to_owned()],
+            usage: None,
             source: source(),
         },
         &mut state,

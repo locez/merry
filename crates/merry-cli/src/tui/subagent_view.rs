@@ -98,6 +98,7 @@ impl From<SubagentStatus> for SubagentPhase {
             SubagentStatus::Completed => Self::Completed,
             SubagentStatus::Failed => Self::Failed,
             SubagentStatus::Cancelled => Self::Cancelled,
+            SubagentStatus::Blocked => Self::Blocked,
         }
     }
 }

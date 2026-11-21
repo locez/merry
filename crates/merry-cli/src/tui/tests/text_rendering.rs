@@ -648,6 +648,7 @@ fn header_respects_configured_items_including_cache_and_rate() {
             source: ContextWindowSource::BundledCatalog,
         }),
         compaction: None,
+        subagent_total: None,
     });
 
     let text = render_to_text(&state, 100, 16);

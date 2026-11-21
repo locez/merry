@@ -336,6 +336,16 @@ impl FileSessionStore {
         &self.sessions_dir
     }
 
+    /// Returns a child-scoped session store rooted at `<sessions_dir>/<parent_id>/subagents`.
+    ///
+    /// Storing child journals under a nested `subagents/` directory keeps them
+    /// durably paired with the parent session without polluting top-level
+    /// session discovery listings.
+    #[must_use]
+    pub fn subagents_store(&self, parent_session_id: &SessionId) -> Self {
+        Self::new(self.session_dir(parent_session_id).join("subagents"))
+    }
+
     /// Reserves exclusive write ownership of a session id until the returned
     /// guard is dropped.
     ///

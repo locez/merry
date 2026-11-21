@@ -1,4 +1,8 @@
 use super::child::{error_info, publish_terminal_activity_snapshot};
+use super::events::{
+    PersistedSubagentRecord, SubagentEventSink, emit_terminal_event_and_persist,
+    to_public_subagent_status,
+};
 use super::protocol::{
     RejectedSubagentView, SpawnSubagentsOutput, SpawnedSubagentStatusLabel, SpawnedSubagentView,
     WaitMode, WaitSubagentsOutput,
@@ -14,7 +18,7 @@ use super::{
     SubagentActivityHub, SubagentConfig, SubagentError, SubagentLimitBehavior, SubagentResultView,
     SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec,
 };
-use crate::{RuntimeError, TaskAnchor};
+use crate::{FileSessionStore, RuntimeError, TaskAnchor};
 use merry_core::{
     ErrorInfo, PlanLinkSnapshot, PlanLinkStatus, SubagentActivityPhase, SubagentId, SubagentTaskId,
     ToolName,
@@ -30,7 +34,7 @@ use std::{
 use tokio::sync::{Mutex, Notify, broadcast};
 use tokio_util::sync::CancellationToken;
 
-const SUBAGENT_EVENT_CHANNEL_CAPACITY: usize = 256;
+pub(super) const SUBAGENT_EVENT_CHANNEL_CAPACITY: usize = 256;
 
 /// Lazy inspection handle returned when a product surface drills into a subagent.
 pub struct SubagentInspectSession {
@@ -69,6 +73,8 @@ pub struct SubagentManager {
     pub(super) plan_link_runtime: Arc<StdMutex<Option<Arc<dyn PlanLinkRuntime>>>>,
     pub(super) parent_capabilities: Arc<StdMutex<Option<ParentCapabilities>>>,
     pub(super) activity_hub: Arc<StdMutex<Option<Arc<SubagentActivityHub>>>>,
+    pub(super) event_sink: Arc<StdMutex<Option<SubagentEventSink>>>,
+    pub(super) child_session_store: Arc<StdMutex<Option<FileSessionStore>>>,
     pub(super) live_parent_model: Arc<StdMutex<Option<ParentPrimaryModel>>>,
     pub(super) live_parent_generation: Arc<StdMutex<merry_llm::GenerationConfig>>,
     pub(super) session_token: CancellationToken,
@@ -195,6 +201,8 @@ impl SubagentManager {
             plan_link_runtime: Arc::new(StdMutex::new(None)),
             parent_capabilities: Arc::new(StdMutex::new(None)),
             activity_hub: Arc::new(StdMutex::new(None)),
+            event_sink: Arc::new(StdMutex::new(None)),
+            child_session_store: Arc::new(StdMutex::new(None)),
             live_parent_model: Arc::new(StdMutex::new(None)),
             live_parent_generation: Arc::new(StdMutex::new(merry_llm::GenerationConfig::default())),
             session_token: CancellationToken::new(),
@@ -279,41 +287,6 @@ impl SubagentManager {
             .any(|agent| !agent.status.is_terminal())
     }
 
-    /// Cancels all live children owned by this manager and awaits their task
-    /// handles up to a bounded shutdown timeout.
-    pub async fn shutdown(&self) {
-        self.session_token.cancel();
-        let handles = {
-            let mut state = self.state.lock().await;
-            for agent in state.agents.values_mut() {
-                if !agent.status.is_terminal() {
-                    agent.cancellation_token.cancel();
-                    agent.status = SubagentStatusLabel::Cancelled;
-                    agent.summary = "child cancelled during parent shutdown".to_owned();
-                    agent.diagnostics = Some(error_info(
-                        "subagent_cancelled",
-                        "child cancelled during parent session shutdown",
-                    ));
-                }
-            }
-            std::mem::take(&mut state.handles)
-                .into_values()
-                .collect::<Vec<_>>()
-        };
-        self.notify.notify_waiters();
-        self.completion_notify.notify_waiters();
-
-        const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
-        for mut handle in handles {
-            if tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut handle)
-                .await
-                .is_err()
-            {
-                handle.abort();
-            }
-        }
-    }
-
     pub(crate) fn attach_parent_capabilities(
         &self,
         allowed_tools: Vec<ToolName>,
@@ -355,6 +328,14 @@ impl SubagentManager {
             .lock()
             .expect("subagent activity hub mutex is not poisoned")
             .clone()
+    }
+
+    pub(super) fn parent_allowed_tools(&self) -> Option<Vec<ToolName>> {
+        self.parent_capabilities
+            .lock()
+            .expect("subagent parent capabilities mutex is not poisoned")
+            .as_ref()
+            .map(|capabilities| capabilities.allowed_tools.clone())
     }
 
     pub(super) fn apply_parent_capabilities(
@@ -745,7 +726,44 @@ impl SubagentManager {
                 to_start.push((agent_id, task_id, task, task_anchor, child_token, plan_link));
             }
         }
+        let spawned_records = spawned
+            .iter()
+            .filter_map(|view| {
+                let agent = state.agents.get(&view.agent_id)?;
+                Some((
+                    view.clone(),
+                    PersistedSubagentRecord::from_status_view(
+                        agent.task.task().to_owned(),
+                        &agent.status_view(),
+                    ),
+                ))
+            })
+            .collect::<Vec<_>>();
         drop(state);
+
+        if let Some(sink) = self.attached_event_sink() {
+            for (view, record) in spawned_records {
+                sink.emit_journal_payload(merry_core::RuntimeJournalPayload::SubagentSpawned {
+                    agent_id: view.agent_id.clone(),
+                    task_id: view.task_id.clone(),
+                    task_anchor: view.task_anchor.clone(),
+                    display_name: view.display_name.clone(),
+                    role: view.role.clone(),
+                })
+                .await;
+                if matches!(view.status, SpawnedSubagentStatusLabel::Queued) {
+                    sink.emit_journal_payload(
+                        merry_core::RuntimeJournalPayload::SubagentStatusChanged {
+                            agent_id: view.agent_id.clone(),
+                            task_id: view.task_id.clone(),
+                            status: to_public_subagent_status(&SubagentStatusLabel::Queued),
+                        },
+                    )
+                    .await;
+                }
+                sink.upsert_persisted_subagent(record).await;
+            }
+        }
 
         for (agent_id, task_id, task, task_anchor, child_token, plan_link) in to_start {
             self.start_child(agent_id, task_id, task, task_anchor, child_token, plan_link)
@@ -757,30 +775,6 @@ impl SubagentManager {
             rejected,
             wait_result: None,
             background_handoff: None,
-        })
-    }
-
-    /// Returns a lazy transcript snapshot and live event subscription for one subagent.
-    pub async fn inspect(&self, agent_id: &SubagentId) -> Option<SubagentInspectSession> {
-        let (status, task, runtime, events) = {
-            let state = self.state.lock().await;
-            let agent = state.agents.get(agent_id)?;
-            (
-                agent.status_view(),
-                agent.task.task().to_owned(),
-                agent.runtime.clone(),
-                agent.event_tx.subscribe(),
-            )
-        };
-        let transcript = match runtime {
-            Some(runtime) => runtime.session_transcript().await.unwrap_or_default(),
-            None => Vec::new(),
-        };
-        Some(SubagentInspectSession {
-            status,
-            task,
-            transcript,
-            events,
         })
     }
 
@@ -841,6 +835,7 @@ impl SubagentManager {
         let mut state = self.state.lock().await;
         let mut links_to_update = Vec::new();
         let mut terminal_activities = Vec::new();
+        let mut cancelled_events = Vec::new();
         for agent_id in agent_ids {
             if let Some(agent) = state.agents.get_mut(agent_id) {
                 if agent.status.is_terminal() {
@@ -862,6 +857,7 @@ impl SubagentManager {
                     SubagentActivityPhase::Cancelled,
                     agent.summary.clone(),
                 ));
+                cancelled_events.push((agent.task.task().to_owned(), agent.status_view()));
             }
         }
         let agents = selected_statuses(&state, agent_ids);
@@ -878,6 +874,10 @@ impl SubagentManager {
                 phase,
                 &summary,
             );
+        }
+        let sink = self.attached_event_sink();
+        for (task, view) in cancelled_events {
+            emit_terminal_event_and_persist(sink.as_ref(), task, &view).await;
         }
         self.notify.notify_waiters();
         self.completion_notify.notify_waiters();
@@ -905,6 +905,8 @@ impl SubagentManager {
             depth: self.depth,
             plan_link_runtime: Arc::clone(&self.plan_link_runtime),
             activity_hub: Arc::clone(&self.activity_hub),
+            event_sink: Arc::clone(&self.event_sink),
+            child_session_store: Arc::clone(&self.child_session_store),
             live_parent_model: Arc::clone(&self.live_parent_model),
             live_parent_generation: Arc::clone(&self.live_parent_generation),
         }

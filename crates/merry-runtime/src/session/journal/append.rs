@@ -42,6 +42,7 @@ pub(crate) struct JournalCursor {
     flushed_model_turns: BTreeMap<ModelTurnId, (ModelTurnStatus, Option<u64>)>,
     flushed_next_model_turn_id: Option<u64>,
     flushed_topic: Option<String>,
+    flushed_subagents: Vec<crate::subagent::PersistedSubagentRecord>,
     flushed_user_message_count: usize,
 }
 
@@ -95,6 +96,9 @@ impl JournalCursor {
         if committed.flushed_topic.is_some() {
             self.flushed_topic = committed.flushed_topic;
         }
+        if !committed.flushed_subagents.is_empty() {
+            self.flushed_subagents = committed.flushed_subagents;
+        }
         self.flushed_user_message_count = self
             .flushed_user_message_count
             .max(committed.flushed_user_message_count);
@@ -125,6 +129,7 @@ pub(crate) struct JournalAppendInput<'a> {
     pub(crate) task_anchor: Option<&'a TaskAnchor>,
     pub(crate) context_entries: &'a [&'a ContextEntry],
     pub(crate) topic: Option<&'a str>,
+    pub(crate) subagents: &'a [crate::subagent::PersistedSubagentRecord],
 }
 
 pub(crate) fn prepare_journal_append(
@@ -243,6 +248,7 @@ pub(super) fn cursor_after_load(session: &SessionState) -> JournalCursor {
         flushed_model_turns: snapshot_model_turns(&session.transcript),
         flushed_next_model_turn_id: Some(session.transcript.next_model_turn_id().as_u64()),
         flushed_topic: session.topic.clone(),
+        flushed_subagents: session.persisted_subagents.clone(),
         flushed_user_message_count: user_message_count,
     }
 }
@@ -330,6 +336,10 @@ fn build_state_delta(
     let topic_current = input.topic.map(str::to_owned);
     let topic = optional_patch(&cursor.flushed_topic, &topic_current);
 
+    let subagents_current = input.subagents.to_vec();
+    let subagents =
+        (cursor.flushed_subagents != subagents_current).then(|| subagents_current.clone());
+
     let delta = JournalStateDelta {
         next_sequence,
         session_started,
@@ -343,6 +353,7 @@ fn build_state_delta(
         model_turns,
         next_model_turn_id,
         topic,
+        subagents,
     };
 
     let next_cursor = JournalCursor {
@@ -363,6 +374,7 @@ fn build_state_delta(
         flushed_model_turns: current_model_turns,
         flushed_next_model_turn_id: Some(next_model_turn_id_val),
         flushed_topic: topic_current,
+        flushed_subagents: subagents_current,
         flushed_user_message_count: user_message_count,
     };
 

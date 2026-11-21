@@ -55,6 +55,7 @@ impl Runtime {
         let mut next_input = Some(input);
         let mut deferred_user_input = None;
         let mut events = Vec::new();
+        let mut subagent_event_receiver = self.subscribe_subagent_events();
         let mut model_turns_run = 0;
         let mut structured_output_retries: usize = 0;
 
@@ -106,6 +107,7 @@ impl Runtime {
             let step_final_output = final_assistant_output_from_step(self, &step_events).await;
             let outcome = classify_step_events(&step_events, config.final_output_contract());
             events.append(&mut step_events);
+            drain_subagent_events(&mut subagent_event_receiver, &mut events);
 
             match outcome {
                 StepOutcome::Completed => {
@@ -173,9 +175,15 @@ impl Runtime {
                                     session_usage,
                                 ));
                             }
+                            subagent_event = subagent_event_receiver.recv() => {
+                                if let Ok(event) = subagent_event {
+                                    events.push(event);
+                                }
+                            }
                             () = notified.as_mut() => {}
                         }
                     }
+                    drain_subagent_events(&mut subagent_event_receiver, &mut events);
                     if next_input.is_some() {
                         continue;
                     }
@@ -674,5 +682,21 @@ impl Runtime {
             bridge_sender,
             bridge_resolution_epoch,
         ))
+    }
+}
+
+fn drain_subagent_events(
+    receiver: &mut tokio::sync::broadcast::Receiver<merry_core::RuntimeJournalEvent>,
+    events: &mut Vec<merry_core::RuntimeJournalEvent>,
+) {
+    loop {
+        match receiver.try_recv() {
+            Ok(event) => events.push(event),
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => return,
+        }
     }
 }

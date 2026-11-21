@@ -377,6 +377,42 @@ impl Runtime {
         }
     }
 
+    pub(crate) fn subscribe_subagent_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<RuntimeJournalEvent> {
+        self.inner.subagent_event_sink.subscribe()
+    }
+
+    pub(crate) async fn flush_attached_session_store(&self) -> Result<(), RuntimeError> {
+        let Some(store) = self.inner.session_store.clone() else {
+            return Ok(());
+        };
+        let prepared = {
+            let session = self.inner.session.lock().await;
+            session.persistable_bundle_if_resume_safe()?
+        };
+        if let Some(bundle) = prepared {
+            let cursor = bundle.cursor.clone();
+            store.write_bundle(bundle).await?;
+            self.inner.session.lock().await.adopt_journal_cursor(cursor);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn shutdown_background_processes(&self) {
+        let Some(control) = self.inner.background_process_control.as_ref() else {
+            return;
+        };
+        for process in control.list() {
+            if matches!(
+                process.state(),
+                crate::BackgroundProcessState::Running { .. }
+            ) {
+                let _ = control.stop(process.id());
+            }
+        }
+    }
+
     pub(crate) fn subagent_completion_notify(&self) -> Option<Arc<Notify>> {
         self.inner
             .subagent_manager

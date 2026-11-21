@@ -66,6 +66,7 @@ fn restored_usage_does_not_create_a_rate_without_receive_timing() {
             total: ModelUsage::new(100, 100),
             context: None,
             compaction: None,
+            subagent_total: None,
         },
         source: source(),
     });
@@ -160,6 +161,7 @@ fn header_shows_tool_only_response_rate_and_preserves_context_on_narrow_screens(
                     source: ContextWindowSource::Fallback,
                 }),
                 compaction: None,
+                subagent_total: None,
             },
             source: source(),
         },

@@ -111,6 +111,8 @@ fn subagent_spawned_event_uses_snake_case_and_round_trips() {
             agent_id: SubagentId::new("agent-1").expect("valid subagent id"),
             task_id: SubagentTaskId::new("task-1").expect("valid subagent task id"),
             task_anchor: "crates/merry-runtime/src/subagent.rs".to_owned(),
+            display_name: None,
+            role: None,
         },
     );
 
@@ -190,6 +192,7 @@ fn subagent_terminal_events_do_not_embed_large_payloads() {
             summary: "Updated protocol tests and core event vocabulary.".to_owned(),
             output_paths: vec!["artifacts/subagents/task-1/report.md".to_owned()],
             changed_paths: vec!["crates/merry-core/src/event.rs".to_owned()],
+            usage: None,
         },
     );
     let completed_json = serde_json::to_value(&completed).expect("completed event serializes");

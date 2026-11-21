@@ -24,4 +24,12 @@ impl LoadedSession {
     pub(crate) fn into_state(self) -> SessionState {
         self.state
     }
+
+    pub(crate) fn transcript_items(&self) -> Vec<crate::SessionTranscriptItem> {
+        self.state
+            .full_transcript_snapshot()
+            .into_iter()
+            .map(crate::SessionTranscriptItem::from)
+            .collect()
+    }
 }

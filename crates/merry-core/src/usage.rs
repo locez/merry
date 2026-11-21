@@ -106,6 +106,12 @@ pub struct SessionUsage {
     pub last: ModelUsage,
     pub context: Option<UsageContextWindow>,
     pub compaction: Option<CompactionUsageWindow>,
+    /// Cumulative token usage rolled up from managed subagents within this session.
+    ///
+    /// Included in [`SessionUsage::total`]; absent when no subagent usage has been
+    /// recorded yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_total: Option<ModelUsage>,
 }
 
 /// Context window snapshot used by the most recent model request that produced `last`.

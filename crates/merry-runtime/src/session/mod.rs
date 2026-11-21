@@ -69,6 +69,8 @@ pub(crate) struct SessionState {
     topic: Option<String>,
     /// In-flight topic call. Not persisted; aborted on drop.
     topic_task: Option<crate::runtime::TopicTask>,
+    /// Durable subagent summaries persisted alongside the parent journal.
+    persisted_subagents: Vec<crate::subagent::PersistedSubagentRecord>,
     /// Store directory that `journal_cursor` is currently tracking incrementally.
     tracked_store_dir: Option<PathBuf>,
     journal_cursor: journal::JournalCursor,
@@ -108,8 +110,28 @@ impl SessionState {
             external_tool_catalog,
             topic: None,
             topic_task: None,
+            persisted_subagents: Vec::new(),
             tracked_store_dir: None,
             journal_cursor: journal::JournalCursor::default(),
+        }
+    }
+
+    pub(crate) fn persisted_subagents(&self) -> &[crate::subagent::PersistedSubagentRecord] {
+        &self.persisted_subagents
+    }
+
+    pub(crate) fn upsert_persisted_subagent(
+        &mut self,
+        record: crate::subagent::PersistedSubagentRecord,
+    ) {
+        if let Some(existing) = self
+            .persisted_subagents
+            .iter_mut()
+            .find(|entry| entry.agent_id == record.agent_id)
+        {
+            *existing = record;
+        } else {
+            self.persisted_subagents.push(record);
         }
     }
 

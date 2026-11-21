@@ -95,11 +95,21 @@ pub(crate) async fn run_agent_loop_stream_producer(
     let mut deferred_user_input = None;
     let mut events = Vec::new();
     let mut projector = RuntimeEventProjector::new();
+    let mut subagent_event_receiver = runtime.subscribe_subagent_events();
     let mut model_turns_run = 0;
     let mut bridge_batch_sequence = 0_u64;
     let mut structured_output_retries: usize = 0;
 
     loop {
+        drain_subagent_stream_events(
+            &runtime,
+            &mut subagent_event_receiver,
+            &mut projector,
+            &sender,
+            &mut events,
+            model_turns_run,
+        )
+        .await?;
         if let Some(notification_input) = take_subagent_notification_input(&runtime).await {
             if next_input
                 .as_ref()
@@ -141,16 +151,41 @@ pub(crate) async fn run_agent_loop_stream_producer(
 
         let mut step_events = Vec::new();
         tokio::pin!(stream);
-        while let Some(event) = stream.next().await {
-            if !event.payload.is_transient() {
-                step_events.push(event.clone());
+        loop {
+            tokio::select! {
+                event = stream.next() => {
+                    let Some(event) = event else {
+                        break;
+                    };
+                    if !event.payload.is_transient() {
+                        step_events.push(event.clone());
+                    }
+                    publish_journal_event(&runtime, &mut projector, &sender, &mut events, event)
+                        .await
+                        .map_err(|source| {
+                            agent_loop_stream_error_with_source(&runtime, model_turns_run, &events, source)
+                        })?;
+                }
+                subagent_event = subagent_event_receiver.recv() => {
+                    if let Ok(event) = subagent_event {
+                        publish_journal_event(&runtime, &mut projector, &sender, &mut events, event)
+                            .await
+                            .map_err(|source| {
+                                agent_loop_stream_error_with_source(&runtime, model_turns_run, &events, source)
+                            })?;
+                    }
+                }
             }
-            publish_journal_event(&runtime, &mut projector, &sender, &mut events, event)
-                .await
-                .map_err(|source| {
-                    agent_loop_stream_error_with_source(&runtime, model_turns_run, &events, source)
-                })?;
         }
+        drain_subagent_stream_events(
+            &runtime,
+            &mut subagent_event_receiver,
+            &mut projector,
+            &sender,
+            &mut events,
+            model_turns_run,
+        )
+        .await?;
 
         let step_final_output = final_assistant_output_from_step(&runtime, &step_events).await;
         match classify_step_events(&step_events, config.final_output_contract()) {
@@ -197,6 +232,15 @@ pub(crate) async fn run_agent_loop_stream_producer(
                     tokio::select! {
                         biased;
                         () = loop_token.cancelled() => {
+                            drain_subagent_stream_events(
+                                &runtime,
+                                &mut subagent_event_receiver,
+                                &mut projector,
+                                &sender,
+                                &mut events,
+                                model_turns_run,
+                            )
+                            .await?;
                             let session_usage = runtime.usage().await;
                             return Ok(AgentLoopResult::new(
                                 AgentLoopStatus::Cancelled {
@@ -208,9 +252,27 @@ pub(crate) async fn run_agent_loop_stream_producer(
                                 session_usage,
                             ));
                         }
+                        subagent_event = subagent_event_receiver.recv() => {
+                            if let Ok(event) = subagent_event {
+                                publish_journal_event(&runtime, &mut projector, &sender, &mut events, event)
+                                    .await
+                                    .map_err(|source| {
+                                        agent_loop_stream_error_with_source(&runtime, model_turns_run, &events, source)
+                                    })?;
+                            }
+                        }
                         () = notified.as_mut() => {}
                     }
                 }
+                drain_subagent_stream_events(
+                    &runtime,
+                    &mut subagent_event_receiver,
+                    &mut projector,
+                    &sender,
+                    &mut events,
+                    model_turns_run,
+                )
+                .await?;
                 if next_input.is_some() {
                     continue;
                 }
@@ -827,4 +889,35 @@ pub(crate) async fn run_agent_loop_stream_producer(
         events,
         "agent loop producer ended without a terminal result",
     ))
+}
+
+async fn drain_subagent_stream_events(
+    runtime: &Runtime,
+    receiver: &mut tokio::sync::broadcast::Receiver<merry_core::RuntimeJournalEvent>,
+    projector: &mut RuntimeEventProjector,
+    sender: &mpsc::Sender<AgentRunMessage>,
+    events: &mut Vec<merry_core::RuntimeJournalEvent>,
+    model_turns_run: usize,
+) -> Result<(), AgentLoopError> {
+    loop {
+        match receiver.try_recv() {
+            Ok(event) => {
+                publish_journal_event(runtime, projector, sender, events, event)
+                    .await
+                    .map_err(|source| {
+                        agent_loop_stream_error_with_source(
+                            runtime,
+                            model_turns_run,
+                            events,
+                            source,
+                        )
+                    })?;
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => return Ok(()),
+        }
+    }
 }

@@ -39,14 +39,24 @@ EVENT_FIELDS: dict[EventType, tuple[frozenset[str], frozenset[str]]] = {
         "skill_name", "skill_md_path", "tool_call_id", "source"
     ),
     EventType.SUBAGENT_SPAWNED: _event_fields(
-        "agent_id", "task_id", "task_anchor", "source"
+        "agent_id",
+        "task_id",
+        "task_anchor",
+        "source",
+        optional=("display_name", "role"),
     ),
     EventType.SUBAGENT_STARTED: _event_fields("agent_id", "task_id", "source"),
     EventType.SUBAGENT_STATUS_CHANGED: _event_fields(
         "agent_id", "task_id", "status", "source"
     ),
     EventType.SUBAGENT_COMPLETED: _event_fields(
-        "agent_id", "task_id", "summary", "output_paths", "changed_paths", "source"
+        "agent_id",
+        "task_id",
+        "summary",
+        "output_paths",
+        "changed_paths",
+        "source",
+        optional=("usage",),
     ),
     EventType.SUBAGENT_FAILED: _event_fields(
         "agent_id", "task_id", "diagnostic", "source"

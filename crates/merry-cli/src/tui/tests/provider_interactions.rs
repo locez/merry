@@ -69,6 +69,7 @@ fn structured_permission_review_renders_hierarchy_badges_queue_and_scrolls() {
     );
     state.open_permission_review_view(PermissionReviewView {
         approval_id: "approval-rich".to_owned(),
+        actor_label: Some("subagent reviewer [review] (subagent-2)".to_owned()),
         command: "git push origin fix/review-ui".to_owned(),
         cwd: ".".to_owned(),
         capabilities: vec![
@@ -93,6 +94,10 @@ fn structured_permission_review_renders_hierarchy_badges_queue_and_scrolls() {
 
     let rendered = render_to_text(&state, 88, 26);
     assert!(rendered.contains("Allow this command?"), "{rendered}");
+    assert!(
+        rendered.contains("subagent reviewer [review] (subagent-2)"),
+        "{rendered}"
+    );
     assert!(rendered.contains("[HIGH RISK]"), "{rendered}");
     assert!(rendered.contains("1/3"), "{rendered}");
     assert!(rendered.contains("COMMAND"), "{rendered}");

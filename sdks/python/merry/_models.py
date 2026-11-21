@@ -280,6 +280,7 @@ class SessionUsage:
     last: ModelUsage
     context: UsageContextWindow | None
     compaction: CompactionUsageWindow | None
+    subagent_total: ModelUsage | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.total, ModelUsage):
@@ -296,6 +297,10 @@ class SessionUsage:
             raise TypeError(
                 "session compaction usage must be CompactionUsageWindow or None"
             )
+        if self.subagent_total is not None and not isinstance(
+            self.subagent_total, ModelUsage
+        ):
+            raise TypeError("session subagent_total usage must be ModelUsage or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,16 +472,29 @@ def parse_session_usage(value: object) -> SessionUsage:
         data,
         "session usage",
         required={"total", "last", "context", "compaction"},
+        optional={"subagent_total"},
     )
     total = _parse_model_usage(data["total"])
     last = _parse_model_usage(data["last"])
     context_value = data.get("context", None)
     compaction_value = data.get("compaction", None)
+    subagent_total_value = data.get("subagent_total", None)
     context = None if context_value is None else _parse_context_window(context_value)
     compaction = (
         None if compaction_value is None else _parse_compaction_window(compaction_value)
     )
-    return SessionUsage(total=total, last=last, context=context, compaction=compaction)
+    subagent_total = (
+        None
+        if subagent_total_value is None
+        else _parse_model_usage(subagent_total_value)
+    )
+    return SessionUsage(
+        total=total,
+        last=last,
+        context=context,
+        compaction=compaction,
+        subagent_total=subagent_total,
+    )
 
 
 def _parse_model_usage(value: object) -> ModelUsage:

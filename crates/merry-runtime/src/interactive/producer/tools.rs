@@ -309,6 +309,11 @@ impl InteractiveProducer {
                         return None;
                     }
                 }
+                subagent_event = self.subagent_event_receiver.recv() => {
+                    if !self.forward_subagent_event(subagent_event).await {
+                        return None;
+                    }
+                }
             }
         };
         self.phase_token = None;
@@ -426,6 +431,11 @@ impl InteractiveProducer {
                 }
                 plan_event = self.plan_event_receiver.recv() => {
                     if !self.forward_plan_event(plan_event).await {
+                        return None;
+                    }
+                }
+                subagent_event = self.subagent_event_receiver.recv() => {
+                    if !self.forward_subagent_event(subagent_event).await {
                         return None;
                     }
                 }
@@ -609,6 +619,11 @@ impl InteractiveProducer {
                 }
                 plan_event = self.plan_event_receiver.recv() => {
                     if !self.forward_plan_event(plan_event).await {
+                        return None;
+                    }
+                }
+                subagent_event = self.subagent_event_receiver.recv() => {
+                    if !self.forward_subagent_event(subagent_event).await {
                         return None;
                     }
                 }

@@ -135,6 +135,10 @@ pub enum RuntimeJournalPayload {
         agent_id: SubagentId,
         task_id: SubagentTaskId,
         task_anchor: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
     },
     /// A subagent started executing its assigned task.
     SubagentStarted {
@@ -154,6 +158,8 @@ pub enum RuntimeJournalPayload {
         summary: String,
         output_paths: Vec<String>,
         changed_paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<crate::ModelUsage>,
     },
     /// A subagent failed.
     SubagentFailed {

@@ -35,6 +35,12 @@ impl InteractiveProducer {
                     }
                     continue;
                 }
+                subagent_event = self.subagent_event_receiver.recv() => {
+                    if !self.forward_subagent_event(subagent_event).await {
+                        return Ok(());
+                    }
+                    continue;
+                }
                 _ = wait_for_subagent_completion => {
                     // A completion can be acknowledged by wait_subagents while
                     // this Notify permit is still pending. Only start a

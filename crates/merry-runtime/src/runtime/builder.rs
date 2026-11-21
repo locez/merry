@@ -82,6 +82,7 @@ pub struct RuntimeBuilder {
     permission_review_mode: PermissionReviewMode,
     permission_review_rules: PermissionReviewRules,
     permission_review_workspace_root: Option<PathBuf>,
+    permission_actor: crate::PermissionActor,
     permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
     permissioned_process_runner_factory: Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     background_process_control: Option<Arc<dyn BackgroundProcessControl>>,
@@ -130,6 +131,7 @@ impl RuntimeBuilder {
             permission_review_mode: PermissionReviewMode::DefaultForTrust,
             permission_review_rules: PermissionReviewRules::default(),
             permission_review_workspace_root: None,
+            permission_actor: crate::PermissionActor::MainAgent,
             permission_admission_source: None,
             permissioned_process_runner_factory: None,
             background_process_control: None,
@@ -142,6 +144,13 @@ impl RuntimeBuilder {
             durable_memory: None,
             memory_maintenance: false,
         }
+    }
+
+    /// Sets the actor identity attached to outgoing host permission review requests.
+    #[must_use]
+    pub fn permission_actor(mut self, actor: crate::PermissionActor) -> Self {
+        self.permission_actor = actor;
+        self
     }
 
     /// Sets the bounded event channel buffer size.
@@ -795,11 +804,18 @@ impl RuntimeBuilder {
             },
             None => None,
         };
+        let persisted_subagents = session.persisted_subagents().to_vec();
         let session = Arc::new(Mutex::new(session));
         let (plan_controller, _plan_events) = PlanController::start(
             Arc::clone(&session),
             self.session_store.clone(),
             self.event_buffer_size,
+        );
+        let subagent_event_sink = crate::subagent::SubagentEventSink::new(
+            Arc::clone(&session),
+            self.session_store.clone(),
+            Arc::clone(&trajectory),
+            self.event_buffer_size.get().max(64),
         );
         let activity_hub = self.activity_hub;
         let subagent_manager = self.subagent_manager;
@@ -819,6 +835,13 @@ impl RuntimeBuilder {
                 .clone();
             manager.attach_parent_capabilities(allowed_tools, parent_scope);
             manager.attach_activity_hub(Arc::clone(&activity_hub));
+            manager.attach_event_sink(subagent_event_sink.clone());
+            if let Some(store) = self.session_store.as_ref() {
+                manager.attach_child_session_store(store.subagents_store(&self.session_id));
+            }
+            if !persisted_subagents.is_empty() {
+                manager.hydrate_persisted(persisted_subagents);
+            }
             if let Some(primary) = self.model_configs.get(RuntimeModelRole::Primary) {
                 manager.update_parent_primary_model(crate::ParentPrimaryModel {
                     provider: primary.provider(),
@@ -859,6 +882,7 @@ impl RuntimeBuilder {
                 permission_review_mode: self.permission_review_mode,
                 permission_review_rules: self.permission_review_rules,
                 permission_review_workspace_root: self.permission_review_workspace_root,
+                permission_actor: self.permission_actor,
                 recorded_permission_decisions: RwLock::new(VecDeque::new()),
                 permission_admission_source: self.permission_admission_source,
                 permissioned_process_runner_factory: self.permissioned_process_runner_factory,
@@ -871,6 +895,7 @@ impl RuntimeBuilder {
                 session_store: self.session_store,
                 tool_batch_active: AtomicBool::new(false),
                 activity_hub,
+                subagent_event_sink,
                 trajectory,
                 durable_memory: self.durable_memory,
                 memory_maintenance: self.memory_maintenance,

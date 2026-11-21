@@ -31,6 +31,13 @@ where
     let id = session_id(session);
     let (session_state, plan_controller) =
         runtime_session_and_plan_controller(id.clone(), event_buffer_size);
+    let trajectory = crate::trajectory::RuntimeObservability::new(id.clone(), Vec::new());
+    let subagent_event_sink = crate::subagent::SubagentEventSink::new(
+        Arc::clone(&session_state),
+        None,
+        Arc::clone(&trajectory),
+        64,
+    );
     Runtime {
         inner: Arc::new(RuntimeInner {
             session_id: id.clone(),
@@ -58,6 +65,7 @@ where
             permission_review_mode: PermissionReviewMode::DefaultForTrust,
             permission_review_rules: crate::PermissionReviewRules::default(),
             permission_review_workspace_root: None,
+            permission_actor: crate::PermissionActor::MainAgent,
             recorded_permission_decisions: tokio::sync::RwLock::new(
                 std::collections::VecDeque::new(),
             ),
@@ -72,7 +80,8 @@ where
             session_store: None,
             tool_batch_active: AtomicBool::new(false),
             activity_hub: Arc::new(crate::SubagentActivityHub::new()),
-            trajectory: crate::trajectory::RuntimeObservability::new(id.clone(), Vec::new()),
+            subagent_event_sink,
+            trajectory,
             durable_memory: None,
             memory_maintenance: false,
             memory_context: None,
@@ -88,6 +97,13 @@ pub(in crate::runtime::tests) fn runtime_with_provider(
     let id = session_id(session);
     let (session_state, plan_controller) =
         runtime_session_and_plan_controller(id.clone(), event_buffer_size);
+    let trajectory = crate::trajectory::RuntimeObservability::new(id.clone(), Vec::new());
+    let subagent_event_sink = crate::subagent::SubagentEventSink::new(
+        Arc::clone(&session_state),
+        None,
+        Arc::clone(&trajectory),
+        64,
+    );
     Runtime {
         inner: Arc::new(RuntimeInner {
             session_id: id.clone(),
@@ -115,6 +131,7 @@ pub(in crate::runtime::tests) fn runtime_with_provider(
             permission_review_mode: PermissionReviewMode::DefaultForTrust,
             permission_review_rules: crate::PermissionReviewRules::default(),
             permission_review_workspace_root: None,
+            permission_actor: crate::PermissionActor::MainAgent,
             recorded_permission_decisions: tokio::sync::RwLock::new(
                 std::collections::VecDeque::new(),
             ),
@@ -129,7 +146,8 @@ pub(in crate::runtime::tests) fn runtime_with_provider(
             session_store: None,
             tool_batch_active: AtomicBool::new(false),
             activity_hub: Arc::new(crate::SubagentActivityHub::new()),
-            trajectory: crate::trajectory::RuntimeObservability::new(id.clone(), Vec::new()),
+            subagent_event_sink,
+            trajectory,
             durable_memory: None,
             memory_maintenance: false,
             memory_context: None,
@@ -148,6 +166,13 @@ where
     let id = session_id(session);
     let (session_state, plan_controller) =
         runtime_session_and_plan_controller(id.clone(), event_buffer_size);
+    let trajectory = crate::trajectory::RuntimeObservability::new(id.clone(), Vec::new());
+    let subagent_event_sink = crate::subagent::SubagentEventSink::new(
+        Arc::clone(&session_state),
+        None,
+        Arc::clone(&trajectory),
+        64,
+    );
     Runtime {
         inner: Arc::new(RuntimeInner {
             session_id: id.clone(),
@@ -175,6 +200,7 @@ where
             permission_review_mode: PermissionReviewMode::DefaultForTrust,
             permission_review_rules: crate::PermissionReviewRules::default(),
             permission_review_workspace_root: None,
+            permission_actor: crate::PermissionActor::MainAgent,
             recorded_permission_decisions: tokio::sync::RwLock::new(
                 std::collections::VecDeque::new(),
             ),
@@ -189,7 +215,8 @@ where
             session_store: None,
             tool_batch_active: AtomicBool::new(false),
             activity_hub: Arc::new(crate::SubagentActivityHub::new()),
-            trajectory: crate::trajectory::RuntimeObservability::new(id.clone(), Vec::new()),
+            subagent_event_sink,
+            trajectory,
             durable_memory: None,
             memory_maintenance: false,
             memory_context: None,

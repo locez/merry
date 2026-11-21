@@ -220,6 +220,7 @@ class SubagentStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    BLOCKED = "blocked"
 
 
 class InteractiveRunState(str, Enum):

@@ -278,6 +278,7 @@ impl SessionState {
             task_anchor: self.task_anchor.as_ref(),
             context_entries: &persisted_context_entries,
             topic: self.topic.as_deref(),
+            subagents: &self.persisted_subagents,
         })?;
         Ok(PersistableSessionBundle {
             session_id: self.session_id.clone(),

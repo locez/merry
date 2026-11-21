@@ -247,6 +247,14 @@ fn build_body_lines(
     let prompt_style =
         semantic_style(state, SemanticColor::ToolKeyword).add_modifier(Modifier::BOLD);
 
+    if let Some(actor) = &view.actor_label {
+        lines.push(Line::from(vec![
+            Span::styled("REQUESTED BY  ", label_style),
+            Span::styled(actor.clone(), prompt_style),
+        ]));
+        lines.push(Line::raw(""));
+    }
+
     // 1. COMMAND + CWD
     lines.push(Line::from(Span::styled("COMMAND", label_style)));
     let cmd_width = width.saturating_sub(2).max(1);

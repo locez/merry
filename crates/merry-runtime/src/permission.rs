@@ -743,11 +743,30 @@ impl std::fmt::Display for HostFallbackReason {
     }
 }
 
+/// Identifies whether a permission review request originated from the main
+/// session or a managed subagent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PermissionActor {
+    /// Request originated directly from the primary/main agent session.
+    #[default]
+    MainAgent,
+    /// Request originated from a managed child subagent.
+    Subagent {
+        /// Stable runtime-assigned subagent identifier.
+        agent_id: merry_core::SubagentId,
+        /// Optional human-friendly display name assigned to the child task.
+        display_name: Option<String>,
+        /// Optional resolved role name (e.g. `coder`, `review`, `explore`).
+        role: Option<String>,
+    },
+}
+
 /// Cancellation-aware permission admission context.
 #[derive(Debug, Clone)]
 pub struct PermissionAdmissionContext {
     cancellation_token: CancellationToken,
     host_fallback_reason: Option<HostFallbackReason>,
+    actor: PermissionActor,
 }
 
 impl PermissionAdmissionContext {
@@ -756,6 +775,7 @@ impl PermissionAdmissionContext {
         Self {
             cancellation_token,
             host_fallback_reason: None,
+            actor: PermissionActor::MainAgent,
         }
     }
 
@@ -775,6 +795,19 @@ impl PermissionAdmissionContext {
     #[must_use]
     pub const fn host_fallback_reason(&self) -> Option<&HostFallbackReason> {
         self.host_fallback_reason.as_ref()
+    }
+
+    /// Attaches the actor identity that originated this permission request.
+    #[must_use]
+    pub fn with_actor(mut self, actor: PermissionActor) -> Self {
+        self.actor = actor;
+        self
+    }
+
+    /// Returns the actor identity that originated this permission request.
+    #[must_use]
+    pub const fn actor(&self) -> &PermissionActor {
+        &self.actor
     }
 }
 

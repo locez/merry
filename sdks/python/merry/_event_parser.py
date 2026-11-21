@@ -79,7 +79,7 @@ from ._json import (
     require_json_object,
     validate_object_keys,
 )
-from ._models import SessionUsage
+from ._models import SessionUsage, _parse_model_usage
 from ._output_rate import parse_output_rate
 
 
@@ -194,6 +194,8 @@ def _parse_payload(
                 _required_string(data, "task_id"),
                 _required_string(data, "task_anchor"),
                 _source(data),
+                display_name=_optional_string(data.get("display_name")),
+                role=_optional_string(data.get("role")),
             )
         case EventType.SUBAGENT_STARTED:
             return SubagentStartedPayload(
@@ -209,6 +211,8 @@ def _parse_payload(
                 _source(data),
             )
         case EventType.SUBAGENT_COMPLETED:
+            usage_value = data.get("usage", None)
+            usage = None if usage_value is None else _parse_model_usage(usage_value)
             return SubagentCompletedPayload(
                 _required_string(data, "agent_id"),
                 _required_string(data, "task_id"),
@@ -216,6 +220,7 @@ def _parse_payload(
                 _required_strings(data["output_paths"], "output paths"),
                 _required_strings(data["changed_paths"], "changed paths"),
                 _source(data),
+                usage=usage,
             )
         case EventType.SUBAGENT_FAILED:
             return SubagentFailedPayload(

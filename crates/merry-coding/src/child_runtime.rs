@@ -119,6 +119,19 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
         if let Some(activity_hub) = input.activity_hub.clone() {
             builder = builder.subagent_activity_hub(activity_hub);
         }
+        if let Some(store) = input.session_store {
+            builder = builder.session_store(store);
+        }
+        if let Some(loaded) = input.loaded_session.and_then(|resumable| resumable.take()) {
+            builder = builder.with_loaded_session(loaded);
+        }
+        if let Some(agent_id) = input.agent_id {
+            builder = builder.permission_actor(merry_runtime::PermissionActor::Subagent {
+                agent_id,
+                display_name: input.task.display_name().map(str::to_owned),
+                role: Some(resolved.role_name.clone()),
+            });
+        }
         let preloaded_files = preload_context_files(
             self.composition.profile_builder.workspace_root(),
             &workspace_scope,
@@ -391,7 +404,10 @@ mod tests {
             .expect("child task should be valid");
         ChildRuntimeInput {
             parent_session_id: SessionId::new("parent-session").expect("parent session valid"),
+            agent_id: None,
             session_id: SessionId::new(session).expect("child session should be valid"),
+            session_store: None,
+            loaded_session: None,
             task_anchor: TaskAnchor::new("Exercise the child runtime.")
                 .expect("child task anchor should be valid"),
             task,
@@ -786,7 +802,10 @@ mod tests {
         let runtime = factory
             .build_child(ChildRuntimeInput {
                 parent_session_id: SessionId::new("parent-writable-proc").expect("parent valid"),
+                agent_id: None,
                 session_id: SessionId::new("child-writable-proc").expect("session id valid"),
+                session_store: None,
+                loaded_session: None,
                 task_anchor: TaskAnchor::new("Run verification command.").expect("anchor valid"),
                 task,
                 allowed_tools: vec![ToolName::new("run_process").expect("tool name valid")],
@@ -858,7 +877,10 @@ mod tests {
                 .build_child(ChildRuntimeInput {
                     parent_session_id: SessionId::new("parent-cache-session")
                         .expect("parent session valid"),
+                    agent_id: None,
                     session_id: SessionId::new(session).expect("child session valid"),
+                    session_store: None,
+                    loaded_session: None,
                     task_anchor: TaskAnchor::new("Find beta definition.").expect("anchor valid"),
                     task,
                     allowed_tools: vec![ToolName::new("read_text").expect("tool valid")],

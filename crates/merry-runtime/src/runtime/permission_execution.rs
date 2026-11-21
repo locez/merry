@@ -403,7 +403,8 @@ pub(super) async fn review_permission_request(
             let model_result = source
                 .review(
                     request.clone(),
-                    PermissionAdmissionContext::new(context.cancellation_token().clone()),
+                    PermissionAdmissionContext::new(context.cancellation_token().clone())
+                        .with_actor(inner.permission_actor.clone()),
                 )
                 .await;
             match model_result {
@@ -457,7 +458,8 @@ pub(super) async fn review_permission_request(
         source
             .review(
                 request.clone(),
-                PermissionAdmissionContext::new(context.cancellation_token().clone()),
+                PermissionAdmissionContext::new(context.cancellation_token().clone())
+                    .with_actor(inner.permission_actor.clone()),
             )
             .await
     };
@@ -482,6 +484,7 @@ async fn host_fallback_or_error(
         return Err(crate::PermissionAdmissionError::ReviewModelUnavailable);
     };
     let review_context = PermissionAdmissionContext::new(context.cancellation_token().clone())
-        .with_host_fallback_reason(reason);
+        .with_host_fallback_reason(reason)
+        .with_actor(inner.permission_actor.clone());
     source.review(request, review_context).await
 }

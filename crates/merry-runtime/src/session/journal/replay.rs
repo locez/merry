@@ -59,6 +59,7 @@ struct ReplayedSideState {
     model_turn_sequences: BTreeMap<ModelTurnId, u64>,
     next_model_turn_id: Option<u64>,
     topic: Option<String>,
+    subagents: Vec<crate::subagent::PersistedSubagentRecord>,
 }
 
 impl ReplayedSideState {
@@ -105,6 +106,9 @@ impl ReplayedSideState {
         }
         if let Some(patch) = delta.topic {
             patch.apply(&mut self.topic);
+        }
+        if let Some(subagents) = delta.subagents {
+            self.subagents = subagents;
         }
         Ok(())
     }
@@ -306,6 +310,7 @@ pub(crate) async fn session_from_journal(
         external_tool_catalog: SessionToolCatalog::default(),
         topic: state.topic,
         topic_task: None,
+        persisted_subagents: state.subagents,
         tracked_store_dir: None,
         journal_cursor: JournalCursor::default(),
     };

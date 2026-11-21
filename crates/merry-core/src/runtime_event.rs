@@ -126,6 +126,10 @@ pub enum RuntimeEvent {
         agent_id: SubagentId,
         task_id: SubagentTaskId,
         task_anchor: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
         source: RuntimeEventSource,
     },
     /// A subagent started executing.
@@ -148,6 +152,8 @@ pub enum RuntimeEvent {
         summary: String,
         output_paths: Vec<String>,
         changed_paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<crate::ModelUsage>,
         source: RuntimeEventSource,
     },
     /// A subagent failed.
@@ -276,6 +282,7 @@ pub enum SubagentStatus {
     Completed,
     Failed,
     Cancelled,
+    Blocked,
 }
 
 /// Output stream carrying a live [`RuntimeEvent::ToolCallOutputDelta`] chunk.

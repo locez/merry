@@ -105,3 +105,67 @@ pub(super) fn fallback_summary(status: SubagentStatusLabel, task: &SubagentTaskS
         None => initial_summary(status),
     }
 }
+
+pub(super) fn apply_built_task_overrides(
+    mut task: SubagentTaskSpec,
+    built: &super::BuiltChildRuntime,
+) -> SubagentTaskSpec {
+    if let Some(turns) = built.max_model_turns
+        && turns > 0
+    {
+        task = task.with_max_model_turns_unchecked(turns);
+    }
+    if let Some(timeout) = built.timeout_secs
+        && let Ok(updated) = task.clone().with_timeout_secs(Some(timeout))
+    {
+        task = updated;
+    }
+    if let Some(max_tokens) = built.max_total_tokens {
+        task = task.with_max_total_tokens(Some(max_tokens));
+    }
+    if let Some(role) = built.resolved_role.as_deref()
+        && let Ok(updated) = task.clone().with_role(Some(role.to_owned()))
+    {
+        task = updated;
+    }
+    task
+}
+
+pub(super) fn error_info(code: &'static str, message: impl ToString) -> merry_core::ErrorInfo {
+    merry_core::ErrorInfo::new(code, &sanitize_diagnostic_message(message.to_string()))
+        .expect("static diagnostic code and sanitized message are valid")
+}
+
+pub(super) fn observed_event_output_bytes(event: &merry_core::RuntimeEvent) -> u64 {
+    let bytes = match event {
+        merry_core::RuntimeEvent::AssistantMessageDelta { delta, .. }
+        | merry_core::RuntimeEvent::ReasoningDelta { delta, .. }
+        | merry_core::RuntimeEvent::ToolCallOutputDelta { delta, .. } => delta.len(),
+        merry_core::RuntimeEvent::ToolCallFinished { output, .. } => {
+            output.as_ref().map_or(0, |value| value.as_str().len())
+        }
+        _ => 0,
+    };
+    u64::try_from(bytes).unwrap_or(u64::MAX)
+}
+
+pub(crate) fn sanitize_diagnostic_message(message: String) -> String {
+    let sanitized = message
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let trimmed = sanitized.trim();
+    let source = if trimmed.is_empty() {
+        "child runtime failed without diagnostic detail"
+    } else {
+        trimmed
+    };
+
+    source.chars().take(4096).collect()
+}

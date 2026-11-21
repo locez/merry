@@ -38,6 +38,7 @@ from ._event_types import (
     _validate_nonnegative,
     _validate_text,
 )
+from ._models import ModelUsage
 from ._output_rate import ModelOutputRateUpdatedPayload
 
 
@@ -172,12 +173,18 @@ class SubagentSpawnedPayload(SourcedEventPayload):
     task_id: str
     task_anchor: str
     source: EventSource
+    display_name: str | None = None
+    role: str | None = None
 
     def __post_init__(self) -> None:
         _validate_event_source(self.source)
         _validate_identifier("subagent id", self.agent_id, 256)
         _validate_identifier("subagent task id", self.task_id, 256)
         _validate_text("subagent task anchor", self.task_anchor, 4096)
+        if self.display_name is not None:
+            _validate_text("subagent display name", self.display_name, 256)
+        if self.role is not None:
+            _validate_identifier("subagent role", self.role, 128)
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +225,7 @@ class SubagentCompletedPayload(SourcedEventPayload):
     output_paths: tuple[str, ...]
     changed_paths: tuple[str, ...]
     source: EventSource
+    usage: ModelUsage | None = None
 
     def __post_init__(self) -> None:
         _validate_event_source(self.source)
@@ -226,6 +234,8 @@ class SubagentCompletedPayload(SourcedEventPayload):
         _validate_text("subagent summary", self.summary, 4096)
         _validate_strings("subagent output paths", self.output_paths, 4096)
         _validate_strings("subagent changed paths", self.changed_paths, 4096)
+        if self.usage is not None and not isinstance(self.usage, ModelUsage):
+            raise TypeError("subagent usage must be ModelUsage or None")
 
 
 @dataclass(frozen=True, slots=True)

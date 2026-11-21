@@ -76,13 +76,14 @@ impl SubagentManager {
         token: CancellationToken,
         plan_link: Option<PlanLinkSnapshot>,
     ) {
-        let child_session_id = child_session_id();
+        let child_session_id = super::events::child_session_id_for_agent(&agent_id);
         let parent_primary_model = self.live_parent_model_snapshot();
         let parent_generation_config = self.live_parent_generation_snapshot();
         let default_generation_config =
             generation_config_for_child_task_with_parent(&task, &parent_generation_config);
         let plan_link_runtime = self.attached_plan_link_runtime();
         let activity_hub = self.attached_activity_hub();
+        let child_session_store = self.attached_child_session_store();
         let plan_subagent_scope = match lookup_plan_subagent_scope(
             plan_link.as_ref(),
             plan_link_runtime.as_ref(),
@@ -111,7 +112,10 @@ impl SubagentManager {
         };
         let built = match self.factory.build_child_with_overrides(ChildRuntimeInput {
             parent_session_id: self.parent_session_id.clone(),
+            agent_id: Some(agent_id.clone()),
             session_id: child_session_id,
+            session_store: child_session_store,
+            loaded_session: None,
             task_anchor,
             task: task.clone(),
             allowed_tools: task.allowed_tools().to_vec(),
@@ -215,6 +219,7 @@ impl SubagentManager {
         let mut link = None;
         let mut terminal_activity = None;
         let mut terminal_notification = None;
+        let mut terminal_task = None;
         if let Some(agent) = state.agents.get_mut(agent_id) {
             if agent.status.is_terminal() {
                 return;
@@ -224,6 +229,7 @@ impl SubagentManager {
             agent.diagnostics = Some(diagnostics);
             link = agent.plan_link.clone();
             terminal_activity = terminal_activity_for_agent(agent);
+            terminal_task = Some(agent.task.task().to_owned());
             terminal_notification = Some(agent.status_view());
         }
         let to_start = self.reserve_queued_starts_locked(&mut state);
@@ -240,6 +246,13 @@ impl SubagentManager {
             );
         }
         if let Some(status) = terminal_notification {
+            let sink = self.attached_event_sink();
+            super::events::emit_terminal_event_and_persist(
+                sink.as_ref(),
+                terminal_task.unwrap_or_default(),
+                &status,
+            )
+            .await;
             self.enqueue_completion_notification(status).await;
         }
         self.notify.notify_waiters();
@@ -251,6 +264,7 @@ impl SubagentManager {
         let mut link = None;
         let mut terminal_activity = None;
         let mut terminal_notification = None;
+        let mut terminal_task = None;
         if let Some(agent) = state.agents.get_mut(agent_id)
             && !agent.status.is_terminal()
         {
@@ -262,6 +276,7 @@ impl SubagentManager {
             ));
             link = agent.plan_link.clone();
             terminal_activity = terminal_activity_for_agent(agent);
+            terminal_task = Some(agent.task.task().to_owned());
             terminal_notification = Some(agent.status_view());
         }
         let to_start = self.reserve_queued_starts_locked(&mut state);
@@ -278,6 +293,13 @@ impl SubagentManager {
             );
         }
         if let Some(status) = terminal_notification {
+            let sink = self.attached_event_sink();
+            super::events::emit_terminal_event_and_persist(
+                sink.as_ref(),
+                terminal_task.unwrap_or_default(),
+                &status,
+            )
+            .await;
             self.enqueue_completion_notification(status).await;
         }
         self.notify.notify_waiters();
@@ -312,7 +334,7 @@ pub(super) async fn spawn_reserved_child(
     if start.cancellation_token.is_cancelled() {
         return Ok(ReservedChildStartOutcome::Cancelled);
     }
-    let child_session_id = child_session_id();
+    let child_session_id = super::events::child_session_id_for_agent(&start.agent_id);
     let parent_primary_model = scheduler.live_parent_model_snapshot();
     let parent_generation_config = scheduler.live_parent_generation_snapshot();
     let default_generation_config =
@@ -321,7 +343,10 @@ pub(super) async fn spawn_reserved_child(
         .factory
         .build_child_with_overrides(ChildRuntimeInput {
             parent_session_id: scheduler.parent_session_id.clone(),
+            agent_id: Some(start.agent_id.clone()),
             session_id: child_session_id,
+            session_store: scheduler.attached_child_session_store(),
+            loaded_session: None,
             task_anchor: start.task_anchor.clone(),
             task: start.task.clone(),
             allowed_tools: start.task.allowed_tools().to_vec(),
@@ -390,6 +415,15 @@ fn spawn_child_loop(
         if let Some(hub) = launch.activity_hub.as_deref() {
             hub.publish(activity_reducer.starting(crate::plan::unix_time_ms()));
         }
+        let sink = scheduler.attached_event_sink();
+        if let Some(sink) = sink.as_ref() {
+            sink.emit_journal_payload(merry_core::RuntimeJournalPayload::SubagentStarted {
+                agent_id: launch.agent_id.clone(),
+                task_id: launch.task_id.clone(),
+            })
+            .await;
+        }
+        let mut reported_usage = launch.runtime.usage().await.map(|u| u.total);
 
         let input = match StepInput::user_text(&launch.prompt) {
             Ok(input) => input,
@@ -535,6 +569,14 @@ fn spawn_child_loop(
             };
             match message {
                 AgentRunMessage::Event(event) => {
+                    if let merry_core::RuntimeEvent::UsageUpdated { usage, .. } = &event {
+                        super::events::fold_incremental_child_usage(
+                            sink.as_ref(),
+                            &mut reported_usage,
+                            usage.total,
+                        )
+                        .await;
+                    }
                     let delta_bytes = observed_event_output_bytes(&event);
                     if delta_bytes > 0 {
                         let mut guard = scheduler.state.lock().await;
@@ -716,7 +758,7 @@ fn spawn_child_loop(
             return;
         }
         state_guard.handles.remove(&launch.agent_id);
-        let (terminal_link, terminal_status, terminal_activity, terminal_notification) =
+        let (terminal_link, terminal_status, terminal_activity, terminal_notification, final_usage) =
             state_guard
                 .agents
                 .get(&launch.agent_id)
@@ -726,9 +768,10 @@ fn spawn_child_loop(
                         plan_link_status_for_agent(agent),
                         terminal_activity_for_agent(agent),
                         agent.status.is_terminal().then(|| agent.status_view()),
+                        agent.usage,
                     )
                 })
-                .unwrap_or((None, PlanLinkStatus::Failed, None, None));
+                .unwrap_or((None, PlanLinkStatus::Failed, None, None, None));
         let to_start =
             reserve_queued_starts_locked(&mut state_guard, scheduler.effective_max_threads());
         drop(state_guard);
@@ -742,6 +785,15 @@ fn spawn_child_loop(
             );
         }
         if let Some(status) = terminal_notification {
+            super::events::teardown_child_runtime(
+                sink.as_ref(),
+                &launch.runtime,
+                reported_usage,
+                final_usage,
+                launch.task.task().to_owned(),
+                &status,
+            )
+            .await;
             scheduler.enqueue_completion_notification(status).await;
         }
         scheduler.notify.notify_waiters();
@@ -788,7 +840,7 @@ async fn settle_child_terminal(
     activity_hub: Option<Arc<SubagentActivityHub>>,
     to_start: Vec<ReservedChildStart>,
 ) {
-    let (link, link_status, terminal_activity, terminal_notification) = scheduler
+    let (link, link_status, terminal_activity, terminal_task, terminal_notification) = scheduler
         .state
         .lock()
         .await
@@ -799,15 +851,23 @@ async fn settle_child_terminal(
                 agent.plan_link.clone(),
                 plan_link_status_for_agent(agent),
                 terminal_activity_for_agent(agent),
+                Some(agent.task.task().to_owned()),
                 agent.status.is_terminal().then(|| agent.status_view()),
             )
         })
-        .unwrap_or((None, PlanLinkStatus::Failed, None, None));
+        .unwrap_or((None, PlanLinkStatus::Failed, None, None, None));
     update_plan_link_with_scheduler(&scheduler, link, link_status).await;
     if let Some((_task_id, phase, summary)) = terminal_activity {
         publish_terminal_activity(activity_hub.as_deref(), reducer, phase, &summary);
     }
     if let Some(status) = terminal_notification {
+        let sink = scheduler.attached_event_sink();
+        super::events::emit_terminal_event_and_persist(
+            sink.as_ref(),
+            terminal_task.unwrap_or_default(),
+            &status,
+        )
+        .await;
         scheduler.enqueue_completion_notification(status).await;
     }
     scheduler.notify.notify_waiters();
@@ -903,34 +963,9 @@ pub(super) fn generation_config_for_child_task_with_parent(
     }
 }
 
-fn apply_built_task_overrides(
-    mut task: SubagentTaskSpec,
-    built: &super::BuiltChildRuntime,
-) -> SubagentTaskSpec {
-    if let Some(turns) = built.max_model_turns
-        && turns > 0
-    {
-        task = task.with_max_model_turns_unchecked(turns);
-    }
-    if let Some(timeout) = built.timeout_secs
-        && let Ok(updated) = task.clone().with_timeout_secs(Some(timeout))
-    {
-        task = updated;
-    }
-    if let Some(max_tokens) = built.max_total_tokens {
-        task = task.with_max_total_tokens(Some(max_tokens));
-    }
-    if let Some(role) = built.resolved_role.as_deref()
-        && let Ok(updated) = task.clone().with_role(Some(role.to_owned()))
-    {
-        task = updated;
-    }
-    task
-}
-
-fn child_session_id() -> merry_core::SessionId {
-    merry_core::SessionId::random()
-}
+pub(super) use super::manager_helpers::{
+    apply_built_task_overrides, error_info, observed_event_output_bytes,
+};
 
 async fn update_child_after_error(
     state: &Mutex<SubagentManagerState>,
@@ -954,43 +989,4 @@ async fn update_child_after_error(
         claimed,
         to_start: reserve_queued_starts_locked(&mut state, max_threads),
     }
-}
-
-pub(super) fn error_info(code: &'static str, message: impl ToString) -> ErrorInfo {
-    ErrorInfo::new(code, &sanitize_diagnostic_message(message.to_string()))
-        .expect("static diagnostic code and sanitized message are valid")
-}
-
-fn observed_event_output_bytes(event: &merry_core::RuntimeEvent) -> u64 {
-    let bytes = match event {
-        merry_core::RuntimeEvent::AssistantMessageDelta { delta, .. }
-        | merry_core::RuntimeEvent::ReasoningDelta { delta, .. }
-        | merry_core::RuntimeEvent::ToolCallOutputDelta { delta, .. } => delta.len(),
-        merry_core::RuntimeEvent::ToolCallFinished { output, .. } => {
-            output.as_ref().map_or(0, |value| value.as_str().len())
-        }
-        _ => 0,
-    };
-    u64::try_from(bytes).unwrap_or(u64::MAX)
-}
-
-pub(crate) fn sanitize_diagnostic_message(message: String) -> String {
-    let sanitized = message
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
-    let trimmed = sanitized.trim();
-    let source = if trimmed.is_empty() {
-        "child runtime failed without diagnostic detail"
-    } else {
-        trimmed
-    };
-
-    source.chars().take(4096).collect()
 }

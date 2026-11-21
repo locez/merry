@@ -56,7 +56,7 @@ impl SessionState {
         self.record_event(RuntimeJournalPayload::Failed { diagnostic })
     }
 
-    pub(super) fn record_event(&mut self, payload: RuntimeJournalPayload) -> RuntimeJournalEvent {
+    pub(crate) fn record_event(&mut self, payload: RuntimeJournalPayload) -> RuntimeJournalEvent {
         let sequence = self.next_sequence;
         self.next_sequence += 1;
         RuntimeJournalEvent::new(self.session_id.clone(), sequence, payload)

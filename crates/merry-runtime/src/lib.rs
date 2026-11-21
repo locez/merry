@@ -100,7 +100,7 @@ pub use merry_core::{
 };
 pub use model_config::RuntimeModelRole;
 pub use permission::{
-    ChannelPermissionAdmissionSource, HostFallbackReason, HostIntegration,
+    ChannelPermissionAdmissionSource, HostFallbackReason, HostIntegration, PermissionActor,
     PermissionAdmissionContext, PermissionAdmissionDecision, PermissionAdmissionError,
     PermissionAdmissionFuture, PermissionAdmissionReview, PermissionAdmissionReviewSource,
     PermissionAdmissionSource, PermissionRequest, PermissionReviewMode, PermissionReviewRequest,
@@ -154,7 +154,7 @@ pub use subagent::{
     ChildRuntimeInput, ChildWorkspaceScope, ContextFileRef, DEFAULT_FOREGROUND_WAIT_BUDGET_SECS,
     DEFAULT_MAX_MODEL_TURNS, DEFAULT_MIN_MODEL_TURNS, MAX_CONTEXT_FILE_REFS,
     MAX_CONTEXT_FILES_TOTAL_BYTES, ParentPrimaryModel, PlanLinkRuntime, PlanSubagentScope,
-    PreloadedContextFile, RejectedSubagentView, SUBAGENT_HANDOFF_CONTEXT_ID,
+    PreloadedContextFile, RejectedSubagentView, ResumableChildSession, SUBAGENT_HANDOFF_CONTEXT_ID,
     SendSubagentMessageInput, SendSubagentMessageOptions, SendSubagentMessageOutcome,
     SendSubagentMessageOutput, SpawnSubagentTaskInput, SpawnSubagentsInput, SpawnSubagentsOutput,
     SpawnWaitMode, SpawnedSubagentStatusLabel, SpawnedSubagentView, SubagentActivityHub,

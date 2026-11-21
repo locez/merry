@@ -47,10 +47,12 @@ impl Runtime {
         let (bridge_sender, bridge_receiver) = mpsc::channel(4);
         let bridge_resolution_epoch = Arc::new(AtomicU64::new(0));
         let plan_event_receiver = self.subscribe_plan_events();
+        let subagent_event_receiver = self.subscribe_subagent_events();
         let producer = InteractiveProducer::new(InteractiveProducerInput {
             runtime: self.clone(),
             command_receiver,
             plan_event_receiver,
+            subagent_event_receiver,
             subagent_completion_notify,
             message_sender,
             rate_sender,

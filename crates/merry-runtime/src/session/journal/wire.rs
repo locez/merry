@@ -197,6 +197,8 @@ pub(super) struct JournalStateDelta {
     pub(super) next_model_turn_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) topic: Option<FieldPatch<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) subagents: Option<Vec<crate::subagent::PersistedSubagentRecord>>,
 }
 
 impl JournalStateDelta {
@@ -213,6 +215,7 @@ impl JournalStateDelta {
             && self.model_turns.is_empty()
             && self.next_model_turn_id.is_none()
             && self.topic.is_none()
+            && self.subagents.is_none()
     }
 }
 

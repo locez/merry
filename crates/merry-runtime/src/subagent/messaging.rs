@@ -1,11 +1,14 @@
 //! Coordinator-to-subagent messaging and wake/resume lifecycle.
 
 use super::{
-    SubagentManager, SubagentStatusLabel,
+    ChildRuntimeInput, ChildWorkspaceScope, ResumableChildSession, SubagentManager,
+    SubagentStatusLabel,
+    child::{apply_built_task_overrides, generation_config_for_child_task_with_parent},
+    events::child_session_id_for_agent,
     protocol::{SendSubagentMessageOutcome, SendSubagentMessageOutput, SubagentMessageDelivery},
     spec::validate_task_max_model_turns,
 };
-use crate::RuntimeError;
+use crate::{LoadedSession, RuntimeError};
 use merry_core::SubagentId;
 
 /// Maximum queued follow-up messages buffered per active child before reporting `Saturated`.
@@ -91,6 +94,7 @@ impl SubagentManager {
 
         let message = trimmed.to_owned();
         let mut launch_now = None;
+        let mut rehydrate_candidate = None;
         let outcome = {
             let mut state = self.state.lock().await;
             let Some(agent) = state.agents.get_mut(agent_id) else {
@@ -133,7 +137,7 @@ impl SubagentManager {
                     .send(merry_core::RuntimeEvent::QueuedInputAccepted {
                         inputs: vec![merry_core::QueuedInputView {
                             id: 0,
-                            text: message,
+                            text: message.clone(),
                             position,
                         }],
                     });
@@ -178,12 +182,29 @@ impl SubagentManager {
                     runtime,
                     generation_config,
                     agent.event_tx.clone(),
-                    message,
+                    message.clone(),
                 ));
                 (
                     SendSubagentMessageOutcome::Woken,
                     SubagentStatusLabel::Running,
                     format!("woke subagent {agent_id} with its retained transcript and context"),
+                )
+            } else if self.attached_child_session_store().is_some() {
+                // Restored from parent session resume: lazily reload child journal and rebuild runtime.
+                let mut wake_task = agent.task.clone();
+                if let Some(extra_turns) = options.extra_model_turns {
+                    wake_task = wake_task.with_max_model_turns_unchecked(extra_turns);
+                }
+                rehydrate_candidate = Some((
+                    agent.task_id.clone(),
+                    wake_task,
+                    agent.task_anchor.clone(),
+                    agent.event_tx.clone(),
+                ));
+                (
+                    SendSubagentMessageOutcome::Woken,
+                    SubagentStatusLabel::Running,
+                    format!("woke persisted subagent {agent_id} from its saved child journal"),
                 )
             } else {
                 return Ok(SendSubagentMessageOutput {
@@ -197,6 +218,83 @@ impl SubagentManager {
                 });
             }
         };
+
+        if let Some((task_id, wake_task, task_anchor, event_tx)) = rehydrate_candidate {
+            let store = self.attached_child_session_store();
+            let child_session_id = child_session_id_for_agent(agent_id);
+            let loaded_session = match store.as_ref() {
+                Some(store) => LoadedSession::load(store, &child_session_id)
+                    .await
+                    .ok()
+                    .map(ResumableChildSession::new),
+                None => None,
+            };
+            let parent_primary_model = self.live_parent_model_snapshot();
+            let parent_generation_config = self.live_parent_generation_snapshot();
+            let default_generation_config =
+                generation_config_for_child_task_with_parent(&wake_task, &parent_generation_config);
+            let allowed_tools = if wake_task.allowed_tools_are_explicit() {
+                wake_task.allowed_tools().to_vec()
+            } else {
+                self.parent_allowed_tools().unwrap_or_default()
+            };
+            let built = self.factory.build_child_with_overrides(ChildRuntimeInput {
+                parent_session_id: self.parent_session_id.clone(),
+                agent_id: Some(agent_id.clone()),
+                session_id: child_session_id,
+                session_store: store,
+                loaded_session,
+                task_anchor,
+                task: wake_task.clone(),
+                allowed_tools,
+                workspace_scope: ChildWorkspaceScope::from_task(&wake_task),
+                depth: self.depth.saturating_add(1),
+                generation_config: default_generation_config.clone(),
+                parent_primary_model,
+                parent_generation_config,
+                plan_subagent_control: None,
+                plan_subagent_scope: None,
+                plan_link: None,
+                plan_link_runtime: self.attached_plan_link_runtime(),
+                activity_hub: self.attached_activity_hub(),
+            })?;
+            let wake_task = apply_built_task_overrides(wake_task, &built);
+            let runtime = built.runtime;
+            let generation_config = built.generation_config.unwrap_or(default_generation_config);
+            let token = self.session_token.child_token();
+            {
+                let mut state = self.state.lock().await;
+                if let Some(agent) = state.agents.get_mut(agent_id) {
+                    agent.cancellation_token = token.clone();
+                    agent.status = SubagentStatusLabel::Running;
+                    agent.summary = "handling follow-up".to_owned();
+                    agent.diagnostics = None;
+                    agent.completion_notification_acknowledged = false;
+                    agent.task = wake_task.clone();
+                    agent.runtime = Some(runtime.clone());
+                    agent.generation_config = Some(generation_config.clone());
+                    agent.started_at = Some(tokio::time::Instant::now());
+                    let _ = agent
+                        .event_tx
+                        .send(merry_core::RuntimeEvent::QueuedInputAccepted {
+                            inputs: vec![merry_core::QueuedInputView {
+                                id: 0,
+                                text: message.clone(),
+                                position: 0,
+                            }],
+                        });
+                }
+            }
+            launch_now = Some((
+                task_id,
+                wake_task,
+                token,
+                runtime,
+                generation_config,
+                event_tx,
+                message,
+            ));
+        }
 
         if let Some((task_id, task, token, runtime, generation_config, event_tx, prompt)) =
             launch_now

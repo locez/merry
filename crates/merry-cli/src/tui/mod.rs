@@ -243,6 +243,12 @@ pub(crate) async fn run(
                 projector.apply_transcript_item(item, &mut state);
             }
         }
+        if let Some(subagents) = session.runtime().subagent_snapshot().await {
+            state.apply_subagent_status_views(&subagents);
+        }
+        if let Some(usage) = session.runtime().usage().await {
+            state.set_usage(usage);
+        }
     }
     project_mcp_startup_warnings(&mut state, &session.startup_warnings);
     controller::run_controller(
