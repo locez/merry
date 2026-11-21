@@ -79,7 +79,11 @@ fn permissioned_factory_preserves_trusted_path_rules() {
         .plan_for(request_process_intent(&request))
         .expect("trusted path launch");
 
-    assert!(contains_path(launch.read_only(), "/var/log"));
+    let resolved_var_log = crate::resolve_host_path(std::path::Path::new("/var/log"));
+    assert!(contains_path(
+        launch.read_only(),
+        resolved_var_log.to_str().expect("utf-8 path")
+    ));
     assert!(launch.network());
 }
 
@@ -130,10 +134,22 @@ fn permissioned_factory_keeps_approved_paths_for_later_actions() {
         .plan_for(request_process_intent(&later_request))
         .expect("later ordinary process plan should build");
 
-    assert!(contains_path(launch.read_only(), "/var/lib/merry-demo.txt"));
+    let resolved_demo = crate::resolve_host_path(std::path::Path::new("/var/lib/merry-demo.txt"));
+    let resolved_tmp = crate::resolve_host_path(std::path::Path::new("/tmp"));
+    let resolved_var_tmp = crate::resolve_host_path(std::path::Path::new("/var/tmp"));
+    assert!(contains_path(
+        launch.read_only(),
+        resolved_demo.to_str().expect("utf-8 path")
+    ));
     assert!(!launch.network());
-    assert!(contains_path(launch.read_write(), "/tmp"));
-    assert!(contains_path(launch.read_write(), "/var/tmp"));
+    assert!(contains_path(
+        launch.read_write(),
+        resolved_tmp.to_str().expect("utf-8 path")
+    ));
+    assert!(contains_path(
+        launch.read_write(),
+        resolved_var_tmp.to_str().expect("utf-8 path")
+    ));
 }
 
 #[test]

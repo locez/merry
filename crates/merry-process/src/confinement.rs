@@ -39,6 +39,10 @@ const READ_ONLY_DIRECTORIES: &[&str] = &[
     "/lib",
     "/lib64",
     "/opt",
+    "/nix/store",
+    "/nix/var/nix/profiles",
+    "/run/current-system/sw",
+    "/home/linuxbrew/.linuxbrew",
     "/proc",
     "/sys",
     "/etc/ld.so.conf.d",
@@ -54,6 +58,10 @@ const READ_ONLY_FILES: &[&str] = &[
     "/etc/resolv.conf",
     "/etc/hosts",
     "/etc/nsswitch.conf",
+    "/etc/protocols",
+    "/etc/services",
+    "/etc/gai.conf",
+    "/etc/mime.types",
     "/etc/passwd",
     "/etc/group",
     "/etc/localtime",
@@ -61,6 +69,15 @@ const READ_ONLY_FILES: &[&str] = &[
 ];
 
 const READ_WRITE_DIRECTORIES: &[&str] = &["/tmp", "/var/tmp", "/dev", "/dev/shm", "/dev/pts"];
+
+#[cfg(target_os = "macos")]
+const MACOS_READ_ONLY_DIRECTORIES: &[&str] = &[
+    "/System",
+    "/Library",
+    "/private/etc",
+    "/private/var/select",
+    "/Applications/Xcode.app",
+];
 
 /// One command plus the confinement the helper applies before `exec`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,10 +368,17 @@ fn filesystem_grants(
         push_directory(&mut read_only, cwd);
     }
     for path in READ_WRITE_DIRECTORIES {
-        push_directory(&mut read_write, Path::new(path));
+        let path = Path::new(path);
+        if path.exists() || !cfg!(target_os = "macos") {
+            push_directory(&mut read_write, path);
+        }
     }
     push_directory(&mut read_write, environment.temporary_directory());
     for path in READ_ONLY_DIRECTORIES {
+        push_if_exists(&mut read_only, Path::new(path));
+    }
+    #[cfg(target_os = "macos")]
+    for path in MACOS_READ_ONLY_DIRECTORIES {
         push_if_exists(&mut read_only, Path::new(path));
     }
     for path in READ_ONLY_FILES {
@@ -500,10 +524,10 @@ fn allowed_directory_label(
             format!("the read-only workspace `{}`", grant.display())
         };
     }
-    if READ_WRITE_DIRECTORIES
-        .iter()
-        .any(|directory| Path::new(directory) == grant)
-    {
+    if READ_WRITE_DIRECTORIES.iter().any(|directory| {
+        let directory = Path::new(directory);
+        directory == grant || resolve_host_path(directory) == grant
+    }) {
         return format!(
             "`{}`, which every sandboxed command can write",
             grant.display()
@@ -605,10 +629,22 @@ fn prepare_writable_directories(paths: &[PathBuf]) {
 }
 
 fn is_preexisting_system_path(path: &Path) -> bool {
-    READ_WRITE_DIRECTORIES
+    let matches_system = |system: &&str| {
+        let system = Path::new(system);
+        system == path || resolve_host_path(system) == path
+    };
+    let in_common = READ_WRITE_DIRECTORIES
         .iter()
         .chain(READ_ONLY_DIRECTORIES.iter())
-        .any(|system| Path::new(system) == path)
+        .any(matches_system);
+    #[cfg(target_os = "macos")]
+    {
+        in_common || MACOS_READ_ONLY_DIRECTORIES.iter().any(matches_system)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        in_common
+    }
 }
 
 fn traverse_ancestors(read_only: &[PathBuf], read_write: &[PathBuf]) -> Vec<PathBuf> {

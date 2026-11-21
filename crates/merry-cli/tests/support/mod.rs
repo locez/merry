@@ -37,9 +37,19 @@ fn xdg_root_outside_baseline_writes(sequence: usize) -> PathBuf {
 }
 
 fn is_baseline_write_path(path: &std::path::Path) -> bool {
-    ["/tmp", "/var/tmp", "/dev", "/dev/shm", "/dev/pts"]
-        .iter()
-        .any(|root| path == std::path::Path::new(root) || path.starts_with(root))
+    [
+        "/tmp",
+        "/private/tmp",
+        "/var/tmp",
+        "/private/var/tmp",
+        "/var/folders",
+        "/private/var/folders",
+        "/dev",
+        "/dev/shm",
+        "/dev/pts",
+    ]
+    .iter()
+    .any(|root| path == std::path::Path::new(root) || path.starts_with(root))
 }
 
 pub fn merry_without_openai_env() -> Command {

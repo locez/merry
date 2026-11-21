@@ -88,9 +88,13 @@ fn relative_xdg_config_home_is_not_a_git_grant() {
 #[test]
 fn read_only_workspace_is_readable_and_tmp_stays_writable() {
     let launch = sample_launch(false, false);
+    let resolved_tmp = crate::resolve_host_path(Path::new("/tmp"));
     assert!(contains_path(launch.read_only(), "/workspace/merry"));
     assert!(!contains_path(launch.read_write(), "/workspace/merry"));
-    assert!(contains_path(launch.read_write(), "/tmp"));
+    assert!(contains_path(
+        launch.read_write(),
+        resolved_tmp.to_str().expect("tmp path is utf-8")
+    ));
     assert!(!launch.network());
 }
 
@@ -99,20 +103,34 @@ fn seatbelt_profile_writes_the_workspace_and_can_deny_network() {
     let closed = super::seatbelt::profile(&sample_launch(false, true));
     assert!(closed.contains("(deny default)"));
     assert!(closed.contains("(deny network*)"));
+    assert!(closed.contains("(allow file-read-data (literal \"/\"))"));
     assert!(closed.contains("(allow file-write* (subpath \"/workspace/merry\"))"));
+    assert!(
+        closed.contains("(allow network-bind (local unix-socket (subpath \"/workspace/merry\")))")
+    );
+    assert!(
+        closed.contains(
+            "(allow network-outbound (remote unix-socket (subpath \"/workspace/merry\")))"
+        )
+    );
     assert!(!closed.contains("(allow network*)"));
 
     let open = super::seatbelt::profile(&sample_launch(true, true));
     assert!(open.contains("(allow network*)"));
     assert!(!open.contains("(deny network*)"));
+    assert!(!open.contains("unix-socket"));
 }
 
 #[test]
 fn seatbelt_profile_keeps_a_read_only_workspace_readable() {
     let profile = super::seatbelt::profile(&sample_launch(false, false));
+    let resolved_tmp = crate::resolve_host_path(Path::new("/tmp"));
     assert!(profile.contains("(allow file-read* (subpath \"/workspace/merry\"))"));
     assert!(!profile.contains("file-write* (subpath \"/workspace/merry\")"));
-    assert!(profile.contains("(allow file-write* (subpath \"/tmp\"))"));
+    assert!(profile.contains(&format!(
+        "(allow file-write* (subpath \"{}\"))",
+        resolved_tmp.display()
+    )));
 }
 
 #[test]
@@ -224,7 +242,17 @@ fn fixture_root() -> PathBuf {
 }
 
 fn is_baseline_write(path: &Path) -> bool {
-    ["/tmp", "/var/tmp", "/dev", "/dev/shm", "/dev/pts"]
-        .iter()
-        .any(|root| path == Path::new(root) || path.starts_with(root))
+    [
+        "/tmp",
+        "/private/tmp",
+        "/var/tmp",
+        "/private/var/tmp",
+        "/var/folders",
+        "/private/var/folders",
+        "/dev",
+        "/dev/shm",
+        "/dev/pts",
+    ]
+    .iter()
+    .any(|root| path == Path::new(root) || path.starts_with(root))
 }

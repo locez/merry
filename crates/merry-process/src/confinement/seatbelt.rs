@@ -20,6 +20,7 @@ pub(crate) fn profile(launch: &SandboxLaunch) -> String {
         "(allow system-socket)".to_owned(),
         "(allow file-ioctl)".to_owned(),
         "(allow file-read-metadata)".to_owned(),
+        "(allow file-read-data (literal \"/\"))".to_owned(),
     ];
     if launch.network() {
         lines.push("(allow network*)".to_owned());
@@ -33,14 +34,23 @@ pub(crate) fn profile(launch: &SandboxLaunch) -> String {
         ));
     }
     for path in &launch.read_write {
-        lines.push(format!(
-            "(allow file-read* (subpath {escaped}))",
-            escaped = quote(path)
-        ));
-        lines.push(format!(
-            "(allow file-write* (subpath {escaped}))",
-            escaped = quote(path)
-        ));
+        let escaped = quote(path);
+        lines.push(format!("(allow file-read* (subpath {escaped}))"));
+        lines.push(format!("(allow file-write* (subpath {escaped}))"));
+        if !launch.network() {
+            // Keep AF_UNIX available inside granted writable paths and enabled
+            // host-integration sockets (matching Linux seccomp) while IP
+            // sockets remain blocked by `(deny network*)`.
+            lines.push(format!(
+                "(allow network-bind (local unix-socket (subpath {escaped})))"
+            ));
+            lines.push(format!(
+                "(allow network-inbound (local unix-socket (subpath {escaped})))"
+            ));
+            lines.push(format!(
+                "(allow network-outbound (remote unix-socket (subpath {escaped})))"
+            ));
+        }
     }
     for path in &launch.traverse {
         lines.push(format!(

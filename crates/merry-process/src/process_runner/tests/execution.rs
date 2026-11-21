@@ -276,7 +276,7 @@ async fn stop_background_process_kills_the_retained_group() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn background_process_outlives_the_permissioned_runner() {
     let workspace = tempfile::tempdir().expect("workspace");
@@ -308,7 +308,7 @@ async fn background_process_outlives_the_permissioned_runner() {
     wait_until_dead(pid).await;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn workspace_process_runner_reuses_tmp_and_writes_workspace() {
     let workspace = tempfile::tempdir().expect("workspace tempdir should be created");
@@ -390,7 +390,7 @@ async fn workspace_process_runner_reuses_tmp_and_writes_workspace() {
     let _ = std::fs::remove_file(Path::new("/tmp").join(marker));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn workspace_git_init_and_local_config_need_no_extra_grant() {
     let workspace = tempfile::tempdir().expect("workspace tempdir should be created");
@@ -443,7 +443,7 @@ async fn workspace_git_init_and_local_config_need_no_extra_grant() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn read_only_workspace_can_read_and_cannot_write() {
     let workspace =
@@ -479,7 +479,7 @@ async fn read_only_workspace_can_read_and_cannot_write() {
     let _ = std::fs::remove_file("/tmp/merry-readonly-workspace-marker");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn sandboxed_git_status_reads_the_user_ignore_file() {
     let root = tempfile::tempdir_in(fixture_root()).expect("fixture root");
@@ -517,7 +517,7 @@ async fn sandboxed_git_status_reads_the_user_ignore_file() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn sandboxed_command_can_read_and_write_only_the_memory_tree() {
     let root = tempfile::tempdir_in(fixture_root()).expect("fixture root");
@@ -578,7 +578,101 @@ async fn sandboxed_command_can_read_and_write_only_the_memory_tree() {
     assert!(!denied.stdout_text().contains("secret"));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn network_denied_sandbox_allows_granted_unix_sockets_and_blocks_inet_and_ungranted_sockets()
+{
+    let root = tempfile::tempdir_in(fixture_root()).expect("fixture root");
+    let workspace = root.path().join("workspace");
+    let granted_dir = root.path().join("granted");
+    let denied_dir = root.path().join("denied");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::create_dir_all(&granted_dir).expect("granted");
+    std::fs::create_dir_all(&denied_dir).expect("denied");
+
+    let granted_sock = granted_dir.join("agent.sock");
+    let denied_sock = denied_dir.join("secret.sock");
+    let _granted_listener = std::os::unix::net::UnixListener::bind(&granted_sock)
+        .expect("granted unix listener should bind");
+    let _denied_listener = std::os::unix::net::UnixListener::bind(&denied_sock)
+        .expect("denied unix listener should bind");
+
+    let runner = WorkspaceProcessRunner::new_at_workspace_root(&workspace).with_path_rules([
+        PathAccessRule::new(
+            granted_sock.clone(),
+            PathAccess::ReadWrite,
+            PathAccessRuleSource::PermissionReview,
+        ),
+    ]);
+    let context = ProcessRunnerContext::new(CancellationToken::new());
+    let script = format!(
+        r#"python3 -c '
+import os, socket, sys
+
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    s.close()
+    print("INET=ALLOWED")
+except OSError:
+    print("INET=DENIED")
+
+local = os.path.join(sys.argv[1], "local.sock")
+srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+srv.bind(local)
+srv.listen(1)
+cli = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+cli.connect(local)
+cli.close()
+srv.close()
+print("LOCAL_UNIX=ALLOWED")
+
+cli = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+cli.connect(sys.argv[2])
+cli.close()
+print("GRANTED_UNIX=ALLOWED")
+
+try:
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(os.path.join(os.path.dirname(sys.argv[3]), "ungranted-bind.sock"))
+    srv.close()
+    print("DENIED_BIND=ALLOWED")
+except OSError:
+    print("DENIED_BIND=DENIED")
+
+try:
+    cli = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    cli.connect(sys.argv[3])
+    cli.close()
+    print("DENIED_UNIX=ALLOWED")
+except OSError:
+    print("DENIED_UNIX=DENIED")
+' '{}' '{}' '{}'"#,
+        workspace.display(),
+        granted_sock.display(),
+        denied_sock.display(),
+    );
+
+    let output = run_shell(&runner, &script, &context).await;
+    assert!(
+        output.ok(),
+        "unix socket sandbox probe failed: stderr={}",
+        output.stderr_text()
+    );
+    let stdout = output.stdout_text();
+    assert!(stdout.contains("INET=DENIED"), "{stdout}");
+    assert!(stdout.contains("LOCAL_UNIX=ALLOWED"), "{stdout}");
+    assert!(stdout.contains("GRANTED_UNIX=ALLOWED"), "{stdout}");
+    assert!(stdout.contains("DENIED_BIND=DENIED"), "{stdout}");
+    // macOS Seatbelt scopes `remote unix-socket` to granted writable paths and
+    // blocks connecting to ungranted sockets; Linux Landlock AccessFs mediates
+    // socket creation (`MakeSock`, checked via DENIED_BIND above) rather than
+    // `connect()` on already-bound pathname sockets.
+    #[cfg(target_os = "macos")]
+    assert!(stdout.contains("DENIED_UNIX=DENIED"), "{stdout}");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn run_shell(
     runner: &WorkspaceProcessRunner,
     command: &str,
@@ -599,7 +693,7 @@ async fn run_shell(
         .expect("sandboxed command should return output")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn fixture_root() -> PathBuf {
     for candidate in [
         std::env::var_os("XDG_RUNTIME_DIR"),
@@ -609,9 +703,19 @@ fn fixture_root() -> PathBuf {
             continue;
         };
         let path = PathBuf::from(value);
-        let baseline = ["/tmp", "/var/tmp", "/dev", "/dev/shm", "/dev/pts"]
-            .iter()
-            .any(|root| path == Path::new(root) || path.starts_with(root));
+        let baseline = [
+            "/tmp",
+            "/private/tmp",
+            "/var/tmp",
+            "/private/var/tmp",
+            "/var/folders",
+            "/private/var/folders",
+            "/dev",
+            "/dev/shm",
+            "/dev/pts",
+        ]
+        .iter()
+        .any(|root| path == Path::new(root) || path.starts_with(root));
         if path.is_dir() && !baseline {
             return path;
         }

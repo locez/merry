@@ -91,8 +91,12 @@ fn review_outside_allowed_directories_is_omitted_from_the_launch() {
         launch.read_write(),
         "/var/merry-review-outside"
     ));
+    let resolved_tmp = crate::resolve_host_path(std::path::Path::new("/tmp"));
     assert!(contains_path(launch.read_write(), "/workspace/merry"));
-    assert!(contains_path(launch.read_write(), "/tmp"));
+    assert!(contains_path(
+        launch.read_write(),
+        resolved_tmp.to_str().expect("tmp path is utf-8")
+    ));
 }
 
 #[test]
@@ -173,8 +177,12 @@ fn review_grants_stay_action_scoped() {
     let message = error.to_string();
     assert!(message.contains("review_paths"), "{message}");
     assert!(message.contains("readwrite_paths"), "{message}");
+    let resolved_secret = crate::resolve_host_path(&secret);
     assert!(
-        message.contains("Remove `/var/merry-parent/secret` from review_paths"),
+        message.contains(&format!(
+            "Remove `{}` from review_paths",
+            resolved_secret.display()
+        )),
         "{message}"
     );
 }

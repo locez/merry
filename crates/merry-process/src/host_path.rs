@@ -59,7 +59,10 @@ mod tests {
 
         assert_eq!(
             resolve_host_path(&missing),
-            real.join("future").join("file")
+            fs::canonicalize(&real)
+                .expect("canonical real")
+                .join("future")
+                .join("file")
         );
     }
 
@@ -69,6 +72,11 @@ mod tests {
         let link = temp.path().join("link");
         symlink(Path::new("missing"), &link).expect("dangling symlink");
 
-        assert_eq!(resolve_host_path(&link), link);
+        assert_eq!(
+            resolve_host_path(&link),
+            fs::canonicalize(temp.path())
+                .expect("canonical temp dir")
+                .join("link")
+        );
     }
 }

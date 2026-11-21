@@ -243,7 +243,10 @@ impl WorkspaceProcessEnvironment {
     ) -> Result<Self, ProcessRunnerError> {
         validate_clean_absolute_path(workspace_root, "action workspace root")?;
         validate_clean_absolute_path(&self.home, "sandbox process HOME")?;
-        if self.home == Path::new("/") || self.home == Path::new("/home") {
+        if self.home == Path::new("/")
+            || self.home == Path::new("/home")
+            || self.home == Path::new("/Users")
+        {
             return Err(ProcessRunnerError::infrastructure(
                 "sandbox process HOME must identify a user directory",
             ));
@@ -266,7 +269,7 @@ impl WorkspaceProcessEnvironment {
         }
         if !is_supported_temp_path(&tmp_source) {
             return Err(ProcessRunnerError::infrastructure(
-                "sandbox process TMPDIR must resolve under /tmp, /var/tmp, /dev/shm, or a runtime temporary subdirectory",
+                "sandbox process TMPDIR must resolve under /tmp, /var/tmp, /dev/shm, a macOS per-user temporary directory, or a runtime temporary subdirectory",
             ));
         }
 
@@ -382,19 +385,14 @@ fn integration_environment_value(binding: &HostIntegrationBinding) -> Option<(St
 fn validate_host_socket(path: &Path) -> Result<(), ProcessRunnerError> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         let metadata = crate::HostPathMetadata::inspect(path).map_err(|error| {
             ProcessRunnerError::infrastructure(format!(
                 "host integration socket `{}` is unavailable: {error}",
                 path.display()
             ))
         })?;
-        let owner = fs::metadata("/proc/self").map_err(|error| {
-            ProcessRunnerError::infrastructure(format!(
-                "cannot validate host integration owner: {error}"
-            ))
-        })?;
-        if !metadata.is_owned_socket(owner.uid()) {
+        let current_uid = rustix::process::getuid().as_raw();
+        if !metadata.is_owned_socket(current_uid) {
             return Err(ProcessRunnerError::infrastructure(format!(
                 "host integration `{}` must be a socket owned by the current user",
                 path.display()
@@ -481,8 +479,21 @@ fn session_bus_socket_path(address: &OsStr) -> Option<PathBuf> {
 }
 
 fn is_supported_temp_path(path: &Path) -> bool {
+    is_supported_temp_path_for(
+        path,
+        cfg!(target_os = "macos"),
+        env::var_os("XDG_RUNTIME_DIR").as_deref(),
+    )
+}
+
+fn is_supported_temp_path_for(
+    path: &Path,
+    allow_macos_temp_roots: bool,
+    xdg_runtime_dir: Option<&OsStr>,
+) -> bool {
     is_standard_temp_path(path)
-        || env::var_os("XDG_RUNTIME_DIR")
+        || (allow_macos_temp_roots && is_macos_temp_path(path))
+        || xdg_runtime_dir
             .map(PathBuf::from)
             .filter(|root| {
                 root != path
@@ -504,6 +515,36 @@ fn is_standard_temp_path(path: &Path) -> bool {
     .any(|root| path == root || path.starts_with(root))
 }
 
+/// macOS canonicalizes `/tmp` to `/private/tmp`, `/var/tmp` to
+/// `/private/var/tmp`, and per-user `TMPDIR` (`_CS_DARWIN_USER_TEMP_DIR`) to
+/// `/private/var/folders/<bucket>/<token>/T` (or a subdirectory inside it).
+/// Sibling directories under `/private/var/folders` such as `C` (caches) or
+/// `0` (per-user root) are excluded so `TMPDIR` remains a temporary tree.
+fn is_macos_temp_path(path: &Path) -> bool {
+    if [Path::new("/private/tmp"), Path::new("/private/var/tmp")]
+        .into_iter()
+        .any(|root| path == root || path.starts_with(root))
+    {
+        return true;
+    }
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return false;
+    }
+    let is_literal = |component: Option<Component<'_>>, expected: &str| matches!(component, Some(Component::Normal(value)) if value == OsStr::new(expected));
+    let is_non_empty = |component: Option<Component<'_>>| matches!(component, Some(Component::Normal(value)) if !value.is_empty());
+    if !is_literal(components.next(), "private")
+        || !is_literal(components.next(), "var")
+        || !is_literal(components.next(), "folders")
+        || !is_non_empty(components.next())
+        || !is_non_empty(components.next())
+        || !is_literal(components.next(), "T")
+    {
+        return false;
+    }
+    components.all(|component| matches!(component, Component::Normal(_)))
+}
+
 fn absolute_env_path(name: &str, fallback: &str) -> PathBuf {
     env::var_os(name)
         .map(PathBuf::from)
@@ -523,5 +564,82 @@ pub(crate) fn process_current_dir(
         root.to_path_buf()
     } else {
         root.join(cwd)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_macos_temp_path, is_supported_temp_path_for};
+    use std::{ffi::OsStr, path::Path};
+
+    #[test]
+    fn macos_temp_paths_accept_private_tmp_var_tmp_and_darwin_user_temp_dirs() {
+        for valid in [
+            "/private/tmp",
+            "/private/tmp/merry-sub",
+            "/private/var/tmp",
+            "/private/var/tmp/nested/dir",
+            "/private/var/folders/pp/tfktnmsx7dx1xcbx05v7rzn40000gn/T",
+            "/private/var/folders/pp/tfktnmsx7dx1xcbx05v7rzn40000gn/T/merry-work",
+        ] {
+            let path = Path::new(valid);
+            assert!(
+                is_macos_temp_path(path),
+                "expected macOS temp path: {valid}"
+            );
+            assert!(
+                is_supported_temp_path_for(path, true, None),
+                "expected supported on macOS: {valid}"
+            );
+            assert!(
+                !is_supported_temp_path_for(path, false, None),
+                "macOS-only root must not be accepted on non-macOS hosts: {valid}"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_temp_paths_reject_cache_user_root_and_arbitrary_directories() {
+        for invalid in [
+            "/private",
+            "/private/var",
+            "/private/var/folders",
+            "/private/var/folders/pp",
+            "/private/var/folders/pp/tfktnmsx7dx1xcbx05v7rzn40000gn",
+            "/private/var/folders/pp/tfktnmsx7dx1xcbx05v7rzn40000gn/C",
+            "/private/var/folders/pp/tfktnmsx7dx1xcbx05v7rzn40000gn/0",
+            "/Users/alice",
+            "/Users/alice/tmp",
+        ] {
+            let path = Path::new(invalid);
+            assert!(
+                !is_macos_temp_path(path),
+                "unexpectedly accepted macOS temp path: {invalid}"
+            );
+            assert!(
+                !is_supported_temp_path_for(path, true, Some(OsStr::new("/run/user/1000"))),
+                "unexpectedly accepted path: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_and_xdg_runtime_temp_paths_remain_supported() {
+        assert!(is_supported_temp_path_for(Path::new("/tmp"), false, None));
+        assert!(is_supported_temp_path_for(
+            Path::new("/var/tmp/work"),
+            false,
+            None
+        ));
+        assert!(is_supported_temp_path_for(
+            Path::new("/run/user/1000/merry-tmp"),
+            false,
+            Some(OsStr::new("/run/user/1000"))
+        ));
+        assert!(!is_supported_temp_path_for(
+            Path::new("/run/user/1000"),
+            false,
+            Some(OsStr::new("/run/user/1000"))
+        ));
     }
 }
