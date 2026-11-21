@@ -250,8 +250,7 @@ success = "light_green"
 # Merry commands use Alt. On macOS that key is Option, and the on-screen
 # prefix says Option. Config accepts alt+ and option+ as the same chord.
 # Alt+X opens the command palette; that chord is fixed and is not a config key.
-submit_next = "enter"
-submit_backlog = "alt+enter"
+submit = "enter"
 cancel_input_or_quit = "ctrl+c"
 insert_newline = "ctrl+j"
 paste_image = "ctrl+v"
@@ -270,8 +269,6 @@ open_session_in_browser = "alt+g"
 history_previous = "up"
 history_next = "down"
 history_search = "ctrl+r"
-resume_suspended = "alt+n"
-discard_suspended = "alt+d"
 # Quote timeline text and attach comments, then send them as one message.
 # The same key is shown on the status chip. Select text, type a note, and
 # Enter saves it. The quote stays highlighted; click that highlight to edit

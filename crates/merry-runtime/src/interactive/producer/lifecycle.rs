@@ -7,7 +7,7 @@ use super::super::{
 };
 use super::InteractiveProducer;
 use crate::StepInput;
-use merry_core::{InteractiveRunState, QueuedInputLane, RuntimeEvent};
+use merry_core::{InteractiveRunState, RuntimeEvent};
 
 impl InteractiveProducer {
     pub(crate) async fn run(mut self) -> Result<(), InteractiveError> {
@@ -65,18 +65,8 @@ impl InteractiveProducer {
                         return self.stop_result();
                     }
                 }
-                CommandDecision::RunNext => {
-                    if !self.run_next_burst().await {
-                        return self.stop_result();
-                    }
-                }
-                CommandDecision::RunSuspended => {
-                    if !self.run_suspended_burst().await {
-                        return self.stop_result();
-                    }
-                }
-                CommandDecision::RunBacklog => {
-                    if !self.run_one_backlog().await {
+                CommandDecision::RunPending => {
+                    if !self.run_pending_burst().await {
                         return self.stop_result();
                     }
                 }
@@ -101,46 +91,24 @@ impl InteractiveProducer {
         self.terminal_error.take().map_or(Ok(()), Err)
     }
 
-    pub(super) async fn run_next_burst(&mut self) -> bool {
-        let accepted = self.queue.accept_next_burst();
+    pub(super) async fn run_pending_burst(&mut self) -> bool {
+        let accepted = self.queue.accept_all_pending();
         if accepted.is_empty() {
             return self.send_state(InteractiveRunState::WaitingForInput).await;
         }
-        self.run_accepted_steps(accepted, QueuedInputLane::Next)
-            .await
-    }
-
-    pub(super) async fn run_suspended_burst(&mut self) -> bool {
-        self.suspended_resume_requested = false;
-        let accepted = self.queue.accept_suspended_burst();
-        if accepted.is_empty() {
-            return self.send_state(InteractiveRunState::WaitingForInput).await;
-        }
-        self.run_accepted_steps(accepted, QueuedInputLane::Suspended)
-            .await
-    }
-
-    pub(super) async fn run_one_backlog(&mut self) -> bool {
-        let accepted = self.queue.accept_one_backlog();
-        if accepted.is_empty() {
-            return self.send_state(InteractiveRunState::WaitingForInput).await;
-        }
-        self.run_accepted_steps(accepted, QueuedInputLane::Backlog)
-            .await
+        self.run_accepted_steps(accepted).await
     }
 
     pub(super) async fn run_accepted_steps(
         &mut self,
         mut accepted: Vec<AcceptedQueuedInput>,
-        mut lane: QueuedInputLane,
     ) -> bool {
         self.interrupted = false;
         loop {
             let Some(input) = step_input_from_accepted(&accepted) else {
                 return false;
             };
-            let Some(step_events) = self.run_model_phase(input, Some((&accepted, lane))).await
-            else {
+            let Some(step_events) = self.run_model_phase(input, Some(&accepted)).await else {
                 return false;
             };
 
@@ -156,10 +124,8 @@ impl InteractiveProducer {
             match self.boundary_action(continuation_required) {
                 BoundaryAction::UserInput {
                     accepted: next_accepted,
-                    lane: next_lane,
                 } => {
                     accepted = next_accepted;
-                    lane = next_lane;
                 }
                 BoundaryAction::Continuation => {
                     let Some(boundary) = self.run_continuation_steps().await else {
@@ -168,10 +134,8 @@ impl InteractiveProducer {
                     match boundary {
                         BoundaryAction::UserInput {
                             accepted: next_accepted,
-                            lane: next_lane,
                         } => {
                             accepted = next_accepted;
-                            lane = next_lane;
                         }
                         BoundaryAction::Continuation => continue,
                         BoundaryAction::Wait => {
@@ -244,9 +208,7 @@ impl InteractiveProducer {
             return false;
         };
         match boundary {
-            BoundaryAction::UserInput { accepted, lane } => {
-                self.run_accepted_steps(accepted, lane).await
-            }
+            BoundaryAction::UserInput { accepted } => self.run_accepted_steps(accepted).await,
             BoundaryAction::Wait => self.send_state(InteractiveRunState::WaitingForInput).await,
             BoundaryAction::Continuation => true,
         }
@@ -281,30 +243,10 @@ impl InteractiveProducer {
             return BoundaryAction::Continuation;
         }
 
-        if self.queue.has_next() {
+        if self.queue.can_auto_dispatch() {
             self.interrupted = false;
             return BoundaryAction::UserInput {
-                accepted: self.queue.accept_next_burst(),
-                lane: QueuedInputLane::Next,
-            };
-        }
-
-        if self.suspended_resume_requested {
-            self.suspended_resume_requested = false;
-            let accepted = self.queue.accept_suspended_burst();
-            if !accepted.is_empty() {
-                return BoundaryAction::UserInput {
-                    accepted,
-                    lane: QueuedInputLane::Suspended,
-                };
-            }
-        }
-
-        let accepted = self.queue.accept_one_backlog();
-        if !accepted.is_empty() {
-            return BoundaryAction::UserInput {
-                accepted,
-                lane: QueuedInputLane::Backlog,
+                accepted: self.queue.accept_all_pending(),
             };
         }
 

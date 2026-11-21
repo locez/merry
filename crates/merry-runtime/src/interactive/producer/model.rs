@@ -7,23 +7,21 @@ use super::InteractiveProducer;
 use crate::agent_loop::{PendingLoopToolCall, StepOutcome, classify_step_events};
 use crate::{StepContext, StepInput, events::RuntimeEventProjector};
 use futures_util::StreamExt;
-use merry_core::{
-    InteractiveRunState, QueuedInputLane, QueuedInputView, RuntimeEvent, RuntimeJournalEvent,
-};
+use merry_core::{InteractiveRunState, QueuedInputView, RuntimeEvent, RuntimeJournalEvent};
 
 impl InteractiveProducer {
     pub(super) async fn run_model_phase(
         &mut self,
         input: StepInput,
-        accepted: Option<(&[AcceptedQueuedInput], QueuedInputLane)>,
+        accepted: Option<&[AcceptedQueuedInput]>,
     ) -> Option<Vec<RuntimeJournalEvent>> {
-        if let Some((accepted, lane)) = accepted {
+        if let Some(accepted) = accepted {
             self.model_turns_run = 0;
             self.structured_output_retries = 0;
             let inputs: Vec<QueuedInputView> =
                 accepted.iter().map(|item| item.view().clone()).collect();
             self.runtime.record_queued_input_accepted(&inputs);
-            let event = RuntimeEvent::QueuedInputAccepted { lane, inputs };
+            let event = RuntimeEvent::QueuedInputAccepted { inputs };
             if !self.send_event(event).await {
                 return None;
             }

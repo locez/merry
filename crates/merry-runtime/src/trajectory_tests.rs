@@ -1,6 +1,6 @@
 use crate::{SessionTranscriptItem, session::SessionState, trajectory::RuntimeObservability};
 use merry_core::{
-    PendingToolCall, PendingToolCallBatch, QueuedInputLane, QueuedInputView, RuntimeJournalEvent,
+    PendingToolCall, PendingToolCallBatch, QueuedInputView, RuntimeJournalEvent,
     RuntimeJournalPayload, SessionId, ToolCallArguments, ToolCallBatchId, ToolCallId,
     ToolCallResult, ToolInputSchema, ToolName, ToolOutput, ToolSpec, TrajectoryEvent,
     TrajectoryPayload, TrajectoryRecordDetails, TrajectoryRecordKind, TrajectoryRecordStatus,
@@ -167,8 +167,8 @@ fn accepted_input_waits_for_a_real_step_sequence() {
         Vec::new(),
     );
     observability.record_queued_input_accepted(&[QueuedInputView {
+        id: 1,
         text: "inspect the repository".to_owned(),
-        lane: QueuedInputLane::Next,
         position: 0,
     }]);
     observability.observe_journal_event(&RuntimeJournalEvent::new(

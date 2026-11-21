@@ -19,7 +19,6 @@ use crate::tui::{
     theme::SemanticColor,
     transcript::{SelectionPolicy, TranscriptRow},
 };
-use merry_core::QueuedInputLane;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -457,17 +456,7 @@ const USER_PROMPT_INDENT: &str = "  ";
 /// User-turn anchor band framed with two subtle gray hairlines (matching the
 /// composer without the `🎀` badge), soft `UserBackground`, and clean `❯`
 /// prompt mark.
-pub(super) fn user_lines(
-    state: &TuiState,
-    text: &str,
-    lane: QueuedInputLane,
-    width: u16,
-) -> Vec<TranscriptRow> {
-    let lane_label = match lane {
-        QueuedInputLane::Next => None,
-        QueuedInputLane::Suspended => Some(("suspended", SemanticColor::Warning)),
-        QueuedInputLane::Backlog => Some(("backlog", SemanticColor::Muted)),
-    };
+pub(super) fn user_lines(state: &TuiState, text: &str, width: u16) -> Vec<TranscriptRow> {
     let border_style = semantic_style(state, SemanticColor::Border);
     let hairline = Line::from(Span::styled("─".repeat(usize::from(width)), border_style));
     let band = state.theme().bg_color(SemanticColor::UserBackground);
@@ -502,16 +491,6 @@ pub(super) fn user_lines(
                 mark_style,
             ),
         ];
-        if index == 0
-            && let Some((label, color)) = lane_label
-        {
-            spans.push(Span::styled(
-                format!("{label}  "),
-                semantic_style(state, color)
-                    .add_modifier(Modifier::BOLD)
-                    .patch(bg_style),
-            ));
-        }
         spans.extend(inline_code_spans(state, segment, body_style));
         let mut line = Line::from(spans);
         if let Some(color) = band {

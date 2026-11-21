@@ -118,14 +118,6 @@ pub(crate) fn run_palette_command(
                 ControllerEffect::None
             }
         }
-        PaletteCommand::ResumeSuspended => {
-            state.close_overlay();
-            handle_key_action(KeyAction::ResumeSuspended, state)
-        }
-        PaletteCommand::DiscardSuspended => {
-            state.close_overlay();
-            handle_key_action(KeyAction::DiscardSuspended, state)
-        }
         PaletteCommand::SaveSession => {
             prepare_timeline_feedback(state);
             if state.is_active_run() {

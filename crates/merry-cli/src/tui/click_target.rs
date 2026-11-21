@@ -63,6 +63,7 @@ pub(crate) enum PointerTarget {
     Model,
     Status(StatusAction),
     Composer,
+    PendingQueue(crate::tui::render::PendingQueuePointer),
     Plan(PlanPointer),
     Completion(usize),
     Overlay(OverlayPointer),
@@ -91,6 +92,13 @@ pub(crate) fn pointer_target(state: &TuiState, size: Size, position: Position) -
             Some(pointer) => PointerTarget::Plan(pointer),
             None => PointerTarget::Consumed,
         };
+    }
+    if let Some(queue) = rects.queue
+        && queue.contains(position)
+    {
+        return render::pending_queue_pointer_at(state, queue, position)
+            .map(PointerTarget::PendingQueue)
+            .unwrap_or(PointerTarget::Consumed);
     }
     if rects.completion.contains(position) {
         return completion_index(state, rects.completion, position)

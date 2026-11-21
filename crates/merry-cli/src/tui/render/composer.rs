@@ -16,8 +16,6 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-pub(super) const QUEUE_PREVIEW_HEIGHT: u16 = 5;
-
 pub(super) const MAX_COMPLETION_PREVIEW_HEIGHT: u16 = 6;
 
 pub(super) const MAX_INPUT_VISIBLE_ROWS: usize = 5;
@@ -176,12 +174,14 @@ pub(super) fn render_input(
                         ),
                         text_rect,
                     );
-                    set_input_cursor(
-                        frame,
-                        text_rect,
-                        query_viewport.cursor_column,
-                        query_viewport.cursor_row,
-                    );
+                    if !state.is_editing_pending() {
+                        set_input_cursor(
+                            frame,
+                            text_rect,
+                            query_viewport.cursor_column,
+                            query_viewport.cursor_row,
+                        );
+                    }
                 }
             } else if state.plain_input_text() == Some("") {
                 let hint = if state.is_commenting() {
@@ -206,12 +206,14 @@ pub(super) fn render_input(
                     ),
                     text_rect,
                 );
-                set_input_cursor(
-                    frame,
-                    text_rect,
-                    input_viewport.cursor_column,
-                    input_viewport.cursor_row,
-                );
+                if !state.is_editing_pending() {
+                    set_input_cursor(
+                        frame,
+                        text_rect,
+                        input_viewport.cursor_column,
+                        input_viewport.cursor_row,
+                    );
+                }
             }
         }
     }
@@ -250,7 +252,9 @@ fn render_composer_placeholder(
         .style(surface_style),
         text_rect,
     );
-    set_input_cursor(frame, text_rect, 0, 0);
+    if !state.is_editing_pending() {
+        set_input_cursor(frame, text_rect, 0, 0);
+    }
 }
 
 fn render_top_hairline(frame: &mut Frame<'_>, state: &TuiState, area: Rect, border_style: Style) {
@@ -548,11 +552,7 @@ pub(super) fn pane_heights(
 }
 
 pub(super) fn desired_queue_preview_height(state: &TuiState) -> u16 {
-    if state.has_queue_preview_items() {
-        QUEUE_PREVIEW_HEIGHT
-    } else {
-        0
-    }
+    super::pending_queue::desired_pending_queue_height(state)
 }
 
 pub(super) fn desired_completion_preview_height(state: &TuiState) -> u16 {
@@ -591,15 +591,6 @@ pub(super) fn desired_input_region_height(
     u16::try_from(visible_rows)
         .unwrap_or(u16::MAX)
         .saturating_add(chrome)
-}
-
-pub(super) fn queue_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
-    let queue = state.queue_preview();
-    vec![
-        queue_lane(state, "Next", &queue.next, region.width),
-        queue_lane(state, "Suspended", &queue.suspended, region.width),
-        queue_lane(state, "Backlog", &queue.backlog, region.width),
-    ]
 }
 
 pub(super) fn completion_lines(state: &TuiState, region: Rect) -> Vec<Line<'static>> {
@@ -769,35 +760,4 @@ fn push_highlighted_query_spans(
         spans.push(Span::styled(text[start..end].to_owned(), highlight_style));
         cursor = end;
     }
-}
-
-pub(super) fn queue_lane(
-    state: &TuiState,
-    label: &'static str,
-    items: &[crate::tui::state::QueuePreviewItem],
-    region_width: u16,
-) -> Line<'static> {
-    let pad = if region_width >= 40 { "  " } else { "" };
-    let label_text = format!("{pad}{label:<10} ");
-    let content_width = usize::from(region_width).saturating_sub(label_text.chars().count());
-    let content = if items.is_empty() {
-        "--".to_owned()
-    } else {
-        items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| format!("{}. {}", index + 1, item.text))
-            .collect::<Vec<_>>()
-            .join(" | ")
-    };
-    Line::from(vec![
-        Span::styled(
-            label_text,
-            semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            truncate_chars(&content, content_width),
-            semantic_style(state, SemanticColor::Muted),
-        ),
-    ])
 }

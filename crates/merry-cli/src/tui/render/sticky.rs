@@ -223,7 +223,6 @@ mod tests {
         theme::TuiTheme,
         transcript::{SelectionPolicy, TranscriptRow},
     };
-    use merry_core::QueuedInputLane;
     use ratatui::text::Line;
     use std::sync::Arc;
 
@@ -237,7 +236,6 @@ mod tests {
         for index in 0..count {
             state.push_timeline_item(TimelineItem::User {
                 text: format!("user-{index}"),
-                lane: QueuedInputLane::Next,
             });
         }
         state

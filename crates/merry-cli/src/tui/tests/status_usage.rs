@@ -21,13 +21,12 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
     projector.apply(
         RuntimeEvent::QueuedInputsChanged {
             inputs: merry_core::QueuedInputsView {
-                next: vec![merry_core::QueuedInputView {
+                items: vec![merry_core::QueuedInputView {
+                    id: 1,
                     text: "urgent".to_owned(),
-                    lane: merry_core::QueuedInputLane::Next,
                     position: 0,
                 }],
-                suspended: vec![],
-                backlog: vec![],
+                paused: false,
             },
         },
         &mut state,
@@ -54,7 +53,7 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
         &mut state,
     );
 
-    assert_eq!(state.queue_preview().next[0].text, "urgent");
+    assert_eq!(state.queue_preview().items[0].text, "urgent");
     assert!(state.timeline().is_empty());
     assert!(state.status_text().contains("ctx 20k/60.8k"));
     assert!(state.status_text().contains("win 64k fallback"));

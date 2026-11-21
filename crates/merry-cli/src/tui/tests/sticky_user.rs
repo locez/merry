@@ -5,7 +5,6 @@ use crate::tui::{
     state::{TimelineItem, TuiState},
     theme::TuiTheme,
 };
-use merry_core::QueuedInputLane;
 
 fn state() -> TuiState {
     TuiState::new(
@@ -19,7 +18,6 @@ fn state() -> TuiState {
 fn user(text: &str) -> TimelineItem {
     TimelineItem::User {
         text: text.to_owned(),
-        lane: QueuedInputLane::Next,
     }
 }
 

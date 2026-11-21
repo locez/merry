@@ -24,7 +24,7 @@ pub use self::handles::{
 pub use self::settings::{
     InteractivePrimaryModel, InteractiveSettingsUpdate, InteractiveSubagentSettings,
 };
-pub use self::types::{InteractiveError, InteractiveRunId, InterruptReason};
+pub use self::types::{InteractiveError, InteractiveRunId, InterruptReason, QueuedInputId};
 
 impl Runtime {
     pub fn start_interactive_agent_run(

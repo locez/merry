@@ -14,8 +14,6 @@ pub(crate) enum PaletteCommand {
     OpenCommandDetails,
     FollowLatest,
     Interrupt,
-    ResumeSuspended,
-    DiscardSuspended,
     SaveSession,
     Quit,
     EnterPlanMode,
@@ -118,18 +116,6 @@ const COMMANDS: &[CommandSpec] = &[
         Some(KeyAction::Interrupt),
     )
     .with_slash("stop", "Interrupt the active run"),
-    CommandSpec::new(
-        PaletteCommand::ResumeSuspended,
-        "Runtime",
-        "Resume suspended input",
-        Some(KeyAction::ResumeSuspended),
-    ),
-    CommandSpec::new(
-        PaletteCommand::DiscardSuspended,
-        "Runtime",
-        "Discard suspended input",
-        Some(KeyAction::DiscardSuspended),
-    ),
     CommandSpec::new(
         PaletteCommand::ShowStatus,
         "Session",
@@ -246,9 +232,8 @@ pub(crate) fn slash_help_body(keymap: &Keymap) -> String {
         })
         .collect::<Vec<_>>();
     lines.push(format!(
-        "Submit {}  Backlog {}  Commands {}  Stop {}",
-        binding_label(keymap, KeyAction::SubmitNext),
-        binding_label(keymap, KeyAction::SubmitBacklog),
+        "Submit {}  Commands {}  Stop {}",
+        binding_label(keymap, KeyAction::Submit),
         binding_label(keymap, KeyAction::OpenCommandPanel),
         binding_label(keymap, KeyAction::Interrupt),
     ));

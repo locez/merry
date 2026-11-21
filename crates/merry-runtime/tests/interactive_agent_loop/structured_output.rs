@@ -66,7 +66,7 @@ async fn interactive_structured_output_is_recorded_as_a_runtime_event() {
         .expect("initial event should be readable")
         .expect("interactive run should remain open");
     input
-        .submit_next("return a structured answer")
+        .submit("return a structured answer")
         .await
         .expect("input should be accepted");
 
@@ -129,7 +129,7 @@ async fn interactive_structured_output_retries_after_validation_failure() {
         .expect("initial event should be readable")
         .expect("interactive run should remain open");
     input
-        .submit_next("return a numeric structured answer")
+        .submit("return a numeric structured answer")
         .await
         .expect("input should be accepted");
 

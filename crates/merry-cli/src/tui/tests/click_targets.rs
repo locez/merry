@@ -12,7 +12,7 @@ use crate::{
         theme::TuiTheme,
     },
 };
-use merry_core::{InteractiveRunState, QueuedInputLane};
+use merry_core::InteractiveRunState;
 use merry_provider_openai::OpenAiProtocol;
 use ratatui::{buffer::Buffer, layout::Position, layout::Size};
 
@@ -119,7 +119,6 @@ fn stop_and_follow_chips_use_the_same_actions_as_the_keyboard() {
     let mut state = state();
     state.push_timeline_item(TimelineItem::User {
         text: "previous question".to_owned(),
-        lane: QueuedInputLane::Next,
     });
     state.jump_to_previous_user_input();
     state.set_run_state(InteractiveRunState::RunningModel);

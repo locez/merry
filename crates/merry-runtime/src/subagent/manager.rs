@@ -630,10 +630,9 @@ impl SubagentManager {
             let _ = agent
                 .event_tx
                 .send(merry_core::RuntimeEvent::QueuedInputAccepted {
-                    lane: merry_core::QueuedInputLane::Next,
                     inputs: vec![merry_core::QueuedInputView {
+                        id: 0,
                         text: message.clone(),
-                        lane: merry_core::QueuedInputLane::Next,
                         position: 0,
                     }],
                 });

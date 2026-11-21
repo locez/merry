@@ -196,8 +196,7 @@ risk = "magenta"
 success = "green"
 
 [tui.keymap]
-submit_next = "enter"
-submit_backlog = "ctrl+b"
+submit = "enter"
 cancel_input_or_quit = "ctrl+c"
 insert_newline = "ctrl+j"
 paste_image = "ctrl+v"
@@ -209,8 +208,6 @@ review_previous_user_input = "ctrl+u"
 open_session_in_browser = "ctrl+g"
 history_previous = "up"
 history_next = "down"
-resume_suspended = "ctrl+n"
-discard_suspended = "ctrl+d"
 "##,
         ),
         &paths,
@@ -224,7 +221,7 @@ discard_suspended = "ctrl+d"
     assert_eq!(tui.theme.assistant.as_deref(), Some("white"));
     assert_eq!(tui.theme.tool_keyword.as_deref(), Some("light_cyan"));
     assert_eq!(tui.theme.command.as_deref(), Some("light_blue"));
-    assert_eq!(tui.keymap.submit_next.as_deref(), Some("enter"));
+    assert_eq!(tui.keymap.submit.as_deref(), Some("enter"));
     assert_eq!(tui.keymap.cancel_input_or_quit.as_deref(), Some("ctrl+c"));
     assert_eq!(tui.keymap.insert_newline.as_deref(), Some("ctrl+j"));
     assert_eq!(tui.keymap.paste_image.as_deref(), Some("ctrl+v"));
@@ -365,7 +362,7 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
     assert_eq!(tui.theme.assistant.as_deref(), Some("white"));
     assert_eq!(tui.theme.tool_keyword.as_deref(), Some("light_cyan"));
     assert_eq!(tui.theme.command.as_deref(), Some("light_blue"));
-    assert_eq!(tui.keymap.submit_next.as_deref(), Some("enter"));
+    assert_eq!(tui.keymap.submit.as_deref(), Some("enter"));
     assert_eq!(tui.keymap.cancel_input_or_quit.as_deref(), Some("ctrl+c"));
     assert_eq!(tui.keymap.insert_newline.as_deref(), Some("ctrl+j"));
     assert_eq!(tui.keymap.scroll_up.as_deref(), Some("pageup"));

@@ -16,11 +16,7 @@ fn default_keymap_maps_core_navigation_and_control_keys() {
 
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Enter, KeyModifiers::NONE)),
-        Some(KeyAction::SubmitNext)
-    );
-    assert_eq!(
-        keymap.action_for(KeyBinding::new(KeyCode::Enter, KeyModifiers::ALT,)),
-        Some(KeyAction::SubmitBacklog)
+        Some(KeyAction::Submit)
     );
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Char('c'), KeyModifiers::CONTROL,)),
@@ -265,8 +261,8 @@ fn controller_ctrl_c_quit_confirmation_resets_after_new_input() {
     state.insert_input_str("draft");
 
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
-        ControllerEffect::SubmitNext(text_submission("draft"))
+        handle_key_action(KeyAction::Submit, &mut state),
+        ControllerEffect::Submit(text_submission("draft"))
     );
     assert_eq!(state.input_text(), "");
 
@@ -317,8 +313,6 @@ fn configured_navigation_bindings_take_precedence() {
         review_previous_user_input: Some("ctrl+u".to_owned()),
         scroll_up: Some("up".to_owned()),
         scroll_down: Some("down".to_owned()),
-        resume_suspended: Some("ctrl+r".to_owned()),
-        discard_suspended: Some("ctrl+d".to_owned()),
         ..crate::config::TuiKeymapToml::default()
     })
     .unwrap();
@@ -342,14 +336,6 @@ fn configured_navigation_bindings_take_precedence() {
     assert_eq!(
         keymap.action_for(KeyBinding::new(KeyCode::Char('u'), KeyModifiers::CONTROL,)),
         Some(KeyAction::ReviewPreviousUserInput)
-    );
-    assert_eq!(
-        keymap.action_for(KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL,)),
-        Some(KeyAction::ResumeSuspended)
-    );
-    assert_eq!(
-        keymap.action_for(KeyBinding::new(KeyCode::Char('d'), KeyModifiers::CONTROL,)),
-        Some(KeyAction::DiscardSuspended)
     );
 }
 

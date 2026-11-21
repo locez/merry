@@ -7,9 +7,9 @@ use super::{
     theme::TuiTheme,
 };
 use merry_core::{
-    ErrorInfo, InteractiveRunState, PendingToolCall, QueuedInputLane, QueuedInputView,
-    RuntimeEvent, RuntimeEventSource, SessionId, TOOL_CANCELLED_BY_USER_CODE, ToolCallArguments,
-    ToolCallId, ToolCallResult, ToolName, ToolOutput,
+    ErrorInfo, InteractiveRunState, PendingToolCall, QueuedInputView, RuntimeEvent,
+    RuntimeEventSource, SessionId, TOOL_CANCELLED_BY_USER_CODE, ToolCallArguments, ToolCallId,
+    ToolCallResult, ToolName, ToolOutput,
 };
 
 fn state() -> TuiState {
@@ -71,7 +71,7 @@ fn tool_cancellation_finishes_stop_without_reporting_an_error() {
 
     state.insert_input_str("/stop");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
+        handle_key_action(KeyAction::Submit, &mut state),
         ControllerEffect::Interrupt
     );
     projector.apply(tool_cancelled_event("call-cancelled"), &mut state);
@@ -127,7 +127,7 @@ fn batched_tool_cancellation_completes_stop_feedback_once() {
 
     state.insert_input_str("/stop");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
+        handle_key_action(KeyAction::Submit, &mut state),
         ControllerEffect::Interrupt
     );
     projector.apply(tool_cancelled_event("call-one"), &mut state);
@@ -189,7 +189,7 @@ fn compaction_cancellation_finishes_both_progress_and_stop_feedback() {
 
     state.insert_input_str("/stop");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
+        handle_key_action(KeyAction::Submit, &mut state),
         ControllerEffect::Interrupt
     );
     projector.apply(run_cancelled_event(), &mut state);
@@ -215,17 +215,17 @@ fn interleaved_stop_feedback_stays_chronological_and_finishes_latest() {
 
     state.insert_input_str("/stop");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
+        handle_key_action(KeyAction::Submit, &mut state),
         ControllerEffect::Interrupt
     );
     state.insert_input_str("/status");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
+        handle_key_action(KeyAction::Submit, &mut state),
         ControllerEffect::None
     );
     state.insert_input_str("/stop");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
+        handle_key_action(KeyAction::Submit, &mut state),
         ControllerEffect::None
     );
     TuiProjector::default().apply(run_cancelled_event(), &mut state);
@@ -255,7 +255,7 @@ fn waiting_state_is_a_stop_completion_fallback_without_duplicates() {
     state.set_run_state(InteractiveRunState::RunningModel);
     state.insert_input_str("/stop");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
+        handle_key_action(KeyAction::Submit, &mut state),
         ControllerEffect::Interrupt
     );
 
@@ -291,7 +291,7 @@ fn slash_stop_feedback_is_idempotent_when_the_effect_is_locally_projected() {
     state.set_run_state(InteractiveRunState::RunningModel);
     state.insert_input_str("/stop");
 
-    let stop = handle_key_action(KeyAction::SubmitNext, &mut state);
+    let stop = handle_key_action(KeyAction::Submit, &mut state);
     assert_eq!(stop, ControllerEffect::Interrupt);
     assert!(matches!(
         state.timeline(),
@@ -311,12 +311,12 @@ fn stale_waiting_does_not_complete_stop_for_a_pending_local_run() {
     let mut state = state();
     let mut projector = TuiProjector::default();
     state.insert_input_str("start work");
-    let submit = handle_key_action(KeyAction::SubmitNext, &mut state);
-    assert!(matches!(submit, ControllerEffect::SubmitNext(_)));
+    let submit = handle_key_action(KeyAction::Submit, &mut state);
+    assert!(matches!(submit, ControllerEffect::Submit(_)));
     project_local_effect(&submit, &mut state);
 
     state.insert_input_str("/stop");
-    let stop = handle_key_action(KeyAction::SubmitNext, &mut state);
+    let stop = handle_key_action(KeyAction::Submit, &mut state);
     assert_eq!(stop, ControllerEffect::Interrupt);
     project_local_effect(&stop, &mut state);
     projector.apply(
@@ -334,10 +334,9 @@ fn stale_waiting_does_not_complete_stop_for_a_pending_local_run() {
 
     projector.apply(
         RuntimeEvent::QueuedInputAccepted {
-            lane: QueuedInputLane::Next,
             inputs: vec![QueuedInputView {
+                id: 1,
                 text: "start work".to_owned(),
-                lane: QueuedInputLane::Next,
                 position: 0,
             }],
         },
@@ -420,7 +419,7 @@ fn timeline_beyond_u16_scroll_limit_still_shows_latest_command_feedback() {
     }
     state.insert_input_str("/help");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
+        handle_key_action(KeyAction::Submit, &mut state),
         ControllerEffect::None
     );
 
@@ -434,10 +433,7 @@ fn single_wrapped_line_beyond_u16_scroll_limit_keeps_its_tail_visible() {
     let mut state = state();
     let mut text = "x".repeat(1_400_000);
     text.push_str("TAIL_SENTINEL");
-    state.push_timeline_item(TimelineItem::User {
-        text,
-        lane: QueuedInputLane::Next,
-    });
+    state.push_timeline_item(TimelineItem::User { text });
 
     let rendered = render::render_to_text(&state, 20, 12);
     let visible_characters = rendered.lines().map(str::trim).collect::<String>();

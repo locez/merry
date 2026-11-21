@@ -31,7 +31,7 @@ async fn interactive_run_exposes_shared_handles_and_public_events() {
     ));
 
     input
-        .submit_next("say hello")
+        .submit("say hello")
         .await
         .expect("interactive input should be accepted");
     let saw_output = tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -116,7 +116,7 @@ async fn interactive_facade_uses_the_same_ordered_bridge_batch_contract() {
         .expect("initial interactive message should be readable")
         .expect("interactive stream should remain open");
     input
-        .submit_next("resolve both bridge calls")
+        .submit("resolve both bridge calls")
         .await
         .expect("interactive input should be accepted");
 

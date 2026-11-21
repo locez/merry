@@ -14,7 +14,7 @@ use crate::{
         state::{TimelineItem, TuiState},
     },
 };
-use merry_runtime::InterruptReason;
+use merry_runtime::{InteractiveError, InterruptReason, QueuedInputId};
 use tokio::{sync::mpsc, task::JoinSet};
 
 pub(super) struct InputHistoryController<'a> {
@@ -105,13 +105,13 @@ pub(super) async fn dispatch_effect(
             );
             Ok(false)
         }
-        ControllerEffect::SubmitNext(submission) => {
+        ControllerEffect::Submit(submission) => {
             let (message, history_text) = submission
                 .into_user_message_and_history()
                 .map_err(unexpected)?;
             session
                 .input
-                .submit_next_message(message)
+                .submit_message(message)
                 .await
                 .map_err(unexpected)?;
             persist_submitted_input_history(
@@ -123,22 +123,61 @@ pub(super) async fn dispatch_effect(
             .await;
             Ok(false)
         }
-        ControllerEffect::SubmitBacklog(submission) => {
-            let (message, history_text) = submission
-                .into_user_message_and_history()
-                .map_err(unexpected)?;
-            session
+        ControllerEffect::SetPendingPaused(paused) => {
+            if let Err(error) = session.input.set_paused(paused).await {
+                tracing::debug!(error = %error, paused, "pending pause update ignored");
+            }
+            Ok(false)
+        }
+        ControllerEffect::UpdatePendingInput { id, text, resume } => {
+            match session
                 .input
-                .enqueue_message(message)
+                .update_by_id(QueuedInputId::from_u64(id), &text)
                 .await
-                .map_err(unexpected)?;
-            persist_submitted_input_history(
-                input_history.store,
-                state,
-                &history_text,
-                input_history.warning_shown,
-            )
-            .await;
+            {
+                Ok(()) => {}
+                Err(
+                    InteractiveError::AlreadyAccepted
+                    | InteractiveError::AlreadyRemoved
+                    | InteractiveError::UnknownInput,
+                ) => {}
+                Err(error) => {
+                    state.push_timeline_item(TimelineItem::Diagnostic {
+                        title: "Pending edit failed".to_owned(),
+                        body: error.to_string(),
+                    });
+                }
+            }
+            if resume && let Err(error) = session.input.set_paused(false).await {
+                tracing::debug!(error = %error, "pending resume after edit ignored");
+            }
+            Ok(false)
+        }
+        ControllerEffect::RemovePendingInput { id, resume } => {
+            match session
+                .input
+                .remove_by_id(QueuedInputId::from_u64(id))
+                .await
+            {
+                Ok(()) => {}
+                Err(
+                    InteractiveError::AlreadyAccepted
+                    | InteractiveError::AlreadyRemoved
+                    | InteractiveError::UnknownInput,
+                ) => {}
+                Err(error) => {
+                    tracing::debug!(error = %error, id, "pending remove ignored");
+                }
+            }
+            if let Some(resume) = resume
+                && let Err(error) = session.input.set_paused(!resume).await
+            {
+                tracing::debug!(error = %error, resume, "pending pause restore after remove ignored");
+            }
+            Ok(false)
+        }
+        ControllerEffect::FlushPendingInputs => {
+            session.input.flush().await.map_err(unexpected)?;
             Ok(false)
         }
         ControllerEffect::PasteImage => {
@@ -188,22 +227,6 @@ pub(super) async fn dispatch_effect(
                     tracing::warn!(error = %error, "interactive interrupt request failed");
                 }
             });
-            Ok(false)
-        }
-        ControllerEffect::ResumeSuspended => {
-            session
-                .control
-                .resume_suspended()
-                .await
-                .map_err(unexpected)?;
-            Ok(false)
-        }
-        ControllerEffect::DiscardSuspended => {
-            session
-                .control
-                .discard_suspended()
-                .await
-                .map_err(unexpected)?;
             Ok(false)
         }
         ControllerEffect::ShowTasks => {

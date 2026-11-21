@@ -70,7 +70,7 @@ EVENT_FIELDS: dict[EventType, tuple[frozenset[str], frozenset[str]]] = {
     EventType.RUN_FAILED: _event_fields("diagnostic", "source"),
     EventType.RUN_CANCELLED: _event_fields("diagnostic", "source"),
     EventType.INTERACTIVE_RUN_STATE_CHANGED: _event_fields("state"),
-    EventType.QUEUED_INPUT_ACCEPTED: _event_fields("lane", "inputs"),
+    EventType.QUEUED_INPUT_ACCEPTED: _event_fields("inputs"),
     EventType.QUEUED_INPUTS_CHANGED: _event_fields("inputs"),
     EventType.CLOSED: _event_fields(),
 }

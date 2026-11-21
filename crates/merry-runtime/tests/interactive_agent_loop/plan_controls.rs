@@ -93,10 +93,7 @@ async fn interactive_plan_controls_reject_while_the_main_model_phase_is_running(
         .await
         .expect("stream error")
         .expect("waiting state");
-    input
-        .submit_next("start blocking work")
-        .await
-        .expect("queued");
+    input.submit("start blocking work").await.expect("queued");
     started_rx.await.expect("provider request starts");
 
     let error = control
@@ -165,7 +162,7 @@ async fn interactive_run_stops_before_another_model_turn_when_plan_awaits_approv
         .expect("waiting state");
 
     input
-        .submit_next("Create the plan, then wait for my approval")
+        .submit("Create the plan, then wait for my approval")
         .await
         .expect("input queued");
     wait_for_interactive_waiting(&mut stream).await;
@@ -228,7 +225,7 @@ async fn interactive_run_stops_before_another_model_turn_for_a_non_empty_plannin
         .expect("waiting state");
 
     input
-        .submit_next("Create a draft and let me approve it")
+        .submit("Create a draft and let me approve it")
         .await
         .expect("input queued");
     wait_for_interactive_waiting(&mut stream).await;
@@ -279,7 +276,7 @@ async fn plan_approval_triggers_a_model_continuation_with_explicit_approval() {
         .expect("stream error")
         .expect("waiting state");
     input
-        .submit_next("Create the plan and wait for approval")
+        .submit("Create the plan and wait for approval")
         .await
         .expect("input queued");
     wait_for_interactive_waiting(&mut stream).await;
@@ -368,7 +365,7 @@ async fn interactive_run_continues_when_user_already_authorized_plan_execution()
         .expect("waiting state");
 
     input
-        .submit_next("Use this plan and execute it")
+        .submit("Use this plan and execute it")
         .await
         .expect("input queued");
     wait_for_interactive_waiting(&mut stream).await;

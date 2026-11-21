@@ -1,20 +1,16 @@
 use super::{
     InteractiveError, InteractiveSettingsUpdate, InterruptReason,
     queue::AcceptedQueuedInput,
-    types::{InputReceipt, InputRecords, QueuedInputId},
+    types::{InputRecords, QueuedInputId},
 };
 use crate::{FileSessionStore, PlanApprovalInput, UserMessageInput};
-use merry_core::{PlanNodeId, QueuedInputLane};
+use merry_core::PlanNodeId;
 use tokio::sync::oneshot;
 
 pub(super) enum InteractiveCommand {
-    SubmitNext {
+    Submit {
         message: UserMessageInput,
-        ack_sender: oneshot::Sender<Result<InputReceipt, InteractiveError>>,
-    },
-    Enqueue {
-        message: UserMessageInput,
-        ack_sender: oneshot::Sender<Result<InputReceipt, InteractiveError>>,
+        ack_sender: oneshot::Sender<Result<QueuedInputId, InteractiveError>>,
     },
     Update {
         id: QueuedInputId,
@@ -26,8 +22,14 @@ pub(super) enum InteractiveCommand {
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
     ReplacePendingOrder {
-        lane: QueuedInputLane,
         ids: Vec<QueuedInputId>,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    SetPendingPaused {
+        paused: bool,
+        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
+    },
+    FlushPending {
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
     Snapshot {
@@ -35,12 +37,6 @@ pub(super) enum InteractiveCommand {
     },
     UpdateSettings {
         update: Box<InteractiveSettingsUpdate>,
-        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
-    },
-    ResumeSuspended {
-        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
-    },
-    DiscardSuspended {
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
     Interrupt {
@@ -95,17 +91,12 @@ pub(super) enum CommandHandlingMode {
 pub(super) enum CommandDecision {
     Continue,
     RunContinuation,
-    RunNext,
-    RunSuspended,
-    RunBacklog,
+    RunPending,
     Close,
 }
 
 pub(super) enum BoundaryAction {
-    UserInput {
-        accepted: Vec<AcceptedQueuedInput>,
-        lane: QueuedInputLane,
-    },
+    UserInput { accepted: Vec<AcceptedQueuedInput> },
     Continuation,
     Wait,
 }

@@ -1,10 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub(crate) enum KeyAction {
-    SubmitNext,
-    SubmitBacklog,
+    Submit,
     CancelInputOrQuit,
     InsertNewline,
     PasteImage,
@@ -14,7 +12,6 @@ pub(crate) enum KeyAction {
     OpenCommandPanel,
     OpenCommandDetails,
     TogglePlan,
-    CloseOverlay,
     Quit,
     ScrollUp,
     ScrollDown,
@@ -23,20 +20,16 @@ pub(crate) enum KeyAction {
     HistoryPrevious,
     HistoryNext,
     HistorySearch,
-    ResumeSuspended,
-    DiscardSuspended,
     ToggleComment,
     SendComments,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub(crate) struct KeyBinding {
     code: KeyCode,
     modifiers: KeyModifiers,
 }
 
-#[allow(dead_code)]
 impl KeyBinding {
     pub(crate) fn new(code: KeyCode, modifiers: KeyModifiers) -> Self {
         Self { code, modifiers }
@@ -53,7 +46,6 @@ impl From<KeyEvent> for KeyBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct Keymap {
     bindings: Vec<(KeyBinding, KeyAction)>,
 }
@@ -64,11 +56,7 @@ impl Default for Keymap {
             bindings: vec![
                 (
                     KeyBinding::new(KeyCode::Enter, KeyModifiers::NONE),
-                    KeyAction::SubmitNext,
-                ),
-                (
-                    KeyBinding::new(KeyCode::Enter, KeyModifiers::ALT),
-                    KeyAction::SubmitBacklog,
+                    KeyAction::Submit,
                 ),
                 (
                     KeyBinding::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
@@ -147,30 +135,18 @@ impl Default for Keymap {
                     KeyBinding::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
                     KeyAction::HistorySearch,
                 ),
-                (
-                    KeyBinding::new(KeyCode::Char('n'), KeyModifiers::ALT),
-                    KeyAction::ResumeSuspended,
-                ),
-                (
-                    KeyBinding::new(KeyCode::Char('d'), KeyModifiers::ALT),
-                    KeyAction::DiscardSuspended,
-                ),
             ],
         }
     }
 }
 
-#[allow(dead_code)]
 impl Keymap {
     pub(crate) fn from_config(
         config: &crate::config::TuiKeymapToml,
     ) -> Result<Self, crate::config::ConfigError> {
         let mut keymap = Self::default();
-        if let Some(binding) = config.submit_next.as_deref() {
-            keymap.set_binding(parse_binding(binding)?, KeyAction::SubmitNext);
-        }
-        if let Some(binding) = config.submit_backlog.as_deref() {
-            keymap.set_binding(parse_binding(binding)?, KeyAction::SubmitBacklog);
+        if let Some(binding) = config.submit.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::Submit);
         }
         if let Some(binding) = config.cancel_input_or_quit.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::CancelInputOrQuit);
@@ -220,12 +196,6 @@ impl Keymap {
         }
         if let Some(binding) = config.history_search.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::HistorySearch);
-        }
-        if let Some(binding) = config.resume_suspended.as_deref() {
-            keymap.set_binding(parse_binding(binding)?, KeyAction::ResumeSuspended);
-        }
-        if let Some(binding) = config.discard_suspended.as_deref() {
-            keymap.set_binding(parse_binding(binding)?, KeyAction::DiscardSuspended);
         }
         if let Some(binding) = config.toggle_comment.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::ToggleComment);
@@ -446,7 +416,7 @@ mod tests {
     fn option_prefix_is_the_alt_modifier() {
         let keymap = Keymap::from_config(&TuiKeymapToml {
             open_command_details: Some("option+t".to_owned()),
-            submit_backlog: Some("option+enter".to_owned()),
+            insert_newline: Some("option+enter".to_owned()),
             ..TuiKeymapToml::default()
         })
         .expect("option+ is the macOS spelling of an alt chord");
@@ -457,7 +427,7 @@ mod tests {
         );
         assert_eq!(
             keymap.action_for(KeyBinding::new(KeyCode::Enter, KeyModifiers::ALT)),
-            Some(KeyAction::SubmitBacklog)
+            Some(KeyAction::InsertNewline)
         );
         assert_eq!(
             keymap
@@ -494,14 +464,14 @@ mod tests {
     #[test]
     fn configured_binding_takes_precedence_over_existing_default_binding() {
         let keymap = Keymap::from_config(&TuiKeymapToml {
-            submit_next: Some("esc".to_owned()),
+            submit: Some("esc".to_owned()),
             ..TuiKeymapToml::default()
         })
         .expect("keymap config should validate");
 
         assert_eq!(
             keymap.action_for(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
-            Some(KeyAction::SubmitNext)
+            Some(KeyAction::Submit)
         );
     }
 

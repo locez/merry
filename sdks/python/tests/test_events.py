@@ -182,3 +182,48 @@ def test_compaction_usage_requires_the_single_threshold() -> None:
                 },
             }
         )
+
+
+def test_event_parser_parses_single_pending_queue_events() -> None:
+    changed = parse_event(
+        {
+            "type": "queued_inputs_changed",
+            "inputs": {
+                "items": [
+                    {"id": 1, "text": "first pending", "position": 0},
+                    {"id": 2, "text": "second pending", "position": 1},
+                ],
+                "paused": True,
+            },
+        }
+    )
+    assert changed.type is merry.EventType.QUEUED_INPUTS_CHANGED
+    assert isinstance(changed.payload, merry.QueuedInputsChangedPayload)
+    assert changed.payload.inputs.paused is True
+    assert changed.payload.inputs.items == (
+        merry.QueuedInput(id=1, text="first pending", position=0),
+        merry.QueuedInput(id=2, text="second pending", position=1),
+    )
+
+    accepted = parse_event(
+        {
+            "type": "queued_input_accepted",
+            "inputs": [
+                {"id": 1, "text": "first pending", "position": 0},
+            ],
+        }
+    )
+    assert accepted.type is merry.EventType.QUEUED_INPUT_ACCEPTED
+    assert isinstance(accepted.payload, merry.QueuedInputAcceptedPayload)
+    assert accepted.payload.inputs == (
+        merry.QueuedInput(id=1, text="first pending", position=0),
+    )
+
+    with pytest.raises(TypeError):
+        parse_event(
+            {
+                "type": "queued_input_accepted",
+                "lane": "next",
+                "inputs": [{"id": 1, "text": "legacy", "position": 0}],
+            }
+        )

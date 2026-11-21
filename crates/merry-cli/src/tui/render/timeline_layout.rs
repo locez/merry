@@ -74,7 +74,7 @@ fn compute_item_layout(state: &TuiState, index: usize, width: u16) -> CachedItem
     let item = &timeline[index];
     let mut item_targets = Vec::new();
     let item_rows = match item {
-        TimelineItem::User { text, lane } => user_lines(state, text, *lane, width),
+        TimelineItem::User { text } => user_lines(state, text, width),
         TimelineItem::Assistant { text } => {
             let rendered = assistant_lines(state, text, index, width);
             item_targets = rendered.copy_targets;

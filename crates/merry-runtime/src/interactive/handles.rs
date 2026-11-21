@@ -1,13 +1,11 @@
 use super::commands::InteractiveCommand;
 use super::{
-    InteractiveError, InteractiveRunId, InteractiveSettingsUpdate, InterruptReason,
-    types::{InputReceipt, InputRecord, InputRecords},
+    InteractiveError, InteractiveRunId, InteractiveSettingsUpdate, InterruptReason, QueuedInputId,
+    types::{InputRecord, InputRecords},
 };
 use crate::bridge::BridgeToolResultCommand;
 use crate::{FileSessionStore, PlanApprovalInput, UserMessageInput};
-use merry_core::{
-    PendingToolCallBatch, PlanNodeId, QueuedInputLane, RuntimeEvent, ToolCallBatchId, ToolCallId,
-};
+use merry_core::{PendingToolCallBatch, PlanNodeId, RuntimeEvent, ToolCallBatchId, ToolCallId};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -375,19 +373,21 @@ impl AgentLoopInput {
         self.run_id
     }
 
-    pub async fn submit_next(&self, text: &str) -> Result<InteractiveInputItem, InteractiveError> {
+    /// Appends text to the pending queue (runs immediately when idle and not paused).
+    pub async fn submit(&self, text: &str) -> Result<InteractiveInputItem, InteractiveError> {
         let message = UserMessageInput::text_only(text)?;
-        self.submit_next_message(message).await
+        self.submit_message(message).await
     }
 
-    pub async fn submit_next_message(
+    /// Appends a user message to the pending queue (runs immediately when idle and not paused).
+    pub async fn submit_message(
         &self,
         message: UserMessageInput,
     ) -> Result<InteractiveInputItem, InteractiveError> {
         let text = message.text().to_owned();
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
-            .send(InteractiveCommand::SubmitNext {
+            .send(InteractiveCommand::Submit {
                 message,
                 ack_sender,
             })
@@ -400,46 +400,19 @@ impl AgentLoopInput {
             .map_err(|_| InteractiveError::CommandChannelClosed {
                 run_id: self.run_id,
             })?
-            .map(|receipt| InteractiveInputItem::new(self.clone(), receipt, text))
+            .map(|id| InteractiveInputItem::new(self.clone(), id, text))
     }
 
-    pub async fn enqueue(&self, text: &str) -> Result<InteractiveInputItem, InteractiveError> {
-        let message = UserMessageInput::text_only(text)?;
-        self.enqueue_message(message).await
-    }
-
-    pub async fn enqueue_message(
+    /// Updates a pending item's text by its stable [`QueuedInputId`].
+    pub async fn update_by_id(
         &self,
-        message: UserMessageInput,
-    ) -> Result<InteractiveInputItem, InteractiveError> {
-        let text = message.text().to_owned();
-        let (ack_sender, ack_receiver) = oneshot::channel();
-        self.command_sender
-            .send(InteractiveCommand::Enqueue {
-                message,
-                ack_sender,
-            })
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?;
-        ack_receiver
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?
-            .map(|receipt| InteractiveInputItem::new(self.clone(), receipt, text))
-    }
-
-    async fn update_receipt(
-        &self,
-        receipt: &InputReceipt,
+        id: QueuedInputId,
         text: &str,
     ) -> Result<(), InteractiveError> {
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
             .send(InteractiveCommand::Update {
-                id: receipt.id,
+                id,
                 text: text.to_owned(),
                 ack_sender,
             })
@@ -454,13 +427,47 @@ impl AgentLoopInput {
             })?
     }
 
-    async fn remove_receipt(&self, receipt: &InputReceipt) -> Result<(), InteractiveError> {
+    /// Removes a pending item by its stable [`QueuedInputId`].
+    pub async fn remove_by_id(&self, id: QueuedInputId) -> Result<(), InteractiveError> {
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
-            .send(InteractiveCommand::Remove {
-                id: receipt.id,
-                ack_sender,
-            })
+            .send(InteractiveCommand::Remove { id, ack_sender })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    /// Pauses or resumes automatic dispatch of pending items.
+    ///
+    /// While paused (for example, when any pending item is being edited in a UI),
+    /// pending items will not auto-send at turn boundaries. Passing `false` resumes
+    /// auto-dispatch and immediately sends all pending items together if the loop is idle.
+    pub async fn set_paused(&self, paused: bool) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::SetPendingPaused { paused, ack_sender })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    /// Resumes and immediately dispatches all pending items together if the loop is idle.
+    pub async fn flush(&self) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::FlushPending { ack_sender })
             .await
             .map_err(|_| InteractiveError::CommandChannelClosed {
                 run_id: self.run_id,
@@ -474,23 +481,17 @@ impl AgentLoopInput {
 
     pub async fn replace_pending_order(
         &self,
-        lane: QueuedInputLane,
         items: &[InteractiveInputItem],
     ) -> Result<(), InteractiveError> {
-        if let Some(item) = items.iter().find(|item| item.input.run_id != self.run_id) {
+        if items.iter().any(|item| item.input.run_id != self.run_id) {
             return Err(InteractiveError::InvalidPendingOrder {
-                lane: item.lane(),
                 reason: "input item belongs to another interactive run",
             });
         }
-        let ids = items.iter().map(|item| item.receipt.id).collect::<Vec<_>>();
+        let ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
-            .send(InteractiveCommand::ReplacePendingOrder {
-                lane,
-                ids,
-                ack_sender,
-            })
+            .send(InteractiveCommand::ReplacePendingOrder { ids, ack_sender })
             .await
             .map_err(|_| InteractiveError::CommandChannelClosed {
                 run_id: self.run_id,
@@ -525,22 +526,18 @@ impl AgentLoopInput {
 #[derive(Clone)]
 pub struct InteractiveInputItem {
     input: AgentLoopInput,
-    receipt: InputReceipt,
+    id: QueuedInputId,
     text: String,
 }
 
 impl InteractiveInputItem {
-    fn new(input: AgentLoopInput, receipt: InputReceipt, text: String) -> Self {
-        Self {
-            input,
-            receipt,
-            text,
-        }
+    fn new(input: AgentLoopInput, id: QueuedInputId, text: String) -> Self {
+        Self { input, id, text }
     }
 
     #[must_use]
-    pub fn lane(&self) -> QueuedInputLane {
-        self.receipt.lane
+    pub fn id(&self) -> QueuedInputId {
+        self.id
     }
 
     #[must_use]
@@ -550,29 +547,27 @@ impl InteractiveInputItem {
 
     pub async fn update(&mut self, text: impl Into<String>) -> Result<(), InteractiveError> {
         let text = text.into();
-        self.input.update_receipt(&self.receipt, &text).await?;
+        self.input.update_by_id(self.id, &text).await?;
         self.text = text;
         Ok(())
     }
 
     pub async fn remove(self) -> Result<(), InteractiveError> {
-        self.input.remove_receipt(&self.receipt).await
+        self.input.remove_by_id(self.id).await
     }
 }
 
 #[derive(Clone)]
 pub struct InteractiveInputSnapshot {
-    pub next: Vec<InteractiveInputItem>,
-    pub suspended: Vec<InteractiveInputItem>,
-    pub backlog: Vec<InteractiveInputItem>,
+    pub items: Vec<InteractiveInputItem>,
+    pub paused: bool,
 }
 
 impl InteractiveInputSnapshot {
     fn from_records(input: AgentLoopInput, records: InputRecords) -> Self {
         Self {
-            next: records_to_items(input.clone(), records.next),
-            suspended: records_to_items(input.clone(), records.suspended),
-            backlog: records_to_items(input, records.backlog),
+            items: records_to_items(input, records.items),
+            paused: records.paused,
         }
     }
 }
@@ -580,7 +575,7 @@ impl InteractiveInputSnapshot {
 fn records_to_items(input: AgentLoopInput, records: Vec<InputRecord>) -> Vec<InteractiveInputItem> {
     records
         .into_iter()
-        .map(|record| InteractiveInputItem::new(input.clone(), record.receipt, record.text))
+        .map(|record| InteractiveInputItem::new(input.clone(), record.id, record.text))
         .collect()
 }
 
@@ -616,36 +611,6 @@ impl AgentLoopControl {
                 update: Box::new(update),
                 ack_sender,
             })
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?;
-        ack_receiver
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?
-    }
-
-    pub async fn resume_suspended(&self) -> Result<(), InteractiveError> {
-        let (ack_sender, ack_receiver) = oneshot::channel();
-        self.command_sender
-            .send(InteractiveCommand::ResumeSuspended { ack_sender })
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?;
-        ack_receiver
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?
-    }
-
-    pub async fn discard_suspended(&self) -> Result<(), InteractiveError> {
-        let (ack_sender, ack_receiver) = oneshot::channel();
-        self.command_sender
-            .send(InteractiveCommand::DiscardSuspended { ack_sender })
             .await
             .map_err(|_| InteractiveError::CommandChannelClosed {
                 run_id: self.run_id,

@@ -45,7 +45,7 @@ async fn interactive_settings_update_changes_the_next_request_generation_config(
         .expect("stream error")
         .expect("waiting state");
 
-    input.submit_next("first").await.expect("first queued");
+    input.submit("first").await.expect("first queued");
     wait_for_interactive_waiting(&mut stream).await;
     let updated_generation = GenerationConfig::default().with_reasoning_effort(Some(
         ReasoningEffort::new("high").expect("valid reasoning effort"),
@@ -56,7 +56,7 @@ async fn interactive_settings_update_changes_the_next_request_generation_config(
         )
         .await
         .expect("settings update accepted");
-    input.submit_next("second").await.expect("second queued");
+    input.submit("second").await.expect("second queued");
     wait_for_interactive_waiting(&mut stream).await;
 
     let requests = provider.recorded_requests();
@@ -102,7 +102,7 @@ async fn interactive_settings_update_changes_the_next_request_primary_model() {
         .expect("stream error")
         .expect("waiting state");
 
-    input.submit_next("first").await.expect("first queued");
+    input.submit("first").await.expect("first queued");
     wait_for_interactive_waiting(&mut stream).await;
     control
         .update_settings(InteractiveSettingsUpdate::default().with_primary_model(
@@ -114,7 +114,7 @@ async fn interactive_settings_update_changes_the_next_request_primary_model() {
         ))
         .await
         .expect("settings update accepted");
-    input.submit_next("second").await.expect("second queued");
+    input.submit("second").await.expect("second queued");
     wait_for_interactive_waiting(&mut stream).await;
 
     let first_requests = first_provider.recorded_requests();
@@ -182,7 +182,7 @@ async fn interactive_settings_update_changes_context_window_at_request_boundary(
         .expect("stream error")
         .expect("waiting state");
 
-    input.submit_next("first").await.expect("first queued");
+    input.submit("first").await.expect("first queued");
     wait_for_interactive_waiting(&mut stream).await;
     let fallback = runtime.usage().await.expect("fallback usage");
     let fallback_context = fallback.context.expect("fallback context");
@@ -199,7 +199,7 @@ async fn interactive_settings_update_changes_context_window_at_request_boundary(
         )
         .await
         .expect("settings update accepted");
-    input.submit_next("second").await.expect("second queued");
+    input.submit("second").await.expect("second queued");
     wait_for_interactive_waiting(&mut stream).await;
 
     let configured = runtime.usage().await.expect("configured usage");
@@ -237,7 +237,7 @@ async fn interactive_settings_update_does_not_interrupt_the_active_model_request
         .expect("stream error")
         .expect("waiting state");
 
-    input.submit_next("first").await.expect("first queued");
+    input.submit("first").await.expect("first queued");
     timeout(Duration::from_secs(1), started_rx)
         .await
         .expect("first request starts")
@@ -261,7 +261,7 @@ async fn interactive_settings_update_does_not_interrupt_the_active_model_request
     release_tx.send(()).expect("release first request");
     wait_for_interactive_waiting(&mut stream).await;
 
-    input.submit_next("second").await.expect("second queued");
+    input.submit("second").await.expect("second queued");
     wait_for_interactive_waiting(&mut stream).await;
 
     let first_requests = first_provider.recorded_requests();
@@ -307,7 +307,7 @@ async fn interactive_subagent_setting_keeps_the_tool_profile_stable() {
         .expect("stream error")
         .expect("waiting state");
 
-    input.submit_next("first").await.expect("first queued");
+    input.submit("first").await.expect("first queued");
     wait_for_interactive_waiting(&mut stream).await;
     control
         .update_settings(InteractiveSettingsUpdate::default().with_subagents(
@@ -315,7 +315,7 @@ async fn interactive_subagent_setting_keeps_the_tool_profile_stable() {
         ))
         .await
         .expect("settings update accepted");
-    input.submit_next("second").await.expect("second queued");
+    input.submit("second").await.expect("second queued");
     wait_for_interactive_waiting(&mut stream).await;
 
     let requests = provider.recorded_requests();

@@ -232,54 +232,36 @@ class InteractiveRunState(str, Enum):
     CLOSED = "closed"
 
 
-class QueuedInputLane(str, Enum):
-    """Queue lane for an interactive input item."""
-
-    NEXT = "next"
-    SUSPENDED = "suspended"
-    BACKLOG = "backlog"
-
-
 @dataclass(frozen=True, slots=True)
 class QueuedInput:
-    """Typed view of one queued interactive input."""
+    """Typed view of one pending interactive input."""
 
+    id: int
     text: str
-    lane: QueuedInputLane
     position: int
 
     def __post_init__(self) -> None:
+        _validate_nonnegative("queued input id", self.id)
         _validate_text(
             "queued input text", self.text, 1_048_576, allow_newline_tab=True
         )
-        if not isinstance(self.lane, QueuedInputLane):
-            raise TypeError("queued input lane must be a QueuedInputLane")
         _validate_nonnegative("queued input position", self.position)
 
 
 @dataclass(frozen=True, slots=True)
 class QueuedInputs:
-    """Typed view of all queued interactive inputs."""
+    """Typed view of the pending interactive input queue."""
 
-    next: tuple[QueuedInput, ...]
-    suspended: tuple[QueuedInput, ...]
-    backlog: tuple[QueuedInput, ...]
+    items: tuple[QueuedInput, ...]
+    paused: bool
 
     def __post_init__(self) -> None:
-        for inputs in (self.next, self.suspended, self.backlog):
-            if not isinstance(inputs, tuple) or any(
-                not isinstance(item, QueuedInput) for item in inputs
-            ):
-                raise TypeError(
-                    "queued input groups must be tuples of QueuedInput values"
-                )
-        for lane, inputs in (
-            (QueuedInputLane.NEXT, self.next),
-            (QueuedInputLane.SUSPENDED, self.suspended),
-            (QueuedInputLane.BACKLOG, self.backlog),
+        if not isinstance(self.items, tuple) or any(
+            not isinstance(item, QueuedInput) for item in self.items
         ):
-            if any(item.lane is not lane for item in inputs):
-                raise ValueError("queued input lane does not match its group")
+            raise TypeError("queued inputs must be a tuple of QueuedInput values")
+        if not isinstance(self.paused, bool):
+            raise TypeError("queued inputs paused flag must be a bool")
 
 
 class EventPayload:

@@ -40,7 +40,7 @@ async fn interactive_wait_until_closed_preserves_unresolved_bridge_handoff() {
         .expect("interactive run starts");
     let (mut stream, input, control) = run.split();
     input
-        .submit_next("use the bridge")
+        .submit("use the bridge")
         .await
         .expect("input should be accepted");
 
@@ -122,7 +122,7 @@ async fn interactive_bridge_calls_are_one_ordered_batch_and_require_completion()
     ));
 
     input
-        .submit_next("use both bridge calls")
+        .submit("use both bridge calls")
         .await
         .expect("input queued");
 
@@ -254,7 +254,7 @@ async fn interactive_next_event_preserves_bridge_handoff_for_message_protocol() 
         })
     ));
     input
-        .submit_next("use bridge tools through message recovery")
+        .submit("use bridge tools through message recovery")
         .await
         .expect("input queued");
 
@@ -365,7 +365,7 @@ async fn interactive_mixed_model_batch_keeps_runtime_and_bridge_ownership_separa
         .await
         .expect("initial message should be readable");
     input
-        .submit_next("use one native and one bridge tool")
+        .submit("use one native and one bridge tool")
         .await
         .expect("input queued");
 
@@ -470,7 +470,7 @@ async fn interrupt_settles_pending_interactive_bridge_calls() {
         .await
         .expect("initial state should be readable");
     input
-        .submit_next("interrupt bridge")
+        .submit("interrupt bridge")
         .await
         .expect("input queued");
 

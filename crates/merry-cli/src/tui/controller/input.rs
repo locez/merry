@@ -8,10 +8,9 @@ use crate::tui::{
     overlay::{Overlay, OverlayKeyResult},
     preferences::TuiPreferences,
     provider_overlay::ModelPickerTarget,
-    state::TuiState,
+    state::{PendingEditCommit, TuiState},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::QueuedInputLane;
 
 pub(super) const TIMELINE_SCROLL_STEP: usize = 5;
 
@@ -19,8 +18,7 @@ pub(super) const PLAN_SCROLL_STEP: usize = 5;
 
 pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> ControllerEffect {
     match action {
-        KeyAction::SubmitNext => dispatch_submit(state, ControllerEffect::SubmitNext),
-        KeyAction::SubmitBacklog => dispatch_submit(state, ControllerEffect::SubmitBacklog),
+        KeyAction::Submit => dispatch_submit(state, ControllerEffect::Submit),
         KeyAction::CancelInputOrQuit => {
             if state.discard_comment_draft() {
                 ControllerEffect::None
@@ -98,14 +96,11 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             state.begin_or_older_history_search();
             ControllerEffect::None
         }
-        KeyAction::ResumeSuspended => ControllerEffect::ResumeSuspended,
-        KeyAction::DiscardSuspended => ControllerEffect::DiscardSuspended,
         KeyAction::ToggleComment => {
             state.toggle_comment_mode();
             ControllerEffect::None
         }
-        KeyAction::SendComments => send_comments(state, ControllerEffect::SubmitNext),
-        KeyAction::CloseOverlay => ControllerEffect::None,
+        KeyAction::SendComments => send_comments(state, ControllerEffect::Submit),
     }
 }
 
@@ -153,9 +148,13 @@ pub(super) fn submit_input(
     if exit_review_if_active(state) {
         return ControllerEffect::None;
     }
-    state
-        .take_input_for_submit()
-        .map_or(ControllerEffect::None, submit)
+    if let Some(submission) = state.take_input_for_submit() {
+        return submit(submission);
+    }
+    if !state.is_active_run() && state.queue_preview().paused && state.has_queue_preview_items() {
+        return ControllerEffect::FlushPendingInputs;
+    }
+    ControllerEffect::None
 }
 
 fn history_search_key(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
@@ -225,6 +224,9 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
     if state.overlay().is_none() && state.history_search_active() {
         return history_search_key(key, state);
     }
+    if state.overlay().is_none() && state.is_editing_pending() {
+        return pending_edit_key(key, state);
+    }
     if matches!(state.overlay(), Some(Overlay::CommandDetails(_)))
         && state.keymap().action_for(key.into()) == Some(KeyAction::OpenCommandDetails)
     {
@@ -243,7 +245,7 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
             KeyCode::Enter if slash_completion => {
                 state.accept_completion();
                 if input_is_known_slash(state) {
-                    return handle_key_action(KeyAction::SubmitNext, state);
+                    return handle_key_action(KeyAction::Submit, state);
                 }
                 return ControllerEffect::None;
             }
@@ -504,39 +506,83 @@ pub(crate) fn handle_paste_event(text: &str, state: &mut TuiState) {
     if state.overlay().is_none() && state.history_search_paste(text) {
         return;
     }
+    if state.overlay().is_none() && state.paste_into_pending_edit(text) {
+        return;
+    }
     if !state.insert_overlay_paste(text) {
         state.insert_input_paste(text);
     }
 }
 
+pub(super) fn commit_pending_edit_effect(state: &mut TuiState, resume: bool) -> ControllerEffect {
+    match state.commit_pending_edit() {
+        Some(PendingEditCommit::Update { id, text }) => {
+            ControllerEffect::UpdatePendingInput { id, text, resume }
+        }
+        Some(PendingEditCommit::Remove { id }) => ControllerEffect::RemovePendingInput {
+            id,
+            resume: Some(resume),
+        },
+        None => ControllerEffect::None,
+    }
+}
+
+fn pending_edit_key(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let super_key = key.modifiers.contains(KeyModifiers::SUPER);
+    match key.code {
+        KeyCode::Enter if !ctrl && !alt && !shift && !super_key => {
+            commit_pending_edit_effect(state, true)
+        }
+        KeyCode::Esc if key.modifiers.is_empty() => {
+            if state.clear_pending_edit_selection() {
+                ControllerEffect::None
+            } else if let Some(paused_before_edit) = state.cancel_pending_edit() {
+                ControllerEffect::SetPendingPaused(paused_before_edit)
+            } else {
+                ControllerEffect::None
+            }
+        }
+        KeyCode::Char('c' | 'C') if (ctrl || super_key) && !alt => {
+            if let Some(selected) = state.selected_pending_edit_text() {
+                ControllerEffect::CopyText(selected)
+            } else if super_key {
+                ControllerEffect::None
+            } else if let Some(paused_before_edit) = state.cancel_pending_edit() {
+                ControllerEffect::SetPendingPaused(paused_before_edit)
+            } else {
+                ControllerEffect::None
+            }
+        }
+        KeyCode::Char('x' | 'X') if (ctrl || super_key) && !alt => {
+            if let Some(cut) = state.cut_pending_edit_selection() {
+                ControllerEffect::CopyText(cut)
+            } else {
+                ControllerEffect::None
+            }
+        }
+        _ => {
+            state.handle_pending_edit_key(key);
+            ControllerEffect::None
+        }
+    }
+}
+
 pub(in crate::tui) fn project_local_effect(effect: &ControllerEffect, state: &mut TuiState) {
     match effect {
-        ControllerEffect::SubmitNext(submission) => {
-            state.push_local_user_echo(submission.text.clone(), QueuedInputLane::Next);
-            state.project_local_run_start();
-        }
-        ControllerEffect::SubmitBacklog(submission) => {
-            state.push_local_user_echo(submission.text.clone(), QueuedInputLane::Backlog);
-            state.project_local_run_start();
+        ControllerEffect::Submit(submission) => {
+            if !state.is_active_run() && !state.queue_preview().paused {
+                state.push_local_user_echo(submission.text.clone());
+                state.project_local_run_start();
+            }
         }
         ControllerEffect::Interrupt => {
             state.follow_latest();
             state.plan_mut().leave_focus();
             state.begin_stop_feedback();
         }
-        ControllerEffect::PersistPreferences(_)
-        | ControllerEffect::ApplyRuntimePreferences(_)
-        | ControllerEffect::OpenProviderManager
-        | ControllerEffect::OpenProviderForm
-        | ControllerEffect::OpenProviderEditor(_)
-        | ControllerEffect::OpenModelPicker(_)
-        | ControllerEffect::SaveProvider(_)
-        | ControllerEffect::UpdateProvider { .. }
-        | ControllerEffect::RefreshModels(_)
-        | ControllerEffect::DeleteProvider(_)
-        | ControllerEffect::SelectProvider { .. }
-        | ControllerEffect::OpenReasoningPicker { .. }
-        | ControllerEffect::ApplyProviderModel { .. } => {}
         _ => {}
     }
 }

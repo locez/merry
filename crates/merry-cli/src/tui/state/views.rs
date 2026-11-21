@@ -1,4 +1,5 @@
-use merry_core::{QueuedInputLane, QueuedInputView, ToolCallId};
+use crate::tui::input::TextInput;
+use merry_core::{QueuedInputsView, ToolCallId};
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -122,71 +123,43 @@ pub(crate) enum CommandView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct QueuePreview {
-    pub(crate) next: Vec<QueuedInputView>,
-    pub(crate) suspended: Vec<QueuedInputView>,
-    pub(crate) backlog: Vec<QueuedInputView>,
-}
-
-#[allow(dead_code)]
-impl QueuePreview {
-    pub(crate) fn empty() -> Self {
-        Self {
-            next: Vec::new(),
-            suspended: Vec::new(),
-            backlog: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct QueuePreviewItem {
+    pub(crate) id: u64,
     pub(crate) text: String,
 }
 
-#[allow(dead_code)]
-impl QueuePreviewItem {
-    pub(crate) fn display_text(&self, max_chars: usize) -> String {
-        if max_chars <= 3 {
-            return ".".repeat(max_chars);
-        }
-        if self.text.chars().count() <= max_chars {
-            return self.text.clone();
-        }
-        let prefix = self.text.chars().take(max_chars - 3).collect::<String>();
-        format!("{prefix}...")
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct QueuePreviewState {
-    pub(crate) next: Vec<QueuePreviewItem>,
-    pub(crate) suspended: Vec<QueuePreviewItem>,
-    pub(crate) backlog: Vec<QueuePreviewItem>,
+    pub(crate) items: Vec<QueuePreviewItem>,
+    pub(crate) paused: bool,
 }
 
 impl QueuePreviewState {
-    pub(super) fn from_preview(preview: QueuePreview) -> Self {
-        fn convert(items: Vec<QueuedInputView>) -> Vec<QueuePreviewItem> {
-            items
-                .into_iter()
-                .map(|item| QueuePreviewItem { text: item.text })
-                .collect()
-        }
-
+    pub(super) fn from_inputs(inputs: QueuedInputsView) -> Self {
         Self {
-            next: convert(preview.next),
-            suspended: convert(preview.suspended),
-            backlog: convert(preview.backlog),
+            items: inputs
+                .items
+                .into_iter()
+                .map(|item| QueuePreviewItem {
+                    id: item.id,
+                    text: item.text,
+                })
+                .collect(),
+            paused: inputs.paused,
         }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.next.is_empty() && self.suspended.is_empty() && self.backlog.is_empty()
+        self.items.is_empty()
     }
+}
+
+/// Active inline editor for one pending queue item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingQueueEditor {
+    pub(crate) id: u64,
+    pub(crate) input: TextInput,
+    pub(crate) paused_before_edit: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,7 +243,6 @@ pub(crate) struct PatchChangeView {
 pub(crate) enum TimelineItem {
     User {
         text: String,
-        lane: QueuedInputLane,
     },
     Assistant {
         text: String,

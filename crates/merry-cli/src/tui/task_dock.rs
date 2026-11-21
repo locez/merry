@@ -369,7 +369,6 @@ mod tests {
             text_interaction::MouseInput,
             theme::TuiTheme,
         };
-        use merry_core::QueuedInputLane;
         use ratatui::layout::{Position, Size};
 
         fn find_text_position(
@@ -403,7 +402,6 @@ mod tests {
         );
         state.push_timeline_item(TimelineItem::User {
             text: "USER_ANCHOR".to_owned(),
-            lane: QueuedInputLane::Next,
         });
         let reply: String = (0..40)
             .map(|i| format!("reply-line-{i:02}"))

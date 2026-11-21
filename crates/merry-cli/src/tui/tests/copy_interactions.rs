@@ -239,7 +239,6 @@ fn dragging_strips_timeline_decoration_from_markdown_output() {
     );
     state.push_timeline_item(TimelineItem::User {
         text: "Request".into(),
-        lane: merry_core::QueuedInputLane::Next,
     });
     state.push_timeline_item(TimelineItem::Assistant {
         text: "# Title\n\n```sh\nprintf 'hello'\n\nnext\n```".into(),

@@ -120,7 +120,7 @@ async fn runtime_process_stays_running_and_animates_until_the_backend_completes(
         );
         let mut projector = TuiProjector::default();
         input
-            .submit_next("Print the current directory.")
+            .submit("Print the current directory.")
             .await
             .expect("input should be accepted");
 

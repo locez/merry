@@ -92,6 +92,7 @@ pub use interactive::{
     AgentLoopControl, AgentLoopInput, InteractiveAgentRun, InteractiveError, InteractiveInputItem,
     InteractiveInputSnapshot, InteractivePrimaryModel, InteractiveRunEventStream, InteractiveRunId,
     InteractiveRunMessage, InteractiveSettingsUpdate, InteractiveSubagentSettings, InterruptReason,
+    QueuedInputId,
 };
 pub use merry_core::{
     ContextWindowSource, ImageSummary, ToolOutput, ToolOutputKind, ToolOutputPreview,

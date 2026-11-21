@@ -7,8 +7,7 @@ use crate::tui::{
     theme::TuiTheme,
 };
 use merry_core::{
-    ErrorInfo, QueuedInputLane, QueuedInputView, RuntimeEvent, ToolCallId, ToolCallResult,
-    ToolOutput,
+    ErrorInfo, QueuedInputView, RuntimeEvent, ToolCallId, ToolCallResult, ToolOutput,
 };
 use merry_runtime::SessionTranscriptItem;
 use serde_json::json;
@@ -87,7 +86,7 @@ fn projector_rebuilds_resume_transcript_history() {
 
     assert!(matches!(
         &state.timeline()[0],
-        TimelineItem::User { text, lane: QueuedInputLane::Next } if text == "看看 hello_world.py"
+        TimelineItem::User { text } if text == "看看 hello_world.py"
     ));
     assert!(matches!(
         &state.timeline()[1],
@@ -322,10 +321,9 @@ fn projector_projects_accepted_user_input_into_timeline() {
 
     projector.apply(
         RuntimeEvent::QueuedInputAccepted {
-            lane: QueuedInputLane::Next,
             inputs: vec![QueuedInputView {
+                id: 1,
                 text: "查一下 baidu.com".to_owned(),
-                lane: QueuedInputLane::Next,
                 position: 0,
             }],
         },
@@ -336,7 +334,6 @@ fn projector_projects_accepted_user_input_into_timeline() {
         state.timeline(),
         &[TimelineItem::User {
             text: "查一下 baidu.com".to_owned(),
-            lane: QueuedInputLane::Next,
         }]
     );
 }
@@ -351,14 +348,13 @@ fn projector_confirms_local_echo_without_duplicate_user_line() {
     );
     let mut projector = TuiProjector::default();
 
-    state.push_local_user_echo("same".to_owned(), QueuedInputLane::Next);
-    state.push_local_user_echo("same".to_owned(), QueuedInputLane::Next);
+    state.push_local_user_echo("same".to_owned());
+    state.push_local_user_echo("same".to_owned());
     projector.apply(
         RuntimeEvent::QueuedInputAccepted {
-            lane: QueuedInputLane::Next,
             inputs: vec![QueuedInputView {
+                id: 1,
                 text: "same".to_owned(),
-                lane: QueuedInputLane::Next,
                 position: 0,
             }],
         },
@@ -370,11 +366,9 @@ fn projector_confirms_local_echo_without_duplicate_user_line() {
         &[
             TimelineItem::User {
                 text: "same".to_owned(),
-                lane: QueuedInputLane::Next,
             },
             TimelineItem::User {
                 text: "same".to_owned(),
-                lane: QueuedInputLane::Next,
             },
         ]
     );

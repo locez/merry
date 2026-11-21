@@ -1,5 +1,4 @@
 use crate::{PlanControllerError, RuntimeError};
-use merry_core::QueuedInputLane;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
@@ -25,32 +24,30 @@ pub enum InterruptReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct InputReceipt {
-    pub id: QueuedInputId,
-    pub lane: QueuedInputLane,
-    pub position: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct InputRecord {
-    pub receipt: InputReceipt,
+    pub id: QueuedInputId,
     pub text: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct InputRecords {
-    pub next: Vec<InputRecord>,
-    pub suspended: Vec<InputRecord>,
-    pub backlog: Vec<InputRecord>,
+    pub items: Vec<InputRecord>,
+    pub paused: bool,
 }
 
+/// Stable runtime-assigned identifier for one pending interactive input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(super) struct QueuedInputId(u64);
+pub struct QueuedInputId(u64);
 
 impl QueuedInputId {
     #[must_use]
     pub const fn from_u64(value: u64) -> Self {
         Self(value)
+    }
+
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
+        self.0
     }
 }
 
@@ -93,23 +90,10 @@ pub enum InteractiveError {
     AlreadyAccepted,
     #[error("interactive input is already removed")]
     AlreadyRemoved,
-    #[error("interactive input is in {actual:?}, expected {expected:?}")]
-    WrongQueue {
-        expected: QueuedInputLane,
-        actual: QueuedInputLane,
-    },
-    #[error("interactive pending input order for {lane:?} is invalid: {reason}")]
-    InvalidPendingOrder {
-        lane: QueuedInputLane,
-        reason: &'static str,
-    },
-    #[error("interactive pending input order for {lane:?} is stale: {reason}")]
-    StalePendingOrder {
-        lane: QueuedInputLane,
-        reason: &'static str,
-    },
-    #[error("interactive input lane {lane:?} is full")]
-    QueueFull { lane: QueuedInputLane },
+    #[error("interactive pending input order is invalid: {reason}")]
+    InvalidPendingOrder { reason: &'static str },
+    #[error("interactive pending input order is stale: {reason}")]
+    StalePendingOrder { reason: &'static str },
     #[error("runtime error while running interactive loop: {source}")]
     Runtime {
         #[from]

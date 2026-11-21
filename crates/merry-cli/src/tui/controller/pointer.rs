@@ -1,6 +1,9 @@
 //! Pointer, click, and mouse-wheel translation for the TUI controller.
 
-use super::input::{PLAN_SCROLL_STEP, handle_key_action, input_is_known_slash, press_overlay};
+use super::input::{
+    PLAN_SCROLL_STEP, commit_pending_edit_effect, handle_key_action, input_is_known_slash,
+    press_overlay,
+};
 use crate::tui::{
     click_target::{OverlayPointer, PointerTarget, StatusAction, pointer_target},
     command_details::CommandNavigation,
@@ -281,6 +284,54 @@ fn status_click(action: StatusAction, state: &mut TuiState) -> ControllerEffect 
     handle_key_action(key_action, state)
 }
 
+fn apply_pending_queue_pointer(
+    state: &mut TuiState,
+    pointer: crate::tui::render::PendingQueuePointer,
+) -> ControllerEffect {
+    use crate::tui::render::PendingQueuePointer;
+    match pointer {
+        PendingQueuePointer::Edit(id) => {
+            if state.editing_pending_id() == Some(id) {
+                return ControllerEffect::None;
+            }
+            if state.is_editing_pending() {
+                return match state.switch_pending_edit(id) {
+                    Some(crate::tui::state::PendingEditCommit::Update { id, text }) => {
+                        ControllerEffect::UpdatePendingInput {
+                            id,
+                            text,
+                            resume: false,
+                        }
+                    }
+                    Some(crate::tui::state::PendingEditCommit::Remove { id }) => {
+                        ControllerEffect::RemovePendingInput {
+                            id,
+                            resume: Some(false),
+                        }
+                    }
+                    None => ControllerEffect::None,
+                };
+            }
+            match state.begin_pending_edit(id) {
+                Some(true) => ControllerEffect::SetPendingPaused(true),
+                _ => ControllerEffect::None,
+            }
+        }
+        PendingQueuePointer::Remove(id) => {
+            let resume = if state.editing_pending_id() == Some(id) {
+                state
+                    .cancel_pending_edit()
+                    .map(|paused_before_edit| !paused_before_edit)
+            } else {
+                None
+            };
+            ControllerEffect::RemovePendingInput { id, resume }
+        }
+        PendingQueuePointer::SaveEdit => commit_pending_edit_effect(state, true),
+        PendingQueuePointer::SendAll => ControllerEffect::FlushPendingInputs,
+    }
+}
+
 fn apply_plan_pointer(state: &mut TuiState, pointer: PlanPointer) {
     match pointer {
         PlanPointer::Fold(node_id) => {
@@ -317,7 +368,7 @@ fn accept_completion_at(
     }
     state.accept_completion();
     if slash && input_is_known_slash(state) {
-        handle_key_action(KeyAction::SubmitNext, state)
+        handle_key_action(KeyAction::Submit, state)
     } else {
         ControllerEffect::None
     }
@@ -375,6 +426,11 @@ pub(crate) fn handle_mouse_input(
                 PointerTarget::Model => return open_model_from_header(state),
                 PointerTarget::Status(action) => return status_click(action, state),
                 PointerTarget::Composer => {
+                    let effect = if state.is_editing_pending() {
+                        commit_pending_edit_effect(state, true)
+                    } else {
+                        ControllerEffect::None
+                    };
                     state.plan_mut().leave_focus();
                     if position_composer_cursor(
                         state,
@@ -385,7 +441,10 @@ pub(crate) fn handle_mouse_input(
                     ) {
                         state.set_composer_mouse_selecting(true);
                     }
-                    return ControllerEffect::None;
+                    return effect;
+                }
+                PointerTarget::PendingQueue(pointer) => {
+                    return apply_pending_queue_pointer(state, pointer);
                 }
                 PointerTarget::Plan(pointer) => {
                     apply_plan_pointer(state, pointer);

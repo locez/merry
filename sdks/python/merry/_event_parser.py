@@ -54,7 +54,6 @@ from ._event_types import (
     EventType,
     InteractiveRunState,
     QueuedInput,
-    QueuedInputLane,
     QueuedInputs,
     RawEventData,
     RuntimeToolCall,
@@ -291,10 +290,7 @@ def _parse_payload(
                 _enum_value(InteractiveRunState, data["state"], "interactive run state")
             )
         case EventType.QUEUED_INPUT_ACCEPTED:
-            return QueuedInputAcceptedPayload(
-                _enum_value(QueuedInputLane, data["lane"], "queued input lane"),
-                _queued_inputs(data["inputs"]),
-            )
+            return QueuedInputAcceptedPayload(_queued_inputs(data["inputs"]))
         case EventType.QUEUED_INPUTS_CHANGED:
             return QueuedInputsChangedPayload(_queued_input_groups(data["inputs"]))
         case EventType.CLOSED:
@@ -389,10 +385,10 @@ def _queued_inputs(
 
 def _queued_input(value: object) -> QueuedInput:
     data = require_json_object(value, "queued input")
-    validate_object_keys(data, "queued input", required={"text", "lane", "position"})
+    validate_object_keys(data, "queued input", required={"id", "text", "position"})
     return QueuedInput(
+        id=_required_int(data, "id"),
         text=_required_string(data, "text"),
-        lane=_enum_value(QueuedInputLane, data["lane"], "queued input lane"),
         position=_required_int(data, "position"),
     )
 
@@ -402,12 +398,14 @@ def _queued_input_groups(value: object) -> QueuedInputs:
     validate_object_keys(
         data,
         "queued input groups",
-        required={"next", "suspended", "backlog"},
+        required={"items", "paused"},
     )
+    paused = data["paused"]
+    if not isinstance(paused, bool):
+        raise TypeError("queued inputs paused flag must be a bool")
     return QueuedInputs(
-        next=_queued_inputs(data["next"], "queued next inputs"),
-        suspended=_queued_inputs(data["suspended"], "queued suspended inputs"),
-        backlog=_queued_inputs(data["backlog"], "queued backlog inputs"),
+        items=_queued_inputs(data["items"], "queued pending inputs"),
+        paused=paused,
     )
 
 

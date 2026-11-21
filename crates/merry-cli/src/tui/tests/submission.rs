@@ -5,7 +5,6 @@ use crate::tui::{
     tests::{draft_image, text_submission},
     theme::TuiTheme,
 };
-use merry_core::QueuedInputLane;
 
 #[test]
 fn controller_submit_next_takes_input_text() {
@@ -19,9 +18,9 @@ fn controller_submit_next_takes_input_text() {
     state.input_mut().insert_char('o');
     state.input_mut().insert_char('w');
 
-    let effect = handle_key_action(KeyAction::SubmitNext, &mut state);
+    let effect = handle_key_action(KeyAction::Submit, &mut state);
 
-    assert_eq!(effect, ControllerEffect::SubmitNext(text_submission("now")));
+    assert_eq!(effect, ControllerEffect::Submit(text_submission("now")));
     assert_eq!(state.input_text(), "");
 }
 
@@ -37,11 +36,11 @@ fn controller_submit_next_preserves_multiline_input_text() {
     state.insert_input_newline();
     state.insert_input_str("换行测试");
 
-    let effect = handle_key_action(KeyAction::SubmitNext, &mut state);
+    let effect = handle_key_action(KeyAction::Submit, &mut state);
 
     assert_eq!(
         effect,
-        ControllerEffect::SubmitNext(text_submission("1234\n换行测试"))
+        ControllerEffect::Submit(text_submission("1234\n换行测试"))
     );
 }
 
@@ -59,8 +58,8 @@ fn controller_submit_carries_images_and_records_text_only_history() {
         .insert_image(draft_image(7))
         .expect("image should insert");
 
-    let effect = handle_key_action(KeyAction::SubmitNext, &mut state);
-    let ControllerEffect::SubmitNext(submission) = effect else {
+    let effect = handle_key_action(KeyAction::Submit, &mut state);
+    let ControllerEffect::Submit(submission) = effect else {
         panic!("image submission should produce a next-lane effect");
     };
 
@@ -90,14 +89,14 @@ fn controller_submit_records_shell_like_input_history() {
 
     state.input_mut().insert_str("first");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
-        ControllerEffect::SubmitNext(text_submission("first"))
+        handle_key_action(KeyAction::Submit, &mut state),
+        ControllerEffect::Submit(text_submission("first"))
     );
     state.record_input_history("first");
     state.input_mut().insert_str("second");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
-        ControllerEffect::SubmitNext(text_submission("second"))
+        handle_key_action(KeyAction::Submit, &mut state),
+        ControllerEffect::Submit(text_submission("second"))
     );
     state.record_input_history("second");
 
@@ -134,8 +133,8 @@ fn controller_history_restores_unsent_draft() {
 
     state.input_mut().insert_str("sent");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
-        ControllerEffect::SubmitNext(text_submission("sent"))
+        handle_key_action(KeyAction::Submit, &mut state),
+        ControllerEffect::Submit(text_submission("sent"))
     );
     state.record_input_history("sent");
     state.input_mut().insert_str("draft");
@@ -161,7 +160,7 @@ fn controller_empty_submit_does_nothing() {
         TuiTheme::default(),
     );
 
-    let effect = handle_key_action(KeyAction::SubmitNext, &mut state);
+    let effect = handle_key_action(KeyAction::Submit, &mut state);
 
     assert_eq!(effect, ControllerEffect::None);
 }
@@ -176,7 +175,6 @@ fn controller_submit_exits_review_mode_before_submitting_input() {
     );
     state.push_timeline_item(TimelineItem::User {
         text: "first".to_owned(),
-        lane: QueuedInputLane::Next,
     });
     state.push_timeline_item(TimelineItem::Assistant {
         text: "answer".to_owned(),
@@ -185,7 +183,7 @@ fn controller_submit_exits_review_mode_before_submitting_input() {
     state.jump_to_previous_user_input();
 
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
+        handle_key_action(KeyAction::Submit, &mut state),
         ControllerEffect::None
     );
     assert_eq!(state.timeline_review_user_index(), None);
@@ -193,7 +191,7 @@ fn controller_submit_exits_review_mode_before_submitting_input() {
     assert_eq!(state.input_text(), "draft");
 
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
-        ControllerEffect::SubmitNext(text_submission("draft"))
+        handle_key_action(KeyAction::Submit, &mut state),
+        ControllerEffect::Submit(text_submission("draft"))
     );
 }

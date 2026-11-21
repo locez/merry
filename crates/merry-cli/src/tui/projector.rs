@@ -7,7 +7,7 @@ use crate::tui::{
         failed_tool_body, parse_apply_patch_view, permission_output_bodies,
         read_text_output_preview, started_tool_title_and_detail, tool_output_text,
     },
-    state::{CommandView, QueuePreview, TimelineItem, ToolOutputPreview, TuiState},
+    state::{CommandView, TimelineItem, ToolOutputPreview, TuiState},
 };
 use merry_core::{
     PlanAttemptOutcome, PlanDirectiveStatus, PlanPhase, RuntimeEvent, TOOL_CANCELLED_BY_USER_CODE,
@@ -50,7 +50,7 @@ impl TuiProjector {
     ) {
         match item {
             SessionTranscriptItem::UserMessage { text, .. } => {
-                state.confirm_or_push_user_input(text, merry_core::QueuedInputLane::Next);
+                state.confirm_or_push_user_input(text);
             }
             SessionTranscriptItem::AssistantText { text } => {
                 self.streaming_assistant_index = None;
@@ -107,16 +107,12 @@ impl TuiProjector {
                 state.apply_runtime_run_state(run_state);
             }
             RuntimeEvent::QueuedInputsChanged { inputs } => {
-                state.update_queue_preview(QueuePreview {
-                    next: inputs.next,
-                    suspended: inputs.suspended,
-                    backlog: inputs.backlog,
-                });
+                state.update_queue_preview(inputs);
             }
-            RuntimeEvent::QueuedInputAccepted { lane, inputs } => {
+            RuntimeEvent::QueuedInputAccepted { inputs } => {
                 state.confirm_local_run_start();
                 for input in inputs {
-                    state.confirm_or_push_user_input(input.text, lane);
+                    state.confirm_or_push_user_input(input.text);
                 }
             }
             RuntimeEvent::CompactionStarted { .. } => {

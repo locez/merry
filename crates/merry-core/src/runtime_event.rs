@@ -227,12 +227,9 @@ pub enum RuntimeEvent {
     },
     /// Interactive driver state changed.
     InteractiveRunStateChanged { state: InteractiveRunState },
-    /// Queued input became provider-visible.
-    QueuedInputAccepted {
-        lane: QueuedInputLane,
-        inputs: Vec<QueuedInputView>,
-    },
-    /// The read-only queued input view changed.
+    /// Queued pending inputs became provider-visible together as one turn.
+    QueuedInputAccepted { inputs: Vec<QueuedInputView> },
+    /// The read-only pending-input queue or its pause state changed.
     QueuedInputsChanged { inputs: QueuedInputsView },
     /// A public runtime stream closed.
     Closed,
@@ -460,29 +457,25 @@ pub enum InteractiveRunState {
     Closed,
 }
 
-/// Pending input lane.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum QueuedInputLane {
-    Next,
-    Suspended,
-    Backlog,
-}
-
 /// Read-only public view of one pending queued input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QueuedInputView {
+    /// Stable runtime-assigned identifier for targeted edit or removal.
+    pub id: u64,
+    /// Message text waiting to be sent.
     pub text: String,
-    pub lane: QueuedInputLane,
+    /// Zero-based position in the pending queue.
     pub position: usize,
 }
 
-/// Read-only public view of all pending queued inputs.
+/// Read-only public view of the single pending-input queue.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QueuedInputsView {
-    pub next: Vec<QueuedInputView>,
-    pub suspended: Vec<QueuedInputView>,
-    pub backlog: Vec<QueuedInputView>,
+    /// Pending inputs waiting to be dispatched together at the next boundary.
+    pub items: Vec<QueuedInputView>,
+    /// Whether automatic dispatch is paused (e.g., while editing a pending item
+    /// or after an interrupt).
+    pub paused: bool,
 }

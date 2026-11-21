@@ -623,8 +623,8 @@ pub(crate) struct TuiThemeToml {
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TuiKeymapToml {
-    pub(crate) submit_next: Option<String>,
-    pub(crate) submit_backlog: Option<String>,
+    #[serde(alias = "submit_next")]
+    pub(crate) submit: Option<String>,
     pub(crate) cancel_input_or_quit: Option<String>,
     pub(crate) insert_newline: Option<String>,
     pub(crate) paste_image: Option<String>,
@@ -640,8 +640,6 @@ pub(crate) struct TuiKeymapToml {
     pub(crate) history_previous: Option<String>,
     pub(crate) history_next: Option<String>,
     pub(crate) history_search: Option<String>,
-    pub(crate) resume_suspended: Option<String>,
-    pub(crate) discard_suspended: Option<String>,
     pub(crate) toggle_comment: Option<String>,
 }
 

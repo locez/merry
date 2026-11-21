@@ -9,8 +9,9 @@ use crate::tui::{
     theme::TuiTheme,
 };
 use clipboard::ClipboardFeedback;
-use merry_core::{InteractiveRunState, QueuedInputLane, RuntimeEvent, SessionUsage};
+use merry_core::{InteractiveRunState, RuntimeEvent, SessionUsage};
 use overlays::OverlayState;
+pub(crate) use pending_queue::PendingEditCommit;
 use std::{
     path::PathBuf,
     time::{Duration, Instant},
@@ -18,8 +19,7 @@ use std::{
 pub(crate) use timeline::TimelineAnchor;
 pub(crate) use views::{
     CommandFailure, CommandView, LiveCommandOutput, PatchChangeView, PatchLineKind, PatchLineView,
-    PatchOperationView, QueuePreview, QueuePreviewItem, QueuePreviewState, TimelineItem,
-    ToolOutputPreview,
+    PatchOperationView, PendingQueueEditor, QueuePreviewState, TimelineItem, ToolOutputPreview,
 };
 
 mod comments;
@@ -27,6 +27,7 @@ pub(crate) use comments::CommentHighlight;
 mod history_search;
 mod input;
 mod overlays;
+mod pending_queue;
 mod status;
 mod subagents;
 pub(crate) use subagents::SubagentUpdate;
@@ -55,6 +56,7 @@ pub(crate) struct TuiState {
     input_history: InputHistory,
     history_search: Option<crate::tui::input::HistorySearch>,
     queue_preview: QueuePreviewState,
+    pending_editor: Option<PendingQueueEditor>,
     timeline: Vec<TimelineItem>,
     timeline_versions: Vec<u64>,
     next_timeline_version: u64,
@@ -74,7 +76,7 @@ pub(crate) struct TuiState {
     timeline_has_updates: bool,
     text_selection: Option<TextSelection>,
     clipboard_feedback: Option<ClipboardFeedback>,
-    pending_local_echoes: Vec<PendingLocalEcho>,
+    pending_local_echoes: Vec<String>,
     pending_local_run_start: bool,
     stop_feedback: StopFeedbackState,
     run_state: InteractiveRunState,
@@ -88,13 +90,6 @@ pub(crate) struct TuiState {
     settings_defaults: TuiSettingsDefaults,
     plan: PlanUiState,
     comments: comments::CommentSession,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingLocalEcho {
-    text: String,
-    lane: QueuedInputLane,
-    timeline_index: usize,
 }
 
 /// A stop request moves from idle to pending, then completes at a cancellation boundary.
@@ -127,7 +122,8 @@ impl TuiState {
             completion_menu: None,
             input_history: InputHistory::default(),
             history_search: None,
-            queue_preview: QueuePreviewState::from_preview(QueuePreview::empty()),
+            queue_preview: QueuePreviewState::default(),
+            pending_editor: None,
             timeline: Vec::new(),
             timeline_versions: Vec::new(),
             next_timeline_version: 1,
@@ -355,45 +351,26 @@ impl TuiState {
         }
     }
 
-    pub(crate) fn push_user_timeline_item(&mut self, text: String, lane: QueuedInputLane) {
-        self.push_timeline_item(TimelineItem::User { text, lane });
+    pub(crate) fn push_user_timeline_item(&mut self, text: String) {
+        self.push_timeline_item(TimelineItem::User { text });
     }
 
-    pub(crate) fn push_local_user_echo(&mut self, text: String, lane: QueuedInputLane) {
-        let timeline_index = self.timeline.len();
-        self.pending_local_echoes.push(PendingLocalEcho {
-            text: text.clone(),
-            lane,
-            timeline_index,
-        });
-        self.push_user_timeline_item(text, lane);
+    pub(crate) fn push_local_user_echo(&mut self, text: String) {
+        self.pending_local_echoes.push(text.clone());
+        self.push_user_timeline_item(text);
     }
 
-    pub(crate) fn confirm_or_push_user_input(&mut self, text: String, lane: QueuedInputLane) {
-        let exact = self
+    pub(crate) fn confirm_or_push_user_input(&mut self, text: String) {
+        if let Some(index) = self
             .pending_local_echoes
             .iter()
-            .position(|echo| echo.text == text && echo.lane == lane);
-        let moved_to_suspended = (lane == QueuedInputLane::Suspended).then(|| {
-            self.pending_local_echoes
-                .iter()
-                .position(|echo| echo.text == text && echo.lane == QueuedInputLane::Next)
-        });
-        if let Some(index) = exact.or_else(|| moved_to_suspended.flatten()) {
-            let echo = self.pending_local_echoes.remove(index);
-            if echo.lane != lane
-                && let Some(TimelineItem::User {
-                    lane: timeline_lane,
-                    ..
-                }) = self.timeline.get_mut(echo.timeline_index)
-            {
-                *timeline_lane = lane;
-                self.bump_timeline_version(echo.timeline_index);
-            }
+            .position(|echo| echo == &text)
+        {
+            let _ = self.pending_local_echoes.remove(index);
             return;
         }
 
-        self.push_user_timeline_item(text, lane);
+        self.push_user_timeline_item(text);
     }
 
     pub(crate) fn replace_timeline_item(&mut self, index: usize, item: TimelineItem) {
@@ -629,18 +606,6 @@ impl TuiState {
             self.timeline_review_user_index = Some(index);
             self.timeline_anchor = None;
         }
-    }
-
-    pub(crate) fn queue_preview(&self) -> &QueuePreviewState {
-        &self.queue_preview
-    }
-
-    pub(crate) fn has_queue_preview_items(&self) -> bool {
-        !self.queue_preview.is_empty()
-    }
-
-    pub(crate) fn update_queue_preview(&mut self, preview: QueuePreview) {
-        self.queue_preview = QueuePreviewState::from_preview(preview);
     }
 
     pub(crate) fn set_run_state(&mut self, state: InteractiveRunState) {

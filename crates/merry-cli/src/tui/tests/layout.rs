@@ -1,14 +1,14 @@
 use crate::tui::{
     keymap::Keymap,
     render::{render_to_buffer, render_to_buffer_and_cursor, render_to_text},
-    state::{QueuePreview, TimelineItem, TuiState},
+    state::{TimelineItem, TuiState},
     tests::{
         draft_image, find_cell_color, find_cell_style, find_text_position, rendered_buffer_text,
     },
     theme::TuiTheme,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::{QueuedInputLane, QueuedInputView};
+use merry_core::{QueuedInputView, QueuedInputsView};
 use ratatui::style::{Color, Modifier};
 
 #[test]
@@ -35,36 +35,6 @@ fn renderer_highlights_complete_image_placeholders_in_the_composer() {
 }
 
 #[test]
-fn queue_preview_keeps_actual_text_and_truncates_for_display() {
-    let mut state = TuiState::new(
-        "/repo/merry".into(),
-        "gpt-test".to_owned(),
-        Keymap::default(),
-        TuiTheme::default(),
-    );
-
-    state.update_queue_preview(QueuePreview {
-        next: vec![QueuedInputView {
-            text: "short next".to_owned(),
-            lane: QueuedInputLane::Next,
-            position: 0,
-        }],
-        suspended: vec![],
-        backlog: vec![QueuedInputView {
-            text: "a very long backlog item that should be truncated".to_owned(),
-            lane: QueuedInputLane::Backlog,
-            position: 0,
-        }],
-    });
-
-    assert_eq!(state.queue_preview().next[0].text, "short next");
-    assert_eq!(
-        state.queue_preview().backlog[0].display_text(18),
-        "a very long bac..."
-    );
-}
-
-#[test]
 fn renderer_shows_status_timeline_queue_and_input() {
     let mut state = TuiState::new(
         "/repo".into(),
@@ -75,18 +45,20 @@ fn renderer_shows_status_timeline_queue_and_input() {
     state.push_timeline_item(TimelineItem::Assistant {
         text: "assistant says hello".to_owned(),
     });
-    state.update_queue_preview(QueuePreview {
-        next: vec![QueuedInputView {
-            text: "next item".to_owned(),
-            lane: QueuedInputLane::Next,
-            position: 0,
-        }],
-        suspended: vec![],
-        backlog: vec![QueuedInputView {
-            text: "backlog item".to_owned(),
-            lane: QueuedInputLane::Backlog,
-            position: 0,
-        }],
+    state.update_queue_preview(QueuedInputsView {
+        items: vec![
+            QueuedInputView {
+                id: 1,
+                text: "first pending item".to_owned(),
+                position: 0,
+            },
+            QueuedInputView {
+                id: 2,
+                text: "second pending item".to_owned(),
+                position: 1,
+            },
+        ],
+        paused: false,
     });
     state.input_mut().insert_char('h');
     state.input_mut().insert_char('i');
@@ -96,10 +68,9 @@ fn renderer_shows_status_timeline_queue_and_input() {
     assert!(text.contains("Ready"));
     assert!(text.contains("gpt-test"));
     assert!(text.contains("assistant says hello"));
-    assert!(text.contains("Next"));
-    assert!(text.contains("next item"));
-    assert!(text.contains("Backlog"));
-    assert!(text.contains("backlog item"));
+    assert!(text.contains("Pending (2)"));
+    assert!(text.contains("first pending item"));
+    assert!(text.contains("second pending item"));
     assert!(text.contains("hi"));
 }
 
@@ -113,25 +84,26 @@ fn renderer_uses_one_timeline_without_permanent_side_rails() {
     );
     state.push_timeline_item(TimelineItem::User {
         text: "make the TUI distinct".to_owned(),
-        lane: QueuedInputLane::Next,
     });
     state.push_timeline_item(TimelineItem::Expanded {
         title: "Ran cargo test -p merry-cli".to_owned(),
         body: "ok".to_owned(),
         expanded: true,
     });
-    state.update_queue_preview(QueuePreview {
-        next: vec![QueuedInputView {
-            text: "queued next item".to_owned(),
-            lane: QueuedInputLane::Next,
-            position: 0,
-        }],
-        suspended: vec![],
-        backlog: vec![QueuedInputView {
-            text: "queued backlog item".to_owned(),
-            lane: QueuedInputLane::Backlog,
-            position: 0,
-        }],
+    state.update_queue_preview(QueuedInputsView {
+        items: vec![
+            QueuedInputView {
+                id: 1,
+                text: "queued first item".to_owned(),
+                position: 0,
+            },
+            QueuedInputView {
+                id: 2,
+                text: "queued second item".to_owned(),
+                position: 1,
+            },
+        ],
+        paused: false,
     });
 
     let text = render_to_text(&state, 180, 32);
@@ -140,8 +112,8 @@ fn renderer_uses_one_timeline_without_permanent_side_rails() {
     assert!(text.contains("merry"));
     assert!(text.contains("make the TUI distinct"));
     assert!(text.contains("Ran cargo test -p merry-cli"));
-    assert!(text.contains("queued next item"));
-    assert!(text.contains("queued backlog item"));
+    assert!(text.contains("queued first item"));
+    assert!(text.contains("queued second item"));
     assert!(!text.contains("CHAT"));
     assert!(!text.contains("FOCUS"));
     assert!(!text.contains("RUN"));
@@ -157,7 +129,6 @@ fn renderer_keeps_medium_terminal_focused_on_the_timeline() {
     );
     state.push_timeline_item(TimelineItem::User {
         text: "review layout".to_owned(),
-        lane: QueuedInputLane::Next,
     });
     state.push_timeline_item(TimelineItem::Muted {
         title: "Read".to_owned(),
@@ -180,22 +151,21 @@ fn renderer_keeps_bottom_queue_on_narrow_terminal() {
         Keymap::default(),
         TuiTheme::default(),
     );
-    state.update_queue_preview(QueuePreview {
-        next: vec![QueuedInputView {
-            text: "narrow next item".to_owned(),
-            lane: QueuedInputLane::Next,
+    state.update_queue_preview(QueuedInputsView {
+        items: vec![QueuedInputView {
+            id: 1,
+            text: "narrow pending item".to_owned(),
             position: 0,
         }],
-        suspended: vec![],
-        backlog: vec![],
+        paused: false,
     });
 
     let text = render_to_text(&state, 79, 24);
 
     assert!(!text.contains("FOCUS"));
     assert!(!text.contains("RUN"));
-    assert!(text.contains("queue"));
-    assert!(text.contains("narrow next item"));
+    assert!(text.contains("Pending (1)"));
+    assert!(text.contains("narrow pending item"));
     assert!(text.contains("M"));
     assert!(!text.contains("input"));
 }
@@ -252,7 +222,6 @@ fn renderer_preserves_user_message_newlines() {
     );
     state.push_timeline_item(TimelineItem::User {
         text: "1234\n换行测试".to_owned(),
-        lane: QueuedInputLane::Next,
     });
 
     let text = render_to_text(&state, 80, 16);
@@ -314,7 +283,6 @@ fn renderer_shows_user_input_in_timeline() {
     );
     state.push_timeline_item(TimelineItem::User {
         text: "查一下 baidu.com".to_owned(),
-        lane: QueuedInputLane::Next,
     });
 
     let buffer = render_to_buffer(&state, 80, 16);
@@ -345,16 +313,12 @@ fn renderer_hides_empty_queue_panel_to_preserve_timeline_space() {
     );
     state.push_timeline_item(TimelineItem::User {
         text: "latest local echo".to_owned(),
-        lane: QueuedInputLane::Next,
     });
 
     let text = render_to_text(&state, 80, 16);
 
     assert!(text.contains("latest local echo"));
-    assert!(!text.contains("queue"));
-    assert!(!text.contains("Next"));
-    assert!(!text.contains("Suspended"));
-    assert!(!text.contains("Backlog"));
+    assert!(!text.contains("Pending"));
 }
 
 #[test]
@@ -416,14 +380,12 @@ fn renderer_review_user_input_starts_viewport_at_selected_user_turn() {
     );
     state.push_timeline_item(TimelineItem::User {
         text: "first request".to_owned(),
-        lane: QueuedInputLane::Next,
     });
     state.push_timeline_item(TimelineItem::Assistant {
         text: "first answer".to_owned(),
     });
     state.push_timeline_item(TimelineItem::User {
         text: "second request".to_owned(),
-        lane: QueuedInputLane::Next,
     });
     state.push_timeline_item(TimelineItem::Assistant {
         text: "second answer".to_owned(),
@@ -493,21 +455,21 @@ fn renderer_ellipsizes_queue_items_to_region_width() {
         Keymap::default(),
         TuiTheme::default(),
     );
-    state.update_queue_preview(QueuePreview {
-        next: vec![QueuedInputView {
+    state.update_queue_preview(QueuedInputsView {
+        items: vec![QueuedInputView {
+            id: 1,
             text: "abcdefghijklmnopqrstuvwxyz".to_owned(),
-            lane: QueuedInputLane::Next,
             position: 0,
         }],
-        suspended: vec![],
-        backlog: vec![],
+        paused: false,
     });
 
     let text = render_to_text(&state, 18, 12);
 
     assert!(
         text.lines()
-            .any(|line| line.contains("  1. ") && line.contains("..."))
+            .any(|line| line.contains("1. ") && line.contains("...")),
+        "{text}"
     );
     assert!(!text.contains("abcdefghijklmnopqrstuvwxyz"));
 }
@@ -520,15 +482,14 @@ fn queue_preview_truncates_long_content_on_narrow_terminal() {
         Keymap::default(),
         TuiTheme::default(),
     );
-    state.update_queue_preview(QueuePreview {
-        next: vec![QueuedInputView {
+    state.update_queue_preview(QueuedInputsView {
+        items: vec![QueuedInputView {
+            id: 1,
             text: "this queue item is intentionally long enough to exceed the right rail width"
                 .to_owned(),
-            lane: QueuedInputLane::Next,
             position: 0,
         }],
-        suspended: vec![],
-        backlog: vec![],
+        paused: false,
     });
 
     let text = render_to_text(&state, 50, 24);
@@ -562,51 +523,53 @@ fn renderer_keeps_input_region_stable_when_queue_count_changes() {
         Keymap::default(),
         TuiTheme::default(),
     );
-    one_item_state.update_queue_preview(QueuePreview {
-        next: vec![QueuedInputView {
-            text: "next item".to_owned(),
-            lane: QueuedInputLane::Next,
+    one_item_state.update_queue_preview(QueuedInputsView {
+        items: vec![QueuedInputView {
+            id: 1,
+            text: "first item".to_owned(),
             position: 0,
         }],
-        suspended: vec![],
-        backlog: vec![],
+        paused: false,
     });
-    let mut three_lane_state = TuiState::new(
+    let mut three_item_state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
         Keymap::default(),
         TuiTheme::default(),
     );
-    three_lane_state.update_queue_preview(QueuePreview {
-        next: vec![QueuedInputView {
-            text: "next item".to_owned(),
-            lane: QueuedInputLane::Next,
-            position: 0,
-        }],
-        suspended: vec![QueuedInputView {
-            text: "suspended item".to_owned(),
-            lane: QueuedInputLane::Suspended,
-            position: 0,
-        }],
-        backlog: vec![QueuedInputView {
-            text: "backlog item".to_owned(),
-            lane: QueuedInputLane::Backlog,
-            position: 0,
-        }],
+    three_item_state.update_queue_preview(QueuedInputsView {
+        items: vec![
+            QueuedInputView {
+                id: 1,
+                text: "first item".to_owned(),
+                position: 0,
+            },
+            QueuedInputView {
+                id: 2,
+                text: "second item".to_owned(),
+                position: 1,
+            },
+            QueuedInputView {
+                id: 3,
+                text: "third item".to_owned(),
+                position: 2,
+            },
+        ],
+        paused: false,
     });
 
     let one_item_text = render_to_text(&one_item_state, 80, 18);
-    let three_lane_text = render_to_text(&three_lane_state, 80, 18);
+    let three_item_text = render_to_text(&three_item_state, 80, 18);
     let one_item_input_row = one_item_text
         .lines()
-        .position(|line| line.contains("M"))
+        .position(|line| line.contains("🎀"))
         .expect("one item queue render should show input");
-    let three_lane_input_row = three_lane_text
+    let three_item_input_row = three_item_text
         .lines()
-        .position(|line| line.contains("M"))
-        .expect("three lane queue render should show input");
+        .position(|line| line.contains("🎀"))
+        .expect("three item queue render should show input");
 
-    assert_eq!(one_item_input_row, three_lane_input_row);
+    assert_eq!(one_item_input_row, three_item_input_row);
 }
 
 #[test]
@@ -620,22 +583,25 @@ fn renderer_keeps_timeline_visible_when_bottom_panes_are_taller_than_short_windo
     state.push_timeline_item(TimelineItem::Assistant {
         text: "latest assistant output".to_owned(),
     });
-    state.update_queue_preview(QueuePreview {
-        next: vec![QueuedInputView {
-            text: "next item".to_owned(),
-            lane: QueuedInputLane::Next,
-            position: 0,
-        }],
-        suspended: vec![QueuedInputView {
-            text: "suspended item".to_owned(),
-            lane: QueuedInputLane::Suspended,
-            position: 0,
-        }],
-        backlog: vec![QueuedInputView {
-            text: "backlog item".to_owned(),
-            lane: QueuedInputLane::Backlog,
-            position: 0,
-        }],
+    state.update_queue_preview(QueuedInputsView {
+        items: vec![
+            QueuedInputView {
+                id: 1,
+                text: "first item".to_owned(),
+                position: 0,
+            },
+            QueuedInputView {
+                id: 2,
+                text: "second item".to_owned(),
+                position: 1,
+            },
+            QueuedInputView {
+                id: 3,
+                text: "third item".to_owned(),
+                position: 2,
+            },
+        ],
+        paused: false,
     });
     state.insert_input_str("line one\nline two\nline three\nline four\nline five");
 
@@ -655,4 +621,143 @@ fn renderer_keeps_timeline_visible_when_bottom_panes_are_taller_than_short_windo
         .position(|line| line.contains("M"))
         .expect("input panel should render");
     assert!(input_row > assistant_row, "{text}");
+}
+
+#[test]
+fn pending_queue_click_to_edit_pauses_auto_send_and_enter_saves_and_resumes() {
+    use crate::tui::{
+        controller::{ControllerEffect, handle_key_event, handle_mouse_input},
+        text_interaction::MouseInput,
+    };
+    use ratatui::layout::{Position, Size};
+
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.update_queue_preview(QueuedInputsView {
+        items: vec![
+            QueuedInputView {
+                id: 11,
+                text: "first draft".to_owned(),
+                position: 0,
+            },
+            QueuedInputView {
+                id: 12,
+                text: "second draft".to_owned(),
+                position: 1,
+            },
+        ],
+        paused: false,
+    });
+
+    let size = Size::new(90, 22);
+    let buffer = render_to_buffer(&state, size.width, size.height);
+    let (item_x, item_y) =
+        find_text_position(&buffer, "first draft").expect("first pending item renders");
+
+    // Clicking the pending item pauses runtime auto-dispatch and opens inline edit.
+    let effect = handle_mouse_input(
+        MouseInput::Down(Position::new(item_x, item_y)),
+        size,
+        &mut state,
+    );
+    assert_eq!(effect, ControllerEffect::SetPendingPaused(true));
+    assert_eq!(state.editing_pending_id(), Some(11));
+
+    // Terminal cursor moves directly onto the edited pending row.
+    let (editing_buf, cursor) = render_to_buffer_and_cursor(&state, size.width, size.height);
+    assert_eq!(cursor.y, item_y);
+    assert!(rendered_buffer_text(&editing_buf).contains("editing #1 (paused)"));
+
+    // Switching directly from editing item #1 to item #2 saves #1 while staying
+    // paused, and pressing Esc on #2 restores the original unpaused state.
+    let (second_x, second_y) =
+        find_text_position(&editing_buf, "second draft").expect("second pending item renders");
+    let _ = handle_key_event(
+        KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE),
+        &mut state,
+    );
+    let switch = handle_mouse_input(
+        MouseInput::Down(Position::new(second_x, second_y)),
+        size,
+        &mut state,
+    );
+    assert_eq!(
+        switch,
+        ControllerEffect::UpdatePendingInput {
+            id: 11,
+            text: "first draft!".to_owned(),
+            resume: false,
+        }
+    );
+    assert_eq!(state.editing_pending_id(), Some(12));
+    let cancel = handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+    assert_eq!(cancel, ControllerEffect::SetPendingPaused(false));
+    assert!(!state.is_editing_pending());
+
+    // Re-enter edit on #1, append '?', and press Enter -> commits edit and resumes.
+    let _ = handle_mouse_input(
+        MouseInput::Down(Position::new(item_x, item_y)),
+        size,
+        &mut state,
+    );
+    let _ = handle_key_event(
+        KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+        &mut state,
+    );
+    let commit = handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    assert_eq!(
+        commit,
+        ControllerEffect::UpdatePendingInput {
+            id: 11,
+            text: "first draft!?".to_owned(),
+            resume: true,
+        }
+    );
+    assert!(!state.is_editing_pending());
+
+    // Clicking [×] on the second item removes it directly.
+    let after_buf = render_to_buffer(&state, size.width, size.height);
+    let (_, second_y) =
+        find_text_position(&after_buf, "second draft").expect("second pending item renders");
+    let remove_x = (0..size.width)
+        .find(|&x| after_buf[(x, second_y)].symbol() == "×")
+        .expect("[×] button renders");
+    let remove_effect = handle_mouse_input(
+        MouseInput::Down(Position::new(remove_x, second_y)),
+        size,
+        &mut state,
+    );
+    assert_eq!(
+        remove_effect,
+        ControllerEffect::RemovePendingInput {
+            id: 12,
+            resume: None,
+        }
+    );
+
+    // When paused (e.g. after interrupt), clicking [Send] flushes all pending items.
+    state.update_queue_preview(QueuedInputsView {
+        items: vec![QueuedInputView {
+            id: 11,
+            text: "first draft!".to_owned(),
+            position: 0,
+        }],
+        paused: true,
+    });
+    let paused_buf = render_to_buffer(&state, size.width, size.height);
+    let (send_x, send_y) =
+        find_text_position(&paused_buf, "[Send]").expect("[Send] chip renders when paused");
+    let flush_effect = handle_mouse_input(
+        MouseInput::Down(Position::new(send_x, send_y)),
+        size,
+        &mut state,
+    );
+    assert_eq!(flush_effect, ControllerEffect::FlushPendingInputs);
 }

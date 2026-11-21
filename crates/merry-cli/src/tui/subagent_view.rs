@@ -18,9 +18,7 @@ use super::{
     theme::SemanticColor,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::{
-    QueuedInputLane, RuntimeEvent, SubagentActivityPhase, SubagentActivitySnapshot, SubagentStatus,
-};
+use merry_core::{RuntimeEvent, SubagentActivityPhase, SubagentActivitySnapshot, SubagentStatus};
 use merry_runtime::{SessionTranscriptItem, SubagentStatusLabel, SubagentStatusView};
 use std::time::Duration;
 
@@ -319,7 +317,6 @@ impl SubagentTakeoverOverlay {
             if !task.trim().is_empty() {
                 fresh.push_timeline_item(TimelineItem::User {
                     text: task.trim().to_owned(),
-                    lane: QueuedInputLane::Next,
                 });
             }
             if let Some(entry) = fallback_entry {
@@ -405,8 +402,7 @@ impl SubagentTakeoverOverlay {
                     return SubagentTakeoverAction::Consumed;
                 }
                 self.child_state.clear_input();
-                self.child_state
-                    .push_local_user_echo(message.clone(), QueuedInputLane::Next);
+                self.child_state.push_local_user_echo(message.clone());
                 self.child_state.follow_latest();
                 SubagentTakeoverAction::SendMessage {
                     agent_id: self.selected_agent_id.clone(),

@@ -72,10 +72,7 @@ async fn interactive_run_executes_parallel_safe_tool_batch_before_waiting() {
         }
     ));
 
-    input
-        .submit_next("search twice")
-        .await
-        .expect("input queued");
+    input.submit("search twice").await.expect("input queued");
     let observed = timeout(Duration::from_secs(1), async {
         let mut finished = 0;
         let mut saw_answer = false;
@@ -139,7 +136,7 @@ async fn interactive_tool_infrastructure_failure_returns_to_waiting() {
         .expect("stream error")
         .expect("waiting state");
 
-    input.submit_next("start").await.expect("input queued");
+    input.submit("start").await.expect("input queued");
     wait_for_interactive_waiting(&mut stream).await;
 
     assert!(runtime.pending_tool_calls().await.is_empty());
@@ -177,7 +174,7 @@ async fn interactive_tool_batch_infrastructure_failure_resolves_all_pending_call
         .expect("stream error")
         .expect("waiting state");
 
-    input.submit_next("start").await.expect("input queued");
+    input.submit("start").await.expect("input queued");
     wait_for_interactive_waiting(&mut stream).await;
 
     assert!(runtime.pending_tool_calls().await.is_empty());

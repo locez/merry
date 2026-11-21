@@ -1,7 +1,7 @@
 use crate::assert_json_round_trip;
 use merry_core::{
-    ErrorInfo, QueuedInputLane, QueuedInputView, QueuedInputsView, RuntimeEvent,
-    RuntimeEventSource, RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallId,
+    ErrorInfo, QueuedInputView, QueuedInputsView, RuntimeEvent, RuntimeEventSource,
+    RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallId,
 };
 use serde_json::json;
 
@@ -75,17 +75,19 @@ fn public_runtime_event_reasoning_delta_uses_top_level_type() {
 fn public_queued_inputs_changed_uses_inputs_view() {
     let event = RuntimeEvent::QueuedInputsChanged {
         inputs: QueuedInputsView {
-            next: vec![QueuedInputView {
-                text: "use the other approach".to_owned(),
-                lane: QueuedInputLane::Next,
-                position: 0,
-            }],
-            suspended: Vec::new(),
-            backlog: vec![QueuedInputView {
-                text: "run tests after that".to_owned(),
-                lane: QueuedInputLane::Backlog,
-                position: 0,
-            }],
+            items: vec![
+                QueuedInputView {
+                    id: 1,
+                    text: "use the other approach".to_owned(),
+                    position: 0,
+                },
+                QueuedInputView {
+                    id: 2,
+                    text: "run tests after that".to_owned(),
+                    position: 1,
+                },
+            ],
+            paused: true,
         },
     };
 
@@ -94,17 +96,19 @@ fn public_queued_inputs_changed_uses_inputs_view() {
         json!({
             "type": "queued_inputs_changed",
             "inputs": {
-                "next": [{
-                    "text": "use the other approach",
-                    "lane": "next",
-                    "position": 0
-                }],
-                "suspended": [],
-                "backlog": [{
-                    "text": "run tests after that",
-                    "lane": "backlog",
-                    "position": 0
-                }]
+                "items": [
+                    {
+                        "id": 1,
+                        "text": "use the other approach",
+                        "position": 0
+                    },
+                    {
+                        "id": 2,
+                        "text": "run tests after that",
+                        "position": 1
+                    }
+                ],
+                "paused": true
             }
         })
     );

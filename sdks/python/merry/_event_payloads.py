@@ -25,7 +25,6 @@ from ._event_types import (
     EventType,
     InteractiveRunState,
     QueuedInput,
-    QueuedInputLane,
     QueuedInputs,
     RawEventData,
     RuntimeToolCall,
@@ -392,18 +391,13 @@ class InteractiveRunStateChangedPayload(EventPayload):
 @dataclass(frozen=True, slots=True)
 class QueuedInputAcceptedPayload(EventPayload):
     event_type: ClassVar[EventType] = EventType.QUEUED_INPUT_ACCEPTED
-    lane: QueuedInputLane
     inputs: tuple[QueuedInput, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.lane, QueuedInputLane):
-            raise TypeError("queued input lane must be a QueuedInputLane")
         if not isinstance(self.inputs, tuple) or any(
             not isinstance(item, QueuedInput) for item in self.inputs
         ):
             raise TypeError("queued inputs must be a tuple of QueuedInput values")
-        if any(item.lane is not self.lane for item in self.inputs):
-            raise ValueError("queued input lane does not match its accepted group")
 
 
 @dataclass(frozen=True, slots=True)

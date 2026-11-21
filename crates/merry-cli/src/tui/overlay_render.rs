@@ -348,8 +348,7 @@ fn setting_line_index(item: SettingItem) -> usize {
 
 fn render_shortcuts(frame: &mut Frame<'_>, state: &TuiState) {
     let lines = vec![
-        shortcut_line_for_action(state, "Submit next", KeyAction::SubmitNext),
-        shortcut_line_for_action(state, "Submit backlog", KeyAction::SubmitBacklog),
+        shortcut_line_for_action(state, "Submit", KeyAction::Submit),
         shortcut_line_for_action(state, "Command palette", KeyAction::OpenCommandPanel),
         shortcut_line_for_action(state, "Toggle plan", KeyAction::TogglePlan),
         shortcut_line_for_action(state, "Command output", KeyAction::OpenCommandDetails),
@@ -367,8 +366,6 @@ fn render_shortcuts(frame: &mut Frame<'_>, state: &TuiState) {
         ),
         shortcut_line_for_action(state, "Search history", KeyAction::HistorySearch),
         shortcut_line_for_action(state, "Comment mode", KeyAction::ToggleComment),
-        shortcut_line_for_action(state, "Resume suspended", KeyAction::ResumeSuspended),
-        shortcut_line_for_action(state, "Discard suspended", KeyAction::DiscardSuspended),
         shortcut_line_for_action(state, "Interrupt", KeyAction::Interrupt),
         shortcut_line_for_action(state, "Quit", KeyAction::Quit),
     ];

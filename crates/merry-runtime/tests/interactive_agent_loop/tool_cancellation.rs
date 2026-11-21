@@ -106,7 +106,7 @@ async fn interrupt_during_tool_execution_closes_pending_tool_call() {
         .expect("stream error")
         .expect("waiting state");
 
-    input.submit_next("start").await.expect("start queued");
+    input.submit("start").await.expect("start queued");
     started_rx.await.expect("tool starts");
     control
         .interrupt(InterruptReason::User)
@@ -164,7 +164,7 @@ async fn new_input_after_interrupt_still_executes_runtime_tool_calls() {
         .expect("stream error")
         .expect("waiting state");
 
-    input.submit_next("first").await.expect("first queued");
+    input.submit("first").await.expect("first queued");
     started_rx.await.expect("first tool starts");
     control
         .interrupt(InterruptReason::User)
@@ -187,7 +187,7 @@ async fn new_input_after_interrupt_still_executes_runtime_tool_calls() {
     assert!(runtime.pending_tool_calls().await.is_empty());
 
     input
-        .submit_next("second")
+        .submit("second")
         .await
         .expect("second queued after interrupt");
 

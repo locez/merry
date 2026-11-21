@@ -13,8 +13,7 @@ use super::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use merry_core::{
-    ErrorInfo, InteractiveRunState, QueuedInputLane, QueuedInputView, RuntimeEvent,
-    RuntimeEventSource, SessionId,
+    ErrorInfo, InteractiveRunState, QueuedInputView, RuntimeEvent, RuntimeEventSource, SessionId,
 };
 use ratatui::{Terminal, backend::TestBackend};
 use std::sync::Arc;
@@ -204,11 +203,11 @@ fn enter_executes_a_slash_completion_once_while_tab_only_completes() {
 }
 
 #[test]
-fn local_slash_commands_do_not_enter_user_history_or_either_runtime_lane() {
+fn local_slash_commands_do_not_enter_user_history_or_runtime_queue() {
     let mut help = state();
     help.insert_input_str("/help");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitBacklog, &mut help),
+        handle_key_action(KeyAction::Submit, &mut help),
         ControllerEffect::None
     );
     assert_eq!(help.input_text(), "");
@@ -222,7 +221,7 @@ fn local_slash_commands_do_not_enter_user_history_or_either_runtime_lane() {
     let mut status = state();
     status.insert_input_str("/status");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut status),
+        handle_key_action(KeyAction::Submit, &mut status),
         ControllerEffect::None
     );
     assert!(matches!(
@@ -247,7 +246,7 @@ fn help_and_status_render_complete_bodies_at_supported_terminal_sizes() {
         let mut help = state();
         help.insert_input_str("/help");
         assert_eq!(
-            handle_key_action(KeyAction::SubmitNext, &mut help),
+            handle_key_action(KeyAction::Submit, &mut help),
             ControllerEffect::None
         );
         let help_text = render::render_to_text(&help, width, height);
@@ -259,8 +258,8 @@ fn help_and_status_render_complete_bodies_at_supported_terminal_sizes() {
             "/stop",
             "List slash commands",
             "Submit",
-            "Backlog",
             "Commands",
+            "Stop",
         ] {
             assert!(
                 help_text.contains(expected),
@@ -271,7 +270,7 @@ fn help_and_status_render_complete_bodies_at_supported_terminal_sizes() {
         let mut status = state();
         status.insert_input_str("/status");
         assert_eq!(
-            handle_key_action(KeyAction::SubmitNext, &mut status),
+            handle_key_action(KeyAction::Submit, &mut status),
             ControllerEffect::None
         );
         let status_text = render::render_to_text(&status, width, height);
@@ -376,7 +375,7 @@ fn invalid_slash_feedback_is_visible_from_plan_focus_and_remains_correctable() {
         state.insert_input_str(input);
 
         assert_eq!(
-            handle_key_action(KeyAction::SubmitNext, &mut state),
+            handle_key_action(KeyAction::Submit, &mut state),
             ControllerEffect::None
         );
         assert!(state.plan().is_open());
@@ -406,7 +405,6 @@ fn help_remains_complete_with_the_plan_open_at_80_by_16() {
         "/stop",
         "/tasks",
         "Submit",
-        "Backlog",
         "Commands",
         "Stop",
     ] {
@@ -424,13 +422,12 @@ fn local_slash_input_bypasses_timeline_review_confirmation() {
     let mut timeline_review = state();
     timeline_review.push_timeline_item(TimelineItem::User {
         text: "earlier request".to_owned(),
-        lane: QueuedInputLane::Next,
     });
     timeline_review.jump_to_previous_user_input();
     timeline_review.insert_input_str("/help");
 
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut timeline_review),
+        handle_key_action(KeyAction::Submit, &mut timeline_review),
         ControllerEffect::None
     );
     assert!(!timeline_review.is_timeline_reviewing());
@@ -444,7 +441,7 @@ fn local_slash_input_bypasses_timeline_review_confirmation() {
     invalid_input.insert_input_str("/unknown");
 
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut invalid_input),
+        handle_key_action(KeyAction::Submit, &mut invalid_input),
         ControllerEffect::None
     );
     assert_eq!(invalid_input.input_text(), "/unknown");
@@ -457,8 +454,8 @@ fn local_slash_input_bypasses_timeline_review_confirmation() {
     provider_input.insert_input_str("/tmp/file");
 
     assert_eq!(
-        handle_key_action(KeyAction::SubmitBacklog, &mut provider_input),
-        ControllerEffect::SubmitBacklog(text_submission("/tmp/file"))
+        handle_key_action(KeyAction::Submit, &mut provider_input),
+        ControllerEffect::Submit(text_submission("/tmp/file"))
     );
     assert_eq!(provider_input.input_text(), "");
 }
@@ -497,7 +494,7 @@ fn stop_and_save_respect_the_current_run_state() {
     let mut idle_stop = state();
     idle_stop.insert_input_str("/stop");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut idle_stop),
+        handle_key_action(KeyAction::Submit, &mut idle_stop),
         ControllerEffect::None
     );
     assert!(matches!(
@@ -510,7 +507,7 @@ fn stop_and_save_respect_the_current_run_state() {
     running_stop.set_run_state(InteractiveRunState::RunningModel);
     running_stop.insert_input_str("/stop");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut running_stop),
+        handle_key_action(KeyAction::Submit, &mut running_stop),
         ControllerEffect::Interrupt
     );
     assert_timeline_feedback(&running_stop, &["⊘ Stopping…"]);
@@ -519,7 +516,7 @@ fn stop_and_save_respect_the_current_run_state() {
     cancelled_stop.set_run_state(InteractiveRunState::RunningModel);
     cancelled_stop.insert_input_str("/stop");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut cancelled_stop),
+        handle_key_action(KeyAction::Submit, &mut cancelled_stop),
         ControllerEffect::Interrupt
     );
     TuiProjector::default().apply(run_cancelled_event(), &mut cancelled_stop);
@@ -545,7 +542,7 @@ fn stop_and_save_respect_the_current_run_state() {
 
     running_stop.insert_input_str("/stop");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut running_stop),
+        handle_key_action(KeyAction::Submit, &mut running_stop),
         ControllerEffect::None
     );
     assert!(matches!(
@@ -566,7 +563,7 @@ fn stop_and_save_respect_the_current_run_state() {
     interrupting.set_run_state(InteractiveRunState::Interrupting);
     interrupting.insert_input_str("/stop");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut interrupting),
+        handle_key_action(KeyAction::Submit, &mut interrupting),
         ControllerEffect::None
     );
 
@@ -574,7 +571,7 @@ fn stop_and_save_respect_the_current_run_state() {
     running_save.set_run_state(InteractiveRunState::RunningTool);
     running_save.insert_input_str("/save");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut running_save),
+        handle_key_action(KeyAction::Submit, &mut running_save),
         ControllerEffect::None
     );
     assert!(matches!(
@@ -608,13 +605,12 @@ fn wrapped_command_feedback_stays_visible_at_the_bottom_of_a_full_timeline() {
                     "Earlier user message {index}: {}",
                     "long history content ".repeat(14)
                 ),
-                lane: QueuedInputLane::Next,
             });
         }
         state.set_run_state(run_state);
         state.insert_input_str(command);
         assert_eq!(
-            handle_key_action(KeyAction::SubmitNext, &mut state),
+            handle_key_action(KeyAction::Submit, &mut state),
             ControllerEffect::None
         );
 
@@ -632,8 +628,8 @@ fn wrapped_command_feedback_stays_visible_at_the_bottom_of_a_full_timeline() {
 fn locally_accepted_input_closes_the_idle_save_window() {
     let mut state = state();
     state.insert_input_str("start work");
-    let submit = handle_key_action(KeyAction::SubmitNext, &mut state);
-    assert!(matches!(submit, ControllerEffect::SubmitNext(_)));
+    let submit = handle_key_action(KeyAction::Submit, &mut state);
+    assert!(matches!(submit, ControllerEffect::Submit(_)));
     project_local_effect(&submit, &mut state);
     assert!(state.is_active_run());
 
@@ -648,7 +644,7 @@ fn locally_accepted_input_closes_the_idle_save_window() {
 
     state.insert_input_str("/save");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
+        handle_key_action(KeyAction::Submit, &mut state),
         ControllerEffect::None
     );
     assert!(matches!(
@@ -658,10 +654,9 @@ fn locally_accepted_input_closes_the_idle_save_window() {
 
     projector.apply(
         RuntimeEvent::QueuedInputAccepted {
-            lane: QueuedInputLane::Next,
             inputs: vec![QueuedInputView {
+                id: 1,
                 text: "start work".to_owned(),
-                lane: QueuedInputLane::Next,
                 position: 0,
             }],
         },
@@ -683,16 +678,20 @@ fn locally_accepted_input_closes_the_idle_save_window() {
 }
 
 #[test]
-fn interrupting_queued_next_input_accepts_real_waiting_and_relabels_the_echo() {
+fn submitting_while_running_defers_timeline_item_until_runtime_accepts_it() {
     let mut state = state();
     state.set_run_state(InteractiveRunState::RunningModel);
     state.insert_input_str("queued next");
-    let submit = handle_key_action(KeyAction::SubmitNext, &mut state);
+    let submit = handle_key_action(KeyAction::Submit, &mut state);
     project_local_effect(&submit, &mut state);
+    assert!(
+        state.timeline().is_empty(),
+        "running submit waits in pending queue instead of pushing a stale timeline echo"
+    );
 
     state.insert_input_str("/stop");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut state),
+        handle_key_action(KeyAction::Submit, &mut state),
         ControllerEffect::Interrupt
     );
     let mut projector = TuiProjector::default();
@@ -706,10 +705,9 @@ fn interrupting_queued_next_input_accepts_real_waiting_and_relabels_the_echo() {
 
     projector.apply(
         RuntimeEvent::QueuedInputAccepted {
-            lane: QueuedInputLane::Suspended,
             inputs: vec![QueuedInputView {
+                id: 1,
                 text: "queued next".to_owned(),
-                lane: QueuedInputLane::Suspended,
                 position: 0,
             }],
         },
@@ -721,18 +719,11 @@ fn interrupting_queued_next_input_accepts_real_waiting_and_relabels_the_echo() {
             .iter()
             .filter(|item| matches!(
                 item,
-                TimelineItem::User { text, .. } if text == "queued next"
+                TimelineItem::User { text } if text == "queued next"
             ))
             .count(),
         1
     );
-    assert!(matches!(
-        state.timeline().first(),
-        Some(TimelineItem::User {
-            text,
-            lane: QueuedInputLane::Suspended,
-        }) if text == "queued next"
-    ));
 }
 
 #[test]
@@ -740,7 +731,7 @@ fn unknown_commands_are_correctable_while_nested_paths_and_plain_text_still_subm
     let mut unknown = state();
     unknown.insert_input_str("/unknown");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut unknown),
+        handle_key_action(KeyAction::Submit, &mut unknown),
         ControllerEffect::None
     );
     assert_eq!(unknown.input_text(), "/unknown");
@@ -749,15 +740,15 @@ fn unknown_commands_are_correctable_while_nested_paths_and_plain_text_still_subm
     let mut path = state();
     path.insert_input_str("/tmp/file");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut path),
-        ControllerEffect::SubmitNext(text_submission("/tmp/file"))
+        handle_key_action(KeyAction::Submit, &mut path),
+        ControllerEffect::Submit(text_submission("/tmp/file"))
     );
 
     let mut plain = state();
     plain.insert_input_str("save");
     assert_eq!(
-        handle_key_action(KeyAction::SubmitNext, &mut plain),
-        ControllerEffect::SubmitNext(text_submission("save"))
+        handle_key_action(KeyAction::Submit, &mut plain),
+        ControllerEffect::Submit(text_submission("save"))
     );
 }
 

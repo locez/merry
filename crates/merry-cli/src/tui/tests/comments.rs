@@ -9,7 +9,6 @@ use crate::tui::{
     theme::TuiTheme,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::QueuedInputLane;
 use ratatui::{
     buffer::Buffer,
     layout::Position,
@@ -118,7 +117,7 @@ fn comment_mode_collects_quotes_and_sends_them_together() {
     state.insert_input_str("and the docs");
     assert_eq!(
         handle_key_event(enter(), &mut state),
-        ControllerEffect::SubmitNext(TuiSubmission {
+        ControllerEffect::Submit(TuiSubmission {
             text:
                 "Review comments:\n\n> alpha\n\nrename it\n\n> omega\n\ncheck this\n\nand the docs"
                     .into(),
@@ -167,7 +166,7 @@ fn status_comment_chip_enters_the_mode_and_send_submits() {
     let buffer = draw(&mut state, size);
     assert_eq!(
         handle_mouse_input(MouseInput::Down(point(&buffer, "[send]")), size, &mut state),
-        ControllerEffect::SubmitNext(TuiSubmission {
+        ControllerEffect::Submit(TuiSubmission {
             text: review("alpha", "rename it"),
             history_text: review("alpha", "rename it"),
             images: Vec::new(),
@@ -279,7 +278,7 @@ fn saved_quote_stays_highlighted_and_a_click_edits_the_note() {
     assert_eq!(state.pending_comment_quote(), None);
     assert_eq!(
         handle_key_event(enter(), &mut state),
-        ControllerEffect::SubmitNext(TuiSubmission {
+        ControllerEffect::Submit(TuiSubmission {
             text: review("alpha", "rename it now"),
             history_text: review("alpha", "rename it now"),
             images: Vec::new(),
@@ -348,7 +347,6 @@ fn a_pinned_user_quote_stays_highlighted_and_can_be_edited() {
     );
     state.push_timeline_item(TimelineItem::User {
         text: "keep this".into(),
-        lane: QueuedInputLane::Next,
     });
     state.push_timeline_item(TimelineItem::Assistant {
         text: "tail".into(),

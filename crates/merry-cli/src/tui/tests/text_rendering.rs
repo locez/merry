@@ -1,13 +1,11 @@
 use crate::tui::{
     keymap::Keymap,
     render::{render_to_buffer, render_to_text},
-    state::{
-        PatchChangeView, PatchLineView, PatchOperationView, QueuePreview, TimelineItem, TuiState,
-    },
+    state::{PatchChangeView, PatchLineView, PatchOperationView, TimelineItem, TuiState},
     tests::{find_cell_color, find_cell_style, find_text_position, rendered_buffer_text},
     theme::{SemanticColor, TuiTheme},
 };
-use merry_core::{QueuedInputLane, QueuedInputView};
+use merry_core::{QueuedInputView, QueuedInputsView};
 use ratatui::style::{Color, Modifier};
 
 #[test]
@@ -103,14 +101,13 @@ fn renderer_applies_configured_semantic_theme_colors() {
         }],
         expanded: false,
     });
-    state.update_queue_preview(QueuePreview {
-        next: vec![QueuedInputView {
+    state.update_queue_preview(QueuedInputsView {
+        items: vec![QueuedInputView {
+            id: 1,
             text: "queued".to_owned(),
-            lane: QueuedInputLane::Next,
             position: 0,
         }],
-        suspended: vec![],
-        backlog: vec![],
+        paused: false,
     });
     let buffer = render_to_buffer(&state, 180, 24);
 
@@ -128,8 +125,8 @@ fn renderer_applies_configured_semantic_theme_colors() {
     assert_eq!(find_cell_color(&buffer, "&&"), Some(Color::Cyan));
     assert_eq!(find_cell_color(&buffer, "$HOME"), Some(Color::Green));
     assert_eq!(find_cell_color(&buffer, "patch"), Some(Color::Magenta));
-    assert_eq!(find_cell_color(&buffer, "Next"), Some(Color::Magenta));
-    assert_eq!(find_cell_color(&buffer, "queued"), Some(Color::Blue));
+    assert_eq!(find_cell_color(&buffer, "Pending"), Some(Color::Magenta));
+    assert!(find_cell_color(&buffer, "queued").is_some());
 }
 
 #[test]
@@ -206,7 +203,6 @@ fn renderer_preserves_historical_emphasis_across_user_and_assistant_text() {
         );
         state.push_timeline_item(TimelineItem::User {
             text: "inspect `user_keyword`".to_owned(),
-            lane: QueuedInputLane::Next,
         });
         state.push_timeline_item(TimelineItem::Assistant {
             text: "**important** and `assistant_keyword`".to_owned(),
@@ -530,7 +526,6 @@ fn renderer_uses_user_turn_card_instead_of_dashed_assistant_separator() {
     );
     state.push_timeline_item(TimelineItem::User {
         text: "first question".to_owned(),
-        lane: QueuedInputLane::Next,
     });
     state.push_timeline_item(TimelineItem::Assistant {
         text: "done".to_owned(),

@@ -2,7 +2,7 @@ use crate::support::{
     models::{BlockingFirstProvider, RecordingProvider, model_name},
     runtime::{session_id, wait_for_interactive_waiting},
 };
-use merry_core::{InteractiveRunState, QueuedInputLane, RuntimeEvent};
+use merry_core::{InteractiveRunState, RuntimeEvent};
 use merry_runtime::{
     AgentLoopConfig, FileSessionStore, InteractiveError, Runtime, SessionTranscriptItem,
     StepContext,
@@ -71,7 +71,7 @@ async fn interactive_control_saves_at_a_waiting_boundary_without_closing_the_run
         }
     ));
     input
-        .submit_next("persist this turn")
+        .submit("persist this turn")
         .await
         .expect("input queued");
     wait_for_interactive_waiting(&mut stream).await;
@@ -142,7 +142,7 @@ async fn interactive_control_returns_waiting_save_failures_through_the_ack() {
 }
 
 #[tokio::test]
-async fn submit_next_while_waiting_starts_model_turn() {
+async fn submit_while_waiting_starts_model_turn() {
     let provider = RecordingProvider::new();
     let runtime = Runtime::builder(session_id("interactive-submit-next"))
         .model_provider(Arc::new(provider.clone()), model_name())
@@ -167,8 +167,7 @@ async fn submit_next_while_waiting_starts_model_turn() {
         }
     ));
 
-    let item = input.submit_next("hello").await.expect("input queued");
-    assert_eq!(item.lane(), QueuedInputLane::Next);
+    let item = input.submit("hello").await.expect("input queued");
     assert_eq!(item.text(), "hello");
 
     let mut saw_accepted = false;
@@ -204,7 +203,7 @@ async fn close_during_running_model_reaches_closed_event() {
         .await
         .expect("stream error")
         .expect("waiting state");
-    input.submit_next("initial").await.expect("initial queued");
+    input.submit("initial").await.expect("initial queued");
     started_rx.await.expect("provider step starts");
 
     control.close().await.expect("close accepted");

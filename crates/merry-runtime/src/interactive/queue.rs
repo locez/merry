@@ -1,9 +1,9 @@
 use super::{
     InteractiveError,
-    types::{InputReceipt, InputRecord, InputRecords, QueuedInputId},
+    types::{InputRecord, InputRecords, QueuedInputId},
 };
 use crate::{StepInput, UserMessageInput};
-use merry_core::{QueuedInputLane, QueuedInputView, QueuedInputsView};
+use merry_core::{QueuedInputView, QueuedInputsView};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,7 +16,6 @@ enum QueuedInputState {
 #[derive(Debug, Clone)]
 struct QueuedInput {
     message: Option<UserMessageInput>,
-    lane: QueuedInputLane,
     state: QueuedInputState,
 }
 
@@ -38,44 +37,57 @@ impl AcceptedQueuedInput {
     }
 }
 
+/// Single runtime-owned pending-input queue with an explicit auto-dispatch pause flag.
+///
+/// While `paused` is true (for example, while the user is editing a pending item
+/// in the UI or after an interrupt), pending items are never auto-dispatched at
+/// turn boundaries. Once resumed, all pending items are accepted together in one burst.
 #[derive(Debug, Default)]
 pub(super) struct InteractiveInputQueue {
     next_id: u64,
-    next: VecDeque<QueuedInputId>,
-    suspended: VecDeque<QueuedInputId>,
-    backlog: VecDeque<QueuedInputId>,
+    pending: VecDeque<QueuedInputId>,
     items: HashMap<QueuedInputId, QueuedInput>,
+    paused: bool,
 }
 
 impl InteractiveInputQueue {
-    pub(super) fn has_next(&self) -> bool {
-        !self.next.is_empty()
+    #[must_use]
+    pub(super) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     #[cfg(test)]
-    pub(super) fn submit_next(&mut self, text: &str) -> Result<InputReceipt, InteractiveError> {
-        validate_interactive_text(text)?;
-        self.submit_next_message(UserMessageInput::text_only(text)?)
+    #[must_use]
+    pub(super) fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    #[must_use]
+    pub(super) fn can_auto_dispatch(&self) -> bool {
+        !self.paused && !self.pending.is_empty()
     }
 
     #[cfg(test)]
-    pub(super) fn enqueue(&mut self, text: &str) -> Result<InputReceipt, InteractiveError> {
+    pub(super) fn submit(&mut self, text: &str) -> Result<QueuedInputId, InteractiveError> {
         validate_interactive_text(text)?;
-        self.enqueue_message(UserMessageInput::text_only(text)?)
+        self.submit_message(UserMessageInput::text_only(text)?)
     }
 
-    pub(super) fn submit_next_message(
+    pub(super) fn submit_message(
         &mut self,
         message: UserMessageInput,
-    ) -> Result<InputReceipt, InteractiveError> {
-        self.push(message, QueuedInputLane::Next)
-    }
-
-    pub(super) fn enqueue_message(
-        &mut self,
-        message: UserMessageInput,
-    ) -> Result<InputReceipt, InteractiveError> {
-        self.push(message, QueuedInputLane::Backlog)
+    ) -> Result<QueuedInputId, InteractiveError> {
+        self.next_id = self.next_id.saturating_add(1);
+        let id = QueuedInputId::from_u64(self.next_id);
+        self.pending.push_back(id);
+        self.items.insert(
+            id,
+            QueuedInput {
+                message: Some(message),
+                state: QueuedInputState::Pending,
+            },
+        );
+        Ok(id)
     }
 
     pub(super) fn update(&mut self, id: QueuedInputId, text: &str) -> Result<(), InteractiveError> {
@@ -93,23 +105,26 @@ impl InteractiveInputQueue {
     }
 
     pub(super) fn remove(&mut self, id: QueuedInputId) -> Result<(), InteractiveError> {
-        let lane = self.pending_item(id)?.lane;
-        self.remove_from_lane(id, lane)?;
+        let _ = self.pending_item(id)?;
+        if !remove_id(&mut self.pending, id) {
+            return Err(InteractiveError::UnknownInput);
+        }
         let item = self.pending_item_mut(id)?;
         item.message.take();
         item.state = QueuedInputState::Removed;
+        if self.pending.is_empty() {
+            self.paused = false;
+        }
         Ok(())
     }
 
     pub(super) fn replace_pending_order(
         &mut self,
-        lane: QueuedInputLane,
         ordered: Vec<QueuedInputId>,
     ) -> Result<(), InteractiveError> {
-        let current = self.lane(lane).iter().copied().collect::<Vec<_>>();
+        let current = self.pending.iter().copied().collect::<Vec<_>>();
         if ordered.len() != current.len() {
             return Err(InteractiveError::StalePendingOrder {
-                lane,
                 reason: "input count changed",
             });
         }
@@ -118,104 +133,97 @@ impl InteractiveInputQueue {
         for id in &ordered {
             if !seen.insert(*id) {
                 return Err(InteractiveError::InvalidPendingOrder {
-                    lane,
                     reason: "input order contains a duplicate item",
                 });
             }
-            let item = self.pending_item(*id)?;
-            if item.lane != lane {
-                return Err(InteractiveError::WrongQueue {
-                    expected: lane,
-                    actual: item.lane,
-                });
-            }
+            let _ = self.pending_item(*id)?;
         }
 
         let current_set = current.into_iter().collect::<HashSet<_>>();
         if seen != current_set {
             return Err(InteractiveError::StalePendingOrder {
-                lane,
                 reason: "input set changed",
             });
         }
 
-        *self.lane_mut(lane) = VecDeque::from(ordered);
+        self.pending = VecDeque::from(ordered);
         Ok(())
     }
 
-    pub(super) fn suspend_next(&mut self) {
-        while let Some(id) = self.next.pop_front() {
-            if let Some(item) = self.items.get_mut(&id) {
-                item.lane = QueuedInputLane::Suspended;
-            }
-            self.suspended.push_back(id);
+    /// Sets whether auto-dispatch is paused. Returns `true` if state changed.
+    pub(super) fn set_paused(&mut self, paused: bool) -> bool {
+        let effective = paused && !self.pending.is_empty();
+        if self.paused == effective {
+            return false;
         }
+        self.paused = effective;
+        true
     }
 
-    pub(super) fn discard_suspended(&mut self) -> Vec<QueuedInputId> {
-        self.suspended
-            .drain(..)
-            .inspect(|id| {
-                if let Some(item) = self.items.get_mut(id) {
-                    item.message.take();
-                    item.state = QueuedInputState::Removed;
-                }
-            })
-            .collect()
+    /// Pauses pending items when a running turn is interrupted so they remain
+    /// reviewable/editable instead of auto-firing immediately.
+    pub(super) fn pause_on_interrupt(&mut self) -> bool {
+        if self.pending.is_empty() || self.paused {
+            return false;
+        }
+        self.paused = true;
+        true
     }
 
-    pub(super) fn accept_next_burst(&mut self) -> Vec<AcceptedQueuedInput> {
-        self.accept_queue_burst(QueuedInputLane::Next)
-    }
-
-    pub(super) fn accept_suspended_burst(&mut self) -> Vec<AcceptedQueuedInput> {
-        self.accept_queue_burst(QueuedInputLane::Suspended)
-    }
-
-    pub(super) fn accept_one_backlog(&mut self) -> Vec<AcceptedQueuedInput> {
-        let Some(id) = self.backlog.pop_front() else {
-            return Vec::new();
-        };
-        self.mark_accepted(id, QueuedInputLane::Backlog, 0)
-            .into_iter()
+    /// Drains all pending items together for one turn and clears the pause flag.
+    pub(super) fn accept_all_pending(&mut self) -> Vec<AcceptedQueuedInput> {
+        self.paused = false;
+        let ids = std::mem::take(&mut self.pending);
+        ids.into_iter()
+            .enumerate()
+            .filter_map(|(position, id)| self.mark_accepted(id, position))
             .collect()
     }
 
     pub(super) fn snapshot(&self) -> QueuedInputsView {
         QueuedInputsView {
-            next: self.snapshots_for(QueuedInputLane::Next),
-            suspended: self.snapshots_for(QueuedInputLane::Suspended),
-            backlog: self.snapshots_for(QueuedInputLane::Backlog),
+            items: self
+                .pending
+                .iter()
+                .enumerate()
+                .filter_map(|(position, id)| {
+                    let item = self.items.get(id)?;
+                    (item.state == QueuedInputState::Pending).then(|| QueuedInputView {
+                        id: id.as_u64(),
+                        text: item
+                            .message
+                            .as_ref()
+                            .expect("pending queued input owns its message")
+                            .text()
+                            .to_owned(),
+                        position,
+                    })
+                })
+                .collect(),
+            paused: self.paused,
         }
     }
 
     pub(super) fn input_records(&self) -> InputRecords {
         InputRecords {
-            next: self.records_for(QueuedInputLane::Next),
-            suspended: self.records_for(QueuedInputLane::Suspended),
-            backlog: self.records_for(QueuedInputLane::Backlog),
+            items: self
+                .pending
+                .iter()
+                .filter_map(|id| {
+                    let item = self.items.get(id)?;
+                    (item.state == QueuedInputState::Pending).then(|| InputRecord {
+                        id: *id,
+                        text: item
+                            .message
+                            .as_ref()
+                            .expect("pending queued input owns its message")
+                            .text()
+                            .to_owned(),
+                    })
+                })
+                .collect(),
+            paused: self.paused,
         }
-    }
-
-    fn push(
-        &mut self,
-        message: UserMessageInput,
-        lane: QueuedInputLane,
-    ) -> Result<InputReceipt, InteractiveError> {
-        let id = QueuedInputId::from_u64(self.next_id);
-        self.next_id += 1;
-        let ids = self.lane_mut(lane);
-        let position = ids.len();
-        ids.push_back(id);
-        self.items.insert(
-            id,
-            QueuedInput {
-                message: Some(message),
-                lane,
-                state: QueuedInputState::Pending,
-            },
-        );
-        Ok(InputReceipt { id, lane, position })
     }
 
     fn pending_item(&self, id: QueuedInputId) -> Result<&QueuedInput, InteractiveError> {
@@ -244,36 +252,7 @@ impl InteractiveInputQueue {
         }
     }
 
-    fn lane_mut(&mut self, lane: QueuedInputLane) -> &mut VecDeque<QueuedInputId> {
-        match lane {
-            QueuedInputLane::Next => &mut self.next,
-            QueuedInputLane::Suspended => &mut self.suspended,
-            QueuedInputLane::Backlog => &mut self.backlog,
-        }
-    }
-
-    fn lane(&self, lane: QueuedInputLane) -> &VecDeque<QueuedInputId> {
-        match lane {
-            QueuedInputLane::Next => &self.next,
-            QueuedInputLane::Suspended => &self.suspended,
-            QueuedInputLane::Backlog => &self.backlog,
-        }
-    }
-
-    fn accept_queue_burst(&mut self, lane: QueuedInputLane) -> Vec<AcceptedQueuedInput> {
-        let ids = std::mem::take(self.lane_mut(lane));
-        ids.into_iter()
-            .enumerate()
-            .filter_map(|(position, id)| self.mark_accepted(id, lane, position))
-            .collect()
-    }
-
-    fn mark_accepted(
-        &mut self,
-        id: QueuedInputId,
-        lane: QueuedInputLane,
-        position: usize,
-    ) -> Option<AcceptedQueuedInput> {
+    fn mark_accepted(&mut self, id: QueuedInputId, position: usize) -> Option<AcceptedQueuedInput> {
         let item = self.items.get_mut(&id)?;
         if item.state != QueuedInputState::Pending {
             return None;
@@ -283,70 +262,14 @@ impl InteractiveInputQueue {
             .take()
             .expect("pending queued input owns its message");
         item.state = QueuedInputState::Accepted;
-        item.lane = lane;
         Some(AcceptedQueuedInput {
             view: QueuedInputView {
+                id: id.as_u64(),
                 text: message.text().to_owned(),
-                lane,
                 position,
             },
             message,
         })
-    }
-
-    fn snapshots_for(&self, lane: QueuedInputLane) -> Vec<QueuedInputView> {
-        self.lane(lane)
-            .iter()
-            .enumerate()
-            .filter_map(|(position, id)| {
-                let item = self.items.get(id)?;
-                (item.state == QueuedInputState::Pending).then(|| QueuedInputView {
-                    text: item
-                        .message
-                        .as_ref()
-                        .expect("pending queued input owns its message")
-                        .text()
-                        .to_owned(),
-                    lane,
-                    position,
-                })
-            })
-            .collect()
-    }
-
-    fn records_for(&self, lane: QueuedInputLane) -> Vec<InputRecord> {
-        self.lane(lane)
-            .iter()
-            .enumerate()
-            .filter_map(|(position, id)| {
-                let item = self.items.get(id)?;
-                (item.state == QueuedInputState::Pending).then(|| InputRecord {
-                    receipt: InputReceipt {
-                        id: *id,
-                        lane,
-                        position,
-                    },
-                    text: item
-                        .message
-                        .as_ref()
-                        .expect("pending queued input owns its message")
-                        .text()
-                        .to_owned(),
-                })
-            })
-            .collect()
-    }
-
-    fn remove_from_lane(
-        &mut self,
-        id: QueuedInputId,
-        lane: QueuedInputLane,
-    ) -> Result<(), InteractiveError> {
-        if remove_id(self.lane_mut(lane), id) {
-            Ok(())
-        } else {
-            Err(InteractiveError::UnknownInput)
-        }
     }
 }
 
@@ -396,65 +319,74 @@ mod tests {
     }
 
     #[test]
-    fn queue_submit_next_preempts_backlog_without_reordering_backlog() {
-        let mut queue = InteractiveInputQueue::default();
-        let backlog = queue.enqueue("backlog").expect("valid backlog");
-        let next = queue.submit_next("next").expect("valid next");
-
-        let snapshot = queue.snapshot();
-        assert_eq!(snapshot.next[0].text, "next");
-        assert_eq!(snapshot.next[0].position, next.position);
-        assert_eq!(snapshot.backlog[0].text, "backlog");
-        assert_eq!(snapshot.backlog[0].position, backlog.position);
-    }
-
-    #[test]
     fn queue_update_remove_and_reorder_pending_items() {
         let mut queue = InteractiveInputQueue::default();
-        let first = queue.enqueue("first").expect("valid first").id;
-        let second = queue.enqueue("second").expect("valid second").id;
+        let first = queue.submit("first").expect("valid first");
+        let second = queue.submit("second").expect("valid second");
 
         queue
             .update(first, "updated")
             .expect("pending item updates");
         queue
-            .replace_pending_order(QueuedInputLane::Backlog, vec![second, first])
+            .replace_pending_order(vec![second, first])
             .expect("pending item reorders");
         queue.remove(first).expect("pending item removes");
 
         let snapshot = queue.snapshot();
-        assert_eq!(snapshot.backlog[0].text, "second");
-        assert_eq!(snapshot.backlog[0].position, 0);
-        assert_eq!(snapshot.backlog.len(), 1);
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0].id, second.as_u64());
+        assert_eq!(snapshot.items[0].text, "second");
+        assert_eq!(snapshot.items[0].position, 0);
     }
 
     #[test]
-    fn queue_interrupt_moves_next_to_suspended_and_leaves_backlog() {
+    fn queue_pause_blocks_auto_dispatch_and_accept_all_flushes_together() {
         let mut queue = InteractiveInputQueue::default();
-        queue.submit_next("x").expect("valid next");
-        queue.submit_next("y").expect("valid next");
-        queue.enqueue("later").expect("valid backlog");
+        let first = queue.submit("first").expect("valid first");
+        queue.submit("second").expect("valid second");
 
-        queue.suspend_next();
+        assert!(queue.can_auto_dispatch());
+        assert!(queue.set_paused(true));
+        assert!(queue.is_paused());
+        assert!(!queue.can_auto_dispatch());
 
-        let snapshot = queue.snapshot();
-        assert!(snapshot.next.is_empty());
+        queue.update(first, "first edited").expect("edit succeeds");
+        assert!(queue.set_paused(false));
+        assert!(queue.can_auto_dispatch());
+
+        let accepted = queue.accept_all_pending();
         assert_eq!(
-            snapshot
-                .suspended
+            accepted
                 .iter()
-                .map(|item| item.text.as_str())
+                .map(|item| item.view().text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["x", "y"]
+            vec!["first edited", "second"]
         );
-        assert_eq!(snapshot.backlog[0].text, "later");
+        assert!(!queue.has_pending());
+        assert!(!queue.is_paused());
+    }
+
+    #[test]
+    fn queue_interrupt_pauses_pending_items_and_removing_last_unpauses() {
+        let mut queue = InteractiveInputQueue::default();
+        let id = queue.submit("follow up").expect("valid submit");
+
+        assert!(queue.pause_on_interrupt());
+        assert!(queue.is_paused());
+        assert!(!queue.can_auto_dispatch());
+        assert_eq!(queue.snapshot().items[0].text, "follow up");
+        assert!(queue.snapshot().paused);
+
+        queue.remove(id).expect("pending item removes");
+        assert!(!queue.has_pending());
+        assert!(!queue.is_paused());
     }
 
     #[test]
     fn queue_rejects_edit_after_acceptance() {
         let mut queue = InteractiveInputQueue::default();
-        let id = queue.submit_next("x").expect("valid next").id;
-        let accepted = queue.accept_next_burst();
+        let id = queue.submit("x").expect("valid submit");
+        let accepted = queue.accept_all_pending();
         assert_eq!(accepted[0].view().text, "x");
 
         let err = queue
@@ -468,14 +400,14 @@ mod tests {
         let mut queue = InteractiveInputQueue::default();
         let message = image_message(Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10]));
         queue
-            .submit_next_message(message.clone())
+            .submit_message(message.clone())
             .expect("valid image message should queue");
 
         let snapshot = queue.snapshot();
-        assert_eq!(snapshot.next.len(), 1);
-        assert_eq!(snapshot.next[0].text, message.text());
+        assert_eq!(snapshot.items.len(), 1);
+        assert_eq!(snapshot.items[0].text, message.text());
 
-        let accepted = queue.accept_next_burst();
+        let accepted = queue.accept_all_pending();
         assert_eq!(accepted.len(), 1);
         assert_eq!(accepted[0].view().text, message.text());
         assert_eq!(accepted[0].message(), &message);
@@ -488,23 +420,21 @@ mod tests {
         let mut queue = InteractiveInputQueue::default();
         let message = image_message(Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10]));
         let id = queue
-            .enqueue_message(message.clone())
-            .expect("valid image message should queue")
-            .id;
+            .submit_message(message.clone())
+            .expect("valid image message should queue");
 
         queue
             .update(id, "updated [Image #1]")
             .expect("label-preserving update should succeed");
-        let accepted = queue.accept_one_backlog();
+        let accepted = queue.accept_all_pending();
         assert_eq!(accepted[0].message().text(), "updated [Image #1]");
         assert_eq!(accepted[0].message().images(), message.images());
 
         let second_id = queue
-            .enqueue_message(message)
-            .expect("second image message should queue")
-            .id;
+            .submit_message(message)
+            .expect("second image message should queue");
         assert!(queue.update(second_id, "label removed").is_err());
-        assert_eq!(queue.snapshot().backlog[0].text, "inspect [Image #1]");
+        assert_eq!(queue.snapshot().items[0].text, "inspect [Image #1]");
     }
 
     #[test]
@@ -513,9 +443,8 @@ mod tests {
         let message = image_message(Arc::clone(&bytes));
         let mut queue = InteractiveInputQueue::default();
         let id = queue
-            .enqueue_message(message)
-            .expect("valid image message should queue")
-            .id;
+            .submit_message(message)
+            .expect("valid image message should queue");
         assert_eq!(Arc::strong_count(&bytes), 2);
 
         queue.remove(id).expect("pending message should remove");

@@ -137,8 +137,7 @@ pub(super) fn coalesce_terminal_events(
 fn needs_pre_dispatch_render(effect: &ControllerEffect) -> bool {
     matches!(
         effect,
-        ControllerEffect::SubmitNext(_)
-            | ControllerEffect::SubmitBacklog(_)
+        ControllerEffect::Submit(_)
             | ControllerEffect::Interrupt
             | ControllerEffect::LoadCommandOutput(_)
             | ControllerEffect::PasteImage
@@ -195,15 +194,23 @@ pub(super) struct ProviderController<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ControllerEffect {
     None,
-    SubmitNext(TuiSubmission),
-    SubmitBacklog(TuiSubmission),
+    Submit(TuiSubmission),
+    SetPendingPaused(bool),
+    UpdatePendingInput {
+        id: u64,
+        text: String,
+        resume: bool,
+    },
+    RemovePendingInput {
+        id: u64,
+        resume: Option<bool>,
+    },
+    FlushPendingInputs,
     PasteImage,
     LoadCommandOutput(merry_core::ToolCallId),
     CopyText(String),
     CopyTextTooLarge,
     Interrupt,
-    ResumeSuspended,
-    DiscardSuspended,
     PersistPreferences(TuiPreferences),
     ApplyRuntimePreferences(TuiPreferences),
     #[cfg(feature = "web")]

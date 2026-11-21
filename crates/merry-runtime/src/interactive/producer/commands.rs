@@ -13,35 +13,20 @@ impl InteractiveProducer {
         mode: CommandHandlingMode,
     ) -> Option<CommandDecision> {
         match command {
-            InteractiveCommand::SubmitNext {
+            InteractiveCommand::Submit {
                 message,
                 ack_sender,
             } => {
-                let receipt = self.queue.submit_next_message(message);
-                let should_run = mode == CommandHandlingMode::Waiting && receipt.is_ok();
+                let receipt = self.queue.submit_message(message);
                 let queue_changed = receipt.is_ok();
+                let should_run =
+                    mode == CommandHandlingMode::Waiting && self.queue.can_auto_dispatch();
                 let _ = ack_sender.send(receipt);
                 if queue_changed && !self.send_queue_changed().await {
                     return None;
                 }
                 if should_run {
-                    return Some(CommandDecision::RunNext);
-                }
-                Some(CommandDecision::Continue)
-            }
-            InteractiveCommand::Enqueue {
-                message,
-                ack_sender,
-            } => {
-                let receipt = self.queue.enqueue_message(message);
-                let should_run = mode == CommandHandlingMode::Waiting && receipt.is_ok();
-                let queue_changed = receipt.is_ok();
-                let _ = ack_sender.send(receipt);
-                if queue_changed && !self.send_queue_changed().await {
-                    return None;
-                }
-                if should_run {
-                    return Some(CommandDecision::RunBacklog);
+                    return Some(CommandDecision::RunPending);
                 }
                 Some(CommandDecision::Continue)
             }
@@ -67,16 +52,38 @@ impl InteractiveProducer {
                 }
                 Some(CommandDecision::Continue)
             }
-            InteractiveCommand::ReplacePendingOrder {
-                lane,
-                ids,
-                ack_sender,
-            } => {
-                let result = self.queue.replace_pending_order(lane, ids);
+            InteractiveCommand::ReplacePendingOrder { ids, ack_sender } => {
+                let result = self.queue.replace_pending_order(ids);
                 let queue_changed = result.is_ok();
                 let _ = ack_sender.send(result);
                 if queue_changed && !self.send_queue_changed().await {
                     return None;
+                }
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::SetPendingPaused { paused, ack_sender } => {
+                let changed = self.queue.set_paused(paused);
+                let should_run = !paused
+                    && mode == CommandHandlingMode::Waiting
+                    && self.queue.can_auto_dispatch();
+                let _ = ack_sender.send(Ok(()));
+                if changed && !self.send_queue_changed().await {
+                    return None;
+                }
+                if should_run {
+                    return Some(CommandDecision::RunPending);
+                }
+                Some(CommandDecision::Continue)
+            }
+            InteractiveCommand::FlushPending { ack_sender } => {
+                let changed = self.queue.set_paused(false);
+                let should_run = mode == CommandHandlingMode::Waiting && self.queue.has_pending();
+                let _ = ack_sender.send(Ok(()));
+                if changed && !self.send_queue_changed().await {
+                    return None;
+                }
+                if should_run {
+                    return Some(CommandDecision::RunPending);
                 }
                 Some(CommandDecision::Continue)
             }
@@ -117,23 +124,6 @@ impl InteractiveProducer {
                     }
                 }
                 let _ = ack_sender.send(result.map_err(InteractiveError::from));
-                Some(CommandDecision::Continue)
-            }
-            InteractiveCommand::ResumeSuspended { ack_sender } => {
-                self.suspended_resume_requested = true;
-                let _ = ack_sender.send(Ok(()));
-                if mode == CommandHandlingMode::Waiting {
-                    return Some(CommandDecision::RunSuspended);
-                }
-                Some(CommandDecision::Continue)
-            }
-            InteractiveCommand::DiscardSuspended { ack_sender } => {
-                self.suspended_resume_requested = false;
-                let discarded = self.queue.discard_suspended();
-                let _ = ack_sender.send(Ok(()));
-                if !discarded.is_empty() && !self.send_queue_changed().await {
-                    return None;
-                }
                 Some(CommandDecision::Continue)
             }
             InteractiveCommand::Interrupt { reason, ack_sender } => {
@@ -266,15 +256,14 @@ impl InteractiveProducer {
         _reason: InterruptReason,
     ) -> Option<CommandDecision> {
         self.interrupted = true;
-        self.suspended_resume_requested = false;
-        self.queue.suspend_next();
+        let queue_changed = self.queue.pause_on_interrupt();
         if self.bridge_pending {
             self.bridge_resolution_epoch.fetch_add(1, Ordering::AcqRel);
         }
         if let Some(token) = self.phase_token.as_ref() {
             token.cancel();
         }
-        if !self.send_queue_changed().await {
+        if queue_changed && !self.send_queue_changed().await {
             return None;
         }
         if !self.send_state(InteractiveRunState::Interrupting).await {

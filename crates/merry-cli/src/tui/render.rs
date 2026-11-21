@@ -9,9 +9,7 @@ use crate::{
         layout::{BottomPaneHeights, cockpit_layout},
         motion::{self, MotionClock},
         overlay_render, plan_render,
-        render::composer::{
-            completion_lines, composer_inner_columns, pane_heights, queue_lines, render_input,
-        },
+        render::composer::{completion_lines, composer_inner_columns, pane_heights, render_input},
         state::TuiState,
         status::build_header_layout,
         text_wrap::semantic_style,
@@ -44,6 +42,8 @@ mod activity;
 mod command_rows;
 mod command_style;
 mod comment_marks;
+pub(crate) use pending_queue::{PendingQueuePointer, pending_queue_pointer_at};
+mod pending_queue;
 mod sticky;
 pub(crate) mod task_dock;
 
@@ -120,16 +120,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
     }
 
     if let Some(queue_region) = rects.queue {
-        let mut queue_block = Block::default()
-            .title(" queue ")
-            .border_style(semantic_style(state, SemanticColor::Border));
-        if let Some(bg) = state.theme().bg_color(SemanticColor::SurfaceSubtle) {
-            queue_block = queue_block.style(Style::default().bg(bg));
-        }
-        frame.render_widget(
-            Paragraph::new(queue_lines(state, queue_region)).block(queue_block),
-            queue_region,
-        );
+        pending_queue::render_pending_queue(frame, state, queue_region);
     }
     if pane_heights.completion > 0 {
         frame.render_widget(
