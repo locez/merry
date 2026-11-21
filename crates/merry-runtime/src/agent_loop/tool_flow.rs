@@ -159,16 +159,34 @@ pub(crate) async fn execute_stream_runtime_batch(
         return Ok(None);
     }
 
-    let execution = runtime
-        .execute_tool_call_batch_with_active_permit(
-            calls,
-            ToolExecutionContext::new(token.clone()),
-            loop_permit,
-        )
-        .await;
-    let (execution_events, error) = execution.into_parts();
-    for event in execution_events {
-        publish_journal_event(runtime, projector, sender, events, event).await?;
+    let (batch_events_tx, mut batch_events_rx) = mpsc::channel(64);
+    let execution = runtime.execute_tool_call_batch_streaming_with_active_permit(
+        calls,
+        ToolExecutionContext::new(token.clone()),
+        batch_events_tx,
+        loop_permit,
+    );
+    tokio::pin!(execution);
+    let mut batch_events_open = true;
+
+    let error = loop {
+        tokio::select! {
+            error = &mut execution => break error,
+            call_events = batch_events_rx.recv(), if batch_events_open => {
+                let Some(call_events) = call_events else {
+                    batch_events_open = false;
+                    continue;
+                };
+                for event in call_events {
+                    publish_journal_event(runtime, projector, sender, events, event).await?;
+                }
+            }
+        }
+    };
+    while let Ok(call_events) = batch_events_rx.try_recv() {
+        for event in call_events {
+            publish_journal_event(runtime, projector, sender, events, event).await?;
+        }
     }
     Ok(error)
 }

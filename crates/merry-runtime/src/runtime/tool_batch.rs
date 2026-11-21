@@ -3,6 +3,7 @@ use crate::{RuntimeError, ToolConcurrency, ToolExecutionContext};
 use futures_util::{StreamExt, stream};
 use merry_core::{PendingToolCall, RuntimeJournalEvent};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 pub(crate) struct ToolBatchExecution {
     events: Vec<RuntimeJournalEvent>,
@@ -30,14 +31,28 @@ pub(super) async fn execute_tool_call_batch_with_active_permit(
 ) -> ToolBatchExecution {
     {
         let _batch_scope = inner.begin_tool_batch();
-        execute_tool_call_batch_inner(inner, calls, context).await
+        execute_tool_call_batch_inner(inner, calls, context, None).await
     }
+}
+
+pub(super) async fn execute_tool_call_batch_streaming_with_active_permit(
+    inner: &Arc<RuntimeInner>,
+    calls: Vec<PendingToolCall>,
+    context: ToolExecutionContext,
+    event_tx: mpsc::Sender<Vec<RuntimeJournalEvent>>,
+) -> Option<RuntimeError> {
+    let execution = {
+        let _batch_scope = inner.begin_tool_batch();
+        execute_tool_call_batch_inner(inner, calls, context, Some(event_tx)).await
+    };
+    execution.error
 }
 
 async fn execute_tool_call_batch_inner(
     inner: &Arc<RuntimeInner>,
     calls: Vec<PendingToolCall>,
     context: ToolExecutionContext,
+    event_tx: Option<mpsc::Sender<Vec<RuntimeJournalEvent>>>,
 ) -> ToolBatchExecution {
     let mut events = Vec::new();
     let mut cursor = 0;
@@ -51,7 +66,7 @@ async fn execute_tool_call_batch_inner(
                 cursor += 1;
             }
 
-            let mut results = stream::iter(calls[start..cursor].iter().cloned().enumerate())
+            let mut running = stream::iter(calls[start..cursor].iter().cloned().enumerate())
                 .map(|(index, call)| {
                     let inner = Arc::clone(inner);
                     let context = context.clone();
@@ -65,20 +80,32 @@ async fn execute_tool_call_batch_inner(
                         (index, result)
                     }
                 })
-                .buffer_unordered(inner.max_parallel_tool_calls.get())
-                .collect::<Vec<_>>()
-                .await;
-            results.sort_by_key(|(index, _)| *index);
+                .buffer_unordered(inner.max_parallel_tool_calls.get());
 
-            let mut first_error = None;
-            for (_, result) in results {
+            let mut first_error: Option<(usize, RuntimeError)> = None;
+            while let Some((index, result)) = running.next().await {
                 match result {
-                    Ok(mut call_events) => events.append(&mut call_events),
-                    Err(error) if first_error.is_none() => first_error = Some(error),
-                    Err(_) => {}
+                    Ok(mut call_events) => {
+                        if let Some(tx) = &event_tx {
+                            inner
+                                .project_journal_events_with_tool_outputs(&call_events)
+                                .await;
+                            let _ = tx.send(call_events).await;
+                        } else {
+                            events.append(&mut call_events);
+                        }
+                    }
+                    Err(error) => {
+                        let replace = first_error
+                            .as_ref()
+                            .is_none_or(|(best_index, _)| index < *best_index);
+                        if replace {
+                            first_error = Some((index, error));
+                        }
+                    }
                 }
             }
-            if let Some(error) = first_error {
+            if let Some((_, error)) = first_error {
                 events.sort_by_key(|event| event.sequence);
                 return ToolBatchExecution {
                     events,
@@ -94,7 +121,16 @@ async fn execute_tool_call_batch_inner(
             .await;
             cursor += 1;
             match result {
-                Ok(mut call_events) => events.append(&mut call_events),
+                Ok(mut call_events) => {
+                    if let Some(tx) = &event_tx {
+                        inner
+                            .project_journal_events_with_tool_outputs(&call_events)
+                            .await;
+                        let _ = tx.send(call_events).await;
+                    } else {
+                        events.append(&mut call_events);
+                    }
+                }
                 Err(error) => {
                     events.sort_by_key(|event| event.sequence);
                     return ToolBatchExecution {

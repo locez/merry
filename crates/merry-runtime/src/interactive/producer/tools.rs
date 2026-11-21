@@ -388,11 +388,13 @@ impl InteractiveProducer {
             .collect::<Vec<_>>();
         let execution_permit = loop_permit.clone();
         let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(64);
+        let (batch_events_tx, mut batch_events_rx) = tokio::sync::mpsc::channel(64);
         let execution = async move {
             runtime
-                .execute_tool_call_batch_with_active_permit(
+                .execute_tool_call_batch_streaming_with_active_permit(
                     calls,
                     ToolExecutionContext::new(phase_token).with_output_sender(output_tx),
+                    batch_events_tx,
                     &execution_permit,
                 )
                 .await
@@ -400,10 +402,20 @@ impl InteractiveProducer {
         tokio::pin!(execution);
         let mut commands_open = true;
         let mut output_open = true;
+        let mut batch_events_open = true;
 
-        let result = loop {
+        let error = loop {
             tokio::select! {
-                result = &mut execution => break result,
+                error = &mut execution => break error,
+                call_events = batch_events_rx.recv(), if batch_events_open => {
+                    let Some(call_events) = call_events else {
+                        batch_events_open = false;
+                        continue;
+                    };
+                    if !self.send_runtime_events(call_events).await {
+                        return None;
+                    }
+                }
                 chunk = output_rx.recv(), if output_open => {
                     let Some(chunk) = chunk else {
                         output_open = false;
@@ -443,9 +455,10 @@ impl InteractiveProducer {
         };
         self.phase_token = None;
 
-        let (events, error) = result.into_parts();
-        if !self.send_runtime_events(events).await {
-            return None;
+        while let Ok(call_events) = batch_events_rx.try_recv() {
+            if !self.send_runtime_events(call_events).await {
+                return None;
+            }
         }
 
         match error {

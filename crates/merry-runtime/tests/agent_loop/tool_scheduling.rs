@@ -408,3 +408,90 @@ async fn agent_loop_runs_run_process_calls_in_parallel_and_queues_above_limit() 
     );
     assert_eq!(runner.started.load(std::sync::atomic::Ordering::SeqCst), 3);
 }
+
+#[tokio::test]
+async fn parallel_batch_emits_fast_tool_finished_before_slow_sibling_completes() {
+    struct FastAndGatedExecutor {
+        unblock_slow: Arc<tokio::sync::Notify>,
+    }
+
+    impl ToolExecutor for FastAndGatedExecutor {
+        fn execute<'a>(
+            &'a self,
+            call: PendingToolCall,
+            _context: ToolExecutionContext,
+        ) -> ToolExecutorFuture<'a> {
+            let unblock_slow = Arc::clone(&self.unblock_slow);
+            Box::pin(async move {
+                let is_slow = call.id().as_str() == "call-slow";
+                if is_slow {
+                    unblock_slow.notified().await;
+                }
+                Ok(ToolExecutionOutcome::succeeded_text(if is_slow {
+                    "slow-ok"
+                } else {
+                    "fast-ok"
+                }))
+            })
+        }
+    }
+
+    let unblock_slow = Arc::new(tokio::sync::Notify::new());
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_batch_event(vec![
+            model_tool_call("call-slow", "probe"),
+            model_tool_call("call-fast", "probe"),
+        ]))],
+        vec![Ok(completed_text_event("both finished"))],
+    ]);
+    let runtime = Runtime::builder(session_id("agent-loop-stream-parallel-finish"))
+        .register_tool(
+            merry_runtime::RegisteredTool::read_only(
+                tool_spec("probe"),
+                Arc::new(FastAndGatedExecutor {
+                    unblock_slow: Arc::clone(&unblock_slow),
+                }),
+            )
+            .with_parallel_safe_execution(),
+        )
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let mut stream = runtime
+        .run_agent_loop_stream(
+            merry_runtime::StepInput::user_text("Run slow and fast calls concurrently.")
+                .expect("valid input"),
+            merry_runtime::StepContext::new(tokio_util::sync::CancellationToken::new()),
+            merry_runtime::AgentLoopConfig::default(),
+        )
+        .expect("stream should start");
+
+    let mut saw_fast_finished = false;
+    let mut saw_slow_finished = false;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Ok(Some(message)) = stream.next_message().await {
+            if let merry_runtime::AgentRunMessage::Event(
+                merry_core::RuntimeEvent::ToolCallFinished { result, .. },
+            ) = message
+            {
+                if result.call_id().as_str() == "call-fast" {
+                    saw_fast_finished = true;
+                    assert!(
+                        !saw_slow_finished,
+                        "fast call must finish and emit before slow sibling is unblocked"
+                    );
+                    unblock_slow.notify_one();
+                } else if result.call_id().as_str() == "call-slow" {
+                    saw_slow_finished = true;
+                }
+            }
+        }
+    })
+    .await
+    .expect("fast tool must emit ToolCallFinished while slow sibling is still running");
+
+    let result = stream.result().await.expect("loop should succeed");
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert!(saw_fast_finished && saw_slow_finished);
+}

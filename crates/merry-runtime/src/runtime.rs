@@ -711,6 +711,26 @@ impl Runtime {
         execution
     }
 
+    pub(crate) async fn execute_tool_call_batch_streaming_with_active_permit(
+        &self,
+        calls: Vec<PendingToolCall>,
+        context: ToolExecutionContext,
+        event_tx: tokio::sync::mpsc::Sender<Vec<RuntimeJournalEvent>>,
+        _active_permit: &ActiveStepPermit,
+    ) -> Option<RuntimeError> {
+        let error = tool_batch::execute_tool_call_batch_streaming_with_active_permit(
+            &self.inner,
+            calls,
+            context,
+            event_tx,
+        )
+        .await;
+        if error.is_none() {
+            self.inner.refresh_resume_savepoint().await;
+        }
+        error
+    }
+
     /// Payload-free summary of the installed compacted checkpoint, if any.
     pub async fn compacted_checkpoint_summary(&self) -> Option<CompactedCheckpointSummary> {
         let session = self.inner.session.lock().await;

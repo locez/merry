@@ -16,6 +16,11 @@ impl RuntimeInner {
     /// Projects events and refreshes the resume savepoint after session state is recorded.
     pub(super) async fn commit_journal_events(&self, events: &[RuntimeJournalEvent]) {
         self.project_journal_events_with_tool_outputs(events).await;
+        self.refresh_resume_savepoint().await;
+    }
+
+    /// Refreshes the durable resume savepoint for already-recorded journal events.
+    pub(super) async fn refresh_resume_savepoint(&self) {
         if let Some(cursor) = write_resume_safe_savepoint(self).await {
             self.session.lock().await.adopt_journal_cursor(cursor);
         }
@@ -51,7 +56,10 @@ impl RuntimeInner {
 }
 
 impl RuntimeInner {
-    async fn project_journal_events_with_tool_outputs(&self, events: &[RuntimeJournalEvent]) {
+    pub(super) async fn project_journal_events_with_tool_outputs(
+        &self,
+        events: &[RuntimeJournalEvent],
+    ) {
         let tool_call_ids = events
             .iter()
             .filter_map(|event| match &event.payload {
