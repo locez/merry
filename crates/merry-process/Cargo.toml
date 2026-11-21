@@ -3,6 +3,7 @@ name = "merry-process"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 merry-runtime = { path = "../merry-runtime", version = "0.1.0" }

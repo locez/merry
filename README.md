@@ -227,3 +227,16 @@ cargo test -p merry-cli --features web
 - [`examples/config.toml`](examples/config.toml) — Fully annotated configuration reference.
 - [`sdks/python/README.md`](sdks/python/README.md) — Python SDK guide and examples.
 - [`sdks/python/CAPABILITY_MATRIX.md`](sdks/python/CAPABILITY_MATRIX.md) — Rust and Python SDK parity.
+
+---
+
+## License
+
+Merry is dual-licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT License ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in Merry by you, as defined in the Apache-2.0 license, shall be dual-licensed as above, without any additional terms or conditions.
