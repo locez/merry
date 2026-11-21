@@ -14,10 +14,7 @@ use crate::{
     },
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{
-    layout::{Position, Size},
-    style::Color,
-};
+use ratatui::layout::{Position, Size};
 
 #[test]
 fn controller_alt_x_opens_searchable_command_palette_and_settings() {
@@ -148,7 +145,10 @@ fn command_palette_uses_a_magenta_selection_surface() {
         selected.bg,
         TuiTheme::default().bg_color(crate::tui::theme::SemanticColor::SelectionBackground)
     );
-    assert_eq!(selected.fg, Some(Color::White));
+    assert_eq!(
+        selected.fg,
+        TuiTheme::default().color(crate::tui::theme::SemanticColor::Assistant)
+    );
 }
 
 #[test]

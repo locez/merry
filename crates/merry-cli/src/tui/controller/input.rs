@@ -362,7 +362,9 @@ pub(super) fn preferences_effect(
     preferences: TuiPreferences,
 ) -> ControllerEffect {
     match item {
-        crate::tui::overlay::SettingItem::CodeTheme => {
+        crate::tui::overlay::SettingItem::CodeTheme
+        | crate::tui::overlay::SettingItem::UiTheme
+        | crate::tui::overlay::SettingItem::TransparentBackground => {
             ControllerEffect::PersistPreferences(preferences)
         }
         crate::tui::overlay::SettingItem::KeyboardShortcuts => ControllerEffect::None,

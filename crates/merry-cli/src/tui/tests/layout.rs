@@ -9,7 +9,7 @@ use crate::tui::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use merry_core::{QueuedInputView, QueuedInputsView};
-use ratatui::style::{Color, Modifier};
+use ratatui::style::Modifier;
 
 #[test]
 fn renderer_highlights_complete_image_placeholders_in_the_composer() {
@@ -30,7 +30,7 @@ fn renderer_highlights_complete_image_placeholders_in_the_composer() {
 
     assert_eq!(
         find_cell_color(&buffer, "[Image #1]"),
-        Some(Color::LightMagenta)
+        TuiTheme::default().color(crate::tui::theme::SemanticColor::Focus)
     );
 }
 
@@ -293,13 +293,20 @@ fn renderer_shows_user_input_in_timeline() {
     assert!(text.contains("baidu.com"));
     let accent_style = find_cell_style(&buffer, "❯").expect("user accent should render");
     let body_style = find_cell_style(&buffer, "baidu.com").expect("user body should render");
-    assert_eq!(accent_style.fg, Some(Color::LightMagenta));
+    let theme = TuiTheme::default();
+    assert_eq!(
+        accent_style.fg,
+        theme.color(crate::tui::theme::SemanticColor::Focus)
+    );
     assert!(accent_style.add_modifier.contains(Modifier::BOLD));
-    assert_eq!(body_style.fg, Some(Color::White));
+    assert_eq!(
+        body_style.fg,
+        theme.color(crate::tui::theme::SemanticColor::Assistant)
+    );
     assert!(body_style.add_modifier.contains(Modifier::BOLD));
     assert_eq!(
         body_style.bg,
-        TuiTheme::default().bg_color(crate::tui::theme::SemanticColor::UserBackground)
+        theme.bg_color(crate::tui::theme::SemanticColor::UserBackground)
     );
 }
 
@@ -442,7 +449,10 @@ fn renderer_does_not_underline_cjk_strong_text_in_nested_lists() {
     for text in ["橙", "血", "脐", "赣"] {
         let style = find_cell_style(&buffer, text)
             .unwrap_or_else(|| panic!("strong CJK list item should render: {text}\n{rendered}"));
-        assert_eq!(style.fg, Some(Color::LightMagenta));
+        assert_eq!(
+            style.fg,
+            TuiTheme::default().color(crate::tui::theme::SemanticColor::Focus)
+        );
         assert!(style.add_modifier.contains(Modifier::BOLD));
         assert!(!style.add_modifier.contains(Modifier::UNDERLINED));
     }

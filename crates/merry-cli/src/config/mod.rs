@@ -599,6 +599,8 @@ struct TuiToml {
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TuiThemeToml {
+    pub(crate) preset: Option<crate::tui::theme::ThemePreset>,
+    pub(crate) transparent: Option<bool>,
     pub(crate) background: Option<String>,
     pub(crate) surface: Option<String>,
     pub(crate) surface_subtle: Option<String>,

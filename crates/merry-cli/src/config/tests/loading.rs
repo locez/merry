@@ -359,10 +359,15 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
         .expect("example TUI config should validate");
     assert!(tui.show_successful_command_output);
     assert_eq!(tui.brand_mark, BrandMarkMode::Emoji);
-    assert_eq!(tui.theme.status.as_deref(), Some("light_magenta"));
-    assert_eq!(tui.theme.assistant.as_deref(), Some("white"));
-    assert_eq!(tui.theme.tool_keyword.as_deref(), Some("light_cyan"));
-    assert_eq!(tui.theme.command.as_deref(), Some("light_blue"));
+    assert_eq!(
+        tui.theme.preset,
+        Some(crate::tui::theme::ThemePreset::Sakura)
+    );
+    assert_eq!(tui.theme.transparent, Some(false));
+    assert_eq!(tui.theme.status, None);
+    assert_eq!(tui.theme.assistant, None);
+    assert_eq!(tui.theme.tool_keyword, None);
+    assert_eq!(tui.theme.command, None);
     assert_eq!(tui.keymap.submit.as_deref(), Some("enter"));
     assert_eq!(tui.keymap.cancel_input_or_quit.as_deref(), Some("ctrl+c"));
     assert_eq!(tui.keymap.insert_newline.as_deref(), Some("ctrl+j"));
@@ -382,6 +387,29 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
     assert_eq!(
         snowflake.tui_config().expect("valid tui config").brand_mark,
         BrandMarkMode::Snowflake
+    );
+
+    let preset = MerryConfig::load_optional_from_text(
+        Some("[tui.theme]\npreset = 'tokyo-night'\ntransparent = true\nheader_bg = '#112233'"),
+        &paths,
+    )
+    .expect("named preset should parse")
+    .expect("config should be present");
+    let preset_tui = preset.tui_config().expect("valid preset config");
+    assert_eq!(
+        preset_tui.theme.preset,
+        Some(crate::tui::theme::ThemePreset::TokyoNight)
+    );
+    assert_eq!(preset_tui.theme.transparent, Some(true));
+    assert_eq!(preset_tui.theme.header_bg.as_deref(), Some("#112233"));
+
+    assert!(
+        MerryConfig::load_optional_from_text(
+            Some("[tui.theme]\npreset = 'nonexistent-theme'"),
+            &paths,
+        )
+        .is_err(),
+        "unknown theme preset should be rejected"
     );
     assert_eq!(tui.keymap.history_search.as_deref(), Some("ctrl+r"));
     assert_eq!(tui.keymap.toggle_comment.as_deref(), Some("alt+c"));

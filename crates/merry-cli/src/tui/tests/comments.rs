@@ -9,12 +9,7 @@ use crate::tui::{
     theme::TuiTheme,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{
-    buffer::Buffer,
-    layout::Position,
-    layout::Size,
-    style::{Color, Modifier},
-};
+use ratatui::{buffer::Buffer, layout::Position, layout::Size, style::Modifier};
 
 fn state(markdown: &str) -> TuiState {
     let mut state = TuiState::new(
@@ -254,7 +249,10 @@ fn saved_quote_stays_highlighted_and_a_click_edits_the_note() {
         style.add_modifier.contains(Modifier::UNDERLINED),
         "quoted text should stay underlined"
     );
-    assert_eq!(style.bg, Some(Color::Magenta));
+    assert_eq!(
+        style.bg,
+        TuiTheme::default().color(crate::tui::theme::SemanticColor::Selection)
+    );
 
     assert_eq!(
         handle_mouse_input(MouseInput::Down(start), size, &mut state),

@@ -16,6 +16,7 @@ impl TuiState {
     ) {
         self.preferences = preferences;
         self.settings_defaults = defaults;
+        self.sync_active_theme();
     }
 
     pub(crate) fn preferences(&self) -> &TuiPreferences {
@@ -184,6 +185,22 @@ impl TuiState {
                     SettingDirection::Next => self.preferences.code_theme.next(),
                 };
             }
+            SettingItem::UiTheme => {
+                let current = self
+                    .preferences
+                    .theme_preset
+                    .unwrap_or(self.settings_defaults.theme_preset);
+                let next = match direction {
+                    SettingDirection::Previous => current.previous(),
+                    SettingDirection::Next => current.next(),
+                };
+                self.preferences.theme_preset = Some(next);
+                self.sync_active_theme();
+            }
+            SettingItem::TransparentBackground => {
+                self.adjust_transparent_background(direction);
+                self.sync_active_theme();
+            }
             SettingItem::DefaultProvider => self.adjust_provider(direction),
             SettingItem::DefaultModel | SettingItem::KeyboardShortcuts => return false,
             SettingItem::ReasoningEffort => self.adjust_reasoning(direction),
@@ -200,6 +217,14 @@ impl TuiState {
     pub(crate) fn reset_setting(&mut self, item: SettingItem) -> bool {
         match item {
             SettingItem::CodeTheme => self.preferences.code_theme = CodeTheme::default(),
+            SettingItem::UiTheme => {
+                self.preferences.theme_preset = None;
+                self.sync_active_theme();
+            }
+            SettingItem::TransparentBackground => {
+                self.preferences.transparent_background = None;
+                self.sync_active_theme();
+            }
             SettingItem::DefaultProvider => self.preferences.provider = None,
             SettingItem::DefaultModel => {
                 if let Some(provider) = self.effective_provider_alias().map(str::to_owned) {
@@ -227,6 +252,24 @@ impl TuiState {
     pub(crate) fn setting_value(&self, item: SettingItem) -> String {
         match item {
             SettingItem::CodeTheme => self.preferences.code_theme.label().to_owned(),
+            SettingItem::UiTheme => self
+                .preferences
+                .theme_preset
+                .map(|preset| preset.label().to_owned())
+                .unwrap_or_else(|| {
+                    format!("Inherit ({})", self.settings_defaults.theme_preset.label())
+                }),
+            SettingItem::TransparentBackground => self
+                .preferences
+                .transparent_background
+                .map(on_off)
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    format!(
+                        "Inherit ({})",
+                        on_off(self.settings_defaults.transparent_background)
+                    )
+                }),
             SettingItem::DefaultProvider => inherited_value(
                 self.preferences.provider.as_deref(),
                 self.settings_defaults.provider.as_deref(),
@@ -355,6 +398,19 @@ impl TuiState {
         let _ = self
             .preferences
             .set_reasoning_effort_for_provider(&provider, reasoning_effort);
+    }
+
+    fn adjust_transparent_background(&mut self, direction: SettingDirection) {
+        const VALUES: [Option<bool>; 3] = [None, Some(true), Some(false)];
+        let current = VALUES
+            .iter()
+            .position(|value| *value == self.preferences.transparent_background)
+            .unwrap_or(0);
+        let next = match direction {
+            SettingDirection::Previous => (current + VALUES.len() - 1) % VALUES.len(),
+            SettingDirection::Next => (current + 1) % VALUES.len(),
+        };
+        self.preferences.transparent_background = VALUES[next];
     }
 
     fn adjust_auto_compaction(&mut self, direction: SettingDirection) {

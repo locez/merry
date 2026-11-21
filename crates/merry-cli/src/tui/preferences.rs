@@ -1,4 +1,4 @@
-use crate::config::ProviderAlias;
+use crate::{config::ProviderAlias, tui::theme::ThemePreset};
 use merry_llm::{ModelName, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -100,6 +100,10 @@ pub(crate) struct TuiPreferences {
     #[serde(default)]
     pub(crate) code_theme: CodeTheme,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) theme_preset: Option<ThemePreset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transparent_background: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) provider: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_states: BTreeMap<String, TuiProviderState>,
@@ -120,6 +124,8 @@ impl Default for TuiPreferences {
         Self {
             version: PREFERENCES_VERSION,
             code_theme: CodeTheme::default(),
+            theme_preset: None,
+            transparent_background: None,
             provider: None,
             provider_states: BTreeMap::new(),
             context_window_tokens: None,
@@ -228,6 +234,8 @@ impl TuiPreferences {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TuiSettingsDefaults {
+    pub(crate) theme_preset: ThemePreset,
+    pub(crate) transparent_background: bool,
     pub(crate) provider_aliases: Vec<String>,
     pub(crate) provider: Option<String>,
     pub(crate) model: Option<String>,
@@ -243,6 +251,8 @@ impl Default for TuiSettingsDefaults {
     fn default() -> Self {
         let limits = merry_runtime::SubagentConfig::default();
         Self {
+            theme_preset: ThemePreset::default(),
+            transparent_background: false,
             provider_aliases: Vec::new(),
             provider: None,
             model: None,
@@ -273,7 +283,12 @@ impl TuiSettingsDefaults {
         }
         let subagents = config.subagents_config()?;
         let auto_compaction = config.automatic_compaction_config()?;
+        let tui_theme = config.tui_config()?.theme;
+        let theme_preset = tui_theme.preset.unwrap_or_default();
+        let transparent_background = tui_theme.transparent.unwrap_or(false);
         Ok(Self {
+            theme_preset,
+            transparent_background,
             provider_aliases,
             provider: default_provider
                 .as_ref()
@@ -584,6 +599,8 @@ fn migrate_provider_states(
     let preferences = TuiPreferences {
         version: PREFERENCES_VERSION,
         code_theme,
+        theme_preset: None,
+        transparent_background: None,
         provider,
         provider_states,
         context_window_tokens,

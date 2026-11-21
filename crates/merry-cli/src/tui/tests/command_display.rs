@@ -12,10 +12,7 @@ use merry_core::{
     ErrorInfo, RuntimeEvent, TOOL_CANCELLED_BY_USER_CODE, ToolCallId, ToolCallResult, ToolOutput,
 };
 use merry_runtime::SessionTranscriptItem;
-use ratatui::{
-    layout::{Position, Size},
-    style::Color,
-};
+use ratatui::layout::{Position, Size};
 use serde_json::json;
 use std::time::Duration;
 
@@ -135,8 +132,15 @@ async fn slow_command_duration_is_visible_and_stops_after_completion() {
     let finished = render_to_text(&state, 120, 24);
     assert!(finished.contains("Ran cargo test (.) -> 128  15.0s"));
     let buffer = render_to_buffer(&state, 120, 24);
-    assert_eq!(find_cell_color(&buffer, "128"), Some(Color::LightRed));
-    assert_eq!(find_cell_color(&buffer, "Ran"), Some(Color::LightCyan));
+    let theme = TuiTheme::default();
+    assert_eq!(
+        find_cell_color(&buffer, "128"),
+        theme.color(crate::tui::theme::SemanticColor::Error)
+    );
+    assert_eq!(
+        find_cell_color(&buffer, "Ran"),
+        theme.color(crate::tui::theme::SemanticColor::ToolKeyword)
+    );
     tokio::time::advance(Duration::from_secs(30)).await;
     assert_eq!(finished, render_to_text(&state, 120, 24));
 }
@@ -205,11 +209,15 @@ async fn running_command_animates_and_completion_stops_the_animation() {
     assert!(!first.contains("Ran "));
     let static_state = state.clone().with_animations(false);
     let buffer = render_to_buffer(&static_state, 120, 24);
+    let theme = TuiTheme::default();
     assert_eq!(
         find_cell_color(&buffer, "Running"),
-        Some(Color::LightMagenta)
+        theme.color(crate::tui::theme::SemanticColor::Focus)
     );
-    assert_eq!(find_cell_color(&buffer, "git"), Some(Color::LightBlue));
+    assert_eq!(
+        find_cell_color(&buffer, "git"),
+        theme.color(crate::tui::theme::SemanticColor::Command)
+    );
 
     tokio::time::advance(Duration::from_millis(100)).await;
     let second = render_to_text(&state, 120, 24);

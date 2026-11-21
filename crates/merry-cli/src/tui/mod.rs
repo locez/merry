@@ -125,7 +125,8 @@ pub(crate) async fn run(
         .map_err(crate::cli_error::unexpected)?
         .unwrap_or_default();
     let keymap = Keymap::from_config(&tui_config.keymap).map_err(crate::cli_error::unexpected)?;
-    let theme = TuiTheme::from_config(&tui_config.theme).map_err(crate::cli_error::unexpected)?;
+    let configured_theme =
+        TuiTheme::from_config_opaque(&tui_config.theme).map_err(crate::cli_error::unexpected)?;
     let paths = XdgPaths::from_env().map_err(crate::cli_error::unexpected)?;
     let mut provider_management =
         ProviderManagementService::new(paths.clone()).map_err(crate::cli_error::unexpected)?;
@@ -140,6 +141,14 @@ pub(crate) async fn run(
         .load_with_default_provider(settings_defaults.provider.as_deref())
         .await
         .map_err(crate::cli_error::unexpected)?;
+    let startup_transparent = preferences
+        .transparent_background
+        .unwrap_or(settings_defaults.transparent_background);
+    let startup_theme = preferences
+        .theme_preset
+        .map(TuiTheme::from_preset)
+        .unwrap_or_else(|| configured_theme.clone())
+        .with_transparent_background(startup_transparent);
     let launch = workspace_trust::prepare_product_workspace(sandbox_mode, trust_workspace, &paths)?;
     let mut terminal = match TerminalSession::enter() {
         Ok(terminal) => terminal,
@@ -152,7 +161,7 @@ pub(crate) async fn run(
             });
         }
     };
-    let Some(workspace) = open_workspace(&mut terminal, launch, &theme).await? else {
+    let Some(workspace) = open_workspace(&mut terminal, launch, &startup_theme).await? else {
         return Ok(());
     };
     let workspace_root = workspace.root;
@@ -165,7 +174,7 @@ pub(crate) async fn run(
             workspace_root.clone(),
             "Provider setup".to_owned(),
             keymap.clone(),
-            theme.clone(),
+            configured_theme.clone(),
         );
         setup_state.configure_preferences(preferences.clone(), settings_defaults.clone());
         let Some(configured) = run_provider_setup(
@@ -187,8 +196,13 @@ pub(crate) async fn run(
     let selection = match launch_mode {
         LaunchMode::New => SessionPickerSelection::New,
         LaunchMode::ResumePicker => {
-            session_picker::pick_session(&mut terminal, &session_store, &workspace_root, &theme)
-                .await?
+            session_picker::pick_session(
+                &mut terminal,
+                &session_store,
+                &workspace_root,
+                &startup_theme,
+            )
+            .await?
         }
     };
     if matches!(selection, SessionPickerSelection::Quit) {
@@ -212,7 +226,7 @@ pub(crate) async fn run(
         session.workspace_root.clone(),
         session.model_label.clone(),
         keymap,
-        theme,
+        configured_theme,
     )
     .with_successful_command_output(tui_config.show_successful_command_output)
     .with_mouse_scroll_lines(tui_config.mouse_scroll_lines)

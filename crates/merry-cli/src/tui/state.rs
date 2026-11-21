@@ -46,6 +46,7 @@ pub(crate) struct TuiState {
     model_label: String,
     reasoning_effort_label: Option<String>,
     keymap: Keymap,
+    configured_theme: TuiTheme,
     theme: TuiTheme,
     input: TextInput,
     /// Inner composer width from the last layout. Zero means keys use logical lines.
@@ -118,6 +119,7 @@ impl TuiState {
             model_label,
             reasoning_effort_label: None,
             keymap,
+            configured_theme: theme.clone(),
             theme,
             input: TextInput::default(),
             composer_columns: 0,
@@ -314,6 +316,18 @@ impl TuiState {
         &self.theme
     }
 
+    pub(super) fn sync_active_theme(&mut self) {
+        let base = match self.preferences.theme_preset {
+            Some(preset) => TuiTheme::from_preset(preset),
+            None => self.configured_theme.clone(),
+        };
+        let transparent = self
+            .preferences
+            .transparent_background
+            .unwrap_or(self.settings_defaults.transparent_background);
+        self.theme = base.with_transparent_background(transparent);
+    }
+
     pub(crate) fn replace_settings_defaults(&mut self, defaults: TuiSettingsDefaults) {
         self.settings_defaults = defaults;
     }
@@ -327,6 +341,7 @@ impl TuiState {
 
     pub(crate) fn replace_preferences(&mut self, preferences: TuiPreferences) {
         self.preferences = preferences;
+        self.sync_active_theme();
     }
 
     pub(crate) fn timeline(&self) -> &[TimelineItem] {

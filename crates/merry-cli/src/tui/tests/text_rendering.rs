@@ -151,20 +151,24 @@ fn renderer_uses_colored_header_bar_and_branded_input() {
         .expect("input brand should render");
     let input_style = find_cell_style(&buffer, "draft").expect("input text should render");
 
+    let theme = TuiTheme::default();
     assert!(!text.contains("input"));
-    assert_eq!(path_style.fg, Some(Color::LightBlue));
-    assert_eq!(model_style.fg, Some(Color::LightCyan));
+    assert_eq!(path_style.fg, theme.color(SemanticColor::Command));
+    assert_eq!(model_style.fg, theme.color(SemanticColor::ToolKeyword));
     assert!(model_style.add_modifier.contains(Modifier::BOLD));
-    assert_eq!(
-        usage_style.fg,
-        TuiTheme::default().color(SemanticColor::TextSecondary)
-    );
+    assert_eq!(usage_style.fg, theme.color(SemanticColor::TextSecondary));
     assert!(usage_style.add_modifier.contains(Modifier::DIM));
-    assert_eq!(path_style.bg, Some(Color::Rgb(54, 26, 58)));
-    assert_eq!(model_style.bg, Some(Color::Rgb(54, 26, 58)));
-    assert_eq!(input_brand_style.fg, Some(Color::LightMagenta));
+    assert_eq!(
+        path_style.bg,
+        theme.bg_color(SemanticColor::HeaderBackground)
+    );
+    assert_eq!(
+        model_style.bg,
+        theme.bg_color(SemanticColor::HeaderBackground)
+    );
+    assert_eq!(input_brand_style.fg, theme.color(SemanticColor::Focus));
     assert!(input_brand_style.add_modifier.contains(Modifier::BOLD));
-    assert_eq!(input_style.fg, Some(Color::White));
+    assert_eq!(input_style.fg, theme.color(SemanticColor::Assistant));
 
     let snowflake_state = state.with_brand_mark(crate::config::BrandMarkMode::Snowflake);
     let snowflake_buffer = render_to_buffer(&snowflake_state, 80, 16);
@@ -191,16 +195,20 @@ fn renderer_highlights_inline_code_spans() {
         find_cell_style(&buffer, "call").expect("assistant text should be rendered");
     let code_style =
         find_cell_style(&buffer, "build_message()").expect("inline code text should be rendered");
+    let theme = TuiTheme::default();
 
-    assert_eq!(assistant_style.fg, Some(Color::White));
-    assert_eq!(code_style.fg, Some(Color::LightMagenta));
-    assert_eq!(code_style.bg, Some(Color::Reset));
+    assert_eq!(assistant_style.fg, theme.color(SemanticColor::Assistant));
+    assert_eq!(code_style.fg, theme.color(SemanticColor::Focus));
+    assert_eq!(code_style.bg, theme.color(SemanticColor::Background));
     assert!(code_style.add_modifier.contains(Modifier::BOLD));
 }
 
 #[test]
 fn renderer_preserves_historical_emphasis_across_user_and_assistant_text() {
-    for (focus, expected_color) in [(None, Color::LightMagenta), (Some("red"), Color::Red)] {
+    let default_focus = TuiTheme::default()
+        .color(SemanticColor::Focus)
+        .expect("default focus color");
+    for (focus, expected_color) in [(None, default_focus), (Some("red"), Color::Red)] {
         let theme = TuiTheme::from_config(&crate::config::TuiThemeToml {
             focus: focus.map(str::to_owned),
             ..crate::config::TuiThemeToml::default()
@@ -232,14 +240,20 @@ fn renderer_preserves_historical_emphasis_across_user_and_assistant_text() {
 
         let bold_style = find_cell_style(&buffer, "important").expect("bold text should render");
         assert_eq!(bold_style.fg, Some(expected_color));
-        assert_eq!(bold_style.bg, Some(Color::Reset));
+        assert_eq!(
+            bold_style.bg,
+            state.theme().color(SemanticColor::Background)
+        );
         assert!(bold_style.add_modifier.contains(Modifier::BOLD));
         assert!(!bold_style.add_modifier.contains(Modifier::DIM));
 
         let code_style =
             find_cell_style(&buffer, "assistant_keyword").expect("code text should render");
         assert_eq!(code_style.fg, Some(expected_color));
-        assert_eq!(code_style.bg, Some(Color::Reset));
+        assert_eq!(
+            code_style.bg,
+            state.theme().color(SemanticColor::Background)
+        );
         assert!(code_style.add_modifier.contains(Modifier::BOLD));
         assert!(!code_style.add_modifier.contains(Modifier::DIM));
     }
@@ -263,7 +277,10 @@ fn renderer_renders_assistant_markdown_strong_without_markers() {
 
     let buffer = render_to_buffer(&state, 80, 16);
     let strong_style = find_cell_style(&buffer, "hello").expect("strong text should render");
-    assert_eq!(strong_style.fg, Some(Color::LightMagenta));
+    assert_eq!(
+        strong_style.fg,
+        TuiTheme::default().color(SemanticColor::Focus)
+    );
     assert!(strong_style.add_modifier.contains(Modifier::BOLD));
     assert!(!strong_style.add_modifier.contains(Modifier::UNDERLINED));
 }
@@ -284,9 +301,10 @@ fn renderer_keeps_plain_assistant_markdown_text_white() {
     let plain_style = find_cell_style(&buffer, "plain text").expect("plain text should render");
     let trailing_style =
         find_cell_style(&buffer, "with").expect("trailing plain text should render");
+    let expected = TuiTheme::default().color(SemanticColor::Assistant);
 
-    assert_eq!(plain_style.fg, Some(Color::White));
-    assert_eq!(trailing_style.fg, Some(Color::White));
+    assert_eq!(plain_style.fg, expected);
+    assert_eq!(trailing_style.fg, expected);
 }
 
 #[test]
@@ -309,9 +327,10 @@ fn renderer_renders_assistant_markdown_heading_as_title_block() {
     let buffer = render_to_buffer(&state, 80, 16);
     let heading_style = find_cell_style(&buffer, "Result").expect("heading should render");
     let body_style = find_cell_style(&buffer, "Body text").expect("body should render");
-    assert_eq!(heading_style.fg, Some(Color::LightMagenta));
+    let theme = TuiTheme::default();
+    assert_eq!(heading_style.fg, theme.color(SemanticColor::Heading));
     assert!(heading_style.add_modifier.contains(Modifier::BOLD));
-    assert_eq!(body_style.fg, Some(Color::White));
+    assert_eq!(body_style.fg, theme.color(SemanticColor::Assistant));
 }
 
 #[test]
@@ -338,9 +357,10 @@ fn renderer_renders_assistant_markdown_table_with_header_and_cells() {
     let buffer = render_to_buffer(&state, 100, 18);
     let header_style = find_cell_style(&buffer, "Status").expect("table header should render");
     let strong_style = find_cell_style(&buffer, "OK").expect("strong table cell should render");
-    assert_eq!(header_style.fg, Some(Color::LightMagenta));
+    let theme = TuiTheme::default();
+    assert_eq!(header_style.fg, theme.color(SemanticColor::Focus));
     assert!(header_style.add_modifier.contains(Modifier::BOLD));
-    assert_eq!(strong_style.fg, Some(Color::LightMagenta));
+    assert_eq!(strong_style.fg, theme.color(SemanticColor::Focus));
     assert!(strong_style.add_modifier.contains(Modifier::BOLD));
     assert!(!strong_style.add_modifier.contains(Modifier::UNDERLINED));
 }
@@ -364,7 +384,10 @@ fn renderer_renders_assistant_markdown_strikethrough_as_muted_crossed_text() {
     let buffer = render_to_buffer(&state, 80, 16);
     let removed_style =
         find_cell_style(&buffer, "removed").expect("strikethrough text should render");
-    assert_eq!(removed_style.fg, Some(Color::DarkGray));
+    assert_eq!(
+        removed_style.fg,
+        TuiTheme::default().color(SemanticColor::Muted)
+    );
     assert!(removed_style.add_modifier.contains(Modifier::CROSSED_OUT));
 }
 
@@ -392,7 +415,10 @@ fn renderer_prefixes_wrapped_assistant_markdown_block_quotes() {
 
     let buffer = render_to_buffer(&state, 34, 16);
     let quote_style = find_cell_style(&buffer, ">").expect("quote marker should render");
-    assert_eq!(quote_style.fg, Some(Color::LightMagenta));
+    assert_eq!(
+        quote_style.fg,
+        TuiTheme::default().color(SemanticColor::Focus)
+    );
 }
 
 #[test]
@@ -417,8 +443,9 @@ fn renderer_keeps_assistant_markdown_link_url_visible() {
     let buffer = render_to_buffer(&state, 100, 16);
     let label_style = find_cell_style(&buffer, "OpenAI").expect("link label should render");
     let url_style = find_cell_style(&buffer, "https://openai.com").expect("link url should render");
-    assert_eq!(label_style.fg, Some(Color::LightBlue));
-    assert_eq!(url_style.fg, Some(Color::LightBlue));
+    let link_color = TuiTheme::default().color(SemanticColor::Link);
+    assert_eq!(label_style.fg, link_color);
+    assert_eq!(url_style.fg, link_color);
     assert!(url_style.add_modifier.contains(Modifier::UNDERLINED));
 }
 
@@ -463,8 +490,9 @@ fn renderer_renders_assistant_fenced_code_blocks_without_fence_markers() {
     let rail_style = find_cell_style(&buffer, "▎").expect("code rail should render");
     let code_style = find_cell_style(&buffer, "hello world").expect("code should render");
     let (_, code_row) = find_text_position(&buffer, "hello world").expect("code should render");
-    let code_bg = TuiTheme::default().bg_color(SemanticColor::CodeBackground);
-    assert_eq!(rail_style.fg, Some(Color::LightMagenta));
+    let theme = TuiTheme::default();
+    let code_bg = theme.bg_color(SemanticColor::CodeBackground);
+    assert_eq!(rail_style.fg, theme.color(SemanticColor::Focus));
     assert_eq!(rail_style.bg, code_bg);
     assert_eq!(code_style.bg, code_bg);
     assert_eq!(buffer[(40, code_row)].style().bg, code_bg);

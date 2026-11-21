@@ -202,11 +202,15 @@ fn successful_command_output_uses_a_terminal_panel_by_default() {
     let rendered = buffer_text(&buffer);
     assert!(rendered.contains("panel-line"), "{rendered}");
     let style = find_cell_style(&buffer, "panel-line").expect("output cell");
+    let theme = TuiTheme::default();
     assert_eq!(
         style.fg,
-        TuiTheme::default().color(crate::tui::theme::SemanticColor::TextSecondary)
+        theme.color(crate::tui::theme::SemanticColor::TextSecondary)
     );
-    assert_eq!(style.bg, Some(Color::Reset));
+    assert_eq!(
+        style.bg,
+        theme.color(crate::tui::theme::SemanticColor::Background)
+    );
 }
 
 #[tokio::test(start_paused = true)]

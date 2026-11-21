@@ -419,7 +419,6 @@ fn projector_keeps_diff_like_non_patch_output_as_a_read_preview() {
 #[test]
 fn renderer_shows_patch_summary_and_colored_diff_when_expanded() {
     use crate::tui::{render::render_to_buffer, tests::find_cell_style, theme::SemanticColor};
-    use ratatui::style::Color;
 
     let mut state = TuiState::new(
         "/repo/merry".into(),
@@ -459,16 +458,11 @@ fn renderer_shows_patch_summary_and_colored_diff_when_expanded() {
 
     let del_style = find_cell_style(&buffer, "print('old')").expect("removed line should render");
     let add_style = find_cell_style(&buffer, "print('new')").expect("added line should render");
-    assert_eq!(
-        del_style.fg,
-        TuiTheme::default().color(SemanticColor::DiffDelete)
-    );
-    assert_eq!(
-        add_style.fg,
-        TuiTheme::default().color(SemanticColor::DiffAdd)
-    );
-    assert_eq!(del_style.bg, Some(Color::Reset));
-    assert_eq!(add_style.bg, Some(Color::Reset));
+    let theme = TuiTheme::default();
+    assert_eq!(del_style.fg, theme.color(SemanticColor::DiffDelete));
+    assert_eq!(add_style.fg, theme.color(SemanticColor::DiffAdd));
+    assert_eq!(del_style.bg, theme.color(SemanticColor::Background));
+    assert_eq!(add_style.bg, theme.color(SemanticColor::Background));
 }
 
 #[test]

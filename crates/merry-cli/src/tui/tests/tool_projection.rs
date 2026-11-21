@@ -8,7 +8,6 @@ use crate::tui::{
 };
 use merry_core::{ErrorInfo, RuntimeEvent, ToolCallId, ToolCallResult, ToolOutput};
 use merry_tools::APPLY_PATCH_TOOL;
-use ratatui::style::Color;
 use serde_json::json;
 
 #[test]
@@ -521,7 +520,10 @@ fn projector_replaces_pending_row_with_failed_result_instead_of_leaving_stale_ro
     assert!(body.contains("no matching documents found"));
 
     let buffer = render_to_buffer(&state, 120, 24);
-    assert_eq!(find_cell_color(&buffer, "Error"), Some(Color::LightRed));
+    assert_eq!(
+        find_cell_color(&buffer, "Error"),
+        TuiTheme::default().color(crate::tui::theme::SemanticColor::Error)
+    );
 }
 
 #[test]
@@ -543,8 +545,15 @@ fn renderer_colors_ran_title_and_shows_process_preview() {
     assert!(text.contains("hello world"));
 
     let buffer = render_to_buffer(&state, 79, 16);
-    assert_eq!(find_cell_color(&buffer, "Ran"), Some(Color::LightCyan));
-    assert_eq!(find_cell_color(&buffer, "python3"), Some(Color::LightBlue));
+    let theme = TuiTheme::default();
+    assert_eq!(
+        find_cell_color(&buffer, "Ran"),
+        theme.color(crate::tui::theme::SemanticColor::ToolKeyword)
+    );
+    assert_eq!(
+        find_cell_color(&buffer, "python3"),
+        theme.color(crate::tui::theme::SemanticColor::Command)
+    );
 }
 
 #[test]
@@ -562,14 +571,27 @@ fn renderer_highlights_shell_syntax_in_ran_titles() {
     });
 
     let buffer = render_to_buffer(&state, 120, 16);
+    let theme = TuiTheme::default();
     let executable = find_cell_color(&buffer, "git").expect("shell executable should render");
     let option = find_cell_color(&buffer, "--short").expect("shell option should render");
     let operator = find_cell_color(&buffer, "&&").expect("shell operator should render");
 
-    assert_eq!(executable, Color::LightBlue);
-    assert_eq!(option, Color::LightMagenta);
-    assert_eq!(operator, Color::LightCyan);
-    assert_eq!(find_cell_color(&buffer, "."), Some(Color::DarkGray));
+    assert_eq!(
+        Some(executable),
+        theme.color(crate::tui::theme::SemanticColor::Command)
+    );
+    assert_eq!(
+        Some(option),
+        theme.color(crate::tui::theme::SemanticColor::Focus)
+    );
+    assert_eq!(
+        Some(operator),
+        theme.color(crate::tui::theme::SemanticColor::ToolKeyword)
+    );
+    assert_eq!(
+        find_cell_color(&buffer, "."),
+        theme.color(crate::tui::theme::SemanticColor::Muted)
+    );
 }
 
 #[test]
@@ -591,11 +613,18 @@ fn renderer_colors_common_tool_title_keywords() {
     });
 
     let buffer = render_to_buffer(&state, 79, 18);
+    let theme = TuiTheme::default();
 
-    assert_eq!(find_cell_color(&buffer, "Searched"), Some(Color::LightCyan));
-    assert_eq!(find_cell_color(&buffer, "Ran"), Some(Color::LightCyan));
+    assert_eq!(
+        find_cell_color(&buffer, "Searched"),
+        theme.color(crate::tui::theme::SemanticColor::ToolKeyword)
+    );
+    assert_eq!(
+        find_cell_color(&buffer, "Ran"),
+        theme.color(crate::tui::theme::SemanticColor::ToolKeyword)
+    );
     assert_eq!(
         find_cell_color(&buffer, "query=hello_world.py"),
-        Some(Color::White)
+        theme.color(crate::tui::theme::SemanticColor::Assistant)
     );
 }

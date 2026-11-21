@@ -179,6 +179,8 @@ pub(crate) enum ShortcutsBack {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingItem {
     CodeTheme,
+    UiTheme,
+    TransparentBackground,
     DefaultProvider,
     DefaultModel,
     ReasoningEffort,
@@ -191,8 +193,10 @@ pub(crate) enum SettingItem {
 }
 
 impl SettingItem {
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::CodeTheme,
+        Self::UiTheme,
+        Self::TransparentBackground,
         Self::DefaultProvider,
         Self::DefaultModel,
         Self::ReasoningEffort,

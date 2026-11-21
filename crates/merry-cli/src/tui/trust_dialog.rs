@@ -338,7 +338,7 @@ mod tests {
             .find(|(x, y)| buffer[(*x, *y)].symbol() == "▸")
             .expect("selected marker");
         let style = buffer[marker].style();
-        assert_eq!(style.bg, Some(Color::LightMagenta));
+        assert_eq!(style.bg, TuiTheme::default().color(SemanticColor::Focus));
         assert_eq!(style.fg, Some(Color::Black));
     }
 

@@ -213,6 +213,18 @@ fn render_settings(frame: &mut Frame<'_>, state: &TuiState) {
             &state.setting_value(SettingItem::CodeTheme),
             selected == Some(SettingItem::CodeTheme),
         ),
+        setting_line(
+            state,
+            "UI theme",
+            &state.setting_value(SettingItem::UiTheme),
+            selected == Some(SettingItem::UiTheme),
+        ),
+        setting_line(
+            state,
+            "Transparent bg",
+            &state.setting_value(SettingItem::TransparentBackground),
+            selected == Some(SettingItem::TransparentBackground),
+        ),
         Line::default(),
         section_line(state, "Model defaults"),
         setting_line(
@@ -334,15 +346,17 @@ fn render_settings(frame: &mut Frame<'_>, state: &TuiState) {
 fn setting_line_index(item: SettingItem) -> usize {
     match item {
         SettingItem::CodeTheme => 1,
-        SettingItem::DefaultProvider => 4,
-        SettingItem::DefaultModel => 5,
-        SettingItem::ReasoningEffort => 6,
-        SettingItem::ContextWindow => 9,
-        SettingItem::AutoCompaction => 10,
-        SettingItem::ContextStrategy => 11,
-        SettingItem::Subagents => 14,
-        SettingItem::MaxThreads => 15,
-        SettingItem::KeyboardShortcuts => 17,
+        SettingItem::UiTheme => 2,
+        SettingItem::TransparentBackground => 3,
+        SettingItem::DefaultProvider => 6,
+        SettingItem::DefaultModel => 7,
+        SettingItem::ReasoningEffort => 8,
+        SettingItem::ContextWindow => 11,
+        SettingItem::AutoCompaction => 12,
+        SettingItem::ContextStrategy => 13,
+        SettingItem::Subagents => 16,
+        SettingItem::MaxThreads => 17,
+        SettingItem::KeyboardShortcuts => 19,
     }
 }
 
@@ -558,7 +572,7 @@ pub(super) fn semantic_style(state: &TuiState, slot: SemanticColor) -> Style {
         .map_or_else(Style::default, |color| Style::default().fg(color))
 }
 
-const SETTINGS_LINE_COUNT: usize = 19;
+const SETTINGS_LINE_COUNT: usize = 21;
 
 struct OverlaySplit {
     modal: ModalRects,

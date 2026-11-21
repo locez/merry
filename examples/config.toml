@@ -256,40 +256,46 @@ brand_mark = "emoji"
 items = ["workspace", "model", "context", "cache", "rate"]
 
 [tui.theme]
+# Built-in base preset: "sakura" (default), "ansi", "tokyo-night",
+# "catppuccin-mocha", "nord", or "paper-light".
+# Set transparent = true to clear the main canvas and status bar backgrounds so
+# terminal opacity/blur shows through. Both options can also be switched live
+# from Settings (Alt+X -> Settings -> Appearance).
+preset = "sakura"
+transparent = false
+# Optional per-slot color overrides layered on top of the selected preset.
 # Every color slot accepts named ANSI colors ("light_magenta", "dark_gray", ...),
 # "default"/"reset" to inherit the terminal color, or hex ("#RRGGBB" / "#RGB").
-# Surfaces & backgrounds (omit to use Merry's built-in dark surface defaults):
-background = "default"
-surface = "#222228"
-surface_subtle = "#1e1e23"
-header_bg = "#361a3a"
-status_bg = "default"
-user_bg = "#2a2230"
-code_bg = "#202026"
-inline_code_bg = "#2a2a32"
-selection_bg = "#36283e"
-chip_bg = "default"
-border = "#46444e"
-border_focus = "light_magenta"
-diff_add_bg = "#182b22"
-diff_delete_bg = "#301920"
-# Typography & semantic accents:
-status = "light_magenta"
-muted = "dark_gray"
-text_secondary = "#a8a0b2"
-focus = "light_magenta"
-assistant = "white"
-heading = "light_magenta"
-link = "light_blue"
-selection = "magenta"
-tool_keyword = "light_cyan"
-command = "light_blue"
-diff_add = "light_green"
-diff_delete = "light_red"
-warning = "light_yellow"
-error = "light_red"
-risk = "magenta"
-success = "light_green"
+# background = "default"
+# surface = "#222228"
+# surface_subtle = "#1e1e23"
+# header_bg = "#361a3a"
+# status_bg = "default"
+# user_bg = "#2a2230"
+# code_bg = "#202026"
+# inline_code_bg = "#2a2a32"
+# selection_bg = "#36283e"
+# chip_bg = "default"
+# border = "#46444e"
+# border_focus = "light_magenta"
+# diff_add_bg = "#182b22"
+# diff_delete_bg = "#301920"
+# status = "light_magenta"
+# muted = "dark_gray"
+# text_secondary = "#a8a0b2"
+# focus = "light_magenta"
+# assistant = "white"
+# heading = "light_magenta"
+# link = "light_blue"
+# selection = "magenta"
+# tool_keyword = "light_cyan"
+# command = "light_blue"
+# diff_add = "light_green"
+# diff_delete = "light_red"
+# warning = "light_yellow"
+# error = "light_red"
+# risk = "magenta"
+# success = "light_green"
 
 [tui.keymap]
 # Composer editing stays on the readline keys and is not listed here:

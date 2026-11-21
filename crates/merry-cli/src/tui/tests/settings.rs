@@ -6,7 +6,7 @@ use crate::tui::{
     render::{render_to_buffer, render_to_buffer_and_cursor, render_to_text},
     state::{TimelineItem, TuiState},
     tests::{find_cell_style, find_text_position},
-    theme::TuiTheme,
+    theme::{SemanticColor, ThemePreset, TuiTheme},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Color;
@@ -79,7 +79,7 @@ fn settings_reasoning_change_applies_to_the_current_runtime() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
     );
-    for _ in 0..3 {
+    for _ in 0..5 {
         handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
     }
 
@@ -130,7 +130,7 @@ fn settings_reasoning_editor_accepts_custom_provider_value() {
         },
     );
     state.open_settings();
-    for _ in 0..3 {
+    for _ in 0..5 {
         handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
     }
 
@@ -205,7 +205,7 @@ fn settings_context_window_editor_applies_to_the_current_runtime() {
         TuiTheme::default(),
     );
     state.open_settings();
-    for _ in 0..4 {
+    for _ in 0..6 {
         handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
     }
 
@@ -237,7 +237,7 @@ fn settings_context_window_editor_rejects_zero() {
         TuiTheme::default(),
     );
     state.open_settings();
-    for _ in 0..4 {
+    for _ in 0..6 {
         handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
     }
     handle_key_event(
@@ -282,7 +282,7 @@ fn settings_compaction_change_applies_to_the_current_runtime() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
     );
-    for _ in 0..5 {
+    for _ in 0..7 {
         handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
     }
 
@@ -389,7 +389,7 @@ fn shortcuts_opened_from_settings_return_to_settings() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
     );
-    for _ in 0..9 {
+    for _ in 0..11 {
         handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
     }
     handle_key_event(
@@ -427,7 +427,7 @@ fn settings_model_editor_owns_the_visible_cursor() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
     );
-    for _ in 0..2 {
+    for _ in 0..4 {
         handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
     }
     handle_key_event(
@@ -471,11 +471,102 @@ fn settings_keep_the_selected_row_visible_in_a_short_terminal() {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
     );
-    for _ in 0..9 {
+    for _ in 0..11 {
         handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
     }
 
     let settings = render_to_text(&state, 40, 12);
 
     assert!(settings.contains("Keyboard shortcuts"));
+}
+
+#[test]
+fn ui_theme_and_transparent_bg_update_active_theme_live_and_reset() {
+    let custom_configured = TuiTheme::from_config_opaque(&crate::config::TuiThemeToml {
+        header_bg: Some("#123456".to_owned()),
+        ..crate::config::TuiThemeToml::default()
+    })
+    .expect("configured theme should parse");
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        custom_configured.clone(),
+    );
+    state.open_settings();
+    handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
+    assert_eq!(state.selected_setting(), Some(SettingItem::UiTheme));
+
+    // Cycling right from Sakura (default) moves to ANSI.
+    let effect = handle_key_event(
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        &mut state,
+    );
+    assert!(matches!(
+        effect,
+        ControllerEffect::PersistPreferences(preferences)
+            if preferences.theme_preset == Some(ThemePreset::Ansi)
+    ));
+    assert_eq!(state.theme(), &TuiTheme::from_preset(ThemePreset::Ansi));
+    assert_eq!(state.theme().bg_color(SemanticColor::Background), None);
+
+    // Resetting restores the inherited configured Sakura + custom header_bg theme.
+    let reset_effect = handle_key_event(
+        KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+        &mut state,
+    );
+    assert!(matches!(
+        reset_effect,
+        ControllerEffect::PersistPreferences(preferences)
+            if preferences.theme_preset.is_none()
+    ));
+    assert_eq!(state.theme(), &custom_configured);
+    assert_eq!(
+        state.setting_value(SettingItem::UiTheme),
+        "Inherit (Sakura)"
+    );
+
+    // Toggling Transparent bg clears Background and StatusBackground live on Sakura.
+    handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
+    assert_eq!(
+        state.selected_setting(),
+        Some(SettingItem::TransparentBackground)
+    );
+    assert_eq!(
+        state.theme().bg_color(SemanticColor::Background),
+        Some(Color::Rgb(35, 38, 39))
+    );
+    let transparent_effect = handle_key_event(
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        &mut state,
+    );
+    assert!(matches!(
+        transparent_effect,
+        ControllerEffect::PersistPreferences(preferences)
+            if preferences.transparent_background == Some(true)
+    ));
+    assert_eq!(state.theme().bg_color(SemanticColor::Background), None);
+    assert_eq!(
+        state.theme().bg_color(SemanticColor::StatusBackground),
+        None
+    );
+    assert_eq!(
+        state.theme().bg_color(SemanticColor::HeaderBackground),
+        Some(Color::Rgb(0x12, 0x34, 0x56))
+    );
+
+    // Toggling right again sets explicit Off, restoring Sakura's opaque background.
+    let opaque_effect = handle_key_event(
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        &mut state,
+    );
+    assert!(matches!(
+        opaque_effect,
+        ControllerEffect::PersistPreferences(preferences)
+            if preferences.transparent_background == Some(false)
+    ));
+    assert_eq!(
+        state.theme().bg_color(SemanticColor::Background),
+        Some(Color::Rgb(35, 38, 39))
+    );
 }

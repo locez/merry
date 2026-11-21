@@ -1,4 +1,59 @@
 use ratatui::style::Color;
+use serde::{Deserialize, Serialize};
+
+/// Named built-in TUI theme presets selectable in `config.toml` or Settings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ThemePreset {
+    /// Matte charcoal paired with soft sakura-rose accents and ice-mint highlights.
+    #[default]
+    Sakura,
+    /// Terminal-following ANSI 16-color accents over transparent dark surfaces.
+    Ansi,
+    /// Deep indigo night surfaces with cool sky-blue and violet accents.
+    TokyoNight,
+    /// Warm velvety dark mocha surfaces with soft pastel accents.
+    CatppuccinMocha,
+    /// Calm arctic slate surfaces with frost-cyan and glacier-blue accents.
+    Nord,
+    /// Clean daylight paper surfaces with high-contrast ink typography.
+    PaperLight,
+}
+
+impl ThemePreset {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Sakura => "Sakura",
+            Self::Ansi => "ANSI",
+            Self::TokyoNight => "Tokyo Night",
+            Self::CatppuccinMocha => "Catppuccin Mocha",
+            Self::Nord => "Nord",
+            Self::PaperLight => "Paper Light",
+        }
+    }
+
+    pub(crate) const fn next(self) -> Self {
+        match self {
+            Self::Sakura => Self::Ansi,
+            Self::Ansi => Self::TokyoNight,
+            Self::TokyoNight => Self::CatppuccinMocha,
+            Self::CatppuccinMocha => Self::Nord,
+            Self::Nord => Self::PaperLight,
+            Self::PaperLight => Self::Sakura,
+        }
+    }
+
+    pub(crate) const fn previous(self) -> Self {
+        match self {
+            Self::Sakura => Self::PaperLight,
+            Self::Ansi => Self::Sakura,
+            Self::TokyoNight => Self::Ansi,
+            Self::CatppuccinMocha => Self::TokyoNight,
+            Self::Nord => Self::CatppuccinMocha,
+            Self::PaperLight => Self::Nord,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
@@ -46,9 +101,36 @@ pub(crate) struct TuiTheme {
 
 impl Default for TuiTheme {
     fn default() -> Self {
+        Self::from_preset(ThemePreset::default())
+    }
+}
+
+#[allow(dead_code)]
+impl TuiTheme {
+    pub(crate) fn from_preset(preset: ThemePreset) -> Self {
+        match preset {
+            ThemePreset::Sakura => Self::sakura(),
+            ThemePreset::Ansi => Self::ansi(),
+            ThemePreset::TokyoNight => Self::tokyo_night(),
+            ThemePreset::CatppuccinMocha => Self::catppuccin_mocha(),
+            ThemePreset::Nord => Self::nord(),
+            ThemePreset::PaperLight => Self::paper_light(),
+        }
+    }
+
+    /// Clears the canvas and status bar backgrounds to inherit terminal transparency.
+    pub(crate) fn with_transparent_background(mut self, transparent: bool) -> Self {
+        if transparent {
+            self.set_color(SemanticColor::Background, Color::Reset);
+            self.set_color(SemanticColor::StatusBackground, Color::Reset);
+        }
+        self
+    }
+
+    fn ansi() -> Self {
         Self {
             colors: vec![
-                // Surfaces & borders (neutral dark charcoal surfaces, letting accents breathe)
+                // Surfaces & borders (neutral dark charcoal surfaces, letting terminal ANSI accents breathe)
                 (SemanticColor::Background, Color::Reset),
                 (SemanticColor::Surface, Color::Rgb(34, 34, 40)),
                 (SemanticColor::SurfaceSubtle, Color::Rgb(30, 30, 35)),
@@ -66,7 +148,7 @@ impl Default for TuiTheme {
                 (SemanticColor::BorderFocus, Color::LightMagenta),
                 (SemanticColor::DiffAddBackground, Color::Rgb(24, 43, 34)),
                 (SemanticColor::DiffDeleteBackground, Color::Rgb(48, 25, 32)),
-                // Typography & accents (preserving existing Merry defaults)
+                // Typography & accents (terminal ANSI 16-color palette)
                 (SemanticColor::Status, Color::LightMagenta),
                 (SemanticColor::Muted, Color::DarkGray),
                 (SemanticColor::TextSecondary, Color::Rgb(168, 160, 178)),
@@ -86,14 +168,214 @@ impl Default for TuiTheme {
             ],
         }
     }
-}
 
-#[allow(dead_code)]
-impl TuiTheme {
+    fn sakura() -> Self {
+        Self {
+            colors: vec![
+                (SemanticColor::Background, Color::Rgb(35, 38, 39)),
+                (SemanticColor::Surface, Color::Rgb(42, 44, 48)),
+                (SemanticColor::SurfaceSubtle, Color::Rgb(38, 40, 43)),
+                (SemanticColor::HeaderBackground, Color::Rgb(54, 30, 48)),
+                (SemanticColor::StatusBackground, Color::Rgb(35, 38, 39)),
+                (SemanticColor::UserBackground, Color::Rgb(46, 36, 48)),
+                (SemanticColor::CodeBackground, Color::Rgb(40, 42, 46)),
+                (SemanticColor::InlineCodeBackground, Color::Reset),
+                (SemanticColor::SelectionBackground, Color::Rgb(92, 54, 78)),
+                (SemanticColor::ChipBackground, Color::Reset),
+                (SemanticColor::Border, Color::Rgb(78, 66, 78)),
+                (SemanticColor::BorderFocus, Color::Rgb(255, 122, 200)),
+                (SemanticColor::DiffAddBackground, Color::Rgb(28, 48, 42)),
+                (SemanticColor::DiffDeleteBackground, Color::Rgb(58, 30, 38)),
+                (SemanticColor::Status, Color::Rgb(255, 122, 200)),
+                (SemanticColor::Muted, Color::Rgb(164, 134, 152)),
+                (SemanticColor::TextSecondary, Color::Rgb(204, 180, 196)),
+                (SemanticColor::Focus, Color::Rgb(255, 122, 200)),
+                (SemanticColor::Assistant, Color::Rgb(255, 243, 249)),
+                (SemanticColor::Heading, Color::Rgb(255, 166, 216)),
+                (SemanticColor::Link, Color::Rgb(216, 180, 255)),
+                (SemanticColor::Selection, Color::Rgb(255, 79, 179)),
+                (SemanticColor::ToolKeyword, Color::Rgb(255, 166, 216)),
+                (SemanticColor::Command, Color::Rgb(216, 180, 255)),
+                (SemanticColor::DiffAdd, Color::Rgb(155, 240, 220)),
+                (SemanticColor::DiffDelete, Color::Rgb(255, 138, 158)),
+                (SemanticColor::Warning, Color::Rgb(255, 220, 122)),
+                (SemanticColor::Error, Color::Rgb(255, 138, 158)),
+                (SemanticColor::Risk, Color::Rgb(255, 122, 200)),
+                (SemanticColor::Success, Color::Rgb(199, 255, 240)),
+            ],
+        }
+    }
+
+    fn tokyo_night() -> Self {
+        Self {
+            colors: vec![
+                (SemanticColor::Background, Color::Rgb(26, 27, 38)),
+                (SemanticColor::Surface, Color::Rgb(36, 40, 59)),
+                (SemanticColor::SurfaceSubtle, Color::Rgb(31, 35, 53)),
+                (SemanticColor::HeaderBackground, Color::Rgb(36, 40, 59)),
+                (SemanticColor::StatusBackground, Color::Rgb(26, 27, 38)),
+                (SemanticColor::UserBackground, Color::Rgb(35, 42, 64)),
+                (SemanticColor::CodeBackground, Color::Rgb(31, 35, 53)),
+                (SemanticColor::InlineCodeBackground, Color::Reset),
+                (SemanticColor::SelectionBackground, Color::Rgb(51, 70, 124)),
+                (SemanticColor::ChipBackground, Color::Reset),
+                (SemanticColor::Border, Color::Rgb(65, 72, 104)),
+                (SemanticColor::BorderFocus, Color::Rgb(122, 162, 247)),
+                (SemanticColor::DiffAddBackground, Color::Rgb(28, 46, 42)),
+                (SemanticColor::DiffDeleteBackground, Color::Rgb(56, 30, 42)),
+                (SemanticColor::Status, Color::Rgb(187, 154, 247)),
+                (SemanticColor::Muted, Color::Rgb(115, 122, 162)),
+                (SemanticColor::TextSecondary, Color::Rgb(169, 177, 214)),
+                (SemanticColor::Focus, Color::Rgb(122, 162, 247)),
+                (SemanticColor::Assistant, Color::Rgb(192, 202, 245)),
+                (SemanticColor::Heading, Color::Rgb(187, 154, 247)),
+                (SemanticColor::Link, Color::Rgb(122, 162, 247)),
+                (SemanticColor::Selection, Color::Rgb(187, 154, 247)),
+                (SemanticColor::ToolKeyword, Color::Rgb(125, 207, 255)),
+                (SemanticColor::Command, Color::Rgb(122, 162, 247)),
+                (SemanticColor::DiffAdd, Color::Rgb(158, 206, 106)),
+                (SemanticColor::DiffDelete, Color::Rgb(247, 118, 142)),
+                (SemanticColor::Warning, Color::Rgb(224, 175, 104)),
+                (SemanticColor::Error, Color::Rgb(247, 118, 142)),
+                (SemanticColor::Risk, Color::Rgb(255, 158, 100)),
+                (SemanticColor::Success, Color::Rgb(158, 206, 106)),
+            ],
+        }
+    }
+
+    fn catppuccin_mocha() -> Self {
+        Self {
+            colors: vec![
+                (SemanticColor::Background, Color::Rgb(30, 30, 46)),
+                (SemanticColor::Surface, Color::Rgb(49, 50, 68)),
+                (SemanticColor::SurfaceSubtle, Color::Rgb(39, 40, 58)),
+                (SemanticColor::HeaderBackground, Color::Rgb(46, 40, 66)),
+                (SemanticColor::StatusBackground, Color::Rgb(30, 30, 46)),
+                (SemanticColor::UserBackground, Color::Rgb(43, 41, 62)),
+                (SemanticColor::CodeBackground, Color::Rgb(37, 37, 54)),
+                (SemanticColor::InlineCodeBackground, Color::Reset),
+                (SemanticColor::SelectionBackground, Color::Rgb(69, 71, 90)),
+                (SemanticColor::ChipBackground, Color::Reset),
+                (SemanticColor::Border, Color::Rgb(88, 91, 112)),
+                (SemanticColor::BorderFocus, Color::Rgb(203, 166, 247)),
+                (SemanticColor::DiffAddBackground, Color::Rgb(30, 48, 42)),
+                (SemanticColor::DiffDeleteBackground, Color::Rgb(58, 34, 46)),
+                (SemanticColor::Status, Color::Rgb(203, 166, 247)),
+                (SemanticColor::Muted, Color::Rgb(147, 153, 178)),
+                (SemanticColor::TextSecondary, Color::Rgb(186, 194, 222)),
+                (SemanticColor::Focus, Color::Rgb(203, 166, 247)),
+                (SemanticColor::Assistant, Color::Rgb(205, 214, 244)),
+                (SemanticColor::Heading, Color::Rgb(245, 194, 231)),
+                (SemanticColor::Link, Color::Rgb(137, 180, 250)),
+                (SemanticColor::Selection, Color::Rgb(203, 166, 247)),
+                (SemanticColor::ToolKeyword, Color::Rgb(148, 226, 213)),
+                (SemanticColor::Command, Color::Rgb(137, 180, 250)),
+                (SemanticColor::DiffAdd, Color::Rgb(166, 227, 161)),
+                (SemanticColor::DiffDelete, Color::Rgb(243, 139, 168)),
+                (SemanticColor::Warning, Color::Rgb(249, 226, 175)),
+                (SemanticColor::Error, Color::Rgb(243, 139, 168)),
+                (SemanticColor::Risk, Color::Rgb(250, 179, 135)),
+                (SemanticColor::Success, Color::Rgb(166, 227, 161)),
+            ],
+        }
+    }
+
+    fn nord() -> Self {
+        Self {
+            colors: vec![
+                (SemanticColor::Background, Color::Rgb(46, 52, 64)),
+                (SemanticColor::Surface, Color::Rgb(59, 66, 82)),
+                (SemanticColor::SurfaceSubtle, Color::Rgb(52, 58, 72)),
+                (SemanticColor::HeaderBackground, Color::Rgb(59, 66, 82)),
+                (SemanticColor::StatusBackground, Color::Rgb(46, 52, 64)),
+                (SemanticColor::UserBackground, Color::Rgb(56, 65, 82)),
+                (SemanticColor::CodeBackground, Color::Rgb(52, 58, 72)),
+                (SemanticColor::InlineCodeBackground, Color::Reset),
+                (SemanticColor::SelectionBackground, Color::Rgb(67, 76, 94)),
+                (SemanticColor::ChipBackground, Color::Reset),
+                (SemanticColor::Border, Color::Rgb(76, 86, 106)),
+                (SemanticColor::BorderFocus, Color::Rgb(136, 192, 208)),
+                (SemanticColor::DiffAddBackground, Color::Rgb(44, 62, 56)),
+                (SemanticColor::DiffDeleteBackground, Color::Rgb(68, 44, 52)),
+                (SemanticColor::Status, Color::Rgb(136, 192, 208)),
+                (SemanticColor::Muted, Color::Rgb(132, 144, 166)),
+                (SemanticColor::TextSecondary, Color::Rgb(216, 222, 233)),
+                (SemanticColor::Focus, Color::Rgb(136, 192, 208)),
+                (SemanticColor::Assistant, Color::Rgb(236, 239, 244)),
+                (SemanticColor::Heading, Color::Rgb(143, 188, 187)),
+                (SemanticColor::Link, Color::Rgb(129, 161, 193)),
+                (SemanticColor::Selection, Color::Rgb(180, 142, 173)),
+                (SemanticColor::ToolKeyword, Color::Rgb(136, 192, 208)),
+                (SemanticColor::Command, Color::Rgb(129, 161, 193)),
+                (SemanticColor::DiffAdd, Color::Rgb(163, 190, 140)),
+                (SemanticColor::DiffDelete, Color::Rgb(191, 97, 106)),
+                (SemanticColor::Warning, Color::Rgb(235, 203, 139)),
+                (SemanticColor::Error, Color::Rgb(191, 97, 106)),
+                (SemanticColor::Risk, Color::Rgb(208, 135, 112)),
+                (SemanticColor::Success, Color::Rgb(163, 190, 140)),
+            ],
+        }
+    }
+
+    fn paper_light() -> Self {
+        Self {
+            colors: vec![
+                (SemanticColor::Background, Color::Rgb(247, 246, 242)),
+                (SemanticColor::Surface, Color::Rgb(238, 236, 230)),
+                (SemanticColor::SurfaceSubtle, Color::Rgb(242, 240, 235)),
+                (SemanticColor::HeaderBackground, Color::Rgb(235, 230, 245)),
+                (SemanticColor::StatusBackground, Color::Rgb(247, 246, 242)),
+                (SemanticColor::UserBackground, Color::Rgb(237, 233, 245)),
+                (SemanticColor::CodeBackground, Color::Rgb(239, 238, 233)),
+                (
+                    SemanticColor::InlineCodeBackground,
+                    Color::Rgb(234, 232, 226),
+                ),
+                (
+                    SemanticColor::SelectionBackground,
+                    Color::Rgb(218, 206, 240),
+                ),
+                (SemanticColor::ChipBackground, Color::Reset),
+                (SemanticColor::Border, Color::Rgb(204, 200, 192)),
+                (SemanticColor::BorderFocus, Color::Rgb(130, 80, 223)),
+                (SemanticColor::DiffAddBackground, Color::Rgb(218, 251, 225)),
+                (
+                    SemanticColor::DiffDeleteBackground,
+                    Color::Rgb(255, 235, 233),
+                ),
+                (SemanticColor::Status, Color::Rgb(130, 80, 223)),
+                (SemanticColor::Muted, Color::Rgb(110, 118, 129)),
+                (SemanticColor::TextSecondary, Color::Rgb(87, 96, 106)),
+                (SemanticColor::Focus, Color::Rgb(130, 80, 223)),
+                (SemanticColor::Assistant, Color::Rgb(36, 41, 47)),
+                (SemanticColor::Heading, Color::Rgb(130, 80, 223)),
+                (SemanticColor::Link, Color::Rgb(9, 105, 218)),
+                (SemanticColor::Selection, Color::Rgb(130, 80, 223)),
+                (SemanticColor::ToolKeyword, Color::Rgb(10, 127, 108)),
+                (SemanticColor::Command, Color::Rgb(9, 105, 218)),
+                (SemanticColor::DiffAdd, Color::Rgb(26, 127, 55)),
+                (SemanticColor::DiffDelete, Color::Rgb(207, 34, 46)),
+                (SemanticColor::Warning, Color::Rgb(154, 103, 0)),
+                (SemanticColor::Error, Color::Rgb(207, 34, 46)),
+                (SemanticColor::Risk, Color::Rgb(188, 76, 0)),
+                (SemanticColor::Success, Color::Rgb(26, 127, 55)),
+            ],
+        }
+    }
+
     pub(crate) fn from_config(
         config: &crate::config::TuiThemeToml,
     ) -> Result<Self, crate::config::ConfigError> {
-        let mut theme = Self::default();
+        let base = Self::from_config_opaque(config)?;
+        Ok(base.with_transparent_background(config.transparent.unwrap_or(false)))
+    }
+
+    /// Resolves `config.toml` preset and explicit slot overrides without applying
+    /// the `transparent` toggle so live Settings toggles can switch cleanly in both directions.
+    pub(crate) fn from_config_opaque(
+        config: &crate::config::TuiThemeToml,
+    ) -> Result<Self, crate::config::ConfigError> {
+        let mut theme = Self::from_preset(config.preset.unwrap_or_default());
 
         // Apply primary accents first so derived defaults stay coherent when
         // users only customize `status`, `focus`, or `command`.
@@ -475,5 +757,79 @@ mod tests {
             Color::Indexed(244)
         );
         assert_eq!(quantize_for_256(Color::LightMagenta), Color::LightMagenta);
+    }
+
+    #[test]
+    fn sakura_is_default_and_all_presets_define_every_slot() {
+        assert_eq!(
+            TuiTheme::from_preset(ThemePreset::Sakura),
+            TuiTheme::default()
+        );
+
+        let presets = [
+            ThemePreset::Sakura,
+            ThemePreset::Ansi,
+            ThemePreset::TokyoNight,
+            ThemePreset::CatppuccinMocha,
+            ThemePreset::Nord,
+            ThemePreset::PaperLight,
+        ];
+        let mut cursor = ThemePreset::Sakura;
+        for expected in presets {
+            assert_eq!(cursor, expected);
+            let theme = TuiTheme::from_preset(expected);
+            assert_eq!(
+                theme.colors.len(),
+                30,
+                "preset {expected:?} should define every semantic slot"
+            );
+            assert_eq!(expected.next().previous(), expected);
+            cursor = cursor.next();
+        }
+        assert_eq!(cursor, ThemePreset::Sakura);
+
+        // ANSI preset preserves terminal-following background and named ANSI accents.
+        let ansi = TuiTheme::from_preset(ThemePreset::Ansi);
+        assert_eq!(ansi.bg_color(SemanticColor::Background), None);
+        assert_eq!(ansi.color(SemanticColor::Status), Some(Color::LightMagenta));
+
+        // Paper Light uses a light surface background and dark readable ink.
+        let light = TuiTheme::from_preset(ThemePreset::PaperLight);
+        assert_eq!(
+            light.bg_color(SemanticColor::Background),
+            Some(Color::Rgb(247, 246, 242))
+        );
+        assert_eq!(
+            light.color(SemanticColor::Assistant),
+            Some(Color::Rgb(36, 41, 47))
+        );
+    }
+
+    #[test]
+    fn config_preset_layers_transparent_and_explicit_overrides() {
+        let theme = TuiTheme::from_config(&crate::config::TuiThemeToml {
+            preset: Some(ThemePreset::Sakura),
+            transparent: Some(true),
+            header_bg: Some("#111111".to_owned()),
+            user_bg: Some("#222222".to_owned()),
+            ..crate::config::TuiThemeToml::default()
+        })
+        .expect("sakura preset with transparent and overrides should parse");
+
+        assert_eq!(theme.bg_color(SemanticColor::Background), None);
+        assert_eq!(theme.bg_color(SemanticColor::StatusBackground), None);
+        assert_eq!(
+            theme.bg_color(SemanticColor::HeaderBackground),
+            Some(Color::Rgb(0x11, 0x11, 0x11))
+        );
+        assert_eq!(
+            theme.bg_color(SemanticColor::UserBackground),
+            Some(Color::Rgb(0x22, 0x22, 0x22))
+        );
+        // Unoverridden slots retain Sakura preset colors.
+        assert_eq!(
+            theme.color(SemanticColor::Status),
+            TuiTheme::from_preset(ThemePreset::Sakura).color(SemanticColor::Status)
+        );
     }
 }
