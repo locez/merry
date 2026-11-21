@@ -4,6 +4,10 @@ A sandboxed terminal coding agent powered by a unified Rust runtime, with CLI/TU
 
 One Rust runtime owns session state, tool admission, context compilation, checkpoints, permissions, and lifecycle — serving the interactive terminal UI, headless CLI, Rust facade, and Python SDK from the same foundation.
 
+https://github.com/user-attachments/assets/f7272d03-d4b8-4ae4-9ba7-547e3bc726f2
+
+*Interactive TUI · Parallel Subagents (`Tasks` dock) · Syntax-Highlighted Diff · Inline Review Comments (`Alt+C`)*
+
 ---
 
 ## Highlights
