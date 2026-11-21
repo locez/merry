@@ -58,7 +58,7 @@ pub(super) fn timeline_scroll_split(
     TimelineScrollSplit {
         header_rows: pin.header_rows,
         content_rows: pin.content_rows,
-        pinned_origin: Some(pin.origin),
+        pinned_origin: pin.origin,
         body_scroll: pin.body_scroll,
         lines: pin.lines,
     }
@@ -104,7 +104,7 @@ pub(super) fn paint_sticky_header(
 struct PinnedUser {
     header_rows: u16,
     content_rows: u16,
-    origin: usize,
+    origin: Option<usize>,
     body_scroll: usize,
     lines: Vec<Line<'static>>,
 }
@@ -135,28 +135,11 @@ fn pin_user(
     if budget == 0 || section.height == 0 {
         return None;
     }
-    let mut show = section
+    let show = section
         .height
         .min(max_sticky_rows(viewport_height))
         .min(budget);
-    let mut gap = usize::from(show < budget);
-    if let Some(next) = sections.get(position + 1) {
-        let next_row = next.y.saturating_sub(scroll_start);
-        if next_row <= show + gap {
-            if next_row <= 1 {
-                return None;
-            }
-            gap = 1;
-            show = next_row.saturating_sub(gap);
-            // Release a framed user box cleanly rather than flickering through
-            // a 1-2 row border-only fragment right before the next turn lands.
-            if show == 0 || (section.height >= 3 && show < 3) {
-                return None;
-            }
-        }
-    }
-    let header_rows = u16::try_from(show + gap).unwrap_or(u16::MAX);
-    let content_rows = u16::try_from(show).unwrap_or(header_rows);
+    let gap = usize::from(show < budget);
     let mut lines = section.lines.clone();
     // Preserve the symmetric bottom hairline when a long multi-line user prompt
     // is clipped to fit the sticky header budget.
@@ -166,7 +149,34 @@ fn pin_user(
     {
         lines.truncate(show - 1);
         lines.push(bottom_rule);
+    } else if lines.len() > show {
+        lines.truncate(show);
     }
+
+    let mut push_up = 0usize;
+    let mut visible_content = show;
+    let mut total_header = show + gap;
+    if let Some(next) = sections.get(position + 1) {
+        let next_row = next.y.saturating_sub(scroll_start);
+        if next_row == 0 {
+            return None;
+        }
+        if next_row < total_header {
+            // Slide the previous sticky header smoothly off the top edge as the
+            // next user turn rises into row 0 (true CSS position: sticky push-out).
+            push_up = total_header.saturating_sub(next_row);
+            visible_content = show.saturating_sub(push_up);
+            total_header = next_row;
+            if visible_content == 0 {
+                lines.clear();
+            } else {
+                lines = slice_bottom_wrapped_lines(&lines, visible_content, viewport_height);
+            }
+        }
+    }
+
+    let header_rows = u16::try_from(total_header).unwrap_or(u16::MAX);
+    let content_rows = u16::try_from(visible_content).unwrap_or(header_rows);
     let base_body_scroll = scroll_start.saturating_add(usize::from(header_rows));
     let body_scroll = if section.y == scroll_start {
         base_body_scroll.max(section.next_item_y)
@@ -176,10 +186,24 @@ fn pin_user(
     Some(PinnedUser {
         header_rows,
         content_rows,
-        origin: section.y,
+        origin: (visible_content > 0).then(|| section.y.saturating_add(push_up)),
         body_scroll,
         lines,
     })
+}
+
+/// Drops the top rows of a sticky user header so it glides smoothly off the top
+/// edge of the viewport rather than popping out abruptly.
+fn slice_bottom_wrapped_lines(
+    lines: &[Line<'static>],
+    keep: usize,
+    _viewport_height: u16,
+) -> Vec<Line<'static>> {
+    if keep >= lines.len() {
+        return lines.to_vec();
+    }
+    let start = lines.len().saturating_sub(keep);
+    lines[start..].to_vec()
 }
 
 fn user_sections(state: &TuiState, timeline: &TimelineLayoutSnapshot) -> Vec<UserSection> {
@@ -316,5 +340,70 @@ mod tests {
         let split = timeline_scroll_split(&state, &timeline, 10, 2);
         assert_eq!(split.header_rows, 0);
         assert_eq!(split.body_scroll, 2);
+    }
+
+    #[test]
+    fn sticky_header_slides_off_top_edge_one_row_at_a_time_without_popping() {
+        let mut state = TuiState::new(
+            "/repo".into(),
+            "test".to_owned(),
+            Keymap::default(),
+            TuiTheme::default(),
+        );
+        state.push_timeline_item(TimelineItem::User {
+            text: "user-0".to_owned(),
+        });
+        state.push_timeline_item(TimelineItem::Assistant {
+            text: "reply".to_owned(),
+        });
+        state.push_timeline_item(TimelineItem::User {
+            text: "user-1".to_owned(),
+        });
+        let timeline = TimelineLayoutSnapshot::new(vec![
+            item_layout(vec![
+                line("top-rule"),
+                line("user-0"),
+                line("bottom-rule"),
+                blank(),
+            ]),
+            item_layout(vec![line("reply-0"), line("reply-1")]),
+            item_layout(vec![line("user-1")]),
+        ]);
+        // user-1 is at y = 6. Scrolling from 2..=6 must glide user-0 off the top
+        // edge continuously without ever popping hidden reply rows behind it.
+        let at_2 = timeline_scroll_split(&state, &timeline, 12, 2);
+        assert_eq!(
+            (at_2.header_rows, at_2.content_rows, at_2.body_scroll),
+            (4, 3, 6)
+        );
+        assert_eq!(at_2.lines.len(), 3);
+
+        let at_3 = timeline_scroll_split(&state, &timeline, 12, 3);
+        assert_eq!(
+            (at_3.header_rows, at_3.content_rows, at_3.body_scroll),
+            (3, 2, 6)
+        );
+        assert_eq!(at_3.lines[0].to_string(), "user-0");
+        assert_eq!(at_3.lines[1].to_string(), "bottom-rule");
+
+        let at_4 = timeline_scroll_split(&state, &timeline, 12, 4);
+        assert_eq!(
+            (at_4.header_rows, at_4.content_rows, at_4.body_scroll),
+            (2, 1, 6)
+        );
+        assert_eq!(at_4.lines[0].to_string(), "bottom-rule");
+
+        let at_5 = timeline_scroll_split(&state, &timeline, 12, 5);
+        assert_eq!(
+            (at_5.header_rows, at_5.content_rows, at_5.body_scroll),
+            (1, 0, 6)
+        );
+        assert!(at_5.lines.is_empty());
+
+        let at_6 = timeline_scroll_split(&state, &timeline, 12, 6);
+        assert_eq!(
+            (at_6.header_rows, at_6.content_rows, at_6.body_scroll),
+            (0, 0, 6)
+        );
     }
 }
