@@ -164,14 +164,19 @@ pub(crate) fn render_process_model_text(output: &ProcessRunnerOutput) -> String 
         ProcessExitStatus::FailedToStart => "not started".to_owned(),
         ProcessExitStatus::DomainFailed => "failed before normal exit".to_owned(),
         ProcessExitStatus::Running => {
+            let prefix = match output.wait_timed_out_secs() {
+                Some(secs) => format!("still running (waited {secs}s, not killed)"),
+                None => "still running".to_owned(),
+            };
             match (output.running_pid(), output.background_process_id()) {
-                (Some(pid), Some(id)) => format!("still running pid {pid} id {id}"),
-                (Some(pid), None) => format!("still running pid {pid}"),
-                (None, Some(id)) => format!("still running id {id}"),
-                (None, None) => "still running".to_owned(),
+                (Some(pid), Some(id)) => format!("{prefix} pid {pid} id {id}"),
+                (Some(pid), None) => format!("{prefix} pid {pid}"),
+                (None, Some(id)) => format!("{prefix} id {id}"),
+                (None, None) => prefix,
             }
         }
     };
+    let recovery = recovery_guidance_for_output(output);
     render_model_text_parts(
         header,
         ModelTextStreams {
@@ -182,7 +187,7 @@ pub(crate) fn render_process_model_text(output: &ProcessRunnerOutput) -> String 
             stderr_truncated: output.stderr_truncated(),
             stderr_utf8: output.stderr_is_utf8(),
         },
-        recovery_guidance(output.status()),
+        recovery.as_deref(),
     )
 }
 
@@ -238,6 +243,19 @@ pub(crate) fn recovery_guidance(status: ProcessExitStatus) -> Option<&'static st
     }
 }
 
+pub(crate) fn recovery_guidance_for_output(
+    output: &ProcessRunnerOutput,
+) -> Option<Cow<'static, str>> {
+    if output.status() == ProcessExitStatus::Running
+        && let Some(secs) = output.wait_timed_out_secs()
+    {
+        return Some(Cow::Owned(format!(
+            "The command did not exit within {secs}s and was NOT killed; it is still running in the background. Use read_background_process with this id to check whether it is still making progress or read later output, or use stop_background_process to terminate it and adjust/retry if it is stuck. For intentionally long-running commands, pass a larger timeout_secs on future run_process calls."
+        )));
+    }
+    recovery_guidance(output.status()).map(Cow::Borrowed)
+}
+
 struct ModelTextStreams<'a> {
     stdout: &'a str,
     stdout_truncated: bool,
@@ -250,7 +268,7 @@ struct ModelTextStreams<'a> {
 fn render_model_text_parts(
     mut text: String,
     streams: ModelTextStreams<'_>,
-    recovery: Option<&'static str>,
+    recovery: Option<&str>,
 ) -> String {
     append_model_stream(
         &mut text,

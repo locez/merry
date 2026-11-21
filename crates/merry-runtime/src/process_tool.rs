@@ -6,8 +6,8 @@
 //! runtime process policy and injected [`crate::ProcessRunner`] lanes.
 
 use crate::{
-    ActionProposal, ActionProposalEvidence, MAX_PROCESS_ARG_BYTES, ProcessActionIntent,
-    ProcessEnvPolicy, RegisteredTool, ToolActionKind, ToolActionPreflight,
+    ActionProposal, ActionProposalEvidence, MAX_PROCESS_ARG_BYTES, MAX_PROCESS_WAIT_TIMEOUT_SECS,
+    ProcessActionIntent, ProcessEnvPolicy, RegisteredTool, ToolActionKind, ToolActionPreflight,
     ToolActionProposalFuture, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome,
     ToolExecutor, ToolExecutorFuture,
     permission::{
@@ -56,10 +56,16 @@ struct ProcessCommandInput {
     #[serde(default)]
     permissions: Option<RequestedCapabilitiesInput>,
     #[schemars(
-        description = "When true, return once the command is still running, include its id, and keep it until stop_background_process or this session ends. Use it for a GUI or a server. The default waits until the command exits. Do not background the command in the shell instead."
+        description = "When true, return once the command is still running, include its id, and keep it until stop_background_process or this session ends. Use it for a GUI or a server. The default waits until the command exits or hits timeout_secs. Do not background the command in the shell instead."
     )]
     #[serde(default)]
     background: bool,
+    #[schemars(
+        description = "Optional foreground wait timeout in seconds (1..=3600, default 120). If the command is still running when this timeout elapses, it is NOT killed; Merry retains it in the background and returns its id and partial output so you can observe progress with read_background_process or terminate it with stop_background_process. Ignored when background is true.",
+        range(min = 1, max = MAX_PROCESS_WAIT_TIMEOUT_SECS)
+    )]
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +81,8 @@ struct ProcessCommandInputWire {
     permissions: Option<RequestedCapabilitiesInput>,
     #[serde(default)]
     background: bool,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 impl<'de> Deserialize<'de> for ProcessCommandInput {
@@ -89,6 +97,7 @@ impl<'de> Deserialize<'de> for ProcessCommandInput {
             reason: input.reason,
             permissions: input.permissions,
             background: input.background,
+            timeout_secs: input.timeout_secs,
         })
     }
 }
@@ -220,7 +229,11 @@ fn process_intent_from_call(
         DEFAULT_PROCESS_TOOL_STDOUT_LIMIT_BYTES,
         DEFAULT_PROCESS_TOOL_STDERR_LIMIT_BYTES,
     )
-    .map(|intent| intent.with_background(input.background))
+    .and_then(|intent| {
+        intent
+            .with_background(input.background)
+            .with_timeout_secs(input.timeout_secs)
+    })
     .map_err(|error| InvalidProcessCommandArguments::new(error.to_string()))
 }
 
@@ -316,6 +329,39 @@ mod tests {
         let intent = process_intent_from_call(&call).expect("process intent should parse");
 
         assert!(intent.background());
+    }
+
+    #[test]
+    fn process_intent_from_call_parses_and_validates_timeout_secs() {
+        let default_call = pending_call(json!({ "command": "cargo check" }));
+        let default_intent = process_intent_from_call(&default_call).expect("default parses");
+        assert_eq!(default_intent.timeout_secs(), None);
+        assert_eq!(
+            default_intent.effective_wait_timeout_secs(),
+            crate::DEFAULT_PROCESS_WAIT_TIMEOUT_SECS
+        );
+
+        let custom_call = pending_call(json!({
+            "command": "cargo test --workspace",
+            "timeout_secs": 300
+        }));
+        let custom_intent = process_intent_from_call(&custom_call).expect("custom timeout parses");
+        assert_eq!(custom_intent.timeout_secs(), Some(300));
+        assert_eq!(custom_intent.effective_wait_timeout_secs(), 300);
+
+        let zero_call = pending_call(json!({
+            "command": "cargo check",
+            "timeout_secs": 0
+        }));
+        let zero_err = process_intent_from_call(&zero_call).expect_err("zero timeout must fail");
+        assert!(zero_err.message().contains("greater than zero"));
+
+        let huge_call = pending_call(json!({
+            "command": "cargo check",
+            "timeout_secs": crate::MAX_PROCESS_WAIT_TIMEOUT_SECS + 1
+        }));
+        let huge_err = process_intent_from_call(&huge_call).expect_err("oversized timeout fails");
+        assert!(huge_err.message().contains("maximum allowed wait timeout"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use super::validation::{
     ProcessActionError, summarize_intent, validate_argv, validate_captured_bytes, validate_cwd,
-    validate_output_limit, validate_stdin_text,
+    validate_output_limit, validate_stdin_text, validate_timeout_secs,
 };
 use super::{BackgroundProcessControl, BackgroundProcessId};
 use crate::{PermissionRequest, RequestedCapability};
@@ -19,6 +19,10 @@ pub const MAX_PROCESS_CWD_BYTES: usize = 4096;
 pub const MAX_PROCESS_STDIN_TEXT_BYTES: usize = 64 * 1024;
 /// Maximum accepted captured byte limit per process output stream.
 pub const MAX_PROCESS_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
+/// Default foreground wait timeout in seconds before handing off to background.
+pub const DEFAULT_PROCESS_WAIT_TIMEOUT_SECS: u64 = 120;
+/// Maximum accepted foreground wait timeout in seconds for one `run_process` call.
+pub const MAX_PROCESS_WAIT_TIMEOUT_SECS: u64 = 3600;
 
 /// Minimal process environment override policy for SP1.
 ///
@@ -418,6 +422,8 @@ pub struct ProcessActionIntent {
     stderr_limit_bytes: usize,
     #[serde(default)]
     background: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timeout_secs: Option<u64>,
 }
 
 impl ProcessActionIntent {
@@ -446,17 +452,31 @@ impl ProcessActionIntent {
             stdout_limit_bytes,
             stderr_limit_bytes,
             background: false,
+            timeout_secs: None,
         })
     }
 
     /// Keeps the process after the tool returns when `background` is true.
     ///
-    /// The default waits until the process exits. A background process stays
-    /// until the owning session ends.
+    /// The default waits until the process exits or reaches its wait timeout.
+    /// A retained background process stays until stopped or the owning session ends.
     #[must_use]
     pub fn with_background(mut self, background: bool) -> Self {
         self.background = background;
         self
+    }
+
+    /// Sets an optional foreground wait timeout in seconds (`1..=MAX_PROCESS_WAIT_TIMEOUT_SECS`).
+    ///
+    /// When a foreground command is still running after this timeout, the runner
+    /// does not kill it; it retains the process in the background and returns
+    /// its id and partial output so the calling LLM can decide how to proceed.
+    pub fn with_timeout_secs(
+        mut self,
+        timeout_secs: Option<u64>,
+    ) -> Result<Self, ProcessActionError> {
+        self.timeout_secs = validate_timeout_secs(timeout_secs)?;
+        Ok(self)
     }
 
     /// Returns a compact deterministic summary of the process intent.
@@ -495,6 +515,21 @@ impl ProcessActionIntent {
         self.background
     }
 
+    /// Returns the explicit foreground wait timeout override in seconds, if set.
+    #[must_use]
+    pub const fn timeout_secs(&self) -> Option<u64> {
+        self.timeout_secs
+    }
+
+    /// Returns the effective foreground wait timeout in seconds.
+    #[must_use]
+    pub const fn effective_wait_timeout_secs(&self) -> u64 {
+        match self.timeout_secs {
+            Some(secs) => secs,
+            None => DEFAULT_PROCESS_WAIT_TIMEOUT_SECS,
+        }
+    }
+
     /// Returns the stdout capture limit in bytes.
     #[must_use]
     pub const fn stdout_limit_bytes(&self) -> usize {
@@ -528,6 +563,7 @@ pub struct ProcessRunnerOutput {
     stderr_truncated: bool,
     running_pid: Option<u32>,
     background_process_id: Option<BackgroundProcessId>,
+    wait_timed_out_secs: Option<u64>,
 }
 
 impl ProcessRunnerOutput {
@@ -582,6 +618,7 @@ impl ProcessRunnerOutput {
             stderr_truncated,
             running_pid: None,
             background_process_id: None,
+            wait_timed_out_secs: None,
         })
     }
 
@@ -596,6 +633,14 @@ impl ProcessRunnerOutput {
     #[must_use]
     pub fn with_background_process_id(mut self, id: BackgroundProcessId) -> Self {
         self.background_process_id = Some(id);
+        self
+    }
+
+    /// Records that a foreground wait elapsed after `secs` seconds without killing
+    /// the still-running process, handing it off to the background supervisor.
+    #[must_use]
+    pub fn with_wait_timed_out_secs(mut self, secs: u64) -> Self {
+        self.wait_timed_out_secs = Some(secs);
         self
     }
 
@@ -675,6 +720,13 @@ impl ProcessRunnerOutput {
     #[must_use]
     pub fn background_process_id(&self) -> Option<&BackgroundProcessId> {
         self.background_process_id.as_ref()
+    }
+
+    /// Returns the foreground wait timeout in seconds when the call handed off a
+    /// still-running command to the background without killing it.
+    #[must_use]
+    pub const fn wait_timed_out_secs(&self) -> Option<u64> {
+        self.wait_timed_out_secs
     }
 
     /// Returns whether the process output represents successful completion.

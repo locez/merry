@@ -181,7 +181,58 @@ async fn background_command_returns_while_the_process_stays_alive() {
         .background_process_id()
         .expect("retained process has an id");
     assert_eq!(id.as_str(), "bg-1");
+    assert_eq!(output.wait_timed_out_secs(), None);
     drop(runner);
+    wait_until_dead(pid).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn foreground_command_wait_timeout_retains_running_process_without_killing_it() {
+    let runner = TokioProcessRunner::new();
+    let intent = ProcessActionIntent::new(
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "echo started; sleep 30".to_owned(),
+        ],
+        None,
+        ProcessEnvPolicy::empty(),
+        None,
+        4096,
+        4096,
+    )
+    .expect("valid intent")
+    .with_timeout_secs(Some(1))
+    .expect("valid timeout_secs");
+
+    let started = std::time::Instant::now();
+    let output = runner
+        .run(intent, ProcessRunnerContext::new(CancellationToken::new()))
+        .await
+        .expect("timed-out foreground process should be retained instead of killed");
+
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(output.status(), ProcessExitStatus::Running);
+    assert!(output.ok());
+    assert_eq!(output.wait_timed_out_secs(), Some(1));
+    assert!(output.stdout_text().contains("started"));
+    let pid = output.running_pid().expect("retained process has a pid");
+    assert!(
+        process_alive(pid),
+        "timed-out foreground command must stay alive for the LLM to inspect or stop"
+    );
+    let id = output
+        .background_process_id()
+        .expect("retained process has a background id")
+        .clone();
+    assert_eq!(id.as_str(), "bg-1");
+
+    let control = runner.background_control().expect("background control");
+    let read = control.read(&id).expect("read retained output");
+    assert!(read.stdout().contains("started"));
+    let stopped = control.stop(&id).expect("stop retained process");
+    assert!(stopped.changed());
     wait_until_dead(pid).await;
 }
 

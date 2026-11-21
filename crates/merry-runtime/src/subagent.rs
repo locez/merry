@@ -143,10 +143,26 @@ pub(crate) fn completion_notification_text(statuses: &[SubagentStatusView]) -> S
         }
 
         if status.status == SubagentStatusLabel::Blocked {
-            text.push_str(&format!(
-                "continue: call send_subagent_message(agent_id=\"{}\", extra_model_turns=...) to resume this subagent with its retained transcript.\n",
-                status.agent_id.as_str()
-            ));
+            match status.diagnostics.as_ref().map(|diag| diag.code()) {
+                Some("subagent_timeout") => {
+                    text.push_str(&format!(
+                        "continue: child timed out; call send_subagent_message(agent_id=\"{}\", message=...) to resume with its retained transcript or adjust the plan.\n",
+                        status.agent_id.as_str()
+                    ));
+                }
+                Some("subagent_token_budget_exceeded") => {
+                    text.push_str(&format!(
+                        "continue: child hit its token budget; inspect its partial progress or call send_subagent_message(agent_id=\"{}\", message=...) with a narrower focus.\n",
+                        status.agent_id.as_str()
+                    ));
+                }
+                _ => {
+                    text.push_str(&format!(
+                        "continue: call send_subagent_message(agent_id=\"{}\", extra_model_turns=...) to resume this subagent with its retained transcript.\n",
+                        status.agent_id.as_str()
+                    ));
+                }
+            }
         } else {
             text.push_str(&format!(
                 "continue: call send_subagent_message(agent_id=\"{}\", message=...) to continue with this subagent's retained context.\n",

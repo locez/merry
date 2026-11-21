@@ -1,6 +1,6 @@
 use super::contracts::{
     MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS, MAX_PROCESS_CWD_BYTES,
-    MAX_PROCESS_OUTPUT_LIMIT_BYTES, MAX_PROCESS_STDIN_TEXT_BYTES,
+    MAX_PROCESS_OUTPUT_LIMIT_BYTES, MAX_PROCESS_STDIN_TEXT_BYTES, MAX_PROCESS_WAIT_TIMEOUT_SECS,
 };
 use std::path::{Component, Path};
 use thiserror::Error;
@@ -55,6 +55,32 @@ pub enum ProcessActionError {
         /// Validation failure detail.
         reason: &'static str,
     },
+
+    /// Foreground wait timeout was invalid.
+    #[error("process action timeout_secs {reason}")]
+    InvalidTimeoutSecs {
+        /// Validation failure detail.
+        reason: &'static str,
+    },
+}
+
+pub(super) fn validate_timeout_secs(
+    timeout_secs: Option<u64>,
+) -> Result<Option<u64>, ProcessActionError> {
+    let Some(secs) = timeout_secs else {
+        return Ok(None);
+    };
+    if secs == 0 {
+        return Err(ProcessActionError::InvalidTimeoutSecs {
+            reason: "must be greater than zero",
+        });
+    }
+    if secs > MAX_PROCESS_WAIT_TIMEOUT_SECS {
+        return Err(ProcessActionError::InvalidTimeoutSecs {
+            reason: "exceeds the maximum allowed wait timeout",
+        });
+    }
+    Ok(Some(secs))
 }
 
 pub(super) fn validate_argv(argv: &[String]) -> Result<(), ProcessActionError> {

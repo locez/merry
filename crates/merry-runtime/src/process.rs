@@ -21,19 +21,20 @@ pub use classification::{
     is_read_only_shell_process_action_intent, shell_command_for_argv,
 };
 pub use contracts::{
-    AcceptedLocalWorkspaceProcessAdmission, LocalWorkspaceProcessSandboxProfile,
-    MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS, MAX_PROCESS_CWD_BYTES,
-    MAX_PROCESS_OUTPUT_LIMIT_BYTES, MAX_PROCESS_STDIN_TEXT_BYTES, PermissionedProcessRunnerFactory,
-    ProcessActionIntent, ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus,
-    ProcessOutputChunk, ProcessOutputSink, ProcessPermissionProfileId, ProcessRunner,
-    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
-    ProcessRunnerResult, StaticPermissionedProcessRunnerFactory,
+    AcceptedLocalWorkspaceProcessAdmission, DEFAULT_PROCESS_WAIT_TIMEOUT_SECS,
+    LocalWorkspaceProcessSandboxProfile, MAX_PROCESS_ARG_BYTES, MAX_PROCESS_ARGV_ITEMS,
+    MAX_PROCESS_CWD_BYTES, MAX_PROCESS_OUTPUT_LIMIT_BYTES, MAX_PROCESS_STDIN_TEXT_BYTES,
+    MAX_PROCESS_WAIT_TIMEOUT_SECS, PermissionedProcessRunnerFactory, ProcessActionIntent,
+    ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus, ProcessOutputChunk,
+    ProcessOutputSink, ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext,
+    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
+    StaticPermissionedProcessRunnerFactory,
 };
 #[cfg(test)]
 pub(crate) use output::{NON_UTF8_GUIDANCE, STILL_RUNNING_GUIDANCE};
 pub(crate) use output::{
-    OUTPUT_RECOVERY_GUIDANCE, TRUNCATION_GUIDANCE, derived_process_model_text, recovery_guidance,
-    render_process_model_text, sanitize_process_output_for_journal,
+    OUTPUT_RECOVERY_GUIDANCE, TRUNCATION_GUIDANCE, derived_process_model_text,
+    recovery_guidance_for_output, render_process_model_text, sanitize_process_output_for_journal,
 };
 pub use output::{ProcessOutputEnvelope, ProcessOutputStream};
 pub use session_permissions::{

@@ -8,8 +8,8 @@
 use merry_runtime::{
     BackgroundProcessControl, BackgroundProcessId, BackgroundProcessLookupError,
     BackgroundProcessOutput, BackgroundProcessState, BackgroundProcessStop,
-    BackgroundProcessSummary, ProcessActionIntent, ProcessExitStatus, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerOutput,
+    BackgroundProcessSummary, ProcessActionIntent, ProcessExitStatus, ProcessOutputSink,
+    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerOutput, ToolOutputStream,
 };
 use std::{
     sync::{
@@ -120,8 +120,10 @@ impl Drop for SupervisorInner {
     }
 }
 
-/// Keeps a still-running command, or returns its real status if it exits first.
-pub(super) async fn finish_background(
+/// Waits for a spawned process up to its background settle window or foreground
+/// wait timeout, retaining it in `BackgroundSupervisor` without killing it if it
+/// is still alive when the wait window elapses.
+pub(super) async fn finish_process(
     mut child: Child,
     stdout: impl AsyncRead + Unpin + Send + 'static,
     stderr: impl AsyncRead + Unpin + Send + 'static,
@@ -130,28 +132,48 @@ pub(super) async fn finish_background(
     supervisor: BackgroundSupervisor,
     program_for_error: String,
 ) -> Result<ProcessRunnerOutput, ProcessRunnerError> {
+    let explicit_background = intent.background();
+    let wait_timeout_secs = (!explicit_background).then(|| intent.effective_wait_timeout_secs());
+    let wait_window = match wait_timeout_secs {
+        Some(secs) => Duration::from_secs(secs),
+        None => BACKGROUND_SETTLE,
+    };
+
     let stdout_capture = Arc::new(Capture::default());
     let stderr_capture = Arc::new(Capture::default());
+    let live_sink = if explicit_background {
+        None
+    } else {
+        context
+            .output_sink()
+            .cloned()
+            .map(|sink| Arc::new(Mutex::new(Some(sink))))
+    };
     let mut stdout_task = tokio::spawn(drain_capture(
         stdout,
         intent.stdout_limit_bytes(),
         Arc::clone(&stdout_capture),
+        live_sink.clone(),
+        ToolOutputStream::Stdout,
     ));
     let mut stderr_task = tokio::spawn(drain_capture(
         stderr,
         intent.stderr_limit_bytes(),
         Arc::clone(&stderr_capture),
+        live_sink.clone(),
+        ToolOutputStream::Stderr,
     ));
 
     let settled = tokio::select! {
         biased;
         () = context.cancellation_token().cancelled() => Settle::Cancelled,
         status = child.wait() => Settle::Exited(status),
-        () = tokio::time::sleep(BACKGROUND_SETTLE) => Settle::StillRunning,
+        () = tokio::time::sleep(wait_window) => Settle::StillRunning,
     };
 
     match settled {
         Settle::Cancelled => {
+            detach_live_sink(&live_sink);
             stdout_task.abort();
             stderr_task.abort();
             kill_child_group(&mut child);
@@ -164,10 +186,16 @@ pub(super) async fn finish_background(
                     "failed to wait for process executable `{program_for_error}`: {source}"
                 ))
             })?;
-            collect_exit_output(&mut stdout_task, &mut stderr_task).await?;
+            if explicit_background {
+                collect_exit_output(&mut stdout_task, &mut stderr_task).await?;
+            } else {
+                join_exit_output(&mut stdout_task, &mut stderr_task).await?;
+            }
+            detach_live_sink(&live_sink);
             finish_exited(&intent, status, &stdout_capture, &stderr_capture)
         }
         Settle::StillRunning => {
+            detach_live_sink(&live_sink);
             if context.cancellation_token().is_cancelled() {
                 stdout_task.abort();
                 stderr_task.abort();
@@ -209,6 +237,9 @@ pub(super) async fn finish_background(
             output = output
                 .with_running_pid(pid)
                 .with_background_process_id(id.clone());
+            if let Some(secs) = wait_timeout_secs {
+                output = output.with_wait_timed_out_secs(secs);
+            }
             supervisor.retain(RetainedProcess {
                 id,
                 command,
@@ -220,10 +251,42 @@ pub(super) async fn finish_background(
                 stdout: stdout_capture,
                 stderr: stderr_capture,
             });
-            tracing::debug!(pid, "retained background process");
+            tracing::debug!(
+                pid,
+                wait_timeout_secs,
+                "retained still-running process in background supervisor"
+            );
             Ok(output)
         }
     }
+}
+
+fn detach_live_sink(slot: &Option<Arc<Mutex<Option<ProcessOutputSink>>>>) {
+    if let Some(slot) = slot {
+        let mut guard = slot.lock().unwrap_or_else(|error| error.into_inner());
+        *guard = None;
+    }
+}
+
+async fn join_exit_output(
+    stdout_task: &mut JoinHandle<Result<(), ProcessRunnerError>>,
+    stderr_task: &mut JoinHandle<Result<(), ProcessRunnerError>>,
+) -> Result<(), ProcessRunnerError> {
+    let stdout_result = (&mut *stdout_task).await.map_err(|source| {
+        ProcessRunnerError::infrastructure(format!("process stdout reader task failed: {source}"))
+    });
+    if let Err(error) = stdout_result {
+        stderr_task.abort();
+        return Err(error);
+    }
+    if let Err(error) = stdout_result.expect("checked above") {
+        stderr_task.abort();
+        return Err(error);
+    }
+    (&mut *stderr_task).await.map_err(|source| {
+        ProcessRunnerError::infrastructure(format!("process stderr reader task failed: {source}"))
+    })??;
+    Ok(())
 }
 
 enum Settle {
@@ -467,6 +530,8 @@ async fn drain_capture<R>(
     mut reader: R,
     limit: usize,
     capture: Arc<Capture>,
+    live_sink: Option<Arc<Mutex<Option<ProcessOutputSink>>>>,
+    stream: ToolOutputStream,
 ) -> Result<(), ProcessRunnerError>
 where
     R: AsyncRead + Unpin,
@@ -478,6 +543,12 @@ where
         })?;
         if count == 0 {
             break;
+        }
+        if let Some(slot) = &live_sink {
+            let guard = slot.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(sink) = guard.as_ref() {
+                sink.emit(stream, &scratch[..count]);
+            }
         }
         let mut bytes = capture
             .bytes

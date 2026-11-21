@@ -2,7 +2,7 @@ use crate::{
     ProcessActionIntent, ProcessOutputEnvelope, ProcessPermissionProfileId, ProcessRunnerOutput,
     permission::PermissionAdmissionReview,
     process::{
-        OUTPUT_RECOVERY_GUIDANCE, TRUNCATION_GUIDANCE, recovery_guidance,
+        OUTPUT_RECOVERY_GUIDANCE, TRUNCATION_GUIDANCE, recovery_guidance_for_output,
         render_process_model_text, shell_process_input,
     },
     tool::ToolResultContent,
@@ -42,7 +42,7 @@ fn full_output(
     permission_review: Option<&PermissionAdmissionReview>,
 ) -> ToolOutput {
     let shell_input = shell_process_input(intent);
-    let recovery = recovery_guidance(output.status());
+    let recovery = recovery_guidance_for_output(output);
     let truncated = output.stdout_truncated() || output.stderr_truncated();
     let truncation = truncated.then(|| ProcessTruncationRecord {
         kind: "process_output_truncated",
@@ -52,7 +52,7 @@ fn full_output(
     });
     // A still-running process can carry recovery text and a truncation note.
     // Recovery keeps the `guidance` field; truncation moves beside it.
-    let (guidance, output_guidance) = match (recovery, truncation) {
+    let (guidance, output_guidance) = match (recovery.as_deref(), truncation) {
         (Some(message), truncation) => (
             Some(ProcessGuidanceRecord::Recovery {
                 kind: "process_action_recovery",
@@ -281,6 +281,37 @@ mod tests {
                 "still running pid 42 id bg-1\nstdout:\nlistening\nguidance:\n{STILL_RUNNING_GUIDANCE}"
             )
         );
+    }
+
+    #[test]
+    fn foreground_wait_timeout_renders_non_killing_harness_guidance() {
+        let output = ProcessRunnerOutput::new(
+            &intent(),
+            ProcessExitStatus::Running,
+            "building crate...\n",
+            false,
+            "",
+            false,
+        )
+        .expect("output")
+        .with_running_pid(99)
+        .with_background_process_id(
+            BackgroundProcessId::new("bg-2").expect("background process id"),
+        )
+        .with_wait_timed_out_secs(120);
+
+        assert!(output.ok());
+        assert_eq!(output.wait_timed_out_secs(), Some(120));
+        let text = model_text(&output);
+        assert!(
+            text.starts_with("still running (waited 120s, not killed) pid 99 id bg-2\n"),
+            "{text}"
+        );
+        assert!(text.contains("building crate...\n"), "{text}");
+        assert!(text.contains("NOT killed"), "{text}");
+        assert!(text.contains("read_background_process"), "{text}");
+        assert!(text.contains("stop_background_process"), "{text}");
+        assert!(text.contains("timeout_secs"), "{text}");
     }
 
     #[test]
