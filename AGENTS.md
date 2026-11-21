@@ -7,7 +7,7 @@ a more-specific `AGENTS.md` governs a descendant path.
 
 - Keep this file limited to stable, repeatable repository rules. Put issue
   lists, temporary migration plans, technical-debt inventories, and design
-  drafts in issues, `ROADMAP.md`, or ignored local documentation.
+  drafts in tracked issues or ignored local documentation.
 - A nested `AGENTS.md` may add rules for its own subtree when that subtree has
   a genuinely different workflow. It must state its scope and must not copy the
   root rules. When rules conflict, the more-specific file governs its subtree.
@@ -16,8 +16,7 @@ a more-specific `AGENTS.md` governs a descendant path.
     workspace lints.
   - Current source and tests define implemented behavior; this file defines
     intended layer ownership and workflow constraints.
-  - `ROADMAP.md` defines the delivery sequence; linked issues define detailed
-    scope, acceptance, evidence, and progress.
+  - Tracked issues define detailed scope, acceptance, evidence, and progress.
   - `sdks/python/pyproject.toml`, CI workflows, and package metadata define
     supported Python commands and packaging behavior.
 - Verify a path, crate, capability, or command against those sources before
@@ -36,8 +35,8 @@ a more-specific `AGENTS.md` governs a descendant path.
 
 Use this loop for every substantial task:
 
-1. **Orient.** Read this file, the relevant roadmap section, and the owning
-   module and tests. Run `git status --short --branch` before editing.
+1. **Orient.** Read this file, the relevant issue or task description, and the
+   owning module and tests. Run `git status --short --branch` before editing.
 2. **State the contract.** Name the active gap, observable acceptance target,
    base commit, and allowed write paths.
 3. **Inspect.** Search for sibling paths, existing tests, current interfaces,
@@ -50,37 +49,26 @@ Use this loop for every substantial task:
 6. **Report.** Summarize changed files, verification, known limits, and
    whether the active delivery focus advanced.
 
-## Delivery Focus And Roadmap
+## Delivery Focus
 
-- The active delivery focus comes from the current `ROADMAP.md` or the user's
-  explicit instruction. This file defines how to avoid drift; it must not make
-  a temporary milestone the permanent product goal.
+- The active delivery focus comes from the user's explicit instruction or
+  tracked issues. This file defines how to avoid drift; it must not make a
+  temporary milestone the permanent product goal.
 - Before substantial implementation, state the capability or gap being
   advanced and at least one command, test, event, artifact, or observable API
   behavior that will prove progress.
 - Prefer implementation, tests, and executable verification when the next
   implementation step is known. Research, policy, taxonomy, classifier,
-  profile, roadmap, and guardrail work is supporting work unless the user
+  profile, planning, and guardrail work is supporting work unless the user
   explicitly requests it or it unblocks the named acceptance target.
 - A documentation, status, planning, or research-only request has its own
   valid acceptance target and is not drift merely because it does not add a
   runtime capability.
+- Keep supporting architecture work subordinate to a runnable or testable
+  capability unless the user explicitly asks for planning or design only.
 - Before reporting completion, state whether the active focus advanced and
   name the evidence. If it did not, identify the resolved blocker or report
   drift.
-
-`ROADMAP.md` is a controlled planning artifact, not a scratchpad:
-
-- Contributors may update implementation status, completed evidence, validation
-  notes, or a user-approved correction.
-- Do not change product priority, reorder major milestones, or promote a
-  supporting architecture thread into the primary track without explicit user
-  approval.
-- Before an authorized priority change, state the current goal, proposed
-  replacement, and authorizing instruction or tracked request. Record the
-  reason in `ROADMAP.md` or a tracked spec.
-- Keep supporting architecture work subordinate to a runnable or testable
-  capability unless the user explicitly asks for planning or design only.
 
 ## Ownership And Dependency Boundaries
 
@@ -266,11 +254,31 @@ not require mechanically moving every existing module in one change.
 
 ## Rust Engineering Standards
 
-Use stable Rust unless a feature is explicitly justified. Prefer typed data
-structures over stringly typed protocols, `serde` at serialization boundaries,
-`schemars` for new tool/provider schemas, `thiserror` for library errors, and
-`tracing` for structured diagnostics. Avoid global mutable state and hidden
-registration side effects in macros.
+Use stable, idiomatic Rust unless a feature is explicitly justified. Prefer
+typed data structures over stringly typed protocols, `serde` at serialization
+boundaries, `schemars` for new tool/provider schemas, `thiserror` for library
+errors, and `tracing` for structured diagnostics. Avoid global mutable state
+and hidden registration side effects in macros.
+
+### Idiomatic Rust, dead code, and lint hygiene
+
+- Write idiomatic Rust. Use the type system, exhaustive `match`, `Option` and
+  `Result` combinators, `?`, iterators, slices, RAII, and standard library
+  traits (`From`, `TryFrom`, `Display`, `Default`, `AsRef`, `Borrow`) rather
+  than C-style index loops, boolean/stringly state flags, or unnecessary
+  wrapper layers. Follow Rust 2024 and Clippy idioms.
+- Dead code is forbidden. Delete unused functions, types, enum variants, struct
+  fields, modules, imports, and obsolete compatibility helpers instead of
+  keeping them around "just in case" or for speculative future work.
+- Do not add `#[allow(dead_code)]`, `#[allow(unused)]`,
+  `#[allow(unused_imports)]`, `#[allow(unused_variables)]`,
+  `#[allow(unused_mut)]`, or broad `#[allow(clippy::...)]` attributes merely to
+  make `cargo check`, `cargo test`, or `cargo clippy` pass. Fix the underlying
+  issue by removing the unused code, wiring the real caller, or refactoring.
+- Only add a narrow, item-scoped `#[allow(...)]` when the compiler cannot see a
+  genuine constraint (such as platform-conditional compilation, feature-gated
+  items, or a reviewed FFI/workspace lint exception), and include a brief
+  comment explaining why.
 
 ### Contracts, types, and dynamic access
 
@@ -482,9 +490,16 @@ paths. They are not a way to count changed lines or restate implementation.
 
 ### Test design
 
-- Before writing a test, name the observable behavior or contract it protects
-  and the regression that would make it fail. Do not add tests only for
-  coverage, mechanical branch mirroring, or an expected source line.
+- Every test must be meaningful. Before writing a test, name the observable
+  behavior, invariant, boundary condition, or regression it protects and what
+  real bug would make it fail. Do not add tests only for line coverage,
+  mechanical branch mirroring, or an expected source line.
+- Reject trivial or tautological unit tests: do not write tests that merely
+  verify derived `Debug`/`Clone`/`Default`, assert that a plain constructor
+  stores the values just passed in without validation or transformation,
+  duplicate the production formula inside the assertion, or test mock setup
+  instead of Merry's behavior. Fewer high-signal tests beat noisy low-value
+  tests; delete pointless tests when refactoring or reviewing.
 - Prefer behavior, interface, integration, and failure-path tests that survive
   internal refactoring. Exercise public constructors, builders, and interfaces
   rather than invalid private state or test-only escape hatches.
