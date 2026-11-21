@@ -380,12 +380,12 @@ pub(super) async fn dispatch_effect(
 }
 
 async fn write_system_clipboard(text: &str) -> Result<(), String> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = text;
         Err("system clipboard is unavailable".to_owned())
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let text = text.to_owned();
         match tokio::time::timeout(
@@ -438,7 +438,7 @@ pub(in crate::tui) async fn persist_submitted_input_history(
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn start_clipboard_image_read(
     sender: mpsc::Sender<ClipboardImageCompletion>,
     background_tasks: &mut JoinSet<()>,
@@ -455,19 +455,19 @@ pub(super) fn start_clipboard_image_read(
     });
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(super) fn start_clipboard_image_read(
     sender: mpsc::Sender<ClipboardImageCompletion>,
     background_tasks: &mut JoinSet<()>,
 ) {
     background_tasks.spawn(async move {
-        let _ =
-            sender
-                .send(ClipboardImageCompletion {
-                    result: Err(
-                        "clipboard image paste is currently supported only on Linux".to_owned()
-                    ),
-                })
-                .await;
+        let _ = sender
+            .send(ClipboardImageCompletion {
+                result: Err(
+                    "clipboard image paste is currently supported only on Linux and macOS"
+                        .to_owned(),
+                ),
+            })
+            .await;
     });
 }

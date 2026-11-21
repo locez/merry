@@ -140,11 +140,25 @@ fn controller_only_starts_image_paste_from_the_main_composer() {
         ),
         ControllerEffect::PasteImage
     );
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
+            &mut state,
+        ),
+        ControllerEffect::PasteImage
+    );
 
     state.open_command_palette();
     assert_eq!(
         handle_key_event(
             KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+            &mut state,
+        ),
+        ControllerEffect::None
+    );
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
             &mut state,
         ),
         ControllerEffect::None

@@ -329,6 +329,10 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
         }
     }
 
+    if matches!(key.code, KeyCode::Char('v' | 'V')) && super_key && !ctrl && !alt {
+        return ControllerEffect::PasteImage;
+    }
+
     if key.code == KeyCode::Enter && shift && !ctrl && !alt && !super_key {
         state.insert_input_newline();
         return ControllerEffect::None;

@@ -75,16 +75,223 @@ pub(crate) fn read_clipboard_image() -> Result<ClipboardImage, ClipboardImageErr
     let mut clipboard = arboard::Clipboard::new()
         .map_err(|error| ClipboardImageError::ClipboardUnavailable(error.to_string()))?;
     let files = clipboard.get().file_list().unwrap_or_default();
-    normalize_file_candidates_or_else(files.iter().map(std::path::PathBuf::as_path), || {
-        let image = clipboard
-            .get_image()
-            .map_err(|error| ClipboardImageError::NoImage(error.to_string()))?;
-        Ok(ClipboardRgba {
-            width: image.width,
-            height: image.height,
-            bytes: image.bytes.into_owned(),
-        })
-    })
+    read_clipboard_image_with_fallback(
+        files.iter().map(std::path::PathBuf::as_path),
+        || {
+            let image = clipboard
+                .get_image()
+                .map_err(|error| ClipboardImageError::NoImage(error.to_string()))?;
+            Ok(ClipboardRgba {
+                width: image.width,
+                height: image.height,
+                bytes: image.bytes.into_owned(),
+            })
+        },
+        read_platform_encoded_fallback,
+    )
+}
+
+fn read_clipboard_image_with_fallback<'a, I, F, G>(
+    paths: I,
+    rgba_reader: F,
+    encoded_fallback: G,
+) -> Result<ClipboardImage, ClipboardImageError>
+where
+    I: IntoIterator<Item = &'a Path>,
+    F: FnOnce() -> Result<ClipboardRgba, ClipboardImageError>,
+    G: FnOnce() -> Option<Result<ClipboardImage, ClipboardImageError>>,
+{
+    match normalize_file_candidates_or_else(paths, rgba_reader) {
+        Ok(image) => Ok(image),
+        Err(error @ (ClipboardImageError::Limit(_) | ClipboardImageError::Encode(_))) => Err(error),
+        Err(primary_error) => match encoded_fallback() {
+            Some(Ok(image)) => Ok(image),
+            Some(Err(
+                fallback_error @ (ClipboardImageError::Limit(_)
+                | ClipboardImageError::Encode(_)
+                | ClipboardImageError::Decode(_)
+                | ClipboardImageError::UnsupportedFormat),
+            )) => Err(fallback_error),
+            Some(Err(_)) | None => Err(primary_error),
+        },
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_platform_encoded_fallback() -> Option<Result<ClipboardImage, ClipboardImageError>> {
+    None
+}
+
+/// Fallback macOS pasteboard image reader for non-TIFF pasteboard payloads.
+///
+/// `arboard` on macOS reads only `NSPasteboardTypeTIFF` and decodes it via
+/// `image`'s TIFF decoder, which misses PNG/JPEG/GIF/WebP-only pasteboards and
+/// some wide-gamut or compressed macOS TIFF variants. Using `/usr/bin/osascript`
+/// with JXA lets AppKit read direct encoded image types or render any `NSImage`
+/// pasteboard payload to PNG without temp files or `unsafe` FFI.
+#[cfg(target_os = "macos")]
+fn read_platform_encoded_fallback() -> Option<Result<ClipboardImage, ClipboardImageError>> {
+    Some(read_macos_pasteboard_encoded_image())
+}
+
+#[cfg(target_os = "macos")]
+const MACOS_PASTEBOARD_IMAGE_SCRIPT: &str = r#"
+ObjC.import("AppKit");
+ObjC.import("Foundation");
+ObjC.import("stdlib");
+
+function run() {
+  var pb = $.NSPasteboard.generalPasteboard;
+  if (!pb || pb.isNil()) {
+    $.exit(2);
+  }
+  var maxBytes = 20971520;
+  var directTypes = [
+    $.NSPasteboardTypePNG,
+    $("public.jpeg"),
+    $("com.compuserve.gif"),
+    $("org.webmproject.webp"),
+  ];
+  var data = null;
+  for (var i = 0; i < directTypes.length; i++) {
+    var candidate = pb.dataForType(directTypes[i]);
+    if (candidate && !candidate.isNil() && candidate.length > 0) {
+      data = candidate;
+      break;
+    }
+  }
+  if (!data) {
+    var image = $.NSImage.alloc.initWithPasteboard(pb);
+    if (image && !image.isNil()) {
+      var tiff = image.TIFFRepresentation;
+      if (tiff && !tiff.isNil() && tiff.length > 0) {
+        var rep = $.NSBitmapImageRep.imageRepWithData(tiff);
+        if (rep && !rep.isNil()) {
+          data = rep.representationUsingTypeProperties(
+            $.NSBitmapImageFileTypePNG,
+            $({}),
+          );
+        }
+      }
+    }
+  }
+  if (!data || data.isNil() || data.length === 0) {
+    $.exit(3);
+  }
+  if (data.length > maxBytes) {
+    $.exit(4);
+  }
+  $.NSFileHandle.fileHandleWithStandardOutput.writeData(data);
+  $.exit(0);
+}
+"#;
+
+#[cfg(target_os = "macos")]
+fn read_macos_pasteboard_encoded_image() -> Result<ClipboardImage, ClipboardImageError> {
+    use std::{
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+    const MAX_STDERR_BYTES: u64 = 4096;
+
+    let mut child = Command::new("/usr/bin/osascript")
+        .args(["-l", "JavaScript", "-e", MACOS_PASTEBOARD_IMAGE_SCRIPT])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| ClipboardImageError::ClipboardUnavailable(error.to_string()))?;
+
+    let stdout = child.stdout.take().ok_or_else(|| {
+        ClipboardImageError::ClipboardUnavailable("osascript stdout pipe unavailable".to_owned())
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        ClipboardImageError::ClipboardUnavailable("osascript stderr pipe unavailable".to_owned())
+    })?;
+
+    let stdout_handle = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let limit =
+            u64::try_from(MAX_CLIPBOARD_IMAGE_SOURCE_BYTES + 1).expect("source limit fits u64");
+        stdout.take(limit).read_to_end(&mut bytes)?;
+        Ok::<Vec<u8>, std::io::Error>(bytes)
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.take(MAX_STDERR_BYTES).read_to_end(&mut bytes)?;
+        Ok::<Vec<u8>, std::io::Error>(bytes)
+    });
+
+    let deadline = Instant::now() + TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(ClipboardImageError::ClipboardUnavailable(
+                        "macOS clipboard image read timed out".to_owned(),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err(ClipboardImageError::ClipboardUnavailable(error.to_string()));
+            }
+        }
+    };
+
+    let stdout_bytes = stdout_handle
+        .join()
+        .map_err(|_| {
+            ClipboardImageError::ClipboardUnavailable("stdout reader panicked".to_owned())
+        })?
+        .map_err(|error| ClipboardImageError::InvalidSource(error.to_string()))?;
+    let stderr_bytes = stderr_handle
+        .join()
+        .map_err(|_| {
+            ClipboardImageError::ClipboardUnavailable("stderr reader panicked".to_owned())
+        })?
+        .map_err(|error| ClipboardImageError::InvalidSource(error.to_string()))?;
+
+    let status = status?;
+    match status.code() {
+        Some(0) => {
+            if stdout_bytes.len() > MAX_CLIPBOARD_IMAGE_SOURCE_BYTES {
+                return Err(ClipboardImageError::Limit(
+                    "encoded source must be at most 20 MiB",
+                ));
+            }
+            if stdout_bytes.is_empty() {
+                return Err(ClipboardImageError::NoImage(
+                    "clipboard does not contain an image".to_owned(),
+                ));
+            }
+            normalize_encoded_image(&stdout_bytes)
+        }
+        Some(2) => Err(ClipboardImageError::ClipboardUnavailable(
+            "macOS general pasteboard is unavailable".to_owned(),
+        )),
+        Some(3) => Err(ClipboardImageError::NoImage(
+            "clipboard does not contain an image".to_owned(),
+        )),
+        Some(4) => Err(ClipboardImageError::Limit(
+            "encoded source must be at most 20 MiB",
+        )),
+        _ => {
+            let detail = String::from_utf8_lossy(&stderr_bytes).trim().to_owned();
+            Err(ClipboardImageError::NoImage(if detail.is_empty() {
+                "macOS pasteboard image read failed".to_owned()
+            } else {
+                detail
+            }))
+        }
+    }
 }
 
 fn normalize_file_candidates_or_else<'a, I, F>(
@@ -373,5 +580,36 @@ mod tests {
         assert!(validate_dimensions(8_001, 1).is_err());
         assert!(validate_dimensions(8_000, 4_001).is_err());
         assert!(validate_encoded_png_size(10 * 1024 * 1024 + 1).is_err());
+    }
+
+    #[test]
+    fn encoded_fallback_recovers_when_rgba_read_misses_clipboard_image() {
+        let fallback_image =
+            normalize_encoded_image(&encoded_fixture(ImageFormat::Png, Rgba([4, 5, 6, 255])))
+                .expect("png fixture");
+        let recovered = super::read_clipboard_image_with_fallback(
+            std::iter::empty::<&std::path::Path>(),
+            || {
+                Err(super::ClipboardImageError::NoImage(
+                    "no TIFF payload".to_owned(),
+                ))
+            },
+            || Some(Ok(fallback_image.clone())),
+        )
+        .expect("encoded fallback should recover PNG-only pasteboard");
+        assert_eq!(recovered, fallback_image);
+
+        let fallback_called = AtomicBool::new(false);
+        let limit_error = super::read_clipboard_image_with_fallback(
+            std::iter::empty::<&std::path::Path>(),
+            || Err(super::ClipboardImageError::Limit("too big")),
+            || {
+                fallback_called.store(true, Ordering::SeqCst);
+                None
+            },
+        )
+        .expect_err("limit errors must not invoke fallback");
+        assert!(matches!(limit_error, super::ClipboardImageError::Limit(_)));
+        assert!(!fallback_called.load(Ordering::SeqCst));
     }
 }
