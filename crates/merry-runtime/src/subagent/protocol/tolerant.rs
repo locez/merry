@@ -83,25 +83,6 @@ where
     }
 }
 
-pub(super) fn deserialize_agent_ids_field<'de, D>(
-    deserializer: D,
-) -> Result<Vec<SubagentId>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum RawIds {
-        List(Vec<SubagentId>),
-        Single(SubagentId),
-    }
-
-    match RawIds::deserialize(deserializer)? {
-        RawIds::List(ids) => Ok(ids),
-        RawIds::Single(id) => Ok(vec![id]),
-    }
-}
-
 pub(super) fn deserialize_optional_agent_ids_field<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<SubagentId>>, D::Error>

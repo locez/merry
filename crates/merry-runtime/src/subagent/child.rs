@@ -4,23 +4,25 @@ use crate::{
         ChildRuntimeInput, ChildWorkspaceScope, PlanLinkRuntime, PlanSubagentScope,
         SubagentActivityHub, SubagentManager, SubagentStatusLabel, SubagentTaskSpec,
         activity::SubagentActivityReducer,
-        manager::SubagentManagerState,
         scheduler::{
             ChildScheduler, ReservedChildStart, ReservedChildStartError, ReservedChildStartOutcome,
             reserve_queued_starts_locked, start_reserved_children_iteratively,
         },
     },
 };
-use merry_core::{
-    ErrorInfo, PlanLinkSnapshot, PlanLinkStatus, SubagentActivityPhase, SubagentId, SubagentTaskId,
-};
+use merry_core::{ErrorInfo, PlanLinkSnapshot, PlanLinkStatus, SubagentId, SubagentTaskId};
 use merry_llm::GenerationConfig;
 pub(super) use projection::{ChildLoopProjection, apply_loop_result};
+use settle::publish_terminal_activity;
+pub(super) use settle::{
+    finish_child_with_status, publish_terminal_activity_snapshot, update_plan_link_with_scheduler,
+};
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 mod projection;
+mod settle;
 
 pub(super) struct ChildLoopLaunch {
     pub(super) agent_id: SubagentId,
@@ -34,9 +36,29 @@ pub(super) struct ChildLoopLaunch {
     pub(super) event_tx: broadcast::Sender<merry_core::RuntimeEvent>,
 }
 
-struct ChildErrorTransition {
-    claimed: bool,
-    to_start: Vec<ReservedChildStart>,
+pub(super) struct ResumeChildLaunch {
+    pub(super) agent_id: SubagentId,
+    pub(super) task_id: SubagentTaskId,
+    pub(super) task: SubagentTaskSpec,
+    pub(super) token: CancellationToken,
+    pub(super) runtime: Runtime,
+    pub(super) generation_config: GenerationConfig,
+    pub(super) event_tx: broadcast::Sender<merry_core::RuntimeEvent>,
+    pub(super) prompt: String,
+}
+
+/// Runs synchronous [`super::ChildRuntimeFactory::build_child_with_overrides`] on
+/// Tokio's blocking pool so worktree Git commands and handoff file reads never
+/// stall async worker threads or the single-threaded CLI/TUI executor.
+pub(super) async fn build_child_offloaded(
+    factory: Arc<dyn super::ChildRuntimeFactory>,
+    input: ChildRuntimeInput,
+) -> Result<super::BuiltChildRuntime, crate::RuntimeError> {
+    tokio::task::spawn_blocking(move || factory.build_child_with_overrides(input))
+        .await
+        .map_err(|error| crate::RuntimeError::ChildRuntimeBuild {
+            message: format!("child runtime factory task panicked: {error}"),
+        })?
 }
 
 enum PlanScopeLookupError {
@@ -110,27 +132,32 @@ impl SubagentManager {
             self.mark_cancelled_and_schedule(&agent_id).await;
             return;
         };
-        let built = match self.factory.build_child_with_overrides(ChildRuntimeInput {
-            parent_session_id: self.parent_session_id.clone(),
-            agent_id: Some(agent_id.clone()),
-            session_id: child_session_id,
-            session_store: child_session_store,
-            loaded_session: None,
-            existing_worktree: None,
-            task_anchor,
-            task: task.clone(),
-            allowed_tools: task.allowed_tools().to_vec(),
-            workspace_scope: ChildWorkspaceScope::from_task(&task),
-            depth: self.depth.saturating_add(1),
-            generation_config: default_generation_config.clone(),
-            parent_primary_model,
-            parent_generation_config,
-            plan_subagent_control: None,
-            plan_subagent_scope,
-            plan_link: plan_link.clone(),
-            plan_link_runtime,
-            activity_hub: activity_hub.clone(),
-        }) {
+        let built = match build_child_offloaded(
+            Arc::clone(&self.factory),
+            ChildRuntimeInput {
+                parent_session_id: self.parent_session_id.clone(),
+                agent_id: Some(agent_id.clone()),
+                session_id: child_session_id,
+                session_store: child_session_store,
+                loaded_session: None,
+                existing_worktree: None,
+                task_anchor,
+                task: task.clone(),
+                allowed_tools: task.allowed_tools().to_vec(),
+                workspace_scope: ChildWorkspaceScope::from_task(&task),
+                depth: self.depth.saturating_add(1),
+                generation_config: default_generation_config.clone(),
+                parent_primary_model,
+                parent_generation_config,
+                plan_subagent_control: None,
+                plan_subagent_scope,
+                plan_link: plan_link.clone(),
+                plan_link_runtime,
+                activity_hub: activity_hub.clone(),
+            },
+        )
+        .await
+        {
             Ok(built) => built,
             Err(error) => {
                 self.mark_failed_and_schedule(
@@ -147,7 +174,12 @@ impl SubagentManager {
             self.mark_cancelled_and_schedule(&agent_id).await;
             return;
         }
-        let task = apply_built_task_overrides(task, &built);
+        let task = apply_built_task_overrides(
+            task,
+            &built,
+            self.default_timeout_secs(),
+            self.max_total_tokens(),
+        );
         let workspace_lifecycle = built.workspace_lifecycle;
         let worktree_metadata = workspace_lifecycle.as_ref().map(|hook| hook.metadata());
         let runtime = built.runtime;
@@ -186,32 +218,21 @@ impl SubagentManager {
         self.state.lock().await.handles.insert(handle_id, handle);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn resume_child_with_prompt(
-        &self,
-        agent_id: SubagentId,
-        task_id: SubagentTaskId,
-        task: SubagentTaskSpec,
-        token: CancellationToken,
-        runtime: Runtime,
-        generation_config: GenerationConfig,
-        event_tx: broadcast::Sender<merry_core::RuntimeEvent>,
-        prompt: String,
-    ) {
+    pub(super) async fn resume_child(&self, launch: ResumeChildLaunch) {
         let activity_hub = self.attached_activity_hub();
-        let handle_id = agent_id.clone();
+        let handle_id = launch.agent_id.clone();
         let handle = spawn_child_loop(
             self.child_scheduler(),
             ChildLoopLaunch {
-                agent_id,
-                task_id,
-                task,
-                prompt,
-                token,
-                runtime,
-                generation_config,
+                agent_id: launch.agent_id,
+                task_id: launch.task_id,
+                task: launch.task,
+                prompt: launch.prompt,
+                token: launch.token,
+                runtime: launch.runtime,
+                generation_config: launch.generation_config,
                 activity_hub,
-                event_tx,
+                event_tx: launch.event_tx,
             },
         );
         self.state.lock().await.handles.insert(handle_id, handle);
@@ -347,9 +368,9 @@ pub(super) async fn spawn_reserved_child(
     let parent_generation_config = scheduler.live_parent_generation_snapshot();
     let default_generation_config =
         generation_config_for_child_task_with_parent(&start.task, &parent_generation_config);
-    let built = scheduler
-        .factory
-        .build_child_with_overrides(ChildRuntimeInput {
+    let built = build_child_offloaded(
+        Arc::clone(&scheduler.factory),
+        ChildRuntimeInput {
             parent_session_id: scheduler.parent_session_id.clone(),
             agent_id: Some(start.agent_id.clone()),
             session_id: child_session_id,
@@ -369,14 +390,21 @@ pub(super) async fn spawn_reserved_child(
             plan_link: start.plan_link.clone(),
             plan_link_runtime,
             activity_hub: scheduler.attached_activity_hub(),
-        })
-        .map_err(ReservedChildStartError::Factory)?;
+        },
+    )
+    .await
+    .map_err(ReservedChildStartError::Factory)?;
     if start.cancellation_token.is_cancelled() {
         super::events::finalize_child_workspace(built.workspace_lifecycle, true).await;
         return Ok(ReservedChildStartOutcome::Cancelled);
     }
 
-    let task = apply_built_task_overrides(start.task.clone(), &built);
+    let task = apply_built_task_overrides(
+        start.task.clone(),
+        &built,
+        scheduler.default_timeout_secs(),
+        scheduler.max_total_tokens(),
+    );
     let workspace_lifecycle = built.workspace_lifecycle;
     let worktree_metadata = workspace_lifecycle.as_ref().map(|hook| hook.metadata());
     let runtime = built.runtime;
@@ -565,6 +593,7 @@ fn spawn_child_loop(
             .timeout_secs()
             .map(|secs| tokio::time::Instant::now() + std::time::Duration::from_secs(secs));
         let mut timed_out = false;
+        let mut token_budget_exceeded = false;
         let mut bridge_request = None;
         loop {
             let next_msg = match timeout_deadline {
@@ -592,6 +621,16 @@ fn spawn_child_loop(
                             usage.total,
                         )
                         .await;
+                        if let Some(limit) = launch.task.max_total_tokens()
+                            && usage
+                                .total
+                                .input_tokens
+                                .saturating_add(usage.total.output_tokens)
+                                > limit
+                        {
+                            token_budget_exceeded = true;
+                            loop_token.cancel();
+                        }
                     }
                     let delta_bytes = observed_event_output_bytes(&event);
                     if delta_bytes > 0 {
@@ -608,6 +647,9 @@ fn spawn_child_loop(
                     {
                         hub.publish(snapshot);
                     }
+                    if token_budget_exceeded {
+                        break;
+                    }
                 }
                 AgentRunMessage::ToolInvocations { batch } => {
                     bridge_request = batch.calls().first().cloned();
@@ -615,7 +657,7 @@ fn spawn_child_loop(
                 }
             }
         }
-        let (loop_result, loop_error) = if timed_out {
+        let (loop_result, loop_error) = if timed_out || token_budget_exceeded {
             drop(stream);
             (None, None)
         } else if let Some(call) = bridge_request.as_ref() {
@@ -711,7 +753,19 @@ fn spawn_child_loop(
             if let Some(started) = agent.started_at {
                 agent.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             }
-            if timed_out {
+            if token_budget_exceeded {
+                let limit = launch.task.max_total_tokens().unwrap_or(0);
+                agent.usage = reported_usage.or(agent.usage);
+                agent.status = SubagentStatusLabel::Blocked;
+                agent.summary = format!(
+                    "child exceeded max_total_tokens budget ({limit}); inspect partial progress before continuing"
+                );
+                agent.result = None;
+                agent.diagnostics = Some(error_info(
+                    "subagent_token_budget_exceeded",
+                    format!("child exceeded configured max_total_tokens budget ({limit})"),
+                ));
+            } else if timed_out {
                 let secs = launch.task.timeout_secs().unwrap_or(0);
                 agent.status = SubagentStatusLabel::Blocked;
                 agent.summary = format!(
@@ -737,12 +791,7 @@ fn spawn_child_loop(
                         if let (Some(limit), Some(usage)) =
                             (launch.task.max_total_tokens(), agent.usage)
                             && usage.input_tokens.saturating_add(usage.output_tokens) > limit
-                            && agent.status == SubagentStatusLabel::Completed
-                        {
-                            // Record note only if exceeded mid-run; if already completed, keep completion.
-                        } else if let (Some(limit), Some(usage)) =
-                            (launch.task.max_total_tokens(), agent.usage)
-                            && usage.input_tokens.saturating_add(usage.output_tokens) > limit
+                            && agent.status != SubagentStatusLabel::Completed
                         {
                             agent.status = SubagentStatusLabel::Blocked;
                             agent.summary = format!(
@@ -838,158 +887,7 @@ fn spawn_child_loop(
     })
 }
 
-pub(super) async fn finish_child_with_status(
-    scheduler: ChildScheduler,
-    launch: &ChildLoopLaunch,
-    reducer: &mut SubagentActivityReducer,
-    status: SubagentStatusLabel,
-    summary: &str,
-    diagnostics: ErrorInfo,
-) {
-    let transition = update_child_after_error(
-        &scheduler.state,
-        &launch.agent_id,
-        status,
-        summary,
-        diagnostics,
-        scheduler.effective_max_threads(),
-    )
-    .await;
-    if transition.claimed {
-        settle_child_terminal(
-            scheduler,
-            &launch.agent_id,
-            reducer,
-            launch.activity_hub.clone(),
-            transition.to_start,
-        )
-        .await;
-    } else {
-        scheduler.notify.notify_waiters();
-        start_reserved_children_iteratively(scheduler, transition.to_start).await;
-    }
-}
-
-async fn settle_child_terminal(
-    scheduler: ChildScheduler,
-    agent_id: &SubagentId,
-    reducer: &mut SubagentActivityReducer,
-    activity_hub: Option<Arc<SubagentActivityHub>>,
-    to_start: Vec<ReservedChildStart>,
-) {
-    let (link, link_status, terminal_activity, terminal_task, terminal_notification) = scheduler
-        .state
-        .lock()
-        .await
-        .agents
-        .get(agent_id)
-        .map(|agent| {
-            (
-                agent.plan_link.clone(),
-                plan_link_status_for_agent(agent),
-                terminal_activity_for_agent(agent),
-                Some(agent.task.task().to_owned()),
-                agent.status.is_terminal().then(|| agent.status_view()),
-            )
-        })
-        .unwrap_or((None, PlanLinkStatus::Failed, None, None, None));
-    update_plan_link_with_scheduler(&scheduler, link, link_status).await;
-    if let Some((_task_id, phase, summary)) = terminal_activity {
-        publish_terminal_activity(activity_hub.as_deref(), reducer, phase, &summary);
-    }
-    if let Some(status) = terminal_notification {
-        let sink = scheduler.attached_event_sink();
-        super::events::emit_terminal_event_and_persist(
-            sink.as_ref(),
-            terminal_task.unwrap_or_default(),
-            &status,
-        )
-        .await;
-        scheduler.enqueue_completion_notification(status).await;
-    }
-    scheduler.notify.notify_waiters();
-    start_reserved_children_iteratively(scheduler, to_start).await;
-}
-
-fn publish_terminal_activity(
-    hub: Option<&SubagentActivityHub>,
-    reducer: &mut SubagentActivityReducer,
-    phase: SubagentActivityPhase,
-    summary: &str,
-) {
-    if let Some(hub) = hub {
-        hub.publish(reducer.terminal(phase, summary, crate::plan::unix_time_ms()));
-    }
-}
-
-pub(super) fn publish_terminal_activity_snapshot(
-    hub: Option<Arc<SubagentActivityHub>>,
-    agent_id: SubagentId,
-    task_id: SubagentTaskId,
-    phase: SubagentActivityPhase,
-    summary: &str,
-) {
-    let Some(hub) = hub else {
-        return;
-    };
-    let mut reducer = SubagentActivityReducer::new(agent_id, task_id);
-    publish_terminal_activity(Some(&hub), &mut reducer, phase, summary);
-}
-
-pub(super) async fn update_plan_link_with_scheduler(
-    scheduler: &ChildScheduler,
-    link: Option<PlanLinkSnapshot>,
-    status: PlanLinkStatus,
-) {
-    let Some(link) = link else {
-        return;
-    };
-    let runtime = scheduler
-        .plan_link_runtime
-        .lock()
-        .expect("subagent plan link runtime mutex is not poisoned")
-        .clone();
-    let Some(runtime) = runtime else {
-        return;
-    };
-    if let Err(error) = runtime
-        .update_subagent_link(link.binding_id.clone(), status, crate::plan::unix_time_ms())
-        .await
-    {
-        tracing::warn!(
-            binding_id = %link.binding_id,
-            ?status,
-            %error,
-            "failed to persist subagent Plan link state"
-        );
-    }
-}
-
 pub(super) use super::manager_helpers::{
     apply_built_task_overrides, error_info, generation_config_for_child_task_with_parent,
     observed_event_output_bytes, plan_link_status_for_agent, terminal_activity_for_agent,
 };
-
-async fn update_child_after_error(
-    state: &Mutex<SubagentManagerState>,
-    agent_id: &SubagentId,
-    status: SubagentStatusLabel,
-    summary: &str,
-    diagnostics: ErrorInfo,
-    max_threads: usize,
-) -> ChildErrorTransition {
-    let mut state = state.lock().await;
-    let mut claimed = false;
-    if let Some(agent) = state.agents.get_mut(agent_id)
-        && !agent.status.is_terminal()
-    {
-        agent.status = status;
-        agent.summary = summary.to_owned();
-        agent.diagnostics = Some(diagnostics);
-        claimed = true;
-    }
-    ChildErrorTransition {
-        claimed,
-        to_start: reserve_queued_starts_locked(&mut state, max_threads),
-    }
-}

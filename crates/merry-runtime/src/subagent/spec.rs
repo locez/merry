@@ -96,6 +96,12 @@ pub enum SubagentError {
     /// A child timeout_secs value was zero.
     #[error("timeout_secs must be greater than zero")]
     ZeroTimeoutSecs,
+    /// A foreground wait budget value was zero.
+    #[error("foreground_wait_budget_secs must be greater than zero")]
+    ZeroForegroundBudgetSecs,
+    /// A child max_total_tokens value was zero.
+    #[error("max_total_tokens must be greater than zero")]
+    ZeroMaxTotalTokens,
     /// A child role name contained invalid characters.
     #[error("invalid subagent role name: {role}")]
     InvalidRoleName {
@@ -161,7 +167,7 @@ impl SubagentConfig {
         max_total_tokens: Option<u64>,
     ) -> Result<Self, SubagentError> {
         if max_total_tokens == Some(0) {
-            return Err(SubagentError::ZeroTimeoutSecs);
+            return Err(SubagentError::ZeroMaxTotalTokens);
         }
         self.max_total_tokens = max_total_tokens;
         Ok(self)
@@ -186,7 +192,7 @@ impl SubagentConfig {
         budget_secs: u64,
     ) -> Result<Self, SubagentError> {
         if budget_secs == 0 {
-            return Err(SubagentError::ZeroTimeoutSecs);
+            return Err(SubagentError::ZeroForegroundBudgetSecs);
         }
         self.foreground_wait_budget_secs = budget_secs;
         Ok(self)

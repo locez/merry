@@ -1,4 +1,10 @@
 use super::*;
+use crate::subagent::{
+    activity::SubagentActivityReducer,
+    child::{ChildLoopLaunch, finish_child_with_status},
+    manager_helpers::{error_info, generation_config_for_child_task_with_parent},
+};
+use merry_core::ErrorInfo;
 
 #[tokio::test(flavor = "current_thread")]
 async fn manager_wait_returns_compact_statuses() {

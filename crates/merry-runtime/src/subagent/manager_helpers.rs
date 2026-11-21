@@ -133,18 +133,28 @@ pub(super) fn fallback_summary(status: SubagentStatusLabel, task: &SubagentTaskS
 pub(super) fn apply_built_task_overrides(
     mut task: SubagentTaskSpec,
     built: &super::BuiltChildRuntime,
+    fallback_timeout_secs: Option<u64>,
+    fallback_max_total_tokens: Option<u64>,
 ) -> SubagentTaskSpec {
     if let Some(turns) = built.max_model_turns
         && turns > 0
     {
         task = task.with_max_model_turns_unchecked(turns);
     }
-    if let Some(timeout) = built.timeout_secs
+    let effective_timeout = built
+        .timeout_secs
+        .or_else(|| task.timeout_secs())
+        .or(fallback_timeout_secs);
+    if let Some(timeout) = effective_timeout
         && let Ok(updated) = task.clone().with_timeout_secs(Some(timeout))
     {
         task = updated;
     }
-    if let Some(max_tokens) = built.max_total_tokens {
+    let effective_max_tokens = built
+        .max_total_tokens
+        .or_else(|| task.max_total_tokens())
+        .or(fallback_max_total_tokens);
+    if let Some(max_tokens) = effective_max_tokens {
         task = task.with_max_total_tokens(Some(max_tokens));
     }
     if let Some(role) = built.resolved_role.as_deref()

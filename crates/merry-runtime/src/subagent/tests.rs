@@ -1,6 +1,7 @@
 use super::test_support::*;
 use crate::{
-    SpawnSubagentsInput, SubagentWorkspaceMode, SubagentWorktreeBase, SubagentWorktreeView,
+    DEFAULT_MAX_MODEL_TURNS, SpawnSubagentsInput, SubagentWorkspaceMode, SubagentWorktreeBase,
+    SubagentWorktreeView, subagent_tool_specs,
 };
 use serde_json::{Value, json};
 
@@ -377,4 +378,183 @@ fn spawn_input_tolerates_worktree_sentinels_and_notification_renders_worktree_me
         "worktree: path=/cache/merry/worktrees/pid-1/s/agent-9 baseline_oid=deadbeef retained=true"
     ));
     assert!(rendered.contains("worktree_diff_stat:\n src/lib.rs | 2 +-"));
+}
+
+#[test]
+fn zero_subagent_budget_errors_report_exact_variants() {
+    assert_eq!(
+        SubagentConfig::default().with_max_total_tokens(Some(0)),
+        Err(SubagentError::ZeroMaxTotalTokens)
+    );
+    assert_eq!(
+        SubagentConfig::default().with_foreground_wait_budget_secs(0),
+        Err(SubagentError::ZeroForegroundBudgetSecs)
+    );
+    assert_eq!(
+        SubagentConfig::default().with_default_timeout_secs(Some(0)),
+        Err(SubagentError::ZeroTimeoutSecs)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn limit_behavior_fail_preserves_original_task_index_after_earlier_rejection() {
+    struct StaticChildFactory;
+    impl ChildRuntimeFactory for StaticChildFactory {
+        fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
+            let provider = Arc::new(merry_llm::testing::FakeModelProvider::new(vec![Ok(
+                merry_llm::ModelEvent::Completed {
+                    response: merry_llm::ModelResponse::new(
+                        vec![merry_llm::ModelOutput::text("done")],
+                        merry_llm::FinishReason::Stop,
+                        None,
+                    ),
+                },
+            )]));
+            Runtime::builder(input.session_id)
+                .model_provider(
+                    provider,
+                    merry_llm::ModelName::new("test-model").expect("valid model"),
+                )
+                .build()
+        }
+    }
+
+    let config = SubagentConfig::new(1, 1)
+        .expect("valid config")
+        .with_max_model_turns(4)
+        .expect("valid max turns")
+        .with_limit_behavior(crate::SubagentLimitBehavior::Fail);
+    let manager = SubagentManager::new(
+        merry_core::SessionId::new("preserve-task-index").expect("valid session"),
+        config,
+        Arc::new(StaticChildFactory),
+    );
+    // Task 0 fails max_model_turns (> 4), Task 1 starts (fills max_threads = 1),
+    // Task 2 is rejected by limit_behavior = Fail -> must report task_index 2, not 1.
+    let output = manager
+        .spawn(
+            vec![
+                SubagentTaskSpec::new("Too many turns.", 10).expect("valid spec"),
+                SubagentTaskSpec::new("Occupies slot.", 2).expect("valid spec"),
+                SubagentTaskSpec::new("Exceeds max_threads.", 2).expect("valid spec"),
+            ],
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn succeeds");
+    assert_eq!(output.spawned.len(), 1);
+    assert_eq!(output.rejected.len(), 2);
+    assert_eq!(output.rejected[0].task_index, 0);
+    assert_eq!(output.rejected[1].task_index, 2);
+    assert!(output.rejected[1].reason.contains("limit_behavior = fail"));
+    manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mid_run_max_total_tokens_circuit_breaker_stops_child_before_next_turn() {
+    use merry_core::{ToolInputSchema, ToolSpec};
+    use merry_llm::{
+        FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse, ModelToolCall,
+        ModelToolCallId, ToolArguments, testing::FakeModelProvider,
+    };
+
+    let call = ModelToolCall::new(
+        ModelToolCallId::new("tok-call-1").expect("valid id"),
+        ToolName::new("noop_probe").expect("valid tool"),
+        ToolArguments::try_from(json!({})).expect("valid args"),
+    );
+    let provider = Arc::new(FakeModelProvider::new_turns(vec![
+        // Turn 1: calls tool and reports 50 tokens (> limit of 10).
+        vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::tool_call(call)],
+                FinishReason::ToolCalls,
+                Some(merry_core::ModelUsage::new(30, 20)),
+            ),
+        })],
+        // Turn 2: must NEVER be reached because circuit breaker fires after turn 1 usage!
+        vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text("should never run")],
+                FinishReason::Stop,
+                Some(merry_core::ModelUsage::new(10, 10)),
+            ),
+        })],
+    ]));
+
+    struct NoopExecutor;
+    impl crate::ToolExecutor for NoopExecutor {
+        fn execute<'a>(
+            &'a self,
+            _call: merry_core::PendingToolCall,
+            _ctx: crate::ToolExecutionContext,
+        ) -> crate::ToolExecutorFuture<'a> {
+            Box::pin(async { Ok(crate::ToolExecutionOutcome::succeeded_text("ok")) })
+        }
+    }
+
+    struct TokenLimitFactory {
+        provider: Arc<FakeModelProvider>,
+    }
+    impl ChildRuntimeFactory for TokenLimitFactory {
+        fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
+            let schema = schemars::Schema::try_from(json!({ "type": "object" })).expect("schema");
+            let spec = ToolSpec::new(
+                ToolName::new("noop_probe").expect("valid name"),
+                "Noop probe tool",
+                ToolInputSchema::new(schema).expect("valid input schema"),
+            )
+            .expect("valid tool spec");
+            Runtime::builder(input.session_id)
+                .model_provider(
+                    Arc::clone(&self.provider) as Arc<dyn merry_llm::ModelProvider>,
+                    ModelName::new("test-model").expect("valid model"),
+                )
+                .register_tool(crate::RegisteredTool::read_only(
+                    spec,
+                    Arc::new(NoopExecutor),
+                ))
+                .build()
+        }
+    }
+
+    let config = SubagentConfig::new(1, 1)
+        .expect("valid config")
+        .with_max_total_tokens(Some(10))
+        .expect("valid token cap");
+    let manager = SubagentManager::new(
+        merry_core::SessionId::new("token-breaker").expect("valid session"),
+        config,
+        Arc::new(TokenLimitFactory {
+            provider: Arc::clone(&provider),
+        }),
+    );
+    let spawned = manager
+        .spawn(
+            vec![SubagentTaskSpec::new("Loop with tool.", 5).expect("valid task")],
+            None,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn succeeds");
+    let id = spawned.spawned[0].agent_id.clone();
+    let waited = manager
+        .wait(
+            std::slice::from_ref(&id),
+            WaitMode::All,
+            Some(Duration::from_secs(5)),
+        )
+        .await
+        .expect("wait succeeds");
+    assert_eq!(waited.agents[0].status, SubagentStatusLabel::Blocked);
+    assert_eq!(
+        waited.agents[0].diagnostics.as_ref().map(|d| d.code()),
+        Some("subagent_token_budget_exceeded")
+    );
+    assert_eq!(
+        provider.recorded_requests().len(),
+        1,
+        "circuit breaker must stop child immediately before executing turn 2"
+    );
 }

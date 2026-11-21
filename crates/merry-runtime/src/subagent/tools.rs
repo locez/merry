@@ -121,8 +121,6 @@ impl ToolExecutor for SpawnSubagentsExecutor {
                         task,
                         self.manager.min_model_turns(),
                         self.manager.max_model_turns(),
-                        self.manager.default_timeout_secs(),
-                        self.manager.max_total_tokens(),
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()
@@ -407,8 +405,6 @@ fn task_spec_from_input(
     input: SpawnSubagentTaskInput,
     min_model_turns: u32,
     default_max_model_turns: u32,
-    default_timeout_secs: Option<u64>,
-    default_max_total_tokens: Option<u64>,
 ) -> Result<SubagentTaskSpec, InvalidSubagentToolArguments> {
     let SpawnSubagentTaskInput {
         task,
@@ -442,9 +438,8 @@ fn task_spec_from_input(
         .with_display_name(display_name)
         .with_role(role)
         .map_err(InvalidSubagentToolArguments::from)?
-        .with_timeout_secs(timeout_secs.or(default_timeout_secs))
-        .map_err(InvalidSubagentToolArguments::from)?
-        .with_max_total_tokens(default_max_total_tokens);
+        .with_timeout_secs(timeout_secs)
+        .map_err(InvalidSubagentToolArguments::from)?;
     if let Some(allowed_tools) = allowed_tools {
         task = task.with_allowed_tools(allowed_tools);
     }

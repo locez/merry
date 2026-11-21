@@ -17,7 +17,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 use tokio::sync::{Mutex, Notify};
@@ -43,6 +43,8 @@ pub(super) struct ChildScheduler {
     pub(super) completion_notify: Arc<Notify>,
     pub(super) enabled: Arc<AtomicBool>,
     pub(super) max_threads: Arc<AtomicUsize>,
+    pub(super) default_timeout_secs: Arc<AtomicU64>,
+    pub(super) max_total_tokens: Arc<AtomicU64>,
     pub(super) depth: u8,
     pub(super) plan_link_runtime: Arc<StdMutex<Option<Arc<dyn PlanLinkRuntime>>>>,
     pub(super) activity_hub: Arc<StdMutex<Option<Arc<SubagentActivityHub>>>>,
@@ -84,6 +86,20 @@ impl ChildScheduler {
             self.max_threads.load(Ordering::Acquire)
         } else {
             0
+        }
+    }
+
+    pub(super) fn default_timeout_secs(&self) -> Option<u64> {
+        match self.default_timeout_secs.load(Ordering::Acquire) {
+            0 => None,
+            secs => Some(secs),
+        }
+    }
+
+    pub(super) fn max_total_tokens(&self) -> Option<u64> {
+        match self.max_total_tokens.load(Ordering::Acquire) {
+            0 => None,
+            limit => Some(limit),
         }
     }
 

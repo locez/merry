@@ -632,7 +632,7 @@ impl SubagentManager {
                 }
                 (None, _) => None,
             };
-            accepted_tasks.push((agent_id, task_id, task, task_anchor, plan_link));
+            accepted_tasks.push((task_index, agent_id, task_id, task, task_anchor, plan_link));
         }
 
         if accepted_tasks.is_empty() {
@@ -658,9 +658,7 @@ impl SubagentManager {
             },
         );
 
-        for (task_index, (agent_id, task_id, task, task_anchor, plan_link)) in
-            accepted_tasks.into_iter().enumerate()
-        {
+        for (task_index, agent_id, task_id, task, task_anchor, plan_link) in accepted_tasks {
             let child_token = parent_token.child_token();
             let starts_now = running_child_count(&state) < self.effective_max_threads()
                 && batch_running_child_count(&state, batch_id) < batch_max_concurrency;
@@ -907,6 +905,8 @@ impl SubagentManager {
             completion_notify: Arc::clone(&self.completion_notify),
             enabled: Arc::clone(&self.enabled),
             max_threads: Arc::clone(&self.max_threads),
+            default_timeout_secs: Arc::clone(&self.default_timeout_secs),
+            max_total_tokens: Arc::clone(&self.max_total_tokens),
             depth: self.depth,
             plan_link_runtime: Arc::clone(&self.plan_link_runtime),
             activity_hub: Arc::clone(&self.activity_hub),
@@ -964,7 +964,6 @@ impl SubagentManager {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(super) async fn cancellation_token_for_test(
         &self,
         agent_id: &SubagentId,

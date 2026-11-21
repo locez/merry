@@ -7,9 +7,8 @@ use serde_json::json;
 
 use super::spec::{DEFAULT_MIN_MODEL_TURNS, MAX_TASK_BYTES};
 use tolerant::{
-    deserialize_agent_ids_field, deserialize_optional_agent_ids_field,
-    deserialize_optional_enum_tolerant, deserialize_optional_paths_tolerant,
-    deserialize_optional_string_tolerant, merge_agent_ids,
+    deserialize_optional_agent_ids_field, deserialize_optional_enum_tolerant,
+    deserialize_optional_paths_tolerant, deserialize_optional_string_tolerant, merge_agent_ids,
 };
 
 /// Filesystem isolation mode for a child subagent.
@@ -527,13 +526,6 @@ impl<'de> Deserialize<'de> for CancelSubagentsInput {
         let agent_ids = merge_agent_ids(wire.agent_ids, wire.agent_id)?;
         Ok(Self { agent_ids })
     }
-}
-
-#[allow(dead_code)]
-fn _keep_agent_ids_helper_used<'de, D: Deserializer<'de>>(
-    d: D,
-) -> Result<Vec<SubagentId>, D::Error> {
-    deserialize_agent_ids_field(d)
 }
 
 fn optional_scope_paths_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {

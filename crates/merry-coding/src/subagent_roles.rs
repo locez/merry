@@ -69,8 +69,10 @@ pub struct SubagentRoleSpec {
     pub workspace_access: SubagentWorkspaceAccess,
     /// Optional allowlist of tools for this role; `None` inherits parent tools.
     pub default_allowed_tools: Option<Vec<ToolName>>,
-    /// Default model-turn budget when the spawn request omits `max_model_turns`.
+    /// Default model-turn budget when neither task nor `[subagents.default]` overrides it.
     pub default_max_model_turns: u32,
+    /// Explicit role-level `max_model_turns` overlay (takes precedence over `[subagents.default]`).
+    pub max_model_turns_override: Option<u32>,
     /// Default wall-clock timeout in seconds when omitted.
     pub default_timeout_secs: Option<u64>,
     /// Optional cumulative per-child token circuit breaker.
@@ -165,6 +167,7 @@ impl SubagentRoleCatalog {
                 workspace_access: SubagentWorkspaceAccess::ReadOnlyWorkspace,
                 default_allowed_tools: Some(tool_names(&["read_text", "run_process", "web_fetch"])),
                 default_max_model_turns: 30,
+                max_model_turns_override: None,
                 default_timeout_secs: Some(180),
                 max_total_tokens: None,
                 instructions: builtin_subagent_role_instructions("explore").map(str::to_owned),
@@ -181,6 +184,7 @@ impl SubagentRoleCatalog {
                 workspace_access: SubagentWorkspaceAccess::ReadWriteWorkspace,
                 default_allowed_tools: None,
                 default_max_model_turns: 80,
+                max_model_turns_override: None,
                 default_timeout_secs: Some(600),
                 max_total_tokens: None,
                 instructions: builtin_subagent_role_instructions("coder").map(str::to_owned),
@@ -206,6 +210,7 @@ impl SubagentRoleCatalog {
                     "stop_background_process",
                 ])),
                 default_max_model_turns: 40,
+                max_model_turns_override: None,
                 default_timeout_secs: Some(300),
                 max_total_tokens: None,
                 instructions: builtin_subagent_role_instructions("review").map(str::to_owned),
@@ -271,15 +276,20 @@ impl SubagentRoleCatalog {
         } else if let Some(existing) = self.roles.get(name) {
             existing.clone()
         } else {
-            let mut inherited = self
-                .roles
-                .get("coder")
-                .cloned()
-                .expect("built-in coder role is always present");
-            inherited.name = name.to_owned();
-            inherited.description = format!("custom {name} specialist");
-            inherited.instructions = None;
-            inherited
+            SubagentRoleSpec {
+                name: name.to_owned(),
+                description: format!("custom {name} specialist"),
+                enabled: true,
+                workspace_access: SubagentWorkspaceAccess::ReadWriteWorkspace,
+                default_allowed_tools: None,
+                default_max_model_turns: 80,
+                max_model_turns_override: None,
+                default_timeout_secs: Some(600),
+                max_total_tokens: None,
+                instructions: None,
+                model_override: None,
+                reasoning_effort: None,
+            }
         };
 
         if let Some(enabled) = overlay.enabled {
@@ -299,6 +309,7 @@ impl SubagentRoleCatalog {
         }
         if let Some(turns) = overlay.max_model_turns {
             spec.default_max_model_turns = turns;
+            spec.max_model_turns_override = Some(turns);
         }
         if let Some(timeout) = overlay.timeout_secs {
             spec.default_timeout_secs = Some(timeout);
@@ -502,26 +513,14 @@ pub fn resolve_subagent_runtime(
         generation_config = generation_config.with_reasoning_effort(Some(effort.clone()));
     }
 
-    // 5. Effective turn budget, timeout, and token circuit breaker.
-    let default_turns = role
-        .default_max_model_turns
-        .min(input.max_model_turns_cap.max(1));
+    // 5. Effective turn budget, timeout, and token circuit breaker:
+    //    task explicit -> role explicit overlay -> [subagents.default] -> built-in role default.
     let max_model_turns = if input.task.max_model_turns_is_explicit() {
         input.task.max_model_turns()
     } else {
-        catalog
-            .default_override
-            .max_model_turns
-            .map(|global| {
-                // Role explicit default still takes precedence over [subagents.default];
-                // if this role is unmodified coder, use global default when configured.
-                if role.name == "coder" && role.default_max_model_turns == 80 {
-                    global
-                } else {
-                    role.default_max_model_turns
-                }
-            })
-            .unwrap_or(default_turns)
+        role.max_model_turns_override
+            .or(catalog.default_override.max_model_turns)
+            .unwrap_or(role.default_max_model_turns)
             .min(input.max_model_turns_cap.max(1))
     };
     let timeout_secs = input
@@ -664,274 +663,4 @@ fn tool_names(names: &[&str]) -> Vec<ToolName> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use merry_llm::testing::FakeModelProvider;
-
-    fn fake_provider() -> Arc<dyn ModelProvider> {
-        Arc::new(FakeModelProvider::new(Vec::new()))
-    }
-
-    #[test]
-    fn resolves_four_level_model_and_generation_inheritance() {
-        let mut catalog =
-            SubagentRoleCatalog::builtin().with_default_override(SubagentDefaultOverride {
-                model_override: Some(SubagentModelOverride {
-                    provider: fake_provider(),
-                    model: ModelName::new("default-sub-model").expect("valid"),
-                    retry_policy: None,
-                }),
-                reasoning_effort: Some(ReasoningEffort::new("medium").expect("valid")),
-                max_model_turns: None,
-                timeout_secs: Some(500),
-                max_total_tokens: Some(400_000),
-            });
-        catalog
-            .apply_role_overlay(
-                "explore",
-                SubagentRoleOverlay {
-                    model_override: Some(SubagentModelOverride {
-                        provider: fake_provider(),
-                        model: ModelName::new("explore-fast-model").expect("valid"),
-                        retry_policy: None,
-                    }),
-                    reasoning_effort: Some(ReasoningEffort::new("low").expect("valid")),
-                    ..Default::default()
-                },
-            )
-            .expect("explore overlay valid");
-
-        let parent_live = ParentPrimaryModel {
-            provider: fake_provider(),
-            model: ModelName::new("live-switched-parent").expect("valid"),
-            retry_policy: ModelRetryPolicy::disabled(),
-        };
-        let parent_gen = GenerationConfig::default()
-            .with_reasoning_effort(Some(ReasoningEffort::new("high").expect("valid")));
-        let parent_tools = tool_names(&[
-            "read_text",
-            "apply_patch",
-            "run_process",
-            "read_background_process",
-            "stop_background_process",
-            "request_permissions",
-            "web_fetch",
-            "spawn_subagents",
-            "send_subagent_message",
-            "wait_subagents",
-            "cancel_subagents",
-        ]);
-        let scope = ChildWorkspaceScope::workspace_root();
-        let fallback_model = ModelName::new("initial-fallback").expect("valid");
-
-        // Role override wins over default & live parent.
-        let explore_task = SubagentTaskSpec::new("Find callers.", 80)
-            .expect("valid")
-            .with_max_model_turns_explicit(false)
-            .with_role(Some("explore".to_owned()))
-            .expect("valid");
-        let resolved_explore = resolve_subagent_runtime(
-            &catalog,
-            &SubagentResolutionInput {
-                task: &explore_task,
-                parent_allowed_tools: &parent_tools,
-                workspace_scope: &scope,
-                parent_workspace_writable: true,
-                depth: 1,
-                max_depth: 1,
-                max_model_turns_cap: 120,
-                parent_primary_model: Some(&parent_live),
-                fallback_provider: fake_provider(),
-                fallback_model: &fallback_model,
-                parent_generation_config: &parent_gen,
-            },
-        )
-        .expect("explore resolves");
-        assert_eq!(resolved_explore.model.as_str(), "explore-fast-model");
-        assert_eq!(
-            resolved_explore
-                .generation_config
-                .reasoning_effort()
-                .map(ReasoningEffort::as_str),
-            Some("low")
-        );
-        assert!(!resolved_explore.workspace_writable);
-        assert_eq!(resolved_explore.max_model_turns, 30);
-        assert_eq!(resolved_explore.timeout_secs, Some(180));
-        assert_eq!(resolved_explore.max_total_tokens, Some(400_000));
-        assert!(
-            !resolved_explore
-                .allowed_tools
-                .iter()
-                .any(|t| t.as_str() == "apply_patch" || t.as_str() == "wait_subagents")
-        );
-
-        // Task reasoning_effort (Level 1) overrides role & default.
-        let explicit_effort_task = explore_task
-            .clone()
-            .with_reasoning_effort(Some(ReasoningEffort::new("xhigh").expect("valid")));
-        let resolved_override = resolve_subagent_runtime(
-            &catalog,
-            &SubagentResolutionInput {
-                task: &explicit_effort_task,
-                parent_allowed_tools: &parent_tools,
-                workspace_scope: &scope,
-                parent_workspace_writable: true,
-                depth: 1,
-                max_depth: 1,
-                max_model_turns_cap: 120,
-                parent_primary_model: Some(&parent_live),
-                fallback_provider: fake_provider(),
-                fallback_model: &fallback_model,
-                parent_generation_config: &parent_gen,
-            },
-        )
-        .expect("resolves");
-        assert_eq!(
-            resolved_override
-                .generation_config
-                .reasoning_effort()
-                .map(ReasoningEffort::as_str),
-            Some("xhigh")
-        );
-
-        // Without default/role model overrides, live parent model & generation win!
-        let bare_catalog = SubagentRoleCatalog::builtin();
-        let coder_task = SubagentTaskSpec::new("Implement.", 80)
-            .expect("valid")
-            .with_max_model_turns_explicit(false);
-        let resolved_coder = resolve_subagent_runtime(
-            &bare_catalog,
-            &SubagentResolutionInput {
-                task: &coder_task,
-                parent_allowed_tools: &parent_tools,
-                workspace_scope: &scope,
-                parent_workspace_writable: false, // parent RO must narrow coder to RO!
-                depth: 1,
-                max_depth: 1,
-                max_model_turns_cap: 120,
-                parent_primary_model: Some(&parent_live),
-                fallback_provider: fake_provider(),
-                fallback_model: &fallback_model,
-                parent_generation_config: &parent_gen,
-            },
-        )
-        .expect("coder resolves");
-        assert_eq!(resolved_coder.model.as_str(), "live-switched-parent");
-        assert_eq!(
-            resolved_coder
-                .generation_config
-                .reasoning_effort()
-                .map(ReasoningEffort::as_str),
-            Some("high")
-        );
-        assert!(
-            !resolved_coder.workspace_writable,
-            "capability intersection must keep child read-only when parent workspace is read-only"
-        );
-        assert!(
-            !resolved_coder
-                .allowed_tools
-                .iter()
-                .any(|t| t.as_str() == "apply_patch"),
-            "apply_patch must be pruned when workspace is read-only"
-        );
-        assert!(
-            !resolved_coder
-                .allowed_tools
-                .iter()
-                .any(|t| t.as_str() == "wait_subagents"),
-            "subagent control tools must be pruned at max_depth"
-        );
-    }
-
-    #[test]
-    fn prunes_orphaned_background_tools_when_run_process_is_absent_and_respects_toggles() {
-        let mut catalog = SubagentRoleCatalog::builtin();
-        catalog
-            .apply_role_overlay(
-                "browser",
-                SubagentRoleOverlay {
-                    base: Some("review".to_owned()),
-                    description: Some("UI verification".to_owned()),
-                    allowed_tools: Some(tool_names(&[
-                        "browser_tab",
-                        "browser_network",
-                        "read_background_process",
-                        "stop_background_process",
-                        "request_permissions",
-                        "wait_subagents",
-                    ])),
-                    ..Default::default()
-                },
-            )
-            .expect("browser role overlay valid");
-
-        let parent_tools = tool_names(&[
-            "read_text",
-            "browser_tab",
-            "browser_network",
-            "read_background_process",
-            "stop_background_process",
-            "request_permissions",
-            "wait_subagents",
-        ]);
-        let task = SubagentTaskSpec::new("Check UI.", 20)
-            .expect("valid")
-            .with_role(Some("browser".to_owned()))
-            .expect("valid");
-        let resolved = resolve_subagent_runtime(
-            &catalog,
-            &SubagentResolutionInput {
-                task: &task,
-                parent_allowed_tools: &parent_tools,
-                workspace_scope: &ChildWorkspaceScope::workspace_root(),
-                parent_workspace_writable: true,
-                depth: 1,
-                max_depth: 1,
-                max_model_turns_cap: 80,
-                parent_primary_model: None,
-                fallback_provider: fake_provider(),
-                fallback_model: &ModelName::new("fallback").expect("valid"),
-                parent_generation_config: &GenerationConfig::default(),
-            },
-        )
-        .expect("browser role resolves");
-        let names: Vec<&str> = resolved
-            .allowed_tools
-            .iter()
-            .map(ToolName::as_str)
-            .collect();
-        assert_eq!(
-            names,
-            vec!["browser_tab", "browser_network", "request_permissions"]
-        );
-
-        let mut toggles = BTreeMap::new();
-        toggles.insert("review".to_owned(), false);
-        catalog.apply_toggles(&toggles).expect("toggle succeeds");
-        let review_task = SubagentTaskSpec::new("Review.", 20)
-            .expect("valid")
-            .with_role(Some("review".to_owned()))
-            .expect("valid");
-        let err = resolve_subagent_runtime(
-            &catalog,
-            &SubagentResolutionInput {
-                task: &review_task,
-                parent_allowed_tools: &parent_tools,
-                workspace_scope: &ChildWorkspaceScope::workspace_root(),
-                parent_workspace_writable: true,
-                depth: 1,
-                max_depth: 1,
-                max_model_turns_cap: 80,
-                parent_primary_model: None,
-                fallback_provider: fake_provider(),
-                fallback_model: &ModelName::new("fallback").expect("valid"),
-                parent_generation_config: &GenerationConfig::default(),
-            },
-        )
-        .err()
-        .expect("disabled role must fail");
-        assert!(matches!(err, SubagentRoleError::DisabledRole { .. }));
-    }
-}
+mod tests;
