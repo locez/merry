@@ -751,8 +751,24 @@ impl Runtime {
         model: ModelName,
         retry_policy: ModelRetryPolicy,
     ) {
+        if let Some(manager) = self.inner.subagent_manager.as_ref() {
+            manager.update_parent_primary_model(crate::ParentPrimaryModel {
+                provider: Arc::clone(&provider),
+                model: model.clone(),
+                retry_policy,
+            });
+        }
         *self.inner.primary_model_override.write().await =
             Some(ModelProviderConfig::new(provider, model, retry_policy));
+    }
+
+    pub(crate) fn update_interactive_generation_config(
+        &self,
+        generation_config: merry_llm::GenerationConfig,
+    ) {
+        if let Some(manager) = self.inner.subagent_manager.as_ref() {
+            manager.update_parent_generation_config(generation_config);
+        }
     }
 
     pub(crate) async fn update_interactive_subagents(

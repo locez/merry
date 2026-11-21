@@ -101,7 +101,6 @@ async fn runtime_process_stays_running_and_animates_until_the_backend_completes(
             retry_policy: None,
             context_compaction: None,
             approval_review: None,
-            browser: None,
             skill_roots: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
             workspace_tool_limits: None,

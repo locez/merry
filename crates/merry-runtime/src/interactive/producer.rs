@@ -75,6 +75,7 @@ impl InteractiveProducer {
             config,
             loop_permit,
         } = input;
+        runtime.update_interactive_generation_config(generation_config.clone());
         Self {
             runtime,
             queue: InteractiveInputQueue::default(),

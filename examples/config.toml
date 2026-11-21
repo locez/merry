@@ -154,14 +154,58 @@ retained_model_turns = 5
 # one_shot_retained_tool_exchanges = 5
 # one_shot_window_percent was removed: actual request fit replaces ratio thresholds.
 
-[runtime.subagents]
-# Disabled by default. Enable this to expose spawn_subagents, wait_subagents,
-# and cancel_subagents to coding-loop runtimes.
-enabled = false
+[subagents]
+# Enabled by default when omitted (or when `enabled` is omitted); set `enabled = false` to disable.
+enabled = true
 max_threads = 6
 max_depth = 1
-# Default model-turn budget for a child task when spawn_subagents omits it.
-max_model_turns = 2048
+# Foreground wait budget in seconds before `wait = "all" | "any"` hands active children off to background.
+foreground_budget_secs = 120
+# Admission behavior when `max_threads` is full: "queue" (default) or "fail".
+limit_behavior = "queue"
+
+# Optional per-role quick toggles (unlisted roles default to enabled).
+# [subagents.toggle]
+# review = true
+
+# Global subagent defaults (omitted provider/model/reasoning_effort inherit the live primary model).
+[subagents.default]
+# provider = "openai-compatible"
+# model = "gpt-4.1"
+# reasoning_effort = "medium"
+max_model_turns = 80
+timeout_secs = 600
+# max_total_tokens = 500000
+
+# Built-in role overrides (each role can independently override provider, model, reasoning_effort, and budgets).
+[subagents.roles.explore]
+# provider = "openai-compatible"
+# model = "gpt-4.1-mini"
+# reasoning_effort = "low"
+max_model_turns = 30
+timeout_secs = 180
+
+[subagents.roles.coder]
+# model = "claude-sonnet-4-5"
+# reasoning_effort = "high"
+max_model_turns = 80
+timeout_secs = 600
+
+[subagents.roles.review]
+# model = "o3"
+# reasoning_effort = "high"
+max_model_turns = 40
+timeout_secs = 300
+
+# Custom roles can also be defined here or in `.merry/roles/<name>.toml`.
+# [subagents.roles.browser]
+# base = "review"
+# description = "UI & browser verification specialist"
+# provider = "openai-compatible"
+# model = "gpt-4.1-mini"
+# allowed_tools = ["browser_tab", "browser_network", "web_fetch", "read_text"]
+# prompt_file = ".merry/prompts/browser.md"
+# instructions = "Focus on live UI verification, console errors, and network failures."
 
 # User-configured MCP servers are trusted external tools. HTTP MCP endpoints
 # are allowed to use the network because registering them in global config is
@@ -336,14 +380,6 @@ model = "gpt-4.1-mini"
 # provider's reasoning_effort. Point this role at a provider that accepts a
 # reasoning effort, and prefer a small fast model over a deep-reasoning one.
 model = "gpt-4.1-mini"
-
-# [models.browser]
-# Optional model override for browser verification subagents (`spawn_subagents`
-# tasks whose `allowed_tools` use `browser_tab` / `browser_network` without
-# `run_process` or `apply_patch`). Omit this table to run browser subagents on
-# [providers.default] and preserve full KV-cache prefix sharing across tools.
-# provider = "openai-compatible"
-# model = "gpt-4.1-mini"
 
 [providers.openai-compatible]
 display_name = "OpenAI"

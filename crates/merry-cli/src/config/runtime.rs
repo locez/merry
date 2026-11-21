@@ -2,7 +2,6 @@ use super::{
     ConfigError, MerryConfig, RuntimeModelToml, default_true, provider::parse_reasoning_effort,
     validate_model_text,
 };
-use merry::profiles::{DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS, MIN_CODING_SUBAGENT_MODEL_TURNS};
 use merry_runtime::{CitationCompactionPolicy, CompactionConfig};
 use serde::Deserialize;
 
@@ -37,19 +36,6 @@ impl MerryConfig {
         Ok(Some(limit))
     }
 
-    pub fn subagents_config(&self) -> Result<SubagentsConfig, ConfigError> {
-        let Some(subagents) = self
-            .raw
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.subagents.as_ref())
-        else {
-            return Ok(SubagentsConfig::default());
-        };
-
-        subagents.to_config()
-    }
-
     pub fn runtime_models(&self) -> Result<EffectiveRuntimeModelsConfig, ConfigError> {
         let Some(models) = self.raw.models.as_ref() else {
             return Ok(EffectiveRuntimeModelsConfig::default());
@@ -65,16 +51,10 @@ impl MerryConfig {
             .as_ref()
             .map(|model| self.effective_runtime_model("approval_review", model))
             .transpose()?;
-        let browser = models
-            .browser
-            .as_ref()
-            .map(|model| self.effective_runtime_model("browser", model))
-            .transpose()?;
 
         Ok(EffectiveRuntimeModelsConfig {
             context_compaction,
             approval_review,
-            browser,
         })
     }
 
@@ -129,7 +109,6 @@ pub struct EffectiveRuntimeModelConfig {
 pub struct EffectiveRuntimeModelsConfig {
     pub context_compaction: Option<EffectiveRuntimeModelConfig>,
     pub approval_review: Option<EffectiveRuntimeModelConfig>,
-    pub browser: Option<EffectiveRuntimeModelConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -137,7 +116,6 @@ pub struct EffectiveRuntimeModelsConfig {
 pub(super) struct RuntimeToml {
     max_parallel_tool_calls: Option<usize>,
     auto_compaction: Option<AutoCompactionToml>,
-    subagents: Option<SubagentsToml>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -219,97 +197,6 @@ fn removed_auto_compaction_field(field: &str) -> ConfigError {
     ConfigError::Invalid(format!(
         "runtime.auto_compaction.{field} was removed; supported fields are enabled, retained_model_turns, target_output_tokens, max_accepted_output_bytes, and one_shot_retained_tool_exchanges"
     ))
-}
-
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct SubagentsToml {
-    #[serde(default)]
-    enabled: bool,
-    max_threads: Option<usize>,
-    max_depth: Option<u8>,
-    max_model_turns: Option<u32>,
-}
-
-impl SubagentsToml {
-    fn to_config(&self) -> Result<SubagentsConfig, ConfigError> {
-        let defaults = SubagentsConfig::default().limits;
-        let limits = merry_runtime::SubagentConfig::new(
-            self.max_threads.unwrap_or(defaults.max_threads()),
-            self.max_depth.unwrap_or(defaults.max_depth()),
-        )
-        .map_err(|error| ConfigError::Invalid(error.to_string()))?
-        .with_model_turn_bounds(
-            MIN_CODING_SUBAGENT_MODEL_TURNS,
-            self.max_model_turns.unwrap_or(defaults.max_model_turns()),
-        )
-        .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-        Ok(SubagentsConfig {
-            enabled: self.enabled,
-            limits,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SubagentsConfig {
-    enabled: bool,
-    limits: merry_runtime::SubagentConfig,
-}
-
-impl Default for SubagentsConfig {
-    fn default() -> Self {
-        let limits = merry_runtime::SubagentConfig::default()
-            .with_model_turn_bounds(
-                MIN_CODING_SUBAGENT_MODEL_TURNS,
-                DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS,
-            )
-            .expect("coding subagent default model-turn bounds are valid");
-        Self {
-            enabled: false,
-            limits,
-        }
-    }
-}
-
-impl SubagentsConfig {
-    #[must_use]
-    pub fn is_enabled(self) -> bool {
-        self.enabled
-    }
-
-    #[must_use]
-    pub fn limits(self) -> merry_runtime::SubagentConfig {
-        self.limits
-    }
-
-    pub fn with_overrides(
-        self,
-        enabled: Option<bool>,
-        max_threads: Option<usize>,
-    ) -> Result<Self, ConfigError> {
-        let limits = merry_runtime::SubagentConfig::new(
-            max_threads.unwrap_or_else(|| self.limits.max_threads()),
-            self.limits.max_depth(),
-        )
-        .map_err(|error| ConfigError::Invalid(error.to_string()))?
-        .with_model_turn_bounds(self.limits.min_model_turns(), self.limits.max_model_turns())
-        .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-        Ok(Self {
-            enabled: enabled.unwrap_or(self.enabled),
-            limits,
-        })
-    }
-}
-
-impl From<SubagentsConfig> for crate::coding::CodingSubagentsConfig {
-    fn from(config: SubagentsConfig) -> Self {
-        if config.is_enabled() {
-            crate::coding::CodingSubagentsConfig::enabled(config.limits())
-        } else {
-            crate::coding::CodingSubagentsConfig::default()
-        }
-    }
 }
 
 #[cfg(test)]
@@ -482,76 +369,6 @@ retained_raw_tail_items = 10
     }
 
     #[test]
-    fn runtime_subagents_config_defaults_disabled_and_parses_limits() {
-        let paths = XdgPaths::from_parts(home(), None, None);
-        let missing = MerryConfig::load_optional_from_text(Some(""), &paths)
-            .expect("empty config should parse")
-            .expect("config should be present")
-            .subagents_config()
-            .expect("default subagents config should validate");
-        assert!(!missing.is_enabled());
-        assert_eq!(
-            missing.limits().min_model_turns(),
-            MIN_CODING_SUBAGENT_MODEL_TURNS
-        );
-        assert_eq!(
-            missing.limits().max_model_turns(),
-            DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS
-        );
-
-        let enabled = MerryConfig::load_optional_from_text(
-            Some(
-                r#"
-[runtime.subagents]
-enabled = true
-max_threads = 3
-max_depth = 1
-max_model_turns = 4096
-"#,
-            ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should be present")
-        .subagents_config()
-        .expect("subagents config should validate");
-        assert!(enabled.is_enabled());
-        assert_eq!(
-            enabled.limits(),
-            merry_runtime::SubagentConfig::new(3, 1)
-                .expect("valid subagent config")
-                .with_model_turn_bounds(MIN_CODING_SUBAGENT_MODEL_TURNS, 4096)
-                .expect("valid child model-turn limit")
-        );
-
-        let invalid = MerryConfig::load_optional_from_text(
-            Some("[runtime.subagents]\nenabled = true\nmax_threads = 0\n"),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should be present")
-        .subagents_config()
-        .expect_err("zero max_threads should be invalid");
-        assert!(invalid.to_string().contains("max_threads"));
-    }
-
-    #[test]
-    fn runtime_subagents_preferences_override_enabled_and_threads_only() {
-        let base = SubagentsConfig {
-            enabled: false,
-            limits: merry_runtime::SubagentConfig::new(3, 2).unwrap(),
-        };
-
-        let overridden = base
-            .with_overrides(Some(true), Some(6))
-            .expect("preference overrides should validate");
-
-        assert!(overridden.is_enabled());
-        assert_eq!(overridden.limits().max_threads(), 6);
-        assert_eq!(overridden.limits().max_depth(), 2);
-    }
-
-    #[test]
     fn context_compaction_model_role_defaults_to_default_provider() {
         let paths = XdgPaths::from_parts(home(), None, None);
         let config = MerryConfig::load_optional_from_text(
@@ -626,39 +443,6 @@ model = "gpt-review"
 
         assert!(models.context_compaction.is_none());
         assert!(models.approval_review.is_none());
-        assert!(models.browser.is_none());
-    }
-
-    #[test]
-    fn browser_model_role_defaults_to_default_provider() {
-        let paths = XdgPaths::from_parts(home(), None, None);
-        let config = MerryConfig::load_optional_from_text(
-            Some(
-                r#"
-[providers.default]
-provider = "openai-compatible"
-model = "gpt-primary"
-
-[providers.openai-compatible]
-api_key = "sk-inline-secret"
-
-[models.browser]
-model = "gpt-browser-vision"
-"#,
-            ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should be present");
-
-        let models = config
-            .runtime_models()
-            .expect("runtime model role config should validate");
-        let browser = models
-            .browser
-            .expect("browser model role should be configured");
-        assert_eq!(browser.provider, "openai-compatible");
-        assert_eq!(browser.model, "gpt-browser-vision");
     }
 
     #[test]

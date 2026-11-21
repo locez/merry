@@ -17,6 +17,7 @@ pub use paths::XdgPaths;
 use paths::{resolve_config_relative_path, resolve_path_access_rule_path, resolve_user_path};
 mod provider;
 mod runtime;
+mod subagents;
 
 pub(crate) use cli::CliDefaults;
 use cli::CliToml;
@@ -31,7 +32,8 @@ pub(crate) use provider::{
 };
 pub use provider::{EffectiveOpenAiProviderConfig, EffectiveProviderConfig};
 use runtime::RuntimeToml;
-pub use runtime::SubagentsConfig;
+use subagents::SubagentsToml;
+pub use subagents::{EffectiveSubagentRoleConfig, SubagentsConfig, load_project_subagent_roles};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -423,6 +425,7 @@ struct MerryConfigToml {
     cli: Option<CliToml>,
     permissions: Option<PermissionsToml>,
     runtime: Option<RuntimeToml>,
+    subagents: Option<SubagentsToml>,
     skills: Option<SkillsToml>,
     models: Option<ModelsToml>,
     observability: Option<ObservabilityToml>,
@@ -520,7 +523,6 @@ struct SkillsToml {
 struct ModelsToml {
     context_compaction: Option<RuntimeModelToml>,
     approval_review: Option<RuntimeModelToml>,
-    browser: Option<RuntimeModelToml>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]

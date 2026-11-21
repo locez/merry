@@ -101,6 +101,8 @@ impl InteractiveProducer {
                 };
                 if result.is_ok() {
                     if let Some(generation_config) = update.generation_config {
+                        self.runtime
+                            .update_interactive_generation_config(generation_config.clone());
                         self.generation_config = generation_config;
                     }
                     if let Some(primary_model) = update.primary_model {

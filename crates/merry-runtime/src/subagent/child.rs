@@ -77,7 +77,10 @@ impl SubagentManager {
         plan_link: Option<PlanLinkSnapshot>,
     ) {
         let child_session_id = child_session_id();
-        let generation_config = generation_config_for_child_task(&task);
+        let parent_primary_model = self.live_parent_model_snapshot();
+        let parent_generation_config = self.live_parent_generation_snapshot();
+        let default_generation_config =
+            generation_config_for_child_task_with_parent(&task, &parent_generation_config);
         let plan_link_runtime = self.attached_plan_link_runtime();
         let activity_hub = self.attached_activity_hub();
         let plan_subagent_scope = match lookup_plan_subagent_scope(
@@ -106,7 +109,7 @@ impl SubagentManager {
             self.mark_cancelled_and_schedule(&agent_id).await;
             return;
         };
-        let runtime = match self.factory.build_child(ChildRuntimeInput {
+        let built = match self.factory.build_child_with_overrides(ChildRuntimeInput {
             parent_session_id: self.parent_session_id.clone(),
             session_id: child_session_id,
             task_anchor,
@@ -114,14 +117,16 @@ impl SubagentManager {
             allowed_tools: task.allowed_tools().to_vec(),
             workspace_scope: ChildWorkspaceScope::from_task(&task),
             depth: self.depth.saturating_add(1),
-            generation_config: generation_config.clone(),
+            generation_config: default_generation_config.clone(),
+            parent_primary_model,
+            parent_generation_config,
             plan_subagent_control: None,
             plan_subagent_scope,
             plan_link: plan_link.clone(),
             plan_link_runtime,
             activity_hub: activity_hub.clone(),
         }) {
-            Ok(runtime) => runtime,
+            Ok(built) => built,
             Err(error) => {
                 self.mark_failed_and_schedule(
                     &agent_id,
@@ -136,11 +141,15 @@ impl SubagentManager {
             self.mark_cancelled_and_schedule(&agent_id).await;
             return;
         }
+        let task = apply_built_task_overrides(task, &built);
+        let runtime = built.runtime;
+        let generation_config = built.generation_config.unwrap_or(default_generation_config);
         let event_tx = {
             let mut state = self.state.lock().await;
             let Some(agent) = state.agents.get_mut(&agent_id) else {
                 return;
             };
+            agent.task = task.clone();
             agent.runtime = Some(runtime.clone());
             agent.generation_config = Some(generation_config.clone());
             agent.event_tx.clone()
@@ -304,10 +313,13 @@ pub(super) async fn spawn_reserved_child(
         return Ok(ReservedChildStartOutcome::Cancelled);
     }
     let child_session_id = child_session_id();
-    let generation_config = generation_config_for_child_task(&start.task);
-    let runtime = scheduler
+    let parent_primary_model = scheduler.live_parent_model_snapshot();
+    let parent_generation_config = scheduler.live_parent_generation_snapshot();
+    let default_generation_config =
+        generation_config_for_child_task_with_parent(&start.task, &parent_generation_config);
+    let built = scheduler
         .factory
-        .build_child(ChildRuntimeInput {
+        .build_child_with_overrides(ChildRuntimeInput {
             parent_session_id: scheduler.parent_session_id.clone(),
             session_id: child_session_id,
             task_anchor: start.task_anchor.clone(),
@@ -315,7 +327,9 @@ pub(super) async fn spawn_reserved_child(
             allowed_tools: start.task.allowed_tools().to_vec(),
             workspace_scope: ChildWorkspaceScope::from_task(&start.task),
             depth: scheduler.depth.saturating_add(1),
-            generation_config: generation_config.clone(),
+            generation_config: default_generation_config.clone(),
+            parent_primary_model,
+            parent_generation_config,
             plan_subagent_control: None,
             plan_subagent_scope,
             plan_link: start.plan_link.clone(),
@@ -327,11 +341,15 @@ pub(super) async fn spawn_reserved_child(
         return Ok(ReservedChildStartOutcome::Cancelled);
     }
 
+    let task = apply_built_task_overrides(start.task.clone(), &built);
+    let runtime = built.runtime;
+    let generation_config = built.generation_config.unwrap_or(default_generation_config);
     let event_tx = {
         let mut state = scheduler.state.lock().await;
         let Some(agent) = state.agents.get_mut(&start.agent_id) else {
             return Ok(ReservedChildStartOutcome::Cancelled);
         };
+        agent.task = task.clone();
         agent.runtime = Some(runtime.clone());
         agent.generation_config = Some(generation_config.clone());
         if agent.started_at.is_none() {
@@ -348,8 +366,8 @@ pub(super) async fn spawn_reserved_child(
         ChildLoopLaunch {
             agent_id: start.agent_id.clone(),
             task_id: start.task_id.clone(),
-            prompt: start.task.task().to_owned(),
-            task: start.task.clone(),
+            prompt: task.task().to_owned(),
+            task,
             token: start.cancellation_token.clone(),
             runtime,
             generation_config,
@@ -601,7 +619,30 @@ fn spawn_child_loop(
                 agent.diagnostics = Some(error_info("subagent_stream_error", error));
             } else {
                 match loop_result {
-                    Some(result) => apply_loop_result(agent, &result, child_projection),
+                    Some(result) => {
+                        apply_loop_result(agent, &result, child_projection);
+                        if let (Some(limit), Some(usage)) =
+                            (launch.task.max_total_tokens(), agent.usage)
+                            && usage.input_tokens.saturating_add(usage.output_tokens) > limit
+                            && agent.status == SubagentStatusLabel::Completed
+                        {
+                            // Record note only if exceeded mid-run; if already completed, keep completion.
+                        } else if let (Some(limit), Some(usage)) =
+                            (launch.task.max_total_tokens(), agent.usage)
+                            && usage.input_tokens.saturating_add(usage.output_tokens) > limit
+                        {
+                            agent.status = SubagentStatusLabel::Blocked;
+                            agent.summary = format!(
+                                "child exceeded max_total_tokens budget ({limit}); inspect partial progress before continuing"
+                            );
+                            agent.diagnostics = Some(error_info(
+                                "subagent_token_budget_exceeded",
+                                format!(
+                                    "child exceeded configured max_total_tokens budget ({limit})"
+                                ),
+                            ));
+                        }
+                    }
                     None if loop_token.is_cancelled() => {
                         agent.status = SubagentStatusLabel::Cancelled;
                         agent.summary = "child cancelled before stream result".to_owned();
@@ -850,8 +891,41 @@ pub(super) async fn update_plan_link_with_scheduler(
     }
 }
 
-pub(super) fn generation_config_for_child_task(task: &SubagentTaskSpec) -> GenerationConfig {
-    GenerationConfig::default().with_reasoning_effort(task.reasoning_effort().cloned())
+pub(super) fn generation_config_for_child_task_with_parent(
+    task: &SubagentTaskSpec,
+    parent_generation: &GenerationConfig,
+) -> GenerationConfig {
+    match task.reasoning_effort() {
+        Some(effort) => parent_generation
+            .clone()
+            .with_reasoning_effort(Some(effort.clone())),
+        None => parent_generation.clone(),
+    }
+}
+
+fn apply_built_task_overrides(
+    mut task: SubagentTaskSpec,
+    built: &super::BuiltChildRuntime,
+) -> SubagentTaskSpec {
+    if let Some(turns) = built.max_model_turns
+        && turns > 0
+    {
+        task = task.with_max_model_turns_unchecked(turns);
+    }
+    if let Some(timeout) = built.timeout_secs
+        && let Ok(updated) = task.clone().with_timeout_secs(Some(timeout))
+    {
+        task = updated;
+    }
+    if let Some(max_tokens) = built.max_total_tokens {
+        task = task.with_max_total_tokens(Some(max_tokens));
+    }
+    if let Some(role) = built.resolved_role.as_deref()
+        && let Ok(updated) = task.clone().with_role(Some(role.to_owned()))
+    {
+        task = updated;
+    }
+    task
 }
 
 fn child_session_id() -> merry_core::SessionId {

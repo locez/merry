@@ -1,9 +1,21 @@
 use super::{PlanLinkRuntime, PlanSubagentScope, SubagentActivityHub, SubagentTaskSpec};
 use crate::{PlanSubagentControl, Runtime, RuntimeError, TaskAnchor};
 use merry_core::{PlanLinkSnapshot, ToolName};
-use merry_llm::GenerationConfig;
+use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
 use std::{path::PathBuf, sync::Arc};
 
+/// Snapshot of the parent runtime's currently active primary provider/model.
+#[derive(Clone)]
+pub struct ParentPrimaryModel {
+    /// Active primary provider handle (reflects live TUI switches).
+    pub provider: Arc<dyn ModelProvider>,
+    /// Active primary model identifier.
+    pub model: ModelName,
+    /// Active provider retry policy.
+    pub retry_policy: ModelRetryPolicy,
+}
+
+/// Runtime-owned input passed to [`ChildRuntimeFactory`] when starting one child.
 #[derive(Clone)]
 pub struct ChildRuntimeInput {
     /// Session id owned by the parent runtime (used for shared prompt-cache keys).
@@ -20,8 +32,13 @@ pub struct ChildRuntimeInput {
     pub workspace_scope: ChildWorkspaceScope,
     /// Delegation depth assigned to this child.
     pub depth: u8,
-    /// Child-scoped model generation controls selected by the parent agent.
+    /// Child-scoped model generation controls derived from the live parent
+    /// generation config and any explicit task override.
     pub generation_config: GenerationConfig,
+    /// Live snapshot of the parent runtime's primary provider/model at spawn time.
+    pub parent_primary_model: Option<ParentPrimaryModel>,
+    /// Live snapshot of the parent runtime's active generation config at spawn time.
+    pub parent_generation_config: GenerationConfig,
     /// Optional compatibility control for an explicitly Plan-bound child.
     pub plan_subagent_control: Option<PlanSubagentControl>,
     /// Optional opaque capability for the subtree below the active Plan link.
@@ -32,6 +49,37 @@ pub struct ChildRuntimeInput {
     pub plan_link_runtime: Option<Arc<dyn PlanLinkRuntime>>,
     /// Optional shared runtime-owned activity hub for this child and descendants.
     pub activity_hub: Option<Arc<SubagentActivityHub>>,
+}
+
+/// Constructed child runtime plus optional resolved per-role execution overrides.
+pub struct BuiltChildRuntime {
+    /// Built child runtime handle.
+    pub runtime: Runtime,
+    /// Optional resolved generation config (e.g. 4-level role/default/parent inheritance).
+    pub generation_config: Option<GenerationConfig>,
+    /// Optional resolved effective model-turn budget (e.g. role default when task omitted it).
+    pub max_model_turns: Option<u32>,
+    /// Optional resolved effective wall-clock timeout in seconds.
+    pub timeout_secs: Option<u64>,
+    /// Optional resolved cumulative token circuit breaker.
+    pub max_total_tokens: Option<u64>,
+    /// Optional resolved effective role label reported in status views.
+    pub resolved_role: Option<String>,
+}
+
+impl BuiltChildRuntime {
+    /// Wraps a plain built child runtime with no execution overrides.
+    #[must_use]
+    pub fn new(runtime: Runtime) -> Self {
+        Self {
+            runtime,
+            generation_config: None,
+            max_model_turns: None,
+            timeout_secs: None,
+            max_total_tokens: None,
+            resolved_role: None,
+        }
+    }
 }
 
 /// Parent-authored workspace scope carried into child runtime construction.
@@ -123,4 +171,13 @@ pub(super) struct ParentCapabilities {
 pub trait ChildRuntimeFactory: Send + Sync {
     /// Builds a child runtime from runtime-owned delegation input.
     fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError>;
+
+    /// Builds a child runtime along with optional resolved per-role execution
+    /// overrides (generation config, turns, timeout, token cap, effective role).
+    fn build_child_with_overrides(
+        &self,
+        input: ChildRuntimeInput,
+    ) -> Result<BuiltChildRuntime, RuntimeError> {
+        self.build_child(input).map(BuiltChildRuntime::new)
+    }
 }

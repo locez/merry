@@ -1,13 +1,18 @@
 use crate::cli_error::{CliError, debug_openai_usage_error};
-use crate::coding::RuntimeRoleProviderConfig;
+use crate::coding::{CodingSubagentsConfig, RuntimeRoleProviderConfig};
 use crate::config::{
-    ConfiguredProviderProfile, EffectiveOpenAiProviderConfig, EffectiveProviderConfig, MerryConfig,
+    ConfiguredProviderProfile, EffectiveOpenAiProviderConfig, EffectiveProviderConfig,
+    EffectiveSubagentRoleConfig, MerryConfig, SubagentsConfig, load_project_subagent_roles,
+};
+use merry::profiles::{
+    SubagentDefaultOverride, SubagentModelOverride, SubagentRoleCatalog, SubagentRoleOverlay,
+    load_workspace_prompt_file,
 };
 use merry_llm::{ModelCatalogProvider, ModelName, ModelProvider, ModelRetryPolicy};
 use merry_provider_anthropic::{AnthropicProvider, AnthropicProviderConfig};
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
 use merry_runtime::{RuntimeBuilder, RuntimeModelRole};
-use std::{env, num::NonZeroU64, sync::Arc};
+use std::{collections::BTreeMap, env, num::NonZeroU64, path::Path, sync::Arc};
 
 pub(crate) const MERRY_OPENAI_DEBUG_ENV: &str = "MERRY_OPENAI_DEBUG";
 
@@ -83,20 +88,6 @@ fn runtime_provider_bundle_from_config_inner(
             )
         })
         .transpose()?;
-    let browser = runtime_models
-        .browser
-        .map(|model| {
-            let provider = merry_config
-                .provider_by_alias(&model.provider)
-                .map_err(|error| map_usage_error(error.to_string()))?;
-            runtime_role_provider(
-                RuntimeModelRole::Browser,
-                provider,
-                model.model,
-                map_usage_error,
-            )
-        })
-        .transpose()?;
     let retry_policy = merry_config
         .provider_retry_policy()
         .map_err(|error| map_usage_error(error.to_string()))?;
@@ -104,7 +95,6 @@ fn runtime_provider_bundle_from_config_inner(
         primary,
         context_compaction,
         approval_review,
-        browser,
         retry_policy,
     })
 }
@@ -316,18 +306,11 @@ pub(crate) fn openai_provider_config_bundle(
             openai_provider_config(&provider_config, &api_key, model.model, map_usage_error)
         })
         .transpose()?;
-    let browser = runtime_models
-        .browser
-        .map(|model| {
-            openai_provider_config(&provider_config, &api_key, model.model, map_usage_error)
-        })
-        .transpose()?;
 
     Ok(OpenAiProviderConfigBundle {
         primary,
         context_compaction,
         approval_review,
-        browser,
         retry_policy,
     })
 }
@@ -415,14 +398,204 @@ pub(crate) fn openai_provider_bundle(
                 )
             })
             .transpose()?,
-        browser: config
-            .browser
-            .map(|config| {
-                openai_role_provider_config(RuntimeModelRole::Browser, config, map_usage_error)
-            })
-            .transpose()?,
         retry_policy: config.retry_policy,
     })
+}
+
+/// Builds a [`CodingSubagentsConfig`] by combining built-in roles, project
+/// `.merry/roles/*.toml` files, user `[subagents.default]` / `[subagents.roles.*]`
+/// config overrides, and `[subagents.toggle]` flags.
+pub(crate) fn build_coding_subagents_config(
+    merry_config: Option<&MerryConfig>,
+    subagents: &SubagentsConfig,
+    workspace_root: &Path,
+    runtime_controlled: bool,
+    map_usage_error: fn(String) -> CliError,
+) -> Result<CodingSubagentsConfig, CliError> {
+    let mut provider_cache: BTreeMap<String, Arc<dyn ModelProvider>> = BTreeMap::new();
+    let retry_policy = merry_config
+        .map(MerryConfig::provider_retry_policy)
+        .transpose()
+        .map_err(|error| map_usage_error(error.to_string()))?
+        .flatten();
+
+    let default_cfg = subagents.default_config();
+    let default_model_override = resolve_subagent_model_override(
+        merry_config,
+        default_cfg.provider.as_deref(),
+        default_cfg.model.as_deref(),
+        retry_policy,
+        &mut provider_cache,
+        map_usage_error,
+    )?;
+    let default_override = SubagentDefaultOverride {
+        model_override: default_model_override,
+        reasoning_effort: default_cfg.reasoning_effort.clone(),
+        max_model_turns: default_cfg.max_model_turns,
+        timeout_secs: default_cfg.timeout_secs,
+        max_total_tokens: default_cfg.max_total_tokens,
+    };
+
+    let mut catalog = SubagentRoleCatalog::builtin().with_default_override(default_override);
+    let mut limits = subagents.limits();
+    let mut highest_turns = limits.max_model_turns();
+
+    // Layer 1: project-local `.merry/roles/*.toml`
+    let project_roles = load_project_subagent_roles(workspace_root, merry_config)
+        .map_err(|error| map_usage_error(error.to_string()))?;
+    for (name, role_cfg) in project_roles {
+        if let Some(turns) = role_cfg.max_model_turns {
+            highest_turns = highest_turns.max(turns);
+        }
+        let overlay = build_role_overlay(
+            &name,
+            &role_cfg,
+            merry_config,
+            workspace_root,
+            retry_policy,
+            &mut provider_cache,
+            map_usage_error,
+        )?;
+        catalog
+            .apply_role_overlay(&name, overlay)
+            .map_err(|error| map_usage_error(error.to_string()))?;
+    }
+
+    // Layer 2: user `[subagents.roles.<name>]` in config.toml (takes precedence)
+    for (name, role_cfg) in subagents.roles() {
+        if let Some(turns) = role_cfg.max_model_turns {
+            highest_turns = highest_turns.max(turns);
+        }
+        let overlay = build_role_overlay(
+            name,
+            role_cfg,
+            merry_config,
+            workspace_root,
+            retry_policy,
+            &mut provider_cache,
+            map_usage_error,
+        )?;
+        catalog
+            .apply_role_overlay(name, overlay)
+            .map_err(|error| map_usage_error(error.to_string()))?;
+    }
+
+    // Layer 3: `[subagents.toggle]`
+    catalog
+        .apply_toggles(subagents.toggle())
+        .map_err(|error| map_usage_error(error.to_string()))?;
+
+    if highest_turns > limits.max_model_turns() {
+        limits = limits
+            .with_model_turn_bounds(limits.min_model_turns(), highest_turns)
+            .map_err(|error| map_usage_error(error.to_string()))?;
+    }
+
+    let coding_subagents = if runtime_controlled {
+        CodingSubagentsConfig::runtime_controlled(subagents.is_enabled(), limits)
+    } else if subagents.is_enabled() {
+        CodingSubagentsConfig::enabled(limits)
+    } else {
+        CodingSubagentsConfig::default()
+    };
+    Ok(coding_subagents.with_role_catalog(catalog))
+}
+
+fn build_role_overlay(
+    name: &str,
+    role_cfg: &EffectiveSubagentRoleConfig,
+    merry_config: Option<&MerryConfig>,
+    workspace_root: &Path,
+    retry_policy: Option<ModelRetryPolicy>,
+    provider_cache: &mut BTreeMap<String, Arc<dyn ModelProvider>>,
+    map_usage_error: fn(String) -> CliError,
+) -> Result<SubagentRoleOverlay, CliError> {
+    let model_override = resolve_subagent_model_override(
+        merry_config,
+        role_cfg.provider.as_deref(),
+        role_cfg.model.as_deref(),
+        retry_policy,
+        provider_cache,
+        map_usage_error,
+    )?;
+    let prompt_from_file = role_cfg
+        .prompt_file
+        .as_deref()
+        .map(|path| {
+            load_workspace_prompt_file(workspace_root, name, path)
+                .map_err(|error| map_usage_error(error.to_string()))
+        })
+        .transpose()?;
+    let instructions = match (prompt_from_file, role_cfg.instructions.as_deref()) {
+        (Some(file_text), Some(inline)) if !inline.trim().is_empty() => {
+            Some(format!("{}\n\n{}", file_text.trim(), inline.trim()))
+        }
+        (Some(file_text), _) => Some(file_text),
+        (None, Some(inline)) => Some(inline.to_owned()),
+        (None, None) => None,
+    };
+
+    Ok(SubagentRoleOverlay {
+        base: role_cfg.base.clone(),
+        enabled: role_cfg.enabled,
+        description: role_cfg.description.clone(),
+        workspace_access: role_cfg.workspace_access,
+        model_override,
+        reasoning_effort: role_cfg.reasoning_effort.clone(),
+        max_model_turns: role_cfg.max_model_turns,
+        timeout_secs: role_cfg.timeout_secs,
+        max_total_tokens: role_cfg.max_total_tokens,
+        allowed_tools: role_cfg.allowed_tools.clone(),
+        instructions,
+    })
+}
+
+fn resolve_subagent_model_override(
+    merry_config: Option<&MerryConfig>,
+    provider_alias: Option<&str>,
+    model: Option<&str>,
+    retry_policy: Option<ModelRetryPolicy>,
+    provider_cache: &mut BTreeMap<String, Arc<dyn ModelProvider>>,
+    map_usage_error: fn(String) -> CliError,
+) -> Result<Option<SubagentModelOverride>, CliError> {
+    let Some(model) = model else {
+        return Ok(None);
+    };
+    let merry_config = merry_config.ok_or_else(|| {
+        map_usage_error(
+            "Merry XDG provider config is required for subagent model overrides".to_owned(),
+        )
+    })?;
+    let (cache_key, effective_provider) = match provider_alias {
+        Some(alias) => {
+            let provider = merry_config
+                .provider_by_alias(alias)
+                .map_err(|error| map_usage_error(error.to_string()))?;
+            (alias.to_owned(), provider)
+        }
+        None => {
+            let default = merry_config
+                .default_provider()
+                .map_err(|error| map_usage_error(error.to_string()))?;
+            let alias = match &default.provider {
+                EffectiveProviderConfig::OpenAiCompatible(cfg) => cfg.alias.clone(),
+                EffectiveProviderConfig::Anthropic(cfg) => cfg.alias.clone(),
+            };
+            (alias, default.provider)
+        }
+    };
+    let provider = if let Some(cached) = provider_cache.get(&cache_key) {
+        Arc::clone(cached)
+    } else {
+        let materialized = model_provider(effective_provider, map_usage_error)?;
+        provider_cache.insert(cache_key, Arc::clone(&materialized));
+        materialized
+    };
+    Ok(Some(SubagentModelOverride {
+        provider,
+        model: ModelName::new(model).map_err(|error| map_usage_error(error.to_string()))?,
+        retry_policy,
+    }))
 }
 
 fn openai_primary_provider(
@@ -457,7 +630,6 @@ pub(crate) struct OpenAiProviderConfigBundle {
     pub(crate) primary: OpenAiConfig,
     pub(crate) context_compaction: Option<OpenAiConfig>,
     pub(crate) approval_review: Option<OpenAiConfig>,
-    pub(crate) browser: Option<OpenAiConfig>,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
 }
 
@@ -470,7 +642,6 @@ pub(crate) struct RuntimeProviderBundle {
     pub(crate) primary: RuntimePrimaryProviderConfig,
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
     pub(crate) approval_review: Option<RuntimeRoleProviderConfig>,
-    pub(crate) browser: Option<RuntimeRoleProviderConfig>,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
 }
 

@@ -7,7 +7,7 @@ use crate::coding::{
 use crate::config::MerryConfig;
 use crate::mcp_tools::discover_configured_mcp_tools;
 use crate::provider_config::{
-    RuntimePrimaryProviderConfig, RuntimeProviderBundle,
+    RuntimePrimaryProviderConfig, RuntimeProviderBundle, build_coding_subagents_config,
     runtime_primary_provider_from_config_with_override,
     runtime_provider_bundle_from_config_with_primary_override,
 };
@@ -82,7 +82,6 @@ pub(crate) async fn start_tui_runtime_session(
         primary,
         context_compaction,
         approval_review,
-        browser,
         retry_policy,
     } = runtime_provider_bundle_from_config_with_primary_override(
         merry_config,
@@ -133,6 +132,13 @@ pub(crate) async fn start_tui_runtime_session(
             preferences.subagent_max_threads,
         )
         .map_err(unexpected)?;
+    let coding_subagents = build_coding_subagents_config(
+        merry_config,
+        &subagents,
+        &workspace_root,
+        true,
+        debug_openai_usage_error,
+    )?;
     let runtime_input = HeadlessCodingRuntimeInput {
         session_id: session_id.as_str(),
         root: &workspace_root,
@@ -147,16 +153,12 @@ pub(crate) async fn start_tui_runtime_session(
         retry_policy,
         context_compaction,
         approval_review,
-        browser,
         skill_roots: merry_config
             .map(MerryConfig::skill_roots)
             .transpose()
             .map_err(unexpected)?
             .unwrap_or_default(),
-        subagents: crate::coding::CodingSubagentsConfig::runtime_controlled(
-            subagents.is_enabled(),
-            subagents.limits(),
-        ),
+        subagents: coding_subagents,
         workspace_tool_limits: None,
         workspace_writable,
     };

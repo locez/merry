@@ -1,7 +1,7 @@
 mod schema;
 
 pub use schema::subagent_tool_specs;
-use schema::subagent_tool_specs_with_bounds;
+use schema::subagent_tool_specs_with_bounds_and_roles;
 
 use super::{
     BackgroundHandoffNotice, CANCEL_SUBAGENTS_TOOL_NAME, SEND_SUBAGENT_MESSAGE_TOOL_NAME,
@@ -28,8 +28,21 @@ const BACKGROUND_HANDOFF_MESSAGE: &str = "Foreground wait ended before all subag
 pub fn subagent_registered_tools(
     manager: SubagentManager,
 ) -> Result<[RegisteredTool; 4], merry_core::CoreError> {
+    subagent_registered_tools_with_roles(manager, &[])
+}
+
+/// Returns provider-visible subagent tool specs advertising the enabled role
+/// catalog in `spawn_subagents`'s description.
+pub fn subagent_registered_tools_with_roles(
+    manager: SubagentManager,
+    role_summaries: &[(String, String)],
+) -> Result<[RegisteredTool; 4], merry_core::CoreError> {
     let [spawn_spec, send_spec, wait_spec, cancel_spec] =
-        subagent_tool_specs_with_bounds(manager.min_model_turns(), manager.max_model_turns())?;
+        subagent_tool_specs_with_bounds_and_roles(
+            manager.min_model_turns(),
+            manager.max_model_turns(),
+            role_summaries,
+        )?;
     Ok([
         RegisteredTool::new(
             spawn_spec,
@@ -109,6 +122,7 @@ impl ToolExecutor for SpawnSubagentsExecutor {
                         self.manager.min_model_turns(),
                         self.manager.max_model_turns(),
                         self.manager.default_timeout_secs(),
+                        self.manager.max_total_tokens(),
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()
@@ -394,6 +408,7 @@ fn task_spec_from_input(
     min_model_turns: u32,
     default_max_model_turns: u32,
     default_timeout_secs: Option<u64>,
+    default_max_total_tokens: Option<u64>,
 ) -> Result<SubagentTaskSpec, InvalidSubagentToolArguments> {
     let SpawnSubagentTaskInput {
         task,
@@ -415,16 +430,19 @@ fn task_spec_from_input(
         .transpose()
         .map_err(|error| InvalidSubagentToolArguments::new(error.to_string()))?;
 
+    let max_model_turns_explicit = max_model_turns.is_some();
     let max_model_turns = max_model_turns.unwrap_or(default_max_model_turns);
     validate_task_max_model_turns(max_model_turns, min_model_turns, default_max_model_turns)
         .map_err(InvalidSubagentToolArguments::from)?;
     let mut task = SubagentTaskSpec::new(task, max_model_turns)
         .map_err(InvalidSubagentToolArguments::from)?
+        .with_max_model_turns_explicit(max_model_turns_explicit)
         .with_display_name(display_name)
         .with_role(role)
         .map_err(InvalidSubagentToolArguments::from)?
         .with_timeout_secs(timeout_secs.or(default_timeout_secs))
-        .map_err(InvalidSubagentToolArguments::from)?;
+        .map_err(InvalidSubagentToolArguments::from)?
+        .with_max_total_tokens(default_max_total_tokens);
     if let Some(allowed_tools) = allowed_tools {
         task = task.with_allowed_tools(allowed_tools);
     }

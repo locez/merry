@@ -13,6 +13,7 @@ mod project_capabilities;
 mod project_rules;
 mod runtime;
 mod search_tools;
+mod subagent_roles;
 mod workspace;
 
 #[cfg(test)]
@@ -30,6 +31,12 @@ pub use runtime::{
     CodingAutoFallback, CodingModelRoleConfig, CodingModelRoleConfigError, CodingPermissionMode,
     CodingPermissionPolicy, CodingPermissionPolicyError, CodingRuntime, CodingRuntimeBuildError,
     CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig,
+};
+pub use subagent_roles::{
+    MAX_ROLE_PROMPT_FILE_BYTES, ResolvedSubagentRuntime, SubagentDefaultOverride,
+    SubagentModelOverride, SubagentResolutionInput, SubagentRoleCatalog, SubagentRoleError,
+    SubagentRoleOverlay, SubagentRoleSpec, SubagentWorkspaceAccess, load_workspace_prompt_file,
+    resolve_subagent_runtime,
 };
 
 use merry_core::{CoreError, ToolName};

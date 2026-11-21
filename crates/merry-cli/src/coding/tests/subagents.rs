@@ -31,7 +31,6 @@ async fn hides_subagent_tools_by_default() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            browser: None,
             automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
@@ -79,7 +78,6 @@ async fn exposes_subagent_tools_when_enabled() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            browser: None,
             automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
@@ -178,7 +176,6 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            browser: None,
             automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
@@ -296,9 +293,9 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn browser_model_role_routes_browser_subagents_when_configured() {
+async fn custom_browser_role_routes_subagents_to_role_provider_and_model() {
+    use merry::profiles::{SubagentModelOverride, SubagentRoleCatalog, SubagentRoleOverlay};
     use merry_llm::ModelName;
-    use merry_runtime::RuntimeModelRole;
 
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
@@ -322,19 +319,7 @@ async fn browser_model_role_routes_browser_subagents_when_configured() {
                                 "task".to_owned(),
                                 Value::String("Verify the login form UI.".to_owned()),
                             ),
-                            (
-                                "max_model_turns".to_owned(),
-                                Value::Number(serde_json::Number::from(2048)),
-                            ),
-                            (
-                                "allowed_tools".to_owned(),
-                                Value::Array(vec![
-                                    Value::String("browser_tab".to_owned()),
-                                    Value::String("browser_network".to_owned()),
-                                    Value::String("read_text".to_owned()),
-                                ]),
-                            ),
-                            ("write_scope".to_owned(), Value::Array(Vec::new())),
+                            ("role".to_owned(), Value::String("browser".to_owned())),
                         ]))]),
                     )])))
                     .expect("valid spawn args"),
@@ -347,21 +332,34 @@ async fn browser_model_role_routes_browser_subagents_when_configured() {
         completion_step(),
         completion_step(),
         completion_step(),
-        completion_step(),
-        completion_step(),
-        completion_step(),
     ]);
     let browser_provider = ScriptedProvider::new(vec![
         completion_step(),
         completion_step(),
         completion_step(),
     ]);
-    let browser_role = crate::coding::RuntimeRoleProviderConfig::new(
-        RuntimeModelRole::Browser,
-        Arc::new(browser_provider.clone()),
-        ModelName::new("browser-vision-test").expect("valid browser model"),
-    )
-    .expect("valid role");
+
+    let mut catalog = SubagentRoleCatalog::builtin();
+    catalog
+        .apply_role_overlay(
+            "browser",
+            SubagentRoleOverlay {
+                base: Some("review".to_owned()),
+                description: Some("UI verification specialist".to_owned()),
+                model_override: Some(SubagentModelOverride {
+                    provider: Arc::new(browser_provider.clone()),
+                    model: ModelName::new("browser-vision-test").expect("valid browser model"),
+                    retry_policy: Some(merry_llm::ModelRetryPolicy::disabled()),
+                }),
+                allowed_tools: Some(vec![
+                    ToolName::new("browser_tab").expect("valid tool"),
+                    ToolName::new("browser_network").expect("valid tool"),
+                    ToolName::new("read_text").expect("valid tool"),
+                ]),
+                ..SubagentRoleOverlay::default()
+            },
+        )
+        .expect("custom browser role should apply");
 
     let runtime = build_coding_runtime(
         "coding-loop-browser-role-routing",
@@ -370,7 +368,6 @@ async fn browser_model_role_routes_browser_subagents_when_configured() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            browser: Some(browser_role),
             automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: Some(merry_llm::ModelRetryPolicy::disabled()),
             context_compaction: None,
@@ -380,9 +377,10 @@ async fn browser_model_role_routes_browser_subagents_when_configured() {
             subagents: CodingSubagentsConfig::enabled(
                 SubagentConfig::new(2, 1)
                     .expect("valid subagent config")
-                    .with_model_turn_bounds(2048, 2048)
+                    .with_model_turn_bounds(1, 80)
                     .expect("coding subagent bounds should be valid"),
-            ),
+            )
+            .with_role_catalog(catalog),
             workspace_tool_limits: None,
         },
     )
@@ -398,7 +396,157 @@ async fn browser_model_role_routes_browser_subagents_when_configured() {
         .expect("agent loop should run");
     assert_eq!(result.status(), &AgentLoopStatus::Completed);
 
+    // Parent tool description must advertise the custom browser role.
+    let parent_spawn_desc = primary.recorded_requests()[0]
+        .tools()
+        .iter()
+        .find(|tool| tool.name().as_str() == "spawn_subagents")
+        .expect("spawn_subagents tool present")
+        .description()
+        .to_owned();
+    assert!(
+        parent_spawn_desc.contains("browser"),
+        "expected custom browser role advertised in spawn_subagents description: {parent_spawn_desc}"
+    );
+
     let browser_requests = browser_provider.recorded_requests();
     assert!(!browser_requests.is_empty());
     assert_eq!(browser_requests[0].model().as_str(), "browser-vision-test");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn interactive_primary_model_switch_routes_subsequent_subagents_to_new_model() {
+    use merry_core::{InteractiveRunState, RuntimeEvent};
+    use merry_llm::{ModelName, ModelRetryPolicy};
+    use merry_runtime::{InteractivePrimaryModel, InteractiveSettingsUpdate};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+
+    let completion_step = || {
+        vec![Ok::<_, merry_llm::ModelError>(ModelEvent::Completed {
+            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
+        })]
+    };
+    let initial_provider = ScriptedProvider::new(vec![completion_step()]);
+    let switched_provider = ScriptedProvider::new(vec![
+        vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::tool_call(ModelToolCall::new(
+                    ModelToolCallId::new("call-spawn-switched").expect("valid call id"),
+                    ToolName::new("spawn_subagents").expect("valid tool name"),
+                    ToolArguments::try_from(Value::Object(Map::from_iter([(
+                        "tasks".to_owned(),
+                        Value::Array(vec![Value::Object(Map::from_iter([
+                            (
+                                "task".to_owned(),
+                                Value::String("Inspect workspace after model switch.".to_owned()),
+                            ),
+                            ("role".to_owned(), Value::String("explore".to_owned())),
+                            ("wait".to_owned(), Value::String("all".to_owned())),
+                        ]))]),
+                    )])))
+                    .expect("valid spawn args"),
+                ))],
+                FinishReason::ToolCalls,
+                None,
+            ),
+        })],
+        completion_step(),
+        completion_step(),
+        completion_step(),
+    ]);
+
+    let runtime = build_coding_runtime(
+        "coding-loop-live-model-switch",
+        &workspace,
+        Arc::new(initial_provider.clone()),
+        ModelName::new("initial-model").expect("valid model"),
+        CodingRuntimeOptions {
+            approval_review: None,
+            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+            retry_policy: Some(ModelRetryPolicy::disabled()),
+            context_compaction: None,
+            process_backend: test_process_backend(),
+            extra_tools: Vec::new(),
+            skill_roots: Vec::new(),
+            subagents: CodingSubagentsConfig::runtime_controlled(
+                true,
+                SubagentConfig::new(2, 1)
+                    .expect("valid subagent config")
+                    .with_model_turn_bounds(1, 80)
+                    .expect("coding subagent bounds should be valid"),
+            ),
+            workspace_tool_limits: None,
+        },
+    )
+    .expect("runtime should build");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::default(),
+            AgentLoopConfig::new(4).expect("valid loop config"),
+        )
+        .expect("interactive run should start");
+    let (mut stream, input, control) = run.split();
+
+    control
+        .update_settings(InteractiveSettingsUpdate::default().with_primary_model(
+            InteractivePrimaryModel::new(
+                Arc::new(switched_provider.clone()),
+                ModelName::new("switched-model").expect("valid switched model"),
+                ModelRetryPolicy::disabled(),
+            ),
+        ))
+        .await
+        .expect("settings update should apply");
+
+    input
+        .submit("Delegate after switching models.")
+        .await
+        .expect("user message should enqueue");
+
+    let mut saw_active = false;
+    while let Some(event) = stream
+        .next_event()
+        .await
+        .expect("interactive stream event should succeed")
+    {
+        match event {
+            RuntimeEvent::InteractiveRunStateChanged {
+                state: InteractiveRunState::WaitingForInput,
+            } if saw_active => break,
+            RuntimeEvent::InteractiveRunStateChanged { state }
+                if state != InteractiveRunState::WaitingForInput =>
+            {
+                saw_active = true;
+            }
+            _ => {}
+        }
+    }
+    drop(input);
+    control.close().await.expect("interactive run should close");
+    while stream
+        .next_event()
+        .await
+        .expect("interactive stream drain should succeed")
+        .is_some()
+    {}
+
+    assert!(
+        initial_provider.recorded_requests().is_empty(),
+        "initial provider should not be called after switching primary model"
+    );
+    let switched_requests = switched_provider.recorded_requests();
+    assert!(
+        switched_requests.len() >= 2,
+        "both parent and child should call the switched provider"
+    );
+    assert!(
+        switched_requests
+            .iter()
+            .all(|req| req.model().as_str() == "switched-model"),
+        "child must dynamically inherit switched-model from live parent runtime"
+    );
 }

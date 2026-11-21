@@ -11,7 +11,8 @@ use crate::{
     headless_review::{HeadlessPermissionReviewer, ReviewInputChannel},
     mcp_tools::{discover_configured_mcp_tools, write_startup_warnings},
     provider_config::{
-        RuntimePrimaryProviderConfig, RuntimeProviderBundle, runtime_provider_bundle_from_config,
+        RuntimePrimaryProviderConfig, RuntimeProviderBundle, build_coding_subagents_config,
+        runtime_provider_bundle_from_config,
     },
     run::persistence::{
         HeadlessRunPersistence, headless_session_metadata, run_agent_loop_with_persistence,
@@ -213,7 +214,6 @@ pub(crate) async fn run(
         primary,
         context_compaction,
         approval_review,
-        browser,
         retry_policy,
     } = runtime_provider_bundle_from_config(merry_config, debug_openai_usage_error)?;
     let RuntimePrimaryProviderConfig { provider, model } = primary;
@@ -237,6 +237,14 @@ pub(crate) async fn run(
     write_startup_warnings(&mut tokio::io::stderr(), &mcp.warnings)
         .await
         .map_err(unexpected)?;
+    let subagents_cfg = subagents_config(merry_config).map_err(unexpected)?;
+    let coding_subagents = build_coding_subagents_config(
+        merry_config,
+        &subagents_cfg,
+        &root,
+        false,
+        debug_openai_usage_error,
+    )?;
     let runtime_input = HeadlessCodingRuntimeInput {
         session_id: session.id().as_str(),
         root: &root,
@@ -248,13 +256,12 @@ pub(crate) async fn run(
         retry_policy,
         context_compaction,
         approval_review,
-        browser,
         skill_roots: merry_config
             .map(MerryConfig::skill_roots)
             .transpose()
             .map_err(unexpected)?
             .unwrap_or_default(),
-        subagents: subagents_config(merry_config).map_err(unexpected)?.into(),
+        subagents: coding_subagents,
         workspace_tool_limits: None,
         workspace_writable: workspace.writable,
     };

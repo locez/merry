@@ -4,6 +4,7 @@ mod activity;
 mod child;
 mod handoff;
 mod manager;
+mod manager_helpers;
 mod messaging;
 mod plan_link;
 mod protocol;
@@ -29,13 +30,19 @@ pub use protocol::{
     SpawnedSubagentView, SubagentMessageDelivery, SubagentResultView, SubagentStatusLabel,
     SubagentStatusView, WaitMode, WaitSubagentsInput, WaitSubagentsOutput,
 };
-pub use scope::{ChildRuntimeFactory, ChildRuntimeInput, ChildWorkspaceScope};
+pub use scope::{
+    BuiltChildRuntime, ChildRuntimeFactory, ChildRuntimeInput, ChildWorkspaceScope,
+    ParentPrimaryModel,
+};
 use spec::validate_task_max_model_turns;
 pub use spec::{
     DEFAULT_FOREGROUND_WAIT_BUDGET_SECS, DEFAULT_MAX_MODEL_TURNS, DEFAULT_MIN_MODEL_TURNS,
-    SubagentConfig, SubagentError, SubagentTaskSpec, validate_no_write_scope_conflicts,
+    SubagentConfig, SubagentError, SubagentLimitBehavior, SubagentTaskSpec,
+    validate_no_write_scope_conflicts,
 };
-pub use tools::{subagent_registered_tools, subagent_tool_specs};
+pub use tools::{
+    subagent_registered_tools, subagent_registered_tools_with_roles, subagent_tool_specs,
+};
 
 /// Maximum UTF-8 bytes of a single child conclusion inlined in a completion notification.
 const MAX_INLINE_CONCLUSION_BYTES: usize = 8 * 1024;

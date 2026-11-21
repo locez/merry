@@ -435,7 +435,10 @@ async fn startup_error_after_terminal_claim_does_not_republish_terminal_activity
     .task_anchor(task_anchor.clone())
     .build()
     .expect("child runtime should build");
-    let generation_config = generation_config_for_child_task(&task);
+    let generation_config = generation_config_for_child_task_with_parent(
+        &task,
+        &merry_llm::GenerationConfig::default(),
+    );
     let launch = ChildLoopLaunch {
         agent_id: agent_id.clone(),
         task_id: task_id.clone(),

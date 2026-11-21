@@ -27,6 +27,9 @@ impl Runtime {
         active_permit: ActiveStepPermit,
     ) -> Result<RuntimeJournalEventStream, RuntimeError> {
         let (parent_token, generation_config, final_output_contract) = context.into_parts();
+        if let Some(manager) = self.inner.subagent_manager.as_ref() {
+            manager.update_parent_generation_config(generation_config.clone());
+        }
         let step_token = parent_token.child_token();
         let producer_token = step_token.clone();
         let (sender, receiver) = mpsc::channel(self.inner.event_buffer_size.get());

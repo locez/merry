@@ -14,20 +14,34 @@ const SEND_MESSAGE_ANTI_MICROMANAGE_GUIDANCE: &str = "Send a follow-up instructi
 
 /// Returns provider-visible subagent tool specs.
 pub fn subagent_tool_specs() -> Result<[ToolSpec; 4], merry_core::CoreError> {
-    subagent_tool_specs_with_bounds(
+    subagent_tool_specs_with_bounds_and_roles(
         crate::subagent::DEFAULT_MIN_MODEL_TURNS,
         crate::subagent::DEFAULT_MAX_MODEL_TURNS,
+        &[],
     )
 }
 
-pub(super) fn subagent_tool_specs_with_bounds(
+pub(super) fn subagent_tool_specs_with_bounds_and_roles(
     min_model_turns: u32,
     max_model_turns: u32,
+    role_summaries: &[(String, String)],
 ) -> Result<[ToolSpec; 4], merry_core::CoreError> {
+    let roles_clause = if role_summaries.is_empty() {
+        "Use `role` to pick a specialist (`explore` for fast read-only search, `coder` for scoped implementation and checks, `review` for independent skeptical verification) and `context_files` to preload key file slices before turn 1.".to_owned()
+    } else {
+        let list = role_summaries
+            .iter()
+            .map(|(name, desc)| format!("`{name}` ({desc})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "Use `role` to pick an enabled specialist role ({list}) and `context_files` to preload key file slices before turn 1."
+        )
+    };
     let spawn_description = format!(
         "Spawn one or more bounded child agents for independent, parallel, or context-heavy tasks. \
          Terminal child results are delivered automatically on the next model turn as a `<subagent-notification>` block with inlined conclusions and changed_paths; set `wait` to `all` or `any` only when you need results inline before continuing (if the foreground wait budget expires or the turn is interrupted, children keep running in the background — do not spawn duplicates). \
-         Use `role` to pick a specialist (`explore` for fast read-only search, `coder` for scoped implementation and checks, `review` for independent skeptical verification) and `context_files` to preload key file slices before turn 1. \
+         {roles_clause} \
          {CHILD_MODEL_TURN_GUIDANCE} Configured child model-turn range: {min_model_turns}..={max_model_turns}. \
          Keep `tasks[].task` focused on the objective and ruled-out paths; declare path boundaries in `read_scope`, `write_scope`, and `forbidden_paths`. \
          When binding to a Plan node, pass an authored `plan_client_key` from `update_plan.bindable_plan_client_keys` (never a runtime node id such as `plan-node-2`). \

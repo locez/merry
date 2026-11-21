@@ -462,6 +462,21 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
         .expect("example should configure approval review model role");
     assert_eq!(approval_review.provider, "openai-compatible");
     assert_eq!(approval_review.model, "gpt-4.1-mini");
+
+    let subagents = config
+        .subagents_config()
+        .expect("example [subagents] config should validate");
+    assert!(subagents.is_enabled());
+    assert_eq!(subagents.limits().max_threads(), 6);
+    assert_eq!(subagents.limits().max_depth(), 1);
+    assert_eq!(subagents.limits().foreground_wait_budget_secs(), 120);
+    assert_eq!(
+        subagents.limits().limit_behavior(),
+        merry_runtime::SubagentLimitBehavior::Queue
+    );
+    assert_eq!(subagents.roles()["explore"].max_model_turns, Some(30));
+    assert_eq!(subagents.roles()["coder"].max_model_turns, Some(80));
+    assert_eq!(subagents.roles()["review"].max_model_turns, Some(40));
 }
 
 #[test]

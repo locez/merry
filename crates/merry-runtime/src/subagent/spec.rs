@@ -103,6 +103,16 @@ pub enum SubagentError {
     },
 }
 
+/// Admission behavior when a spawn request exceeds `max_threads`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubagentLimitBehavior {
+    /// Queue excess children until an active slot frees up (default).
+    #[default]
+    Queue,
+    /// Immediately reject excess children when `max_threads` is already full.
+    Fail,
+}
+
 /// Runtime configuration for subagent delegation limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubagentConfig {
@@ -112,6 +122,8 @@ pub struct SubagentConfig {
     max_model_turns: u32,
     default_timeout_secs: Option<u64>,
     foreground_wait_budget_secs: u64,
+    limit_behavior: SubagentLimitBehavior,
+    max_total_tokens: Option<u64>,
 }
 
 impl SubagentConfig {
@@ -130,7 +142,28 @@ impl SubagentConfig {
             max_model_turns: DEFAULT_MAX_MODEL_TURNS,
             default_timeout_secs: None,
             foreground_wait_budget_secs: DEFAULT_FOREGROUND_WAIT_BUDGET_SECS,
+            limit_behavior: SubagentLimitBehavior::Queue,
+            max_total_tokens: None,
         })
+    }
+
+    /// Sets admission behavior when a batch exceeds `max_threads`.
+    #[must_use]
+    pub fn with_limit_behavior(mut self, behavior: SubagentLimitBehavior) -> Self {
+        self.limit_behavior = behavior;
+        self
+    }
+
+    /// Sets an optional per-child cumulative token circuit breaker.
+    pub fn with_max_total_tokens(
+        mut self,
+        max_total_tokens: Option<u64>,
+    ) -> Result<Self, SubagentError> {
+        if max_total_tokens == Some(0) {
+            return Err(SubagentError::ZeroTimeoutSecs);
+        }
+        self.max_total_tokens = max_total_tokens;
+        Ok(self)
     }
 
     /// Sets an optional default wall-clock timeout in seconds for child tasks.
@@ -252,6 +285,18 @@ impl SubagentConfig {
     pub fn foreground_wait_budget_secs(self) -> u64 {
         self.foreground_wait_budget_secs
     }
+
+    /// Returns admission behavior when `max_threads` is full.
+    #[must_use]
+    pub fn limit_behavior(self) -> SubagentLimitBehavior {
+        self.limit_behavior
+    }
+
+    /// Returns the optional per-child cumulative token circuit breaker.
+    #[must_use]
+    pub fn max_total_tokens(self) -> Option<u64> {
+        self.max_total_tokens
+    }
 }
 
 impl Default for SubagentConfig {
@@ -263,6 +308,8 @@ impl Default for SubagentConfig {
             max_model_turns: DEFAULT_MAX_MODEL_TURNS,
             default_timeout_secs: None,
             foreground_wait_budget_secs: DEFAULT_FOREGROUND_WAIT_BUDGET_SECS,
+            limit_behavior: SubagentLimitBehavior::Queue,
+            max_total_tokens: None,
         }
     }
 }
@@ -274,7 +321,9 @@ pub struct SubagentTaskSpec {
     role: Option<String>,
     task: String,
     max_model_turns: u32,
+    max_model_turns_explicit: bool,
     timeout_secs: Option<u64>,
+    max_total_tokens: Option<u64>,
     allowed_tools: Vec<ToolName>,
     allowed_tools_explicit: bool,
     read_scope: Vec<PathBuf>,
@@ -319,7 +368,9 @@ impl SubagentTaskSpec {
             role: None,
             task,
             max_model_turns,
+            max_model_turns_explicit: true,
             timeout_secs: None,
+            max_total_tokens: None,
             allowed_tools: Vec::new(),
             allowed_tools_explicit: false,
             read_scope: Vec::new(),
@@ -337,6 +388,33 @@ impl SubagentTaskSpec {
 
     pub(crate) fn with_max_model_turns_unchecked(mut self, max_model_turns: u32) -> Self {
         self.max_model_turns = max_model_turns;
+        self
+    }
+
+    /// Marks whether `max_model_turns` was explicitly requested by the parent
+    /// (as opposed to filled from the runtime default).
+    #[must_use]
+    pub fn with_max_model_turns_explicit(mut self, explicit: bool) -> Self {
+        self.max_model_turns_explicit = explicit;
+        self
+    }
+
+    /// Returns true when the parent explicitly requested `max_model_turns`.
+    #[must_use]
+    pub const fn max_model_turns_is_explicit(&self) -> bool {
+        self.max_model_turns_explicit
+    }
+
+    /// Returns the optional cumulative token circuit breaker for this task.
+    #[must_use]
+    pub const fn max_total_tokens(&self) -> Option<u64> {
+        self.max_total_tokens
+    }
+
+    /// Sets an optional cumulative token circuit breaker for this task.
+    #[must_use]
+    pub fn with_max_total_tokens(mut self, max_total_tokens: Option<u64>) -> Self {
+        self.max_total_tokens = max_total_tokens.filter(|value| *value > 0);
         self
     }
 
@@ -379,7 +457,8 @@ impl SubagentTaskSpec {
         &self.allowed_tools
     }
 
-    pub(crate) fn allowed_tools_are_explicit(&self) -> bool {
+    #[must_use]
+    pub fn allowed_tools_are_explicit(&self) -> bool {
         self.allowed_tools_explicit
     }
 

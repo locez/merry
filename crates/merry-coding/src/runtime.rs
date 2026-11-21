@@ -8,7 +8,8 @@
 use crate::child_runtime::{CodingChildRuntimeFactory, CodingRuntimeComposition};
 use crate::{
     CodingAgentProfile, CodingAgentProfileBuildError, CodingAgentProfileBuilder,
-    MIN_CODING_SUBAGENT_MODEL_TURNS, ProjectRulesLoadError, coding_agent, load_root_project_rules,
+    MIN_CODING_SUBAGENT_MODEL_TURNS, ProjectRulesLoadError, SubagentRoleCatalog, coding_agent,
+    load_root_project_rules,
 };
 use merry_core::{CoreError, SessionId};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
@@ -17,7 +18,7 @@ use merry_runtime::{
     AgentLoopConfig, AgentLoopConfigError, ChildRuntimeFactory, CompactionConfig, DurableMemory,
     FileSessionStore, LoadedSession, PermissionReviewRules, RegisteredTool, Runtime,
     RuntimeBuilder, RuntimeError, RuntimeModelRole, SkillCatalog, SkillError, SubagentConfig,
-    SubagentError, SubagentManager, subagent_registered_tools,
+    SubagentError, SubagentManager, subagent_registered_tools_with_roles,
 };
 use merry_tools::WorkspaceToolLimits;
 pub use permission_policy::{
@@ -129,10 +130,6 @@ impl CodingRuntimePolicy {
         self
     }
 
-    pub(crate) fn role(&self, target: RuntimeModelRole) -> Option<&CodingModelRoleConfig> {
-        self.model_roles.iter().find(|role| role.role() == target)
-    }
-
     pub(crate) fn apply_to(&self, mut builder: RuntimeBuilder) -> RuntimeBuilder {
         for role in &self.model_roles {
             builder =
@@ -149,50 +146,68 @@ impl CodingRuntimePolicy {
 }
 
 /// Typed subagent composition policy for a parent coding runtime.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub struct CodingSubagentsConfig {
     installed: bool,
     enabled: bool,
     limits: SubagentConfig,
+    role_catalog: SubagentRoleCatalog,
 }
 
 impl CodingSubagentsConfig {
     /// Installs and enables subagent tools with the supplied runtime limits.
     #[must_use]
-    pub const fn enabled(limits: SubagentConfig) -> Self {
+    pub fn enabled(limits: SubagentConfig) -> Self {
         Self {
             installed: true,
             enabled: true,
             limits,
+            role_catalog: SubagentRoleCatalog::builtin(),
         }
     }
 
-    /// Installs subagent tools while leaving their runtime admission disabled.
+    /// Installs subagent tools while leaving their runtime admission controlled
+    /// by `enabled`.
     #[must_use]
-    pub const fn runtime_controlled(enabled: bool, limits: SubagentConfig) -> Self {
+    pub fn runtime_controlled(enabled: bool, limits: SubagentConfig) -> Self {
         Self {
             installed: true,
             enabled,
             limits,
+            role_catalog: SubagentRoleCatalog::builtin(),
         }
+    }
+
+    /// Attaches a customized role catalog (built-in + `.merry/roles/*.toml` +
+    /// `[subagents.roles.*]` + `[subagents.default]` + `[subagents.toggle]`).
+    #[must_use]
+    pub fn with_role_catalog(mut self, role_catalog: SubagentRoleCatalog) -> Self {
+        self.role_catalog = role_catalog;
+        self
     }
 
     /// Returns whether the parent should advertise subagent tools.
     #[must_use]
-    pub const fn is_installed(self) -> bool {
+    pub const fn is_installed(&self) -> bool {
         self.installed
     }
 
     /// Returns whether new subagent work is enabled by the parent policy.
     #[must_use]
-    pub const fn is_enabled(self) -> bool {
+    pub const fn is_enabled(&self) -> bool {
         self.enabled
     }
 
     /// Returns the runtime-owned subagent limits.
     #[must_use]
-    pub const fn limits(self) -> SubagentConfig {
+    pub const fn limits(&self) -> SubagentConfig {
         self.limits
+    }
+
+    /// Returns the configured role catalog.
+    #[must_use]
+    pub fn role_catalog(&self) -> &SubagentRoleCatalog {
+        &self.role_catalog
     }
 }
 
@@ -603,13 +618,17 @@ impl CodingRuntimeBuilder {
                     max_model_turns = subagent_config.max_model_turns(),
                     "runtime subagent tools installed"
                 );
+                let role_catalog = subagents.role_catalog().clone();
+                let role_summaries = role_catalog.enabled_role_summaries();
                 let composition = CodingRuntimeComposition {
                     profile_builder: profile_builder.clone(),
                     provider: Arc::clone(&provider),
                     model: model.clone(),
                     process_backend,
                     parent_process_permissions,
+                    parent_workspace_writable: workspace_writable,
                     subagent_config,
+                    role_catalog,
                     automatic_compaction,
                     max_parallel_tool_calls,
                     policy: policy.clone(),
@@ -623,7 +642,7 @@ impl CodingRuntimeBuilder {
                     subagents.is_enabled(),
                 );
                 let [spawn_tool, send_tool, wait_tool, cancel_tool] =
-                    subagent_registered_tools(manager.clone())?;
+                    subagent_registered_tools_with_roles(manager.clone(), &role_summaries)?;
                 runtime_builder = runtime_builder.subagent_manager(manager);
                 profile_tools.extend([spawn_tool, send_tool, wait_tool, cancel_tool]);
             }

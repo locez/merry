@@ -6,11 +6,12 @@ use super::manager::{
     SubagentManagerState, enqueue_completion_notification_if_needed, initial_summary,
 };
 use super::{
-    ChildRuntimeFactory, PlanLinkRuntime, SubagentActivityHub, SubagentStatusLabel,
-    SubagentStatusView, SubagentTaskSpec,
+    ChildRuntimeFactory, ParentPrimaryModel, PlanLinkRuntime, SubagentActivityHub,
+    SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec,
 };
 use crate::{RuntimeError, TaskAnchor};
 use merry_core::{ErrorInfo, PlanLinkSnapshot, PlanLinkStatus, SubagentId, SubagentTaskId};
+use merry_llm::GenerationConfig;
 use std::{
     collections::VecDeque,
     sync::{
@@ -44,9 +45,24 @@ pub(super) struct ChildScheduler {
     pub(super) depth: u8,
     pub(super) plan_link_runtime: Arc<StdMutex<Option<Arc<dyn PlanLinkRuntime>>>>,
     pub(super) activity_hub: Arc<StdMutex<Option<Arc<SubagentActivityHub>>>>,
+    pub(super) live_parent_model: Arc<StdMutex<Option<ParentPrimaryModel>>>,
+    pub(super) live_parent_generation: Arc<StdMutex<GenerationConfig>>,
 }
 
 impl ChildScheduler {
+    pub(super) fn live_parent_model_snapshot(&self) -> Option<ParentPrimaryModel> {
+        self.live_parent_model
+            .lock()
+            .expect("subagent live parent model mutex is not poisoned")
+            .clone()
+    }
+
+    pub(super) fn live_parent_generation_snapshot(&self) -> GenerationConfig {
+        self.live_parent_generation
+            .lock()
+            .expect("subagent live parent generation mutex is not poisoned")
+            .clone()
+    }
     pub(super) fn effective_max_threads(&self) -> usize {
         if self.enabled.load(Ordering::Acquire) {
             self.max_threads.load(Ordering::Acquire)

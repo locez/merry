@@ -10,8 +10,9 @@ use super::scheduler::{
 use super::scope::ParentCapabilities;
 use super::spec::{validate_no_write_scope_conflicts, validate_task_max_model_turns};
 use super::{
-    ChildRuntimeFactory, ChildWorkspaceScope, PlanLinkRuntime, SubagentActivityHub, SubagentConfig,
-    SubagentError, SubagentResultView, SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec,
+    ChildRuntimeFactory, ChildWorkspaceScope, ParentPrimaryModel, PlanLinkRuntime,
+    SubagentActivityHub, SubagentConfig, SubagentError, SubagentLimitBehavior, SubagentResultView,
+    SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec,
 };
 use crate::{RuntimeError, TaskAnchor};
 use merry_core::{
@@ -20,7 +21,6 @@ use merry_core::{
 };
 use std::{
     collections::{BTreeMap, VecDeque},
-    path::{Path, PathBuf},
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
@@ -54,6 +54,8 @@ pub struct SubagentManager {
     pub(super) max_model_turns: Arc<AtomicU32>,
     pub(super) default_timeout_secs: Arc<AtomicU64>,
     pub(super) foreground_wait_budget_secs: Arc<AtomicU64>,
+    pub(super) max_total_tokens: Arc<AtomicU64>,
+    pub(super) limit_behavior: Arc<StdMutex<SubagentLimitBehavior>>,
     pub(super) has_agents: Arc<AtomicBool>,
     pub(super) factory: Arc<dyn ChildRuntimeFactory>,
     pub(super) state: Arc<Mutex<SubagentManagerState>>,
@@ -67,6 +69,8 @@ pub struct SubagentManager {
     pub(super) plan_link_runtime: Arc<StdMutex<Option<Arc<dyn PlanLinkRuntime>>>>,
     pub(super) parent_capabilities: Arc<StdMutex<Option<ParentCapabilities>>>,
     pub(super) activity_hub: Arc<StdMutex<Option<Arc<SubagentActivityHub>>>>,
+    pub(super) live_parent_model: Arc<StdMutex<Option<ParentPrimaryModel>>>,
+    pub(super) live_parent_generation: Arc<StdMutex<merry_llm::GenerationConfig>>,
     pub(super) session_token: CancellationToken,
 }
 
@@ -176,6 +180,8 @@ impl SubagentManager {
             foreground_wait_budget_secs: Arc::new(AtomicU64::new(
                 config.foreground_wait_budget_secs(),
             )),
+            max_total_tokens: Arc::new(AtomicU64::new(config.max_total_tokens().unwrap_or(0))),
+            limit_behavior: Arc::new(StdMutex::new(config.limit_behavior())),
             has_agents: Arc::new(AtomicBool::new(false)),
             factory,
             state: Arc::new(Mutex::new(SubagentManagerState::default())),
@@ -189,8 +195,55 @@ impl SubagentManager {
             plan_link_runtime: Arc::new(StdMutex::new(None)),
             parent_capabilities: Arc::new(StdMutex::new(None)),
             activity_hub: Arc::new(StdMutex::new(None)),
+            live_parent_model: Arc::new(StdMutex::new(None)),
+            live_parent_generation: Arc::new(StdMutex::new(merry_llm::GenerationConfig::default())),
             session_token: CancellationToken::new(),
         }
+    }
+
+    /// Updates the live parent primary model snapshot read when building new children.
+    pub(crate) fn update_parent_primary_model(&self, model: ParentPrimaryModel) {
+        *self
+            .live_parent_model
+            .lock()
+            .expect("subagent live parent model mutex is not poisoned") = Some(model);
+    }
+
+    /// Updates the live parent generation config snapshot read when building new children.
+    pub(crate) fn update_parent_generation_config(&self, config: merry_llm::GenerationConfig) {
+        *self
+            .live_parent_generation
+            .lock()
+            .expect("subagent live parent generation mutex is not poisoned") = config;
+    }
+
+    pub(super) fn live_parent_model_snapshot(&self) -> Option<ParentPrimaryModel> {
+        self.live_parent_model
+            .lock()
+            .expect("subagent live parent model mutex is not poisoned")
+            .clone()
+    }
+
+    pub(super) fn live_parent_generation_snapshot(&self) -> merry_llm::GenerationConfig {
+        self.live_parent_generation
+            .lock()
+            .expect("subagent live parent generation mutex is not poisoned")
+            .clone()
+    }
+
+    /// Returns the optional default per-child cumulative token circuit breaker.
+    pub(crate) fn max_total_tokens(&self) -> Option<u64> {
+        match self.max_total_tokens.load(Ordering::Acquire) {
+            0 => None,
+            limit => Some(limit),
+        }
+    }
+
+    fn effective_limit_behavior(&self) -> SubagentLimitBehavior {
+        *self
+            .limit_behavior
+            .lock()
+            .expect("subagent limit behavior mutex is not poisoned")
     }
 
     /// Returns the optional default wall-clock timeout in seconds for child tasks.
@@ -381,6 +434,12 @@ impl SubagentManager {
         );
         self.foreground_wait_budget_secs
             .store(config.foreground_wait_budget_secs(), Ordering::Release);
+        self.max_total_tokens
+            .store(config.max_total_tokens().unwrap_or(0), Ordering::Release);
+        *self
+            .limit_behavior
+            .lock()
+            .expect("subagent limit behavior mutex is not poisoned") = config.limit_behavior();
         self.enabled.store(enabled, Ordering::Release);
         if enabled {
             let mut state = self.state.lock().await;
@@ -615,10 +674,22 @@ impl SubagentManager {
             },
         );
 
-        for (agent_id, task_id, task, task_anchor, plan_link) in accepted_tasks {
+        for (task_index, (agent_id, task_id, task, task_anchor, plan_link)) in
+            accepted_tasks.into_iter().enumerate()
+        {
             let child_token = parent_token.child_token();
             let starts_now = running_child_count(&state) < self.effective_max_threads()
                 && batch_running_child_count(&state, batch_id) < batch_max_concurrency;
+            if !starts_now && self.effective_limit_behavior() == SubagentLimitBehavior::Fail {
+                rejected.push(RejectedSubagentView {
+                    task_index,
+                    reason: format!(
+                        "maximum concurrent subagents ({}) reached (limit_behavior = fail)",
+                        self.effective_max_threads()
+                    ),
+                });
+                continue;
+            }
             let managed_status = if starts_now {
                 SubagentStatusLabel::Running
             } else {
@@ -834,6 +905,8 @@ impl SubagentManager {
             depth: self.depth,
             plan_link_runtime: Arc::clone(&self.plan_link_runtime),
             activity_hub: Arc::clone(&self.activity_hub),
+            live_parent_model: Arc::clone(&self.live_parent_model),
+            live_parent_generation: Arc::clone(&self.live_parent_generation),
         }
     }
 
@@ -897,100 +970,7 @@ impl SubagentManager {
     }
 }
 
-fn wait_mode_satisfied(mode: WaitMode, agents: &[SubagentStatusView]) -> bool {
-    match mode {
-        WaitMode::Any => agents.iter().any(SubagentStatusView::is_terminal),
-        WaitMode::All => agents.iter().all(SubagentStatusView::is_terminal),
-    }
-}
-
-impl ManagedSubagent {
-    pub(super) fn status_view(&self) -> SubagentStatusView {
-        let summary = if self.summary.is_empty() {
-            fallback_summary(self.status.clone(), &self.task)
-        } else {
-            self.summary.clone()
-        };
-        let elapsed_ms = if self.status.is_terminal() {
-            self.elapsed_ms
-        } else {
-            self.started_at
-                .map(|started| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX))
-                .unwrap_or(self.elapsed_ms)
-        };
-
-        SubagentStatusView {
-            agent_id: self.agent_id.clone(),
-            task_id: self.task_id.clone(),
-            display_name: self.task.display_name().map(str::to_owned),
-            role: self.task.role().map(str::to_owned),
-            status: self.status.clone(),
-            summary,
-            result: self.result.clone(),
-            output_paths: self.output_paths.clone(),
-            changed_paths: self.changed_paths.clone(),
-            diagnostics: self.diagnostics.clone(),
-            turns_used: self.turns_used,
-            tool_calls: self.tool_calls,
-            elapsed_ms,
-            usage: self.usage,
-            raw_output_bytes: self.raw_output_bytes,
-        }
-    }
-}
-
-pub(super) fn selected_statuses(
-    state: &SubagentManagerState,
-    agent_ids: &[SubagentId],
-) -> Vec<SubagentStatusView> {
-    state
-        .agents
-        .values()
-        .filter(|agent| agent_ids.contains(&agent.agent_id))
-        .map(ManagedSubagent::status_view)
-        .collect()
-}
-
-fn paths_to_strings(paths: &[PathBuf]) -> Vec<String> {
-    paths
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect()
-}
-
-fn ensure_scope_within_parent(
-    field: &'static str,
-    requested: &[PathBuf],
-    parent: &[PathBuf],
-) -> Result<(), SubagentError> {
-    for path in requested {
-        if !parent
-            .iter()
-            .any(|root| root == Path::new(".") || path == root || path.starts_with(root))
-        {
-            return Err(SubagentError::CapabilityExpansion {
-                field,
-                value: path.display().to_string(),
-            });
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn initial_summary(status: SubagentStatusLabel) -> String {
-    match status {
-        SubagentStatusLabel::Queued => "child queued".to_owned(),
-        SubagentStatusLabel::Running => "child running".to_owned(),
-        SubagentStatusLabel::Completed => "child completed".to_owned(),
-        SubagentStatusLabel::Failed => "child failed".to_owned(),
-        SubagentStatusLabel::Blocked => "child blocked".to_owned(),
-        SubagentStatusLabel::Cancelled => "child cancelled".to_owned(),
-    }
-}
-
-pub(super) fn fallback_summary(status: SubagentStatusLabel, task: &SubagentTaskSpec) -> String {
-    match task.display_name() {
-        Some(display_name) => format!("{}: {display_name}", initial_summary(status)),
-        None => initial_summary(status),
-    }
-}
+pub(super) use super::manager_helpers::{
+    ensure_scope_within_parent, initial_summary, paths_to_strings, selected_statuses,
+    wait_mode_satisfied,
+};

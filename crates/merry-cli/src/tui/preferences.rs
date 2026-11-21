@@ -248,7 +248,7 @@ impl Default for TuiSettingsDefaults {
             model: None,
             reasoning_efforts: BTreeMap::new(),
             context_window_tokens: merry_runtime::DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
-            subagents_enabled: false,
+            subagents_enabled: true,
             subagent_max_threads: limits.max_threads(),
             auto_compaction_enabled: true,
             compaction_strategy: "Balanced".to_owned(),

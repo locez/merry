@@ -150,19 +150,19 @@ pub use skill::{
 };
 pub use step::StepContext;
 pub use subagent::{
-    BackgroundHandoffNotice, CancelSubagentsInput, ChildRuntimeFactory, ChildRuntimeInput,
-    ChildWorkspaceScope, ContextFileRef, DEFAULT_FOREGROUND_WAIT_BUDGET_SECS,
+    BackgroundHandoffNotice, BuiltChildRuntime, CancelSubagentsInput, ChildRuntimeFactory,
+    ChildRuntimeInput, ChildWorkspaceScope, ContextFileRef, DEFAULT_FOREGROUND_WAIT_BUDGET_SECS,
     DEFAULT_MAX_MODEL_TURNS, DEFAULT_MIN_MODEL_TURNS, MAX_CONTEXT_FILE_REFS,
-    MAX_CONTEXT_FILES_TOTAL_BYTES, PlanLinkRuntime, PlanSubagentScope, PreloadedContextFile,
-    RejectedSubagentView, SUBAGENT_HANDOFF_CONTEXT_ID, SendSubagentMessageInput,
-    SendSubagentMessageOptions, SendSubagentMessageOutcome, SendSubagentMessageOutput,
-    SpawnSubagentTaskInput, SpawnSubagentsInput, SpawnSubagentsOutput, SpawnWaitMode,
-    SpawnedSubagentStatusLabel, SpawnedSubagentView, SubagentActivityHub, SubagentActivityReceiver,
-    SubagentConfig, SubagentError, SubagentInspectSession, SubagentManager,
-    SubagentMessageDelivery, SubagentResultView, SubagentStatusLabel, SubagentStatusView,
-    SubagentTaskSpec, WaitMode, WaitSubagentsInput, WaitSubagentsOutput, preload_context_files,
-    render_subagent_handoff, subagent_registered_tools, subagent_tool_specs,
-    validate_no_write_scope_conflicts,
+    MAX_CONTEXT_FILES_TOTAL_BYTES, ParentPrimaryModel, PlanLinkRuntime, PlanSubagentScope,
+    PreloadedContextFile, RejectedSubagentView, SUBAGENT_HANDOFF_CONTEXT_ID,
+    SendSubagentMessageInput, SendSubagentMessageOptions, SendSubagentMessageOutcome,
+    SendSubagentMessageOutput, SpawnSubagentTaskInput, SpawnSubagentsInput, SpawnSubagentsOutput,
+    SpawnWaitMode, SpawnedSubagentStatusLabel, SpawnedSubagentView, SubagentActivityHub,
+    SubagentActivityReceiver, SubagentConfig, SubagentError, SubagentInspectSession,
+    SubagentLimitBehavior, SubagentManager, SubagentMessageDelivery, SubagentResultView,
+    SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec, WaitMode, WaitSubagentsInput,
+    WaitSubagentsOutput, preload_context_files, render_subagent_handoff, subagent_registered_tools,
+    subagent_registered_tools_with_roles, subagent_tool_specs, validate_no_write_scope_conflicts,
 };
 pub use tool::{
     ActionExecutionEvidence, ActionProposal, ActionProposalError, ActionProposalEvidence,

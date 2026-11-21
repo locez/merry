@@ -35,7 +35,6 @@ async fn projects_skill_metadata_without_body() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            browser: None,
             automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
@@ -111,7 +110,6 @@ async fn includes_skill_roots_in_workspace_read_tools() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            browser: None,
             automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
@@ -157,7 +155,6 @@ async fn allows_missing_default_skill_root() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            browser: None,
             automatic_compaction: merry_runtime::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,

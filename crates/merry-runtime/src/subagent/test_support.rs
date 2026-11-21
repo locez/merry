@@ -6,7 +6,7 @@ pub(super) use super::{
     activity::SubagentActivityHub,
     child::{
         ChildLoopLaunch, ChildLoopProjection, apply_loop_result, error_info,
-        finish_child_with_status, generation_config_for_child_task,
+        finish_child_with_status, generation_config_for_child_task_with_parent,
     },
     manager::{ManagedSubagent, SubagentBatch},
     plan_link::{PlanLinkRuntime, PlanSubagentScope, plan_link_runtime_for_controller},

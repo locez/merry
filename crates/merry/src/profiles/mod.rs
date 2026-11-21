@@ -9,8 +9,12 @@ pub use merry_coding::{
     CodingPermissionPolicy, CodingPermissionPolicyError, CodingRuntime, CodingRuntimeBuildError,
     CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig,
     DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS,
-    MAX_ROOT_PROJECT_RULES_BYTES, MIN_CODING_SUBAGENT_MODEL_TURNS, ProjectRulesLoadError,
-    ROOT_PROJECT_RULES_FILE, WorkspaceToolLimits, coding_agent, load_root_project_rules,
+    MAX_ROLE_PROMPT_FILE_BYTES, MAX_ROOT_PROJECT_RULES_BYTES, MIN_CODING_SUBAGENT_MODEL_TURNS,
+    ProjectRulesLoadError, ROOT_PROJECT_RULES_FILE, ResolvedSubagentRuntime,
+    SubagentDefaultOverride, SubagentModelOverride, SubagentResolutionInput, SubagentRoleCatalog,
+    SubagentRoleError, SubagentRoleOverlay, SubagentRoleSpec, SubagentWorkspaceAccess,
+    WorkspaceToolLimits, coding_agent, load_root_project_rules, load_workspace_prompt_file,
+    resolve_subagent_runtime,
 };
 
 pub use merry_process::{ProcessBackend, ProcessSession};

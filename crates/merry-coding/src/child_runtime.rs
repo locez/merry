@@ -1,18 +1,18 @@
 use crate::{
-    CODING_LOOP_PROCESS_TOOL, CodingAgentProfileBuilder, builtin_subagent_role_instructions,
-    coding_subagent_policy_prompt, runtime::CodingRuntimePolicy,
+    CODING_LOOP_PROCESS_TOOL, CodingAgentProfileBuilder, SubagentResolutionInput,
+    SubagentRoleCatalog, coding_subagent_policy_prompt, resolve_subagent_runtime,
+    runtime::CodingRuntimePolicy,
 };
 use merry_core::{SessionId, ToolName};
 use merry_llm::{ModelName, ModelProvider};
 use merry_process::{ProcessBackend, ProcessSessionRequest};
 use merry_runtime::{
-    ChildRuntimeFactory, ChildRuntimeInput, ChildWorkspaceScope, CompactionConfig,
+    BuiltChildRuntime, ChildRuntimeFactory, ChildRuntimeInput, CompactionConfig,
     LocalWorkspaceProcessSandboxProfile, ProcessSessionPermissionView, PromptBlock, PromptProfile,
-    Runtime, RuntimeError, RuntimeModelRole, SUBAGENT_HANDOFF_CONTEXT_ID, SubagentConfig,
-    SubagentManager, ToolAdmission, preload_context_files, render_subagent_handoff,
-    subagent_registered_tools,
+    Runtime, RuntimeError, SUBAGENT_HANDOFF_CONTEXT_ID, SubagentConfig, SubagentManager,
+    ToolAdmission, preload_context_files, render_subagent_handoff,
+    subagent_registered_tools_with_roles,
 };
-use merry_tools::{BROWSER_NETWORK_TOOL, BROWSER_TAB_TOOL};
 use std::{num::NonZeroUsize, path::Path, sync::Arc};
 
 /// Coding-owned child runtime factory.
@@ -37,7 +37,9 @@ pub(crate) struct CodingRuntimeComposition {
     pub(crate) model: ModelName,
     pub(crate) process_backend: Arc<dyn ProcessBackend>,
     pub(crate) parent_process_permissions: Option<ProcessSessionPermissionView>,
+    pub(crate) parent_workspace_writable: bool,
     pub(crate) subagent_config: SubagentConfig,
+    pub(crate) role_catalog: SubagentRoleCatalog,
     pub(crate) automatic_compaction: CompactionConfig,
     pub(crate) max_parallel_tool_calls: Option<NonZeroUsize>,
     pub(crate) policy: CodingRuntimePolicy,
@@ -51,10 +53,36 @@ impl CodingChildRuntimeFactory {
 
 impl ChildRuntimeFactory for CodingChildRuntimeFactory {
     fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
-        let write_scope_is_explicit = input.task.write_scope_is_explicit();
+        self.build_child_with_overrides(input)
+            .map(|built| built.runtime)
+    }
+
+    fn build_child_with_overrides(
+        &self,
+        input: ChildRuntimeInput,
+    ) -> Result<BuiltChildRuntime, RuntimeError> {
         let workspace_scope = input.workspace_scope;
-        let child_workspace_writable =
-            child_workspace_is_writable(&workspace_scope, write_scope_is_explicit);
+        let resolved = resolve_subagent_runtime(
+            &self.composition.role_catalog,
+            &SubagentResolutionInput {
+                task: &input.task,
+                parent_allowed_tools: &input.allowed_tools,
+                workspace_scope: &workspace_scope,
+                parent_workspace_writable: self.composition.parent_workspace_writable,
+                depth: input.depth,
+                max_depth: self.composition.subagent_config.max_depth(),
+                max_model_turns_cap: self.composition.subagent_config.max_model_turns(),
+                parent_primary_model: input.parent_primary_model.as_ref(),
+                fallback_provider: Arc::clone(&self.composition.provider),
+                fallback_model: &self.composition.model,
+                parent_generation_config: &input.parent_generation_config,
+            },
+        )
+        .map_err(|source| RuntimeError::ChildRuntimeBuild {
+            message: source.to_string(),
+        })?;
+
+        let child_workspace_writable = resolved.workspace_writable;
         let mut session_request =
             ProcessSessionRequest::new().with_workspace_writable(child_workspace_writable);
         if let Some(view) = self.composition.parent_process_permissions.clone() {
@@ -68,33 +96,23 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
                 message: source.to_string(),
             })?;
         let runner = process_session.runner();
-        let allow_local_workspace_process = input
+        let allow_local_workspace_process = resolved
             .allowed_tools
             .iter()
             .any(|tool| tool.as_str() == CODING_LOOP_PROCESS_TOOL);
-        let (child_provider, child_model) = if is_browser_subagent_toolset(&input.allowed_tools)
-            && let Some(browser_role) = self.composition.policy.role(RuntimeModelRole::Browser)
-        {
-            (browser_role.provider(), browser_role.model().clone())
-        } else {
-            (
-                Arc::clone(&self.composition.provider),
-                self.composition.model.clone(),
-            )
-        };
-        let effective_role = input.task.role().unwrap_or(if child_workspace_writable {
-            "coder"
-        } else {
-            "explore"
-        });
-        let cache_key = shared_child_prompt_cache_key(&input.parent_session_id, effective_role);
+
+        let cache_key =
+            shared_child_prompt_cache_key(&input.parent_session_id, &resolved.role_name);
         // Do not install `task_anchor` redundantly: the full delegated task is
         // passed directly as the child's first User message.
         let mut builder = Runtime::builder(input.session_id.clone())
             .prompt_cache_key(cache_key)
             .automatic_compaction(self.composition.automatic_compaction.clone())
-            .model_provider(child_provider, child_model)
-            .tool_admission(ToolAdmission::allow_only(input.allowed_tools.clone()));
+            .model_provider(Arc::clone(&resolved.provider), resolved.model.clone())
+            .tool_admission(ToolAdmission::allow_only(resolved.allowed_tools.clone()));
+        if let Some(retry_policy) = resolved.retry_policy {
+            builder = builder.model_retry_policy(retry_policy);
+        }
         if let Some(limit) = self.composition.max_parallel_tool_calls {
             builder = builder.max_parallel_tool_calls(limit);
         }
@@ -117,14 +135,16 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
             input.session_id.clone(),
             self.composition.subagent_config,
             child_factory,
-            input
+            resolved
                 .allowed_tools
                 .iter()
                 .any(|tool| tool.as_str() == "spawn_subagents"),
             input.depth,
         );
+        let role_summaries = self.composition.role_catalog.enabled_role_summaries();
         let [spawn_tool, send_tool, wait_tool, cancel_tool] =
-            subagent_registered_tools(child_manager.clone()).map_err(RuntimeError::from)?;
+            subagent_registered_tools_with_roles(child_manager.clone(), &role_summaries)
+                .map_err(RuntimeError::from)?;
         builder = builder
             .subagent_parent_scope(workspace_scope.clone())
             .subagent_manager(child_manager);
@@ -137,17 +157,25 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
         if let Some(scope) = input.plan_subagent_scope {
             builder = builder.plan_subagent_scope(scope);
         }
-        let child_prompt_profile = build_child_prompt_profile(&input.allowed_tools, effective_role)
-            .map_err(|source| RuntimeError::ChildRuntimeBuild {
-                message: source.to_string(),
-            })?;
+        let child_prompt_profile = build_child_prompt_profile(
+            &resolved.allowed_tools,
+            resolved.role_instructions.as_deref(),
+        )
+        .map_err(|source| RuntimeError::ChildRuntimeBuild {
+            message: source.to_string(),
+        })?;
         let memory = self.composition.profile_builder.durable_memory_handle();
+        let effective_write_scope = if child_workspace_writable {
+            workspace_scope.write_scope().to_vec()
+        } else {
+            Vec::new()
+        };
         let mut profile = self
             .composition
             .profile_builder
             .clone()
             .prompt_profile(child_prompt_profile)
-            .patch_write_scope(workspace_scope.write_scope().to_vec())
+            .patch_write_scope(effective_write_scope)
             .forbidden_paths(workspace_scope.forbidden_paths().to_vec())
             .register_tools([spawn_tool, send_tool, wait_tool, cancel_tool]);
         if !workspace_scope
@@ -175,27 +203,28 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
         if let Some(memory) = memory {
             builder = builder.durable_memory(memory, false);
         }
-        self.composition.policy.apply_to(builder).build()
+        let runtime = self.composition.policy.apply_to(builder).build()?;
+        Ok(BuiltChildRuntime {
+            runtime,
+            generation_config: Some(resolved.generation_config),
+            max_model_turns: Some(resolved.max_model_turns),
+            timeout_secs: resolved.timeout_secs,
+            max_total_tokens: resolved.max_total_tokens,
+            resolved_role: Some(resolved.role_name),
+        })
     }
-}
-
-fn child_workspace_is_writable(
-    workspace_scope: &ChildWorkspaceScope,
-    write_scope_is_explicit: bool,
-) -> bool {
-    !(write_scope_is_explicit && workspace_scope.write_scope().is_empty())
 }
 
 fn build_child_prompt_profile(
     allowed_tools: &[ToolName],
-    effective_role: &str,
+    role_instructions: Option<&str>,
 ) -> Result<PromptProfile, merry_runtime::PromptError> {
     let mut profile =
         PromptProfile::for_subagent(allowed_tools).with_stable_block(PromptBlock::new(
             "merry_coding_subagent_policy",
             coding_subagent_policy_prompt(allowed_tools),
         )?)?;
-    if let Some(role_text) = builtin_subagent_role_instructions(effective_role) {
+    if let Some(role_text) = role_instructions.filter(|text| !text.trim().is_empty()) {
         profile = profile.with_stable_block(PromptBlock::new("merry_subagent_role", role_text)?)?;
     }
     Ok(profile)
@@ -222,16 +251,6 @@ fn shared_child_prompt_cache_key(parent_session_id: &SessionId, effective_role: 
         .unwrap_or_else(|_| parent_session_id.clone())
 }
 
-fn is_browser_subagent_toolset(allowed_tools: &[ToolName]) -> bool {
-    let uses_browser = allowed_tools
-        .iter()
-        .any(|tool| matches!(tool.as_str(), BROWSER_TAB_TOOL | BROWSER_NETWORK_TOOL));
-    let allows_code_mutation_or_process = allowed_tools
-        .iter()
-        .any(|tool| matches!(tool.as_str(), CODING_LOOP_PROCESS_TOOL | "apply_patch"));
-    uses_browser && !allows_code_mutation_or_process
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,11 +266,12 @@ mod tests {
     };
     use merry_process::{LocalProcessBackend, ProcessBackend, ProcessSession, TokioProcessRunner};
     use merry_runtime::{
-        AcceptedLocalWorkspaceProcessAdmission, CitationCompactionPolicy, CompactionConfig,
-        PermissionAdmissionContext, PermissionAdmissionDecision, PermissionAdmissionFuture,
-        PermissionAdmissionSource, ProcessRunner as RuntimeProcessRunner, Runtime,
-        RuntimeModelRole, StaticPermissionedProcessRunnerFactory, StepContext, StepInput,
-        SubagentConfig, SubagentTaskSpec, TaskAnchor,
+        AcceptedLocalWorkspaceProcessAdmission, ChildWorkspaceScope, CitationCompactionPolicy,
+        CompactionConfig, PermissionAdmissionContext, PermissionAdmissionDecision,
+        PermissionAdmissionFuture, PermissionAdmissionSource,
+        ProcessRunner as RuntimeProcessRunner, Runtime, RuntimeModelRole,
+        StaticPermissionedProcessRunnerFactory, StepContext, StepInput, SubagentConfig,
+        SubagentTaskSpec, TaskAnchor,
     };
     use serde_json::json;
     use std::sync::{
@@ -261,26 +281,59 @@ mod tests {
 
     #[test]
     fn explicit_empty_write_scope_requests_read_only_child_workspace() {
+        let catalog = SubagentRoleCatalog::builtin();
+        let fallback_provider: Arc<dyn ModelProvider> =
+            Arc::new(FakeModelProvider::new(Vec::new()));
+        let fallback_model = ModelName::new("fallback").expect("valid model");
+        let generation = GenerationConfig::default();
+
         let task = SubagentTaskSpec::new("Read the assigned files.", 1)
             .expect("valid task")
             .with_write_scope(Vec::<&str>::new())
             .expect("empty write scope is valid");
         let scope = ChildWorkspaceScope::from_task(&task);
-
-        assert!(!child_workspace_is_writable(
-            &scope,
-            task.write_scope_is_explicit()
-        ));
+        let ro = resolve_subagent_runtime(
+            &catalog,
+            &SubagentResolutionInput {
+                task: &task,
+                parent_allowed_tools: &[],
+                workspace_scope: &scope,
+                parent_workspace_writable: true,
+                depth: 1,
+                max_depth: 1,
+                max_model_turns_cap: 80,
+                parent_primary_model: None,
+                fallback_provider: Arc::clone(&fallback_provider),
+                fallback_model: &fallback_model,
+                parent_generation_config: &generation,
+            },
+        )
+        .expect("ro resolves");
+        assert!(!ro.workspace_writable);
 
         let writable_task = SubagentTaskSpec::new("Edit assigned files.", 1)
             .expect("valid task")
             .with_write_scope(["src"])
             .expect("write scope is valid");
         let writable_scope = ChildWorkspaceScope::from_task(&writable_task);
-        assert!(child_workspace_is_writable(
-            &writable_scope,
-            writable_task.write_scope_is_explicit()
-        ));
+        let rw = resolve_subagent_runtime(
+            &catalog,
+            &SubagentResolutionInput {
+                task: &writable_task,
+                parent_allowed_tools: &[],
+                workspace_scope: &writable_scope,
+                parent_workspace_writable: true,
+                depth: 1,
+                max_depth: 1,
+                max_model_turns_cap: 80,
+                parent_primary_model: None,
+                fallback_provider,
+                fallback_model: &fallback_model,
+                parent_generation_config: &generation,
+            },
+        )
+        .expect("rw resolves");
+        assert!(rw.workspace_writable);
     }
 
     fn process_backend() -> Arc<dyn ProcessBackend> {
@@ -321,10 +374,12 @@ mod tests {
             model: ModelName::new("child-primary").expect("child model should be valid"),
             process_backend: process_backend(),
             parent_process_permissions: None,
+            parent_workspace_writable: true,
             subagent_config: SubagentConfig::new(1, 1)
                 .expect("subagent config should be valid")
-                .with_model_turn_bounds(2048, 2048)
+                .with_model_turn_bounds(1, 80)
                 .expect("coding subagent bounds should be valid"),
+            role_catalog: SubagentRoleCatalog::builtin(),
             automatic_compaction: CompactionConfig::disabled(),
             max_parallel_tool_calls: None,
             policy,
@@ -344,6 +399,8 @@ mod tests {
             workspace_scope: ChildWorkspaceScope::workspace_root(),
             depth: 0,
             generation_config: GenerationConfig::default(),
+            parent_primary_model: None,
+            parent_generation_config: GenerationConfig::default(),
             plan_subagent_control: None,
             plan_subagent_scope: None,
             plan_link: None,
@@ -595,34 +652,51 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn child_runtime_routes_browser_only_subagents_to_browser_role_when_configured() {
+    async fn child_runtime_routes_configured_role_model_and_live_parent_model_switch() {
         let temp = tempfile::tempdir().expect("tempdir should be created");
         let primary = Arc::new(FakeModelProvider::new(vec![Ok(completed_text(
             "primary reply",
         ))]));
+        let switched_primary = Arc::new(FakeModelProvider::new(vec![Ok(completed_text(
+            "switched reply",
+        ))]));
         let browser = Arc::new(FakeModelProvider::new(vec![Ok(completed_text(
             "browser reply",
         ))]));
-        let browser_role = CodingModelRoleConfig::new(
-            RuntimeModelRole::Browser,
-            browser.clone(),
-            ModelName::new("browser-vision-model").expect("browser model valid"),
-        )
-        .expect("browser role valid");
-        let policy =
-            CodingRuntimePolicy::try_new(vec![browser_role], CodingPermissionPolicy::default())
-                .expect("policy valid");
-        let factory = build_factory(temp.path(), primary.clone(), policy);
+        let mut catalog = SubagentRoleCatalog::builtin();
+        catalog
+            .apply_role_overlay(
+                "browser",
+                crate::SubagentRoleOverlay {
+                    base: Some("review".to_owned()),
+                    model_override: Some(crate::SubagentModelOverride {
+                        provider: browser.clone(),
+                        model: ModelName::new("browser-vision-model").expect("browser model valid"),
+                        retry_policy: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .expect("browser role overlay valid");
+        let policy = CodingRuntimePolicy::try_new(Vec::new(), CodingPermissionPolicy::default())
+            .expect("policy valid");
+        let mut factory = build_factory(temp.path(), primary.clone(), policy);
+        factory.composition.role_catalog = catalog;
 
+        let mut browser_input = child_input(
+            "child-browser-only",
+            vec![
+                ToolName::new("browser_tab").expect("valid name"),
+                ToolName::new("browser_network").expect("valid name"),
+                ToolName::new("read_text").expect("valid name"),
+            ],
+        );
+        browser_input.task = browser_input
+            .task
+            .with_role(Some("browser".to_owned()))
+            .expect("valid role");
         let browser_child = factory
-            .build_child(child_input(
-                "child-browser-only",
-                vec![
-                    ToolName::new("browser_tab").expect("valid name"),
-                    ToolName::new("browser_network").expect("valid name"),
-                    ToolName::new("read_text").expect("valid name"),
-                ],
-            ))
+            .build_child(browser_input)
             .expect("browser child runtime builds");
         run_text_step(&browser_child, "Inspect preview page.").await;
         assert_eq!(browser.recorded_requests().len(), 1);
@@ -632,20 +706,24 @@ mod tests {
         );
         assert_eq!(primary.recorded_requests().len(), 0);
 
-        let mixed_child = factory
-            .build_child(child_input(
-                "child-mixed",
-                vec![
-                    ToolName::new("browser_tab").expect("valid name"),
-                    ToolName::new("run_process").expect("valid name"),
-                ],
-            ))
-            .expect("mixed child runtime builds");
-        run_text_step(&mixed_child, "Fix bug and check UI.").await;
-        assert_eq!(primary.recorded_requests().len(), 1);
+        // Live switched parent model takes effect immediately for roles without explicit model override.
+        let mut switched_input = child_input(
+            "child-switched",
+            vec![ToolName::new("read_text").expect("valid name")],
+        );
+        switched_input.parent_primary_model = Some(merry_runtime::ParentPrimaryModel {
+            provider: switched_primary.clone(),
+            model: ModelName::new("live-switched-model").expect("valid"),
+            retry_policy: ModelRetryPolicy::disabled(),
+        });
+        let switched_child = factory
+            .build_child(switched_input)
+            .expect("switched child runtime builds");
+        run_text_step(&switched_child, "Use live parent model.").await;
+        assert_eq!(switched_primary.recorded_requests().len(), 1);
         assert_eq!(
-            primary.recorded_requests()[0].model().as_str(),
-            "child-primary"
+            switched_primary.recorded_requests()[0].model().as_str(),
+            "live-switched-model"
         );
     }
 
@@ -689,10 +767,12 @@ mod tests {
             model: ModelName::new("child-primary").expect("child model should be valid"),
             process_backend: Arc::new(LocalProcessBackend::from_session(session)),
             parent_process_permissions: None,
+            parent_workspace_writable: true,
             subagent_config: SubagentConfig::new(1, 1)
                 .expect("subagent config should be valid")
-                .with_model_turn_bounds(2048, 2048)
+                .with_model_turn_bounds(1, 80)
                 .expect("coding subagent bounds should be valid"),
+            role_catalog: SubagentRoleCatalog::builtin(),
             automatic_compaction: CompactionConfig::disabled(),
             max_parallel_tool_calls: None,
             policy,
@@ -713,6 +793,8 @@ mod tests {
                 workspace_scope: scope,
                 depth: 1,
                 generation_config: GenerationConfig::default(),
+                parent_primary_model: None,
+                parent_generation_config: GenerationConfig::default(),
                 plan_subagent_control: None,
                 plan_subagent_scope: None,
                 plan_link: None,
@@ -783,6 +865,8 @@ mod tests {
                     workspace_scope: scope,
                     depth: 1,
                     generation_config: GenerationConfig::default(),
+                    parent_primary_model: None,
+                    parent_generation_config: GenerationConfig::default(),
                     plan_subagent_control: None,
                     plan_subagent_scope: None,
                     plan_link: None,

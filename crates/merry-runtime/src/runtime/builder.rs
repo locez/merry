@@ -819,6 +819,13 @@ impl RuntimeBuilder {
                 .clone();
             manager.attach_parent_capabilities(allowed_tools, parent_scope);
             manager.attach_activity_hub(Arc::clone(&activity_hub));
+            if let Some(primary) = self.model_configs.get(RuntimeModelRole::Primary) {
+                manager.update_parent_primary_model(crate::ParentPrimaryModel {
+                    provider: primary.provider(),
+                    model: primary.model().clone(),
+                    retry_policy: primary.retry_policy(),
+                });
+            }
         }
         // Plan is an advisory projection. Execution is started only by an
         // explicit subagent spawn and optional `plan_client_key` binding.
