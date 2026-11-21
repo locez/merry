@@ -30,11 +30,12 @@ pub use protocol::{
     SendSubagentMessageOutcome, SendSubagentMessageOutput, SpawnSubagentTaskInput,
     SpawnSubagentsInput, SpawnSubagentsOutput, SpawnWaitMode, SpawnedSubagentStatusLabel,
     SpawnedSubagentView, SubagentMessageDelivery, SubagentResultView, SubagentStatusLabel,
-    SubagentStatusView, WaitMode, WaitSubagentsInput, WaitSubagentsOutput,
+    SubagentStatusView, SubagentWorkspaceMode, SubagentWorktreeBase, SubagentWorktreeView,
+    WaitMode, WaitSubagentsInput, WaitSubagentsOutput,
 };
 pub use scope::{
-    BuiltChildRuntime, ChildRuntimeFactory, ChildRuntimeInput, ChildWorkspaceScope,
-    ParentPrimaryModel, ResumableChildSession,
+    BuiltChildRuntime, ChildRuntimeFactory, ChildRuntimeInput, ChildWorkspaceFinalization,
+    ChildWorkspaceLifecycle, ChildWorkspaceScope, ParentPrimaryModel, ResumableChildSession,
 };
 use spec::validate_task_max_model_turns;
 pub use spec::{
@@ -95,6 +96,26 @@ pub(crate) fn completion_notification_text(statuses: &[SubagentStatusView]) -> S
             text.push_str("changed_paths: ");
             text.push_str(&status.changed_paths.join(", "));
             text.push('\n');
+        }
+
+        if let Some(worktree) = status.worktree.as_ref() {
+            text.push_str(&format!(
+                "worktree: path={} baseline_oid={} retained={}\n",
+                sanitize_inline_text(&worktree.path),
+                sanitize_inline_text(&worktree.baseline_oid),
+                worktree.retained
+            ));
+            if let Some(diff_stat) = worktree
+                .diff_stat
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                text.push_str("worktree_diff_stat:\n");
+                text.push_str(diff_stat);
+                if !diff_stat.ends_with('\n') {
+                    text.push('\n');
+                }
+            }
         }
 
         if let Some(diagnostic) = status.diagnostics.as_ref() {

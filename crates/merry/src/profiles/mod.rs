@@ -13,7 +13,9 @@ pub use merry_coding::{
     ProjectRulesLoadError, ROOT_PROJECT_RULES_FILE, ResolvedSubagentRuntime,
     SubagentDefaultOverride, SubagentModelOverride, SubagentResolutionInput, SubagentRoleCatalog,
     SubagentRoleError, SubagentRoleOverlay, SubagentRoleSpec, SubagentWorkspaceAccess,
-    WorkspaceToolLimits, coding_agent, load_root_project_rules, load_workspace_prompt_file,
+    WorkspaceToolLimits, WorktreeError, WorktreeGcReport, WorktreeIsolationManager,
+    cleanup_orphaned_worktrees, cleanup_orphaned_worktrees_default, coding_agent,
+    default_worktree_base_dir, load_root_project_rules, load_workspace_prompt_file,
     resolve_subagent_runtime,
 };
 

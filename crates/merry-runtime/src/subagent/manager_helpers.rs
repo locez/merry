@@ -5,8 +5,31 @@ use super::{
     protocol::{SubagentStatusLabel, SubagentStatusView, WaitMode},
     spec::{SubagentError, SubagentTaskSpec},
 };
-use merry_core::SubagentId;
+use merry_core::{PlanLinkStatus, SubagentActivityPhase, SubagentId, SubagentTaskId};
 use std::path::{Path, PathBuf};
+
+pub(super) fn plan_link_status_for_agent(agent: &ManagedSubagent) -> PlanLinkStatus {
+    match agent.status {
+        SubagentStatusLabel::Completed => PlanLinkStatus::Completed,
+        SubagentStatusLabel::Cancelled => PlanLinkStatus::Cancelled,
+        SubagentStatusLabel::Blocked => PlanLinkStatus::Blocked,
+        SubagentStatusLabel::Failed => PlanLinkStatus::Failed,
+        SubagentStatusLabel::Queued | SubagentStatusLabel::Running => PlanLinkStatus::Failed,
+    }
+}
+
+pub(super) fn terminal_activity_for_agent(
+    agent: &ManagedSubagent,
+) -> Option<(SubagentTaskId, SubagentActivityPhase, String)> {
+    let phase = match agent.status {
+        SubagentStatusLabel::Completed => SubagentActivityPhase::Completed,
+        SubagentStatusLabel::Failed => SubagentActivityPhase::Failed,
+        SubagentStatusLabel::Blocked => SubagentActivityPhase::Blocked,
+        SubagentStatusLabel::Cancelled => SubagentActivityPhase::Cancelled,
+        SubagentStatusLabel::Queued | SubagentStatusLabel::Running => return None,
+    };
+    Some((agent.task_id.clone(), phase, agent.summary.clone()))
+}
 
 pub(super) fn wait_mode_satisfied(mode: WaitMode, agents: &[SubagentStatusView]) -> bool {
     match mode {
@@ -46,6 +69,7 @@ impl ManagedSubagent {
             elapsed_ms,
             usage: self.usage,
             raw_output_bytes: self.raw_output_bytes,
+            worktree: self.worktree.clone(),
         }
     }
 }
@@ -129,6 +153,18 @@ pub(super) fn apply_built_task_overrides(
         task = updated;
     }
     task
+}
+
+pub(super) fn generation_config_for_child_task_with_parent(
+    task: &SubagentTaskSpec,
+    parent_generation: &merry_llm::GenerationConfig,
+) -> merry_llm::GenerationConfig {
+    match task.reasoning_effort() {
+        Some(effort) => parent_generation
+            .clone()
+            .with_reasoning_effort(Some(effort.clone())),
+        None => parent_generation.clone(),
+    }
 }
 
 pub(super) fn error_info(code: &'static str, message: impl ToString) -> merry_core::ErrorInfo {

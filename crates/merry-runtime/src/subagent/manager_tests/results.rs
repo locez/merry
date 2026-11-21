@@ -416,6 +416,8 @@ async fn startup_error_after_terminal_claim_does_not_republish_terminal_activity
                 elapsed_ms: 0,
                 usage: None,
                 raw_output_bytes: 0,
+                workspace_lifecycle: None,
+                worktree: None,
             },
         );
     }
@@ -581,6 +583,8 @@ fn max_model_turns_result_is_exposed_as_recoverable_blocked_child() {
         elapsed_ms: 0,
         usage: None,
         raw_output_bytes: 0,
+        workspace_lifecycle: None,
+        worktree: None,
     };
     let result = AgentLoopResult::new(
         AgentLoopStatus::Blocked {

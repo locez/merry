@@ -311,6 +311,7 @@ mod tests {
             read_scope: vec![PathBuf::from("src")],
             write_scope: Vec::new(),
             forbidden_paths: vec![PathBuf::from("secret")],
+            workspace_mode: crate::SubagentWorkspaceMode::Shared,
         };
         let refs = vec![
             ContextFileRef::parse("src/a.rs:2-3").expect("valid"),

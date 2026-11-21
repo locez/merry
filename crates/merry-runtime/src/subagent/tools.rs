@@ -424,6 +424,8 @@ fn task_spec_from_input(
         expected_output,
         reasoning_effort,
         plan_client_key,
+        workspace,
+        worktree_base,
     } = input;
     let reasoning_effort = reasoning_effort
         .map(|value| merry_llm::ReasoningEffort::new(&value))
@@ -465,6 +467,12 @@ fn task_spec_from_input(
         task = task
             .with_context_files(context_files)
             .map_err(InvalidSubagentToolArguments::from)?;
+    }
+    if let Some(workspace_mode) = workspace {
+        task = task.with_workspace_mode(workspace_mode);
+    }
+    if let Some(worktree_base) = worktree_base {
+        task = task.with_worktree_base(worktree_base);
     }
     Ok(task
         .with_expected_output(expected_output)

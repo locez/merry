@@ -632,6 +632,7 @@ impl CodingRuntimeBuilder {
                     automatic_compaction,
                     max_parallel_tool_calls,
                     policy: policy.clone(),
+                    worktree_manager: crate::WorktreeIsolationManager::new(),
                 };
                 let child_factory: Arc<dyn ChildRuntimeFactory> =
                     Arc::new(CodingChildRuntimeFactory::from_composition(composition));

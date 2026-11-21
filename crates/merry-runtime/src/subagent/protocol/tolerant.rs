@@ -39,6 +39,23 @@ where
     Ok(raw.and_then(|value| (!is_sentinel_str(&value)).then_some(value)))
 }
 
+pub(super) fn deserialize_optional_enum_tolerant<'de, T, D>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match raw {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(ref value)) if is_sentinel_str(value) => Ok(None),
+        Some(value) => T::deserialize(value)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
+}
+
 pub(super) fn deserialize_optional_paths_tolerant<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<String>>, D::Error>

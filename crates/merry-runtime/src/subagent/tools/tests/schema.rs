@@ -19,8 +19,10 @@ fn spawn_schema_accepts_an_optional_plan_client_key_reference() {
     assert!(schema.to_string().contains("plan_client_key"));
     assert!(schema.to_string().contains("context_files"));
     assert!(schema.to_string().contains("role"));
+    assert!(schema.to_string().contains("worktree_base"));
     assert!(!schema.to_string().contains("plan_task"));
     assert!(specs[0].description().contains("never a runtime node id"));
+    assert!(specs[0].description().contains("worktree"));
 }
 
 #[test]

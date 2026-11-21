@@ -15,6 +15,7 @@ mod runtime;
 mod search_tools;
 mod subagent_roles;
 mod workspace;
+mod worktree;
 
 #[cfg(test)]
 mod tests;
@@ -37,6 +38,10 @@ pub use subagent_roles::{
     SubagentModelOverride, SubagentResolutionInput, SubagentRoleCatalog, SubagentRoleError,
     SubagentRoleOverlay, SubagentRoleSpec, SubagentWorkspaceAccess, load_workspace_prompt_file,
     resolve_subagent_runtime,
+};
+pub use worktree::{
+    WorktreeError, WorktreeGcReport, WorktreeIsolationManager, cleanup_orphaned_worktrees,
+    cleanup_orphaned_worktrees_default, default_worktree_base_dir,
 };
 
 use merry_core::{CoreError, ToolName};

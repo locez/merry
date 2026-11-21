@@ -14,9 +14,10 @@ use super::scheduler::{
 use super::scope::ParentCapabilities;
 use super::spec::{validate_no_write_scope_conflicts, validate_task_max_model_turns};
 use super::{
-    ChildRuntimeFactory, ChildWorkspaceScope, ParentPrimaryModel, PlanLinkRuntime,
-    SubagentActivityHub, SubagentConfig, SubagentError, SubagentLimitBehavior, SubagentResultView,
-    SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec,
+    ChildRuntimeFactory, ChildWorkspaceLifecycle, ChildWorkspaceScope, ParentPrimaryModel,
+    PlanLinkRuntime, SubagentActivityHub, SubagentConfig, SubagentError, SubagentLimitBehavior,
+    SubagentResultView, SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec,
+    SubagentWorktreeView,
 };
 use crate::{FileSessionStore, RuntimeError, TaskAnchor};
 use merry_core::{
@@ -141,6 +142,8 @@ pub(super) struct ManagedSubagent {
     pub(super) elapsed_ms: u64,
     pub(super) usage: Option<merry_core::ModelUsage>,
     pub(super) raw_output_bytes: u64,
+    pub(super) workspace_lifecycle: Option<Arc<dyn ChildWorkspaceLifecycle>>,
+    pub(super) worktree: Option<SubagentWorktreeView>,
 }
 
 impl SubagentManager {
@@ -704,6 +707,8 @@ impl SubagentManager {
                 elapsed_ms: 0,
                 usage: None,
                 raw_output_bytes: 0,
+                workspace_lifecycle: None,
+                worktree: None,
             };
             state.agents.insert(agent_id.clone(), managed);
 

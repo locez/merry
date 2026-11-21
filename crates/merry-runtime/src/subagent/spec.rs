@@ -1,4 +1,5 @@
 use super::handoff::{ContextFileRef, MAX_CONTEXT_FILE_REFS};
+use super::protocol::{SubagentWorkspaceMode, SubagentWorktreeBase};
 use merry_core::ToolName;
 use merry_llm::ReasoningEffort;
 use std::{
@@ -336,6 +337,8 @@ pub struct SubagentTaskSpec {
     expected_output: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
     plan_client_key: Option<String>,
+    workspace_mode: SubagentWorkspaceMode,
+    worktree_base: SubagentWorktreeBase,
 }
 
 pub(crate) fn validate_task_max_model_turns(
@@ -383,6 +386,8 @@ impl SubagentTaskSpec {
             expected_output: None,
             reasoning_effort: None,
             plan_client_key: None,
+            workspace_mode: SubagentWorkspaceMode::Shared,
+            worktree_base: SubagentWorktreeBase::WorkingTree,
         })
     }
 
@@ -519,6 +524,18 @@ impl SubagentTaskSpec {
         self.plan_client_key.as_deref()
     }
 
+    /// Returns the requested filesystem isolation mode (`shared` or `worktree`).
+    #[must_use]
+    pub const fn workspace_mode(&self) -> SubagentWorkspaceMode {
+        self.workspace_mode
+    }
+
+    /// Returns the requested snapshot base when `workspace_mode` is `worktree`.
+    #[must_use]
+    pub const fn worktree_base(&self) -> SubagentWorktreeBase {
+        self.worktree_base
+    }
+
     /// Replaces the child's allowed tool list.
     #[must_use]
     pub fn with_allowed_tools<I>(mut self, tools: I) -> Self
@@ -638,6 +655,20 @@ impl SubagentTaskSpec {
         self.plan_client_key = plan_client_key.filter(|value| !value.trim().is_empty());
         self
     }
+
+    /// Sets the child's filesystem isolation mode (`shared` or `worktree`).
+    #[must_use]
+    pub const fn with_workspace_mode(mut self, workspace_mode: SubagentWorkspaceMode) -> Self {
+        self.workspace_mode = workspace_mode;
+        self
+    }
+
+    /// Sets the worktree snapshot base (`working_tree` or `head`).
+    #[must_use]
+    pub const fn with_worktree_base(mut self, worktree_base: SubagentWorktreeBase) -> Self {
+        self.worktree_base = worktree_base;
+        self
+    }
 }
 
 fn validate_task_text(task: &str) -> Result<(), SubagentError> {
@@ -671,10 +702,19 @@ pub(super) fn validate_scope_path(path: PathBuf) -> Result<PathBuf, SubagentErro
     Ok(path)
 }
 
-/// Rejects child batches where two write scopes overlap.
+/// Rejects child batches where two shared-workspace write scopes overlap.
+///
+/// Tasks running in isolated `worktree` mode operate in distinct physical
+/// directories and do not conflict with shared or sibling worktree writers.
 pub fn validate_no_write_scope_conflicts(tasks: &[SubagentTaskSpec]) -> Result<(), SubagentError> {
     for (first_index, first) in tasks.iter().enumerate() {
+        if first.workspace_mode() != SubagentWorkspaceMode::Shared {
+            continue;
+        }
         for (second_offset, second) in tasks[first_index + 1..].iter().enumerate() {
+            if second.workspace_mode() != SubagentWorkspaceMode::Shared {
+                continue;
+            }
             let second_index = first_index + 1 + second_offset;
             for first_path in first.write_scope() {
                 for second_path in second.write_scope() {

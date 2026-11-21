@@ -189,17 +189,22 @@ impl SubagentManager {
                     SubagentStatusLabel::Running,
                     format!("woke subagent {agent_id} with its retained transcript and context"),
                 )
-            } else if self.attached_child_session_store().is_some() {
-                // Restored from parent session resume: lazily reload child journal and rebuild runtime.
+            } else if self.attached_child_session_store().is_some()
+                || agent.worktree.as_ref().is_some_and(|w| !w.retained)
+            {
+                // Restored from parent session resume (or worktree auto-cleaned after
+                // zero net changes): lazily reload child journal and rebuild runtime.
                 let mut wake_task = agent.task.clone();
                 if let Some(extra_turns) = options.extra_model_turns {
                     wake_task = wake_task.with_max_model_turns_unchecked(extra_turns);
                 }
+                let existing_worktree = agent.worktree.clone().filter(|worktree| worktree.retained);
                 rehydrate_candidate = Some((
                     agent.task_id.clone(),
                     wake_task,
                     agent.task_anchor.clone(),
                     agent.event_tx.clone(),
+                    existing_worktree,
                 ));
                 (
                     SendSubagentMessageOutcome::Woken,
@@ -219,7 +224,9 @@ impl SubagentManager {
             }
         };
 
-        if let Some((task_id, wake_task, task_anchor, event_tx)) = rehydrate_candidate {
+        if let Some((task_id, wake_task, task_anchor, event_tx, existing_worktree)) =
+            rehydrate_candidate
+        {
             let store = self.attached_child_session_store();
             let child_session_id = child_session_id_for_agent(agent_id);
             let loaded_session = match store.as_ref() {
@@ -244,6 +251,7 @@ impl SubagentManager {
                 session_id: child_session_id,
                 session_store: store,
                 loaded_session,
+                existing_worktree,
                 task_anchor,
                 task: wake_task.clone(),
                 allowed_tools,
@@ -259,6 +267,8 @@ impl SubagentManager {
                 activity_hub: self.attached_activity_hub(),
             })?;
             let wake_task = apply_built_task_overrides(wake_task, &built);
+            let workspace_lifecycle = built.workspace_lifecycle;
+            let worktree_metadata = workspace_lifecycle.as_ref().map(|hook| hook.metadata());
             let runtime = built.runtime;
             let generation_config = built.generation_config.unwrap_or(default_generation_config);
             let token = self.session_token.child_token();
@@ -273,6 +283,10 @@ impl SubagentManager {
                     agent.task = wake_task.clone();
                     agent.runtime = Some(runtime.clone());
                     agent.generation_config = Some(generation_config.clone());
+                    agent.workspace_lifecycle = workspace_lifecycle;
+                    if let Some(metadata) = worktree_metadata {
+                        agent.worktree = Some(metadata);
+                    }
                     agent.started_at = Some(tokio::time::Instant::now());
                     let _ = agent
                         .event_tx

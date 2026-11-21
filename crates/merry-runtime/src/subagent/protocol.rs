@@ -8,8 +8,68 @@ use serde_json::json;
 use super::spec::{DEFAULT_MIN_MODEL_TURNS, MAX_TASK_BYTES};
 use tolerant::{
     deserialize_agent_ids_field, deserialize_optional_agent_ids_field,
-    deserialize_optional_paths_tolerant, deserialize_optional_string_tolerant, merge_agent_ids,
+    deserialize_optional_enum_tolerant, deserialize_optional_paths_tolerant,
+    deserialize_optional_string_tolerant, merge_agent_ids,
 };
+
+/// Filesystem isolation mode for a child subagent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentWorkspaceMode {
+    /// Run inside the parent's shared workspace directory (default).
+    #[default]
+    Shared,
+    /// Run inside an isolated detached Git worktree outside the main repository.
+    Worktree,
+}
+
+impl SubagentWorkspaceMode {
+    /// Returns the stable provider-visible mode string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::Worktree => "worktree",
+        }
+    }
+}
+
+/// Snapshot source used when creating a child Git worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentWorktreeBase {
+    /// Snapshot the parent's current working tree (tracked diff + small untracked files) on top of `HEAD` (default).
+    #[default]
+    WorkingTree,
+    /// Checkout clean `HEAD` without uncommitted working-tree edits.
+    Head,
+}
+
+impl SubagentWorktreeBase {
+    /// Returns the stable provider-visible worktree base string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkingTree => "working_tree",
+            Self::Head => "head",
+        }
+    }
+}
+
+/// Metadata reported for a child subagent executed inside an isolated Git worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentWorktreeView {
+    /// Absolute path to the isolated Git worktree directory.
+    pub path: String,
+    /// Baseline commit OID against which net child changes are diffed.
+    pub baseline_oid: String,
+    /// Compact `git diff --stat <baseline_oid>` summary when net changes exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_stat: Option<String>,
+    /// True when the worktree remains on disk (changes exist or cleanup skipped); false when auto-removed after zero net changes.
+    pub retained: bool,
+}
 
 /// Optional wait behavior for `spawn_subagents`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
@@ -196,6 +256,16 @@ pub struct SpawnSubagentTaskInput {
     )]
     #[serde(default, deserialize_with = "deserialize_optional_string_tolerant")]
     pub plan_client_key: Option<String>,
+    #[schemars(
+        description = "Optional filesystem isolation mode: `shared` (default, shares parent workspace) or `worktree` (isolated detached Git worktree outside the main repository; requires a Git workspace)."
+    )]
+    #[serde(default, deserialize_with = "deserialize_optional_enum_tolerant")]
+    pub workspace: Option<SubagentWorkspaceMode>,
+    #[schemars(
+        description = "Optional snapshot base when `workspace` is `worktree`: `working_tree` (default, includes parent's uncommitted tracked edits and small untracked files) or `head` (clean `HEAD`)."
+    )]
+    #[serde(default, deserialize_with = "deserialize_optional_enum_tolerant")]
+    pub worktree_base: Option<SubagentWorktreeBase>,
 }
 
 /// Notice returned when a foreground wait hands active children off to background execution.
@@ -653,6 +723,9 @@ pub struct SubagentStatusView {
     /// (progress signature for polling loops).
     #[serde(default)]
     pub raw_output_bytes: u64,
+    /// Optional isolated Git worktree metadata when the child ran with `workspace: "worktree"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<SubagentWorktreeView>,
 }
 
 impl SubagentStatusView {
@@ -681,6 +754,7 @@ impl SubagentStatusView {
             elapsed_ms: 0,
             usage: None,
             raw_output_bytes: 0,
+            worktree: None,
         }
     }
 

@@ -4,7 +4,7 @@ use crate::{
         ChildRuntimeInput, ChildWorkspaceScope, PlanLinkRuntime, PlanSubagentScope,
         SubagentActivityHub, SubagentManager, SubagentStatusLabel, SubagentTaskSpec,
         activity::SubagentActivityReducer,
-        manager::{ManagedSubagent, SubagentManagerState},
+        manager::SubagentManagerState,
         scheduler::{
             ChildScheduler, ReservedChildStart, ReservedChildStartError, ReservedChildStartOutcome,
             reserve_queued_starts_locked, start_reserved_children_iteratively,
@@ -116,6 +116,7 @@ impl SubagentManager {
             session_id: child_session_id,
             session_store: child_session_store,
             loaded_session: None,
+            existing_worktree: None,
             task_anchor,
             task: task.clone(),
             allowed_tools: task.allowed_tools().to_vec(),
@@ -142,10 +143,13 @@ impl SubagentManager {
             }
         };
         if token.is_cancelled() {
+            super::events::finalize_child_workspace(built.workspace_lifecycle, true).await;
             self.mark_cancelled_and_schedule(&agent_id).await;
             return;
         }
         let task = apply_built_task_overrides(task, &built);
+        let workspace_lifecycle = built.workspace_lifecycle;
+        let worktree_metadata = workspace_lifecycle.as_ref().map(|hook| hook.metadata());
         let runtime = built.runtime;
         let generation_config = built.generation_config.unwrap_or(default_generation_config);
         let event_tx = {
@@ -156,6 +160,10 @@ impl SubagentManager {
             agent.task = task.clone();
             agent.runtime = Some(runtime.clone());
             agent.generation_config = Some(generation_config.clone());
+            agent.workspace_lifecycle = workspace_lifecycle;
+            if let Some(metadata) = worktree_metadata {
+                agent.worktree = Some(metadata);
+            }
             agent.event_tx.clone()
         };
 
@@ -347,6 +355,7 @@ pub(super) async fn spawn_reserved_child(
             session_id: child_session_id,
             session_store: scheduler.attached_child_session_store(),
             loaded_session: None,
+            existing_worktree: None,
             task_anchor: start.task_anchor.clone(),
             task: start.task.clone(),
             allowed_tools: start.task.allowed_tools().to_vec(),
@@ -363,10 +372,13 @@ pub(super) async fn spawn_reserved_child(
         })
         .map_err(ReservedChildStartError::Factory)?;
     if start.cancellation_token.is_cancelled() {
+        super::events::finalize_child_workspace(built.workspace_lifecycle, true).await;
         return Ok(ReservedChildStartOutcome::Cancelled);
     }
 
     let task = apply_built_task_overrides(start.task.clone(), &built);
+    let workspace_lifecycle = built.workspace_lifecycle;
+    let worktree_metadata = workspace_lifecycle.as_ref().map(|hook| hook.metadata());
     let runtime = built.runtime;
     let generation_config = built.generation_config.unwrap_or(default_generation_config);
     let event_tx = {
@@ -377,6 +389,10 @@ pub(super) async fn spawn_reserved_child(
         agent.task = task.clone();
         agent.runtime = Some(runtime.clone());
         agent.generation_config = Some(generation_config.clone());
+        agent.workspace_lifecycle = workspace_lifecycle;
+        if let Some(metadata) = worktree_metadata {
+            agent.worktree = Some(metadata);
+        }
         if agent.started_at.is_none() {
             agent.started_at = Some(tokio::time::Instant::now());
         }
@@ -632,10 +648,65 @@ fn spawn_child_loop(
             let to_start =
                 reserve_queued_starts_locked(&mut state_guard, scheduler.effective_max_threads());
             drop(state_guard);
+            super::events::finalize_agent_workspace_into_state(
+                &scheduler.state,
+                &launch.agent_id,
+                true,
+            )
+            .await;
             scheduler.notify.notify_waiters();
             start_reserved_children_iteratively(scheduler, to_start).await;
             return;
         }
+        let next_follow_up = state_guard
+            .agents
+            .get_mut(&launch.agent_id)
+            .and_then(|agent| {
+                if loop_token.is_cancelled() || agent.status == SubagentStatusLabel::Cancelled {
+                    None
+                } else {
+                    let prompt = agent.pending_follow_ups.pop_front()?;
+                    let turn_override = agent.resume_turn_override.take();
+                    Some((prompt, turn_override))
+                }
+            });
+        if let Some((next_prompt, turn_override)) = next_follow_up {
+            if let Some(agent) = state_guard.agents.get_mut(&launch.agent_id) {
+                if let Some(result) = loop_result.as_ref() {
+                    apply_loop_result(agent, result, child_projection);
+                }
+                agent.status = SubagentStatusLabel::Running;
+                agent.summary = "handling follow-up".to_owned();
+                agent.diagnostics = None;
+            }
+            let handle_id = launch.agent_id.clone();
+            let mut next_task = launch.task;
+            if let Some(extra_turns) = turn_override {
+                next_task = next_task.with_max_model_turns_unchecked(extra_turns);
+            }
+            let handle = spawn_child_loop(
+                scheduler.clone(),
+                ChildLoopLaunch {
+                    task: next_task,
+                    prompt: next_prompt,
+                    ..launch
+                },
+            );
+            state_guard.handles.insert(handle_id, handle);
+            drop(state_guard);
+            return;
+        }
+        // Finalize any isolated workspace BEFORE flipping `agent.status` to a
+        // terminal label so `wait()` and `snapshot()` never observe completion
+        // before worktree diff collection and fail-toward-keep cleanup settle.
+        let workspace_lifecycle = state_guard
+            .agents
+            .get(&launch.agent_id)
+            .and_then(|agent| agent.workspace_lifecycle.clone());
+        drop(state_guard);
+        let workspace_finalization =
+            super::events::finalize_child_workspace(workspace_lifecycle, true).await;
+        let mut state_guard = scheduler.state.lock().await;
         if let Some(agent) = state_guard.agents.get_mut(&launch.agent_id) {
             if let Some(started) = agent.started_at {
                 agent.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -721,41 +792,7 @@ fn spawn_child_loop(
                     }
                 }
             }
-        }
-        let next_follow_up = state_guard
-            .agents
-            .get_mut(&launch.agent_id)
-            .and_then(|agent| {
-                if loop_token.is_cancelled() || agent.status == SubagentStatusLabel::Cancelled {
-                    None
-                } else {
-                    let prompt = agent.pending_follow_ups.pop_front()?;
-                    let turn_override = agent.resume_turn_override.take();
-                    Some((prompt, turn_override))
-                }
-            });
-        if let Some((next_prompt, turn_override)) = next_follow_up {
-            if let Some(agent) = state_guard.agents.get_mut(&launch.agent_id) {
-                agent.status = SubagentStatusLabel::Running;
-                agent.summary = "handling follow-up".to_owned();
-                agent.diagnostics = None;
-            }
-            let handle_id = launch.agent_id.clone();
-            let mut next_task = launch.task;
-            if let Some(extra_turns) = turn_override {
-                next_task = next_task.with_max_model_turns_unchecked(extra_turns);
-            }
-            let handle = spawn_child_loop(
-                scheduler.clone(),
-                ChildLoopLaunch {
-                    task: next_task,
-                    prompt: next_prompt,
-                    ..launch
-                },
-            );
-            state_guard.handles.insert(handle_id, handle);
-            drop(state_guard);
-            return;
+            super::events::apply_workspace_finalization(agent, workspace_finalization);
         }
         state_guard.handles.remove(&launch.agent_id);
         let (terminal_link, terminal_status, terminal_activity, terminal_notification, final_usage) =
@@ -899,29 +936,6 @@ pub(super) fn publish_terminal_activity_snapshot(
     publish_terminal_activity(Some(&hub), &mut reducer, phase, summary);
 }
 
-fn plan_link_status_for_agent(agent: &ManagedSubagent) -> PlanLinkStatus {
-    match agent.status {
-        SubagentStatusLabel::Completed => PlanLinkStatus::Completed,
-        SubagentStatusLabel::Cancelled => PlanLinkStatus::Cancelled,
-        SubagentStatusLabel::Blocked => PlanLinkStatus::Blocked,
-        SubagentStatusLabel::Failed => PlanLinkStatus::Failed,
-        SubagentStatusLabel::Queued | SubagentStatusLabel::Running => PlanLinkStatus::Failed,
-    }
-}
-
-pub(super) fn terminal_activity_for_agent(
-    agent: &ManagedSubagent,
-) -> Option<(SubagentTaskId, SubagentActivityPhase, String)> {
-    let phase = match agent.status {
-        SubagentStatusLabel::Completed => SubagentActivityPhase::Completed,
-        SubagentStatusLabel::Failed => SubagentActivityPhase::Failed,
-        SubagentStatusLabel::Blocked => SubagentActivityPhase::Blocked,
-        SubagentStatusLabel::Cancelled => SubagentActivityPhase::Cancelled,
-        SubagentStatusLabel::Queued | SubagentStatusLabel::Running => return None,
-    };
-    Some((agent.task_id.clone(), phase, agent.summary.clone()))
-}
-
 pub(super) async fn update_plan_link_with_scheduler(
     scheduler: &ChildScheduler,
     link: Option<PlanLinkSnapshot>,
@@ -951,20 +965,9 @@ pub(super) async fn update_plan_link_with_scheduler(
     }
 }
 
-pub(super) fn generation_config_for_child_task_with_parent(
-    task: &SubagentTaskSpec,
-    parent_generation: &GenerationConfig,
-) -> GenerationConfig {
-    match task.reasoning_effort() {
-        Some(effort) => parent_generation
-            .clone()
-            .with_reasoning_effort(Some(effort.clone())),
-        None => parent_generation.clone(),
-    }
-}
-
 pub(super) use super::manager_helpers::{
-    apply_built_task_overrides, error_info, observed_event_output_bytes,
+    apply_built_task_overrides, error_info, generation_config_for_child_task_with_parent,
+    observed_event_output_bytes, plan_link_status_for_agent, terminal_activity_for_agent,
 };
 
 async fn update_child_after_error(

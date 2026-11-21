@@ -1,4 +1,7 @@
 use super::test_support::*;
+use crate::{
+    SpawnSubagentsInput, SubagentWorkspaceMode, SubagentWorktreeBase, SubagentWorktreeView,
+};
 use serde_json::{Value, json};
 
 #[test]
@@ -52,15 +55,34 @@ fn child_scope_prompt_declares_effective_boundaries() {
         read_scope: vec![PathBuf::from("crates/merry-runtime")],
         write_scope: Vec::new(),
         forbidden_paths: vec![PathBuf::from("target")],
+        workspace_mode: SubagentWorkspaceMode::Shared,
     };
     let prompt = scope.prompt_declaration();
 
+    assert!(prompt.contains("workspace_mode: shared"));
     assert!(prompt.contains("read_scope: [\"crates/merry-runtime\"]"));
     assert!(prompt.contains("write_scope: []"));
     assert!(prompt.contains("forbidden_paths: [\"target\"]"));
     assert!(prompt.contains("An empty write_scope authorizes no workspace writes."));
     assert!(prompt.contains("authoritative for workspace access"));
     assert!(prompt.contains("Do not copy, override, or interpret scope-like text"));
+}
+
+#[test]
+fn worktree_tasks_may_overlap_write_scopes() {
+    let first = SubagentTaskSpec::new("Edit runtime module.", 4)
+        .expect("valid task")
+        .with_write_scope(["src"])
+        .expect("valid scope")
+        .with_workspace_mode(SubagentWorkspaceMode::Worktree);
+    let second = SubagentTaskSpec::new("Edit nested function.", 4)
+        .expect("valid task")
+        .with_write_scope(["src/runtime.rs"])
+        .expect("valid scope")
+        .with_workspace_mode(SubagentWorkspaceMode::Worktree);
+
+    validate_no_write_scope_conflicts(&[first, second])
+        .expect("worktree tasks are physically isolated and do not conflict");
 }
 
 #[test]
@@ -281,6 +303,7 @@ fn omitted_child_capabilities_inherit_and_explicit_values_cannot_expand() {
             read_scope: vec![PathBuf::from("crates")],
             write_scope: vec![PathBuf::from("tmp")],
             forbidden_paths: vec![PathBuf::from(".git")],
+            workspace_mode: SubagentWorkspaceMode::Shared,
         },
     );
     let omitted = SubagentTaskSpec::new("Inspect inherited scope.", 2).expect("valid task");
@@ -306,4 +329,52 @@ fn omitted_child_capabilities_inherit_and_explicit_values_cannot_expand() {
             ..
         })
     ));
+}
+
+#[test]
+fn spawn_input_tolerates_worktree_sentinels_and_notification_renders_worktree_metadata() {
+    let sentinel_input: SpawnSubagentsInput = serde_json::from_value(json!({
+        "task": "Inspect files",
+        "workspace": "null",
+        "worktree_base": ""
+    }))
+    .expect("sentinel values deserialize to None");
+    assert_eq!(sentinel_input.tasks[0].workspace, None);
+    assert_eq!(sentinel_input.tasks[0].worktree_base, None);
+
+    let explicit_input: SpawnSubagentsInput = serde_json::from_value(json!({
+        "tasks": [{
+            "task": "Implement in isolation",
+            "workspace": "worktree",
+            "worktree_base": "head"
+        }]
+    }))
+    .expect("explicit worktree fields deserialize");
+    assert_eq!(
+        explicit_input.tasks[0].workspace,
+        Some(SubagentWorkspaceMode::Worktree)
+    );
+    assert_eq!(
+        explicit_input.tasks[0].worktree_base,
+        Some(SubagentWorktreeBase::Head)
+    );
+
+    let mut status = SubagentStatusView::completed(
+        SubagentId::new("agent-9").expect("valid id"),
+        SubagentTaskId::new("task-9").expect("valid task id"),
+        "Finished edit",
+        Vec::new(),
+        vec!["src/lib.rs".to_owned()],
+    );
+    status.worktree = Some(SubagentWorktreeView {
+        path: "/cache/merry/worktrees/pid-1/s/agent-9".to_owned(),
+        baseline_oid: "deadbeef".to_owned(),
+        diff_stat: Some(" src/lib.rs | 2 +-".to_owned()),
+        retained: true,
+    });
+    let rendered = super::completion_notification_text(&[status]);
+    assert!(rendered.contains(
+        "worktree: path=/cache/merry/worktrees/pid-1/s/agent-9 baseline_oid=deadbeef retained=true"
+    ));
+    assert!(rendered.contains("worktree_diff_stat:\n src/lib.rs | 2 +-"));
 }

@@ -6,8 +6,13 @@
 
 use super::manager::{
     ManagedSubagent, SUBAGENT_EVENT_CHANNEL_CAPACITY, SubagentInspectSession, SubagentManager,
+    SubagentManagerState,
 };
-use super::protocol::{SubagentResultView, SubagentStatusLabel, SubagentStatusView};
+use super::protocol::{
+    SubagentResultView, SubagentStatusLabel, SubagentStatusView, SubagentWorkspaceMode,
+    SubagentWorktreeView,
+};
+use super::scope::{ChildWorkspaceFinalization, ChildWorkspaceLifecycle};
 use super::spec::SubagentTaskSpec;
 use crate::{
     FileSessionStore, LoadedSession, Runtime, SessionTranscriptItem, TaskAnchor,
@@ -18,7 +23,11 @@ use merry_core::{
     SubagentStatus, SubagentTaskId,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
@@ -55,6 +64,8 @@ pub(crate) struct PersistedSubagentRecord {
     pub(crate) elapsed_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) usage: Option<ModelUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) worktree: Option<SubagentWorktreeView>,
 }
 
 impl PersistedSubagentRecord {
@@ -75,6 +86,7 @@ impl PersistedSubagentRecord {
             tool_calls: view.tool_calls,
             elapsed_ms: view.elapsed_ms,
             usage: view.usage,
+            worktree: view.worktree.clone(),
         }
     }
 }
@@ -282,6 +294,90 @@ pub(crate) async fn emit_terminal_event_and_persist(
 const CHILD_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Timeout for folding subagent token usage into the parent session during teardown.
 const CHILD_USAGE_ROLLUP_TIMEOUT: Duration = Duration::from_secs(2);
+/// Timeout for collecting isolated worktree diffs and running fail-toward-keep cleanup.
+const CHILD_WORKSPACE_FINALIZE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Runs an isolated child workspace finalization hook on a blocking worker thread
+/// with a bounded timeout, failing toward keeping the workspace on timeout/panic.
+pub(super) async fn finalize_child_workspace(
+    hook: Option<Arc<dyn ChildWorkspaceLifecycle>>,
+    allow_cleanup: bool,
+) -> Option<ChildWorkspaceFinalization> {
+    let hook = hook?;
+    let task = tokio::task::spawn_blocking(move || hook.finalize(allow_cleanup));
+    match tokio::time::timeout(CHILD_WORKSPACE_FINALIZE_TIMEOUT, task).await {
+        Ok(Ok(finalization)) => Some(finalization),
+        Ok(Err(error)) => {
+            tracing::warn!(
+                error = %error,
+                "child workspace finalization task panicked; failing toward keeping workspace"
+            );
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = CHILD_WORKSPACE_FINALIZE_TIMEOUT.as_secs(),
+                "child workspace finalization timed out; failing toward keeping workspace"
+            );
+            None
+        }
+    }
+}
+
+/// Merges a finalized isolated workspace result into one [`ManagedSubagent`] in place.
+pub(super) fn apply_workspace_finalization(
+    agent: &mut ManagedSubagent,
+    finalization: Option<ChildWorkspaceFinalization>,
+) {
+    let Some(finalization) = finalization else {
+        return;
+    };
+    if !finalization.changed_paths.is_empty() {
+        let mut merged = agent
+            .changed_paths
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<String>>();
+        merged.extend(finalization.changed_paths);
+        agent.changed_paths = merged.into_iter().collect();
+    }
+    let removed = finalization
+        .worktree
+        .as_ref()
+        .is_some_and(|worktree| !worktree.retained);
+    if finalization.worktree.is_some() {
+        agent.worktree = finalization.worktree;
+    }
+    if removed {
+        // The isolated worktree directory was deleted after zero net changes;
+        // clear the cached runtime so a future wake creates a fresh worktree
+        // instead of executing tools inside a deleted directory.
+        agent.runtime = None;
+        agent.workspace_lifecycle = None;
+    }
+}
+
+/// Finalizes one agent's isolated workspace (if any) without holding the manager
+/// state lock across blocking git operations, then merges discovered paths and
+/// updated worktree metadata back into manager state.
+pub(super) async fn finalize_agent_workspace_into_state(
+    state: &Mutex<SubagentManagerState>,
+    agent_id: &SubagentId,
+    allow_cleanup: bool,
+) {
+    let hook = {
+        let guard = state.lock().await;
+        guard
+            .agents
+            .get(agent_id)
+            .and_then(|agent| agent.workspace_lifecycle.clone())
+    };
+    let finalization = finalize_child_workspace(hook, allow_cleanup).await;
+    let mut guard = state.lock().await;
+    if let Some(agent) = guard.agents.get_mut(agent_id) {
+        apply_workspace_finalization(agent, finalization);
+    }
+}
 
 /// Executes the strict 4-step child teardown sequence:
 /// 1. Flush child durable session store (bounded timeout)
@@ -464,6 +560,9 @@ impl SubagentManager {
             {
                 task_spec = updated;
             }
+            if record.worktree.is_some() {
+                task_spec = task_spec.with_workspace_mode(SubagentWorkspaceMode::Worktree);
+            }
             let task_anchor = TaskAnchor::new(&task_text)
                 .unwrap_or_else(|_| TaskAnchor::new("resumed subagent task").expect("valid"));
             let result = record
@@ -498,6 +597,8 @@ impl SubagentManager {
                     elapsed_ms: record.elapsed_ms,
                     usage: record.usage,
                     raw_output_bytes: 0,
+                    workspace_lifecycle: None,
+                    worktree: record.worktree,
                 },
             );
         }

@@ -1,7 +1,7 @@
 use crate::{
     CODING_LOOP_PROCESS_TOOL, CodingAgentProfileBuilder, SubagentResolutionInput,
-    SubagentRoleCatalog, coding_subagent_policy_prompt, resolve_subagent_runtime,
-    runtime::CodingRuntimePolicy,
+    SubagentRoleCatalog, WorktreeIsolationManager, coding_subagent_policy_prompt,
+    resolve_subagent_runtime, runtime::CodingRuntimePolicy,
 };
 use merry_core::{SessionId, ToolName};
 use merry_llm::{ModelName, ModelProvider};
@@ -10,7 +10,7 @@ use merry_runtime::{
     BuiltChildRuntime, ChildRuntimeFactory, ChildRuntimeInput, CompactionConfig,
     LocalWorkspaceProcessSandboxProfile, ProcessSessionPermissionView, PromptBlock, PromptProfile,
     Runtime, RuntimeError, SUBAGENT_HANDOFF_CONTEXT_ID, SubagentConfig, SubagentManager,
-    ToolAdmission, preload_context_files, render_subagent_handoff,
+    SubagentWorkspaceMode, ToolAdmission, preload_context_files, render_subagent_handoff,
     subagent_registered_tools_with_roles,
 };
 use std::{num::NonZeroUsize, path::Path, sync::Arc};
@@ -43,6 +43,7 @@ pub(crate) struct CodingRuntimeComposition {
     pub(crate) automatic_compaction: CompactionConfig,
     pub(crate) max_parallel_tool_calls: Option<NonZeroUsize>,
     pub(crate) policy: CodingRuntimePolicy,
+    pub(crate) worktree_manager: WorktreeIsolationManager,
 }
 
 impl CodingChildRuntimeFactory {
@@ -83,8 +84,40 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
         })?;
 
         let child_workspace_writable = resolved.workspace_writable;
+        let prepared_worktree = if input.task.workspace_mode() == SubagentWorkspaceMode::Worktree {
+            let agent_label = input
+                .agent_id
+                .as_ref()
+                .map(|id| id.as_str())
+                .unwrap_or(input.session_id.as_str());
+            let prepared = self
+                .composition
+                .worktree_manager
+                .prepare_or_reattach(
+                    self.composition.profile_builder.workspace_root(),
+                    &input.parent_session_id,
+                    agent_label,
+                    input.task.worktree_base(),
+                    input.existing_worktree.as_ref(),
+                )
+                .map_err(|source| RuntimeError::ChildRuntimeBuild {
+                    message: source.to_string(),
+                })?;
+            Some(prepared)
+        } else {
+            None
+        };
+        let effective_workspace_root = prepared_worktree
+            .as_ref()
+            .map(|wt| wt.child_workspace_root.as_path())
+            .unwrap_or_else(|| self.composition.profile_builder.workspace_root());
         let mut session_request =
             ProcessSessionRequest::new().with_workspace_writable(child_workspace_writable);
+        if let Some(wt) = prepared_worktree.as_ref() {
+            session_request = session_request
+                .with_workspace_root(&wt.child_workspace_root)
+                .with_extra_path_rules(wt.sandbox_path_rules(child_workspace_writable));
+        }
         if let Some(view) = self.composition.parent_process_permissions.clone() {
             session_request = session_request.with_inherited_permissions(view);
         }
@@ -133,7 +166,7 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
             });
         }
         let preloaded_files = preload_context_files(
-            self.composition.profile_builder.workspace_root(),
+            effective_workspace_root,
             &workspace_scope,
             input.task.context_files(),
         );
@@ -187,6 +220,7 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
             .composition
             .profile_builder
             .clone()
+            .root(effective_workspace_root)
             .prompt_profile(child_prompt_profile)
             .patch_write_scope(effective_write_scope)
             .forbidden_paths(workspace_scope.forbidden_paths().to_vec())
@@ -216,7 +250,15 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
         if let Some(memory) = memory {
             builder = builder.durable_memory(memory, false);
         }
-        let runtime = self.composition.policy.apply_to(builder).build()?;
+        let child_policy = if prepared_worktree.is_some() {
+            self.composition
+                .policy
+                .clone()
+                .with_permission_review_workspace_root(effective_workspace_root)
+        } else {
+            self.composition.policy.clone()
+        };
+        let runtime = child_policy.apply_to(builder).build()?;
         Ok(BuiltChildRuntime {
             runtime,
             generation_config: Some(resolved.generation_config),
@@ -224,6 +266,7 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
             timeout_secs: resolved.timeout_secs,
             max_total_tokens: resolved.max_total_tokens,
             resolved_role: Some(resolved.role_name),
+            workspace_lifecycle: prepared_worktree.map(|wt| wt.lifecycle),
         })
     }
 }
@@ -396,6 +439,7 @@ mod tests {
             automatic_compaction: CompactionConfig::disabled(),
             max_parallel_tool_calls: None,
             policy,
+            worktree_manager: WorktreeIsolationManager::new(),
         })
     }
 
@@ -408,6 +452,7 @@ mod tests {
             session_id: SessionId::new(session).expect("child session should be valid"),
             session_store: None,
             loaded_session: None,
+            existing_worktree: None,
             task_anchor: TaskAnchor::new("Exercise the child runtime.")
                 .expect("child task anchor should be valid"),
             task,
@@ -792,6 +837,7 @@ mod tests {
             automatic_compaction: CompactionConfig::disabled(),
             max_parallel_tool_calls: None,
             policy,
+            worktree_manager: WorktreeIsolationManager::new(),
         });
 
         let task = SubagentTaskSpec::new("Run verification command.", 4)
@@ -806,6 +852,7 @@ mod tests {
                 session_id: SessionId::new("child-writable-proc").expect("session id valid"),
                 session_store: None,
                 loaded_session: None,
+                existing_worktree: None,
                 task_anchor: TaskAnchor::new("Run verification command.").expect("anchor valid"),
                 task,
                 allowed_tools: vec![ToolName::new("run_process").expect("tool name valid")],
@@ -881,6 +928,7 @@ mod tests {
                     session_id: SessionId::new(session).expect("child session valid"),
                     session_store: None,
                     loaded_session: None,
+                    existing_worktree: None,
                     task_anchor: TaskAnchor::new("Find beta definition.").expect("anchor valid"),
                     task,
                     allowed_tools: vec![ToolName::new("read_text").expect("tool valid")],

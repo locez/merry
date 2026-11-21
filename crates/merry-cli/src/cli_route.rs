@@ -14,8 +14,13 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
     let permission_mode = cli.permission_mode();
     let auto_fallback = cli.auto_fallback();
     let trust_workspace = cli.trust_workspace();
+    let worktree_gc = matches!(
+        cli.command,
+        None | Some(CliCommand::Resume) | Some(CliCommand::Run(_))
+    )
+    .then(|| tokio::task::spawn_blocking(merry::profiles::cleanup_orphaned_worktrees_default));
 
-    match cli.command {
+    let exit = match cli.command {
         None => map_result(
             tui::run(
                 merry_config.as_ref(),
@@ -93,7 +98,29 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
         // `main` answers this before loading config; kept here so the route
         // stays total if that short-circuit ever moves.
         Some(CliCommand::Completions(args)) => crate::completions::print_completions(args.shell),
+    };
+
+    if let Some(gc_handle) = worktree_gc {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), gc_handle).await {
+            Ok(Ok(report)) if report.removed_instances > 0 || report.removed_worktrees > 0 => {
+                tracing::debug!(
+                    removed_instances = report.removed_instances,
+                    removed_worktrees = report.removed_worktrees,
+                    pruned_repos = report.pruned_repos,
+                    skipped_live_instances = report.skipped_live_instances,
+                    "cleaned up orphaned subagent worktrees from exited processes"
+                );
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(error = %error, "orphaned worktree GC task failed");
+            }
+            Err(_) => {
+                tracing::debug!("orphaned worktree GC still running at CLI exit");
+            }
+        }
     }
+    exit
 }
 
 fn map_result(
