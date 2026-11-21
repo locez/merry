@@ -220,6 +220,7 @@ pub struct CodingRuntimeInput {
     workspace_writable: bool,
     durable_memory: Option<Arc<DurableMemory>>,
     permission_review_rules: PermissionReviewRules,
+    max_parallel_tool_calls: Option<std::num::NonZeroUsize>,
 }
 
 impl CodingRuntimeInput {
@@ -248,6 +249,7 @@ impl CodingRuntimeInput {
             workspace_writable: true,
             durable_memory: None,
             permission_review_rules: PermissionReviewRules::default(),
+            max_parallel_tool_calls: None,
         }
     }
 
@@ -285,6 +287,7 @@ impl CodingRuntimeInput {
             workspace_writable: true,
             durable_memory: None,
             permission_review_rules: PermissionReviewRules::default(),
+            max_parallel_tool_calls: None,
         }
     }
 
@@ -369,6 +372,14 @@ impl CodingRuntimeInput {
     #[must_use]
     pub fn with_permission_review_rules(mut self, rules: PermissionReviewRules) -> Self {
         self.permission_review_rules = rules;
+        self
+    }
+
+    /// Sets the maximum number of parallel-safe tool calls executed together in
+    /// one model turn for both parent and child runtimes.
+    #[must_use]
+    pub fn with_max_parallel_tool_calls(mut self, limit: std::num::NonZeroUsize) -> Self {
+        self.max_parallel_tool_calls = Some(limit);
         self
     }
 }
@@ -500,6 +511,7 @@ impl CodingRuntimeBuilder {
             workspace_writable,
             durable_memory,
             permission_review_rules,
+            max_parallel_tool_calls,
         } = input;
 
         let policy = CodingRuntimePolicy::try_new(model_roles, permission)?
@@ -538,6 +550,9 @@ impl CodingRuntimeBuilder {
         let mut runtime_builder = Runtime::builder(session_id.clone())
             .automatic_compaction(automatic_compaction.clone())
             .model_provider(Arc::clone(&provider), model.clone());
+        if let Some(limit) = max_parallel_tool_calls {
+            runtime_builder = runtime_builder.max_parallel_tool_calls(limit);
+        }
         if matches!(variant, CodingRuntimeVariant::FullCoding) {
             runtime_builder = runtime_builder.coordinator_plan_tools();
         }
@@ -567,6 +582,7 @@ impl CodingRuntimeBuilder {
             let process_backend =
                 process_backend.ok_or(CodingRuntimeBuildError::MissingProcessBackend)?;
             let process_session = process_backend.new_session();
+            let parent_process_permissions = process_session.permission_view();
             profile_builder = profile_builder
                 .patch_tool()
                 .web_tools()
@@ -592,8 +608,10 @@ impl CodingRuntimeBuilder {
                     provider: Arc::clone(&provider),
                     model: model.clone(),
                     process_backend,
+                    parent_process_permissions,
                     subagent_config,
                     automatic_compaction,
+                    max_parallel_tool_calls,
                     policy: policy.clone(),
                 };
                 let child_factory: Arc<dyn ChildRuntimeFactory> =

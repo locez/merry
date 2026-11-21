@@ -28,6 +28,7 @@ pub use process_runner::{
 use merry_runtime::{
     AcceptedLocalWorkspaceProcessAdmission, HostIntegration, PathAccessRule, PermissionRequest,
     PermissionedProcessRunnerFactory, ProcessRunner, ProcessRunnerError,
+    ProcessSessionPermissionView,
 };
 use std::{
     ffi::OsString,
@@ -85,12 +86,14 @@ impl From<ProcessRunnerError> for ProcessBackendError {
 /// The admission and both runner capabilities are kept together so callers
 /// cannot accidentally pair a runner with a permission factory from another
 /// backend configuration. Child runtimes obtain their process session through
-/// [`ProcessBackend::new_session`], whose backend controls session isolation.
+/// [`ProcessBackend::new_session`] or [`ProcessBackend::new_session_with`],
+/// whose backend controls session isolation.
 #[derive(Clone)]
 pub struct ProcessSession {
     admission: AcceptedLocalWorkspaceProcessAdmission,
     runner: Arc<dyn ProcessRunner>,
     permissioned_factory: Arc<dyn PermissionedProcessRunnerFactory>,
+    permission_view: Option<ProcessSessionPermissionView>,
 }
 
 impl ProcessSession {
@@ -110,7 +113,17 @@ impl ProcessSession {
             admission,
             runner,
             permissioned_factory,
+            permission_view: None,
         }
+    }
+
+    /// Attaches a read-only view of this session's retained permissions so child
+    /// runtimes may inherit already-approved ordinary capabilities without
+    /// mutating the parent session.
+    #[must_use]
+    pub fn with_permission_view(mut self, view: ProcessSessionPermissionView) -> Self {
+        self.permission_view = Some(view);
+        self
     }
 
     /// Returns the runtime admission selected for this process boundary.
@@ -130,6 +143,110 @@ impl ProcessSession {
     pub fn permissioned_factory(&self) -> Arc<dyn PermissionedProcessRunnerFactory> {
         Arc::clone(&self.permissioned_factory)
     }
+
+    /// Returns a read-only view of capabilities retained by this session, when
+    /// backed by a session-scoped permission store.
+    #[must_use]
+    pub fn permission_view(&self) -> Option<ProcessSessionPermissionView> {
+        self.permission_view.clone()
+    }
+}
+
+/// Request options for deriving a scoped [`ProcessSession`] from a [`ProcessBackend`].
+#[derive(Debug, Clone)]
+pub struct ProcessSessionRequest {
+    workspace_root: Option<PathBuf>,
+    workspace_writable: bool,
+    inherited_permissions: Option<ProcessSessionPermissionView>,
+    extra_path_rules: Vec<PathAccessRule>,
+}
+
+impl Default for ProcessSessionRequest {
+    fn default() -> Self {
+        Self {
+            workspace_root: None,
+            workspace_writable: true,
+            inherited_permissions: None,
+            extra_path_rules: Vec::new(),
+        }
+    }
+}
+
+impl ProcessSessionRequest {
+    /// Creates a default session request inheriting the backend's workspace root
+    /// and writability.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Overrides the workspace root directory for the new session (for example,
+    /// an isolated git worktree).
+    #[must_use]
+    pub fn with_workspace_root(mut self, workspace_root: impl Into<PathBuf>) -> Self {
+        self.workspace_root = Some(workspace_root.into());
+        self
+    }
+
+    /// Keeps the workspace readable and not writable for isolated actions in
+    /// this session.
+    #[must_use]
+    pub fn read_only_workspace(mut self) -> Self {
+        self.workspace_writable = false;
+        self
+    }
+
+    /// Sets whether isolated actions in this session may write inside the
+    /// workspace root.
+    ///
+    /// A request cannot widen a backend that was already configured read-only.
+    #[must_use]
+    pub fn with_workspace_writable(mut self, writable: bool) -> Self {
+        self.workspace_writable = writable;
+        self
+    }
+
+    /// Seeds the new session with a read-only snapshot of an existing session's
+    /// approved ordinary capabilities.
+    #[must_use]
+    pub fn with_inherited_permissions(mut self, view: ProcessSessionPermissionView) -> Self {
+        self.inherited_permissions = Some(view);
+        self
+    }
+
+    /// Appends additional filesystem rules for the new session.
+    #[must_use]
+    pub fn with_extra_path_rules(
+        mut self,
+        rules: impl IntoIterator<Item = PathAccessRule>,
+    ) -> Self {
+        self.extra_path_rules = rules.into_iter().collect();
+        self
+    }
+
+    /// Returns the optional workspace root override.
+    #[must_use]
+    pub fn workspace_root(&self) -> Option<&Path> {
+        self.workspace_root.as_deref()
+    }
+
+    /// Returns whether the caller requested workspace writability.
+    #[must_use]
+    pub const fn workspace_writable(&self) -> bool {
+        self.workspace_writable
+    }
+
+    /// Returns the optional inherited permission view.
+    #[must_use]
+    pub fn inherited_permissions(&self) -> Option<&ProcessSessionPermissionView> {
+        self.inherited_permissions.as_ref()
+    }
+
+    /// Returns any extra filesystem access rules attached to this request.
+    #[must_use]
+    pub fn extra_path_rules(&self) -> &[PathAccessRule] {
+        &self.extra_path_rules
+    }
 }
 
 /// Stable host-process backend boundary consumed by coding composition.
@@ -145,6 +262,22 @@ pub trait ProcessBackend: Send + Sync {
     /// runner capabilities. Backends may use a fresh session-scoped capability
     /// store for every call, which keeps parent and child runtime state isolated.
     fn new_session(&self) -> ProcessSession;
+
+    /// Creates a process session configured with scoped request options.
+    ///
+    /// The default implementation delegates to [`Self::new_session`] for custom
+    /// test or adapter backends that do not vary session parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ProcessBackendError`] when the requested workspace root,
+    /// sandbox rules, or inherited permissions cannot be validated.
+    fn new_session_with(
+        &self,
+        _request: ProcessSessionRequest,
+    ) -> Result<ProcessSession, ProcessBackendError> {
+        Ok(self.new_session())
+    }
 }
 
 /// Inputs shared by local process backend implementations.
@@ -279,6 +412,9 @@ impl ProcessBackendOptions {
 #[derive(Clone)]
 pub struct LocalProcessBackend {
     new_session: Arc<dyn Fn() -> ProcessSession + Send + Sync>,
+    new_session_with: Arc<
+        dyn Fn(ProcessSessionRequest) -> Result<ProcessSession, ProcessBackendError> + Send + Sync,
+    >,
 }
 
 impl LocalProcessBackend {
@@ -290,11 +426,14 @@ impl LocalProcessBackend {
     #[must_use]
     pub fn from_session(session: ProcessSession) -> Self {
         let child_session = session.clone();
+        let scoped_session = session;
         Self {
             new_session: Arc::new(move || child_session.clone()),
+            new_session_with: Arc::new(move |_request| Ok(scoped_session.clone())),
         }
     }
 
+    #[cfg(test)]
     fn from_parts(
         admission: AcceptedLocalWorkspaceProcessAdmission,
         runner: Arc<dyn ProcessRunner>,
@@ -335,18 +474,42 @@ impl LocalProcessBackend {
         workspace_root: impl Into<PathBuf>,
         options: ProcessBackendOptions,
     ) -> Result<Self, ProcessBackendError> {
+        let workspace_root = workspace_root.into();
+        let environment_overrides = options.environment_overrides;
         let runner = Arc::new(
-            TokioProcessRunner::new_at_workspace_root(workspace_root.into())
-                .with_environment_overrides(options.environment_overrides)?,
+            TokioProcessRunner::new_at_workspace_root(workspace_root.clone())
+                .with_environment_overrides(environment_overrides.clone())?,
         );
         let permissioned_factory = Arc::new(UnrestrictedPermissionedProcessRunnerFactory::new(
             Arc::clone(&runner) as Arc<dyn ProcessRunner>,
         ));
-        Ok(Self::from_parts(
+        let default_session = ProcessSession::from_parts(
             AcceptedLocalWorkspaceProcessAdmission::accept_host(),
             runner,
             permissioned_factory,
-        ))
+        );
+        let fallback_session = default_session.clone();
+        Ok(Self {
+            new_session: Arc::new(move || default_session.clone()),
+            new_session_with: Arc::new(move |request| {
+                let Some(root_override) = request.workspace_root else {
+                    return Ok(fallback_session.clone());
+                };
+                let runner = Arc::new(
+                    TokioProcessRunner::new_at_workspace_root(root_override)
+                        .with_environment_overrides(environment_overrides.clone())?,
+                );
+                let permissioned_factory =
+                    Arc::new(UnrestrictedPermissionedProcessRunnerFactory::new(
+                        Arc::clone(&runner) as Arc<dyn ProcessRunner>,
+                    ));
+                Ok(ProcessSession::from_parts(
+                    AcceptedLocalWorkspaceProcessAdmission::accept_host(),
+                    runner,
+                    permissioned_factory,
+                ))
+            }),
+        })
     }
 
     /// Creates the current isolated local-process implementation.
@@ -411,8 +574,11 @@ impl LocalProcessBackend {
         workspace_writable: bool,
     ) -> Self {
         let child_workspace_root = workspace_root.clone();
-        let child_environment = environment;
-        let child_path_rules = path_rules;
+        let child_environment = environment.clone();
+        let child_path_rules = path_rules.clone();
+        let scoped_workspace_root = workspace_root;
+        let scoped_environment = environment;
+        let scoped_path_rules = path_rules;
         Self {
             new_session: Arc::new(move || {
                 Self::sandboxed_session(
@@ -421,7 +587,50 @@ impl LocalProcessBackend {
                     &child_path_rules,
                     network_requests_allowed,
                     workspace_writable,
+                    ProcessSessionPermissions::new(),
                 )
+            }),
+            new_session_with: Arc::new(move |request| {
+                let target_root = request
+                    .workspace_root
+                    .as_deref()
+                    .unwrap_or(&scoped_workspace_root);
+                // Intersection: a scoped session can narrow a writable backend
+                // to read-only, never widen a read-only backend to writable.
+                let effective_writable = workspace_writable && request.workspace_writable;
+                let session_permissions = match request.inherited_permissions.as_ref() {
+                    Some(view) => ProcessSessionPermissions::from_inherited_view(view)?,
+                    None => ProcessSessionPermissions::new(),
+                };
+                let mut combined_rules =
+                    Vec::with_capacity(scoped_path_rules.len() + request.extra_path_rules.len());
+                combined_rules.extend(scoped_path_rules.iter().cloned());
+                combined_rules.extend(request.extra_path_rules);
+                let validated_env = if request.workspace_root.is_some() {
+                    scoped_environment
+                        .clone()
+                        .validate_for_workspace(target_root)?
+                } else {
+                    scoped_environment.clone()
+                };
+                if request.workspace_root.is_some() || !combined_rules.is_empty() {
+                    let mut rules_runner =
+                        WorkspaceProcessRunner::new_at_workspace_root(target_root)
+                            .with_environment(validated_env.clone())
+                            .with_path_rules(combined_rules.iter().cloned());
+                    if !effective_writable {
+                        rules_runner = rules_runner.read_only_workspace();
+                    }
+                    rules_runner.ensure_sandbox_rules()?;
+                }
+                Ok(Self::sandboxed_session(
+                    target_root,
+                    &validated_env,
+                    &combined_rules,
+                    network_requests_allowed,
+                    effective_writable,
+                    session_permissions,
+                ))
             }),
         }
     }
@@ -433,8 +642,9 @@ impl LocalProcessBackend {
         path_rules: &[PathAccessRule],
         network_requests_allowed: bool,
         workspace_writable: bool,
+        session_permissions: ProcessSessionPermissions,
     ) -> ProcessSession {
-        let session_permissions = ProcessSessionPermissions::new();
+        let permission_view = session_permissions.view();
         let background = crate::process_runner::BackgroundSupervisor::new();
         let mut runner = WorkspaceProcessRunner::new_at_workspace_root(workspace_root)
             .with_environment(environment.clone())
@@ -458,12 +668,20 @@ impl LocalProcessBackend {
             Arc::new(runner),
             Arc::new(permissioned_factory),
         )
+        .with_permission_view(permission_view)
     }
 }
 
 impl ProcessBackend for LocalProcessBackend {
     fn new_session(&self) -> ProcessSession {
         (self.new_session)()
+    }
+
+    fn new_session_with(
+        &self,
+        request: ProcessSessionRequest,
+    ) -> Result<ProcessSession, ProcessBackendError> {
+        (self.new_session_with)(request)
     }
 }
 
@@ -607,5 +825,151 @@ mod tests {
         assert!(message.contains("conflicting sandbox rules"), "{message}");
         assert!(message.contains("readonly_paths"), "{message}");
         assert!(message.contains("/var/merry-path-check/merry"), "{message}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn new_session_with_read_only_workspace_and_inherited_permissions_stays_isolated() {
+        use crate::{
+            ProcessSessionRequest,
+            process_runner::tests::{fixture_root, permission_request},
+        };
+        use merry_runtime::{
+            ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunnerContext,
+        };
+        use serde_json::json;
+
+        let root = tempfile::tempdir_in(fixture_root()).expect("fixture root outside /tmp");
+        let workspace = root.path().join("workspace");
+        let extra = root.path().join("extra");
+        std::fs::create_dir_all(&workspace).expect("workspace dir");
+        std::fs::create_dir_all(&extra).expect("extra dir");
+        std::fs::write(workspace.join("hello.txt"), "hi\n").expect("seed workspace");
+        std::fs::write(extra.join("shared.txt"), "from-extra\n").expect("seed extra");
+
+        let backend = LocalProcessBackend::sandboxed(&workspace, ProcessBackendOptions::new())
+            .expect("isolated backend should build");
+        let parent_session = backend.new_session();
+        let parent_view = parent_session
+            .permission_view()
+            .expect("sandboxed session should expose a permission view");
+
+        // Grant the parent session read access to `extra` via an approved request.
+        let grant_request = permission_request(json!({
+            "requested": {
+                "paths": [{
+                    "path": extra.display().to_string(),
+                    "access": "ro"
+                }]
+            },
+            "for_action": { "command": "true", "cwd": "." }
+        }));
+        let _ = parent_session
+            .permissioned_factory()
+            .runner_for(&grant_request);
+
+        let child_session = backend
+            .new_session_with(
+                ProcessSessionRequest::new()
+                    .read_only_workspace()
+                    .with_inherited_permissions(parent_view.clone()),
+            )
+            .expect("read-only child session should build");
+        let child_view = child_session
+            .permission_view()
+            .expect("child session should expose its own permission view");
+        assert_eq!(
+            child_view
+                .snapshot()
+                .expect("child snapshot")
+                .path_rules()
+                .len(),
+            parent_view
+                .snapshot()
+                .expect("parent snapshot")
+                .path_rules()
+                .len(),
+            "child should inherit parent's approved ordinary path grants"
+        );
+
+        // Child can read inside workspace & inherited extra dir, and cannot write workspace.
+        let read_intent = ProcessActionIntent::new(
+            vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                format!("cat hello.txt && cat {}/shared.txt", extra.display()),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            4096,
+            4096,
+        )
+        .expect("valid read intent");
+        let read_out = child_session
+            .runner()
+            .run(
+                read_intent,
+                ProcessRunnerContext::new(tokio_util::sync::CancellationToken::new()),
+            )
+            .await
+            .expect("read command should run in read-only sandbox");
+        assert_eq!(
+            read_out.status(),
+            ProcessExitStatus::Exited(0),
+            "stderr: {}",
+            read_out.stderr_text()
+        );
+        assert!(read_out.stdout_text().contains("hi"));
+        assert!(read_out.stdout_text().contains("from-extra"));
+
+        let write_intent = ProcessActionIntent::new(
+            vec![
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "touch should-fail.txt".to_owned(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            4096,
+            4096,
+        )
+        .expect("valid write intent");
+        let write_out = child_session
+            .runner()
+            .run(
+                write_intent,
+                ProcessRunnerContext::new(tokio_util::sync::CancellationToken::new()),
+            )
+            .await
+            .expect("write command should execute and be refused by OS sandbox");
+        assert_ne!(write_out.status(), ProcessExitStatus::Exited(0));
+        assert!(!workspace.join("should-fail.txt").exists());
+
+        // Child's extra grant must not leak back to parent.
+        let child_only_dir = root.path().join("child-only");
+        std::fs::create_dir_all(&child_only_dir).expect("child only dir");
+        let child_grant_request = permission_request(json!({
+            "requested": {
+                "paths": [{
+                    "path": child_only_dir.display().to_string(),
+                    "access": "ro"
+                }]
+            },
+            "for_action": { "command": "true", "cwd": "." }
+        }));
+        let _ = child_session
+            .permissioned_factory()
+            .runner_for(&child_grant_request);
+        assert_eq!(
+            parent_view
+                .snapshot()
+                .expect("parent snapshot")
+                .path_rules()
+                .len(),
+            1,
+            "child-only grants must not mutate parent session permissions"
+        );
     }
 }

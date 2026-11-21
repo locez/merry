@@ -270,12 +270,18 @@ pub(crate) async fn run(
         .transpose()
         .map_err(unexpected)?
         .unwrap_or_default();
+    let max_parallel_tool_calls = merry_config
+        .map(MerryConfig::max_parallel_tool_calls)
+        .transpose()
+        .map_err(unexpected)?
+        .flatten();
     let coding_runtime = match loaded_session {
         None => build_headless_coding_with_policy_composition(
             runtime_input,
             permission_policy,
             permission_review_rules,
             Some(session_store.clone()),
+            max_parallel_tool_calls,
         )?,
         Some(loaded) => resume_headless_coding_composition_with_loaded_session(
             runtime_input,
@@ -283,6 +289,7 @@ pub(crate) async fn run(
             permission_policy,
             permission_review_rules,
             Some(session_store.clone()),
+            max_parallel_tool_calls,
         )?,
     };
     let loop_config = coding_runtime.loop_config();

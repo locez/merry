@@ -400,6 +400,20 @@ impl Runtime {
         }
     }
 
+    pub(crate) async fn has_active_subagents(&self) -> bool {
+        match &self.inner.subagent_manager {
+            Some(manager) => manager.has_active_agents().await,
+            None => false,
+        }
+    }
+
+    /// Cancels all live subagents owned by this runtime and awaits their task handles.
+    pub async fn shutdown_subagents(&self) {
+        if let Some(manager) = &self.inner.subagent_manager {
+            manager.shutdown().await;
+        }
+    }
+
     /// Returns the latest committed active plan snapshot.
     pub async fn plan_snapshot(
         &self,

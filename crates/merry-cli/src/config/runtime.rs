@@ -20,6 +20,23 @@ impl MerryConfig {
         auto_compaction.to_config()
     }
 
+    pub fn max_parallel_tool_calls(&self) -> Result<Option<std::num::NonZeroUsize>, ConfigError> {
+        let Some(limit) = self
+            .raw
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.max_parallel_tool_calls)
+        else {
+            return Ok(None);
+        };
+        let limit = std::num::NonZeroUsize::new(limit).ok_or_else(|| {
+            ConfigError::Invalid(
+                "runtime.max_parallel_tool_calls must be greater than zero".to_owned(),
+            )
+        })?;
+        Ok(Some(limit))
+    }
+
     pub fn subagents_config(&self) -> Result<SubagentsConfig, ConfigError> {
         let Some(subagents) = self
             .raw
@@ -118,6 +135,7 @@ pub struct EffectiveRuntimeModelsConfig {
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RuntimeToml {
+    max_parallel_tool_calls: Option<usize>,
     auto_compaction: Option<AutoCompactionToml>,
     subagents: Option<SubagentsToml>,
 }
@@ -681,5 +699,44 @@ model = "gpt-compact"
         .runtime_models()
         .expect_err("unknown model role provider should fail validation");
         assert!(unknown_provider.to_string().contains("not-configured"));
+    }
+
+    #[test]
+    fn parses_runtime_max_parallel_tool_calls_and_rejects_zero() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+        let config = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[runtime]
+max_parallel_tool_calls = 16
+"#,
+            ),
+            &paths,
+        )
+        .expect("config should parse")
+        .expect("config should be present");
+        assert_eq!(
+            config
+                .max_parallel_tool_calls()
+                .expect("positive limit should validate")
+                .map(std::num::NonZeroUsize::get),
+            Some(16)
+        );
+
+        let zero = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[runtime]
+max_parallel_tool_calls = 0
+"#,
+            ),
+            &paths,
+        )
+        .expect("zero parses before validation")
+        .expect("config should be present");
+        let err = zero
+            .max_parallel_tool_calls()
+            .expect_err("zero limit must be rejected");
+        assert!(err.to_string().contains("max_parallel_tool_calls"));
     }
 }

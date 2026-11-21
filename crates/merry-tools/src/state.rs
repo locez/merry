@@ -14,7 +14,9 @@ pub(crate) struct WorkspaceToolState {
     pub(crate) root: PathBuf,
     pub(crate) readonly_resource_roots: Vec<PathBuf>,
     pub(crate) limits: WorkspaceToolLimits,
+    pub(crate) read_scope: Option<Vec<String>>,
     pub(crate) patch_write_scope: Option<Vec<String>>,
+    pub(crate) read_forbidden_paths: Vec<String>,
     pub(crate) forbidden_paths: Vec<String>,
     pub(crate) durable_memory: Option<Arc<DurableMemory>>,
 }
@@ -33,11 +35,16 @@ impl WorkspaceToolState {
             }
         }
 
+        let read_scope = match config.read_scope {
+            Some(paths) => Some(normalize_scope_paths(paths)?),
+            None => None,
+        };
         let patch_write_scope = match config.patch_write_scope {
             Some(paths) => Some(normalize_scope_paths(paths)?),
             None => None,
         };
-        let mut forbidden_paths = normalize_scope_paths(config.forbidden_paths)?;
+        let read_forbidden_paths = normalize_scope_paths(config.forbidden_paths)?;
+        let mut forbidden_paths = read_forbidden_paths.clone();
         if !forbidden_paths.iter().any(|path| path == ".git") {
             forbidden_paths.push(".git".to_owned());
         }
@@ -46,7 +53,9 @@ impl WorkspaceToolState {
             root,
             readonly_resource_roots,
             limits: config.limits,
+            read_scope,
             patch_write_scope,
+            read_forbidden_paths,
             forbidden_paths,
             durable_memory: config.durable_memory,
         })

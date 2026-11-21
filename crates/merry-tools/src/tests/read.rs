@@ -210,6 +210,44 @@ fn read_text_executor_returns_cancelled_when_token_is_cancelled() {
     assert!(matches!(err, ToolExecutionError::Cancelled));
 }
 
+#[test]
+fn read_text_enforces_read_scope_and_forbidden_paths_while_allowing_resource_roots() {
+    let temp = TempWorkspace::new("read-scope");
+    let skills = TempWorkspace::new("read-scope-skills");
+    temp.write_text("allowed/ok.txt", "allowed content\n");
+    temp.write_text("allowed/secret.txt", "secret content\n");
+    temp.write_text("other/denied.txt", "denied content\n");
+    skills.write_text("SKILL.md", "skill doc\n");
+
+    let tools = WorkspaceTools::new(
+        WorkspaceToolsConfig::new(temp.path())
+            .with_readonly_resource_roots(vec![skills.path().to_path_buf()])
+            .with_read_scope(Some(vec![std::path::PathBuf::from("allowed")]))
+            .with_forbidden_paths(vec![std::path::PathBuf::from("allowed/secret.txt")]),
+    )
+    .expect("scoped tools should build");
+
+    let allowed = read_outcome(&tools, "allowed/ok.txt");
+    assert_eq!(allowed.status(), ToolCallResultStatus::Succeeded);
+
+    let forbidden = read_outcome(&tools, "allowed/secret.txt");
+    assert_eq!(forbidden.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        forbidden.diagnostic().expect("diagnostic").code(),
+        ERROR_PATH_DENIED
+    );
+
+    let out_of_scope = read_outcome(&tools, "other/denied.txt");
+    assert_eq!(out_of_scope.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        out_of_scope.diagnostic().expect("diagnostic").code(),
+        ERROR_PATH_DENIED
+    );
+
+    let skill_doc = read_outcome(&tools, "SKILL.md");
+    assert_eq!(skill_doc.status(), ToolCallResultStatus::Succeeded);
+}
+
 pub(super) fn read_text_range_outcome(
     tools: &WorkspaceTools,
     path: &str,

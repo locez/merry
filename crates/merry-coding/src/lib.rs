@@ -286,6 +286,17 @@ impl CodingAgentProfileBuilder {
         self
     }
 
+    /// Sets workspace-relative paths that `read_text` may read.
+    #[must_use]
+    pub fn read_scope<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.workspace = self.workspace.read_scope(paths);
+        self
+    }
+
     /// Sets workspace-relative paths that `apply_patch` may write.
     #[must_use]
     pub fn patch_write_scope<I, P>(mut self, paths: I) -> Self

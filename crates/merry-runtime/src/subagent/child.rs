@@ -146,7 +146,8 @@ impl SubagentManager {
         };
 
         let prompt = task.task().to_owned();
-        spawn_child_loop(
+        let handle_id = agent_id.clone();
+        let handle = spawn_child_loop(
             self.child_scheduler(),
             ChildLoopLaunch {
                 agent_id,
@@ -160,10 +161,11 @@ impl SubagentManager {
                 event_tx,
             },
         );
+        self.state.lock().await.handles.insert(handle_id, handle);
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn resume_child_with_prompt(
+    pub(super) async fn resume_child_with_prompt(
         &self,
         agent_id: SubagentId,
         task_id: SubagentTaskId,
@@ -175,7 +177,8 @@ impl SubagentManager {
         prompt: String,
     ) {
         let activity_hub = self.attached_activity_hub();
-        spawn_child_loop(
+        let handle_id = agent_id.clone();
+        let handle = spawn_child_loop(
             self.child_scheduler(),
             ChildLoopLaunch {
                 agent_id,
@@ -189,6 +192,7 @@ impl SubagentManager {
                 event_tx,
             },
         );
+        self.state.lock().await.handles.insert(handle_id, handle);
     }
 
     pub(super) async fn mark_failed_and_schedule(
@@ -332,7 +336,9 @@ pub(super) async fn spawn_reserved_child(
     };
 
     let activity_hub = scheduler.attached_activity_hub();
-    spawn_child_loop(
+    let handle_id = start.agent_id.clone();
+    let handles_state = Arc::clone(&scheduler.state);
+    let handle = spawn_child_loop(
         scheduler,
         ChildLoopLaunch {
             agent_id: start.agent_id.clone(),
@@ -346,11 +352,15 @@ pub(super) async fn spawn_reserved_child(
             event_tx,
         },
     );
+    handles_state.lock().await.handles.insert(handle_id, handle);
 
     Ok(ReservedChildStartOutcome::Started)
 }
 
-fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
+fn spawn_child_loop(
+    scheduler: ChildScheduler,
+    launch: ChildLoopLaunch,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut activity_reducer =
             SubagentActivityReducer::new(launch.agent_id.clone(), launch.task_id.clone());
@@ -503,6 +513,7 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
             .get(&launch.agent_id)
             .is_some_and(|agent| agent.status == SubagentStatusLabel::Cancelled)
         {
+            state_guard.handles.remove(&launch.agent_id);
             let to_start =
                 reserve_queued_starts_locked(&mut state_guard, scheduler.effective_max_threads());
             drop(state_guard);
@@ -572,16 +583,19 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
                 agent.summary = "handling follow-up".to_owned();
                 agent.diagnostics = None;
             }
-            drop(state_guard);
-            spawn_child_loop(
-                scheduler,
+            let handle_id = launch.agent_id.clone();
+            let handle = spawn_child_loop(
+                scheduler.clone(),
                 ChildLoopLaunch {
                     prompt: next_prompt,
                     ..launch
                 },
             );
+            state_guard.handles.insert(handle_id, handle);
+            drop(state_guard);
             return;
         }
+        state_guard.handles.remove(&launch.agent_id);
         let (terminal_link, terminal_status, terminal_activity, terminal_notification) =
             state_guard
                 .agents
@@ -612,7 +626,7 @@ fn spawn_child_loop(scheduler: ChildScheduler, launch: ChildLoopLaunch) {
         }
         scheduler.notify.notify_waiters();
         start_reserved_children_iteratively(scheduler, to_start).await;
-    });
+    })
 }
 
 pub(super) async fn finish_child_with_status(

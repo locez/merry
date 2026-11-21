@@ -694,7 +694,7 @@ async fn run_shell(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn fixture_root() -> PathBuf {
+pub(crate) fn fixture_root() -> PathBuf {
     for candidate in [
         std::env::var_os("XDG_RUNTIME_DIR"),
         std::env::var_os("HOME"),

@@ -109,32 +109,74 @@ impl Runtime {
 
             match outcome {
                 StepOutcome::Completed => {
-                    if let Some(notification_input) = take_subagent_notification_input(self).await {
-                        if model_turns_run >= config.max_model_turns() {
-                            trace_loop_finish(
-                                self.session_id().as_str(),
-                                "blocked",
-                                model_turns_run,
-                                Some("max_model_turns_reached"),
-                            );
-                            let session_usage = self.usage().await;
-                            return Ok(AgentLoopResult::new(
-                                AgentLoopStatus::Blocked {
-                                    reason: AgentLoopBlockedReason::MaxModelTurnsReached {
-                                        max_model_turns: config.max_model_turns(),
+                    loop {
+                        if let Some(notification_input) =
+                            take_subagent_notification_input(self).await
+                        {
+                            if model_turns_run >= config.max_model_turns() {
+                                trace_loop_finish(
+                                    self.session_id().as_str(),
+                                    "blocked",
+                                    model_turns_run,
+                                    Some("max_model_turns_reached"),
+                                );
+                                let session_usage = self.usage().await;
+                                return Ok(AgentLoopResult::new(
+                                    AgentLoopStatus::Blocked {
+                                        reason: AgentLoopBlockedReason::MaxModelTurnsReached {
+                                            max_model_turns: config.max_model_turns(),
+                                        },
                                     },
-                                },
-                                events,
-                                model_turns_run,
-                                None,
-                                session_usage,
-                            ));
+                                    events,
+                                    model_turns_run,
+                                    None,
+                                    session_usage,
+                                ));
+                            }
+                            next_input = Some(notification_input);
+                            break;
                         }
-                        next_input = Some(notification_input);
-                        continue;
+                        if let Some(deferred_user_input) = deferred_user_input.take() {
+                            next_input = Some(deferred_user_input);
+                            break;
+                        }
+                        if !self.has_active_subagents().await {
+                            break;
+                        }
+                        let Some(notify) = self.subagent_completion_notify() else {
+                            break;
+                        };
+                        let notified = notify.notified();
+                        tokio::pin!(notified);
+                        notified.as_mut().enable();
+                        if self.has_subagent_completion_notifications().await
+                            || !self.has_active_subagents().await
+                        {
+                            continue;
+                        }
+                        tokio::select! {
+                            biased;
+                            () = loop_token.cancelled() => {
+                                let diagnostic = crate::agent_loop::agent_loop_cancelled_diagnostic();
+                                trace_loop_finish(
+                                    self.session_id().as_str(),
+                                    "cancelled",
+                                    model_turns_run,
+                                    Some(diagnostic.code()),
+                                );
+                                let session_usage = self.usage().await;
+                                return Ok(AgentLoopResult::new(
+                                    AgentLoopStatus::Cancelled { diagnostic },
+                                    events,
+                                    model_turns_run,
+                                    None,
+                                    session_usage,
+                                ));
+                            }
+                            () = notified.as_mut() => {}
+                        }
                     }
-                    if let Some(deferred_user_input) = deferred_user_input.take() {
-                        next_input = Some(deferred_user_input);
+                    if next_input.is_some() {
                         continue;
                     }
                     trace_loop_finish(

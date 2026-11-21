@@ -171,6 +171,11 @@ pub(crate) async fn start_tui_runtime_session(
         .transpose()
         .map_err(unexpected)?
         .unwrap_or_default();
+    let max_parallel_tool_calls = merry_config
+        .map(MerryConfig::max_parallel_tool_calls)
+        .transpose()
+        .map_err(unexpected)?
+        .flatten();
     let coding_runtime = match loaded_session {
         Some(loaded) => resume_headless_coding_composition_with_loaded_session(
             runtime_input,
@@ -178,12 +183,14 @@ pub(crate) async fn start_tui_runtime_session(
             permission_policy,
             permission_review_rules,
             Some(state_store),
+            max_parallel_tool_calls,
         )?,
         None => build_headless_coding_with_policy_composition(
             runtime_input,
             permission_policy,
             permission_review_rules,
             Some(state_store),
+            max_parallel_tool_calls,
         )?,
     };
     let loop_config = coding_runtime.loop_config();

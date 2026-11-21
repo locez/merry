@@ -113,6 +113,12 @@ roots = [
   "skills",
 ]
 
+[runtime]
+# Maximum number of parallel-safe tool calls executed concurrently within one
+# model turn (default 8). Calls above this limit queue automatically. Set to 1
+# to force strictly serial tool execution, or raise for heavier fan-out.
+max_parallel_tool_calls = 8
+
 [runtime.auto_compaction]
 # Automatic compaction runs when the dynamic body reaches 85% of its budget.
 # It first appends a summary directive to the unchanged session request,

@@ -297,3 +297,114 @@ async fn agent_loop_treats_exclusive_tool_as_barrier_between_parallel_waves() {
     );
     assert!(after_index > exclusive_index);
 }
+
+#[derive(Clone)]
+struct ConcurrencyCountingProcessRunner {
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    max_observed: Arc<std::sync::atomic::AtomicUsize>,
+    two_active_barrier: Arc<Barrier>,
+    started: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl merry_runtime::ProcessRunner for ConcurrencyCountingProcessRunner {
+    fn run<'a>(
+        &'a self,
+        intent: merry_runtime::ProcessActionIntent,
+        _context: merry_runtime::ProcessRunnerContext,
+    ) -> merry_runtime::ProcessRunnerFuture<'a> {
+        let in_flight = Arc::clone(&self.in_flight);
+        let max_observed = Arc::clone(&self.max_observed);
+        let barrier = Arc::clone(&self.two_active_barrier);
+        let started = Arc::clone(&self.started);
+        Box::pin(async move {
+            let current = in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            max_observed.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+            let order = started.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if order < 2 {
+                barrier.wait().await;
+            }
+            in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(merry_runtime::ProcessRunnerOutput::new(
+                &intent,
+                merry_runtime::ProcessExitStatus::Exited(0),
+                format!("ran {:?}", intent.argv()),
+                false,
+                String::new(),
+                false,
+            )
+            .expect("valid process output"))
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agent_loop_runs_run_process_calls_in_parallel_and_queues_above_limit() {
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(completed_tool_call_batch_event(vec![
+            merry_llm::ModelToolCall::new(
+                merry_llm::ModelToolCallId::new("proc-1").expect("valid id"),
+                merry_core::ToolName::new("run_process").expect("valid tool"),
+                merry_llm::ToolArguments::try_from(
+                    serde_json::json!({ "command": "echo one", "cwd": null }),
+                )
+                .expect("valid args"),
+            ),
+            merry_llm::ModelToolCall::new(
+                merry_llm::ModelToolCallId::new("proc-2").expect("valid id"),
+                merry_core::ToolName::new("run_process").expect("valid tool"),
+                merry_llm::ToolArguments::try_from(
+                    serde_json::json!({ "command": "echo two", "cwd": null }),
+                )
+                .expect("valid args"),
+            ),
+            merry_llm::ModelToolCall::new(
+                merry_llm::ModelToolCallId::new("proc-3").expect("valid id"),
+                merry_core::ToolName::new("run_process").expect("valid tool"),
+                merry_llm::ToolArguments::try_from(
+                    serde_json::json!({ "command": "echo three", "cwd": null }),
+                )
+                .expect("valid args"),
+            ),
+        ]))],
+        vec![Ok(completed_text_event("all three done"))],
+    ]);
+    let runner = Arc::new(ConcurrencyCountingProcessRunner {
+        in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        max_observed: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        two_active_barrier: Arc::new(Barrier::new(2)),
+        started: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    });
+    let process_tool = merry_runtime::process_command_tool(
+        merry_core::ToolName::new("run_process").expect("valid name"),
+        "Run shell command",
+    )
+    .expect("process tool should build");
+    let runtime = Runtime::builder(session_id("agent-loop-parallel-run-process"))
+        .register_tool(process_tool)
+        .allow_read_only_shell_process_actions(runner.clone())
+        .allow_accepted_local_workspace_process_actions(
+            merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+            runner.clone(),
+        )
+        .max_parallel_tool_calls(NonZeroUsize::new(2).expect("non-zero limit"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime should build");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        run_default_loop(&runtime, "Run three commands."),
+    )
+    .await
+    .expect("two run_process calls must run concurrently and queue the third");
+
+    assert_eq!(result.status(), &AgentLoopStatus::Completed);
+    assert_eq!(
+        runner
+            .max_observed
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "concurrency must reach limit (2) and queue the 3rd call"
+    );
+    assert_eq!(runner.started.load(std::sync::atomic::Ordering::SeqCst), 3);
+}

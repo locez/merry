@@ -20,4 +20,4 @@ pub(crate) use background::BackgroundSupervisor;
 pub(crate) use environment::process_current_dir;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

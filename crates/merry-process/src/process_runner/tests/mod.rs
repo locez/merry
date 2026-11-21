@@ -1,6 +1,9 @@
 use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
 use merry_runtime::{PermissionRequest, PermissionedAction, ProcessActionIntent, ProcessEnvPolicy};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use execution::fixture_root;
+
 mod execution;
 mod path_review;
 mod permissions;
@@ -17,7 +20,7 @@ fn intent(cwd: Option<&str>) -> ProcessActionIntent {
     .expect("process intent should be valid")
 }
 
-fn permission_request(arguments: serde_json::Value) -> PermissionRequest {
+pub(crate) fn permission_request(arguments: serde_json::Value) -> PermissionRequest {
     let call = PendingToolCall::new(
         ToolCallId::new("call-permission").expect("valid call id"),
         ToolName::new("request_permissions").expect("valid tool name"),

@@ -127,7 +127,8 @@ pub fn process_command_tool(
         Arc::new(ProcessCommandToolExecutor),
         ToolActionKind::CommandExec,
     )
-    .with_action_proposal())
+    .with_action_proposal()
+    .with_parallel_safe_execution())
 }
 
 pub(crate) fn process_call_requests_permission(call: &PendingToolCall) -> bool {

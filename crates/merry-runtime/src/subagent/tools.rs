@@ -30,16 +30,19 @@ pub fn subagent_registered_tools(
             spawn_spec,
             Arc::new(SpawnSubagentsExecutor::new(manager.clone())),
             ToolActionKind::RuntimeControl,
-        ),
+        )
+        .with_parallel_safe_execution(),
         RegisteredTool::read_only(
             wait_spec,
             Arc::new(WaitSubagentsExecutor::new(manager.clone())),
-        ),
+        )
+        .with_parallel_safe_execution(),
         RegisteredTool::new(
             cancel_spec,
             Arc::new(CancelSubagentsExecutor::new(manager)),
             ToolActionKind::RuntimeControl,
-        ),
+        )
+        .with_parallel_safe_execution(),
     ])
 }
 
@@ -93,12 +96,15 @@ impl ToolExecutor for SpawnSubagentsExecutor {
                     ));
                 }
             };
+            if context.cancellation_token().is_cancelled() {
+                return Err(ToolExecutionError::Cancelled);
+            }
             let output = self
                 .manager
                 .spawn(
                     tasks,
                     input.max_concurrency,
-                    context.cancellation_token().clone(),
+                    self.manager.session_token().clone(),
                 )
                 .await
                 .map_err(infrastructure_error)?;

@@ -65,6 +65,7 @@ pub(crate) fn build_headless_coding_composition(
         CodingPermissionPolicy::default(),
         PermissionReviewRules::default(),
         None,
+        None,
     )
 }
 
@@ -73,8 +74,14 @@ pub(crate) fn build_headless_coding_with_policy_composition(
     permission: CodingPermissionPolicy,
     review_rules: PermissionReviewRules,
     session_store: Option<FileSessionStore>,
+    max_parallel_tool_calls: Option<std::num::NonZeroUsize>,
 ) -> Result<SharedCodingRuntime, CodingRuntimeError> {
-    let mut builder = build_coding_runtime_from_headless_input(input, permission, review_rules)?;
+    let mut builder = build_coding_runtime_from_headless_input(
+        input,
+        permission,
+        review_rules,
+        max_parallel_tool_calls,
+    )?;
     if let Some(store) = session_store {
         builder = builder.session_store(store);
     }
@@ -87,10 +94,15 @@ async fn resume_headless_coding_composition_with_policy(
     store: FileSessionStore,
     permission: CodingPermissionPolicy,
 ) -> Result<SharedCodingRuntime, CodingRuntimeError> {
-    build_coding_runtime_from_headless_input(input, permission, PermissionReviewRules::default())?
-        .resume_from_store_without_automatic_savepoints(store)
-        .await
-        .map_err(CodingRuntimeError::from)
+    build_coding_runtime_from_headless_input(
+        input,
+        permission,
+        PermissionReviewRules::default(),
+        None,
+    )?
+    .resume_from_store_without_automatic_savepoints(store)
+    .await
+    .map_err(CodingRuntimeError::from)
 }
 
 pub(crate) fn resume_headless_coding_composition_with_loaded_session(
@@ -99,9 +111,15 @@ pub(crate) fn resume_headless_coding_composition_with_loaded_session(
     permission: CodingPermissionPolicy,
     review_rules: PermissionReviewRules,
     session_store: Option<FileSessionStore>,
+    max_parallel_tool_calls: Option<std::num::NonZeroUsize>,
 ) -> Result<SharedCodingRuntime, CodingRuntimeError> {
-    let mut builder = build_coding_runtime_from_headless_input(input, permission, review_rules)?
-        .with_loaded_session(loaded);
+    let mut builder = build_coding_runtime_from_headless_input(
+        input,
+        permission,
+        review_rules,
+        max_parallel_tool_calls,
+    )?
+    .with_loaded_session(loaded);
     if let Some(store) = session_store {
         builder = builder.session_store(store);
     }
@@ -159,6 +177,7 @@ fn build_coding_runtime_from_headless_input(
     input: HeadlessCodingRuntimeInput<'_>,
     permission: CodingPermissionPolicy,
     review_rules: PermissionReviewRules,
+    max_parallel_tool_calls: Option<std::num::NonZeroUsize>,
 ) -> Result<CodingRuntimeBuilder, CodingRuntimeError> {
     let session_id = merry_core::SessionId::new(input.session_id)?;
     #[cfg(not(test))]
@@ -177,6 +196,9 @@ fn build_coding_runtime_from_headless_input(
     .with_skill_roots(input.skill_roots)
     .with_subagents(input.subagents)
     .with_permission_review_rules(review_rules);
+    if let Some(limit) = max_parallel_tool_calls {
+        coding_input = coding_input.with_max_parallel_tool_calls(limit);
+    }
     if let Some(limits) = input.workspace_tool_limits {
         coding_input = coding_input.with_workspace_tool_limits(limits);
     }

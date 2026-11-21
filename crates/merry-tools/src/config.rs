@@ -38,6 +38,7 @@ pub struct WorkspaceToolsConfig {
     pub(crate) root: PathBuf,
     pub(crate) readonly_resource_roots: Vec<PathBuf>,
     pub(crate) limits: WorkspaceToolLimits,
+    pub(crate) read_scope: Option<Vec<PathBuf>>,
     pub(crate) patch_write_scope: Option<Vec<PathBuf>>,
     pub(crate) forbidden_paths: Vec<PathBuf>,
     pub(crate) durable_memory: Option<Arc<DurableMemory>>,
@@ -55,6 +56,7 @@ impl WorkspaceToolsConfig {
             root: root.into(),
             readonly_resource_roots: Vec::new(),
             limits: WorkspaceToolLimits::default(),
+            read_scope: None,
             patch_write_scope: None,
             forbidden_paths: Vec::new(),
             durable_memory: None,
@@ -95,13 +97,19 @@ impl WorkspaceToolsConfig {
         &self.limits
     }
 
+    /// Returns the optional workspace-relative read scope for `read_text`.
+    #[must_use]
+    pub fn read_scope(&self) -> Option<&[PathBuf]> {
+        self.read_scope.as_deref()
+    }
+
     /// Returns the optional workspace-relative write scope for `apply_patch`.
     #[must_use]
     pub fn patch_write_scope(&self) -> Option<&[PathBuf]> {
         self.patch_write_scope.as_deref()
     }
 
-    /// Returns workspace-relative paths forbidden to `apply_patch`.
+    /// Returns workspace-relative paths forbidden to `apply_patch` and `read_text`.
     #[must_use]
     pub fn forbidden_paths(&self) -> &[PathBuf] {
         &self.forbidden_paths
@@ -111,6 +119,17 @@ impl WorkspaceToolsConfig {
     #[must_use]
     pub fn with_limits(mut self, limits: WorkspaceToolLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Sets the optional root-relative read scope for `read_text`.
+    ///
+    /// `None` preserves existing unrestricted workspace read behavior.
+    /// `Some([])` denies all workspace file reads (read-only resource roots
+    /// such as skills remain readable).
+    #[must_use]
+    pub fn with_read_scope(mut self, paths: Option<Vec<PathBuf>>) -> Self {
+        self.read_scope = paths;
         self
     }
 

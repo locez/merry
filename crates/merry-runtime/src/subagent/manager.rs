@@ -64,12 +64,14 @@ pub struct SubagentManager {
     pub(super) plan_link_runtime: Arc<StdMutex<Option<Arc<dyn PlanLinkRuntime>>>>,
     pub(super) parent_capabilities: Arc<StdMutex<Option<ParentCapabilities>>>,
     pub(super) activity_hub: Arc<StdMutex<Option<Arc<SubagentActivityHub>>>>,
+    pub(super) session_token: CancellationToken,
 }
 
 #[derive(Default)]
 pub(super) struct SubagentManagerState {
     pub(super) agents: BTreeMap<SubagentId, ManagedSubagent>,
     pub(super) batches: BTreeMap<u64, SubagentBatch>,
+    pub(super) handles: BTreeMap<SubagentId, tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +99,7 @@ pub(super) async fn enqueue_completion_notification_if_needed(
     notifications.push_back(status);
     drop(state_guard);
     drop(notifications);
-    completion_notify.notify_one();
+    completion_notify.notify_waiters();
 }
 #[derive(Clone)]
 pub(super) struct ManagedSubagent {
@@ -170,6 +172,58 @@ impl SubagentManager {
             plan_link_runtime: Arc::new(StdMutex::new(None)),
             parent_capabilities: Arc::new(StdMutex::new(None)),
             activity_hub: Arc::new(StdMutex::new(None)),
+            session_token: CancellationToken::new(),
+        }
+    }
+
+    /// Returns the session-scoped cancellation token that owns all children
+    /// spawned through runtime tools, decoupled from any single tool phase.
+    #[must_use]
+    pub(crate) fn session_token(&self) -> &CancellationToken {
+        &self.session_token
+    }
+
+    /// Returns true while any managed child is queued or running.
+    pub async fn has_active_agents(&self) -> bool {
+        let state = self.state.lock().await;
+        state
+            .agents
+            .values()
+            .any(|agent| !agent.status.is_terminal())
+    }
+
+    /// Cancels all live children owned by this manager and awaits their task
+    /// handles up to a bounded shutdown timeout.
+    pub async fn shutdown(&self) {
+        self.session_token.cancel();
+        let handles = {
+            let mut state = self.state.lock().await;
+            for agent in state.agents.values_mut() {
+                if !agent.status.is_terminal() {
+                    agent.cancellation_token.cancel();
+                    agent.status = SubagentStatusLabel::Cancelled;
+                    agent.summary = "child cancelled during parent shutdown".to_owned();
+                    agent.diagnostics = Some(error_info(
+                        "subagent_cancelled",
+                        "child cancelled during parent session shutdown",
+                    ));
+                }
+            }
+            std::mem::take(&mut state.handles)
+                .into_values()
+                .collect::<Vec<_>>()
+        };
+        self.notify.notify_waiters();
+        self.completion_notify.notify_waiters();
+
+        const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+        for mut handle in handles {
+            if tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut handle)
+                .await
+                .is_err()
+            {
+                handle.abort();
+            }
         }
     }
 
@@ -571,10 +625,7 @@ impl SubagentManager {
                 .await;
         }
 
-        Ok(SpawnSubagentsOutput {
-            spawned,
-            rejected: Vec::new(),
-        })
+        Ok(SpawnSubagentsOutput { spawned, rejected })
     }
 
     /// Returns a lazy transcript snapshot and live event subscription for one subagent.
@@ -641,7 +692,7 @@ impl SubagentManager {
             } else if let (Some(runtime), Some(generation_config)) =
                 (agent.runtime.clone(), agent.generation_config.clone())
             {
-                let token = CancellationToken::new();
+                let token = self.session_token.child_token();
                 agent.cancellation_token = token.clone();
                 agent.status = SubagentStatusLabel::Running;
                 agent.summary = "handling follow-up".to_owned();
@@ -674,7 +725,8 @@ impl SubagentManager {
                 generation_config,
                 event_tx,
                 prompt,
-            );
+            )
+            .await;
         }
         Ok(())
     }
@@ -775,6 +827,7 @@ impl SubagentManager {
             );
         }
         self.notify.notify_waiters();
+        self.completion_notify.notify_waiters();
         self.start_reserved_children(to_start).await?;
         Ok(WaitSubagentsOutput::new(agents))
     }

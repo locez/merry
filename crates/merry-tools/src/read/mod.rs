@@ -16,13 +16,14 @@ use crate::{
     config::WorkspaceToolLimits,
     errors::{
         BlockingToolError, DomainError, ERROR_FILE_NOT_FOUND, ERROR_FILE_TOO_LARGE,
-        ERROR_INVALID_ARGUMENTS, ERROR_NOT_FILE, ERROR_READ_FAILED, failed_outcome,
+        ERROR_INVALID_ARGUMENTS, ERROR_NOT_FILE, ERROR_PATH_DENIED, ERROR_READ_FAILED,
+        failed_outcome,
     },
     path::{
         ValidatedToolPath, open_file_for_read, resolve_existing_path,
         validate_workspace_path_argument,
     },
-    state::WorkspaceToolState,
+    state::{WorkspaceToolState, matches_any_scope_path},
     trace::{
         WorkspaceTraceFinish, WorkspaceTracePath, WorkspaceTraceTarget, invalid_arguments_outcome,
         trace_workspace_tool_finish, trace_workspace_tool_start,
@@ -194,6 +195,14 @@ fn read_text_blocking_checked(
             ));
         }
     };
+    if let Err(error) = validate_read_boundary(state, &relative, &resolved) {
+        return Ok(failed_outcome(
+            READ_TEXT_TOOL,
+            error.code,
+            error.message,
+            Some(relative.display),
+        ));
+    }
     match read_resolved_text(
         &relative,
         &resolved,
@@ -221,6 +230,50 @@ fn read_text_blocking_checked(
             error.message,
             Some(relative.display),
         )),
+    }
+}
+
+fn validate_read_boundary(
+    state: &WorkspaceToolState,
+    path: &ValidatedToolPath,
+    resolved: &Path,
+) -> Result<(), DomainError> {
+    if state
+        .readonly_resource_roots
+        .iter()
+        .any(|root| resolved.starts_with(root))
+    {
+        return Ok(());
+    }
+    if let Some(memory) = &state.durable_memory
+        && memory.governs_path(resolved)
+    {
+        return Ok(());
+    }
+
+    let scope_path = path.relative_spelling();
+    if let Some(scope_path) = scope_path
+        && matches_any_scope_path(scope_path, &state.read_forbidden_paths)
+    {
+        return Err(DomainError::new(
+            ERROR_PATH_DENIED,
+            "workspace read path is forbidden by the child workspace scope",
+        ));
+    }
+
+    let Some(read_scope) = &state.read_scope else {
+        return Ok(());
+    };
+    match scope_path {
+        Some(scope_path) if matches_any_scope_path(scope_path, read_scope) => Ok(()),
+        _ => {
+            let message = if read_scope.is_empty() {
+                "workspace read path is outside the configured read scope; this read scope allows no workspace files"
+            } else {
+                "workspace read path is outside the configured read scope"
+            };
+            Err(DomainError::new(ERROR_PATH_DENIED, message))
+        }
     }
 }
 

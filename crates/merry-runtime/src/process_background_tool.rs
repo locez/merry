@@ -53,10 +53,10 @@ pub fn read_background_process_tool(
         ReadBackgroundProcessInput::tool_spec().map_err(|error| ProcessCommandToolError::Core {
             source: error.into(),
         })?;
-    Ok(RegisteredTool::read_only(
-        spec,
-        Arc::new(ReadBackgroundProcessExecutor { control }),
-    ))
+    Ok(
+        RegisteredTool::read_only(spec, Arc::new(ReadBackgroundProcessExecutor { control }))
+            .with_parallel_safe_execution(),
+    )
 }
 
 /// Registers the tool that stops one retained background process group.
@@ -71,7 +71,8 @@ pub fn stop_background_process_tool(
         spec,
         Arc::new(StopBackgroundProcessExecutor { control }),
         ToolActionKind::RuntimeControl,
-    ))
+    )
+    .with_parallel_safe_execution())
 }
 
 struct ReadBackgroundProcessExecutor {

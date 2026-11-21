@@ -44,6 +44,7 @@ use std::{
 use tokio::sync::{Mutex, RwLock};
 
 const DEFAULT_EVENT_BUFFER_SIZE: usize = 16;
+const DEFAULT_MAX_PARALLEL_TOOL_CALLS: usize = 8;
 
 /// Builder for a Merry runtime.
 ///
@@ -99,7 +100,7 @@ impl RuntimeBuilder {
             session_id,
             event_buffer_size: NonZeroUsize::new(DEFAULT_EVENT_BUFFER_SIZE)
                 .expect("default event buffer size is non-zero"),
-            max_parallel_tool_calls: NonZeroUsize::new(4)
+            max_parallel_tool_calls: NonZeroUsize::new(DEFAULT_MAX_PARALLEL_TOOL_CALLS)
                 .expect("default parallel tool-call limit is non-zero"),
             model_configs: RuntimeModelConfigs::default(),
             model_retry_policy: ModelRetryPolicy::default(),

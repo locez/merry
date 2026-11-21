@@ -97,6 +97,28 @@ impl ProcessSessionPermissions {
         Self::default()
     }
 
+    /// Creates an independent session seeded with an immutable capability snapshot.
+    ///
+    /// Subsequent grants retained in the returned session stay isolated from any
+    /// parent or sibling sessions that produced the snapshot.
+    #[must_use]
+    pub fn from_snapshot(snapshot: ProcessSessionPermissionSnapshot) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(snapshot)),
+        }
+    }
+
+    /// Creates an independent session seeded from a read-only parent permission view.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed if the parent permission lock was poisoned.
+    pub fn from_inherited_view(
+        view: &ProcessSessionPermissionView,
+    ) -> Result<Self, ProcessRunnerError> {
+        Ok(Self::from_snapshot(view.snapshot()?))
+    }
+
     /// Supplies a read-only view to an ordinary or permissioned process backend.
     #[must_use]
     pub fn view(&self) -> ProcessSessionPermissionView {

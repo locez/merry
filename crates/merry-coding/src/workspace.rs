@@ -51,6 +51,7 @@ pub(crate) struct WorkspaceCodingProfileBuilder {
     pub(crate) root: PathBuf,
     pub(crate) readonly_resource_roots: Vec<PathBuf>,
     pub(crate) limits: WorkspaceToolLimits,
+    pub(crate) read_scope: Option<Vec<PathBuf>>,
     pub(crate) patch_write_scope: Option<Vec<PathBuf>>,
     pub(crate) forbidden_paths: Vec<PathBuf>,
     pub(crate) enable_patch_tool: bool,
@@ -67,6 +68,7 @@ impl WorkspaceCodingProfileBuilder {
             root: root.into(),
             readonly_resource_roots: Vec::new(),
             limits: WorkspaceToolLimits::default(),
+            read_scope: None,
             patch_write_scope: None,
             forbidden_paths: Vec::new(),
             enable_patch_tool: false,
@@ -111,6 +113,15 @@ impl WorkspaceCodingProfileBuilder {
         self
     }
 
+    pub(crate) fn read_scope<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.read_scope = Some(paths.into_iter().map(Into::into).collect());
+        self
+    }
+
     pub(crate) fn patch_write_scope<I, P>(mut self, paths: I) -> Self
     where
         I: IntoIterator<Item = P>,
@@ -151,6 +162,7 @@ impl WorkspaceCodingProfileBuilder {
         let mut config = WorkspaceToolsConfig::new(self.root.clone())
             .with_readonly_resource_roots(self.readonly_resource_roots)
             .with_limits(self.limits)
+            .with_read_scope(self.read_scope)
             .with_patch_write_scope(self.patch_write_scope)
             .with_forbidden_paths(self.forbidden_paths);
         if let Some(memory) = self.durable_memory.clone() {
@@ -273,6 +285,15 @@ impl WorkspaceCodingProfileBuilder {
         );
         if self.enable_web_tools {
             append_hash_field(&mut material, "web-tools", "on");
+        }
+        match self.read_scope.as_ref() {
+            None => append_hash_field(&mut material, "read-scope-state", "unrestricted"),
+            Some(paths) => {
+                append_hash_field(&mut material, "read-scope-state", "restricted");
+                for path in paths {
+                    append_hash_field(&mut material, "read-scope", &path.to_string_lossy());
+                }
+            }
         }
         match self.patch_write_scope.as_ref() {
             None => append_hash_field(&mut material, "patch-write-scope-state", "unrestricted"),

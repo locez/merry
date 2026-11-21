@@ -646,3 +646,226 @@ mod plan_runtime;
 mod policy;
 mod results;
 mod scheduler;
+
+struct GateChildFactory {
+    release: CancellationToken,
+}
+
+impl ChildRuntimeFactory for GateChildFactory {
+    fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, crate::RuntimeError> {
+        let provider = ScriptedStepProvider::with_release(
+            vec![vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text("gated child finished")],
+                    FinishReason::Stop,
+                    None,
+                ),
+            })]],
+            self.release.clone(),
+        );
+        Runtime::builder(input.session_id)
+            .task_anchor(input.task_anchor)
+            .model_provider(
+                Arc::new(provider),
+                ModelName::new("fake/gated-child").expect("valid model"),
+            )
+            .build()
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn spawn_reports_partial_rejections_alongside_spawned_tasks() {
+    let release = CancellationToken::new();
+    release.cancel();
+    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(GateChildFactory { release });
+    let config = SubagentConfig::new(2, 1)
+        .expect("valid config")
+        .with_model_turn_bounds(2, 10)
+        .expect("valid bounds");
+    let manager = SubagentManager::new(
+        SessionId::new("partial-reject-parent").expect("valid session id"),
+        config,
+        factory,
+    );
+
+    let valid = SubagentTaskSpec::new("Valid child task.", 4)
+        .expect("valid task")
+        .with_write_scope(Vec::<&str>::new())
+        .expect("valid empty write scope");
+    let invalid_budget = SubagentTaskSpec::new("Out-of-bounds budget task.", 1)
+        .expect("valid spec")
+        .with_write_scope(Vec::<&str>::new())
+        .expect("valid empty write scope");
+
+    let output = manager
+        .spawn(vec![valid, invalid_budget], None, CancellationToken::new())
+        .await
+        .expect("spawn should succeed with partial rejections");
+    assert_eq!(output.spawned.len(), 1);
+    assert_eq!(output.rejected.len(), 1);
+    assert_eq!(output.rejected[0].task_index, 1);
+    manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn spawn_tool_decouples_child_cancellation_from_tool_phase_token() {
+    let release = CancellationToken::new();
+    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(GateChildFactory {
+        release: release.clone(),
+    });
+    let manager = SubagentManager::new(
+        SessionId::new("decoupled-phase-parent").expect("valid session id"),
+        SubagentConfig::new(2, 1).expect("valid config"),
+        factory,
+    );
+    let [spawn_tool, _, _] =
+        crate::subagent_registered_tools(manager.clone()).expect("subagent tools build");
+    let phase_token = CancellationToken::new();
+    let call = PendingToolCall::new(
+        merry_core::ToolCallId::new("spawn-call-1").expect("valid call id"),
+        ToolName::new("spawn_subagents").expect("valid tool name"),
+        ToolArguments::try_from(json!({
+            "tasks": [{
+                "task": "Wait on gate.",
+                "write_scope": []
+            }]
+        }))
+        .expect("valid arguments"),
+    );
+
+    let outcome = spawn_tool
+        .executor()
+        .execute(call, ToolExecutionContext::new(phase_token.clone()))
+        .await
+        .expect("spawn tool should succeed");
+    assert_eq!(outcome.status(), merry_core::ToolCallResultStatus::Succeeded);
+
+    // Cancelling the tool phase token after spawn must NOT cancel the child.
+    phase_token.cancel();
+    tokio::task::yield_now().await;
+    let snapshot = manager.snapshot().await;
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].status, SubagentStatusLabel::Running);
+
+    release.cancel();
+    let waited = manager
+        .wait(&[snapshot[0].agent_id.clone()], WaitMode::All, None)
+        .await
+        .expect("wait should complete");
+    assert_eq!(waited.agents[0].status, SubagentStatusLabel::Completed);
+    manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn shutdown_cancels_active_children_and_reclaims_handles() {
+    let release = CancellationToken::new();
+    let factory: Arc<dyn ChildRuntimeFactory> = Arc::new(GateChildFactory { release });
+    let manager = SubagentManager::new(
+        SessionId::new("shutdown-parent").expect("valid session id"),
+        SubagentConfig::new(2, 1).expect("valid config"),
+        factory,
+    );
+    let task = SubagentTaskSpec::new("Long running task.", 4)
+        .expect("valid task")
+        .with_write_scope(Vec::<&str>::new())
+        .expect("valid scope");
+    let spawned = manager
+        .spawn(vec![task], None, CancellationToken::new())
+        .await
+        .expect("spawn should succeed");
+    assert_eq!(spawned.spawned.len(), 1);
+    assert!(manager.has_active_agents().await);
+
+    manager.shutdown().await;
+    assert!(!manager.has_active_agents().await);
+    let snapshot = manager.snapshot().await;
+    assert_eq!(snapshot[0].status, SubagentStatusLabel::Cancelled);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn non_interactive_agent_loop_waits_for_active_subagents_before_completing() {
+    let release = CancellationToken::new();
+    let child_factory: Arc<dyn ChildRuntimeFactory> = Arc::new(GateChildFactory {
+        release: release.clone(),
+    });
+    let parent_provider = ScriptedStepProvider::new(vec![
+        vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::tool_call(ModelToolCall::new(
+                    ModelToolCallId::new("call-spawn").expect("valid call id"),
+                    ToolName::new("spawn_subagents").expect("valid tool name"),
+                    ToolArguments::try_from(json!({
+                        "tasks": [{
+                            "task": "Slow child task.",
+                            "write_scope": []
+                        }]
+                    }))
+                    .expect("valid arguments"),
+                ))],
+                FinishReason::ToolCalls,
+                None,
+            ),
+        })],
+        vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text("Spawned child, waiting for it.")],
+                FinishReason::Stop,
+                None,
+            ),
+        })],
+        vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::text("Child finished; parent done.")],
+                FinishReason::Stop,
+                None,
+            ),
+        })],
+    ]);
+    let session_id = SessionId::new("non-interactive-wait-parent").expect("valid session id");
+    let manager = SubagentManager::new(
+        session_id.clone(),
+        SubagentConfig::new(2, 1).expect("valid config"),
+        child_factory,
+    );
+    let [spawn_tool, wait_tool, cancel_tool] =
+        crate::subagent_registered_tools(manager.clone()).expect("subagent tools build");
+    let runtime = Runtime::builder(session_id)
+        .model_provider(
+            Arc::new(parent_provider),
+            ModelName::new("fake/parent").expect("valid model"),
+        )
+        .subagent_manager(manager)
+        .register_tool(spawn_tool)
+        .register_tool(wait_tool)
+        .register_tool(cancel_tool)
+        .build()
+        .expect("parent runtime should build");
+
+    let releaser = tokio::spawn({
+        let release = release.clone();
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            release.cancel();
+        }
+    });
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        runtime.run_agent_loop(
+            crate::StepInput::user_text("Delegate and wait.").expect("valid input"),
+            crate::StepContext::default(),
+            crate::AgentLoopConfig::new(6).expect("valid loop config"),
+        ),
+    )
+    .await
+    .expect("parent loop should not hang")
+    .expect("parent loop should succeed");
+    releaser.await.expect("releaser should finish");
+
+    assert_eq!(result.status(), &crate::AgentLoopStatus::Completed);
+    assert_eq!(result.model_turns_run(), 3);
+    assert_eq!(
+        result.final_output().map(str::trim),
+        Some("Child finished; parent done.")
+    );
+}
