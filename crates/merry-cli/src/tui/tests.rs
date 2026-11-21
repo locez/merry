@@ -65,31 +65,27 @@ fn find_text_position(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<
     let area = buffer.area;
     for y in area.y..area.y + area.height {
         let mut row = String::new();
+        let mut cell_offsets = Vec::with_capacity(usize::from(area.width));
         for x in area.x..area.x + area.width {
+            let start = row.len();
             row.push_str(buffer[(x, y)].symbol());
+            cell_offsets.push((start, x));
         }
-        if let Some(byte_index) = row.find(needle) {
-            let x = row[..byte_index].chars().count();
-            return Some((u16::try_from(x).ok()?, y));
+        if let Some(byte_index) = row.find(needle)
+            && let Some(&(_, x)) = cell_offsets
+                .iter()
+                .rev()
+                .find(|&&(start, _)| start <= byte_index)
+        {
+            return Some((x, y));
         }
     }
     None
 }
 
 fn find_cell_style(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<ratatui::style::Style> {
-    let area = buffer.area;
-    for y in area.y..area.y + area.height {
-        let mut row = String::new();
-        for x in area.x..area.x + area.width {
-            row.push_str(buffer[(x, y)].symbol());
-        }
-        let Some(start) = row.find(text) else {
-            continue;
-        };
-        let x = area.x + u16::try_from(row[..start].chars().count()).ok()?;
-        return Some(buffer[(x, y)].style());
-    }
-    None
+    let (x, y) = find_text_position(buffer, text)?;
+    Some(buffer[(x, y)].style())
 }
 
 mod click_targets;

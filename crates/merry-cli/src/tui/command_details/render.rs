@@ -94,7 +94,7 @@ pub(crate) fn render_details(frame: &mut Frame<'_>, state: &TuiState, details: &
     let mut block = Block::default()
         .title(Line::from(vec![
             Span::styled(
-                " 🎀 ",
+                state.primary_brand_badge(),
                 semantic_style(state, SemanticColor::Status).add_modifier(Modifier::BOLD),
             ),
             Span::styled(

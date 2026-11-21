@@ -108,7 +108,7 @@ fn renderer_uses_one_timeline_without_permanent_side_rails() {
 
     let text = render_to_text(&state, 180, 32);
 
-    assert!(text.contains('🐾'));
+    assert!(text.contains(crate::tui::glyphs::BRAND_PAW));
     assert!(text.contains("merry"));
     assert!(text.contains("make the TUI distinct"));
     assert!(text.contains("Ran cargo test -p merry-cli"));
@@ -417,7 +417,8 @@ fn cockpit_wide_cursor_remains_inside_input_with_cjk_text() {
     state.insert_input_str("你好 cockpit");
 
     let (buffer, cursor) = render_to_buffer_and_cursor(&state, 180, 24);
-    let input_label = find_text_position(&buffer, "🎀").expect("input brand should render");
+    let input_label = find_text_position(&buffer, crate::tui::glyphs::BRAND_RIBBON)
+        .expect("input brand should render");
 
     assert!(cursor.y > input_label.1);
     assert!(cursor.x > input_label.0);
@@ -562,11 +563,11 @@ fn renderer_keeps_input_region_stable_when_queue_count_changes() {
     let three_item_text = render_to_text(&three_item_state, 80, 18);
     let one_item_input_row = one_item_text
         .lines()
-        .position(|line| line.contains("🎀"))
+        .position(|line| line.contains(crate::tui::glyphs::BRAND_RIBBON))
         .expect("one item queue render should show input");
     let three_item_input_row = three_item_text
         .lines()
-        .position(|line| line.contains("🎀"))
+        .position(|line| line.contains(crate::tui::glyphs::BRAND_RIBBON))
         .expect("three item queue render should show input");
 
     assert_eq!(one_item_input_row, three_item_input_row);

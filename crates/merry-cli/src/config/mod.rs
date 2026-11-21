@@ -566,6 +566,14 @@ pub(crate) enum TextSizingMode {
     On,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BrandMarkMode {
+    #[default]
+    Emoji,
+    Snowflake,
+}
+
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TuiHeaderToml {
@@ -580,6 +588,7 @@ struct TuiToml {
     animations: Option<bool>,
     max_reading_width: Option<u16>,
     text_sizing: Option<TextSizingMode>,
+    brand_mark: Option<BrandMarkMode>,
     header: Option<TuiHeaderToml>,
     theme: Option<TuiThemeToml>,
     keymap: Option<TuiKeymapToml>,
@@ -650,6 +659,7 @@ pub(crate) struct TuiConfig {
     pub(crate) animations: bool,
     pub(crate) max_reading_width: u16,
     pub(crate) text_sizing: TextSizingMode,
+    pub(crate) brand_mark: BrandMarkMode,
     pub(crate) header_items: Vec<HeaderItemKind>,
     pub(crate) theme: TuiThemeToml,
     pub(crate) keymap: TuiKeymapToml,
@@ -663,6 +673,7 @@ impl Default for TuiConfig {
             animations: true,
             max_reading_width: DEFAULT_MAX_READING_WIDTH,
             text_sizing: TextSizingMode::Off,
+            brand_mark: BrandMarkMode::Emoji,
             header_items: HeaderItemKind::DEFAULT_ITEMS.to_vec(),
             theme: TuiThemeToml::default(),
             keymap: TuiKeymapToml::default(),
@@ -686,6 +697,7 @@ impl MerryConfig {
             animations: tui.animations.unwrap_or(true),
             max_reading_width: tui.max_reading_width.unwrap_or(DEFAULT_MAX_READING_WIDTH),
             text_sizing: tui.text_sizing.unwrap_or(TextSizingMode::Off),
+            brand_mark: tui.brand_mark.unwrap_or(BrandMarkMode::Emoji),
             header_items,
             theme: tui.theme.clone().unwrap_or_default(),
             keymap: tui.keymap.clone().unwrap_or_default(),

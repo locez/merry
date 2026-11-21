@@ -196,6 +196,9 @@ animations = true
 max_reading_width = 104
 # Optional Kitty OSC 66 text-sizing protocol for display titles: "off" (default), "auto", or "on".
 text_sizing = "off"
+# Primary Merry brand mark in the composer hairline and modal titles:
+# "emoji" (default, 🎀) or "snowflake" (monochrome ❆ across Linux/macOS/iOS).
+brand_mark = "emoji"
 
 [tui.header]
 # Ordered segments shown in the top bar. Supported values:

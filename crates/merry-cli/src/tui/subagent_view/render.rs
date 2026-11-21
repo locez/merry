@@ -157,7 +157,7 @@ pub(crate) fn render_subagent_takeover(
     let mut block = Block::default()
         .title(Line::from(vec![
             Span::styled(
-                " 🐾 ",
+                crate::tui::glyphs::BRAND_PAW_BADGE,
                 semantic_style(state, SemanticColor::Status)
                     .add_modifier(Modifier::BOLD)
                     .patch(surface),

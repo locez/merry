@@ -66,6 +66,7 @@ pub(crate) struct TuiState {
     animations: bool,
     max_reading_width: u16,
     text_sizing_active: bool,
+    brand_mark: crate::config::BrandMarkMode,
     header_items: Vec<crate::config::HeaderItemKind>,
     subagents: Vec<crate::tui::subagent_view::SubagentEntry>,
     task_dock: crate::tui::task_dock::TaskDockState,
@@ -133,6 +134,7 @@ impl TuiState {
             animations: true,
             max_reading_width: crate::config::DEFAULT_MAX_READING_WIDTH,
             text_sizing_active: false,
+            brand_mark: crate::config::BrandMarkMode::Emoji,
             header_items: crate::config::HeaderItemKind::DEFAULT_ITEMS.to_vec(),
             subagents: Vec::new(),
             task_dock: crate::tui::task_dock::TaskDockState::default(),
@@ -216,6 +218,15 @@ impl TuiState {
     pub(crate) fn with_text_sizing(mut self, mode: crate::config::TextSizingMode) -> Self {
         self.text_sizing_active = crate::tui::text_sizing::is_text_sizing_active(mode);
         self
+    }
+
+    pub(crate) fn with_brand_mark(mut self, mode: crate::config::BrandMarkMode) -> Self {
+        self.brand_mark = mode;
+        self
+    }
+
+    pub(crate) fn primary_brand_badge(&self) -> &'static str {
+        crate::tui::glyphs::primary_badge(self.brand_mark)
     }
 
     #[allow(dead_code)]

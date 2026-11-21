@@ -274,7 +274,9 @@ fn renderer_shows_completion_candidates_above_input() {
 
     assert!(text.contains("> Cargo.toml"));
     assert!(!text.contains("> @ Cargo.toml"));
-    assert!(text.find("> Cargo.toml").unwrap() < text.find('🎀').unwrap());
+    assert!(
+        text.find("> Cargo.toml").unwrap() < text.find(crate::tui::glyphs::BRAND_RIBBON).unwrap()
+    );
 }
 
 #[test]

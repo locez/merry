@@ -111,7 +111,10 @@ fn renderer_applies_configured_semantic_theme_colors() {
     });
     let buffer = render_to_buffer(&state, 180, 24);
 
-    assert_eq!(find_cell_color(&buffer, "🐾"), Some(Color::Red));
+    assert_eq!(
+        find_cell_color(&buffer, crate::tui::glyphs::BRAND_PAW),
+        Some(Color::Red)
+    );
     assert_eq!(find_cell_color(&buffer, "/repo"), Some(Color::LightBlue));
     assert_eq!(find_cell_color(&buffer, "gpt-test"), Some(Color::Cyan));
     assert_eq!(find_cell_color(&buffer, "tool"), Some(Color::Blue));
@@ -144,7 +147,8 @@ fn renderer_uses_colored_header_bar_and_branded_input() {
     let path_style = find_cell_style(&buffer, "/repo").expect("workspace path should render");
     let model_style = find_cell_style(&buffer, "gpt-test").expect("model should render");
     let usage_style = find_cell_style(&buffer, "usage -").expect("usage should render");
-    let input_brand_style = find_cell_style(&buffer, "🎀").expect("input brand should render");
+    let input_brand_style = find_cell_style(&buffer, crate::tui::glyphs::BRAND_RIBBON)
+        .expect("input brand should render");
     let input_style = find_cell_style(&buffer, "draft").expect("input text should render");
 
     assert!(!text.contains("input"));
@@ -161,6 +165,13 @@ fn renderer_uses_colored_header_bar_and_branded_input() {
     assert_eq!(input_brand_style.fg, Some(Color::LightMagenta));
     assert!(input_brand_style.add_modifier.contains(Modifier::BOLD));
     assert_eq!(input_style.fg, Some(Color::White));
+
+    let snowflake_state = state.with_brand_mark(crate::config::BrandMarkMode::Snowflake);
+    let snowflake_buffer = render_to_buffer(&snowflake_state, 80, 16);
+    let snowflake_text = rendered_buffer_text(&snowflake_buffer);
+    assert!(snowflake_text.contains(crate::tui::glyphs::BRAND_SNOWFLAKE));
+    assert!(snowflake_text.contains(crate::tui::glyphs::BRAND_PAW));
+    assert!(!snowflake_text.contains(crate::tui::glyphs::BRAND_RIBBON));
 }
 
 #[test]

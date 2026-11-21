@@ -2,7 +2,7 @@ use super::home;
 use crate::coding::{AutoFallback, PermissionMode};
 use crate::config::provider::{EffectiveOpenAiApiKeySource, ProviderConfigSource};
 use crate::config::{
-    CliDefaults, EffectiveProviderConfig, LogFormat, LogLevel, MerryConfig, XdgPaths,
+    BrandMarkMode, CliDefaults, EffectiveProviderConfig, LogFormat, LogLevel, MerryConfig, XdgPaths,
 };
 use merry_runtime::PathAccess;
 use std::{
@@ -358,6 +358,7 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
         .tui_config()
         .expect("example TUI config should validate");
     assert!(tui.show_successful_command_output);
+    assert_eq!(tui.brand_mark, BrandMarkMode::Emoji);
     assert_eq!(tui.theme.status.as_deref(), Some("light_magenta"));
     assert_eq!(tui.theme.assistant.as_deref(), Some("white"));
     assert_eq!(tui.theme.tool_keyword.as_deref(), Some("light_cyan"));
@@ -373,6 +374,15 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
         Some("alt+u")
     );
     assert_eq!(tui.keymap.history_previous.as_deref(), Some("up"));
+
+    let snowflake =
+        MerryConfig::load_optional_from_text(Some("[tui]\nbrand_mark = 'snowflake'"), &paths)
+            .expect("snowflake brand_mark should parse")
+            .expect("config should be present");
+    assert_eq!(
+        snowflake.tui_config().expect("valid tui config").brand_mark,
+        BrandMarkMode::Snowflake
+    );
     assert_eq!(tui.keymap.history_search.as_deref(), Some("ctrl+r"));
     assert_eq!(tui.keymap.toggle_comment.as_deref(), Some("alt+c"));
 

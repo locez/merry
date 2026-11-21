@@ -536,7 +536,7 @@ pub(super) fn subagent_lines(
     let inspect_label = "[Inspect ▸]";
     let inspect_width = unicode_width::UnicodeWidthStr::width(inspect_label);
 
-    let prefix_text = format!("{glyph} 🐾 Subagent ");
+    let prefix_text = format!("{glyph} {} Subagent ", crate::tui::glyphs::BRAND_PAW);
     let mut left_spans = vec![
         Span::styled(
             prefix_text,

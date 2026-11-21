@@ -4,7 +4,7 @@ use merry_core::{ContextWindowSource, SessionUsage};
 use std::path::Path;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-pub(crate) const HEADER_BRAND_MARK: &str = "🐾";
+pub(crate) const HEADER_BRAND_MARK: &str = crate::tui::glyphs::BRAND_PAW;
 const BRAND_AND_SEPARATORS_WIDTH: usize = 11;
 const MIN_WORKSPACE_WIDTH: usize = 8;
 

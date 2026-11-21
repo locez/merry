@@ -35,6 +35,7 @@ mod completion;
 mod controller;
 mod controller_provider;
 mod copy_controls;
+pub(crate) mod glyphs;
 mod highlight;
 mod input;
 mod input_history_store;
@@ -218,6 +219,7 @@ pub(crate) async fn run(
     .with_animations(tui_config.animations)
     .with_max_reading_width(tui_config.max_reading_width)
     .with_text_sizing(tui_config.text_sizing)
+    .with_brand_mark(tui_config.brand_mark)
     .with_header_items(tui_config.header_items);
     let input_history_store =
         InputHistoryStore::for_workspace(paths.state_dir(), &session.workspace_root);

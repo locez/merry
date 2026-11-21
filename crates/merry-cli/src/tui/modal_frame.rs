@@ -82,7 +82,7 @@ pub(crate) fn render_modal_frame(
     let mut block = Block::default()
         .title(Line::from(vec![
             Span::styled(
-                " 🎀 ",
+                state.primary_brand_badge(),
                 semantic_style(state, SemanticColor::Status)
                     .add_modifier(Modifier::BOLD)
                     .patch(surface),
