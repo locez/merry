@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download tested Web assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: merry-web-dist
           path: web/dist
@@ -37,71 +37,49 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install shell and sandbox test dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes bubblewrap fish ripgrep gnupg openssh-client
-
-      - name: Enable unprivileged sandbox namespaces
-        run: |
-          set -euo pipefail
-          # Ubuntu 26 ships /etc/apparmor.d/bwrap-userns-restrict with the
-          # apparmor package. One bwrap still starts, but children are stacked
-          # into unpriv_bwrap, so the inner action sandbox cannot create its
-          # user namespace. The local override is the host fix in SANDBOX.md.
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
-          profile=/etc/apparmor.d/bwrap-userns-restrict
-          if [[ -f "$profile" ]]; then
-            sudo mkdir -p /etc/apparmor.d/local
-            sudo tee /etc/apparmor.d/local/bwrap-userns-restrict /etc/apparmor.d/local/unpriv_bwrap >/dev/null <<'RULE'
-          # Allow bubblewrap inside bubblewrap: when a sandboxed process executes bwrap,
-          # attach the full bwrap profile again instead of the capability-stripped stack.
-          priority=1 allow px /usr/bin/bwrap -> bwrap,
-          RULE
-            if ! sudo apparmor_parser -r "$profile"; then
-              # AppArmor before 4.1 rejects rule priority. Unload the profile
-              # only after the sysctl is off; unloading it alone breaks even
-              # a single bubblewrap layer.
-              sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-              sudo apparmor_parser -R "$profile"
-            fi
-          fi
-          bwrap --unshare-user --die-with-parent --ro-bind / / --proc /proc --dev /dev -- /usr/bin/true
-          bwrap --unshare-user --die-with-parent --ro-bind / / --proc /proc --dev /dev -- \
-            bwrap --unshare-user --die-with-parent --ro-bind / / --proc /proc --dev /dev -- /usr/bin/true
-
       - name: Check formatting
         run: cargo fmt --all --check
 
       - name: Verify scenario selection fails closed
         run: bash .github/scripts/tests/cargo-test-scenario.sh
 
-      - name: Run named T6 evidence scenario
-        run: >-
-          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test provider_boundary
-          t6_failure_evidence
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "reliability-gate-linux"
 
-      - name: Run deterministic security and lifecycle scenarios
+      - name: Install shell and sandbox test dependencies
         run: |
-          set -euo pipefail
-          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test provider_boundary provider_stream_eof_before_completed_emits_failed
-          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test provider_boundary provider_stream_error_emits_failed_without_step_completed
-          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test provider_boundary duplicate_tool_result_after_resolved_does_not_mutate_session
-          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test provider_boundary provider_cancel_keeps_tool_exchange_for_retry
-          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test cancellation cancelling_
-          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test agent_loop agent_loop_process_command_invalid_arguments
-          bash .github/scripts/cargo-test-scenario.sh -p merry-runtime --test agent_loop provider_request_trace_includes_checkpoint_budget_diagnostics
-          bash .github/scripts/cargo-test-scenario.sh -p merry-tools --test runtime_integration denied_apply_patch
-          bash .github/scripts/cargo-test-scenario.sh -p merry-tools --test runtime_integration registered_read_text_domain_failure
-          bash .github/scripts/cargo-test-scenario.sh -p merry-process --lib bwrap_process_plan_hides_unapproved_host_integrations
-          bash .github/scripts/cargo-test-scenario.sh -p merry-cli --bin merry settings_debug_does_not_include_secret_material
-          bash .github/scripts/cargo-test-scenario.sh -p merry-cli --bin merry sandbox_supports_symlinked_product_write_roots
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes fish ripgrep gnupg openssh-client
 
       - name: Run deterministic Rust suite
+        run: cargo test --locked --workspace --features merry-cli/web
+
+      - name: Verify required reliability and security scenarios
         run: |
-          cargo test --locked --all
-          cargo test --locked -p merry-cli --features web
+          set -euo pipefail
+          listing=$(cargo test --locked --workspace --features merry-cli/web -- --list)
+          for scenario in \
+            t6_failure_links_journal_output_and_trajectory \
+            provider_stream_eof_before_completed_emits_failed \
+            provider_stream_error_emits_failed_without_step_completed \
+            duplicate_tool_result_after_resolved_does_not_mutate_session \
+            provider_cancel_keeps_tool_exchange_for_retry \
+            cancelling_ \
+            agent_loop_process_command_invalid_arguments \
+            provider_request_trace_includes_checkpoint_budget_diagnostics \
+            denied_apply_patch \
+            registered_read_text_domain_failure \
+            permissioned_factory_preauthorizes_configured_host_integrations \
+            settings_debug_does_not_include_secret_material \
+            product_private_paths_are_not_inherited_as_task_grants
+          do
+            if ! grep -Eq "${scenario}.*: test$" <<< "$listing"; then
+              printf 'Required scenario missing from workspace test suite: %s\n' "$scenario" >&2
+              exit 1
+            fi
+          done
 
       - name: Run Rust lint gate
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -112,7 +90,7 @@ jobs:
           {
             echo "## Deterministic reliability/security gate"
             echo "- revision: \`${GITHUB_SHA}\`"
-            echo "- named evidence scenario: \`t6_failure_evidence\`"
+            echo "- named evidence scenario: \`t6_failure_links_journal_output_and_trajectory\`"
             echo "- live provider: not used"
             echo "- runtime event, artifact, ledger, trajectory, and test-result links are asserted by the named scenario"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -127,7 +105,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download tested Web assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: merry-web-dist
           path: web/dist
@@ -135,15 +113,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "reliability-gate-windows"
+
       - name: Run Windows cross-platform unit tests
-        run: |
-          $PSNativeCommandUseErrorActionPreference = $true
-          cargo test --locked -p merry-core -p merry-llm -p merry-provider-openai -p merry-provider-anthropic -p merry-mcp -p merry-tools-macros
-          cargo test --locked -p merry-runtime --lib
-          cargo test --locked -p merry-process --lib
-          cargo test --locked -p merry-tools --lib
-          cargo test --locked -p merry-coding --lib
-          cargo test --locked -p merry-cli --bin merry
+        run: cargo test --locked --workspace --exclude merry-py --features merry-cli/web --lib --bins
 
       - name: Run Windows lint gate
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -157,7 +133,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -171,7 +147,7 @@ jobs:
         run: git diff --exit-code -- web/src/trajectory-contract.generated.ts
 
       - name: Upload tested Web assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: merry-web-dist
           path: web/dist
