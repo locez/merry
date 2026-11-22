@@ -8,8 +8,8 @@ action network switch.
 
 | Flag | Config | Behavior |
 | --- | --- | --- |
-| `--sandbox workspace` | `sandbox = "workspace"` | Default. Each action is confined. |
-| `--sandbox off` | `sandbox = "off"` | The action runs on the host. Path and network limits in `[permissions]` are not applied. |
+| `--sandbox workspace` | `sandbox = "workspace"` | Default on Linux and macOS. Each action is confined. Fails closed on Windows. |
+| `--sandbox off` | `sandbox = "off"` | Default on Windows. The action runs on the host. Path and network limits in `[permissions]` are not applied. |
 
 On Linux, workspace mode uses [Landlock](https://docs.kernel.org/userspace-api/landlock.html)
 for the filesystem and a seccomp filter that rejects `AF_INET`, `AF_INET6`, and
@@ -20,6 +20,14 @@ be able to enforce Landlock. If it cannot, Merry stops and asks you to pass
 On macOS, workspace mode uses Seatbelt through `/usr/bin/sandbox-exec -p`.
 The profile allows the same paths. Linux tests check that profile text.
 Seatbelt itself is not executed on Linux.
+
+On Windows, a native kernel sandbox (such as AppContainer) is not yet
+implemented, so Merry defaults to `--sandbox off` and prints a host-mode notice
+at startup. Actions still go through permission review (`--permission-mode
+auto`), run inside a Windows Job Object so timed-out or cancelled command trees
+are cleaned up, and prefer `pwsh`, then `powershell.exe`, then Git Bash (or
+`MERRY_SHELL` when set). Passing `--sandbox workspace` explicitly on Windows
+fails closed rather than silently running unconfined.
 
 ## What an action can see
 

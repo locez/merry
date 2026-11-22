@@ -1,7 +1,8 @@
 # Copy this file to:
 #   $XDG_CONFIG_HOME/merry/config.toml
 # or, when XDG_CONFIG_HOME is unset:
-#   ~/.config/merry/config.toml
+#   ~/.config/merry/config.toml        (Linux / macOS)
+#   %APPDATA%\merry\config.toml        (Windows)
 #
 # Usually required edits:
 # - Set [providers.default].model for your provider.
@@ -22,9 +23,10 @@
 profile = "default"
 
 [cli]
-# sandbox = "workspace" or "off". Omitted means workspace: each action runs in
-# the workspace sandbox. "off" runs actions on the host. --sandbox on the
-# command line replaces this.
+# sandbox = "workspace" or "off". Omitted means "workspace" on Linux/macOS
+# (each action runs in the workspace sandbox) and "off" on Windows (host mode,
+# with explicit "workspace" failing closed). --sandbox on the command line
+# replaces this.
 # The first time workspace mode opens a directory, a dialog asks you to trust
 # it, then offers read-write, read-only, whether to save that choice, and exit.
 # Read-write loads AGENTS.md. Read-only does not.
