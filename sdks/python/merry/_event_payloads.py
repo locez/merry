@@ -24,6 +24,7 @@ from ._event_types import (
     EventSource,
     EventType,
     InteractiveRunState,
+    PlanModeState,
     QueuedInput,
     QueuedInputs,
     RawEventData,
@@ -33,9 +34,9 @@ from ._event_types import (
     RuntimeToolResult,
     SourcedEventPayload,
     SubagentStatus,
+    TodoItem,
     _validate_event_source,
     _validate_identifier,
-    _validate_nonnegative,
     _validate_text,
 )
 from ._models import ModelUsage
@@ -271,121 +272,67 @@ class SubagentCancelledPayload(SourcedEventPayload):
 
 
 @dataclass(frozen=True, slots=True)
-class PlanUpdatedPayload(SourcedEventPayload):
-    event_type: ClassVar[EventType] = EventType.PLAN_UPDATED
-    snapshot: RawEventData
-    summary: RawEventData
+class PlanModeChangedPayload(SourcedEventPayload):
+    event_type: ClassVar[EventType] = EventType.PLAN_MODE_CHANGED
+    mode: PlanModeState
     source: EventSource
 
     def __post_init__(self) -> None:
         _validate_event_source(self.source)
-        if not isinstance(self.snapshot, RawEventData):
-            raise TypeError("plan snapshot must be RawEventData")
-        if not isinstance(self.summary, RawEventData):
-            raise TypeError("plan revision summary must be RawEventData")
+        if not isinstance(self.mode, PlanModeState):
+            raise TypeError("plan mode must be a PlanModeState")
 
 
 @dataclass(frozen=True, slots=True)
-class PlanPhaseChangedPayload(SourcedEventPayload):
-    event_type: ClassVar[EventType] = EventType.PLAN_PHASE_CHANGED
+class PlanSavedPayload(SourcedEventPayload):
+    event_type: ClassVar[EventType] = EventType.PLAN_SAVED
+    plan: RawEventData
+    source: EventSource
+
+    def __post_init__(self) -> None:
+        _validate_event_source(self.source)
+        if not isinstance(self.plan, RawEventData):
+            raise TypeError("plan document must be RawEventData")
+
+
+@dataclass(frozen=True, slots=True)
+class PlanApprovalRequestedPayload(SourcedEventPayload):
+    event_type: ClassVar[EventType] = EventType.PLAN_APPROVAL_REQUESTED
+    plan: RawEventData
+    source: EventSource
+
+    def __post_init__(self) -> None:
+        _validate_event_source(self.source)
+        if not isinstance(self.plan, RawEventData):
+            raise TypeError("plan document must be RawEventData")
+
+
+@dataclass(frozen=True, slots=True)
+class PlanReviewedPayload(SourcedEventPayload):
+    event_type: ClassVar[EventType] = EventType.PLAN_REVIEWED
     plan_id: str
-    phase: str
+    decision: RawEventData
     source: EventSource
 
     def __post_init__(self) -> None:
         _validate_event_source(self.source)
         _validate_identifier("plan id", self.plan_id, 256)
-        _validate_identifier("plan phase", self.phase, 128)
+        if not isinstance(self.decision, RawEventData):
+            raise TypeError("plan review decision must be RawEventData")
 
 
 @dataclass(frozen=True, slots=True)
-class PlanNodeReadyPayload(SourcedEventPayload):
-    event_type: ClassVar[EventType] = EventType.PLAN_NODE_READY
-    plan_id: str
-    node_id: str
-    node_revision: int
+class TodoListUpdatedPayload(SourcedEventPayload):
+    event_type: ClassVar[EventType] = EventType.TODO_LIST_UPDATED
+    items: tuple[TodoItem, ...]
     source: EventSource
 
     def __post_init__(self) -> None:
         _validate_event_source(self.source)
-        _validate_identifier("plan id", self.plan_id, 256)
-        _validate_identifier("plan node id", self.node_id, 256)
-        _validate_nonnegative("plan node revision", self.node_revision)
-
-
-@dataclass(frozen=True, slots=True)
-class PlanLeaseStartedPayload(SourcedEventPayload):
-    event_type: ClassVar[EventType] = EventType.PLAN_LEASE_STARTED
-    lease: RawEventData
-    source: EventSource
-
-    def __post_init__(self) -> None:
-        _validate_event_source(self.source)
-        if not isinstance(self.lease, RawEventData):
-            raise TypeError("plan lease must be RawEventData")
-
-
-@dataclass(frozen=True, slots=True)
-class PlanProgressUpdatedPayload(SourcedEventPayload):
-    event_type: ClassVar[EventType] = EventType.PLAN_PROGRESS_UPDATED
-    progress: RawEventData
-    source: EventSource
-
-    def __post_init__(self) -> None:
-        _validate_event_source(self.source)
-        if not isinstance(self.progress, RawEventData):
-            raise TypeError("plan progress must be RawEventData")
-
-
-@dataclass(frozen=True, slots=True)
-class PlanProgressReviewRequestedPayload(SourcedEventPayload):
-    event_type: ClassVar[EventType] = EventType.PLAN_PROGRESS_REVIEW_REQUESTED
-    plan_id: str
-    attempt_id: str
-    reason: str
-    source: EventSource
-
-    def __post_init__(self) -> None:
-        _validate_event_source(self.source)
-        _validate_identifier("plan id", self.plan_id, 256)
-        _validate_identifier("plan attempt id", self.attempt_id, 256)
-        _validate_text("plan review reason", self.reason, 4096)
-
-
-@dataclass(frozen=True, slots=True)
-class PlanAttemptProgressReportedPayload(SourcedEventPayload):
-    event_type: ClassVar[EventType] = EventType.PLAN_ATTEMPT_PROGRESS_REPORTED
-    progress: RawEventData
-    source: EventSource
-
-    def __post_init__(self) -> None:
-        _validate_event_source(self.source)
-        if not isinstance(self.progress, RawEventData):
-            raise TypeError("plan attempt progress must be RawEventData")
-
-
-@dataclass(frozen=True, slots=True)
-class PlanDirectiveUpdatedPayload(SourcedEventPayload):
-    event_type: ClassVar[EventType] = EventType.PLAN_DIRECTIVE_UPDATED
-    directive: RawEventData
-    source: EventSource
-
-    def __post_init__(self) -> None:
-        _validate_event_source(self.source)
-        if not isinstance(self.directive, RawEventData):
-            raise TypeError("plan directive must be RawEventData")
-
-
-@dataclass(frozen=True, slots=True)
-class PlanAttemptFinishedPayload(SourcedEventPayload):
-    event_type: ClassVar[EventType] = EventType.PLAN_ATTEMPT_FINISHED
-    attempt: RawEventData
-    source: EventSource
-
-    def __post_init__(self) -> None:
-        _validate_event_source(self.source)
-        if not isinstance(self.attempt, RawEventData):
-            raise TypeError("plan attempt must be RawEventData")
+        if not isinstance(self.items, tuple) or any(
+            not isinstance(item, TodoItem) for item in self.items
+        ):
+            raise TypeError("todo items must be a tuple of TodoItem values")
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,15 +418,11 @@ EventPayloadValue: TypeAlias = (
     | SubagentCompletedPayload
     | SubagentFailedPayload
     | SubagentCancelledPayload
-    | PlanUpdatedPayload
-    | PlanPhaseChangedPayload
-    | PlanNodeReadyPayload
-    | PlanLeaseStartedPayload
-    | PlanProgressUpdatedPayload
-    | PlanProgressReviewRequestedPayload
-    | PlanAttemptProgressReportedPayload
-    | PlanDirectiveUpdatedPayload
-    | PlanAttemptFinishedPayload
+    | PlanModeChangedPayload
+    | PlanSavedPayload
+    | PlanApprovalRequestedPayload
+    | PlanReviewedPayload
+    | TodoListUpdatedPayload
     | RunFailedPayload
     | RunCancelledPayload
     | InteractiveRunStateChangedPayload

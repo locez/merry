@@ -312,3 +312,92 @@ def test_event_parser_supports_enriched_subagent_events_and_usage_rollup() -> No
     assert usage.subagent_total is not None
     assert usage.subagent_total.input_tokens == 120
     assert usage.subagent_total.output_tokens == 30
+
+
+def test_event_parser_supports_plan_mode_and_todo_list_events() -> None:
+    mode_changed = parse_event(
+        {
+            "type": "plan_mode_changed",
+            "mode": "active",
+            "source": {"session_id": "session-1", "sequence": 1},
+        }
+    )
+    assert mode_changed.type is merry.EventType.PLAN_MODE_CHANGED
+    assert isinstance(mode_changed.payload, merry.PlanModeChangedPayload)
+    assert mode_changed.payload.mode is merry.PlanModeState.ACTIVE
+
+    plan_doc = {
+        "id": "plan-001",
+        "slug": "auth-refactor",
+        "title": "Auth Refactor",
+        "status": "draft",
+        "content": "# Auth Refactor\n\n- Step 1",
+    }
+    saved = parse_event(
+        {
+            "type": "plan_saved",
+            "plan": plan_doc,
+            "source": {"session_id": "session-1", "sequence": 2},
+        }
+    )
+    assert saved.type is merry.EventType.PLAN_SAVED
+    assert isinstance(saved.payload, merry.PlanSavedPayload)
+    assert saved.payload.plan.value["id"] == "plan-001"
+
+    approval = parse_event(
+        {
+            "type": "plan_approval_requested",
+            "plan": plan_doc,
+            "source": {"session_id": "session-1", "sequence": 3},
+        }
+    )
+    assert approval.type is merry.EventType.PLAN_APPROVAL_REQUESTED
+    assert isinstance(approval.payload, merry.PlanApprovalRequestedPayload)
+    assert approval.payload.plan.value["title"] == "Auth Refactor"
+
+    reviewed = parse_event(
+        {
+            "type": "plan_reviewed",
+            "plan_id": "plan-001",
+            "decision": {"kind": "approve", "comments": "Looks good"},
+            "source": {"session_id": "session-1", "sequence": 4},
+        }
+    )
+    assert reviewed.type is merry.EventType.PLAN_REVIEWED
+    assert isinstance(reviewed.payload, merry.PlanReviewedPayload)
+    assert reviewed.payload.plan_id == "plan-001"
+    assert reviewed.payload.decision.value["kind"] == "approve"
+
+    todos = parse_event(
+        {
+            "type": "todo_list_updated",
+            "items": [
+                {"id": "1", "content": "Inspect runtime", "status": "completed"},
+                {"id": "2", "content": "Update tests", "status": "in_progress"},
+            ],
+            "source": {"session_id": "session-1", "sequence": 5},
+        }
+    )
+    assert todos.type is merry.EventType.TODO_LIST_UPDATED
+    assert isinstance(todos.payload, merry.TodoListUpdatedPayload)
+    assert todos.payload.items == (
+        merry.TodoItem(
+            id="1",
+            content="Inspect runtime",
+            status=merry.TodoStatus.COMPLETED,
+        ),
+        merry.TodoItem(
+            id="2",
+            content="Update tests",
+            status=merry.TodoStatus.IN_PROGRESS,
+        ),
+    )
+
+    with pytest.raises(TypeError, match="todo status"):
+        parse_event(
+            {
+                "type": "todo_list_updated",
+                "items": [{"id": "1", "content": "Bad status", "status": "unknown"}],
+                "source": {"session_id": "session-1", "sequence": 6},
+            }
+        )

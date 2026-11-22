@@ -71,17 +71,7 @@ pub(super) async fn execute_admitted_process_action(
             call_id: pending.id().clone(),
         });
     }
-
-    if attribute_plan_effect {
-        inner
-            .record_plan_runtime_effect(Vec::new())
-            .await
-            .map_err(|error| RuntimeError::PlanEffectAttribution {
-                session_id: inner.session_id.clone(),
-                call_id: pending.id().clone(),
-                message: error.to_string(),
-            })?;
-    }
+    let _ = attribute_plan_effect;
 
     let mut runner_context = ProcessRunnerContext::new(context.cancellation_token().clone());
     if let Some(sender) = context.output_sender() {

@@ -1,72 +1,124 @@
-use super::{ReadPlanInput, SubagentPlanUpdateInput, UpdatePlanInput};
-use crate::plan::projection::{
-    CHILD_LINKED_SCOPE_GUIDANCE, CHILD_SCOPED_UPDATE_GUIDANCE,
-    COORDINATOR_ACTIVE_LINK_MUTATION_GUIDANCE, COORDINATOR_LINKED_SUMMARIES_GUIDANCE,
-    COORDINATOR_ROOT_SCOPE_GUIDANCE, LINKED_CHILD_DECOMPOSITION_GUIDANCE,
-    RUNTIME_OWNED_EXECUTION_GUIDANCE,
-};
+//! Intrinsic coordinator Plan Mode tool definitions.
+
 use crate::{
     RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutor,
     ToolExecutorFuture,
 };
-use merry_core::{CoreError, ToolName, ToolSpec};
+use merry_core::{CoreError, PlanId, ToolName, ToolSpec};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+pub(crate) const ENTER_PLAN_MODE_TOOL_NAME: &str = "enter_plan_mode";
+pub(crate) const WRITE_PLAN_TOOL_NAME: &str = "write_plan";
 pub(crate) const READ_PLAN_TOOL_NAME: &str = "read_plan";
-pub(crate) const UPDATE_PLAN_TOOL_NAME: &str = "update_plan";
+pub(crate) const EXIT_PLAN_MODE_TOOL_NAME: &str = "exit_plan_mode";
 
-pub(crate) const COORDINATOR_PLAN_TOOL_NAMES: [&str; 2] =
-    [READ_PLAN_TOOL_NAME, UPDATE_PLAN_TOOL_NAME];
+pub(crate) const COORDINATOR_PLAN_TOOL_NAMES: [&str; 4] = [
+    ENTER_PLAN_MODE_TOOL_NAME,
+    WRITE_PLAN_TOOL_NAME,
+    READ_PLAN_TOOL_NAME,
+    EXIT_PLAN_MODE_TOOL_NAME,
+];
+
+/// Input for `enter_plan_mode`: no parameters required.
+#[merry_tools_macros::tool(
+    crate = "crate",
+    name = "enter_plan_mode",
+    description = "Enter read-only Plan Mode to explore the codebase and design an implementation plan before editing workspace files."
+)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EnterPlanModeInput {}
+
+/// Input for `write_plan`: creates or updates a named Markdown plan document in the session.
+#[merry_tools_macros::tool(
+    crate = "crate",
+    name = "write_plan",
+    description = "Write or update a Markdown implementation plan stored in the session plans directory."
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WritePlanInput {
+    /// Short, descriptive title for the plan (used for the file slug and UI header).
+    #[schemars(description = "Short, descriptive title for the plan (max 200 UTF-8 bytes).")]
+    pub(crate) title: String,
+    /// Full Markdown body of the plan (Context, Recommended Approach, Key Files, Verification).
+    #[schemars(
+        description = "Complete Markdown content for the plan. Include Context, Approach, Key Files, and Verification."
+    )]
+    pub(crate) content: String,
+    /// Optional existing draft plan id to update explicitly. Omit to update the active draft or create a new plan.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional existing draft plan id to update. Omit to update the current draft or create a new plan."
+    )]
+    pub(crate) plan_id: Option<PlanId>,
+    /// Set to true to force creating a separate numbered plan instead of updating the current draft.
+    #[serde(default)]
+    #[schemars(
+        description = "Optional. Set true to create a brand-new numbered plan file instead of updating the active draft."
+    )]
+    pub(crate) create_new: bool,
+}
+
+/// Input for `read_plan`: lists session plans and reads the requested or active plan body.
+#[merry_tools_macros::tool(
+    crate = "crate",
+    name = "read_plan",
+    description = "List plans saved in this session and read the Markdown content of the active or specified plan."
+)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReadPlanInput {
+    /// Optional plan id to read. Omit to read the active or most recent plan.
+    #[serde(default)]
+    #[schemars(description = "Optional plan id to read. Omit to read the active or latest plan.")]
+    pub(crate) plan_id: Option<PlanId>,
+}
+
+/// Input for `exit_plan_mode`: submits the plan for user review and pauses execution until decided.
+#[merry_tools_macros::tool(
+    crate = "crate",
+    name = "exit_plan_mode",
+    description = "Submit your Markdown plan for user review and exit Plan Mode upon approval."
+)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExitPlanModeInput {
+    /// Optional plan id to submit. Omit to submit the active draft plan.
+    #[serde(default)]
+    #[schemars(description = "Optional plan id to submit. Omit to submit the active draft plan.")]
+    pub(crate) plan_id: Option<PlanId>,
+}
 
 pub(crate) fn coordinator_plan_registered_tools() -> Result<Vec<RegisteredTool>, CoreError> {
     let definitions = [
-        plan_tool(plan_tool_spec(ReadPlanInput::tool_spec_with(
-            READ_PLAN_TOOL_NAME,
-            format!(
-                "Read a bounded exact snapshot or subtree of the current durable plan, including runtime-owned linked subagent summaries. {COORDINATOR_ROOT_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} {COORDINATOR_LINKED_SUMMARIES_GUIDANCE} {COORDINATOR_ACTIVE_LINK_MUTATION_GUIDANCE} Historical attempt, lease, heartbeat, and model-report records are not part of this coordinator interface."
-            ),
+        intrinsic_tool(plan_tool_spec(EnterPlanModeInput::tool_spec_with(
+            ENTER_PLAN_MODE_TOOL_NAME,
+            "Enter read-only Plan Mode when a task has genuine architectural ambiguity or when the user asks for a plan first. While active, workspace file edits are blocked; explore read-only, author your plan with `write_plan`, and call `exit_plan_mode` for user review. Skip Plan Mode for straightforward changes.",
         ))?),
-        plan_tool(plan_tool_spec(UpdatePlanInput::tool_spec_with(
-            UPDATE_PLAN_TOOL_NAME,
-            format!(
-                "Create or update the durable Plan with a tagged JSON change object. The change argument must contain a nested string field change.type; valid coordinator values are define_plan, replace_subtree, and use_current_plan. Do not put type on the outer update object. Keep reason, execution_intent, coordinator_node_id, and max_concurrency_hint as top-level siblings of change; do not nest them inside change. The first valid update creates the Plan. A define_plan change describes the whole authored tree; when a fresh run is requested, use it again with a new root and direct children, without target_node_id or other runtime ids. Runtime archives the previous plan and owns the new plan and node identities. A successful result includes bindable_plan_client_keys: the authored client_key values that may be passed to spawn_subagents.tasks[].plan_client_key. It intentionally omits runtime node ids; call read_plan when an exact node id is needed for replace_subtree or an existing-node dependency. {COORDINATOR_ROOT_SCOPE_GUIDANCE} {LINKED_CHILD_DECOMPOSITION_GUIDANCE} {COORDINATOR_LINKED_SUMMARIES_GUIDANCE} {COORDINATOR_ACTIVE_LINK_MUTATION_GUIDANCE} New nodes use client_key without id; existing mutable nodes use id without client_key. The root and each node's direct children may be authored in one request; omit children and depends_on when they are empty. Do not nest a child's implementation subtree in coordinator input. Define or revise authored intent, dependencies, and acceptance; runtime-owned execution state is derived from actual activity. If acceptance needs an explicit check, author a direct verification child; runtime closes the root after every declared child completes. Use execute_if_authorized only when the user already authorized execution, and request_user_review only when an explicit review boundary is wanted. When the Plan is already executing, do not call use_current_plan again; continue ordinary work or revise only a genuinely changed future subtree."
-            ),
+        intrinsic_tool(plan_tool_spec(WritePlanInput::tool_spec_with(
+            WRITE_PLAN_TOOL_NAME,
+            "Create or update a Markdown implementation plan in the session's `plans/` directory. Each distinct plan receives a numbered file name (`001-<slug>.md`, `002-<slug>.md`, ...). Updating during the same planning cycle updates the active draft in place unless `create_new: true` is set.",
+        ))?),
+        intrinsic_tool(plan_tool_spec(ReadPlanInput::tool_spec_with(
+            READ_PLAN_TOOL_NAME,
+            "List all Markdown plans saved in this session (with ids, titles, statuses, and file names) and return the full Markdown content of the active or requested plan.",
+        ))?),
+        intrinsic_tool(plan_tool_spec(ExitPlanModeInput::tool_spec_with(
+            EXIT_PLAN_MODE_TOOL_NAME,
+            "Finish planning and present the active Markdown plan to the user for approval. The interactive session pauses so the user can approve, attach review comments and request changes, or abandon the plan.",
         ))?),
     ];
     Ok(definitions.into_iter().collect())
-}
-
-pub(crate) fn subagent_plan_registered_tools() -> Result<Vec<RegisteredTool>, CoreError> {
-    unbound_child_plan_registered_tools()
-}
-
-pub(crate) fn scoped_child_plan_registered_tools() -> Result<Vec<RegisteredTool>, CoreError> {
-    let definitions = [
-        plan_tool(plan_tool_spec(ReadPlanInput::tool_spec_with(
-            READ_PLAN_TOOL_NAME,
-            format!(
-                "Read a bounded exact snapshot or subtree below the linked task in the active Plan. {CHILD_LINKED_SCOPE_GUIDANCE} {CHILD_SCOPED_UPDATE_GUIDANCE} This linked subtree scope excludes the coordinator and sibling tasks. {RUNTIME_OWNED_EXECUTION_GUIDANCE} Historical attempt, lease, heartbeat, and model-report records are not part of this child interface."
-            ),
-        ))?),
-        plan_tool(plan_tool_spec(SubagentPlanUpdateInput::tool_spec_with(
-            UPDATE_PLAN_TOOL_NAME,
-            format!(
-                "Update authored children or replace a mutable subtree below the linked task in the active Plan. The change argument must contain a nested string field change.type; valid child values are define_children and replace_subtree. Do not put type on the outer update object. {CHILD_LINKED_SCOPE_GUIDANCE} {CHILD_SCOPED_UPDATE_GUIDANCE} This linked subtree scope excludes the coordinator and sibling tasks; {RUNTIME_OWNED_EXECUTION_GUIDANCE} Child binding identity remains controlled by the runtime."
-            ),
-        ))?),
-    ];
-    Ok(definitions.into_iter().collect())
-}
-
-pub(crate) fn unbound_child_plan_registered_tools() -> Result<Vec<RegisteredTool>, CoreError> {
-    Ok(Vec::new())
 }
 
 pub(crate) fn is_plan_tool(name: &ToolName) -> bool {
     COORDINATOR_PLAN_TOOL_NAMES.contains(&name.as_str())
 }
 
-fn plan_tool(spec: ToolSpec) -> RegisteredTool {
+fn intrinsic_tool(spec: ToolSpec) -> RegisteredTool {
     RegisteredTool::new(
         spec,
         Arc::new(IntrinsicPlanExecutor),

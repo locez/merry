@@ -12,7 +12,6 @@ use super::{
 };
 use crate::{AgentLoopConfig, Runtime, bridge::BridgeToolResultCommand, events::ActiveStepPermit};
 use merry_llm::GenerationConfig;
-use std::collections::BTreeSet;
 use std::sync::{Arc, atomic::AtomicU64};
 use tokio::sync::{Notify, mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -21,7 +20,6 @@ pub(super) struct InteractiveProducer {
     pub(super) runtime: Runtime,
     pub(super) queue: InteractiveInputQueue,
     pub(super) command_receiver: mpsc::Receiver<InteractiveCommand>,
-    pub(super) plan_event_receiver: crate::plan::PlanControllerEventReceiver,
     pub(super) subagent_event_receiver:
         tokio::sync::broadcast::Receiver<merry_core::RuntimeJournalEvent>,
     pub(super) subagent_completion_notify: Option<Arc<Notify>>,
@@ -37,8 +35,6 @@ pub(super) struct InteractiveProducer {
     pub(super) loop_permit: ActiveStepPermit,
     pub(super) phase_token: Option<CancellationToken>,
     pub(super) interrupted: bool,
-    pub(super) seen_plan_sequences: BTreeSet<u64>,
-    pub(super) coordinator_continuation_requested: bool,
     pub(super) coordinator_continuation_note: Option<String>,
     pub(super) subagent_continuation_requested: bool,
     pub(super) model_turns_run: usize,
@@ -49,7 +45,6 @@ pub(super) struct InteractiveProducer {
 pub(super) struct InteractiveProducerInput {
     pub(super) runtime: Runtime,
     pub(super) command_receiver: mpsc::Receiver<InteractiveCommand>,
-    pub(super) plan_event_receiver: crate::plan::PlanControllerEventReceiver,
     pub(super) subagent_event_receiver:
         tokio::sync::broadcast::Receiver<merry_core::RuntimeJournalEvent>,
     pub(super) subagent_completion_notify: Option<Arc<Notify>>,
@@ -68,7 +63,6 @@ impl InteractiveProducer {
         let InteractiveProducerInput {
             runtime,
             command_receiver,
-            plan_event_receiver,
             subagent_event_receiver,
             subagent_completion_notify,
             message_sender,
@@ -85,7 +79,6 @@ impl InteractiveProducer {
             runtime,
             queue: InteractiveInputQueue::default(),
             command_receiver,
-            plan_event_receiver,
             subagent_event_receiver,
             subagent_completion_notify,
             message_sender,
@@ -100,8 +93,6 @@ impl InteractiveProducer {
             loop_permit,
             phase_token: None,
             interrupted: false,
-            seen_plan_sequences: std::collections::BTreeSet::new(),
-            coordinator_continuation_requested: false,
             coordinator_continuation_note: None,
             subagent_continuation_requested: false,
             model_turns_run: 0,
@@ -110,5 +101,3 @@ impl InteractiveProducer {
         }
     }
 }
-
-pub(super) use output::is_plan_payload;

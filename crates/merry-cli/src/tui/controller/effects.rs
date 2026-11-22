@@ -359,11 +359,10 @@ pub(super) async fn dispatch_effect(
             state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
             Ok(false)
         }
-        ControllerEffect::EnterPlanMode
-        | ControllerEffect::ApprovePlan(_)
-        | ControllerEffect::RevisePlan
-        | ControllerEffect::RetryPlanNode(_)
-        | ControllerEffect::CancelPlan => unreachable!("plan effect handled above"),
+        ControllerEffect::SetPlanMode { .. }
+        | ControllerEffect::ApprovePlan { .. }
+        | ControllerEffect::RequestPlanChanges { .. }
+        | ControllerEffect::AbandonPlan(_) => unreachable!("plan effect handled above"),
         ControllerEffect::Quit => {
             session.set_topic_if_empty(state.first_user_input_topic());
             session.control.close().await.map_err(unexpected)?;

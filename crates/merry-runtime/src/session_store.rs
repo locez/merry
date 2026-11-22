@@ -2,7 +2,6 @@ use merry_core::SessionId;
 use std::{
     env,
     ffi::OsStr,
-    fmt,
     fs::{File, OpenOptions as StdOpenOptions},
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,29 +12,13 @@ use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::Mutex};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-/// Identifies which persisted Plan snapshot failed document validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlanPersistenceLocation {
-    Active,
-    Terminal { index: usize },
-}
-
-impl fmt::Display for PlanPersistenceLocation {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Active => formatter.write_str("active plan"),
-            Self::Terminal { index } => write!(formatter, "terminal plan {index}"),
-        }
-    }
-}
-
 const JOURNAL_FILE_NAME: &str = "journal.jsonl";
 
 const LEGACY_STATE_FILE_NAME: &str = "state.json";
 
-const LEGACY_PLAN_FILE_NAME: &str = "plan-state.json";
-
 const SESSION_LOCK_FILE_NAME: &str = ".session.lock";
+
+const PLANS_DIR_NAME: &str = "plans";
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,26 +61,6 @@ pub enum SessionStoreError {
     },
     #[error("session document is invalid: {reason}")]
     InvalidDocument { reason: &'static str },
-    #[error("persisted plan at {location} is invalid: {source}")]
-    InvalidPlan {
-        location: PlanPersistenceLocation,
-        #[source]
-        source: crate::PlanError,
-    },
-}
-
-pub(crate) fn invalid_plan(
-    location: PlanPersistenceLocation,
-    source: crate::PlanError,
-) -> SessionStoreError {
-    SessionStoreError::InvalidPlan { location, source }
-}
-
-pub(crate) fn validate_plan_snapshot(
-    snapshot: &merry_core::PlanSnapshot,
-    location: PlanPersistenceLocation,
-) -> Result<(), SessionStoreError> {
-    crate::plan::validate_snapshot_limits(snapshot).map_err(|source| invalid_plan(location, source))
 }
 
 /// File-backed session storage. Durable session facts append directly to `journal.jsonl`.
@@ -403,17 +366,13 @@ impl FileSessionStore {
     ///
     /// Saving appends `journal.jsonl`, so a new run that reuses an id would
     /// mix its transcript into an existing session. Callers that start a
-    /// session check this first and refuse the id. A legacy `state.json` or
-    /// `plan-state.json` still occupies the id; those sessions are not resumed.
+    /// session check this first and refuse the id. A legacy `state.json` still
+    /// occupies the id; those sessions are not resumed.
     pub async fn contains_session(
         &self,
         session_id: &SessionId,
     ) -> Result<bool, SessionStoreError> {
-        for name in [
-            JOURNAL_FILE_NAME,
-            LEGACY_STATE_FILE_NAME,
-            LEGACY_PLAN_FILE_NAME,
-        ] {
+        for name in [JOURNAL_FILE_NAME, LEGACY_STATE_FILE_NAME] {
             let path = self.session_dir(session_id).join(name);
             if tokio::fs::try_exists(&path)
                 .await
@@ -581,6 +540,65 @@ impl FileSessionStore {
         session_id: &SessionId,
     ) -> Result<Vec<u8>, SessionStoreError> {
         self.read_journal_bytes(session_id).await
+    }
+
+    /// Writes one named Markdown plan file under `<session_dir>/plans/<file_name>`.
+    pub(crate) async fn write_plan_file(
+        &self,
+        session_id: &SessionId,
+        file_name: &str,
+        content: &str,
+    ) -> Result<PathBuf, SessionStoreError> {
+        if crate::plan::validate_plan_file_name(file_name).is_err() {
+            return Err(SessionStoreError::InvalidDocument {
+                reason: "plan file name is invalid",
+            });
+        }
+        let directory = self.session_dir(session_id).join(PLANS_DIR_NAME);
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .map_err(|source| io_error(directory.clone(), source))?;
+        let path = directory.join(file_name);
+        let tmp_path = directory.join(format!(".{file_name}.tmp"));
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&tmp_path)
+            .await
+            .map_err(|source| io_error(tmp_path.clone(), source))?;
+        file.write_all(content.as_bytes())
+            .await
+            .map_err(|source| io_error(tmp_path.clone(), source))?;
+        file.sync_all()
+            .await
+            .map_err(|source| io_error(tmp_path.clone(), source))?;
+        drop(file);
+        tokio::fs::rename(&tmp_path, &path)
+            .await
+            .map_err(|source| io_error(path.clone(), source))?;
+        Ok(path)
+    }
+
+    /// Reads one named Markdown plan file from `<session_dir>/plans/<file_name>`.
+    pub(crate) async fn read_plan_file(
+        &self,
+        session_id: &SessionId,
+        file_name: &str,
+    ) -> Result<Option<String>, SessionStoreError> {
+        if crate::plan::validate_plan_file_name(file_name).is_err() {
+            return Ok(None);
+        }
+        let path = self
+            .session_dir(session_id)
+            .join(PLANS_DIR_NAME)
+            .join(file_name);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => Ok(Some(content)),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(io_error(path, source)),
+        }
     }
 
     pub(crate) async fn read_legacy_bytes(

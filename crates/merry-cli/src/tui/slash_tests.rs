@@ -44,27 +44,18 @@ fn draft_image() -> DraftImage {
     .expect("valid draft image")
 }
 
-fn plan_snapshot() -> merry_core::PlanSnapshot {
-    merry_core::PlanSnapshot {
-        plan_id: merry_core::PlanId::new("slash-test-plan").expect("plan id"),
-        revision: 1,
-        phase: merry_core::PlanPhase::Executing,
-        activation_source: merry_core::PlanActivationSource::User,
-        root_node_id: None,
-        coordinator_node_id: None,
-        execution_contract_fingerprint: None,
-        execution_authorization_refs: Vec::new(),
-        authorized_capability_envelope: None,
-        approval_requirements: Vec::new(),
-        nodes: Vec::new(),
-        attempts: Vec::new(),
-        leases: Vec::new(),
-        attempt_progress: Vec::new(),
-        directives: Vec::new(),
-        resource_policy_snapshot: merry_core::PlanResourcePolicySnapshot::default(),
-        max_concurrency_hint: None,
-        scheduler_status: merry_core::PlanSchedulerStatus::Active,
-        revision_summaries: Vec::new(),
+fn sample_plan_document() -> merry_core::PlanDocument {
+    merry_core::PlanDocument {
+        summary: merry_core::PlanDocumentSummary {
+            id: merry_core::PlanId::new("plan-1").expect("plan id"),
+            title: "Slash test plan".to_owned(),
+            file_name: "001-slash-test-plan.md".to_owned(),
+            status: merry_core::PlanDocumentStatus::AwaitingApproval,
+            revision: 1,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        },
+        content: "# Slash test plan\n\n- Step 1\n".to_owned(),
     }
 }
 
@@ -98,7 +89,7 @@ fn slash_completion_uses_the_shared_registry_only_at_the_input_start() {
     let all = sources
         .menu_for_input("/", 1, None)
         .expect("slash completion");
-    assert_eq!(all.items().len(), 6);
+    assert_eq!(all.items().len(), 8);
     assert!(
         all.items()
             .iter()
@@ -109,7 +100,9 @@ fn slash_completion_uses_the_shared_registry_only_at_the_input_start() {
             .iter()
             .map(|item| item.value())
             .collect::<Vec<_>>(),
-        vec!["/exit", "/help", "/save", "/status", "/stop", "/tasks"]
+        vec![
+            "/exit", "/help", "/plan", "/plans", "/save", "/status", "/stop", "/tasks"
+        ]
     );
 
     let save = sources
@@ -229,7 +222,7 @@ fn local_slash_commands_do_not_enter_user_history_or_runtime_queue() {
         Some(TimelineItem::LocalCommand { title, body })
             if title == "Session status"
                 && body.contains("Run: ready")
-                && body.contains("Plan: none")
+                && body.contains("Plan: inactive")
                 && body.contains("Workspace: /repo")
     ));
     assert!(
@@ -279,7 +272,7 @@ fn help_and_status_render_complete_bodies_at_supported_terminal_sizes() {
             "Run: ready",
             "Model: gpt-test",
             "Usage:",
-            "Plan: none",
+            "Plan: inactive",
             "Workspace: /repo",
         ] {
             assert!(
@@ -300,7 +293,8 @@ fn status_reports_every_runtime_state_and_the_current_plan_phase() {
         (InteractiveRunState::Closed, "Run: closed"),
     ] {
         let mut state = state();
-        state.plan_mut().update_snapshot(plan_snapshot());
+        state.plan_mut().set_mode(merry_core::PlanModeState::Active);
+        state.plan_mut().upsert_plan(sample_plan_document());
         state.set_run_state(run_state);
 
         assert_eq!(
@@ -310,13 +304,13 @@ fn status_reports_every_runtime_state_and_the_current_plan_phase() {
         assert!(matches!(
             state.timeline().last(),
             Some(TimelineItem::LocalCommand { body, .. })
-                if body.contains(expected) && body.contains("Plan: executing")
+                if body.contains(expected) && body.contains("Plan: active (read-only)")
         ));
     }
 }
 
 #[test]
-fn palette_slash_commands_reveal_feedback_from_plan_focus() {
+fn palette_slash_commands_reveal_feedback_from_plan_overlay() {
     for (width, height) in [(50, 20), (80, 16), (120, 24)] {
         for (command, run_state, effect, expected) in [
             (
@@ -345,14 +339,13 @@ fn palette_slash_commands_reveal_feedback_from_plan_focus() {
             ),
         ] {
             let mut state = state();
-            state.plan_mut().update_snapshot(plan_snapshot());
-            assert!(state.plan_mut().open_and_focus());
+            state.plan_mut().upsert_plan(sample_plan_document());
+            state.open_plan_view(None);
             state.set_run_state(run_state);
 
-            assert!(state.plan().is_focused());
+            assert!(state.overlay().is_some());
             assert_eq!(run_palette_command(command, &mut state), effect);
-            assert!(state.plan().is_open());
-            assert!(!state.plan().is_focused());
+            assert!(state.overlay().is_none());
 
             let rendered = render::render_to_text(&state, width, height);
             assert!(
@@ -364,32 +357,27 @@ fn palette_slash_commands_reveal_feedback_from_plan_focus() {
 }
 
 #[test]
-fn invalid_slash_feedback_is_visible_from_plan_focus_and_remains_correctable() {
+fn invalid_slash_feedback_is_visible_and_remains_correctable() {
     for (input, expected) in [
         ("/unknown", "Unknown command"),
         ("/help now", "Command not run"),
     ] {
         let mut state = state();
-        state.plan_mut().update_snapshot(plan_snapshot());
-        assert!(state.plan_mut().open_and_focus());
+        state.plan_mut().set_mode(merry_core::PlanModeState::Active);
         state.insert_input_str(input);
 
         assert_eq!(
             handle_key_action(KeyAction::Submit, &mut state),
             ControllerEffect::None
         );
-        assert!(state.plan().is_open());
-        assert!(!state.plan().is_focused());
         assert_eq!(state.input_text(), input);
         assert!(render::render_to_text(&state, 80, 16).contains(expected));
     }
 }
 
 #[test]
-fn help_remains_complete_with_the_plan_open_at_80_by_16() {
+fn help_remains_complete_at_80_by_16() {
     let mut state = state();
-    state.plan_mut().update_snapshot(plan_snapshot());
-    assert!(state.plan_mut().open_and_focus());
 
     assert_eq!(
         run_palette_command(PaletteCommand::ShowHelp, &mut state),
@@ -400,6 +388,8 @@ fn help_remains_complete_with_the_plan_open_at_80_by_16() {
     for expected in [
         "Command help",
         "/help",
+        "/plan",
+        "/plans",
         "/save",
         "/status",
         "/stop",
@@ -410,11 +400,9 @@ fn help_remains_complete_with_the_plan_open_at_80_by_16() {
     ] {
         assert!(
             rendered.contains(expected),
-            "{expected:?} should render with Plan open at 80x16:\n{rendered}"
+            "{expected:?} should render at 80x16:\n{rendered}"
         );
     }
-    assert!(state.plan().is_open());
-    assert!(!state.plan().is_focused());
 }
 
 #[test]
@@ -463,16 +451,12 @@ fn local_slash_input_bypasses_timeline_review_confirmation() {
 #[test]
 fn keyboard_stop_reveals_the_same_feedback_as_slash_stop() {
     let mut state = state();
-    state.plan_mut().update_snapshot(plan_snapshot());
-    assert!(state.plan_mut().open_and_focus());
     state.set_run_state(InteractiveRunState::RunningModel);
 
     let effect = handle_key_action(KeyAction::Interrupt, &mut state);
     assert_eq!(effect, ControllerEffect::Interrupt);
     project_local_effect(&effect, &mut state);
 
-    assert!(state.plan().is_open());
-    assert!(!state.plan().is_focused());
     assert!(matches!(
         state.timeline().last(),
         Some(TimelineItem::Muted { title, .. }) if title == "⊘ Stopping…"
@@ -784,10 +768,34 @@ fn slash_completion_renders_all_commands_at_compact_and_standard_sizes() {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        for command in ["/exit", "/help", "/save", "/status", "/stop", "/tasks"] {
+        for command in ["/exit", "/help", "/plan", "/plans", "/save", "/status"] {
             assert!(
                 text.contains(command),
                 "{command} should render at {width}x{height}"
+            );
+        }
+        // Navigating down reveals the remaining slash commands in the bounded popup.
+        state.select_next_completion();
+        state.select_next_completion();
+        state.select_next_completion();
+        state.select_next_completion();
+        state.select_next_completion();
+        state.select_next_completion();
+        state.select_next_completion();
+        terminal
+            .draw(|frame| render::render(frame, &state))
+            .expect("render scrolled slash completion");
+        let scrolled = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        for command in ["/stop", "/tasks"] {
+            assert!(
+                scrolled.contains(command),
+                "{command} should render after scrolling at {width}x{height}"
             );
         }
     }

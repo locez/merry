@@ -45,7 +45,6 @@ pub(super) fn subagent_tool_specs_with_bounds_and_roles(
          {CHILD_MODEL_TURN_GUIDANCE} Configured child model-turn range: {min_model_turns}..={max_model_turns}. \
          Keep `tasks[].task` focused on the objective and ruled-out paths; declare path boundaries in `read_scope`, `write_scope`, and `forbidden_paths`. \
          Set `tasks[].workspace` to `worktree` when a child needs an isolated detached Git worktree (for parallel edits or speculative changes; `worktree_base` defaults to `working_tree`). \
-         When binding to a Plan node, pass an authored `plan_client_key` from `update_plan.bindable_plan_client_keys` (never a runtime node id such as `plan-node-2`). \
          In `tasks[].allowed_tools`, copy exact registered Merry tool names without provider namespace prefixes: use `run_process`, never `functions.run_process`."
     );
     let spawn_spec =

@@ -227,7 +227,7 @@ pub(super) fn timeline_scroll_start(
     }
 }
 
-pub(super) fn prepare_timeline_viewport(state: &mut TuiState, region: Rect) {
+pub(crate) fn prepare_timeline_viewport(state: &mut TuiState, region: Rect) {
     let content = timeline_content_region(region);
     if content.is_empty() {
         return;

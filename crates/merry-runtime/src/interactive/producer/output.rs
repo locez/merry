@@ -4,7 +4,7 @@ use super::super::handles::InteractiveRunMessage;
 use super::super::types::InteractiveError;
 use super::InteractiveProducer;
 use crate::events::RuntimeEventProjector;
-use merry_core::{InteractiveRunState, RuntimeEvent, RuntimeJournalEvent, RuntimeJournalPayload};
+use merry_core::{InteractiveRunState, RuntimeEvent, RuntimeJournalEvent};
 
 impl InteractiveProducer {
     pub(super) async fn send_runtime_events(&mut self, events: Vec<RuntimeJournalEvent>) -> bool {
@@ -25,16 +25,6 @@ impl InteractiveProducer {
         projector: &mut RuntimeEventProjector,
         event: RuntimeJournalEvent,
     ) -> bool {
-        if is_plan_payload(&event.payload) {
-            if !self.seen_plan_sequences.insert(event.sequence) {
-                return true;
-            }
-            if self.seen_plan_sequences.len() > 256
-                && let Some(oldest) = self.seen_plan_sequences.first().copied()
-            {
-                self.seen_plan_sequences.remove(&oldest);
-            }
-        }
         let event = match projector.project(event, &self.runtime).await {
             Ok(Some(event)) => event,
             Ok(None) => return true,
@@ -77,19 +67,4 @@ impl InteractiveProducer {
             .await
             .is_ok()
     }
-}
-
-pub(crate) fn is_plan_payload(payload: &RuntimeJournalPayload) -> bool {
-    matches!(
-        payload,
-        RuntimeJournalPayload::PlanUpdated { .. }
-            | RuntimeJournalPayload::PlanPhaseChanged { .. }
-            | RuntimeJournalPayload::PlanNodeReady { .. }
-            | RuntimeJournalPayload::PlanLeaseStarted { .. }
-            | RuntimeJournalPayload::PlanProgressUpdated { .. }
-            | RuntimeJournalPayload::PlanProgressReviewRequested { .. }
-            | RuntimeJournalPayload::PlanAttemptProgressReported { .. }
-            | RuntimeJournalPayload::PlanDirectiveUpdated { .. }
-            | RuntimeJournalPayload::PlanAttemptFinished { .. }
-    )
 }

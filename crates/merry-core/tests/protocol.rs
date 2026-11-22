@@ -1,8 +1,4 @@
-use merry_core::{
-    PlanActivationSource, PlanExecutorPolicy, PlanId, PlanNodeId, PlanNodeSnapshot, PlanNodeStatus,
-    PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot, PlanRevisionSummary,
-    PlanSchedulerStatus, PlanSnapshot,
-};
+use merry_core::{PlanDocument, PlanDocumentStatus, PlanDocumentSummary, PlanId};
 use schemars::{JsonSchema, Schema};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -39,56 +35,18 @@ fn assert_uuid_v4_string(value: &str) {
     }
 }
 
-fn sample_plan_snapshot() -> PlanSnapshot {
-    let plan_id = PlanId::new("plan-1").expect("valid plan id");
-    let root_node_id = PlanNodeId::new("node-root").expect("valid root id");
-    PlanSnapshot {
-        plan_id,
-        revision: 2,
-        phase: PlanPhase::Executing,
-        activation_source: PlanActivationSource::Coordinator {
-            reason: "coordinate independent work".to_owned(),
-            governing_skill_id: None,
+fn sample_plan_document() -> PlanDocument {
+    PlanDocument {
+        summary: PlanDocumentSummary {
+            id: PlanId::new("plan-1").expect("valid plan id"),
+            title: "Plan Mode Redesign".to_owned(),
+            file_name: "001-plan-mode-redesign.md".to_owned(),
+            status: PlanDocumentStatus::AwaitingApproval,
+            revision: 2,
+            created_at_ms: 1_700_000_000_000,
+            updated_at_ms: 1_700_000_005_000,
         },
-        root_node_id: Some(root_node_id.clone()),
-        coordinator_node_id: None,
-        execution_contract_fingerprint: Some("contract-sha256".to_owned()),
-        execution_authorization_refs: vec!["user-task-authority".to_owned()],
-        authorized_capability_envelope: None,
-        approval_requirements: Vec::new(),
-        nodes: vec![PlanNodeSnapshot {
-            id: root_node_id,
-            client_key: None,
-            parent_id: None,
-            sibling_order: 0,
-            objective: "Complete the recursive plan acceptance".to_owned(),
-            acceptance: vec!["all deterministic checks pass".to_owned()],
-            status: PlanNodeStatus::InProgress,
-            executor_policy: PlanExecutorPolicy::Local,
-            harness: Default::default(),
-            recovery_policy: PlanRecoveryPolicySnapshot {
-                max_transient_attempts: 2,
-                retry_backoff_ms: 0,
-                retry_only_before_observable_side_effects: true,
-            },
-            depends_on: Vec::new(),
-            result: None,
-            created_revision: 1,
-            updated_revision: 2,
-            declared_status: PlanNodeStatus::InProgress,
-            execution_summary: Default::default(),
-            links: Vec::new(),
-        }],
-        attempts: Vec::new(),
-        leases: Vec::new(),
-        attempt_progress: Vec::new(),
-        directives: Vec::new(),
-        resource_policy_snapshot: PlanResourcePolicySnapshot::default(),
-        max_concurrency_hint: Some(2),
-        scheduler_status: PlanSchedulerStatus::Active,
-        revision_summaries: vec![
-            PlanRevisionSummary::new(2, "root execution started").expect("valid revision summary"),
-        ],
+        content: "# Plan Mode Redesign\n\n- Keep Plan Mode read-only.\n".to_owned(),
     }
 }
 

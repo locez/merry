@@ -13,18 +13,7 @@ impl TuiState {
 
     pub(crate) fn command_status_body(&self) -> String {
         let [workspace, model, usage] = self.status_parts();
-        let plan = self
-            .plan
-            .snapshot()
-            .map(|snapshot| match snapshot.phase {
-                merry_core::PlanPhase::Planning => "planning",
-                merry_core::PlanPhase::AwaitingApproval => "awaiting approval",
-                merry_core::PlanPhase::Executing => "executing",
-                merry_core::PlanPhase::Completed => "completed",
-                merry_core::PlanPhase::Blocked => "blocked",
-                merry_core::PlanPhase::Cancelled => "cancelled",
-            })
-            .unwrap_or("none");
+        let plan = self.plan.status_summary();
         let run = match self.run_state {
             InteractiveRunState::WaitingForInput => "ready",
             InteractiveRunState::RunningModel => "running model",

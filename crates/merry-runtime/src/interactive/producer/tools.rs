@@ -304,11 +304,6 @@ impl InteractiveProducer {
                     };
                     self.handle_command(command, CommandHandlingMode::Running).await?;
                 }
-                plan_event = self.plan_event_receiver.recv() => {
-                    if !self.forward_plan_event(plan_event).await {
-                        return None;
-                    }
-                }
                 subagent_event = self.subagent_event_receiver.recv() => {
                     if !self.forward_subagent_event(subagent_event).await {
                         return None;
@@ -440,11 +435,6 @@ impl InteractiveProducer {
                         continue;
                     };
                     self.handle_command(command, CommandHandlingMode::Running).await?;
-                }
-                plan_event = self.plan_event_receiver.recv() => {
-                    if !self.forward_plan_event(plan_event).await {
-                        return None;
-                    }
                 }
                 subagent_event = self.subagent_event_receiver.recv() => {
                     if !self.forward_subagent_event(subagent_event).await {
@@ -629,11 +619,6 @@ impl InteractiveProducer {
                         continue;
                     };
                     self.handle_command(command, CommandHandlingMode::Running).await?;
-                }
-                plan_event = self.plan_event_receiver.recv() => {
-                    if !self.forward_plan_event(plan_event).await {
-                        return None;
-                    }
                 }
                 subagent_event = self.subagent_event_receiver.recv() => {
                     if !self.forward_subagent_event(subagent_event).await {

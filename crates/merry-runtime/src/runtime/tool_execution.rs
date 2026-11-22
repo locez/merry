@@ -17,19 +17,17 @@ use crate::{
             HighRiskActionReview, execute_permission_request_tool_call,
             execute_process_permission_request_tool_call, review_process_action,
         },
-        plan_tool_execution::execute_plan_tool_call,
+        plan_tool_execution::execute_plan_or_todo_tool_call,
         process_execution::{ProcessExecutionAdmission, execute_admitted_process_action},
-        tool_execution::harness::plan_harness_violation,
     },
+    todo::is_todo_tool,
     tool::{ActionProposalEvidence, ToolActionPreflight, ToolExecutionContext, ToolExecutionError},
 };
 use merry_core::{
-    CoreError, ErrorInfo, PendingToolCall, RuntimeJournalEvent, SessionId, ToolCallId,
-    ToolCallResult, ToolCallResultStatus,
+    CoreError, PendingToolCall, RuntimeJournalEvent, SessionId, ToolCallId, ToolCallResult,
+    ToolCallResultStatus,
 };
 use std::sync::Arc;
-
-mod harness;
 
 pub(super) async fn execute_tool_call_with_active_permit(
     inner: &Arc<RuntimeInner>,
@@ -61,26 +59,9 @@ pub(super) async fn execute_tool_call_with_active_permit(
         return resolve_tool_admission_denial(inner, &pending, context).await;
     }
 
-    // Plan control calls remain executable; only the current read/update pair
-    // is advertised in provider requests.
-    if is_plan_tool(pending.name()) {
-        return execute_plan_tool_call(inner, &pending, context).await;
+    if is_plan_tool(pending.name()) || is_todo_tool(pending.name()) {
+        return execute_plan_or_todo_tool_call(inner, &pending).await;
     }
-
-    let active_plan_harness = if inner.plan_subagent_control.is_some() {
-        Some(
-            inner
-                .active_subagent_plan_harness()
-                .await
-                .map_err(|error| RuntimeError::PlanSubagentAttemptInactive {
-                    session_id: inner.session_id.clone(),
-                    call_id: call_id.clone(),
-                    message: error.to_string(),
-                })?,
-        )
-    } else {
-        None
-    };
 
     let Some(registered_tool) = inner.tool_registry.registered_tool(pending.name()) else {
         if context.cancellation_token().is_cancelled() {
@@ -146,27 +127,19 @@ pub(super) async fn execute_tool_call_with_active_permit(
         return Ok(events);
     }
 
-    if inner.plan_subagent_control.is_some()
-        && let Some(diagnostic) = plan_harness_violation(
-            active_plan_harness.as_ref(),
-            &pending,
-            registered_tool.action_kind(),
-            None,
-        )
-    {
-        return resolve_plan_harness_denial(inner, &pending, diagnostic).await;
+    // Plan Mode read-only edit gate: block workspace file mutations even under
+    // fully-trusted permission mode so design remains separate from coding.
+    if registered_tool.action_kind() == crate::ToolActionKind::WorkspaceWrite {
+        let plan_mode_active = inner.session.lock().await.plan_state().is_active();
+        if plan_mode_active {
+            return resolve_plan_mode_read_only_denial(inner, &pending).await;
+        }
     }
 
     if is_request_permissions_tool(pending.name())
         && registered_tool.action_kind() == crate::ToolActionKind::RuntimeControl
     {
-        return execute_permission_request_tool_call(
-            inner,
-            &pending,
-            context,
-            active_plan_harness.is_some(),
-        )
-        .await;
+        return execute_permission_request_tool_call(inner, &pending, context, false).await;
     }
 
     let fully_trusted = inner.permission_review_mode.is_fully_trusted();
@@ -272,25 +245,11 @@ pub(super) async fn execute_tool_call_with_active_permit(
         }
 
         if let Some(proposal) = proposal {
-            if inner.plan_subagent_control.is_some()
-                && let Some(diagnostic) = plan_harness_violation(
-                    active_plan_harness.as_ref(),
-                    &pending,
-                    registered_tool.action_kind(),
-                    Some(&proposal),
-                )
-            {
-                return resolve_plan_harness_denial(inner, &pending, diagnostic).await;
-            }
             if let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence()
                 && process_call_requests_permission(&pending)
             {
                 return execute_process_permission_request_tool_call(
-                    inner,
-                    &pending,
-                    intent,
-                    context,
-                    active_plan_harness.is_some(),
+                    inner, &pending, intent, context, false,
                 )
                 .await;
             }
@@ -325,7 +284,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                         policy_decision,
                         ProcessPermissionProfileId::READ_ONLY,
                         runner,
-                        active_plan_harness.is_some(),
+                        false,
                     ),
                     context,
                 )
@@ -346,7 +305,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                         policy_decision,
                         ProcessPermissionProfileId::SHELL_READ_ONLY,
                         runner,
-                        active_plan_harness.is_some(),
+                        false,
                     ),
                     context,
                 )
@@ -369,7 +328,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                         policy_decision,
                         accepted.admission.permission_profile_id(),
                         accepted.runner,
-                        active_plan_harness.is_some(),
+                        false,
                     ),
                     context,
                 )
@@ -397,7 +356,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     policy_decision,
                     permission_profile_id,
                     accepted.runner,
-                    active_plan_harness.is_some(),
+                    false,
                 );
                 let requires_high_risk_review =
                     crate::process::requires_process_action_review(intent);
@@ -498,14 +457,6 @@ pub(super) async fn execute_tool_call_with_active_permit(
             });
         }
         return Err(error);
-    }
-
-    if active_plan_harness.is_some() && registered_tool.action_kind().is_mutating() {
-        let changed_paths = allowed_proposal
-            .as_ref()
-            .map(changed_paths_from_proposal)
-            .unwrap_or_default();
-        attribute_plan_effect_before_execution(inner, &pending, changed_paths).await?;
     }
 
     let execution_context =
@@ -666,18 +617,19 @@ async fn resolve_tool_admission_denial(
     Ok(events)
 }
 
-async fn resolve_plan_harness_denial(
+async fn resolve_plan_mode_read_only_denial(
     inner: &RuntimeInner,
     pending: &PendingToolCall,
-    diagnostic: ErrorInfo,
 ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+    let message = "Rejected: workspace file edits are blocked while Plan Mode is active. Use `write_plan` to author or revise your Markdown plan, or call `exit_plan_mode` when ready for user approval.";
+    let diagnostic = diagnostic_from_text("plan_mode_read_only", message);
     let content = ToolOutput::json(
         serde_json::json!({
             "ok": false,
             "tool": pending.name().as_str(),
             "error": {
-                "code": diagnostic.code(),
-                "message": diagnostic.message(),
+                "code": "plan_mode_read_only",
+                "message": message,
             }
         })
         .to_string(),
@@ -693,32 +645,6 @@ async fn resolve_plan_harness_denial(
         )?
     };
     Ok(events)
-}
-
-fn changed_paths_from_proposal(proposal: &ActionProposal) -> Vec<String> {
-    match proposal.evidence() {
-        ActionProposalEvidence::WorkspacePatch(patch) => patch
-            .changes()
-            .iter()
-            .map(|change| change.relative_path().to_owned())
-            .collect(),
-        ActionProposalEvidence::ProcessAction(_) => Vec::new(),
-    }
-}
-
-async fn attribute_plan_effect_before_execution(
-    inner: &RuntimeInner,
-    pending: &PendingToolCall,
-    changed_paths: Vec<String>,
-) -> Result<(), RuntimeError> {
-    inner
-        .record_plan_runtime_effect(changed_paths)
-        .await
-        .map_err(|error| RuntimeError::PlanEffectAttribution {
-            session_id: inner.session_id.clone(),
-            call_id: pending.id().clone(),
-            message: error.to_string(),
-        })
 }
 
 pub(super) fn denied_tool_action_outcome(pending: &PendingToolCall) -> crate::ToolExecutionOutcome {

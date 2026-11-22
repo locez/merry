@@ -1,11 +1,11 @@
-//! Terminal settlement, activity publication, and Plan-link updates for child loops.
+//! Terminal settlement and activity publication for child loops.
 
 use super::{
     super::{
         SubagentActivityHub, SubagentStatusLabel,
         activity::SubagentActivityReducer,
         manager::SubagentManagerState,
-        manager_helpers::{plan_link_status_for_agent, terminal_activity_for_agent},
+        manager_helpers::terminal_activity_for_agent,
         scheduler::{
             ChildScheduler, ReservedChildStart, reserve_queued_starts_locked,
             start_reserved_children_iteratively,
@@ -13,9 +13,7 @@ use super::{
     },
     ChildLoopLaunch,
 };
-use merry_core::{
-    ErrorInfo, PlanLinkSnapshot, PlanLinkStatus, SubagentActivityPhase, SubagentId, SubagentTaskId,
-};
+use merry_core::{ErrorInfo, SubagentActivityPhase, SubagentId, SubagentTaskId};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -63,7 +61,7 @@ async fn settle_child_terminal(
     activity_hub: Option<Arc<SubagentActivityHub>>,
     to_start: Vec<ReservedChildStart>,
 ) {
-    let (link, link_status, terminal_activity, terminal_task, terminal_notification) = scheduler
+    let (terminal_activity, terminal_task, terminal_notification) = scheduler
         .state
         .lock()
         .await
@@ -71,15 +69,12 @@ async fn settle_child_terminal(
         .get(agent_id)
         .map(|agent| {
             (
-                agent.plan_link.clone(),
-                plan_link_status_for_agent(agent),
                 terminal_activity_for_agent(agent),
                 Some(agent.task.task().to_owned()),
                 agent.status.is_terminal().then(|| agent.status_view()),
             )
         })
-        .unwrap_or((None, PlanLinkStatus::Failed, None, None, None));
-    update_plan_link_with_scheduler(&scheduler, link, link_status).await;
+        .unwrap_or((None, None, None));
     if let Some((_task_id, phase, summary)) = terminal_activity {
         publish_terminal_activity(activity_hub.as_deref(), reducer, phase, &summary);
     }
@@ -120,35 +115,6 @@ pub(in crate::subagent) fn publish_terminal_activity_snapshot(
     };
     let mut reducer = SubagentActivityReducer::new(agent_id, task_id);
     publish_terminal_activity(Some(&hub), &mut reducer, phase, summary);
-}
-
-pub(in crate::subagent) async fn update_plan_link_with_scheduler(
-    scheduler: &ChildScheduler,
-    link: Option<PlanLinkSnapshot>,
-    status: PlanLinkStatus,
-) {
-    let Some(link) = link else {
-        return;
-    };
-    let runtime = scheduler
-        .plan_link_runtime
-        .lock()
-        .expect("subagent plan link runtime mutex is not poisoned")
-        .clone();
-    let Some(runtime) = runtime else {
-        return;
-    };
-    if let Err(error) = runtime
-        .update_subagent_link(link.binding_id.clone(), status, crate::plan::unix_time_ms())
-        .await
-    {
-        tracing::warn!(
-            binding_id = %link.binding_id,
-            ?status,
-            %error,
-            "failed to persist subagent Plan link state"
-        );
-    }
 }
 
 async fn update_child_after_error(

@@ -5,18 +5,8 @@ use super::{
     protocol::{SubagentStatusLabel, SubagentStatusView, WaitMode},
     spec::{SubagentError, SubagentTaskSpec},
 };
-use merry_core::{PlanLinkStatus, SubagentActivityPhase, SubagentId, SubagentTaskId};
+use merry_core::{SubagentActivityPhase, SubagentId, SubagentTaskId};
 use std::path::{Path, PathBuf};
-
-pub(super) fn plan_link_status_for_agent(agent: &ManagedSubagent) -> PlanLinkStatus {
-    match agent.status {
-        SubagentStatusLabel::Completed => PlanLinkStatus::Completed,
-        SubagentStatusLabel::Cancelled => PlanLinkStatus::Cancelled,
-        SubagentStatusLabel::Blocked => PlanLinkStatus::Blocked,
-        SubagentStatusLabel::Failed => PlanLinkStatus::Failed,
-        SubagentStatusLabel::Queued | SubagentStatusLabel::Running => PlanLinkStatus::Failed,
-    }
-}
 
 pub(super) fn terminal_activity_for_agent(
     agent: &ManagedSubagent,

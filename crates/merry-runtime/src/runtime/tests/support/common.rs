@@ -1,7 +1,6 @@
 use crate::{
     PermissionReviewMode, RuntimeError, RuntimeModelRole, RuntimeTrustLevel,
     model_config::RuntimeModelConfigs,
-    plan::PlanController,
     process::AcceptedLocalWorkspaceProcessAdmission,
     runtime::{
         CompactionConfig, Runtime, RuntimeInner,
@@ -102,21 +101,16 @@ pub(in crate::runtime::tests) fn model_configs_with_primary(
     configs
 }
 
-pub(in crate::runtime::tests) fn runtime_session_and_plan_controller(
+pub(in crate::runtime::tests) fn runtime_session(
     session_id: SessionId,
-    event_buffer_size: NonZeroUsize,
-) -> (Arc<Mutex<SessionState>>, PlanController) {
-    let session = Arc::new(Mutex::new(SessionState::new(session_id)));
-    let (plan_controller, _events) =
-        PlanController::start(Arc::clone(&session), None, event_buffer_size);
-    (session, plan_controller)
+) -> Arc<Mutex<SessionState>> {
+    Arc::new(Mutex::new(SessionState::new(session_id)))
 }
 
 pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
     let session_id = SessionId::new("runtime-send-test").expect("valid session id");
     let event_buffer_size = NonZeroUsize::new(1).expect("non-zero buffer");
-    let (session, plan_controller) =
-        runtime_session_and_plan_controller(session_id.clone(), event_buffer_size);
+    let session = runtime_session(session_id.clone());
     let trajectory = crate::trajectory::RuntimeObservability::new(session_id.clone(), Vec::new());
     let subagent_event_sink = crate::subagent::SubagentEventSink::new(
         Arc::clone(&session),
@@ -157,9 +151,6 @@ pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
         background_process_control: None,
         subagent_manager: None,
         coordinator_plan_tools: false,
-        plan_controller,
-        plan_subagent_control: None,
-        plan_subagent_scope: None,
         session_store: None,
         tool_batch_active: AtomicBool::new(false),
         activity_hub: Arc::new(crate::SubagentActivityHub::new()),

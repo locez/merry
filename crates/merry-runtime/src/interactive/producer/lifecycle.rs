@@ -24,17 +24,6 @@ impl InteractiveProducer {
             };
             let command = tokio::select! {
                 command = self.command_receiver.recv() => command,
-                plan_event = self.plan_event_receiver.recv() => {
-                    if !self.forward_plan_event(plan_event).await {
-                        return Ok(());
-                    }
-                    if self.coordinator_continuation_requested
-                        && !self.run_coordinator_continuation().await
-                    {
-                        return self.stop_result();
-                    }
-                    continue;
-                }
                 subagent_event = self.subagent_event_receiver.recv() => {
                     if !self.forward_subagent_event(subagent_event).await {
                         return Ok(());
@@ -111,6 +100,11 @@ impl InteractiveProducer {
     ) -> bool {
         self.interrupted = false;
         loop {
+            if let Some(event) = self.runtime.activate_pending_plan_mode_for_prompt().await
+                && !self.send_runtime_events(vec![event]).await
+            {
+                return false;
+            }
             let Some(input) = step_input_from_accepted(&accepted) else {
                 return false;
             };
@@ -145,11 +139,22 @@ impl InteractiveProducer {
                         }
                         BoundaryAction::Continuation => continue,
                         BoundaryAction::Wait => {
+                            if let Some(event) =
+                                self.runtime.complete_deferred_plan_mode_exit().await
+                                && !self.send_runtime_events(vec![event]).await
+                            {
+                                return false;
+                            }
                             return self.send_state(InteractiveRunState::WaitingForInput).await;
                         }
                     }
                 }
                 BoundaryAction::Wait => {
+                    if let Some(event) = self.runtime.complete_deferred_plan_mode_exit().await
+                        && !self.send_runtime_events(vec![event]).await
+                    {
+                        return false;
+                    }
                     return self.send_state(InteractiveRunState::WaitingForInput).await;
                 }
             }
@@ -209,13 +214,19 @@ impl InteractiveProducer {
     }
 
     pub(super) async fn run_coordinator_continuation(&mut self) -> bool {
-        self.coordinator_continuation_requested = false;
         let Some(boundary) = self.run_continuation_steps().await else {
             return false;
         };
         match boundary {
             BoundaryAction::UserInput { accepted } => self.run_accepted_steps(accepted).await,
-            BoundaryAction::Wait => self.send_state(InteractiveRunState::WaitingForInput).await,
+            BoundaryAction::Wait => {
+                if let Some(event) = self.runtime.complete_deferred_plan_mode_exit().await
+                    && !self.send_runtime_events(vec![event]).await
+                {
+                    return false;
+                }
+                self.send_state(InteractiveRunState::WaitingForInput).await
+            }
             BoundaryAction::Continuation => true,
         }
     }
@@ -256,13 +267,7 @@ impl InteractiveProducer {
             };
         }
 
-        if continuation_required {
-            self.coordinator_continuation_requested = false;
-            return BoundaryAction::Continuation;
-        }
-
-        if self.coordinator_continuation_requested {
-            self.coordinator_continuation_requested = false;
+        if continuation_required || self.coordinator_continuation_note.is_some() {
             return BoundaryAction::Continuation;
         }
 

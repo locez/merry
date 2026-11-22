@@ -254,6 +254,7 @@ pub(crate) fn alt_modifier_name() -> &'static str {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn alt_chord(key: &str) -> String {
     format!("{}+{key}", alt_modifier_name())
 }

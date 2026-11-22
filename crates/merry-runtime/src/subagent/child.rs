@@ -1,8 +1,8 @@
 use crate::{
     AgentLoopConfig, AgentRunMessage, Runtime, StepContext, StepInput, TaskAnchor,
     subagent::{
-        ChildRuntimeInput, ChildWorkspaceScope, PlanLinkRuntime, PlanSubagentScope,
-        SubagentActivityHub, SubagentManager, SubagentStatusLabel, SubagentTaskSpec,
+        ChildRuntimeInput, ChildWorkspaceScope, SubagentActivityHub, SubagentManager,
+        SubagentStatusLabel, SubagentTaskSpec,
         activity::SubagentActivityReducer,
         scheduler::{
             ChildScheduler, ReservedChildStart, ReservedChildStartError, ReservedChildStartOutcome,
@@ -10,13 +10,11 @@ use crate::{
         },
     },
 };
-use merry_core::{ErrorInfo, PlanLinkSnapshot, PlanLinkStatus, SubagentId, SubagentTaskId};
+use merry_core::{ErrorInfo, SubagentId, SubagentTaskId};
 use merry_llm::GenerationConfig;
 pub(super) use projection::{ChildLoopProjection, apply_loop_result};
 use settle::publish_terminal_activity;
-pub(super) use settle::{
-    finish_child_with_status, publish_terminal_activity_snapshot, update_plan_link_with_scheduler,
-};
+pub(super) use settle::{finish_child_with_status, publish_terminal_activity_snapshot};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -61,33 +59,6 @@ pub(super) async fn build_child_offloaded(
         })?
 }
 
-enum PlanScopeLookupError {
-    Cancelled,
-    Lookup(String),
-}
-
-async fn lookup_plan_subagent_scope(
-    plan_link: Option<&PlanLinkSnapshot>,
-    plan_link_runtime: Option<&Arc<dyn PlanLinkRuntime>>,
-    token: &CancellationToken,
-) -> Result<Option<PlanSubagentScope>, PlanScopeLookupError> {
-    if token.is_cancelled() {
-        return Err(PlanScopeLookupError::Cancelled);
-    }
-    let Some((link, runtime)) = plan_link.zip(plan_link_runtime) else {
-        return Ok(None);
-    };
-    let lookup = runtime.scope_for_link(link);
-    let result = tokio::select! {
-        _ = token.cancelled() => return Err(PlanScopeLookupError::Cancelled),
-        result = lookup => result,
-    };
-    if token.is_cancelled() {
-        return Err(PlanScopeLookupError::Cancelled);
-    }
-    result.map_err(PlanScopeLookupError::Lookup)
-}
-
 impl SubagentManager {
     pub(super) async fn start_child(
         &self,
@@ -96,38 +67,14 @@ impl SubagentManager {
         task: SubagentTaskSpec,
         task_anchor: TaskAnchor,
         token: CancellationToken,
-        plan_link: Option<PlanLinkSnapshot>,
     ) {
         let child_session_id = super::events::child_session_id_for_agent(&agent_id);
         let parent_primary_model = self.live_parent_model_snapshot();
         let parent_generation_config = self.live_parent_generation_snapshot();
         let default_generation_config =
             generation_config_for_child_task_with_parent(&task, &parent_generation_config);
-        let plan_link_runtime = self.attached_plan_link_runtime();
         let activity_hub = self.attached_activity_hub();
         let child_session_store = self.attached_child_session_store();
-        let plan_subagent_scope = match lookup_plan_subagent_scope(
-            plan_link.as_ref(),
-            plan_link_runtime.as_ref(),
-            &token,
-        )
-        .await
-        {
-            Ok(scope) => scope,
-            Err(PlanScopeLookupError::Cancelled) => {
-                self.mark_cancelled_and_schedule(&agent_id).await;
-                return;
-            }
-            Err(PlanScopeLookupError::Lookup(error)) => {
-                self.mark_failed_and_schedule(
-                    &agent_id,
-                    "child Plan scope lookup failed",
-                    error_info("subagent_plan_scope_error", error),
-                )
-                .await;
-                return;
-            }
-        };
         if token.is_cancelled() {
             self.mark_cancelled_and_schedule(&agent_id).await;
             return;
@@ -149,10 +96,6 @@ impl SubagentManager {
                 generation_config: default_generation_config.clone(),
                 parent_primary_model,
                 parent_generation_config,
-                plan_subagent_control: None,
-                plan_subagent_scope,
-                plan_link: plan_link.clone(),
-                plan_link_runtime,
                 activity_hub: activity_hub.clone(),
             },
         )
@@ -245,7 +188,6 @@ impl SubagentManager {
         diagnostics: ErrorInfo,
     ) {
         let mut state = self.state.lock().await;
-        let mut link = None;
         let mut terminal_activity = None;
         let mut terminal_notification = None;
         let mut terminal_task = None;
@@ -256,15 +198,12 @@ impl SubagentManager {
             agent.status = SubagentStatusLabel::Failed;
             agent.summary = summary.to_owned();
             agent.diagnostics = Some(diagnostics);
-            link = agent.plan_link.clone();
             terminal_activity = terminal_activity_for_agent(agent);
             terminal_task = Some(agent.task.task().to_owned());
             terminal_notification = Some(agent.status_view());
         }
         let to_start = self.reserve_queued_starts_locked(&mut state);
         drop(state);
-        self.update_plan_links(link.into_iter().collect(), PlanLinkStatus::Failed)
-            .await;
         if let Some((task_id, phase, summary)) = terminal_activity {
             publish_terminal_activity_snapshot(
                 self.attached_activity_hub(),
@@ -290,7 +229,6 @@ impl SubagentManager {
 
     pub(super) async fn mark_cancelled_and_schedule(&self, agent_id: &SubagentId) {
         let mut state = self.state.lock().await;
-        let mut link = None;
         let mut terminal_activity = None;
         let mut terminal_notification = None;
         let mut terminal_task = None;
@@ -303,15 +241,12 @@ impl SubagentManager {
                 "subagent_cancelled",
                 "child cancellation requested before runtime start",
             ));
-            link = agent.plan_link.clone();
             terminal_activity = terminal_activity_for_agent(agent);
             terminal_task = Some(agent.task.task().to_owned());
             terminal_notification = Some(agent.status_view());
         }
         let to_start = self.reserve_queued_starts_locked(&mut state);
         drop(state);
-        self.update_plan_links(link.into_iter().collect(), PlanLinkStatus::Cancelled)
-            .await;
         if let Some((task_id, phase, summary)) = terminal_activity {
             publish_terminal_activity_snapshot(
                 self.attached_activity_hub(),
@@ -340,26 +275,6 @@ pub(super) async fn spawn_reserved_child(
     scheduler: ChildScheduler,
     start: &ReservedChildStart,
 ) -> Result<ReservedChildStartOutcome, ReservedChildStartError> {
-    let plan_link_runtime = scheduler
-        .plan_link_runtime
-        .lock()
-        .expect("subagent plan link runtime mutex is not poisoned")
-        .clone();
-    let plan_subagent_scope = match lookup_plan_subagent_scope(
-        start.plan_link.as_ref(),
-        plan_link_runtime.as_ref(),
-        &start.cancellation_token,
-    )
-    .await
-    {
-        Ok(scope) => scope,
-        Err(PlanScopeLookupError::Cancelled) => {
-            return Ok(ReservedChildStartOutcome::Cancelled);
-        }
-        Err(PlanScopeLookupError::Lookup(error)) => {
-            return Err(ReservedChildStartError::PlanScope(error));
-        }
-    };
     if start.cancellation_token.is_cancelled() {
         return Ok(ReservedChildStartOutcome::Cancelled);
     }
@@ -385,10 +300,6 @@ pub(super) async fn spawn_reserved_child(
             generation_config: default_generation_config.clone(),
             parent_primary_model,
             parent_generation_config,
-            plan_subagent_control: None,
-            plan_subagent_scope,
-            plan_link: start.plan_link.clone(),
-            plan_link_runtime,
             activity_hub: scheduler.attached_activity_hub(),
         },
     )
@@ -844,24 +755,20 @@ fn spawn_child_loop(
             super::events::apply_workspace_finalization(agent, workspace_finalization);
         }
         state_guard.handles.remove(&launch.agent_id);
-        let (terminal_link, terminal_status, terminal_activity, terminal_notification, final_usage) =
-            state_guard
-                .agents
-                .get(&launch.agent_id)
-                .map(|agent| {
-                    (
-                        agent.plan_link.clone(),
-                        plan_link_status_for_agent(agent),
-                        terminal_activity_for_agent(agent),
-                        agent.status.is_terminal().then(|| agent.status_view()),
-                        agent.usage,
-                    )
-                })
-                .unwrap_or((None, PlanLinkStatus::Failed, None, None, None));
+        let (terminal_activity, terminal_notification, final_usage) = state_guard
+            .agents
+            .get(&launch.agent_id)
+            .map(|agent| {
+                (
+                    terminal_activity_for_agent(agent),
+                    agent.status.is_terminal().then(|| agent.status_view()),
+                    agent.usage,
+                )
+            })
+            .unwrap_or((None, None, None));
         let to_start =
             reserve_queued_starts_locked(&mut state_guard, scheduler.effective_max_threads());
         drop(state_guard);
-        update_plan_link_with_scheduler(&scheduler, terminal_link, terminal_status).await;
         if let Some((_task_id, phase, summary)) = terminal_activity {
             publish_terminal_activity(
                 launch.activity_hub.as_deref(),
@@ -889,5 +796,5 @@ fn spawn_child_loop(
 
 pub(super) use super::manager_helpers::{
     apply_built_task_overrides, error_info, generation_config_for_child_task_with_parent,
-    observed_event_output_bytes, plan_link_status_for_agent, terminal_activity_for_agent,
+    observed_event_output_bytes, terminal_activity_for_agent,
 };

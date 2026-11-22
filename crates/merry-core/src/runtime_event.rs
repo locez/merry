@@ -1,10 +1,9 @@
 //! Public runtime event contract for SDK/UI consumers.
 
 use crate::{
-    CoordinatorDirectiveSnapshot, ErrorInfo, PendingToolCall, PendingToolCallBatch, PlanAttemptId,
-    PlanAttemptProgressSnapshot, PlanAttemptSnapshot, PlanId, PlanLeaseSnapshot, PlanNodeId,
-    PlanPhase, PlanRevisionSummary, PlanSnapshot, SessionId, SessionUsage, SubagentId,
-    SubagentTaskId, ToolCallId, ToolCallResult,
+    ErrorInfo, PendingToolCall, PendingToolCallBatch, PlanDocument, PlanId, PlanModeState,
+    PlanReviewDecision, SessionId, SessionUsage, SubagentId, SubagentTaskId, TodoItem, ToolCallId,
+    ToolCallResult,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -170,55 +169,30 @@ pub enum RuntimeEvent {
         diagnostic: ErrorInfo,
         source: RuntimeEventSource,
     },
-    /// A complete bounded plan snapshot was durably committed.
-    PlanUpdated {
-        snapshot: PlanSnapshot,
-        summary: PlanRevisionSummary,
+    /// Session Plan Mode transitioned to a new state.
+    PlanModeChanged {
+        mode: PlanModeState,
         source: RuntimeEventSource,
     },
-    /// The active plan changed lifecycle phase.
-    PlanPhaseChanged {
+    /// A Markdown plan document was created or updated in this session.
+    PlanSaved {
+        plan: PlanDocument,
+        source: RuntimeEventSource,
+    },
+    /// The agent submitted a Markdown plan and paused for user review.
+    PlanApprovalRequested {
+        plan: PlanDocument,
+        source: RuntimeEventSource,
+    },
+    /// The user approved, requested changes on, or abandoned a submitted plan.
+    PlanReviewed {
         plan_id: PlanId,
-        phase: PlanPhase,
+        decision: PlanReviewDecision,
         source: RuntimeEventSource,
     },
-    /// A plan node became dependency- and policy-ready.
-    PlanNodeReady {
-        plan_id: PlanId,
-        node_id: PlanNodeId,
-        node_revision: u64,
-        source: RuntimeEventSource,
-    },
-    /// The scheduler durably reserved an execution lease.
-    PlanLeaseStarted {
-        lease: PlanLeaseSnapshot,
-        source: RuntimeEventSource,
-    },
-    /// Runtime-recorded liveness or activity progress changed.
-    PlanProgressUpdated {
-        progress: PlanAttemptProgressSnapshot,
-        source: RuntimeEventSource,
-    },
-    /// Runtime policy requested semantic coordinator review of progress.
-    PlanProgressReviewRequested {
-        plan_id: PlanId,
-        attempt_id: PlanAttemptId,
-        reason: String,
-        source: RuntimeEventSource,
-    },
-    /// A subagent or local executor durably reported semantic progress.
-    PlanAttemptProgressReported {
-        progress: PlanAttemptProgressSnapshot,
-        source: RuntimeEventSource,
-    },
-    /// A coordinator directive changed persisted lifecycle state.
-    PlanDirectiveUpdated {
-        directive: CoordinatorDirectiveSnapshot,
-        source: RuntimeEventSource,
-    },
-    /// One plan attempt reached a typed terminal outcome.
-    PlanAttemptFinished {
-        attempt: PlanAttemptSnapshot,
+    /// The session execution checklist was updated.
+    TodoListUpdated {
+        items: Vec<TodoItem>,
         source: RuntimeEventSource,
     },
     /// The runtime failed.

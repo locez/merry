@@ -26,6 +26,8 @@ pub(crate) enum TimelineMouseDown {
     InspectSubagent(String),
     /// Handles a click inside the persistent Background Tasks & Subagents dock.
     TaskDock(TaskDockPointer),
+    /// Handles a click inside the inline Todo checklist dock.
+    TodoDock(crate::tui::todo_dock::TodoDockPointer),
     Select(TextSelection),
 }
 
@@ -44,11 +46,18 @@ pub(crate) fn timeline_mouse_down(
     let scroll = timeline_scroll_start(state, &timeline, content);
     let split = timeline_scroll_split(state, &timeline, content.height, scroll);
     let (_, after_header) = split_timeline_content(content, split.header_rows);
-    let (dock_rect, body) = split_dock_region(state, after_header);
+    let (dock_rect, after_task_dock) = split_dock_region(state, after_header);
     if let Some(pointer) = dock_mouse_down(state, dock_rect, position) {
         return TimelineMouseDown::TaskDock(pointer);
     }
     if dock_rect.contains(position) {
+        return TimelineMouseDown::None;
+    }
+    let (todo_rect, body) = crate::tui::todo_dock::split_todo_dock_region(state, after_task_dock);
+    if let Some(pointer) = crate::tui::todo_dock::todo_dock_mouse_down(state, todo_rect, position) {
+        return TimelineMouseDown::TodoDock(pointer);
+    }
+    if todo_rect.contains(position) {
         return TimelineMouseDown::None;
     }
     let body_scroll = adjust_body_scroll(
@@ -99,7 +108,8 @@ pub(crate) fn timeline_text_area(state: &TuiState, region: Rect) -> Rect {
     let scroll = timeline_scroll_start(state, &timeline, content);
     let split = timeline_scroll_split(state, &timeline, content.height, scroll);
     let (_, after_header) = split_timeline_content(content, split.header_rows);
-    split_dock_region(state, after_header).1
+    let (_, after_task_dock) = split_dock_region(state, after_header);
+    crate::tui::todo_dock::split_todo_dock_region(state, after_task_dock).1
 }
 
 /// Returns the screen rectangle occupied by the inline task dock, if visible.
@@ -113,6 +123,20 @@ pub(crate) fn timeline_task_dock_rect(state: &TuiState, region: Rect) -> Rect {
     let split = timeline_scroll_split(state, &timeline, content.height, scroll);
     let (_, after_header) = split_timeline_content(content, split.header_rows);
     split_dock_region(state, after_header).0
+}
+
+/// Returns the screen rectangle occupied by the inline todo dock, if visible.
+pub(crate) fn timeline_todo_dock_rect(state: &TuiState, region: Rect) -> Rect {
+    let content = timeline_content_region(region);
+    if content.is_empty() {
+        return Rect::default();
+    }
+    let timeline = timeline_layout(state, content);
+    let scroll = timeline_scroll_start(state, &timeline, content);
+    let split = timeline_scroll_split(state, &timeline, content.height, scroll);
+    let (_, after_header) = split_timeline_content(content, split.header_rows);
+    let (_, after_task_dock) = split_dock_region(state, after_header);
+    crate::tui::todo_dock::split_todo_dock_region(state, after_task_dock).0
 }
 
 fn copy_target_text(

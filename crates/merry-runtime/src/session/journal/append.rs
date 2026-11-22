@@ -13,14 +13,15 @@ use super::{
 };
 use crate::{
     ContextEntry, SessionStoreError, TaskAnchor,
-    plan::{PersistedPlanState, PlanState},
+    plan::{PersistedPlanModeState, PlanSessionState},
     session::{
         ModelTurnId, ModelTurnStatus, PromptHistoryProjection, SessionState,
         transcript::{ToolResultPromptProjection, Transcript, TranscriptItem},
     },
+    todo::TodoListState,
     token_estimate::RequestTokenCalibration,
 };
-use merry_core::{PlanSnapshot, SessionId, SessionUsage, ToolCallId, ToolOutput};
+use merry_core::{SessionId, SessionUsage, TodoItem, ToolCallId, ToolOutput};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -35,8 +36,8 @@ pub(crate) struct JournalCursor {
     flushed_usage: Option<SessionUsage>,
     flushed_calibration: Option<RequestTokenCalibration>,
     flushed_task_anchor: Option<String>,
-    flushed_active_plan: Option<PersistedPlanState>,
-    flushed_terminal_plans: Vec<PlanSnapshot>,
+    flushed_plan_mode: Option<PersistedPlanModeState>,
+    flushed_todos: Vec<TodoItem>,
     flushed_context_entries: Vec<JournalContextEntry>,
     flushed_next_item_id: Option<u64>,
     flushed_model_turns: BTreeMap<ModelTurnId, (ModelTurnStatus, Option<u64>)>,
@@ -81,8 +82,8 @@ impl JournalCursor {
         self.flushed_usage = committed.flushed_usage;
         self.flushed_calibration = committed.flushed_calibration;
         self.flushed_task_anchor = committed.flushed_task_anchor;
-        self.flushed_active_plan = committed.flushed_active_plan;
-        self.flushed_terminal_plans = committed.flushed_terminal_plans;
+        self.flushed_plan_mode = committed.flushed_plan_mode;
+        self.flushed_todos = committed.flushed_todos;
         self.flushed_context_entries = committed.flushed_context_entries;
         self.flushed_next_item_id = self
             .flushed_next_item_id
@@ -122,8 +123,8 @@ pub(crate) struct JournalAppendInput<'a> {
     pub(crate) compacted_checkpoint: Option<&'a crate::CompactedCheckpoint>,
     pub(crate) next_sequence: u64,
     pub(crate) session_started: bool,
-    pub(crate) active_plan: Option<&'a PlanState>,
-    pub(crate) terminal_plans: &'a [PlanSnapshot],
+    pub(crate) plan_state: &'a PlanSessionState,
+    pub(crate) todo_list: &'a TodoListState,
     pub(crate) usage: Option<&'a SessionUsage>,
     pub(crate) request_token_calibration: Option<&'a RequestTokenCalibration>,
     pub(crate) task_anchor: Option<&'a TaskAnchor>,
@@ -237,8 +238,8 @@ pub(super) fn cursor_after_load(session: &SessionState) -> JournalCursor {
             .task_anchor
             .as_ref()
             .map(|anchor| anchor.objective().to_owned()),
-        flushed_active_plan: session.active_plan.as_ref().map(PlanState::persisted),
-        flushed_terminal_plans: session.terminal_plans.clone(),
+        flushed_plan_mode: session.plan_state.persisted(),
+        flushed_todos: session.todo_list.items().to_vec(),
         flushed_context_entries: session
             .context_entries
             .iter()
@@ -285,12 +286,11 @@ fn build_state_delta(
             FieldPatch::Clear => FieldPatch::Clear,
         });
 
-    let active_plan_current = input.active_plan.map(PlanState::persisted);
-    let active_plan = optional_patch(&cursor.flushed_active_plan, &active_plan_current);
+    let plan_mode_current = input.plan_state.persisted();
+    let plan_mode = optional_patch(&cursor.flushed_plan_mode, &plan_mode_current);
 
-    let terminal_plans_current = input.terminal_plans.to_vec();
-    let terminal_plans = (cursor.flushed_terminal_plans != terminal_plans_current)
-        .then(|| terminal_plans_current.clone());
+    let todos_current = input.todo_list.items().to_vec();
+    let todos = (cursor.flushed_todos != todos_current).then(|| todos_current.clone());
 
     let context_entries_current = input
         .context_entries
@@ -346,8 +346,8 @@ fn build_state_delta(
         usage,
         request_token_calibration,
         task_anchor,
-        active_plan,
-        terminal_plans,
+        plan_mode,
+        todos,
         context_entries,
         next_item_id,
         model_turns,
@@ -367,8 +367,8 @@ fn build_state_delta(
         flushed_usage: usage_current,
         flushed_calibration: calibration_current,
         flushed_task_anchor: anchor_current,
-        flushed_active_plan: active_plan_current,
-        flushed_terminal_plans: terminal_plans_current,
+        flushed_plan_mode: plan_mode_current,
+        flushed_todos: todos_current,
         flushed_context_entries: context_entries_current,
         flushed_next_item_id: Some(next_item_id_val),
         flushed_model_turns: current_model_turns,

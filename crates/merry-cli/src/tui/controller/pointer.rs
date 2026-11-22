@@ -1,8 +1,7 @@
 //! Pointer, click, and mouse-wheel translation for the TUI controller.
 
 use super::input::{
-    PLAN_SCROLL_STEP, commit_pending_edit_effect, handle_key_action, input_is_known_slash,
-    press_overlay,
+    commit_pending_edit_effect, handle_key_action, input_is_known_slash, press_overlay,
 };
 use crate::tui::{
     click_target::{OverlayPointer, PointerTarget, StatusAction, pointer_target},
@@ -11,7 +10,6 @@ use crate::tui::{
     copy_controls::CopyTextError,
     keymap::KeyAction,
     overlay::Overlay,
-    plan_render::PlanPointer,
     state::TuiState,
     text_interaction::MouseInput,
 };
@@ -36,12 +34,11 @@ fn overlay_pointer_effect(pointer: OverlayPointer, state: &mut TuiState) -> Cont
             }
             press_overlay(state, KeyCode::Enter)
         }
-        OverlayPointer::PlanApprove
-        | OverlayPointer::DialogClose
-        | OverlayPointer::PermissionAllow => press_overlay(state, KeyCode::Enter),
-        OverlayPointer::PlanBack | OverlayPointer::PermissionReject => {
-            press_overlay(state, KeyCode::Esc)
+        OverlayPointer::DialogClose | OverlayPointer::PermissionAllow => {
+            press_overlay(state, KeyCode::Enter)
         }
+        OverlayPointer::PermissionReject => press_overlay(state, KeyCode::Esc),
+        OverlayPointer::PlanView(pointer) => plan_view_pointer_effect(pointer, state),
         OverlayPointer::ProviderWorkbench(action) => {
             provider_workbench_pointer_effect(action, state)
         }
@@ -274,14 +271,94 @@ fn open_model_from_header(state: &TuiState) -> ControllerEffect {
     }
 }
 
+fn plan_view_pointer_effect(
+    pointer: crate::tui::plan_view::PlanViewPointer,
+    state: &mut TuiState,
+) -> ControllerEffect {
+    use crate::tui::plan_view::{PlanViewAction, PlanViewPointer};
+    match pointer {
+        PlanViewPointer::Close => {
+            state.close_overlay();
+            ControllerEffect::None
+        }
+        PlanViewPointer::SelectPlan(plan_id) => {
+            state.select_plan_view(plan_id);
+            ControllerEffect::None
+        }
+        PlanViewPointer::Approve => {
+            let Some(Overlay::PlanView(view)) = state.overlay_mut() else {
+                return ControllerEffect::None;
+            };
+            let plan_id = view.selected_plan_id().clone();
+            let note = view.take_combined_feedback();
+            state.close_overlay();
+            ControllerEffect::ApprovePlan { plan_id, note }
+        }
+        PlanViewPointer::RequestChanges => {
+            let action = match state.overlay_mut() {
+                Some(Overlay::PlanView(view)) => view.try_request_changes(),
+                _ => return ControllerEffect::None,
+            };
+            match action {
+                PlanViewAction::RequestChanges { plan_id, feedback } => {
+                    state.close_overlay();
+                    ControllerEffect::RequestPlanChanges { plan_id, feedback }
+                }
+                _ => ControllerEffect::None,
+            }
+        }
+        PlanViewPointer::Abandon => {
+            let Some(Overlay::PlanView(view)) = state.overlay() else {
+                return ControllerEffect::None;
+            };
+            let plan_id = view.selected_plan_id().clone();
+            state.close_overlay();
+            ControllerEffect::AbandonPlan(plan_id)
+        }
+        PlanViewPointer::ToggleComment => {
+            if let Some(Overlay::PlanView(view)) = state.overlay_mut() {
+                view.toggle_comment_mode();
+            }
+            ControllerEffect::None
+        }
+        PlanViewPointer::CopyPlan => {
+            let content = match state.overlay() {
+                Some(Overlay::PlanView(view)) => state
+                    .plan()
+                    .plan_by_id(view.selected_plan_id())
+                    .map(|doc| doc.content.clone()),
+                _ => None,
+            };
+            content
+                .map(ControllerEffect::CopyText)
+                .unwrap_or(ControllerEffect::None)
+        }
+        PlanViewPointer::Composer => ControllerEffect::None,
+        PlanViewPointer::TimelineCopy(text) => ControllerEffect::CopyText(text),
+        PlanViewPointer::TimelineCopyTooLarge => ControllerEffect::CopyTextTooLarge,
+        PlanViewPointer::TimelineSelect(selection) => {
+            if let Some(Overlay::PlanView(view)) = state.overlay_mut() {
+                view.child_state_mut().begin_text_selection(selection);
+            }
+            ControllerEffect::None
+        }
+    }
+}
+
 fn status_click(action: StatusAction, state: &mut TuiState) -> ControllerEffect {
     if action == StatusAction::Agents {
         state.open_subagent_inspect(None);
         return ControllerEffect::RefreshSubagents;
     }
+    if action == StatusAction::PlanMode {
+        return ControllerEffect::SetPlanMode {
+            enabled: !state.plan().is_plan_mode_on(),
+            initial_prompt: None,
+        };
+    }
     let key_action = match action {
         StatusAction::Commands => KeyAction::OpenCommandPanel,
-        StatusAction::Agents => unreachable!("handled above"),
+        StatusAction::Agents | StatusAction::PlanMode => unreachable!("handled above"),
         StatusAction::Plan => KeyAction::TogglePlan,
         StatusAction::Follow => KeyAction::FollowLatest,
         StatusAction::Stop => KeyAction::Interrupt,
@@ -339,25 +416,6 @@ fn apply_pending_queue_pointer(
     }
 }
 
-fn apply_plan_pointer(state: &mut TuiState, pointer: PlanPointer) {
-    match pointer {
-        PlanPointer::Fold(node_id) => {
-            state.plan_mut().focus();
-            state.plan_mut().toggle_collapse(&node_id);
-        }
-        PlanPointer::Row(node_id) => {
-            let inspect =
-                state.plan().is_focused() && state.plan().selected_node_id() == Some(&node_id);
-            state.plan_mut().focus();
-            if inspect {
-                state.plan_mut().open_inspector();
-            } else {
-                state.plan_mut().select_node(node_id);
-            }
-        }
-    }
-}
-
 fn accept_completion_at(
     state: &mut TuiState,
     index: usize,
@@ -390,11 +448,60 @@ pub(crate) fn handle_mouse_input(
         state.clear_text_selection();
         state.set_composer_mouse_selecting(false);
         return match mouse {
-            MouseInput::Down(position) => match pointer_target(state, terminal_size, position) {
-                PointerTarget::Overlay(pointer) => overlay_pointer_effect(pointer, state),
-                _ => ControllerEffect::None,
-            },
-            MouseInput::Drag(_) | MouseInput::Up(_) => ControllerEffect::None,
+            MouseInput::Down(position) => {
+                if let Some(Overlay::PlanView(view)) = state.overlay_mut() {
+                    view.child_state_mut().clear_text_selection();
+                }
+                match pointer_target(state, terminal_size, position) {
+                    PointerTarget::Overlay(pointer) => overlay_pointer_effect(pointer, state),
+                    _ => ControllerEffect::None,
+                }
+            }
+            MouseInput::Drag(position) => {
+                if let Some(Overlay::PlanView(view)) = state.overlay_mut() {
+                    view.child_state_mut().drag_text_selection(position);
+                }
+                ControllerEffect::None
+            }
+            MouseInput::Up(position) => {
+                let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+                let timeline_rect = crate::tui::plan_view::plan_view_timeline_rect(state, area);
+                if let Some(Overlay::PlanView(view)) = state.overlay_mut() {
+                    let child = view.child_state_mut();
+                    let had_selection = child.text_selection().is_some();
+                    match child.finish_text_selection(position) {
+                        Ok(Some(captured)) if child.is_commenting() => {
+                            let occurrence = crate::tui::render::quote_occurrence(
+                                child,
+                                timeline_rect,
+                                captured.item_index,
+                                &captured.text,
+                                captured.visual_row,
+                                captured.column,
+                            );
+                            child.capture_comment_selection(
+                                captured.text,
+                                captured.item_index,
+                                occurrence,
+                            );
+                            return ControllerEffect::None;
+                        }
+                        Ok(Some(captured)) => return ControllerEffect::CopyText(captured.text),
+                        Ok(None) => {
+                            if let Some(hit) =
+                                crate::tui::render::comment_mark_at(child, timeline_rect, position)
+                                && (had_selection || hit.in_sticky_header)
+                            {
+                                child.edit_comment(hit.index);
+                            }
+                        }
+                        Err(CopyTextError::TooLarge) => {
+                            return ControllerEffect::CopyTextTooLarge;
+                        }
+                    }
+                }
+                ControllerEffect::None
+            }
         };
     }
     if let MouseInput::Drag(position) = mouse
@@ -438,7 +545,6 @@ pub(crate) fn handle_mouse_input(
                     } else {
                         ControllerEffect::None
                     };
-                    state.plan_mut().leave_focus();
                     if position_composer_cursor(
                         state,
                         rects.input,
@@ -452,10 +558,6 @@ pub(crate) fn handle_mouse_input(
                 }
                 PointerTarget::PendingQueue(pointer) => {
                     return apply_pending_queue_pointer(state, pointer);
-                }
-                PointerTarget::Plan(pointer) => {
-                    apply_plan_pointer(state, pointer);
-                    return ControllerEffect::None;
                 }
                 PointerTarget::Completion(index) => {
                     return accept_completion_at(
@@ -517,6 +619,14 @@ pub(crate) fn handle_mouse_input(
                             return ControllerEffect::None;
                         }
                     }
+                }
+                crate::tui::render::TimelineMouseDown::TodoDock(todo_pointer) => {
+                    match todo_pointer {
+                        crate::tui::todo_dock::TodoDockPointer::ToggleExpanded => {
+                            state.todo_dock_mut().toggle_expanded();
+                        }
+                    }
+                    return ControllerEffect::None;
                 }
                 crate::tui::render::TimelineMouseDown::Select(selection) => {
                     state.begin_text_selection(selection);
@@ -588,6 +698,10 @@ pub(crate) fn handle_mouse_scroll_up_by(
         let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
         return crate::tui::command_details::handle_mouse_scroll(state, area, position, true);
     }
+    if matches!(state.overlay(), Some(Overlay::PlanView(_))) {
+        let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+        return crate::tui::plan_view::handle_mouse_scroll(state, area, position, true, lines);
+    }
     if scroll_active_overlay(state, true, lines) {
         return ControllerEffect::None;
     }
@@ -598,19 +712,12 @@ pub(crate) fn handle_mouse_scroll_up_by(
         state.newer_history_search();
         return ControllerEffect::None;
     }
-    if scroll_task_dock_at(position, terminal_size, state, -1) {
+    if scroll_task_dock_at(position, terminal_size, state, -1)
+        || scroll_todo_dock_at(position, terminal_size, state, -1)
+    {
         return ControllerEffect::None;
     }
-    if position_in_plan_pane(position, terminal_size, state) {
-        let plan_lines = lines.min(PLAN_SCROLL_STEP);
-        if state.plan().is_inspector_open() {
-            state.plan_mut().scroll_inspector_up_by(plan_lines);
-        } else {
-            state.plan_mut().scroll_up_by(plan_lines);
-        }
-    } else {
-        state.scroll_timeline_up_by(lines);
-    }
+    state.scroll_timeline_up_by(lines);
     ControllerEffect::None
 }
 
@@ -626,6 +733,10 @@ pub(crate) fn handle_mouse_scroll_down_by(
         let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
         return crate::tui::command_details::handle_mouse_scroll(state, area, position, false);
     }
+    if matches!(state.overlay(), Some(Overlay::PlanView(_))) {
+        let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+        return crate::tui::plan_view::handle_mouse_scroll(state, area, position, false, lines);
+    }
     if scroll_active_overlay(state, false, lines) {
         return ControllerEffect::None;
     }
@@ -636,19 +747,12 @@ pub(crate) fn handle_mouse_scroll_down_by(
         state.begin_or_older_history_search();
         return ControllerEffect::None;
     }
-    if scroll_task_dock_at(position, terminal_size, state, 1) {
+    if scroll_task_dock_at(position, terminal_size, state, 1)
+        || scroll_todo_dock_at(position, terminal_size, state, 1)
+    {
         return ControllerEffect::None;
     }
-    if position_in_plan_pane(position, terminal_size, state) {
-        let plan_lines = lines.min(PLAN_SCROLL_STEP);
-        if state.plan().is_inspector_open() {
-            state.plan_mut().scroll_inspector_down_by(plan_lines);
-        } else {
-            state.plan_mut().scroll_down_by(plan_lines);
-        }
-    } else {
-        state.scroll_timeline_down_by(lines);
-    }
+    state.scroll_timeline_down_by(lines);
     ControllerEffect::None
 }
 
@@ -675,14 +779,24 @@ fn scroll_task_dock_at(
     true
 }
 
-pub(super) fn position_in_plan_pane(
+fn scroll_todo_dock_at(
     position: Position,
     terminal_size: Size,
-    state: &TuiState,
+    state: &mut TuiState,
+    delta: isize,
 ) -> bool {
-    cockpit_rects(terminal_size, state)
-        .plan
-        .is_some_and(|plan| plan.contains(position))
+    if !state.todo_dock().is_expanded() {
+        return false;
+    }
+    let rects = cockpit_rects(terminal_size, state);
+    let dock_rect = crate::tui::render::timeline_todo_dock_rect(state, rects.timeline);
+    if !dock_rect.contains(position) {
+        return false;
+    }
+    let visible_rows = usize::from(dock_rect.height.saturating_sub(2))
+        .clamp(1, crate::tui::todo_dock::MAX_TODO_VISIBLE_ROWS);
+    state.todo_dock_mut().scroll_by(delta, visible_rows);
+    true
 }
 
 fn position_composer_cursor(

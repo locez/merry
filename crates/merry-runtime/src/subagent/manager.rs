@@ -15,15 +15,11 @@ use super::scope::ParentCapabilities;
 use super::spec::{validate_no_write_scope_conflicts, validate_task_max_model_turns};
 use super::{
     ChildRuntimeFactory, ChildWorkspaceLifecycle, ChildWorkspaceScope, ParentPrimaryModel,
-    PlanLinkRuntime, SubagentActivityHub, SubagentConfig, SubagentError, SubagentLimitBehavior,
-    SubagentResultView, SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec,
-    SubagentWorktreeView,
+    SubagentActivityHub, SubagentConfig, SubagentError, SubagentLimitBehavior, SubagentResultView,
+    SubagentStatusLabel, SubagentStatusView, SubagentTaskSpec, SubagentWorktreeView,
 };
 use crate::{FileSessionStore, RuntimeError, TaskAnchor};
-use merry_core::{
-    ErrorInfo, PlanLinkSnapshot, PlanLinkStatus, SubagentActivityPhase, SubagentId, SubagentTaskId,
-    ToolName,
-};
+use merry_core::{ErrorInfo, SubagentActivityPhase, SubagentId, SubagentTaskId, ToolName};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
@@ -71,7 +67,6 @@ pub struct SubagentManager {
     pub(super) next_batch_id: Arc<AtomicU64>,
     pub(super) depth: u8,
     pub(super) max_depth: u8,
-    pub(super) plan_link_runtime: Arc<StdMutex<Option<Arc<dyn PlanLinkRuntime>>>>,
     pub(super) parent_capabilities: Arc<StdMutex<Option<ParentCapabilities>>>,
     pub(super) activity_hub: Arc<StdMutex<Option<Arc<SubagentActivityHub>>>>,
     pub(super) event_sink: Arc<StdMutex<Option<SubagentEventSink>>>,
@@ -129,7 +124,6 @@ pub(super) struct ManagedSubagent {
     pub(super) changed_paths: Vec<String>,
     pub(super) diagnostics: Option<ErrorInfo>,
     pub(super) cancellation_token: CancellationToken,
-    pub(super) plan_link: Option<PlanLinkSnapshot>,
     pub(super) completion_notification_acknowledged: bool,
     pub(super) runtime: Option<crate::Runtime>,
     pub(super) generation_config: Option<merry_llm::GenerationConfig>,
@@ -201,7 +195,6 @@ impl SubagentManager {
             next_batch_id: Arc::new(AtomicU64::new(1)),
             depth,
             max_depth: config.max_depth(),
-            plan_link_runtime: Arc::new(StdMutex::new(None)),
             parent_capabilities: Arc::new(StdMutex::new(None)),
             activity_hub: Arc::new(StdMutex::new(None)),
             event_sink: Arc::new(StdMutex::new(None)),
@@ -303,20 +296,6 @@ impl SubagentManager {
                 allowed_tools,
                 workspace_scope,
             });
-    }
-
-    pub(crate) fn attach_plan_link_runtime(&self, runtime: Arc<dyn PlanLinkRuntime>) {
-        *self
-            .plan_link_runtime
-            .lock()
-            .expect("subagent plan link runtime mutex is not poisoned") = Some(runtime);
-    }
-
-    pub(super) fn attached_plan_link_runtime(&self) -> Option<Arc<dyn PlanLinkRuntime>> {
-        self.plan_link_runtime
-            .lock()
-            .expect("subagent plan link runtime mutex is not poisoned")
-            .clone()
     }
 
     pub(crate) fn attach_activity_hub(&self, hub: Arc<SubagentActivityHub>) {
@@ -604,35 +583,7 @@ impl SubagentManager {
             let number = self.next_id.fetch_add(1, Ordering::SeqCst);
             let agent_id = SubagentId::new(&format!("agent-{number}"))?;
             let task_id = SubagentTaskId::new(&format!("task-{number}"))?;
-            let plan_link = match (task.plan_client_key(), self.attached_plan_link_runtime()) {
-                (Some(client_key), Some(runtime)) => match runtime
-                    .bind_subagent(
-                        client_key.to_owned(),
-                        agent_id.clone(),
-                        task_id.clone(),
-                        crate::plan::unix_time_ms(),
-                    )
-                    .await
-                {
-                    Ok(link) => Some(link),
-                    Err(error) => {
-                        rejected.push(RejectedSubagentView {
-                            task_index,
-                            reason: format!("Plan task binding failed: {error}"),
-                        });
-                        continue;
-                    }
-                },
-                (Some(_), None) => {
-                    rejected.push(RejectedSubagentView {
-                        task_index,
-                        reason: "Plan task binding is unavailable for this runtime".to_owned(),
-                    });
-                    continue;
-                }
-                (None, _) => None,
-            };
-            accepted_tasks.push((task_index, agent_id, task_id, task, task_anchor, plan_link));
+            accepted_tasks.push((task_index, agent_id, task_id, task, task_anchor));
         }
 
         if accepted_tasks.is_empty() {
@@ -658,7 +609,7 @@ impl SubagentManager {
             },
         );
 
-        for (task_index, agent_id, task_id, task, task_anchor, plan_link) in accepted_tasks {
+        for (task_index, agent_id, task_id, task, task_anchor) in accepted_tasks {
             let child_token = parent_token.child_token();
             let starts_now = running_child_count(&state) < self.effective_max_threads()
                 && batch_running_child_count(&state, batch_id) < batch_max_concurrency;
@@ -692,7 +643,6 @@ impl SubagentManager {
                 changed_paths: Vec::new(),
                 diagnostics: None,
                 cancellation_token: child_token.clone(),
-                plan_link: plan_link.clone(),
                 completion_notification_acknowledged: false,
                 runtime: None,
                 generation_config: None,
@@ -726,7 +676,7 @@ impl SubagentManager {
             });
 
             if starts_now {
-                to_start.push((agent_id, task_id, task, task_anchor, child_token, plan_link));
+                to_start.push((agent_id, task_id, task, task_anchor, child_token));
             }
         }
         let spawned_records = spawned
@@ -768,8 +718,8 @@ impl SubagentManager {
             }
         }
 
-        for (agent_id, task_id, task, task_anchor, child_token, plan_link) in to_start {
-            self.start_child(agent_id, task_id, task, task_anchor, child_token, plan_link)
+        for (agent_id, task_id, task, task_anchor, child_token) in to_start {
+            self.start_child(agent_id, task_id, task, task_anchor, child_token)
                 .await;
         }
 
@@ -836,7 +786,6 @@ impl SubagentManager {
             });
         }
         let mut state = self.state.lock().await;
-        let mut links_to_update = Vec::new();
         let mut terminal_activities = Vec::new();
         let mut cancelled_events = Vec::new();
         for agent_id in agent_ids {
@@ -851,9 +800,6 @@ impl SubagentManager {
                     "subagent_cancelled",
                     "child cancellation requested by parent",
                 ));
-                if let Some(link) = agent.plan_link.clone() {
-                    links_to_update.push(link);
-                }
                 terminal_activities.push((
                     agent.agent_id.clone(),
                     agent.task_id.clone(),
@@ -866,8 +812,6 @@ impl SubagentManager {
         let agents = selected_statuses(&state, agent_ids);
         let to_start = self.reserve_queued_starts_locked(&mut state);
         drop(state);
-        self.update_plan_links(links_to_update, PlanLinkStatus::Cancelled)
-            .await;
         let activity_hub = self.attached_activity_hub();
         for (agent_id, task_id, phase, summary) in terminal_activities {
             publish_terminal_activity_snapshot(
@@ -908,7 +852,6 @@ impl SubagentManager {
             default_timeout_secs: Arc::clone(&self.default_timeout_secs),
             max_total_tokens: Arc::clone(&self.max_total_tokens),
             depth: self.depth,
-            plan_link_runtime: Arc::clone(&self.plan_link_runtime),
             activity_hub: Arc::clone(&self.activity_hub),
             event_sink: Arc::clone(&self.event_sink),
             child_session_store: Arc::clone(&self.child_session_store),
@@ -937,30 +880,6 @@ impl SubagentManager {
             .map(|agent| agent.agent_id.clone())
             .collect::<Vec<_>>();
         self.acknowledge_completion_notifications(&agent_ids).await;
-    }
-
-    pub(super) async fn update_plan_links(
-        &self,
-        links: Vec<PlanLinkSnapshot>,
-        status: PlanLinkStatus,
-    ) {
-        let Some(runtime) = self.attached_plan_link_runtime() else {
-            return;
-        };
-        for link in links {
-            let binding_id = link.binding_id.clone();
-            if let Err(error) = runtime
-                .update_subagent_link(binding_id.clone(), status, crate::plan::unix_time_ms())
-                .await
-            {
-                tracing::warn!(
-                    binding_id = %binding_id,
-                    ?status,
-                    %error,
-                    "failed to persist subagent Plan link state"
-                );
-            }
-        }
     }
 
     #[cfg(test)]

@@ -149,10 +149,6 @@ fn child_input(session: &str, allowed_tools: Vec<ToolName>) -> ChildRuntimeInput
         generation_config: GenerationConfig::default(),
         parent_primary_model: None,
         parent_generation_config: GenerationConfig::default(),
-        plan_subagent_control: None,
-        plan_subagent_scope: None,
-        plan_link: None,
-        plan_link_runtime: None,
         activity_hub: None,
     }
 }
@@ -548,10 +544,6 @@ async fn writable_child_with_explicit_write_scope_keeps_accepted_process_session
             generation_config: GenerationConfig::default(),
             parent_primary_model: None,
             parent_generation_config: GenerationConfig::default(),
-            plan_subagent_control: None,
-            plan_subagent_scope: None,
-            plan_link: None,
-            plan_link_runtime: None,
             activity_hub: None,
         })
         .expect("writable child should build");
@@ -624,10 +616,6 @@ async fn child_uses_dedicated_subagent_prompt_handoff_and_shared_role_cache_key(
                 generation_config: GenerationConfig::default(),
                 parent_primary_model: None,
                 parent_generation_config: GenerationConfig::default(),
-                plan_subagent_control: None,
-                plan_subagent_scope: None,
-                plan_link: None,
-                plan_link_runtime: None,
                 activity_hub: None,
             })
             .expect("explore child should build")

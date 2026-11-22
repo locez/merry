@@ -12,8 +12,18 @@ pub(crate) fn slash_input_effect(state: &mut TuiState) -> Option<ControllerEffec
         .unwrap_or(SlashCommandMatch::NotCommand);
     match matched {
         SlashCommandMatch::NotCommand => None,
-        SlashCommandMatch::Known(command) => {
+        SlashCommandMatch::Known(command, args) => {
+            let owned_args = args.map(str::to_owned);
             state.clear_input();
+            if command.command == PaletteCommand::TogglePlanMode
+                && let Some(prompt) = owned_args
+            {
+                state.close_overlay();
+                return Some(ControllerEffect::SetPlanMode {
+                    enabled: true,
+                    initial_prompt: Some(prompt),
+                });
+            }
             Some(run_palette_command(command.command, state))
         }
         SlashCommandMatch::Unknown(name) => {
@@ -130,14 +140,9 @@ pub(crate) fn run_palette_command(
                 ControllerEffect::SaveSession
             }
         }
-        PaletteCommand::EnterPlanMode
-        | PaletteCommand::ApprovePlan
-        | PaletteCommand::RevisePlan
-        | PaletteCommand::OpenPlan
-        | PaletteCommand::FocusPlan
-        | PaletteCommand::ClosePlan
-        | PaletteCommand::RetryPlanNode
-        | PaletteCommand::CancelPlan => unreachable!("plan command handled above"),
+        PaletteCommand::TogglePlanMode | PaletteCommand::ViewPlans => {
+            unreachable!("plan command handled above")
+        }
         PaletteCommand::Quit => {
             state.close_overlay();
             ControllerEffect::Quit
@@ -148,5 +153,4 @@ pub(crate) fn run_palette_command(
 fn prepare_timeline_feedback(state: &mut TuiState) {
     state.close_overlay();
     state.follow_latest();
-    state.plan_mut().leave_focus();
 }

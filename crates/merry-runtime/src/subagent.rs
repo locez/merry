@@ -7,7 +7,6 @@ mod handoff;
 mod manager;
 mod manager_helpers;
 mod messaging;
-mod plan_link;
 mod protocol;
 mod scheduler;
 mod scope;
@@ -23,8 +22,6 @@ pub use handoff::{
 pub use manager::{SubagentInspectSession, SubagentManager};
 pub(crate) use manager_helpers::sanitize_diagnostic_message;
 pub use messaging::SendSubagentMessageOptions;
-pub(crate) use plan_link::plan_link_runtime_for_controller;
-pub use plan_link::{PlanLinkRuntime, PlanSubagentScope};
 pub use protocol::{
     BackgroundHandoffNotice, CancelSubagentsInput, RejectedSubagentView, SendSubagentMessageInput,
     SendSubagentMessageOutcome, SendSubagentMessageOutput, SpawnSubagentTaskInput,

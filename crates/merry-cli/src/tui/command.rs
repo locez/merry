@@ -16,14 +16,8 @@ pub(crate) enum PaletteCommand {
     Interrupt,
     SaveSession,
     Quit,
-    EnterPlanMode,
-    ApprovePlan,
-    RevisePlan,
-    OpenPlan,
-    FocusPlan,
-    ClosePlan,
-    RetryPlanNode,
-    CancelPlan,
+    TogglePlanMode,
+    ViewPlans,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +28,7 @@ pub(crate) struct CommandSpec {
     pub(crate) key_action: Option<KeyAction>,
     slash_name: Option<&'static str>,
     slash_description: Option<&'static str>,
+    accepts_args: bool,
 }
 
 impl CommandSpec {
@@ -50,12 +45,20 @@ impl CommandSpec {
             key_action,
             slash_name: None,
             slash_description: None,
+            accepts_args: false,
         }
     }
 
     const fn with_slash(mut self, name: &'static str, description: &'static str) -> Self {
         self.slash_name = Some(name);
         self.slash_description = Some(description);
+        self
+    }
+
+    const fn with_slash_args(mut self, name: &'static str, description: &'static str) -> Self {
+        self.slash_name = Some(name);
+        self.slash_description = Some(description);
+        self.accepts_args = true;
         self
     }
 
@@ -138,34 +141,25 @@ const COMMANDS: &[CommandSpec] = &[
     )
     .with_slash("exit", "Quit Merry"),
     CommandSpec::new(
-        PaletteCommand::EnterPlanMode,
+        PaletteCommand::TogglePlanMode,
         "Plan",
-        "Enter Plan Mode",
+        "Toggle Plan Mode",
         None,
-    ),
+    )
+    .with_slash_args("plan", "Toggle Plan Mode or start planning a prompt"),
     CommandSpec::new(
-        PaletteCommand::ApprovePlan,
+        PaletteCommand::ViewPlans,
         "Plan",
-        "Approve plan and execute",
-        None,
-    ),
-    CommandSpec::new(PaletteCommand::RevisePlan, "Plan", "Revise plan", None),
-    CommandSpec::new(PaletteCommand::OpenPlan, "Plan", "Open plan", None),
-    CommandSpec::new(PaletteCommand::FocusPlan, "Plan", "Focus plan tree", None),
-    CommandSpec::new(PaletteCommand::ClosePlan, "Plan", "Close plan", None),
-    CommandSpec::new(
-        PaletteCommand::RetryPlanNode,
-        "Plan",
-        "Retry selected interrupted node",
-        None,
-    ),
-    CommandSpec::new(PaletteCommand::CancelPlan, "Plan", "Cancel plan", None),
+        "View & review plans",
+        Some(KeyAction::TogglePlan),
+    )
+    .with_slash("plans", "Open the Plan Review & History view"),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SlashCommandMatch<'a> {
     NotCommand,
-    Known(&'static CommandSpec),
+    Known(&'static CommandSpec, Option<&'a str>),
     Unknown(&'a str),
     ArgumentsNotSupported(&'a str),
 }
@@ -214,7 +208,10 @@ pub(crate) fn match_slash_input(input: &str) -> SlashCommandMatch<'_> {
     }
     let arguments = rest[name_end..].trim();
     match (find_slash_exact(name), arguments.is_empty()) {
-        (Some(command), true) => SlashCommandMatch::Known(command),
+        (Some(command), true) => SlashCommandMatch::Known(command, None),
+        (Some(command), false) if command.accepts_args => {
+            SlashCommandMatch::Known(command, Some(arguments))
+        }
         (Some(_), false) => SlashCommandMatch::ArgumentsNotSupported(name),
         (None, _) => SlashCommandMatch::Unknown(name),
     }
@@ -272,10 +269,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["save"]
         );
-        assert_eq!(find_slash_prefix("").len(), 6);
+        assert_eq!(find_slash_prefix("").len(), 8);
         assert_eq!(
             find_slash_exact("tasks").map(|command| command.command),
             Some(PaletteCommand::ShowTasks)
+        );
+        assert_eq!(
+            find_slash_exact("plan").map(|command| command.command),
+            Some(PaletteCommand::TogglePlanMode)
+        );
+        assert_eq!(
+            find_slash_exact("plans").map(|command| command.command),
+            Some(PaletteCommand::ViewPlans)
         );
         assert!(find_slash_exact("unknown").is_none());
     }
@@ -284,7 +289,12 @@ mod tests {
     fn slash_parser_is_strict_without_consuming_normal_paths_or_multiline_text() {
         assert!(matches!(
             match_slash_input("/save   "),
-            SlashCommandMatch::Known(command) if command.command == PaletteCommand::SaveSession
+            SlashCommandMatch::Known(command, None) if command.command == PaletteCommand::SaveSession
+        ));
+        assert!(matches!(
+            match_slash_input("/plan refactor auth"),
+            SlashCommandMatch::Known(command, Some("refactor auth"))
+                if command.command == PaletteCommand::TogglePlanMode
         ));
         assert_eq!(
             match_slash_input("/unknown"),

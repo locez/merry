@@ -6,10 +6,7 @@ use super::{
         render_modal_frame,
     },
     overlay::SettingItem,
-    overlay::{
-        CommandPalette, CommandSpec, MessageDialogKind, MessageDialogOverlay, Overlay,
-        PlanApprovalOverlay,
-    },
+    overlay::{CommandPalette, CommandSpec, MessageDialogKind, MessageDialogOverlay, Overlay},
     state::TuiState,
     theme::SemanticColor,
 };
@@ -134,7 +131,7 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
         Overlay::ReasoningPicker(picker) => {
             super::provider_render::render_reasoning_picker(frame, state, picker)
         }
-        Overlay::PlanApproval(approval) => render_plan_approval(frame, state, approval),
+        Overlay::PlanView(plan_view) => super::plan_view::render_plan_view(frame, state, plan_view),
         Overlay::PermissionReview(review) => {
             super::permission_render::render_permission_review(frame, state, review)
         }
@@ -147,29 +144,6 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
             super::render::task_dock::render_background_task_overlay(frame, state, inspector)
         }
     }
-}
-
-fn render_plan_approval(frame: &mut Frame<'_>, state: &TuiState, approval: &PlanApprovalOverlay) {
-    let split = approval_split(frame.area(), approval.message());
-    render_modal_frame(
-        frame,
-        state,
-        split.modal,
-        "Approve plan and execute?",
-        SemanticColor::Warning,
-        true,
-    );
-    frame.render_widget(
-        Paragraph::new(approval.message().to_owned())
-            .style(semantic_style(state, SemanticColor::Assistant).patch(code_surface_style(state)))
-            .wrap(Wrap { trim: false }),
-        split.body,
-    );
-    render_divider(frame, state, split.divider);
-    frame.render_widget(
-        Paragraph::new(chip_line(state, &["Approve", "Back"])).style(code_surface_style(state)),
-        split.footer,
-    );
 }
 
 fn render_settings(frame: &mut Frame<'_>, state: &TuiState) {
@@ -604,20 +578,8 @@ pub(crate) fn overlay_pointer(
             }
             settings_item_at(state, modal.inner, position).map(OverlayPointer::Setting)
         }
-        Overlay::PlanApproval(approval) => {
-            let split = approval_split(area, approval.message());
-            if split.modal.close_hit(position) {
-                return Some(OverlayPointer::CloseModal);
-            }
-            match chip_hit(
-                Position::new(split.footer.x, split.footer.y),
-                &["Approve", "Back"],
-                position,
-            ) {
-                Some(0) => Some(OverlayPointer::PlanApprove),
-                Some(1) => Some(OverlayPointer::PlanBack),
-                _ => None,
-            }
+        Overlay::PlanView(_) => {
+            super::plan_view::plan_view_pointer(state, area, position).map(OverlayPointer::PlanView)
         }
         Overlay::PermissionReview(review) => {
             super::permission_render::permission_review_pointer(state, area, review, position)
@@ -684,16 +646,6 @@ pub(crate) fn overlay_pointer(
             .map(OverlayPointer::BackgroundTask)
         }
     }
-}
-
-fn approval_split(area: Rect, message: &str) -> OverlaySplit {
-    let desired_width = area.width.saturating_sub(4).min(MAX_OVERLAY_WIDTH);
-    let content_width = usize::from(desired_width.saturating_sub(6)).max(1);
-    let body_lines = estimated_wrapped_lines(message, content_width);
-    let desired_height = u16::try_from(body_lines.saturating_add(7))
-        .unwrap_or(24)
-        .clamp(10, area.height.saturating_sub(2).min(24));
-    split_overlay(area, desired_width, desired_height, 1)
 }
 
 fn dialog_split(area: Rect, message: &str) -> OverlaySplit {

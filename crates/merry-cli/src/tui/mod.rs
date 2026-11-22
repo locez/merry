@@ -49,10 +49,8 @@ mod output_rate;
 mod overlay;
 mod overlay_render;
 mod permission_render;
-mod plan;
 mod plan_controller;
-mod plan_projector;
-mod plan_render;
+mod plan_view;
 mod preferences;
 mod process_output;
 mod projector;
@@ -74,6 +72,7 @@ mod text_interaction;
 mod text_sizing;
 mod text_wrap;
 pub(crate) mod theme;
+mod todo_dock;
 mod tool_error;
 mod transcript;
 pub(crate) mod trust_dialog;
@@ -82,8 +81,6 @@ pub(crate) mod trust_dialog;
 mod history_tests;
 #[cfg(test)]
 mod mcp_tests;
-#[cfg(test)]
-mod plan_tests;
 #[cfg(test)]
 mod slash_stop_tests;
 #[cfg(test)]
@@ -241,9 +238,11 @@ pub(crate) async fn run(
     state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
     state.set_completion_skills(session.skills.clone());
     state.configure_preferences(preferences, settings_defaults);
-    if let Some(snapshot) = session.plan_snapshot().await? {
-        state.plan_mut().update_snapshot(snapshot);
-    }
+    let plan_snapshot = session.plan_session_snapshot().await;
+    let plan_docs = session.plan_documents().await;
+    state.plan_mut().hydrate(plan_snapshot, plan_docs);
+    let todo_items = session.todo_items().await;
+    state.todo_dock_mut().set_items(todo_items);
     if session.resumed {
         let transcript = session.session_transcript().await?;
         if transcript.is_empty() {

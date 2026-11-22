@@ -9,8 +9,8 @@ use super::{
     },
 };
 use crate::{
-    ContextEntry, ContextSummary, PlanPersistenceLocation, SessionStoreError, TaskAnchor,
-    plan::{PersistedPlanState, PlanState},
+    ContextEntry, ContextSummary, SessionStoreError, TaskAnchor,
+    plan::{PersistedPlanModeState, PlanSessionState},
     session::{
         ModelTurnId, ModelTurnStatus, PromptHistoryProjection, SessionState,
         checkpoint_window::{ArchivedRefManifest, archived_refs_after_projection},
@@ -20,10 +20,11 @@ use crate::{
             TranscriptItem, TranscriptItemId,
         },
     },
+    todo::TodoListState,
     token_estimate::RequestTokenCalibration,
 };
 use merry_core::{
-    PlanSnapshot, SessionId, SessionToolCatalog, SessionUsage, ToolCallResult, ToolOutput,
+    SessionId, SessionToolCatalog, SessionUsage, TodoItem, ToolCallResult, ToolOutput,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -51,8 +52,8 @@ struct ReplayedSideState {
     usage: Option<SessionUsage>,
     request_token_calibration: Option<RequestTokenCalibration>,
     task_anchor: Option<JournalTaskAnchor>,
-    active_plan: Option<PersistedPlanState>,
-    terminal_plans: Vec<PlanSnapshot>,
+    plan_mode: Option<PersistedPlanModeState>,
+    todos: Vec<TodoItem>,
     context_entries: Vec<JournalContextEntry>,
     next_item_id: Option<u64>,
     model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
@@ -79,11 +80,11 @@ impl ReplayedSideState {
         if let Some(patch) = delta.task_anchor {
             patch.apply(&mut self.task_anchor);
         }
-        if let Some(patch) = delta.active_plan {
-            patch.apply(&mut self.active_plan);
+        if let Some(patch) = delta.plan_mode {
+            patch.apply(&mut self.plan_mode);
         }
-        if let Some(terminal_plans) = delta.terminal_plans {
-            self.terminal_plans = terminal_plans;
+        if let Some(todos) = delta.todos {
+            self.todos = todos;
         }
         if let Some(context_entries) = delta.context_entries {
             self.context_entries = context_entries;
@@ -274,14 +275,11 @@ pub(crate) async fn session_from_journal(
         .map_err(runtime_error_to_invalid_document)?;
     let archived_ref_manifest = ArchivedRefManifest::new(archived_refs)
         .map_err(|_| invalid_document("stored archived ref manifest is invalid"))?;
-    let active_plan = state
-        .active_plan
-        .map(|persisted| {
-            PlanState::from_persisted(persisted).map_err(|source| {
-                crate::session_store::invalid_plan(PlanPersistenceLocation::Active, source)
-            })
-        })
-        .transpose()?;
+    let plan_state = state
+        .plan_mode
+        .map(|persisted| PlanSessionState::from_persisted(persisted, BTreeMap::new()))
+        .unwrap_or_default();
+    let todo_list = TodoListState::from_items(state.todos);
     let mut session = SessionState {
         session_id: session_id.clone(),
         next_sequence: state.next_sequence,
@@ -300,8 +298,8 @@ pub(crate) async fn session_from_journal(
             .collect::<Result<Vec<_>, _>>()?,
         construction_context_ids: BTreeSet::new(),
         activated_memories: Vec::new(),
-        active_plan,
-        terminal_plans: state.terminal_plans,
+        plan_state,
+        todo_list,
         transcript,
         pending_tool_calls: Vec::new(),
         resolved_tool_calls,
@@ -332,12 +330,6 @@ pub(crate) async fn session_from_journal(
     session
         .validate_archived_ref_manifest()
         .map_err(runtime_error_to_invalid_document)?;
-    for (index, terminal) in session.terminal_plans.iter().enumerate() {
-        crate::session_store::validate_plan_snapshot(
-            terminal,
-            PlanPersistenceLocation::Terminal { index },
-        )?;
-    }
     session.journal_cursor = cursor_after_load(&session);
     Ok(ReplayedJournal {
         session,

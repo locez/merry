@@ -262,12 +262,10 @@ async fn coordinator_tool_specs_and_stable_prefix_stay_fixed_across_plan_activat
 
     collect_step(&runtime, "request before planning", StepContext::default()).await;
     runtime
-        .begin_plan(crate::BeginPlanInput {
-            reason: "coordinate a recursive task".to_owned(),
-            governing_skill_id: None,
-        })
+        .set_plan_mode(true, false)
         .await
-        .expect("plan activation succeeds");
+        .expect("plan mode enables");
+    runtime.activate_pending_plan_mode_for_prompt().await;
     collect_step(&runtime, "request during planning", StepContext::default()).await;
 
     let requests = provider.recorded_requests();

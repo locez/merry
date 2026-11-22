@@ -3,8 +3,8 @@ use super::{
     queue::AcceptedQueuedInput,
     types::{InputRecords, QueuedInputId},
 };
-use crate::{FileSessionStore, PlanApprovalInput, UserMessageInput};
-use merry_core::PlanNodeId;
+use crate::{FileSessionStore, UserMessageInput};
+use merry_core::PlanId;
 use tokio::sync::oneshot;
 
 pub(super) enum InteractiveCommand {
@@ -47,33 +47,22 @@ pub(super) enum InteractiveCommand {
         store: FileSessionStore,
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
-    EnterPlanMode {
-        reason: String,
+    SetPlanMode {
+        enabled: bool,
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
     ApprovePlan {
-        input: PlanApprovalInput,
+        plan_id: PlanId,
+        note: Option<String>,
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
-    RevisePlan {
-        reason: String,
+    RequestPlanChanges {
+        plan_id: PlanId,
+        feedback: String,
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
-    PausePlanScheduling {
-        reason: String,
-        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
-    },
-    ResumePlanScheduling {
-        reason: String,
-        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
-    },
-    RetryInterruptedPlanNode {
-        node_id: PlanNodeId,
-        reason: String,
-        ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
-    },
-    CancelPlan {
-        reason: String,
+    AbandonPlan {
+        plan_id: PlanId,
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
     Close {

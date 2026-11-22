@@ -1,10 +1,9 @@
 //! Internal ordered runtime journal contract.
 
 use crate::{
-    CoordinatorDirectiveSnapshot, ErrorInfo, PendingToolCall, PendingToolCallBatch, PlanAttemptId,
-    PlanAttemptProgressSnapshot, PlanAttemptSnapshot, PlanId, PlanLeaseSnapshot, PlanNodeId,
-    PlanPhase, PlanRevisionSummary, PlanSnapshot, SessionId, SessionUsage, SubagentId,
-    SubagentTaskId, ToolCallId, ToolCallResult,
+    ErrorInfo, PendingToolCall, PendingToolCallBatch, PlanDocument, PlanId, PlanModeState,
+    PlanReviewDecision, SessionId, SessionUsage, SubagentId, SubagentTaskId, TodoItem, ToolCallId,
+    ToolCallResult,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -173,41 +172,19 @@ pub enum RuntimeJournalPayload {
         task_id: SubagentTaskId,
         diagnostic: ErrorInfo,
     },
-    /// A complete bounded plan snapshot was durably committed.
-    PlanUpdated {
-        snapshot: PlanSnapshot,
-        summary: PlanRevisionSummary,
-    },
-    /// The active plan changed lifecycle phase.
-    PlanPhaseChanged { plan_id: PlanId, phase: PlanPhase },
-    /// A plan node became dependency- and policy-ready.
-    PlanNodeReady {
+    /// Session Plan Mode transitioned to a new state.
+    PlanModeChanged { mode: PlanModeState },
+    /// A Markdown plan document was created or updated in this session.
+    PlanSaved { plan: PlanDocument },
+    /// The agent submitted a Markdown plan and paused for user review.
+    PlanApprovalRequested { plan: PlanDocument },
+    /// The user approved, requested changes on, or abandoned a submitted plan.
+    PlanReviewed {
         plan_id: PlanId,
-        node_id: PlanNodeId,
-        node_revision: u64,
+        decision: PlanReviewDecision,
     },
-    /// The scheduler durably reserved an execution lease.
-    PlanLeaseStarted { lease: PlanLeaseSnapshot },
-    /// Runtime-recorded liveness or activity progress changed.
-    PlanProgressUpdated {
-        progress: PlanAttemptProgressSnapshot,
-    },
-    /// Runtime policy requested semantic coordinator review of progress.
-    PlanProgressReviewRequested {
-        plan_id: PlanId,
-        attempt_id: PlanAttemptId,
-        reason: String,
-    },
-    /// A subagent or local executor durably reported semantic progress.
-    PlanAttemptProgressReported {
-        progress: PlanAttemptProgressSnapshot,
-    },
-    /// A coordinator directive changed persisted lifecycle state.
-    PlanDirectiveUpdated {
-        directive: CoordinatorDirectiveSnapshot,
-    },
-    /// One plan attempt reached a typed terminal outcome.
-    PlanAttemptFinished { attempt: PlanAttemptSnapshot },
+    /// The session execution checklist was updated.
+    TodoListUpdated { items: Vec<TodoItem> },
     /// The runtime was cancelled.
     Cancelled { diagnostic: ErrorInfo },
     /// The runtime failed.

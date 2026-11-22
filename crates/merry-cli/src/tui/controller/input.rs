@@ -14,8 +14,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub(super) const TIMELINE_SCROLL_STEP: usize = 5;
 
-pub(super) const PLAN_SCROLL_STEP: usize = 5;
-
 pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> ControllerEffect {
     match action {
         KeyAction::Submit => dispatch_submit(state, ControllerEffect::Submit),
@@ -48,15 +46,24 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             }
         }
         KeyAction::TogglePlan => {
-            state.plan_mut().toggle();
-            ControllerEffect::None
+            if matches!(state.overlay(), Some(Overlay::PlanView(_))) {
+                state.close_overlay();
+                ControllerEffect::None
+            } else if state.plan().has_plans() {
+                state.open_plan_view(None);
+                ControllerEffect::None
+            } else {
+                ControllerEffect::SetPlanMode {
+                    enabled: !state.plan().is_plan_mode_on(),
+                    initial_prompt: None,
+                }
+            }
         }
         KeyAction::Interrupt => {
             if state.can_interrupt_run() {
                 ControllerEffect::Interrupt
             } else if state.is_interrupting() {
                 state.follow_latest();
-                state.plan_mut().leave_focus();
                 state.repeat_stop_feedback();
                 ControllerEffect::None
             } else if state.is_timeline_reviewing() {
@@ -232,6 +239,13 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
     {
         return handle_key_action(KeyAction::OpenCommandDetails, state);
     }
+    if matches!(state.overlay(), Some(Overlay::PlanView(_))) {
+        if state.keymap().action_for(key.into()) == Some(KeyAction::TogglePlan) {
+            state.close_overlay();
+            return ControllerEffect::None;
+        }
+        return handle_plan_view_key(key, state);
+    }
     if let Some(overlay) = state.overlay_mut() {
         let result = overlay.handle_key(key);
         return overlay_key_effect(result, state);
@@ -269,26 +283,15 @@ pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> Controlle
         }
     }
 
-    if state.plan().is_focused() {
-        if crate::tui::plan_controller::handle_navigation_key(key, state) {
-            return ControllerEffect::None;
-        }
-        if let Some(action) = state.keymap().action_for(key.into())
-            && matches!(
-                action,
-                KeyAction::OpenCommandPanel
-                    | KeyAction::OpenCommandDetails
-                    | KeyAction::FollowLatest
-                    | KeyAction::TogglePlan
-                    | KeyAction::ToggleComment
-                    | KeyAction::HistorySearch
-                    | KeyAction::Interrupt
-                    | KeyAction::Quit
-            )
-        {
-            return handle_key_action(action, state);
-        }
-        return ControllerEffect::None;
+    if key.code == KeyCode::BackTab
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && !key.modifiers.contains(KeyModifiers::SUPER)
+    {
+        return ControllerEffect::SetPlanMode {
+            enabled: !state.plan().is_plan_mode_on(),
+            initial_prompt: None,
+        };
     }
 
     if key.code == KeyCode::Backspace && key.modifiers.is_empty() && state.restore_last_comment() {
@@ -376,9 +379,56 @@ pub(super) fn input_is_known_slash(state: &TuiState) -> bool {
     state.plain_input_text().is_some_and(|text| {
         matches!(
             crate::tui::command::match_slash_input(text),
-            crate::tui::command::SlashCommandMatch::Known(_)
+            crate::tui::command::SlashCommandMatch::Known(_, None)
         )
     })
+}
+
+fn handle_plan_view_key(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
+    use crate::tui::plan_view::PlanViewAction;
+    let (can_review, plan_content) = match state.overlay() {
+        Some(Overlay::PlanView(view)) => {
+            let doc = state.plan().plan_by_id(view.selected_plan_id());
+            let can_review = doc.is_some_and(|d| {
+                matches!(
+                    d.summary.status,
+                    merry_core::PlanDocumentStatus::AwaitingApproval
+                        | merry_core::PlanDocumentStatus::Draft
+                )
+            });
+            let content = doc.map(|d| d.content.clone());
+            (can_review, content)
+        }
+        _ => return ControllerEffect::None,
+    };
+    let action = match state.overlay_mut() {
+        Some(Overlay::PlanView(view)) => view.handle_key(key, can_review, plan_content.as_deref()),
+        _ => return ControllerEffect::None,
+    };
+    match action {
+        PlanViewAction::Consumed => ControllerEffect::None,
+        PlanViewAction::Close => {
+            state.close_overlay();
+            ControllerEffect::None
+        }
+        PlanViewAction::StepPlan(delta) => {
+            state.step_plan_view(delta);
+            ControllerEffect::None
+        }
+        PlanViewAction::CopyText(text) => ControllerEffect::CopyText(text),
+        PlanViewAction::Approve { plan_id, note } => {
+            state.close_overlay();
+            ControllerEffect::ApprovePlan { plan_id, note }
+        }
+        PlanViewAction::RequestChanges { plan_id, feedback } => {
+            state.close_overlay();
+            ControllerEffect::RequestPlanChanges { plan_id, feedback }
+        }
+        PlanViewAction::Abandon(plan_id) => {
+            state.close_overlay();
+            ControllerEffect::AbandonPlan(plan_id)
+        }
+    }
 }
 
 fn overlay_key_effect(result: OverlayKeyResult, state: &mut TuiState) -> ControllerEffect {
@@ -459,14 +509,6 @@ fn overlay_key_effect(result: OverlayKeyResult, state: &mut TuiState) -> Control
         OverlayKeyResult::OpenShortcuts => {
             state.open_shortcuts();
             ControllerEffect::None
-        }
-        OverlayKeyResult::ConfirmPlanApproval => {
-            let Some(input) = state.plan_approval_input() else {
-                state.close_overlay();
-                return ControllerEffect::None;
-            };
-            state.close_overlay();
-            ControllerEffect::ApprovePlan(input)
         }
         OverlayKeyResult::ApprovePermission(approval_id) => {
             state.close_overlay();
@@ -586,7 +628,6 @@ pub(in crate::tui) fn project_local_effect(effect: &ControllerEffect, state: &mu
         }
         ControllerEffect::Interrupt => {
             state.follow_latest();
-            state.plan_mut().leave_focus();
             state.begin_stop_feedback();
         }
         _ => {}

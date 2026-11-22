@@ -12,10 +12,6 @@ use crate::{
         ActiveStepPermit, RuntimeEventProjector, RuntimeEventStream, RuntimeJournalEventStream,
     },
     model_config::ModelProviderConfig,
-    plan::{
-        BeginPlanInput, BeginPlanOutput, PlanControllerError, PlanControllerEventReceiver,
-        PlanUpdateOutput, UpdatePlanInput,
-    },
     step::{StepContext, StepInput},
     subagent::{SubagentActivityReceiver, SubagentManager},
     tool::ToolExecutionContext,
@@ -40,9 +36,7 @@ mod model_output;
 mod model_turn_lifecycle;
 mod output_rate;
 mod permission_execution;
-mod plan_read;
 mod plan_tool_execution;
-mod plan_tool_protocol;
 mod process_execution;
 mod provider_request;
 mod provider_step;
@@ -450,156 +444,175 @@ impl Runtime {
         }
     }
 
-    /// Returns the latest committed active plan snapshot.
-    pub async fn plan_snapshot(
-        &self,
-    ) -> Result<Option<merry_core::PlanSnapshot>, PlanControllerError> {
-        self.inner.plan_controller.snapshot().await
+    /// Returns the current Plan Mode and session plan list snapshot.
+    pub async fn plan_session_snapshot(&self) -> merry_core::PlanSessionSnapshot {
+        self.inner.session.lock().await.plan_state().snapshot()
     }
 
-    /// Activates Plan Mode through the runtime PlanController API.
+    /// Returns all Markdown plan documents authored in this session.
+    pub async fn plan_documents(&self) -> Vec<merry_core::PlanDocument> {
+        self.inner.session.lock().await.plan_state().documents()
+    }
+
+    /// Returns the current checklist items for this session.
+    pub async fn todo_items(&self) -> Vec<merry_core::TodoItem> {
+        self.inner.session.lock().await.todo_list().items().to_vec()
+    }
+
+    /// Returns whether a submitted plan is currently awaiting user review.
+    pub async fn awaiting_plan_approval(&self) -> bool {
+        self.inner
+            .session
+            .lock()
+            .await
+            .plan_state()
+            .awaiting_approval_plan_id()
+            .is_some()
+    }
+
+    /// Toggles Plan Mode from an explicit user control.
     ///
-    /// The provider-facing coordinator surface is `update_plan`; this Rust
-    /// method is an internal runtime control entry point, not a registered
-    /// provider tool.
-    pub async fn begin_plan(
+    /// Returns any durable journal event emitted if the mode changed.
+    pub async fn set_plan_mode(
         &self,
-        input: BeginPlanInput,
-    ) -> Result<BeginPlanOutput, PlanControllerError> {
-        let output = self.inner.plan_controller.begin(input).await?;
-        Ok(output)
+        enabled: bool,
+        turn_in_flight: bool,
+    ) -> Result<Option<RuntimeJournalEvent>, RuntimeError> {
+        let event = {
+            let mut session = self.inner.session.lock().await;
+            session
+                .plan_state_mut()
+                .set_mode_from_user(enabled, turn_in_flight)
+                .map(|mode| {
+                    session
+                        .record_event(merry_core::RuntimeJournalPayload::PlanModeChanged { mode })
+                })
+        };
+        if event.is_some() {
+            self.persist_resume_safe_snapshot_if_store_attached()
+                .await?;
+        }
+        Ok(event)
     }
 
-    /// Activates Plan Mode from an explicit user control without changing permissions.
-    pub async fn enter_plan_mode(
+    /// Activates `Pending` Plan Mode when a user prompt begins.
+    pub(crate) async fn activate_pending_plan_mode_for_prompt(
         &self,
-        reason: &str,
-    ) -> Result<BeginPlanOutput, PlanControllerError> {
-        let committed = self
-            .inner
-            .plan_controller
-            .begin_from_user(reason.to_owned())
-            .await?;
-        Ok(committed.output)
+    ) -> Option<RuntimeJournalEvent> {
+        let mut session = self.inner.session.lock().await;
+        session
+            .plan_state_mut()
+            .activate_on_user_prompt()
+            .map(|mode| {
+                session.record_event(merry_core::RuntimeJournalPayload::PlanModeChanged { mode })
+            })
     }
 
-    /// Replaces the complete planning tree or one mutable future subtree.
-    pub async fn update_plan(
-        &self,
-        input: UpdatePlanInput,
-    ) -> Result<PlanUpdateOutput, PlanControllerError> {
-        let output = self.inner.plan_controller.update(input).await?;
-        Ok(output)
+    /// Finalizes `ExitPending -> Inactive` when an in-flight turn completes.
+    pub(crate) async fn complete_deferred_plan_mode_exit(&self) -> Option<RuntimeJournalEvent> {
+        let mut session = self.inner.session.lock().await;
+        session
+            .plan_state_mut()
+            .complete_deferred_exit()
+            .map(|mode| {
+                session.record_event(merry_core::RuntimeJournalPayload::PlanModeChanged { mode })
+            })
     }
 
-    /// Persists an attempt-scoped coordinator directive for one live subagent.
-    /// This is a runtime control API and is not provider-visible.
-    pub async fn control_plan_attempt(
-        &self,
-        input: crate::ControlPlanAttemptInput,
-    ) -> Result<merry_core::CoordinatorDirectiveSnapshot, PlanControllerError> {
-        Ok(self
-            .inner
-            .plan_controller
-            .directive(input, crate::plan::unix_time_ms())
-            .await?
-            .output
-            .directive)
-    }
-
-    /// Authorizes the current non-empty plan under an explicit capability envelope.
-    pub async fn authorize_plan_execution(
-        &self,
-        envelope: merry_core::PlanCapabilityEnvelopeSnapshot,
-        authorization_refs: Vec<String>,
-    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
-        let committed = self
-            .inner
-            .plan_controller
-            .authorize_execution(envelope, authorization_refs)
-            .await?;
-        Ok(committed.output)
-    }
-
-    /// Resolves the current plan's typed approval requirements and starts execution.
+    /// Approves a submitted plan, exits Plan Mode, and persists the updated state.
     pub async fn approve_plan(
         &self,
-        input: crate::PlanApprovalInput,
-    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
-        let committed = self.inner.plan_controller.approve(input).await?;
-        Ok(committed.output.snapshot)
-    }
-
-    /// Pauses admission of new plan attempts without cancelling live subagents.
-    pub async fn pause_plan_scheduling(
-        &self,
-        reason: &str,
-    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
-        Ok(self
-            .inner
-            .plan_controller
-            .pause_scheduling(reason.to_owned())
-            .await?
-            .output
-            .snapshot)
-    }
-
-    /// Re-enables deterministic admission of ready plan nodes.
-    pub async fn resume_plan_scheduling(
-        &self,
-        reason: &str,
-    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
-        let committed = self
-            .inner
-            .plan_controller
-            .resume_scheduling(reason.to_owned())
+        plan_id: merry_core::PlanId,
+        note: Option<String>,
+    ) -> Result<(merry_core::PlanDocument, Vec<RuntimeJournalEvent>), RuntimeError> {
+        let now_ms = crate::plan::unix_time_ms();
+        let (doc, events) = {
+            let mut session = self.inner.session.lock().await;
+            let (doc, decision) = session
+                .plan_state_mut()
+                .approve_plan(&plan_id, note, now_ms)?;
+            let reviewed = session.record_event(merry_core::RuntimeJournalPayload::PlanReviewed {
+                plan_id: doc.summary.id.clone(),
+                decision,
+            });
+            let mode_changed =
+                session.record_event(merry_core::RuntimeJournalPayload::PlanModeChanged {
+                    mode: merry_core::PlanModeState::Inactive,
+                });
+            (doc, vec![reviewed, mode_changed])
+        };
+        self.persist_resume_safe_snapshot_if_store_attached()
             .await?;
-        Ok(committed.output.snapshot)
+        Ok((doc, events))
     }
 
-    /// Returns an idle approved or executing plan to planning for revision.
-    pub async fn revise_plan(
+    /// Requests changes on a submitted plan, keeps Plan Mode active, and persists state.
+    pub async fn request_plan_changes(
         &self,
-        reason: &str,
-    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
-        Ok(self
-            .inner
-            .plan_controller
-            .revise(reason.to_owned())
-            .await?
-            .output
-            .snapshot)
-    }
-
-    /// Reopens one blocked node whose latest terminal attempt was interrupted.
-    pub async fn retry_interrupted_plan_node(
-        &self,
-        node_id: merry_core::PlanNodeId,
-        reason: &str,
-    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
-        let committed = self
-            .inner
-            .plan_controller
-            .retry_interrupted_node(node_id, reason.to_owned())
+        plan_id: merry_core::PlanId,
+        feedback: String,
+    ) -> Result<(merry_core::PlanDocument, Vec<RuntimeJournalEvent>), RuntimeError> {
+        let now_ms = crate::plan::unix_time_ms();
+        let (doc, events) = {
+            let mut session = self.inner.session.lock().await;
+            let (doc, decision) = session
+                .plan_state_mut()
+                .request_changes(&plan_id, feedback, now_ms)?;
+            let reviewed = session.record_event(merry_core::RuntimeJournalPayload::PlanReviewed {
+                plan_id: doc.summary.id.clone(),
+                decision,
+            });
+            let mode_changed =
+                session.record_event(merry_core::RuntimeJournalPayload::PlanModeChanged {
+                    mode: merry_core::PlanModeState::Active,
+                });
+            (doc, vec![reviewed, mode_changed])
+        };
+        self.persist_resume_safe_snapshot_if_store_attached()
             .await?;
-        Ok(committed.output.snapshot)
+        Ok((doc, events))
     }
 
-    /// Stops new attempt admission and cooperatively cancels live plan subagents.
-    pub async fn cancel_plan(
+    /// Abandons a submitted plan and exits Plan Mode without starting implementation.
+    pub async fn abandon_plan(
         &self,
-        reason: &str,
-    ) -> Result<merry_core::PlanSnapshot, PlanControllerError> {
-        let committed = self
-            .inner
-            .plan_controller
-            .request_cancellation(reason.to_owned())
+        plan_id: merry_core::PlanId,
+    ) -> Result<(merry_core::PlanDocument, Vec<RuntimeJournalEvent>), RuntimeError> {
+        let now_ms = crate::plan::unix_time_ms();
+        let (doc, events) = {
+            let mut session = self.inner.session.lock().await;
+            let (doc, decision) = session.plan_state_mut().abandon_plan(&plan_id, now_ms)?;
+            let reviewed = session.record_event(merry_core::RuntimeJournalPayload::PlanReviewed {
+                plan_id: doc.summary.id.clone(),
+                decision,
+            });
+            let mode_changed =
+                session.record_event(merry_core::RuntimeJournalPayload::PlanModeChanged {
+                    mode: merry_core::PlanModeState::Inactive,
+                });
+            (doc, vec![reviewed, mode_changed])
+        };
+        self.persist_resume_safe_snapshot_if_store_attached()
             .await?;
-        Ok(committed.output.snapshot)
+        Ok((doc, events))
     }
 
-    pub(crate) fn subscribe_plan_events(&self) -> PlanControllerEventReceiver {
-        self.inner.plan_controller.subscribe()
+    async fn persist_resume_safe_snapshot_if_store_attached(&self) -> Result<(), RuntimeError> {
+        let Some(store) = self.inner.session_store.as_ref() else {
+            return Ok(());
+        };
+        let bundle = {
+            let session = self.inner.session.lock().await;
+            session.persistable_bundle_if_resume_safe()?
+        };
+        if let Some(bundle) = bundle
+            && !bundle.document_bytes.is_empty()
+        {
+            let cursor = bundle.cursor.clone();
+            store.write_bundle(bundle).await?;
+            self.inner.session.lock().await.adopt_journal_cursor(cursor);
+        }
+        Ok(())
     }
 
     /// Returns the low-level Merry-managed capabilities configured for this runtime.

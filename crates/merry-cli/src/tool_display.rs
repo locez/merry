@@ -17,8 +17,94 @@ pub(crate) fn format_tool_call_detail(
     match name {
         "apply_patch" => format_apply_patch_call_detail(arguments),
         "run_process" => format_process_call_detail(arguments),
+        "enter_plan_mode" => Some("enter read-only mode".to_owned()),
+        "write_plan" => format_write_plan_call_detail(arguments),
+        "read_plan" => format_read_plan_call_detail(arguments),
+        "exit_plan_mode" => format_exit_plan_call_detail(arguments),
+        "update_todos" => format_update_todos_call_detail(arguments),
         _ => format_generic_tool_call_detail(arguments),
     }
+}
+
+fn format_write_plan_call_detail(arguments: &Map<String, Value>) -> Option<String> {
+    let verb = if arguments
+        .get("create_new")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "new"
+    } else if let Some(plan_id) = arguments
+        .get("plan_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return Some(format_write_plan_summary(
+            &format!("update {}", compact_inline(plan_id, 40)),
+            arguments,
+        ));
+    } else {
+        "write"
+    };
+    Some(format_write_plan_summary(verb, arguments))
+}
+
+fn format_write_plan_summary(verb: &str, arguments: &Map<String, Value>) -> String {
+    let title = arguments
+        .get("title")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(|title| compact_inline(title, 60));
+    let lines = arguments
+        .get("content")
+        .and_then(Value::as_str)
+        .map(|content| content.lines().count());
+    match (title, lines) {
+        (Some(title), Some(lines)) => format!("{verb} \"{title}\" ({lines} lines)"),
+        (Some(title), None) => format!("{verb} \"{title}\""),
+        (None, Some(lines)) => format!("{verb} ({lines} lines)"),
+        (None, None) => verb.to_owned(),
+    }
+}
+
+fn format_read_plan_call_detail(arguments: &Map<String, Value>) -> Option<String> {
+    match arguments
+        .get("plan_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(plan_id) => Some(format!("read {}", compact_inline(plan_id, 40))),
+        None => Some("read active plan".to_owned()),
+    }
+}
+
+fn format_exit_plan_call_detail(arguments: &Map<String, Value>) -> Option<String> {
+    match arguments
+        .get("plan_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(plan_id) => Some(format!("submit {} for review", compact_inline(plan_id, 40))),
+        None => Some("submit for review".to_owned()),
+    }
+}
+
+fn format_update_todos_call_detail(arguments: &Map<String, Value>) -> Option<String> {
+    let merge = arguments
+        .get("merge")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let verb = if merge { "update" } else { "set" };
+    let count = arguments
+        .get("todos")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let noun = if count == 1 { "item" } else { "items" };
+    Some(format!("{verb} {count} {noun}"))
 }
 
 fn format_process_call_detail(arguments: &Map<String, Value>) -> Option<String> {

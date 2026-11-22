@@ -342,7 +342,6 @@ pub struct SubagentTaskSpec {
     context_files: Vec<ContextFileRef>,
     expected_output: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
-    plan_client_key: Option<String>,
     workspace_mode: SubagentWorkspaceMode,
     worktree_base: SubagentWorktreeBase,
 }
@@ -391,7 +390,6 @@ impl SubagentTaskSpec {
             context_files: Vec::new(),
             expected_output: None,
             reasoning_effort: None,
-            plan_client_key: None,
             workspace_mode: SubagentWorkspaceMode::Shared,
             worktree_base: SubagentWorktreeBase::WorkingTree,
         })
@@ -524,12 +522,6 @@ impl SubagentTaskSpec {
         self.reasoning_effort.as_ref()
     }
 
-    /// Returns the optional authored Plan node client key.
-    #[must_use]
-    pub fn plan_client_key(&self) -> Option<&str> {
-        self.plan_client_key.as_deref()
-    }
-
     /// Returns the requested filesystem isolation mode (`shared` or `worktree`).
     #[must_use]
     pub const fn workspace_mode(&self) -> SubagentWorkspaceMode {
@@ -652,13 +644,6 @@ impl SubagentTaskSpec {
     #[must_use]
     pub fn with_reasoning_effort(mut self, reasoning_effort: Option<ReasoningEffort>) -> Self {
         self.reasoning_effort = reasoning_effort;
-        self
-    }
-
-    /// Associates the child with an authored Plan node client key.
-    #[must_use]
-    pub fn with_plan_client_key(mut self, plan_client_key: Option<String>) -> Self {
-        self.plan_client_key = plan_client_key.filter(|value| !value.trim().is_empty());
         self
     }
 

@@ -1,6 +1,5 @@
 use super::{
-    ModelTurnId, ModelTurnStatus, PreparedCompactionInstall, PreparedPlanToolCommit,
-    PromptHistoryProjection, SessionState,
+    ModelTurnId, ModelTurnStatus, PreparedCompactionInstall, PromptHistoryProjection, SessionState,
     checkpoint_window::ArchivedRefManifest,
     journal::{
         JournalAppendInput, JournalCursor, JournalImageFile, PreparedJournalAppend,
@@ -12,11 +11,12 @@ use super::{
     },
 };
 use crate::{
-    FileSessionStore, PlanPersistenceLocation, RuntimeError, SessionStoreError, UserMessageInput,
+    FileSessionStore, RuntimeError, SessionStoreError, UserMessageInput,
     context::{CompactedCheckpoint, ContextCompiler, SessionContextSnapshot},
-    plan::PlanState,
+    plan::PlanSessionState,
+    todo::TodoListState,
 };
-use merry_core::{PendingToolCall, PlanSnapshot, SessionId, ToolCallId};
+use merry_core::{PendingToolCall, SessionId, ToolCallId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Bytes that append one durable journal commit, plus the cursor to adopt after
@@ -40,8 +40,8 @@ struct PersistableSessionView<'a> {
     session_started: bool,
     pending_tool_calls: &'a [PendingToolCall],
     resolved_tool_calls: &'a BTreeSet<ToolCallId>,
-    active_plan: Option<&'a PlanState>,
-    terminal_plans: &'a [PlanSnapshot],
+    plan_state: &'a PlanSessionState,
+    todo_list: &'a TodoListState,
 }
 
 impl SessionState {
@@ -73,6 +73,15 @@ impl SessionState {
                     truncate_to_len,
                 } = session_from_journal(session_id, &bytes, &images_dir(store, session_id))
                     .await?;
+                let mut plan_contents = BTreeMap::new();
+                for summary in session.plan_state().summaries() {
+                    if let Some(content) =
+                        store.read_plan_file(session_id, &summary.file_name).await?
+                    {
+                        plan_contents.insert(summary.id.clone(), content);
+                    }
+                }
+                session.plan_state_mut().set_contents(plan_contents);
                 session.set_tracked_store_dir(store.sessions_dir().to_path_buf());
                 if let Some(valid_len) = truncate_to_len
                     && let Err(error) = store.truncate_journal_tail(session_id, valid_len).await
@@ -92,13 +101,6 @@ impl SessionState {
         if let Some(bytes) = store.read_legacy_bytes(session_id, "state.json").await? {
             let actual = legacy_format_version(&bytes).unwrap_or(6);
             return Err(SessionStoreError::UnsupportedFormatVersion { actual });
-        }
-        if store
-            .read_legacy_bytes(session_id, "plan-state.json")
-            .await?
-            .is_some()
-        {
-            return Err(SessionStoreError::UnsupportedFormatVersion { actual: 2 });
         }
         Err(SessionStoreError::Io {
             path: store.journal_path(session_id),
@@ -139,8 +141,8 @@ impl SessionState {
                 session_started: self.session_started,
                 pending_tool_calls: &self.pending_tool_calls,
                 resolved_tool_calls: &self.resolved_tool_calls,
-                active_plan: self.active_plan.as_ref(),
-                terminal_plans: &self.terminal_plans,
+                plan_state: &self.plan_state,
+                todo_list: &self.todo_list,
             },
             cursor,
         )
@@ -160,52 +162,8 @@ impl SessionState {
                 session_started: self.session_started,
                 pending_tool_calls: &self.pending_tool_calls,
                 resolved_tool_calls: &self.resolved_tool_calls,
-                active_plan: self.active_plan.as_ref(),
-                terminal_plans: &self.terminal_plans,
-            },
-            &self.journal_cursor,
-        )
-    }
-
-    pub(crate) fn persistable_bundle_with_plan_tool_commit(
-        &self,
-        prepared: &PreparedPlanToolCommit,
-    ) -> Result<PersistableSessionBundle, SessionStoreError> {
-        self.persistable_bundle_for(
-            PersistableSessionView {
-                transcript: prepared.transcript(),
-                prompt_history_projection: self.prompt_history_projection,
-                compacted_checkpoint: self.compacted_checkpoint.as_ref(),
-                archived_ref_manifest: &self.archived_ref_manifest,
-                next_sequence: prepared.next_sequence(),
-                session_started: prepared.session_started(),
-                pending_tool_calls: prepared.pending_tool_calls(),
-                resolved_tool_calls: prepared.resolved_tool_calls(),
-                active_plan: Some(prepared.active_plan()),
-                terminal_plans: prepared.terminal_plans(),
-            },
-            &self.journal_cursor,
-        )
-    }
-
-    pub(crate) fn persistable_bundle_with_plan(
-        &self,
-        active_plan: &PlanState,
-        terminal_plans: &[PlanSnapshot],
-        next_sequence: u64,
-    ) -> Result<PersistableSessionBundle, SessionStoreError> {
-        self.persistable_bundle_for(
-            PersistableSessionView {
-                transcript: &self.transcript,
-                prompt_history_projection: self.prompt_history_projection,
-                compacted_checkpoint: self.compacted_checkpoint.as_ref(),
-                archived_ref_manifest: &self.archived_ref_manifest,
-                next_sequence,
-                session_started: self.session_started,
-                pending_tool_calls: &self.pending_tool_calls,
-                resolved_tool_calls: &self.resolved_tool_calls,
-                active_plan: Some(active_plan),
-                terminal_plans,
+                plan_state: &self.plan_state,
+                todo_list: &self.todo_list,
             },
             &self.journal_cursor,
         )
@@ -235,18 +193,6 @@ impl SessionState {
             view.archived_ref_manifest,
         )
         .map_err(runtime_error_to_invalid_document)?;
-        if let Some(active_plan) = view.active_plan {
-            crate::session_store::validate_plan_snapshot(
-                active_plan.snapshot(),
-                PlanPersistenceLocation::Active,
-            )?;
-        }
-        for (index, terminal) in view.terminal_plans.iter().enumerate() {
-            crate::session_store::validate_plan_snapshot(
-                terminal,
-                PlanPersistenceLocation::Terminal { index },
-            )?;
-        }
 
         let persisted_context_entries = self
             .context_entries
@@ -271,8 +217,8 @@ impl SessionState {
             compacted_checkpoint: view.compacted_checkpoint,
             next_sequence: view.next_sequence,
             session_started: view.session_started,
-            active_plan: view.active_plan,
-            terminal_plans: view.terminal_plans,
+            plan_state: view.plan_state,
+            todo_list: view.todo_list,
             usage: self.usage.as_ref(),
             request_token_calibration: self.request_token_calibration.as_ref(),
             task_anchor: self.task_anchor.as_ref(),

@@ -1,8 +1,5 @@
 use crate::{assert_json_round_trip, assert_uuid_v4_string};
-use merry_core::{
-    PlanAttemptId, PlanDirectiveId, PlanId, PlanLeaseId, PlanNodeId, ProviderName, SessionId,
-    SkillId, SubagentId, SubagentTaskId,
-};
+use merry_core::{PlanId, ProviderName, SessionId, SkillId, SubagentId, SubagentTaskId};
 use serde_json::json;
 use std::str::FromStr;
 
@@ -113,28 +110,10 @@ fn subagent_ids_validate_and_round_trip_as_json_strings() {
 #[test]
 fn plan_identifiers_validate_and_round_trip_as_json_strings() {
     let plan = PlanId::new("plan-1").expect("valid plan id");
-    let node = PlanNodeId::new("node-1").expect("valid plan node id");
-    let attempt = PlanAttemptId::new("attempt-1").expect("valid plan attempt id");
-    let lease = PlanLeaseId::new("lease-1").expect("valid plan lease id");
-    let directive = PlanDirectiveId::new("directive-1").expect("valid plan directive id");
-
     assert_eq!(plan.as_str(), "plan-1");
-    assert_eq!(node.as_str(), "node-1");
-    assert_eq!(attempt.as_str(), "attempt-1");
-    assert_eq!(lease.as_str(), "lease-1");
-    assert_eq!(directive.as_str(), "directive-1");
-
     assert_json_round_trip(&plan);
-    assert_json_round_trip(&node);
-    assert_json_round_trip(&attempt);
-    assert_json_round_trip(&lease);
-    assert_json_round_trip(&directive);
 
     for invalid in ["", "   ", " leading", "trailing ", "has\nnewline"] {
         assert!(PlanId::new(invalid).is_err());
-        assert!(PlanNodeId::new(invalid).is_err());
-        assert!(PlanAttemptId::new(invalid).is_err());
-        assert!(PlanLeaseId::new(invalid).is_err());
-        assert!(PlanDirectiveId::new(invalid).is_err());
     }
 }

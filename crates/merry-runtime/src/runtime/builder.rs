@@ -10,23 +10,17 @@ use crate::{
     permission::{
         PermissionAdmissionSource, PermissionReviewMode, PermissionReviewRules, RuntimeTrustLevel,
     },
-    plan::{
-        PlanController, PlanSubagentControl,
-        tools::{
-            coordinator_plan_registered_tools, scoped_child_plan_registered_tools,
-            subagent_plan_registered_tools,
-        },
-    },
+    plan::tools::coordinator_plan_registered_tools,
     process::{
         BackgroundProcessControl, PermissionedProcessRunnerFactory,
         StaticPermissionedProcessRunnerFactory,
     },
     session::SessionState,
     subagent::{
-        ChildRuntimeFactory, ChildWorkspaceScope, PlanLinkRuntime, PlanSubagentScope,
-        SUBAGENT_WORKSPACE_SCOPE_CONTEXT_ID, SubagentActivityHub, SubagentManager,
-        plan_link_runtime_for_controller,
+        ChildWorkspaceScope, SUBAGENT_WORKSPACE_SCOPE_CONTEXT_ID, SubagentActivityHub,
+        SubagentManager,
     },
+    todo::todo_registered_tool,
     tool::{RegisteredTool, ToolRegistry, ToolRegistryError},
     trajectory::RuntimeObservability,
 };
@@ -65,8 +59,6 @@ pub struct RuntimeBuilder {
     registered_tools: Vec<RegisteredTool>,
     tool_admission: Option<ToolAdmission>,
     coordinator_plan_tools: bool,
-    plan_subagent_control: Option<PlanSubagentControl>,
-    plan_subagent_scope: Option<PlanSubagentScope>,
     initial_context_summaries: BTreeMap<String, String>,
     skill_catalog: Option<SkillCatalog>,
     project_rules: Option<ProjectRules>,
@@ -88,7 +80,6 @@ pub struct RuntimeBuilder {
     background_process_control: Option<Arc<dyn BackgroundProcessControl>>,
     subagent_manager: Option<SubagentManager>,
     subagent_parent_scope: Option<ChildWorkspaceScope>,
-    subagent_parent_plan_link_runtime: Option<Arc<dyn PlanLinkRuntime>>,
     activity_hub: Arc<SubagentActivityHub>,
     session_store: Option<FileSessionStore>,
     loaded_session: Option<SessionState>,
@@ -114,8 +105,6 @@ impl RuntimeBuilder {
             registered_tools: Vec::new(),
             tool_admission: None,
             coordinator_plan_tools: false,
-            plan_subagent_control: None,
-            plan_subagent_scope: None,
             initial_context_summaries: BTreeMap::new(),
             skill_catalog: None,
             project_rules: None,
@@ -137,7 +126,6 @@ impl RuntimeBuilder {
             background_process_control: None,
             subagent_manager: None,
             subagent_parent_scope: None,
-            subagent_parent_plan_link_runtime: None,
             activity_hub: Arc::new(SubagentActivityHub::new()),
             session_store: None,
             loaded_session: None,
@@ -276,37 +264,10 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Installs the complete stable coordinator plan-control tool surface.
+    /// Installs the stable coordinator Plan Mode and Todo tool surface.
     #[must_use]
     pub fn coordinator_plan_tools(mut self) -> Self {
         self.coordinator_plan_tools = true;
-        self
-    }
-
-    /// Installs the stable subagent-scoped plan reporting surface.
-    #[must_use]
-    pub fn plan_subagent_control(mut self, control: PlanSubagentControl) -> Self {
-        self.plan_subagent_control = Some(control);
-        self
-    }
-
-    /// Installs the opaque Plan subtree capability for a linked child runtime.
-    #[must_use]
-    pub fn plan_subagent_scope(mut self, scope: PlanSubagentScope) -> Self {
-        self.plan_subagent_scope = Some(scope);
-        self
-    }
-
-    /// Retained as a source-compatible no-op for callers that used the removed
-    /// automatic Plan scheduler. Plan execution now starts only through the
-    /// normal subagent manager and optional `plan_client_key` binding.
-    #[must_use]
-    pub fn plan_subagent_factory(
-        self,
-        factory: Arc<dyn ChildRuntimeFactory>,
-        max_subagent_concurrency: usize,
-    ) -> Self {
-        let _ = (factory, max_subagent_concurrency);
         self
     }
 
@@ -610,16 +571,6 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Keeps nested subagent Plan links attached to the parent runtime's Plan.
-    ///
-    /// The adapter is runtime-owned; child models never receive the controller
-    /// or persistence details behind it.
-    #[must_use]
-    pub fn subagent_parent_plan_link_runtime(mut self, runtime: Arc<dyn PlanLinkRuntime>) -> Self {
-        self.subagent_parent_plan_link_runtime = Some(runtime);
-        self
-    }
-
     /// Installs the filesystem store used by explicit and automatic session savepoints.
     #[must_use]
     pub fn session_store(mut self, store: FileSessionStore) -> Self {
@@ -681,23 +632,10 @@ impl RuntimeBuilder {
     /// Duplicate tool names are rejected before the runtime is constructed.
     pub fn build(self) -> Result<Runtime, RuntimeError> {
         let mut registered_tools = self.registered_tools;
-        if self.coordinator_plan_tools
-            && (self.plan_subagent_control.is_some() || self.plan_subagent_scope.is_some())
-        {
-            return Err(RuntimeError::InvalidStepInput {
-                reason: "a runtime cannot be both a plan coordinator and a plan subagent",
-            });
-        }
         if self.coordinator_plan_tools {
             registered_tools
                 .extend(coordinator_plan_registered_tools().map_err(RuntimeError::from)?);
-        }
-        if self.plan_subagent_control.is_some() {
-            registered_tools.extend(subagent_plan_registered_tools().map_err(RuntimeError::from)?);
-        }
-        if self.plan_subagent_scope.is_some() {
-            registered_tools
-                .extend(scoped_child_plan_registered_tools().map_err(RuntimeError::from)?);
+            registered_tools.push(todo_registered_tool().map_err(RuntimeError::from)?);
         }
         let tool_registry =
             ToolRegistry::from_registered(registered_tools).map_err(|error| match error {
@@ -721,7 +659,6 @@ impl RuntimeBuilder {
                 .unwrap_or_else(ChildWorkspaceScope::workspace_root)
         });
 
-        let loaded_from_store = self.loaded_session.is_some();
         let external_tool_catalog = tool_registry.external_tool_catalog()?;
         let mut session = match self.loaded_session {
             Some(mut session) => {
@@ -741,15 +678,6 @@ impl RuntimeBuilder {
         };
         if let Some(store) = self.session_store.as_ref() {
             session.set_tracked_store_dir(store.sessions_dir().to_path_buf());
-        }
-        if loaded_from_store
-            && let Some(plan) = session.active_plan_mut()
-            && plan.abandon_unresumed_execution(crate::plan::unix_time_ms())
-        {
-            tracing::info!(
-                session_id = %self.session_id,
-                "closed persisted Plan execution state without replaying it"
-            );
         }
         if session.session_id() != &self.session_id {
             return Err(RuntimeError::SessionStore {
@@ -806,11 +734,6 @@ impl RuntimeBuilder {
         };
         let persisted_subagents = session.persisted_subagents().to_vec();
         let session = Arc::new(Mutex::new(session));
-        let (plan_controller, _plan_events) = PlanController::start(
-            Arc::clone(&session),
-            self.session_store.clone(),
-            self.event_buffer_size,
-        );
         let subagent_event_sink = crate::subagent::SubagentEventSink::new(
             Arc::clone(&session),
             self.session_store.clone(),
@@ -820,10 +743,6 @@ impl RuntimeBuilder {
         let activity_hub = self.activity_hub;
         let subagent_manager = self.subagent_manager;
         if let Some(manager) = subagent_manager.as_ref() {
-            let plan_link_runtime = self
-                .subagent_parent_plan_link_runtime
-                .unwrap_or_else(|| plan_link_runtime_for_controller(plan_controller.clone()));
-            manager.attach_plan_link_runtime(plan_link_runtime);
             let allowed_tools = tool_registry
                 .tool_specs()
                 .into_iter()
@@ -850,8 +769,6 @@ impl RuntimeBuilder {
                 });
             }
         }
-        // Plan is an advisory projection. Execution is started only by an
-        // explicit subagent spawn and optional `plan_client_key` binding.
         Ok(Runtime {
             inner: Arc::new(RuntimeInner {
                 session_id: self.session_id.clone(),
@@ -889,9 +806,6 @@ impl RuntimeBuilder {
                 background_process_control: self.background_process_control,
                 subagent_manager,
                 coordinator_plan_tools: self.coordinator_plan_tools,
-                plan_controller,
-                plan_subagent_control: self.plan_subagent_control,
-                plan_subagent_scope: self.plan_subagent_scope,
                 session_store: self.session_store,
                 tool_batch_active: AtomicBool::new(false),
                 activity_hub,

@@ -42,15 +42,11 @@ class EventType(str, Enum):
     SUBAGENT_COMPLETED = "subagent_completed"
     SUBAGENT_FAILED = "subagent_failed"
     SUBAGENT_CANCELLED = "subagent_cancelled"
-    PLAN_UPDATED = "plan_updated"
-    PLAN_PHASE_CHANGED = "plan_phase_changed"
-    PLAN_NODE_READY = "plan_node_ready"
-    PLAN_LEASE_STARTED = "plan_lease_started"
-    PLAN_PROGRESS_UPDATED = "plan_progress_updated"
-    PLAN_PROGRESS_REVIEW_REQUESTED = "plan_progress_review_requested"
-    PLAN_ATTEMPT_PROGRESS_REPORTED = "plan_attempt_progress_reported"
-    PLAN_DIRECTIVE_UPDATED = "plan_directive_updated"
-    PLAN_ATTEMPT_FINISHED = "plan_attempt_finished"
+    PLAN_MODE_CHANGED = "plan_mode_changed"
+    PLAN_SAVED = "plan_saved"
+    PLAN_APPROVAL_REQUESTED = "plan_approval_requested"
+    PLAN_REVIEWED = "plan_reviewed"
+    TODO_LIST_UPDATED = "todo_list_updated"
     RUN_FAILED = "run_failed"
     RUN_CANCELLED = "run_cancelled"
     INTERACTIVE_RUN_STATE_CHANGED = "interactive_run_state_changed"
@@ -221,6 +217,39 @@ class SubagentStatus(str, Enum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     BLOCKED = "blocked"
+
+
+class PlanModeState(str, Enum):
+    """Session Plan Mode lifecycle state."""
+
+    INACTIVE = "inactive"
+    PENDING = "pending"
+    ACTIVE = "active"
+    EXIT_PENDING = "exit_pending"
+
+
+class TodoStatus(str, Enum):
+    """Status of one lightweight session todo item."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+
+
+@dataclass(frozen=True, slots=True)
+class TodoItem:
+    """Typed view of one session checklist item."""
+
+    id: str
+    content: str
+    status: TodoStatus
+
+    def __post_init__(self) -> None:
+        _validate_identifier("todo item id", self.id, 128)
+        _validate_text("todo item content", self.content, 512)
+        if not isinstance(self.status, TodoStatus):
+            raise TypeError("todo item status must be a TodoStatus")
 
 
 class InteractiveRunState(str, Enum):

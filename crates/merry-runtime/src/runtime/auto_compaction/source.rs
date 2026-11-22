@@ -24,7 +24,7 @@ pub(super) async fn manual_compaction_budget(
     let (inputs, history_ids) = {
         let session = inner.session.lock().await;
         (
-            step_request_inputs_from_session(&session, None, inner.coordinator_plan_tools)?
+            step_request_inputs_from_session(&session)?
                 .with_memory_context(inner.memory_context.clone()),
             session.provider_transcript_history_ids(),
         )

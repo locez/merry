@@ -4,8 +4,8 @@ use super::{
     types::{InputRecord, InputRecords},
 };
 use crate::bridge::BridgeToolResultCommand;
-use crate::{FileSessionStore, PlanApprovalInput, UserMessageInput};
-use merry_core::{PendingToolCallBatch, PlanNodeId, RuntimeEvent, ToolCallBatchId, ToolCallId};
+use crate::{FileSessionStore, UserMessageInput};
+use merry_core::{PendingToolCallBatch, PlanId, RuntimeEvent, ToolCallBatchId, ToolCallId};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -656,11 +656,12 @@ impl AgentLoopControl {
             })?
     }
 
-    pub async fn enter_plan_mode(&self, reason: &str) -> Result<(), InteractiveError> {
+    /// Toggles Plan Mode on or off (works both while idle and mid-turn).
+    pub async fn set_plan_mode(&self, enabled: bool) -> Result<(), InteractiveError> {
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
-            .send(InteractiveCommand::EnterPlanMode {
-                reason: reason.to_owned(),
+            .send(InteractiveCommand::SetPlanMode {
+                enabled,
                 ack_sender,
             })
             .await
@@ -674,103 +675,60 @@ impl AgentLoopControl {
             })?
     }
 
-    pub async fn approve_plan(&self, input: PlanApprovalInput) -> Result<(), InteractiveError> {
-        let (ack_sender, ack_receiver) = oneshot::channel();
-        self.command_sender
-            .send(InteractiveCommand::ApprovePlan { input, ack_sender })
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?;
-        ack_receiver
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?
-    }
-
-    pub async fn revise_plan(&self, reason: &str) -> Result<(), InteractiveError> {
-        let (ack_sender, ack_receiver) = oneshot::channel();
-        self.command_sender
-            .send(InteractiveCommand::RevisePlan {
-                reason: reason.to_owned(),
-                ack_sender,
-            })
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?;
-        ack_receiver
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?
-    }
-
-    pub async fn pause_plan_scheduling(&self, reason: &str) -> Result<(), InteractiveError> {
-        let (ack_sender, ack_receiver) = oneshot::channel();
-        self.command_sender
-            .send(InteractiveCommand::PausePlanScheduling {
-                reason: reason.to_owned(),
-                ack_sender,
-            })
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?;
-        ack_receiver
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?
-    }
-
-    pub async fn resume_plan_scheduling(&self, reason: &str) -> Result<(), InteractiveError> {
-        let (ack_sender, ack_receiver) = oneshot::channel();
-        self.command_sender
-            .send(InteractiveCommand::ResumePlanScheduling {
-                reason: reason.to_owned(),
-                ack_sender,
-            })
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?;
-        ack_receiver
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?
-    }
-
-    pub async fn cancel_plan(&self, reason: &str) -> Result<(), InteractiveError> {
-        let (ack_sender, ack_receiver) = oneshot::channel();
-        self.command_sender
-            .send(InteractiveCommand::CancelPlan {
-                reason: reason.to_owned(),
-                ack_sender,
-            })
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?;
-        ack_receiver
-            .await
-            .map_err(|_| InteractiveError::CommandChannelClosed {
-                run_id: self.run_id,
-            })?
-    }
-
-    pub async fn retry_interrupted_plan_node(
+    /// Approves a submitted plan, exits Plan Mode, and continues execution.
+    pub async fn approve_plan(
         &self,
-        node_id: PlanNodeId,
-        reason: &str,
+        plan_id: PlanId,
+        note: Option<String>,
     ) -> Result<(), InteractiveError> {
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
-            .send(InteractiveCommand::RetryInterruptedPlanNode {
-                node_id,
-                reason: reason.to_owned(),
+            .send(InteractiveCommand::ApprovePlan {
+                plan_id,
+                note,
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    /// Keeps Plan Mode active and delivers revision feedback to the agent.
+    pub async fn request_plan_changes(
+        &self,
+        plan_id: PlanId,
+        feedback: String,
+    ) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::RequestPlanChanges {
+                plan_id,
+                feedback,
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    /// Abandons a submitted plan and exits Plan Mode without implementing.
+    pub async fn abandon_plan(&self, plan_id: PlanId) -> Result<(), InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::AbandonPlan {
+                plan_id,
                 ack_sender,
             })
             .await

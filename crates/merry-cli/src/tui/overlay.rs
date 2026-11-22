@@ -7,50 +7,18 @@ use super::{
     reasoning_picker::{ReasoningPickerAction, ReasoningPickerOverlay},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::{PlanAttemptOutcome, PlanNodeId, PlanPhase, PlanSnapshot};
 
 pub(crate) use super::command::{CommandSpec, PaletteCommand};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PlanPaletteContext {
-    has_plan: bool,
-    plan_open: bool,
-    plan_focused: bool,
-    phase: Option<PlanPhase>,
-    plan_ready: bool,
-    retry_selected: bool,
+    has_plans: bool,
 }
 
 impl PlanPaletteContext {
-    pub(crate) fn from_snapshot(
-        snapshot: Option<&PlanSnapshot>,
-        selected_node_id: Option<&PlanNodeId>,
-        plan_open: bool,
-        plan_focused: bool,
-    ) -> Self {
-        let retry_selected = snapshot.is_some_and(|snapshot| {
-            let selected_is_blocked = selected_node_id.is_some_and(|selected| {
-                snapshot.nodes.iter().any(|node| {
-                    &node.id == selected && node.status == merry_core::PlanNodeStatus::Blocked
-                })
-            });
-            let latest_outcome = selected_node_id.and_then(|selected| {
-                snapshot
-                    .attempts
-                    .iter()
-                    .rev()
-                    .find(|attempt| &attempt.node_id == selected)
-                    .and_then(|attempt| attempt.outcome)
-            });
-            selected_is_blocked && latest_outcome == Some(PlanAttemptOutcome::Interrupted)
-        });
+    pub(crate) fn from_plan_state(plan: &super::plan_view::PlanUiState) -> Self {
         Self {
-            has_plan: snapshot.is_some(),
-            plan_open,
-            plan_focused,
-            phase: snapshot.map(|snapshot| snapshot.phase),
-            plan_ready: snapshot.is_some_and(|snapshot| snapshot.root_node_id.is_some()),
-            retry_selected,
+            has_plans: plan.has_plans(),
         }
     }
 }
@@ -63,7 +31,7 @@ pub(crate) enum Overlay {
     ProviderForm(ProviderFormOverlay),
     ModelPicker(ModelPickerOverlay),
     ReasoningPicker(ReasoningPickerOverlay),
-    PlanApproval(PlanApprovalOverlay),
+    PlanView(super::plan_view::PlanViewOverlay),
     PermissionReview(PermissionReviewOverlay),
     Dialog(MessageDialogOverlay),
     Shortcuts(ShortcutsBack),
@@ -83,12 +51,6 @@ pub(crate) struct MessageDialogOverlay {
     title: String,
     message: String,
     kind: MessageDialogKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PlanApprovalOverlay {
-    message: String,
-    input: merry_runtime::PlanApprovalInput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,20 +93,6 @@ impl PermissionReviewOverlay {
 
     pub(crate) fn set_queue_total(&mut self, total: usize) {
         self.view.queue_total = total.max(1);
-    }
-}
-
-impl PlanApprovalOverlay {
-    pub(crate) fn new(message: String, input: merry_runtime::PlanApprovalInput) -> Self {
-        Self { message, input }
-    }
-
-    pub(crate) fn message(&self) -> &str {
-        &self.message
-    }
-
-    pub(crate) fn input(&self) -> &merry_runtime::PlanApprovalInput {
-        &self.input
     }
 }
 
@@ -249,7 +197,6 @@ pub(crate) enum OverlayKeyResult {
     BeginContextWindowEdit,
     CommitContextWindow(String),
     OpenShortcuts,
-    ConfirmPlanApproval,
     ApprovePermission(String),
     DenyPermission(String),
     Provider(ProviderOverlayAction),
@@ -514,10 +461,6 @@ impl Overlay {
         Self::Settings(SettingsOverlay::default())
     }
 
-    pub(crate) fn plan_approval(message: String, input: merry_runtime::PlanApprovalInput) -> Self {
-        Self::PlanApproval(PlanApprovalOverlay::new(message, input))
-    }
-
     #[cfg(test)]
     pub(crate) fn permission_review(approval_id: String, body: String) -> Self {
         Self::PermissionReview(PermissionReviewOverlay::new(approval_id, body))
@@ -578,11 +521,7 @@ impl Overlay {
                     target,
                 }),
             },
-            Self::PlanApproval(_) => match key.code {
-                KeyCode::Enter => OverlayKeyResult::ConfirmPlanApproval,
-                KeyCode::Esc => OverlayKeyResult::Back,
-                _ => OverlayKeyResult::Consumed,
-            },
+            Self::PlanView(_) => OverlayKeyResult::Consumed,
             Self::PermissionReview(review) => match key.code {
                 KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                     OverlayKeyResult::ApprovePermission(review.approval_id().to_owned())
@@ -662,10 +601,10 @@ impl Overlay {
             Self::ProviderForm(form) => form.insert_paste(text),
             Self::ProviderManager(manager) => manager.insert_paste(text),
             Self::SubagentInspect(takeover) => takeover.insert_paste(text),
+            Self::PlanView(plan_view) => plan_view.insert_paste(text),
             Self::CommandDetails(_)
             | Self::BackgroundTaskInspect(_)
             | Self::ModelPicker(_)
-            | Self::PlanApproval(_)
             | Self::PermissionReview(_)
             | Self::Dialog(_) => {}
             Self::ReasoningPicker(picker) => picker.insert_paste(text),
@@ -695,34 +634,7 @@ fn fuzzy_matches(candidate: &str, query: &str) -> bool {
 
 fn plan_command_is_available(command: PaletteCommand, context: PlanPaletteContext) -> bool {
     match command {
-        PaletteCommand::EnterPlanMode => {
-            !context.has_plan
-                || matches!(
-                    context.phase,
-                    Some(PlanPhase::Completed | PlanPhase::Blocked | PlanPhase::Cancelled)
-                )
-        }
-        PaletteCommand::ApprovePlan => {
-            context.plan_ready
-                && matches!(
-                    context.phase,
-                    Some(PlanPhase::Planning | PlanPhase::AwaitingApproval)
-                )
-        }
-        PaletteCommand::RevisePlan => matches!(
-            context.phase,
-            Some(PlanPhase::AwaitingApproval | PlanPhase::Executing)
-        ),
-        PaletteCommand::OpenPlan => context.has_plan && !context.plan_open,
-        PaletteCommand::FocusPlan => context.has_plan && context.plan_open && !context.plan_focused,
-        PaletteCommand::ClosePlan => context.has_plan && context.plan_open,
-        // Plan no longer owns an automatic scheduler. Child lifecycle is
-        // runtime-owned, so pause/resume are intentionally absent from the UI.
-        PaletteCommand::RetryPlanNode => context.retry_selected,
-        PaletteCommand::CancelPlan => matches!(
-            context.phase,
-            Some(PlanPhase::Planning | PlanPhase::AwaitingApproval | PlanPhase::Executing)
-        ),
+        PaletteCommand::ViewPlans => context.has_plans,
         _ => true,
     }
 }

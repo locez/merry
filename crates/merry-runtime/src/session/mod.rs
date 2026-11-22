@@ -3,10 +3,11 @@
 use crate::{
     context::{CompactedCheckpoint, ContextEntry, ProjectRules, TaskAnchor},
     memory::{ActivatedMemory, MemoryStore},
-    plan::PlanState,
+    plan::PlanSessionState,
     skill::SkillCatalog,
+    todo::TodoListState,
 };
-use merry_core::{PendingToolCall, PlanSnapshot, SessionId, ToolCallId};
+use merry_core::{PendingToolCall, SessionId, ToolCallId};
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},
@@ -20,7 +21,6 @@ mod journal;
 mod messages;
 mod model_turns;
 mod persistence;
-mod plan_tool_commit;
 mod recording;
 mod tool_calls;
 mod transcript;
@@ -32,8 +32,7 @@ pub(crate) use self::journal::{
 };
 pub(crate) use self::{
     model_turns::{ModelTurn, ModelTurnId, ModelTurnStatus, PromptHistoryProjection},
-    persistence::{PersistableSessionBundle, journal_destination_has_header},
-    plan_tool_commit::PreparedPlanToolCommit,
+    persistence::journal_destination_has_header,
     transcript::{Transcript, TranscriptItem, TranscriptItemSnapshot, UserInputOrigin},
 };
 
@@ -57,8 +56,8 @@ pub(crate) struct SessionState {
     /// Context summary ids seeded by runtime construction; rebuilt on resume and not persisted.
     construction_context_ids: BTreeSet<String>,
     activated_memories: Vec<ActivatedMemory>,
-    active_plan: Option<PlanState>,
-    terminal_plans: Vec<PlanSnapshot>,
+    plan_state: PlanSessionState,
+    todo_list: TodoListState,
     transcript: Transcript,
     pending_tool_calls: Vec<PendingToolCall>,
     resolved_tool_calls: BTreeSet<ToolCallId>,
@@ -100,8 +99,8 @@ impl SessionState {
             context_entries: Vec::new(),
             construction_context_ids: BTreeSet::new(),
             activated_memories: Vec::new(),
-            active_plan: None,
-            terminal_plans: Vec::new(),
+            plan_state: PlanSessionState::default(),
+            todo_list: TodoListState::default(),
             transcript: Transcript::new(),
             pending_tool_calls: Vec::new(),
             resolved_tool_calls: BTreeSet::new(),
@@ -188,32 +187,35 @@ impl SessionState {
         self.external_tool_catalog = catalog;
     }
 
-    pub(crate) fn active_plan(&self) -> Option<&PlanState> {
-        self.active_plan.as_ref()
+    pub(crate) fn plan_state(&self) -> &PlanSessionState {
+        &self.plan_state
     }
 
-    pub(crate) fn active_plan_mut(&mut self) -> Option<&mut PlanState> {
-        self.active_plan.as_mut()
+    pub(crate) fn plan_state_mut(&mut self) -> &mut PlanSessionState {
+        &mut self.plan_state
     }
 
-    pub(crate) fn set_active_plan(&mut self, plan: PlanState) {
-        self.active_plan = Some(plan);
+    pub(crate) fn todo_list(&self) -> &TodoListState {
+        &self.todo_list
     }
 
-    pub(crate) fn take_active_plan(&mut self) -> Option<PlanState> {
-        self.active_plan.take()
+    pub(crate) fn todo_list_mut(&mut self) -> &mut TodoListState {
+        &mut self.todo_list
     }
 
-    pub(crate) fn terminal_plans(&self) -> &[PlanSnapshot] {
-        &self.terminal_plans
-    }
-
-    pub(crate) fn push_terminal_plan(&mut self, snapshot: PlanSnapshot) {
-        const MAX_TERMINAL_PLANS: usize = 8;
-        if self.terminal_plans.len() == MAX_TERMINAL_PLANS {
-            self.terminal_plans.remove(0);
+    /// Renders optional dynamic Plan Mode and Todo context placed after the stable prefix.
+    ///
+    /// Returns `None` during normal inactive turns with no open todos so prompt
+    /// and KV cache stability incur zero overhead.
+    pub(crate) fn dynamic_plan_and_todo_context(&self) -> Option<String> {
+        let mut sections = Vec::new();
+        if let Some(plan) = self.plan_state.dynamic_prompt_reminder() {
+            sections.push(plan);
         }
-        self.terminal_plans.push(snapshot);
+        if let Some(todos) = self.todo_list.dynamic_prompt_context() {
+            sections.push(todos);
+        }
+        (!sections.is_empty()).then(|| sections.join("\n\n"))
     }
 
     #[cfg(test)]

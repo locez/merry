@@ -1,11 +1,6 @@
-use super::{
-    PlanLinkRuntime, PlanSubagentScope, SubagentActivityHub, SubagentTaskSpec,
-    SubagentWorkspaceMode, SubagentWorktreeView,
-};
-use crate::{
-    FileSessionStore, LoadedSession, PlanSubagentControl, Runtime, RuntimeError, TaskAnchor,
-};
-use merry_core::{PlanLinkSnapshot, SubagentId, ToolName};
+use super::{SubagentActivityHub, SubagentTaskSpec, SubagentWorkspaceMode, SubagentWorktreeView};
+use crate::{FileSessionStore, LoadedSession, Runtime, RuntimeError, TaskAnchor};
+use merry_core::{SubagentId, ToolName};
 use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
 use std::{
     path::PathBuf,
@@ -109,14 +104,6 @@ pub struct ChildRuntimeInput {
     pub parent_primary_model: Option<ParentPrimaryModel>,
     /// Live snapshot of the parent runtime's active generation config at spawn time.
     pub parent_generation_config: GenerationConfig,
-    /// Optional compatibility control for an explicitly Plan-bound child.
-    pub plan_subagent_control: Option<PlanSubagentControl>,
-    /// Optional opaque capability for the subtree below the active Plan link.
-    pub plan_subagent_scope: Option<PlanSubagentScope>,
-    /// Optional runtime-owned Plan link for this child execution.
-    pub plan_link: Option<PlanLinkSnapshot>,
-    /// Runtime-owned link adapter used when this child delegates further.
-    pub plan_link_runtime: Option<Arc<dyn PlanLinkRuntime>>,
     /// Optional shared runtime-owned activity hub for this child and descendants.
     pub activity_hub: Option<Arc<SubagentActivityHub>>,
 }

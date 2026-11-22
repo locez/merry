@@ -4,9 +4,11 @@
 //! is a `Header`; subsequent lines are incremental `Commit` deltas.
 
 use super::super::{ModelTurnId, ModelTurnStatus, transcript::UserInputOrigin};
-use crate::{SessionStoreError, plan::PersistedPlanState, token_estimate::RequestTokenCalibration};
+use crate::{
+    SessionStoreError, plan::PersistedPlanModeState, token_estimate::RequestTokenCalibration,
+};
 use merry_core::{
-    ErrorInfo, PendingToolCall, PlanSnapshot, SessionId, SessionUsage, ToolCallId,
+    ErrorInfo, PendingToolCall, SessionId, SessionUsage, TodoItem, ToolCallId,
     ToolCallResultStatus, ToolOutput,
 };
 use serde::{Deserialize, Serialize};
@@ -184,9 +186,9 @@ pub(super) struct JournalStateDelta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) task_anchor: Option<FieldPatch<JournalTaskAnchor>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) active_plan: Option<FieldPatch<PersistedPlanState>>,
+    pub(super) plan_mode: Option<FieldPatch<PersistedPlanModeState>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) terminal_plans: Option<Vec<PlanSnapshot>>,
+    pub(super) todos: Option<Vec<TodoItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) context_entries: Option<Vec<JournalContextEntry>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -208,8 +210,8 @@ impl JournalStateDelta {
             && self.usage.is_none()
             && self.request_token_calibration.is_none()
             && self.task_anchor.is_none()
-            && self.active_plan.is_none()
-            && self.terminal_plans.is_none()
+            && self.plan_mode.is_none()
+            && self.todos.is_none()
             && self.context_entries.is_none()
             && self.next_item_id.is_none()
             && self.model_turns.is_empty()

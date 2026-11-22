@@ -4,8 +4,6 @@ mod bridge_handoff;
 mod input_queue;
 #[path = "interactive_agent_loop/lifecycle.rs"]
 mod lifecycle;
-#[path = "interactive_agent_loop/plan_controls.rs"]
-mod plan_controls;
 #[path = "interactive_agent_loop/settings.rs"]
 mod settings;
 #[path = "interactive_agent_loop/structured_output.rs"]

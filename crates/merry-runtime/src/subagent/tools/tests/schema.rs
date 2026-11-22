@@ -13,15 +13,12 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 #[test]
-fn spawn_schema_accepts_an_optional_plan_client_key_reference() {
+fn spawn_schema_exposes_roles_context_files_and_worktree() {
     let specs = subagent_tool_specs().expect("subagent tools build");
     let schema = serde_json::to_value(specs[0].input_schema()).expect("spawn schema serializes");
-    assert!(schema.to_string().contains("plan_client_key"));
     assert!(schema.to_string().contains("context_files"));
     assert!(schema.to_string().contains("role"));
     assert!(schema.to_string().contains("worktree_base"));
-    assert!(!schema.to_string().contains("plan_task"));
-    assert!(specs[0].description().contains("never a runtime node id"));
     assert!(specs[0].description().contains("worktree"));
 }
 

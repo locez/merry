@@ -7,7 +7,6 @@ use crate::tui::{
     keymap::KeyAction,
     layout::{BottomPaneHeights, TimelineRects, cockpit_layout},
     overlay_render::overlay_pointer,
-    plan_render::{PlanPointer, plan_pointer_target},
     render::{self, STATUS_HEIGHT},
     state::TuiState,
 };
@@ -24,6 +23,7 @@ use super::{text_wrap::semantic_style, theme::SemanticColor};
 pub(crate) enum StatusAction {
     Commands,
     Agents,
+    PlanMode,
     Plan,
     Follow,
     Stop,
@@ -36,8 +36,7 @@ pub(crate) enum OverlayPointer {
     CloseModal,
     Palette(usize),
     Setting(crate::tui::overlay::SettingItem),
-    PlanApprove,
-    PlanBack,
+    PlanView(crate::tui::plan_view::PlanViewPointer),
     PermissionAllow,
     PermissionReject,
     DialogClose,
@@ -64,7 +63,6 @@ pub(crate) enum PointerTarget {
     Status(StatusAction),
     Composer,
     PendingQueue(crate::tui::render::PendingQueuePointer),
-    Plan(PlanPointer),
     Completion(usize),
     Overlay(OverlayPointer),
 }
@@ -84,14 +82,6 @@ pub(crate) fn pointer_target(state: &TuiState, size: Size, position: Position) -
     }
     if header_model_rect(rects.header, state).is_some_and(|model| model.contains(position)) {
         return PointerTarget::Model;
-    }
-    if let Some(plan) = rects.plan
-        && plan.contains(position)
-    {
-        return match plan_pointer_target(state, plan, position) {
-            Some(pointer) => PointerTarget::Plan(pointer),
-            None => PointerTarget::Consumed,
-        };
     }
     if let Some(queue) = rects.queue
         && queue.contains(position)
@@ -122,8 +112,6 @@ fn cockpit_rects(size: Size, state: &TuiState) -> TimelineRects {
             input: pane_heights.input,
             status: STATUS_HEIGHT,
         },
-        state.plan().is_open(),
-        state.plan().is_focused(),
     )
 }
 
@@ -132,7 +120,10 @@ pub(crate) fn status_actions(state: &TuiState) -> Vec<StatusAction> {
     if !state.subagents().is_empty() {
         actions.push(StatusAction::Agents);
     }
-    if state.plan().snapshot().is_some() {
+    if state.plan().mode() != merry_core::PlanModeState::Inactive {
+        actions.push(StatusAction::PlanMode);
+    }
+    if state.plan().has_plans() {
         actions.push(StatusAction::Plan);
     }
     if state.is_timeline_reviewing() {
@@ -158,7 +149,24 @@ pub(crate) fn status_action_label(state: &TuiState, action: &StatusAction) -> St
                 format!("{count} agents")
             }
         }
-        StatusAction::Plan => "plan".to_owned(),
+        StatusAction::PlanMode => match state.plan().mode() {
+            merry_core::PlanModeState::Pending => "PLAN (pending)".to_owned(),
+            merry_core::PlanModeState::Active => "PLAN".to_owned(),
+            merry_core::PlanModeState::ExitPending => "PLAN (exiting)".to_owned(),
+            merry_core::PlanModeState::Inactive => "plan mode".to_owned(),
+        },
+        StatusAction::Plan => {
+            if state.plan().is_awaiting_approval() {
+                "Review Plan".to_owned()
+            } else {
+                let count = state.plan().plans().len();
+                if count == 1 {
+                    "1 plan".to_owned()
+                } else {
+                    format!("{count} plans")
+                }
+            }
+        }
         StatusAction::Follow => "follow".to_owned(),
         StatusAction::Stop => "stop".to_owned(),
         StatusAction::Comment => comment_chip_label(state),
@@ -335,6 +343,7 @@ fn completion_index(state: &TuiState, region: Rect, position: Position) -> Optio
         return (index < usize::from(region.height) && start + index < end).then_some(index);
     }
     let menu = state.completion_menu()?;
-    let index = usize::from(position.y.saturating_sub(region.y));
-    (index < usize::from(region.height) && index < menu.items().len()).then_some(index)
+    let row = usize::from(position.y.saturating_sub(region.y));
+    let (start, end) = menu.visible_window(usize::from(region.height));
+    (row < usize::from(region.height) && start + row < end).then_some(start + row)
 }

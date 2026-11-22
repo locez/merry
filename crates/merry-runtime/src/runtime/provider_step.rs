@@ -27,7 +27,6 @@ use crate::{
     events::{ActiveStepPermit, RuntimeJournalEventBatch, RuntimeRateUpdateSender},
     memory::MemoryActivationContext,
     model_config::ModelProviderConfig,
-    plan::unix_time_ms,
     step::StepInput,
 };
 use merry_llm::{GenerationConfig, ModelStreamContext};
@@ -163,37 +162,6 @@ pub(super) async fn run_provider_step(
         "runtime memories activated"
     );
 
-    let plan_subagent_control = if let Some(control) = inner.plan_subagent_control.as_ref() {
-        if let Err(error) = control.review_progress_at_boundary(unix_time_ms()).await {
-            let diagnostic = diagnostic_from_text("plan_progress_review", error.to_string());
-            trace_provider_step_failed(&diagnostic);
-            let _ = send_failed_event(inner, sender, token, diagnostic).await;
-            return;
-        }
-        if let Err(error) = control.deliver_directives(unix_time_ms()).await {
-            let diagnostic = diagnostic_from_text("plan_directive_delivery", error.to_string());
-            trace_provider_step_failed(&diagnostic);
-            let _ = send_failed_event(inner, sender, token, diagnostic).await;
-            return;
-        }
-        match control.snapshot().await {
-            Ok(snapshot) => crate::plan::projection::plan_subagent_control_message(
-                &snapshot,
-                control.node_id(),
-                control.attempt_id(),
-                control.lease_id(),
-            ),
-            Err(error) => {
-                let diagnostic = diagnostic_from_text("plan_subagent_context", error.to_string());
-                trace_provider_step_failed(&diagnostic);
-                let _ = send_failed_event(inner, sender, token, diagnostic).await;
-                return;
-            }
-        }
-    } else {
-        None
-    };
-
     let (request_inputs, activation_epoch) = {
         let mut session = inner.session.lock().await;
         if token.is_cancelled() {
@@ -207,11 +175,7 @@ pub(super) async fn run_provider_step(
             .memory_projection_epoch
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
-        let request_inputs = match step_request_inputs_from_session(
-            &session,
-            plan_subagent_control.clone(),
-            inner.coordinator_plan_tools,
-        ) {
+        let request_inputs = match step_request_inputs_from_session(&session) {
             Ok(inputs) => inputs,
             Err(error) => {
                 session.replace_activated_memories(Vec::new());
@@ -226,6 +190,7 @@ pub(super) async fn run_provider_step(
                 return;
             }
         };
+        session.plan_state_mut().record_prompt_delivered();
         (request_inputs, activation_epoch)
     };
     let mut request_inputs = request_inputs.with_memory_context(inner.memory_context.clone());
@@ -382,12 +347,11 @@ pub(super) async fn run_provider_step(
             let installed_replacement = replacement_outcome.is_some();
 
             let refreshed = {
-                let session = inner.session.lock().await;
-                step_request_inputs_from_session(
-                    &session,
-                    plan_subagent_control.clone(),
-                    inner.coordinator_plan_tools,
-                )
+                let mut session = inner.session.lock().await;
+                if installed_replacement {
+                    session.plan_state_mut().reset_after_compaction();
+                }
+                step_request_inputs_from_session(&session)
             };
             request_inputs = match refreshed {
                 Ok(inputs) => inputs.with_memory_context(inner.memory_context.clone()),

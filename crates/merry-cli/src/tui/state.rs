@@ -3,10 +3,11 @@ use crate::tui::{
     input::{InputHistory, TextInput},
     keymap::Keymap,
     output_rate::OutputRate,
-    plan::PlanUiState,
+    plan_view::PlanUiState,
     preferences::{TuiPreferences, TuiSettingsDefaults},
     text_interaction::TextSelection,
     theme::TuiTheme,
+    todo_dock::TodoDockState,
 };
 use clipboard::ClipboardFeedback;
 use merry_core::{InteractiveRunState, RuntimeEvent, SessionUsage};
@@ -71,6 +72,7 @@ pub(crate) struct TuiState {
     header_items: Vec<crate::config::HeaderItemKind>,
     subagents: Vec<crate::tui::subagent_view::SubagentEntry>,
     task_dock: crate::tui::task_dock::TaskDockState,
+    todo_dock: TodoDockState,
     command_details_generation: u64,
     timeline_scroll_offset: usize,
     timeline_review_user_index: Option<usize>,
@@ -143,6 +145,7 @@ impl TuiState {
             header_items: crate::config::HeaderItemKind::DEFAULT_ITEMS.to_vec(),
             subagents: Vec::new(),
             task_dock: crate::tui::task_dock::TaskDockState::default(),
+            todo_dock: TodoDockState::default(),
             command_details_generation: 0,
             timeline_scroll_offset: 0,
             timeline_review_user_index: None,
@@ -178,6 +181,14 @@ impl TuiState {
 
     pub(crate) fn task_dock(&self) -> &crate::tui::task_dock::TaskDockState {
         &self.task_dock
+    }
+
+    pub(crate) fn todo_dock(&self) -> &TodoDockState {
+        &self.todo_dock
+    }
+
+    pub(crate) fn todo_dock_mut(&mut self) -> &mut TodoDockState {
+        &mut self.todo_dock
     }
 
     pub(crate) fn task_dock_mut(&mut self) -> &mut crate::tui::task_dock::TaskDockState {

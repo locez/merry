@@ -8,7 +8,7 @@ use crate::{
         },
         layout::{BottomPaneHeights, cockpit_layout},
         motion::{self, MotionClock},
-        overlay_render, plan_render,
+        overlay_render,
         render::composer::{completion_lines, composer_inner_columns, pane_heights, render_input},
         state::TuiState,
         status::build_header_layout,
@@ -30,11 +30,12 @@ use ratatui::{
     widgets::{Block, Paragraph},
 };
 use std::time::Instant;
-pub(crate) use timeline::render_timeline_pane;
+pub(crate) use timeline::{prepare_timeline_viewport, render_timeline_pane};
 #[cfg(test)]
 pub(crate) use timeline_layout::timeline_content_region;
 pub(crate) use timeline_pointer::{
     TimelineMouseDown, timeline_mouse_down, timeline_task_dock_rect, timeline_text_area,
+    timeline_todo_dock_rect,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -63,6 +64,7 @@ pub(crate) fn prepare_viewport(state: &mut TuiState, size: ratatui::layout::Size
     state.set_composer_columns(composer_inner_columns(size.width));
     let area = Rect::new(0, 0, size.width, size.height);
     super::command_details::prepare_viewport(state, area);
+    super::plan_view::prepare_viewport(state, area);
     let heights = pane_heights_for_area(state, area);
     let rects = cockpit_layout(
         area,
@@ -72,8 +74,6 @@ pub(crate) fn prepare_viewport(state: &mut TuiState, size: ratatui::layout::Size
             input: heights.input,
             status: STATUS_HEIGHT,
         },
-        state.plan().is_open(),
-        state.plan().is_focused(),
     );
     let selection_matches_size = state.overlay().is_none()
         && state
@@ -100,8 +100,6 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
             input: pane_heights.input,
             status: STATUS_HEIGHT,
         },
-        state.plan().is_open(),
-        state.plan().is_focused(),
     );
 
     if let Some(bg) = state.theme().bg_color(SemanticColor::Background) {
@@ -114,9 +112,6 @@ pub(crate) fn render(frame: &mut Frame<'_>, state: &TuiState) {
     render_header(frame, state, rects.header);
     if rects.timeline.width > 0 && rects.timeline.height > 0 {
         render_timeline_pane(frame, state, rects.timeline);
-    }
-    if let Some(region) = rects.plan {
-        plan_render::render_plan(frame, state, region);
     }
 
     if let Some(queue_region) = rects.queue {

@@ -1,561 +1,113 @@
-//! Public recursive plan snapshots and lifecycle vocabulary.
+//! Public Plan Mode lifecycle and multi-plan document contracts.
 
-use crate::{
-    ErrorInfo, PlanApprovalRequirementId, PlanAttemptId, PlanBindingId, PlanDirectiveId, PlanId,
-    PlanLeaseId, PlanNodeId, SessionId, SessionUsage, SkillId, SubagentId, SubagentTaskId,
-    ToolName,
-};
+use crate::PlanId;
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize, de};
+use serde::{Deserialize, Serialize};
 
-const MAX_REVISION_SUMMARY_BYTES: usize = 2 * 1024;
-
-/// Runtime-owned lifecycle phase for one active plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanPhase {
-    Planning,
-    AwaitingApproval,
-    Executing,
-    Completed,
-    Blocked,
-    Cancelled,
-}
-
-/// Semantic state persisted for one plan node.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanNodeStatus {
-    #[default]
-    Pending,
-    InProgress,
-    Expanded,
-    Verifying,
-    Completed,
-    Blocked,
-    Failed,
-    Superseded,
-}
-
-/// Effective status projected from authored intent and linked executions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanEffectiveNodeStatus {
-    Pending,
-    InProgress,
-    Completed,
-    Attention,
-}
-
-/// Runtime-derived aggregate for subagents linked to one Plan node.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanExecutionSummary {
-    pub active: u32,
-    pub completed: u32,
-    pub failed: u32,
-    pub cancelled: u32,
-    /// Linked work stopped before completion but may be replaced.
-    #[serde(default)]
-    pub blocked: u32,
-}
-
-/// Lifecycle state of one runtime-owned Plan/subagent association.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanLinkStatus {
-    Active,
-    Completed,
-    Failed,
-    Cancelled,
-    /// Linked work stopped without completing and can be replaced.
-    Blocked,
-    Superseded,
-}
-
-/// Runtime-owned association between a Plan task and one subagent execution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanLinkSnapshot {
-    pub plan_id: PlanId,
-    pub node_id: PlanNodeId,
-    pub binding_id: PlanBindingId,
-    pub subagent_id: SubagentId,
-    pub task_id: SubagentTaskId,
-    pub status: PlanLinkStatus,
-    pub linked_at_ms: u64,
-    pub terminal_at_ms: Option<u64>,
-    pub superseded_by: Option<PlanBindingId>,
-}
-
-/// Model-authored execution preference for a node.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanExecutorPolicy {
-    Local,
-    Delegate,
-    #[default]
-    Auto,
-}
-
-/// Runtime-owned admission state retained for legacy attempt-domain records.
-/// Coordinator Plan tools do not expose or mutate this field; subagent
-/// lifecycle links are the authoritative execution projection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanSchedulerStatus {
-    Active,
-    Paused,
-    Draining,
-}
-
-/// Terminal outcome of one continuous execution attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanAttemptOutcome {
-    Completed,
-    Decomposed,
-    Blocked,
-    SemanticFailure,
-    TransientFailure,
-    Yielded,
-    Cancelled,
-    Interrupted,
-}
-
-/// Runtime-owned lifecycle state of one execution lease.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanLeaseStatus {
-    Live,
-    Resolved,
-    Cancelled,
-    Expired,
-}
-
-/// Kind of coordinator steering sent to one live attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanDirectiveKind {
-    RequestStatus,
-    Steer,
-    Converge,
-    CheckpointAndContinue,
-    CheckpointAndYield,
-    CancelAtSafePoint,
-}
-
-/// Persisted delivery/application state for a coordinator directive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanDirectiveStatus {
-    Queued,
-    Delivered,
-    Acknowledged,
-    Applied,
-    Superseded,
-    Expired,
-}
-
-/// Source that activated Plan Mode.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum PlanActivationSource {
-    Coordinator {
-        reason: String,
-        governing_skill_id: Option<SkillId>,
-    },
-    User,
-}
-
-/// Typed reason that prevents autonomous execution until resolved.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum PlanApprovalRequirementKind {
-    UserReviewRequested,
-    SkillReviewRequested { skill_id: SkillId },
-    RootObjectiveChange,
-    RootAcceptanceChange,
-    CapabilityOrPermissionExpansion,
-    DestructiveExternalAuthority,
-    RequiredExternalInput { prompt: String },
-}
-
-/// Resolution state for one typed approval requirement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanApprovalRequirementStatus {
-    Pending,
-    Resolved,
-    Rejected,
-}
-
-/// Persisted approval requirement shown to SDK and UI consumers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanApprovalRequirementSnapshot {
-    pub requirement_id: PlanApprovalRequirementId,
-    pub kind: PlanApprovalRequirementKind,
-    pub status: PlanApprovalRequirementStatus,
-    pub created_revision: u64,
-    pub resolution_ref: Option<String>,
-}
-
-/// Bounded node execution harness projected without provider credentials.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanHarnessSnapshot {
-    /// Optional configured model role for this node.
-    pub model_role: Option<String>,
-    /// Optional provider-supported reasoning effort for this node.
-    pub reasoning_effort: Option<String>,
-    /// Optional model-turn interval between durable checkpoints.
-    pub checkpoint_turn_interval: Option<u32>,
-    /// Optional timeout for one provider request; this is not a task-duration budget.
-    pub provider_request_timeout_ms: Option<u64>,
-    /// Optional timeout for one bounded tool call; this is not a task-duration budget.
-    pub tool_timeout_ms: Option<u64>,
-    /// Exact registered tool names available to this node.
-    pub allowed_tools: Vec<ToolName>,
-    /// Normalized workspace-relative paths this node may read. Use `.` for the
-    /// workspace root or a concrete path such as `crates/merry-runtime`.
-    #[schemars(schema_with = "plan_scope_paths_schema")]
-    pub read_scope: Vec<String>,
-    /// Normalized workspace-relative paths this node may write. Use `.` for the
-    /// workspace root or a concrete path such as `crates/merry-runtime`.
-    #[schemars(schema_with = "plan_scope_paths_schema")]
-    pub write_scope: Vec<String>,
-    /// Normalized workspace-relative paths this node must not access. Use concrete
-    /// paths such as `.git`; `.` denotes the complete workspace.
-    #[schemars(schema_with = "plan_scope_paths_schema")]
-    pub forbidden_paths: Vec<String>,
-}
-
-fn plan_scope_paths_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-    schemars::Schema::try_from(serde_json::json!({
-        "type": "array",
-        "items": {
-            "type": "string",
-            "minLength": 1,
-            "description": "A normalized workspace scope. Use `.` for the workspace root or a concrete relative path such as `crates/merry-runtime`. Do not use `..`, absolute paths, embedded `.` segments, empty segments, or backslashes.",
-            "examples": [".", "crates/merry-runtime", "examples/config.toml"],
-            "anyOf": [
-                { "const": "." },
-                { "allOf": [
-                    { "not": { "pattern": "(^|/)\\.\\.?(/|$)" } },
-                    { "not": { "pattern": "(^/|//|\\\\)" } },
-                    { "not": { "pattern": "[\\u0000-\\u001F\\u007F]" } }
-                ] }
-            ]
-        }
-    }))
-    .expect("static plan scope schema is valid")
-}
-
-/// Retry policy captured on one node revision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanRecoveryPolicySnapshot {
-    pub max_transient_attempts: u8,
-    pub retry_backoff_ms: u64,
-    pub retry_only_before_observable_side_effects: bool,
-}
-
-impl Default for PlanRecoveryPolicySnapshot {
-    fn default() -> Self {
-        Self {
-            max_transient_attempts: 2,
-            retry_backoff_ms: 0,
-            retry_only_before_observable_side_effects: true,
-        }
-    }
-}
-
-/// Runtime/operator policy snapshot for bounded execution diagnostics.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanResourcePolicySnapshot {
-    pub max_concurrency: usize,
-    pub subagent_heartbeat_interval_ms: u64,
-    pub subagent_heartbeat_ttl_ms: u64,
-    pub provider_request_timeout_ms: Option<u64>,
-    pub tool_timeout_ms: Option<u64>,
-    pub checkpoint_turn_interval: u32,
-    pub no_durable_progress_review_window_ms: u64,
-    pub repeated_failure_limit: u8,
-}
-
-impl Default for PlanResourcePolicySnapshot {
-    fn default() -> Self {
-        Self {
-            max_concurrency: Self::DEFAULT_MAX_CONCURRENCY,
-            subagent_heartbeat_interval_ms: 10_000,
-            subagent_heartbeat_ttl_ms: 300_000,
-            provider_request_timeout_ms: None,
-            tool_timeout_ms: None,
-            checkpoint_turn_interval: 8,
-            no_durable_progress_review_window_ms: 900_000,
-            repeated_failure_limit: 3,
-        }
-    }
-}
-
-impl PlanResourcePolicySnapshot {
-    /// Default maximum concurrent delegated tasks accepted by a plan.
-    pub const DEFAULT_MAX_CONCURRENCY: usize = 6;
-}
-
-/// Provider-invisible capability ceiling for one executing plan.
+/// Session-scoped lifecycle state of Plan Mode.
 ///
-/// This bounds plan delegation and detects later expansion. It does not replace
-/// the runtime's per-tool permission admission or authorize an external action.
+/// While [`PlanModeState::Active`], runtime tool admission blocks workspace
+/// file mutations (`ToolActionKind::WorkspaceWrite`) so exploration and design
+/// remain read-only except for session plan documents authored via `write_plan`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanModeState {
+    /// Normal operating mode with no Plan Mode edit restrictions.
+    #[default]
+    Inactive,
+    /// User toggled Plan Mode on before submitting the next prompt.
+    Pending,
+    /// Plan Mode is active: workspace edits are blocked until approved or exited.
+    Active,
+    /// User toggled Plan Mode off mid-turn; exits cleanly once the turn finishes.
+    ExitPending,
+}
+
+impl PlanModeState {
+    /// Returns whether the read-only Plan Mode edit gate is currently enforced.
+    #[must_use]
+    pub const fn is_active(self) -> bool {
+        matches!(self, Self::Active)
+    }
+}
+
+/// Lifecycle status of one Markdown plan document inside a session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanDocumentStatus {
+    /// Currently authored or being revised by the agent.
+    #[default]
+    Draft,
+    /// Submitted via `exit_plan_mode` and awaiting user review.
+    AwaitingApproval,
+    /// Approved by the user for implementation.
+    Approved,
+    /// Abandoned without approval.
+    Abandoned,
+}
+
+/// Bounded metadata for one Markdown plan document in `<session_dir>/plans/`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDocumentSummary {
+    /// Stable runtime-allocated identifier for this plan (`plan-1`, `plan-2`, ...).
+    pub id: PlanId,
+    /// Human-readable title displayed in UI rails and headers.
+    pub title: String,
+    /// Sanitized file name under `<session_dir>/plans/` (e.g., `001-auth-refactor.md`).
+    pub file_name: String,
+    /// Current lifecycle status of this plan document.
+    pub status: PlanDocumentStatus,
+    /// Monotonic revision count incremented each time this document is saved.
+    pub revision: u32,
+    /// Creation timestamp in Unix milliseconds.
+    pub created_at_ms: u64,
+    /// Last modification timestamp in Unix milliseconds.
+    pub updated_at_ms: u64,
+}
+
+/// Complete Markdown plan document combining durable metadata and content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PlanDocument {
+    /// Durable metadata for this plan.
+    pub summary: PlanDocumentSummary,
+    /// Full Markdown body of the plan.
+    pub content: String,
+}
+
+/// User decision submitted from a Plan review boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PlanReviewDecision {
+    /// Approve the plan, exit Plan Mode, and proceed to implementation.
+    Approved {
+        /// Optional user note or inline comments attached alongside approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// Keep Plan Mode active and return structured feedback for plan revision.
+    ChangesRequested {
+        /// User feedback or formatted inline comments explaining requested edits.
+        feedback: String,
+    },
+    /// Abandon the proposed plan and exit Plan Mode without starting implementation.
+    Abandoned,
+}
+
+/// Compact session-level view of Plan Mode and all plans authored in the session.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct PlanCapabilityEnvelopeSnapshot {
-    pub allowed_tools: Vec<ToolName>,
-    pub read_scope: Vec<String>,
-    pub write_scope: Vec<String>,
-    pub forbidden_paths: Vec<String>,
-    pub destructive_external_authority: bool,
-}
-
-/// Compact completion or failure result for one node.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanNodeResult {
-    pub conclusion: String,
-    #[serde(default)]
-    pub output_paths: Vec<String>,
-    pub changed_paths: Vec<String>,
-    pub verification: Vec<String>,
-    pub open_questions: Vec<String>,
-}
-
-/// Public flat node record that can be rendered recursively by parent/order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanNodeSnapshot {
-    pub id: PlanNodeId,
-    #[serde(default)]
-    pub client_key: Option<String>,
-    pub parent_id: Option<PlanNodeId>,
-    pub sibling_order: u16,
-    pub objective: String,
-    pub acceptance: Vec<String>,
-    pub status: PlanNodeStatus,
-    pub executor_policy: PlanExecutorPolicy,
-    pub harness: PlanHarnessSnapshot,
-    pub recovery_policy: PlanRecoveryPolicySnapshot,
-    pub depends_on: Vec<PlanNodeId>,
-    pub result: Option<PlanNodeResult>,
-    pub created_revision: u64,
-    pub updated_revision: u64,
-    #[serde(default)]
-    pub declared_status: PlanNodeStatus,
-    #[serde(default)]
-    pub execution_summary: PlanExecutionSummary,
-    #[serde(default)]
-    pub links: Vec<PlanLinkSnapshot>,
-}
-
-/// Compact persisted view of one execution attempt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanAttemptSnapshot {
-    pub attempt_id: PlanAttemptId,
-    pub node_id: PlanNodeId,
-    pub node_revision: u64,
-    /// Present only when a delegated subagent owns this attempt.
-    pub lease_id: Option<PlanLeaseId>,
-    pub executor_session_id: SessionId,
-    pub harness_fingerprint: String,
-    pub started_at_ms: u64,
-    pub finished_at_ms: Option<u64>,
-    pub outcome: Option<PlanAttemptOutcome>,
-    pub result: Option<PlanNodeResult>,
-    pub diagnostic: Option<ErrorInfo>,
-    pub latest_checkpoint_ref: Option<String>,
-    pub last_applied_directive_sequence: u64,
-}
-
-/// Compact persisted view of one delegated subagent lease.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanLeaseSnapshot {
-    pub lease_id: PlanLeaseId,
-    pub attempt_id: PlanAttemptId,
-    pub node_id: PlanNodeId,
-    pub node_revision: u64,
-    pub executor_session_id: SessionId,
-    pub started_at_ms: u64,
-    pub last_heartbeat_at_ms: u64,
-    pub lease_expires_at_ms: u64,
-    pub status: PlanLeaseStatus,
-}
-
-/// Latest bounded liveness and semantic progress for one attempt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanAttemptProgressSnapshot {
-    pub attempt_id: PlanAttemptId,
-    pub node_id: PlanNodeId,
-    pub elapsed_ms: u64,
-    pub model_turns: u32,
-    pub reported_usage: Option<SessionUsage>,
-    pub last_subagent_heartbeat_at_ms: Option<u64>,
-    pub last_runtime_activity_at_ms: u64,
-    pub last_durable_progress_at_ms: Option<u64>,
-    pub provider_request_in_flight: bool,
-    pub tool_call_in_flight: bool,
-    /// Count of successful runtime-observed actions that may have external effects.
-    #[serde(default)]
-    pub observable_side_effects: usize,
-    #[serde(default)]
-    pub output_paths: Vec<String>,
-    pub changed_paths: Vec<String>,
-    #[serde(default)]
-    pub evidence_notes: Vec<String>,
-    pub repeated_failure_fingerprint: Option<String>,
-    pub summary: Option<String>,
-    pub next_action: Option<String>,
-    pub request_coordinator_review: bool,
-}
-
-/// Runtime-enforceable part of a coordinator directive.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanDirectiveConstraints {
-    pub allow_decomposition: bool,
-    pub require_terminal_report: bool,
-    pub preserve_partial_result: bool,
-}
-
-impl Default for PlanDirectiveConstraints {
-    fn default() -> Self {
-        Self {
-            allow_decomposition: true,
-            require_terminal_report: true,
-            preserve_partial_result: true,
-        }
-    }
-}
-
-/// Persisted attempt-scoped coordinator steering.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CoordinatorDirectiveSnapshot {
-    pub directive_id: PlanDirectiveId,
-    pub sequence: u64,
-    pub plan_id: PlanId,
-    pub node_id: PlanNodeId,
-    pub node_revision: u64,
-    pub attempt_id: PlanAttemptId,
-    pub lease_id: PlanLeaseId,
-    pub kind: PlanDirectiveKind,
-    pub reason: String,
-    pub instruction: Option<String>,
-    pub constraints: PlanDirectiveConstraints,
-    pub requested_output: Vec<String>,
-    pub issued_at_ms: u64,
-    pub status: PlanDirectiveStatus,
-    pub delivered_at_ms: Option<u64>,
-    pub acknowledged_at_ms: Option<u64>,
-    pub applied_at_ms: Option<u64>,
-}
-
-/// Bounded explanation of one committed plan revision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanRevisionSummary {
-    revision: u64,
-    summary: String,
-}
-
-impl PlanRevisionSummary {
-    pub fn new(revision: u64, summary: &str) -> Result<Self, crate::CoreError> {
-        validate_revision_summary(summary)?;
-        Ok(Self {
-            revision,
-            summary: summary.to_owned(),
-        })
-    }
-
-    #[must_use]
-    pub fn revision(&self) -> u64 {
-        self.revision
-    }
-
-    #[must_use]
-    pub fn summary(&self) -> &str {
-        &self.summary
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PlanRevisionSummaryWire {
-    revision: u64,
-    summary: String,
-}
-
-impl<'de> Deserialize<'de> for PlanRevisionSummary {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = PlanRevisionSummaryWire::deserialize(deserializer)?;
-        Self::new(wire.revision, &wire.summary).map_err(de::Error::custom)
-    }
-}
-
-/// Complete bounded state projection for one active or terminal plan.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PlanSnapshot {
-    pub plan_id: PlanId,
-    pub revision: u64,
-    pub phase: PlanPhase,
-    pub activation_source: PlanActivationSource,
-    pub root_node_id: Option<PlanNodeId>,
-    pub coordinator_node_id: Option<PlanNodeId>,
-    pub execution_contract_fingerprint: Option<String>,
-    pub execution_authorization_refs: Vec<String>,
-    pub authorized_capability_envelope: Option<PlanCapabilityEnvelopeSnapshot>,
-    pub approval_requirements: Vec<PlanApprovalRequirementSnapshot>,
-    pub nodes: Vec<PlanNodeSnapshot>,
-    pub attempts: Vec<PlanAttemptSnapshot>,
-    pub leases: Vec<PlanLeaseSnapshot>,
-    pub attempt_progress: Vec<PlanAttemptProgressSnapshot>,
-    pub directives: Vec<CoordinatorDirectiveSnapshot>,
-    pub resource_policy_snapshot: PlanResourcePolicySnapshot,
-    pub max_concurrency_hint: Option<usize>,
-    pub scheduler_status: PlanSchedulerStatus,
-    pub revision_summaries: Vec<PlanRevisionSummary>,
-}
-
-fn validate_revision_summary(summary: &str) -> Result<(), crate::CoreError> {
-    if summary.trim().is_empty() {
-        return Err(invalid_summary(summary, "must not be blank"));
-    }
-    if summary.len() > MAX_REVISION_SUMMARY_BYTES {
-        return Err(invalid_summary(
-            summary,
-            "is longer than the allowed maximum",
-        ));
-    }
-    if summary.chars().any(char::is_control) {
-        return Err(invalid_summary(
-            summary,
-            "must not contain control characters",
-        ));
-    }
-    Ok(())
-}
-
-fn invalid_summary(value: &str, reason: &'static str) -> crate::CoreError {
-    crate::CoreError::InvalidIdentifier {
-        kind: "PlanRevisionSummary",
-        value: value.to_owned(),
-        reason,
-    }
+pub struct PlanSessionSnapshot {
+    /// Current session Plan Mode state.
+    pub mode: PlanModeState,
+    /// Plan currently being drafted or most recently active, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_plan_id: Option<PlanId>,
+    /// Plan currently parked waiting for user approval, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_approval_plan_id: Option<PlanId>,
+    /// Ordered metadata for all plans authored in this session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plans: Vec<PlanDocumentSummary>,
 }

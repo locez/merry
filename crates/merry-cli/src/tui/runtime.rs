@@ -427,8 +427,16 @@ impl TuiRuntimeSession {
         self.runtime.session_transcript().await.map_err(unexpected)
     }
 
-    pub(crate) async fn plan_snapshot(&self) -> Result<Option<merry_core::PlanSnapshot>, CliError> {
-        self.runtime.plan_snapshot().await.map_err(unexpected)
+    pub(crate) async fn plan_session_snapshot(&self) -> merry_core::PlanSessionSnapshot {
+        self.runtime.plan_session_snapshot().await
+    }
+
+    pub(crate) async fn plan_documents(&self) -> Vec<merry_core::PlanDocument> {
+        self.runtime.plan_documents().await
+    }
+
+    pub(crate) async fn todo_items(&self) -> Vec<merry_core::TodoItem> {
+        self.runtime.todo_items().await
     }
 }
 

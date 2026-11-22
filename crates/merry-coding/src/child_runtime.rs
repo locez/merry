@@ -18,7 +18,7 @@ use std::{num::NonZeroUsize, path::Path, sync::Arc};
 /// Coding-owned child runtime factory.
 ///
 /// This factory combines the shared coding profile with runtime-owned child
-/// scope, subagent, admission, and plan-link state. It deliberately accepts a
+/// scope, subagent, and admission state. It deliberately accepts a
 /// host-process backend contract instead of a CLI or sandbox type.
 #[derive(Clone)]
 pub(crate) struct CodingChildRuntimeFactory {
@@ -175,7 +175,6 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
         {
             builder = builder.initial_context_summary(SUBAGENT_HANDOFF_CONTEXT_ID, &handoff);
         }
-        let parent_plan_link_runtime = input.plan_link_runtime.clone();
         let child_factory: Arc<dyn ChildRuntimeFactory> = Arc::new(self.clone());
         let child_manager = SubagentManager::runtime_controlled_at_depth(
             input.session_id.clone(),
@@ -194,15 +193,6 @@ impl ChildRuntimeFactory for CodingChildRuntimeFactory {
         builder = builder
             .subagent_parent_scope(workspace_scope.clone())
             .subagent_manager(child_manager);
-        if let Some(runtime) = parent_plan_link_runtime {
-            builder = builder.subagent_parent_plan_link_runtime(runtime);
-        }
-        if let Some(control) = input.plan_subagent_control {
-            builder = builder.plan_subagent_control(control);
-        }
-        if let Some(scope) = input.plan_subagent_scope {
-            builder = builder.plan_subagent_scope(scope);
-        }
         let child_prompt_profile = build_child_prompt_profile(
             &resolved.allowed_tools,
             resolved.role_instructions.as_deref(),

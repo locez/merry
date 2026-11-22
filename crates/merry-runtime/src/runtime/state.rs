@@ -9,14 +9,13 @@ use crate::{
         PermissionAdmissionSource, PermissionRequest, PermissionReviewMode, PermissionReviewRules,
         RecordedPermissionDecision, RuntimeTrustLevel,
     },
-    plan::{PlanController, PlanControllerError, PlanSubagentControl},
     process::{BackgroundProcessControl, PermissionedProcessRunnerFactory},
     session::SessionState,
-    subagent::{PlanSubagentScope, SubagentActivityHub, SubagentEventSink, SubagentManager},
+    subagent::{SubagentActivityHub, SubagentEventSink, SubagentManager},
     tool::ToolRegistry,
     trajectory::RuntimeObservability,
 };
-use merry_core::{PlanHarnessSnapshot, SessionId};
+use merry_core::SessionId;
 use std::{
     collections::VecDeque,
     num::{NonZeroU64, NonZeroUsize},
@@ -62,9 +61,6 @@ pub(super) struct RuntimeInner {
     pub(super) background_process_control: Option<Arc<dyn BackgroundProcessControl>>,
     pub(super) subagent_manager: Option<SubagentManager>,
     pub(super) coordinator_plan_tools: bool,
-    pub(super) plan_controller: PlanController,
-    pub(super) plan_subagent_control: Option<PlanSubagentControl>,
-    pub(super) plan_subagent_scope: Option<PlanSubagentScope>,
     pub(super) session_store: Option<FileSessionStore>,
     pub(super) tool_batch_active: AtomicBool,
     pub(super) activity_hub: Arc<SubagentActivityHub>,
@@ -79,44 +75,6 @@ impl RuntimeInner {
     pub(super) fn begin_tool_batch(&self) -> ToolBatchScope<'_> {
         debug_assert!(!self.tool_batch_active.swap(true, Ordering::AcqRel));
         ToolBatchScope { inner: self }
-    }
-
-    pub(super) fn tool_batch_active(&self) -> bool {
-        self.tool_batch_active.load(Ordering::Acquire)
-    }
-
-    pub(super) async fn active_subagent_plan_harness(
-        &self,
-    ) -> Result<PlanHarnessSnapshot, PlanControllerError> {
-        self.plan_subagent_control
-            .as_ref()
-            .expect("subagent harness is requested only for a bound runtime")
-            .active_harness()
-            .await
-    }
-
-    pub(super) async fn record_plan_runtime_effect(
-        &self,
-        changed_paths: Vec<String>,
-    ) -> Result<(), PlanControllerError> {
-        let now_ms = crate::plan::unix_time_ms();
-        if let Some(control) = self.plan_subagent_control.as_ref() {
-            control
-                .record_runtime_effect(changed_paths, now_ms)
-                .await
-                .map(|_| ())
-        } else {
-            self.plan_controller
-                .record_runtime_effect(
-                    crate::plan::execution::PlanAttemptActor {
-                        executor_session_id: self.session_id.clone(),
-                    },
-                    changed_paths,
-                    now_ms,
-                )
-                .await
-                .map(|_| ())
-        }
     }
 
     pub(super) async fn model_config(&self, role: RuntimeModelRole) -> Option<ModelProviderConfig> {

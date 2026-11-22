@@ -1,107 +1,37 @@
+//! Plan Mode & Plan Review command/effect translation for the TUI controller.
+
 use super::{
-    controller::ControllerEffect, overlay::PaletteCommand, runtime::TuiRuntimeSession,
-    state::TuiState,
+    controller::ControllerEffect,
+    overlay::PaletteCommand,
+    runtime::TuiRuntimeSession,
+    state::{TimelineItem, TuiState},
 };
-use crossterm::event::{KeyCode, KeyEvent};
-
-const PLAN_SCROLL_STEP: usize = 5;
-
-pub(crate) fn handle_navigation_key(key: KeyEvent, state: &mut TuiState) -> bool {
-    match key.code {
-        KeyCode::Up => {
-            if state.plan().is_inspector_open() {
-                state.plan_mut().scroll_inspector_up_by(1);
-            } else {
-                state.plan_mut().select_previous();
-            }
-        }
-        KeyCode::Down => {
-            if state.plan().is_inspector_open() {
-                state.plan_mut().scroll_inspector_down_by(1);
-            } else {
-                state.plan_mut().select_next();
-            }
-        }
-        KeyCode::PageUp => {
-            if state.plan().is_inspector_open() {
-                state.plan_mut().scroll_inspector_up_by(PLAN_SCROLL_STEP);
-            } else {
-                state.plan_mut().scroll_up_by(PLAN_SCROLL_STEP);
-            }
-        }
-        KeyCode::PageDown => {
-            if state.plan().is_inspector_open() {
-                state.plan_mut().scroll_inspector_down_by(PLAN_SCROLL_STEP);
-            } else {
-                state.plan_mut().scroll_down_by(PLAN_SCROLL_STEP);
-            }
-        }
-        KeyCode::Left => {
-            if !state.plan_mut().close_inspector() {
-                state.plan_mut().select_parent_or_collapse();
-            }
-        }
-        KeyCode::Right => {
-            if !state.plan().is_inspector_open() {
-                state.plan_mut().select_child_or_expand();
-            }
-        }
-        KeyCode::Enter => {
-            state.plan_mut().open_inspector();
-        }
-        KeyCode::Esc => {
-            if !state.plan_mut().close_inspector() {
-                state.plan_mut().leave_focus();
-            }
-        }
-        _ => return false,
-    }
-    true
-}
 
 pub(crate) fn palette_effect(
     command: PaletteCommand,
     state: &mut TuiState,
 ) -> Option<ControllerEffect> {
     let effect = match command {
-        PaletteCommand::EnterPlanMode => {
+        PaletteCommand::TogglePlanMode => {
             state.close_overlay();
-            ControllerEffect::EnterPlanMode
+            ControllerEffect::SetPlanMode {
+                enabled: !state.plan().is_plan_mode_on(),
+                initial_prompt: None,
+            }
         }
-        PaletteCommand::ApprovePlan => {
-            state.open_plan_approval();
+        PaletteCommand::ViewPlans => {
+            state.close_overlay();
+            if state.plan().has_plans() {
+                state.open_plan_view(None);
+            } else {
+                state.push_timeline_item(TimelineItem::Muted {
+                    title: "Plans".to_owned(),
+                    detail:
+                        "No plans in this session yet. Use /plan or Shift+Tab to enter Plan Mode."
+                            .to_owned(),
+                });
+            }
             ControllerEffect::None
-        }
-        PaletteCommand::RevisePlan => {
-            state.close_overlay();
-            ControllerEffect::RevisePlan
-        }
-        PaletteCommand::OpenPlan | PaletteCommand::FocusPlan => {
-            state.close_overlay();
-            state.plan_mut().open_and_focus();
-            ControllerEffect::None
-        }
-        PaletteCommand::ClosePlan => {
-            state.close_overlay();
-            state.plan_mut().close();
-            ControllerEffect::None
-        }
-        PaletteCommand::RetryPlanNode => {
-            state.close_overlay();
-            state.plan().selected_node_id().cloned().map_or_else(
-                || {
-                    state.show_error_dialog(
-                        "Plan retry unavailable",
-                        "No plan node is selected.".to_owned(),
-                    );
-                    ControllerEffect::None
-                },
-                ControllerEffect::RetryPlanNode,
-            )
-        }
-        PaletteCommand::CancelPlan => {
-            state.close_overlay();
-            ControllerEffect::CancelPlan
         }
         _ => return None,
     };
@@ -114,48 +44,46 @@ pub(crate) async fn dispatch_effect(
     state: &mut TuiState,
 ) -> Option<bool> {
     match effect {
-        ControllerEffect::EnterPlanMode => {
-            if let Err(error) = session
-                .control
-                .enter_plan_mode("user entered Plan Mode from the TUI")
-                .await
+        ControllerEffect::SetPlanMode {
+            enabled,
+            initial_prompt,
+        } => {
+            if let Err(error) = session.control.set_plan_mode(*enabled).await {
+                state.show_error_dialog("Plan Mode failed", error.to_string());
+                return Some(false);
+            }
+            if let Some(prompt) = initial_prompt
+                && let Ok(message) = merry_runtime::UserMessageInput::text_only(prompt)
             {
-                state.show_error_dialog("Plan control failed", error.to_string());
+                if let Err(error) = session.input.submit_message(message).await {
+                    state.show_error_dialog("Plan prompt failed", error.to_string());
+                } else if !state.is_active_run() && !state.queue_preview().paused {
+                    state.push_local_user_echo(prompt.clone());
+                    state.project_local_run_start();
+                }
             }
         }
-        ControllerEffect::ApprovePlan(input) => {
-            if let Err(error) = session.control.approve_plan(input.clone()).await {
+        ControllerEffect::ApprovePlan { plan_id, note } => {
+            if let Err(error) = session
+                .control
+                .approve_plan(plan_id.clone(), note.clone())
+                .await
+            {
                 state.show_error_dialog("Plan approval failed", error.to_string());
             }
         }
-        ControllerEffect::RevisePlan => {
+        ControllerEffect::RequestPlanChanges { plan_id, feedback } => {
             if let Err(error) = session
                 .control
-                .revise_plan("user requested plan revision from the TUI")
+                .request_plan_changes(plan_id.clone(), feedback.clone())
                 .await
             {
                 state.show_error_dialog("Plan revision failed", error.to_string());
             }
         }
-        ControllerEffect::RetryPlanNode(node_id) => {
-            if let Err(error) = session
-                .control
-                .retry_interrupted_plan_node(
-                    node_id.clone(),
-                    "user explicitly retried interrupted plan work from the TUI",
-                )
-                .await
-            {
-                state.show_error_dialog("Plan retry failed", error.to_string());
-            }
-        }
-        ControllerEffect::CancelPlan => {
-            if let Err(error) = session
-                .control
-                .cancel_plan("user cancelled the plan from the TUI")
-                .await
-            {
-                state.show_error_dialog("Plan cancellation failed", error.to_string());
+        ControllerEffect::AbandonPlan(plan_id) => {
+            if let Err(error) = session.control.abandon_plan(plan_id.clone()).await {
+                state.show_error_dialog("Plan abandon failed", error.to_string());
             }
         }
         _ => return None,

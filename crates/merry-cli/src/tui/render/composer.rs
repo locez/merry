@@ -107,10 +107,8 @@ pub(super) fn render_input(
     let surface_bg = state.theme().bg_color(SemanticColor::SurfaceSubtle);
     let surface_style = surface_bg.map_or_else(Style::default, |bg| Style::default().bg(bg));
     let border_style = semantic_style(state, SemanticColor::Border);
-    let prompt_color = if state.is_commenting() {
+    let prompt_color = if state.is_commenting() || state.plan().is_plan_mode_on() {
         SemanticColor::Warning
-    } else if state.plan().is_focused() {
-        SemanticColor::Muted
     } else {
         SemanticColor::Focus
     };
@@ -186,6 +184,8 @@ pub(super) fn render_input(
             } else if state.plain_input_text() == Some("") {
                 let hint = if state.is_commenting() {
                     "Add comment…"
+                } else if state.plan().is_plan_mode_on() {
+                    "Plan Mode (read-only) — describe what to plan…"
                 } else {
                     "Message Merry…"
                 };
@@ -602,11 +602,12 @@ pub(super) fn completion_lines(state: &TuiState, region: Rect) -> Vec<Line<'stat
     };
     let surface_bg = state.theme().bg_color(SemanticColor::SurfaceSubtle);
     let selected_bg = state.theme().bg_color(SemanticColor::SelectionBackground);
-    menu.items()
+    let (start, end) = menu.visible_window(usize::from(region.height));
+    menu.items()[start..end]
         .iter()
-        .take(usize::from(region.height))
         .enumerate()
-        .map(|(index, item)| {
+        .map(|(offset, item)| {
+            let index = start + offset;
             let selected = index == menu.selected_index();
             let row_bg = if selected { selected_bg } else { surface_bg };
             let with_bg = |style: Style| row_bg.map_or(style, |bg| style.bg(bg));

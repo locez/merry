@@ -27,7 +27,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-pub(super) use super::timeline_layout::prepare_timeline_viewport;
+pub(crate) use super::timeline_layout::prepare_timeline_viewport;
 use super::timeline_layout::{timeline_layout, timeline_padding, timeline_scroll_start};
 
 pub(crate) fn render_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, region: Rect) {
@@ -44,8 +44,10 @@ pub(crate) fn render_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, regi
     let split = timeline_scroll_split(state, &timeline, content_region.height, scroll);
     let (header, after_header) = split_timeline_content(content_region, split.header_rows);
     paint_sticky_header(frame, header, &split);
-    let (dock_rect, body) = split_dock_region(state, after_header);
+    let (dock_rect, after_task_dock) = split_dock_region(state, after_header);
     render_task_dock(frame, state, dock_rect);
+    let (todo_rect, body) = crate::tui::todo_dock::split_todo_dock_region(state, after_task_dock);
+    crate::tui::todo_dock::render_todo_dock(frame, state, todo_rect);
     let body_scroll = adjust_body_scroll(
         split.body_scroll,
         after_header.height,
@@ -411,6 +413,8 @@ pub(super) const TOOL_TITLE_KEYWORDS: &[&str] = &[
     "MCP",
     "Permission",
     "Patch",
+    "Plan",
+    "Todos",
     "Delegated",
     "Waited",
     "Cancelled",

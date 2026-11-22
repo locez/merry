@@ -64,19 +64,11 @@ EVENT_FIELDS: dict[EventType, tuple[frozenset[str], frozenset[str]]] = {
     EventType.SUBAGENT_CANCELLED: _event_fields(
         "agent_id", "task_id", "diagnostic", "source"
     ),
-    EventType.PLAN_UPDATED: _event_fields("snapshot", "summary", "source"),
-    EventType.PLAN_PHASE_CHANGED: _event_fields("plan_id", "phase", "source"),
-    EventType.PLAN_NODE_READY: _event_fields(
-        "plan_id", "node_id", "node_revision", "source"
-    ),
-    EventType.PLAN_LEASE_STARTED: _event_fields("lease", "source"),
-    EventType.PLAN_PROGRESS_UPDATED: _event_fields("progress", "source"),
-    EventType.PLAN_PROGRESS_REVIEW_REQUESTED: _event_fields(
-        "plan_id", "attempt_id", "reason", "source"
-    ),
-    EventType.PLAN_ATTEMPT_PROGRESS_REPORTED: _event_fields("progress", "source"),
-    EventType.PLAN_DIRECTIVE_UPDATED: _event_fields("directive", "source"),
-    EventType.PLAN_ATTEMPT_FINISHED: _event_fields("attempt", "source"),
+    EventType.PLAN_MODE_CHANGED: _event_fields("mode", "source"),
+    EventType.PLAN_SAVED: _event_fields("plan", "source"),
+    EventType.PLAN_APPROVAL_REQUESTED: _event_fields("plan", "source"),
+    EventType.PLAN_REVIEWED: _event_fields("plan_id", "decision", "source"),
+    EventType.TODO_LIST_UPDATED: _event_fields("items", "source"),
     EventType.RUN_FAILED: _event_fields("diagnostic", "source"),
     EventType.RUN_CANCELLED: _event_fields("diagnostic", "source"),
     EventType.INTERACTIVE_RUN_STATE_CHANGED: _event_fields("state"),

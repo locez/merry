@@ -211,8 +211,8 @@ impl SubagentActivityReducer {
                 }
                 (SubagentActivityPhase::Running, format!("tool: {tool_name}"))
             }
-            RuntimeEvent::PlanUpdated { .. } => {
-                (SubagentActivityPhase::Running, "subplan updated".to_owned())
+            RuntimeEvent::PlanSaved { .. } => {
+                (SubagentActivityPhase::Running, "plan saved".to_owned())
             }
             RuntimeEvent::InteractiveRunStateChanged { state } => match state {
                 InteractiveRunState::WaitingForInput => (
@@ -346,39 +346,28 @@ mod tests {
         );
         assert_eq!(reducer.last_valid(), Some(&tool));
 
-        let plan_updated = reducer
+        let plan_saved = reducer
             .reduce(
-                &RuntimeEvent::PlanUpdated {
-                    snapshot: merry_core::PlanSnapshot {
-                        plan_id: merry_core::PlanId::new("plan-1").expect("valid plan id"),
-                        revision: 1,
-                        phase: merry_core::PlanPhase::Executing,
-                        activation_source: merry_core::PlanActivationSource::User,
-                        root_node_id: None,
-                        coordinator_node_id: None,
-                        execution_contract_fingerprint: None,
-                        execution_authorization_refs: Vec::new(),
-                        authorized_capability_envelope: None,
-                        approval_requirements: Vec::new(),
-                        nodes: Vec::new(),
-                        attempts: Vec::new(),
-                        leases: Vec::new(),
-                        attempt_progress: Vec::new(),
-                        directives: Vec::new(),
-                        resource_policy_snapshot: merry_core::PlanResourcePolicySnapshot::default(),
-                        max_concurrency_hint: None,
-                        scheduler_status: merry_core::PlanSchedulerStatus::Active,
-                        revision_summaries: Vec::new(),
+                &RuntimeEvent::PlanSaved {
+                    plan: merry_core::PlanDocument {
+                        summary: merry_core::PlanDocumentSummary {
+                            id: merry_core::PlanId::new("plan-1").expect("valid plan id"),
+                            title: "Refactor auth".to_owned(),
+                            file_name: "001-refactor-auth.md".to_owned(),
+                            status: merry_core::PlanDocumentStatus::Draft,
+                            revision: 1,
+                            created_at_ms: 10,
+                            updated_at_ms: 35,
+                        },
+                        content: "# Refactor auth\n".to_owned(),
                     },
-                    summary: merry_core::PlanRevisionSummary::new(1, "subplan changed")
-                        .expect("valid plan revision summary"),
                     source: source(),
                 },
                 35,
             )
-            .expect("plan update projects activity");
-        assert_eq!(plan_updated.phase, SubagentActivityPhase::Running);
-        assert_eq!(plan_updated.summary, "subplan updated");
+            .expect("plan save projects activity");
+        assert_eq!(plan_saved.phase, SubagentActivityPhase::Running);
+        assert_eq!(plan_saved.summary, "plan saved");
 
         let waiting = reducer
             .reduce(

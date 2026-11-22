@@ -121,7 +121,7 @@ fn projector_shows_the_specific_schema_violation_for_failed_tool_input() {
     else {
         panic!("schema failure should replace the pending row with a diagnostic");
     };
-    assert_eq!(title, "Tool read_plan -> failed");
+    assert_eq!(title, "Plan read active plan -> failed");
     assert!(body.contains("include_leases"));
     assert!(body.contains("Remove unsupported fields"));
 }
@@ -627,4 +627,121 @@ fn renderer_colors_common_tool_title_keywords() {
         find_cell_color(&buffer, "query=hello_world.py"),
         theme.color(crate::tui::theme::SemanticColor::Assistant)
     );
+}
+
+#[test]
+fn projector_formats_plan_and_todo_tools_without_raw_payload_dumps() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-write-plan",
+                "write_plan",
+                json!({
+                    "title": "Auth Refactor",
+                    "content": "## Context\nLine 2\nLine 3",
+                    "create_new": true
+                }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    match state.timeline().last() {
+        Some(TimelineItem::ToolRunning { title, detail, .. }) => {
+            assert_eq!(title, "Plan");
+            assert_eq!(detail, "new \"Auth Refactor\" (3 lines)");
+            assert!(!detail.contains("content="));
+        }
+        other => panic!("expected running Plan tool row, got {other:?}"),
+    }
+
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-write-plan").expect("valid call id"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: json!({
+                    "ok": true,
+                    "plan_id": "plan-1",
+                    "title": "Auth Refactor",
+                    "file_name": "001-auth-refactor.md",
+                    "file_path": "/tmp/plans/001-auth-refactor.md",
+                    "status": "draft",
+                    "revision": 1
+                })
+                .to_string(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+    match state.timeline().last() {
+        Some(TimelineItem::Expanded { title, body, .. }) => {
+            assert_eq!(
+                title,
+                "Plan saved \"Auth Refactor\" (001-auth-refactor.md, v1)"
+            );
+            assert_eq!(body, "plan-1 · /tmp/plans/001-auth-refactor.md");
+        }
+        other => panic!("expected formatted Plan saved row, got {other:?}"),
+    }
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-todos",
+                "update_todos",
+                json!({
+                    "merge": true,
+                    "todos": [
+                        {"id": "1", "content": "Inspect", "status": "completed"},
+                        {"id": "2", "content": "Ship", "status": "in_progress"}
+                    ]
+                }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    match state.timeline().last() {
+        Some(TimelineItem::ToolRunning { title, detail, .. }) => {
+            assert_eq!(title, "Todos");
+            assert_eq!(detail, "update 2 items");
+        }
+        other => panic!("expected running Todos tool row, got {other:?}"),
+    }
+
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-todos").expect("valid call id"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: json!({
+                    "ok": true,
+                    "count": 2,
+                    "summary": "- [completed] 1: Inspect\n- [in_progress] 2: Ship\n"
+                })
+                .to_string(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+    match state.timeline().last() {
+        Some(TimelineItem::Expanded { title, body, .. }) => {
+            assert_eq!(title, "Todos updated (2 items)");
+            assert!(body.contains("[completed] 1: Inspect"));
+        }
+        other => panic!("expected formatted Todos updated row, got {other:?}"),
+    }
 }

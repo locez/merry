@@ -71,6 +71,8 @@ pub(super) fn tui_tool_title(name: &str) -> &'static str {
         "cancel_subagents" => "Cancelled",
         "read_background_process" => "Process",
         "stop_background_process" => "Stopped",
+        "enter_plan_mode" | "write_plan" | "read_plan" | "exit_plan_mode" => "Plan",
+        "update_todos" => "Todos",
         APPLY_PATCH_TOOL => "Patch",
         _ => "Tool",
     }
@@ -86,7 +88,15 @@ pub(super) fn tui_tool_detail(name: &str, arguments: &serde_json::Map<String, Va
     }
 
     let detail = format_tool_call_detail(name, arguments);
-    if name == "run_process" {
+    if matches!(
+        name,
+        "run_process"
+            | "enter_plan_mode"
+            | "write_plan"
+            | "read_plan"
+            | "exit_plan_mode"
+            | "update_todos"
+    ) {
         return detail
             .filter(|detail| !detail.is_empty())
             .unwrap_or_else(|| name.to_owned());
@@ -95,6 +105,135 @@ pub(super) fn tui_tool_detail(name: &str, arguments: &serde_json::Map<String, Va
     match detail {
         Some(detail) if !detail.is_empty() => format!("{name} {detail}"),
         _ => name.to_owned(),
+    }
+}
+
+pub(super) fn completed_plan_or_todo_view(
+    tool: &StartedToolView,
+    output: &str,
+) -> Option<TimelineItem> {
+    let value: Value = serde_json::from_str(output).ok()?;
+    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    match tool.name.as_str() {
+        "enter_plan_mode" => {
+            let existing = value
+                .get("existing_plans")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let body = if existing > 0 {
+                format!("Read-only Plan Mode active ({existing} existing plans in session)")
+            } else {
+                "Read-only Plan Mode active (workspace file edits blocked)".to_owned()
+            };
+            Some(TimelineItem::Expanded {
+                title: "Plan entered read-only mode".to_owned(),
+                body,
+                expanded: false,
+            })
+        }
+        "write_plan" => {
+            let title = value
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Untitled Plan");
+            let file_name = value
+                .get("file_name")
+                .and_then(Value::as_str)
+                .unwrap_or("plan.md");
+            let revision = value.get("revision").and_then(Value::as_u64).unwrap_or(1);
+            let plan_id = value.get("plan_id").and_then(Value::as_str).unwrap_or("");
+            let file_path = value
+                .get("file_path")
+                .and_then(Value::as_str)
+                .unwrap_or(file_name);
+            let body = if plan_id.is_empty() {
+                file_path.to_owned()
+            } else {
+                format!("{plan_id} · {file_path}")
+            };
+            Some(TimelineItem::Expanded {
+                title: format!("Plan saved \"{title}\" ({file_name}, v{revision})"),
+                body,
+                expanded: false,
+            })
+        }
+        "read_plan" => {
+            let plan_count = value
+                .get("plans")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            let selected = value.get("selected").filter(|selected| !selected.is_null());
+            let (title, body) = if let Some(selected) = selected {
+                let summary = selected.get("summary").unwrap_or(selected);
+                let plan_title = summary
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("plan");
+                let file_name = summary
+                    .get("file_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let revision = summary.get("revision").and_then(Value::as_u64).unwrap_or(1);
+                let content = selected
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let heading = if file_name.is_empty() {
+                    format!("Plan read \"{plan_title}\" (v{revision})")
+                } else {
+                    format!("Plan read \"{plan_title}\" ({file_name}, v{revision})")
+                };
+                (heading, compact_tool_output(content))
+            } else {
+                (
+                    format!("Plan listed {plan_count} plans"),
+                    "No active plan selected.".to_owned(),
+                )
+            };
+            Some(TimelineItem::Expanded {
+                title,
+                body,
+                expanded: false,
+            })
+        }
+        "exit_plan_mode" => {
+            let title = value
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Untitled Plan");
+            let file_name = value
+                .get("file_name")
+                .and_then(Value::as_str)
+                .unwrap_or("plan.md");
+            let revision = value.get("revision").and_then(Value::as_u64).unwrap_or(1);
+            let message = value
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Ready for user review.");
+            Some(TimelineItem::Expanded {
+                title: format!("Plan review \"{title}\" ({file_name}, v{revision})"),
+                body: message.to_owned(),
+                expanded: false,
+            })
+        }
+        "update_todos" => {
+            let count = value.get("count").and_then(Value::as_u64).unwrap_or(0);
+            let noun = if count == 1 { "item" } else { "items" };
+            let summary = value
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            Some(TimelineItem::Expanded {
+                title: format!("Todos updated ({count} {noun})"),
+                body: compact_tool_output(summary),
+                expanded: false,
+            })
+        }
+        _ => None,
     }
 }
 

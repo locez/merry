@@ -1,17 +1,16 @@
 use crate::tui::{
-    overlay::Overlay,
-    plan_projector::plan_timeline_item,
     process_output::process_exit_code,
     projector::tool_output::{
-        compact_tool_output, completed_process_view, completed_tool_title, expanded_tool_title,
-        failed_tool_body, parse_apply_patch_view, permission_output_bodies,
-        read_text_output_preview, started_tool_title_and_detail, tool_output_text,
+        compact_tool_output, completed_plan_or_todo_view, completed_process_view,
+        completed_tool_title, expanded_tool_title, failed_tool_body, parse_apply_patch_view,
+        permission_output_bodies, read_text_output_preview, started_tool_title_and_detail,
+        tool_output_text,
     },
     state::{CommandView, TimelineItem, ToolOutputPreview, TuiState},
 };
 use merry_core::{
-    PlanAttemptOutcome, PlanDirectiveStatus, PlanPhase, RuntimeEvent, TOOL_CANCELLED_BY_USER_CODE,
-    ToolCallId, ToolCallResultStatus, ToolName,
+    PlanModeState, PlanReviewDecision, RuntimeEvent, TOOL_CANCELLED_BY_USER_CODE, ToolCallId,
+    ToolCallResultStatus, ToolName,
 };
 use merry_runtime::SessionTranscriptItem;
 use merry_tools::{APPLY_PATCH_TOOL, READ_TEXT_TOOL};
@@ -247,6 +246,10 @@ impl TuiProjector {
                             expanded: false,
                         },
                     );
+                } else if let Some(tool) = tool.as_ref()
+                    && let Some(item) = completed_plan_or_todo_view(tool, &text)
+                {
+                    state.replace_timeline_item(tool.timeline_index, item);
                 } else if let Some(tool) = tool.as_ref() {
                     state.replace_timeline_item(
                         tool.timeline_index,
@@ -364,89 +367,76 @@ impl TuiProjector {
                     diagnostic: Some(detail),
                 });
             }
-            RuntimeEvent::PlanUpdated {
-                snapshot, summary, ..
-            } => {
-                let refresh_open_approval =
-                    matches!(state.overlay(), Some(Overlay::PlanApproval(_)))
-                        && state.plan().snapshot().is_some_and(|current| {
-                            current.plan_id != snapshot.plan_id
-                                || current.revision != snapshot.revision
-                        });
-                let entered_planning_review = snapshot.phase == PlanPhase::Planning
-                    && snapshot.root_node_id.is_some()
-                    && !state.plan().snapshot().is_some_and(|current| {
-                        current.phase == PlanPhase::Planning && current.root_node_id.is_some()
+            RuntimeEvent::PlanModeChanged { mode, .. } => {
+                let previous = state.plan().mode();
+                state.plan_mut().set_mode(mode);
+                if previous != mode {
+                    let detail = match mode {
+                        PlanModeState::Pending => {
+                            "Plan Mode armed (read-only exploration on next prompt)"
+                        }
+                        PlanModeState::Active => "Plan Mode active (workspace writes blocked)",
+                        PlanModeState::ExitPending => {
+                            "Plan Mode will exit after the current turn completes"
+                        }
+                        PlanModeState::Inactive => "Plan Mode off (workspace writes enabled)",
+                    };
+                    state.push_timeline_item(TimelineItem::Muted {
+                        title: "Plan Mode".to_owned(),
+                        detail: detail.to_owned(),
                     });
-                let entered_awaiting_approval = snapshot.phase == PlanPhase::AwaitingApproval
-                    && !state
-                        .plan()
-                        .snapshot()
-                        .is_some_and(|current| current.phase == PlanPhase::AwaitingApproval);
-                let timeline_item =
-                    plan_timeline_item(state.plan().snapshot(), &snapshot, summary.summary());
-                state.plan_mut().update_snapshot(snapshot);
-                if let Some(item) = timeline_item {
-                    state.push_timeline_item(item);
-                }
-                if entered_planning_review || entered_awaiting_approval || refresh_open_approval {
-                    state.open_plan_approval();
                 }
             }
-            RuntimeEvent::PlanLeaseStarted { lease, .. } => {
-                state.plan_mut().update_lease(lease);
+            RuntimeEvent::PlanSaved { plan, .. } => {
+                let detail = format!(
+                    "{} ({}, v{})",
+                    plan.summary.title, plan.summary.file_name, plan.summary.revision
+                );
+                state.plan_mut().upsert_plan(plan.clone());
+                state.refresh_open_plan_view(&plan);
+                if !self.has_started_tool("write_plan") {
+                    state.push_timeline_item(TimelineItem::Muted {
+                        title: "Plan saved".to_owned(),
+                        detail,
+                    });
+                }
             }
-            RuntimeEvent::PlanProgressUpdated { progress, .. }
-            | RuntimeEvent::PlanAttemptProgressReported { progress, .. } => {
-                state.plan_mut().update_progress(progress);
+            RuntimeEvent::PlanApprovalRequested { plan, .. } => {
+                let plan_id = plan.summary.id.clone();
+                let detail = format!(
+                    "{} ({}, v{}) — ready for review",
+                    plan.summary.title, plan.summary.file_name, plan.summary.revision
+                );
+                state.plan_mut().mark_approval_requested(plan);
+                if !self.has_started_tool("exit_plan_mode") {
+                    state.push_timeline_item(TimelineItem::Muted {
+                        title: "Plan review".to_owned(),
+                        detail,
+                    });
+                }
+                state.open_plan_view(Some(plan_id));
             }
-            RuntimeEvent::PlanProgressReviewRequested { reason, .. } => {
+            RuntimeEvent::PlanReviewed {
+                plan_id, decision, ..
+            } => {
+                state.plan_mut().apply_review(&plan_id, &decision);
+                let title = match &decision {
+                    PlanReviewDecision::Approved { .. } => "Plan approved",
+                    PlanReviewDecision::ChangesRequested { .. } => "Plan changes requested",
+                    PlanReviewDecision::Abandoned => "Plan abandoned",
+                };
+                let detail = state
+                    .plan()
+                    .plan_by_id(&plan_id)
+                    .map(|doc| doc.summary.title.clone())
+                    .unwrap_or_else(|| plan_id.as_str().to_owned());
                 state.push_timeline_item(TimelineItem::Muted {
-                    title: "Plan review requested".to_owned(),
-                    detail: reason,
+                    title: title.to_owned(),
+                    detail,
                 });
             }
-            RuntimeEvent::PlanDirectiveUpdated { directive, .. }
-                if matches!(
-                    directive.status,
-                    PlanDirectiveStatus::Queued | PlanDirectiveStatus::Applied
-                ) =>
-            {
-                state.push_timeline_item(TimelineItem::Muted {
-                    title: match directive.status {
-                        PlanDirectiveStatus::Queued => "Plan steering queued",
-                        PlanDirectiveStatus::Applied => "Plan steering applied",
-                        _ => unreachable!("match guard limits directive status"),
-                    }
-                    .to_owned(),
-                    detail: format!("{:?}: {}", directive.kind, directive.reason)
-                        .to_ascii_lowercase(),
-                });
-            }
-            RuntimeEvent::PlanAttemptFinished { attempt, .. }
-                if matches!(
-                    attempt.outcome,
-                    Some(
-                        PlanAttemptOutcome::Blocked
-                            | PlanAttemptOutcome::SemanticFailure
-                            | PlanAttemptOutcome::Interrupted
-                            | PlanAttemptOutcome::Cancelled
-                    )
-                ) =>
-            {
-                state.plan_mut().update_attempt(attempt.clone());
-                let outcome = attempt
-                    .outcome
-                    .map(|outcome| format!("{outcome:?}").to_ascii_lowercase())
-                    .unwrap_or_else(|| "finished".to_owned());
-                state.push_timeline_item(TimelineItem::Diagnostic {
-                    title: format!("Plan node {outcome}"),
-                    body: attempt
-                        .diagnostic
-                        .as_ref()
-                        .map(|diagnostic| diagnostic.message().to_owned())
-                        .unwrap_or_else(|| attempt.node_id.as_str().to_owned()),
-                });
+            RuntimeEvent::TodoListUpdated { items, .. } => {
+                state.todo_dock_mut().set_items(items);
             }
             RuntimeEvent::StepCompleted { .. } => {
                 state.finish_reasoning();
@@ -504,6 +494,12 @@ impl TuiProjector {
             }
             _ => {}
         }
+    }
+
+    fn has_started_tool(&self, name: &str) -> bool {
+        self.started_tools
+            .values()
+            .any(|tool| tool.name.as_str() == name)
     }
 
     /// Stops running-tool animations when the run ends before individual results arrive.

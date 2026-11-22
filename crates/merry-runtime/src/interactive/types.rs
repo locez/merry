@@ -1,4 +1,4 @@
-use crate::{PlanControllerError, RuntimeError};
+use crate::{PlanError, RuntimeError};
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
@@ -102,7 +102,7 @@ pub enum InteractiveError {
     #[error("plan control failed: {source}")]
     Plan {
         #[from]
-        source: PlanControllerError,
+        source: PlanError,
     },
     #[error("plan controls require an idle interactive boundary")]
     PlanControlRequiresIdle,

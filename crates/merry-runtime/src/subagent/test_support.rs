@@ -3,7 +3,6 @@ pub(super) use super::{
     activity::SubagentActivityHub,
     child::{ChildLoopProjection, apply_loop_result},
     manager::{ManagedSubagent, SubagentBatch},
-    plan_link::{PlanLinkRuntime, PlanSubagentScope, plan_link_runtime_for_controller},
     protocol::{
         SpawnedSubagentStatusLabel, SpawnedSubagentView, SubagentStatusLabel, SubagentStatusView,
         WaitMode, WaitSubagentsOutput,
@@ -16,12 +15,7 @@ pub(super) use super::{
 };
 pub(super) use crate::{
     AgentLoopBlockedReason, AgentLoopResult, AgentLoopStatus, Runtime, RuntimeError, TaskAnchor,
-    plan::PlanController,
 };
-pub(super) use futures_util::future::BoxFuture;
-pub(super) use merry_core::{
-    PlanBindingId, PlanLinkSnapshot, PlanLinkStatus, SubagentId, SubagentTaskId, ToolName,
-};
+pub(super) use merry_core::{SubagentId, SubagentTaskId, ToolName};
 pub(super) use std::{collections::VecDeque, path::PathBuf, sync::Arc, time::Duration};
-pub(super) use tokio::sync::Notify;
 pub(super) use tokio_util::sync::CancellationToken;

@@ -23,12 +23,6 @@ pub(crate) fn is_valid_workspace_scope(path: &Path) -> bool {
         .all(|component| matches!(component, Component::Normal(_)))
 }
 
-pub(crate) fn workspace_scope_contains(parent: &Path, child: &Path) -> bool {
-    parent == Path::new(WORKSPACE_ROOT_SCOPE)
-        || parent == child
-        || (child != Path::new(WORKSPACE_ROOT_SCOPE) && child.starts_with(parent))
-}
-
 pub(crate) fn workspace_scopes_overlap(left: &Path, right: &Path) -> bool {
     left == Path::new(WORKSPACE_ROOT_SCOPE)
         || right == Path::new(WORKSPACE_ROOT_SCOPE)
@@ -42,12 +36,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_root_is_valid_and_contains_every_concrete_scope() {
+    fn workspace_root_is_valid_and_overlaps_every_concrete_scope() {
         let root = Path::new(".");
         let crate_path = Path::new("crates/merry-runtime");
 
         assert!(is_valid_workspace_scope(root));
-        assert!(workspace_scope_contains(root, crate_path));
         assert!(workspace_scopes_overlap(root, crate_path));
     }
 

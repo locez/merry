@@ -584,7 +584,6 @@ impl SubagentManager {
                     changed_paths: record.changed_paths,
                     diagnostics,
                     cancellation_token: CancellationToken::new(),
-                    plan_link: None,
                     completion_notification_acknowledged: true,
                     runtime: None,
                     generation_config: None,

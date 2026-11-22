@@ -91,7 +91,7 @@ async fn provider_stream_context_uses_runtime_session_as_prompt_cache_key() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn coordinator_request_explains_when_no_plan_is_active() {
+async fn coordinator_request_omits_plan_context_when_plan_mode_is_inactive() {
     let provider = RecordingModelProvider::new();
     let runtime = Runtime::builder(session_id("runtime-plan-inactive-context"))
         .model_provider(Arc::new(provider.clone()), model_name())
@@ -117,9 +117,33 @@ async fn coordinator_request_explains_when_no_plan_is_active() {
         .map(|message| message.content().as_text())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(request_text.contains("<plan_context>"));
-    assert!(request_text.contains("inactive"));
-    assert!(request_text.contains("Do not call read_plan"));
+    assert!(!request_text.contains("<plan_mode>"));
+
+    runtime
+        .set_plan_mode(true, false)
+        .await
+        .expect("plan mode enables");
+    runtime.activate_pending_plan_mode_for_prompt().await;
+    collect_step(
+        &runtime,
+        "Now plan the migration.",
+        crate::StepContext::default(),
+    )
+    .await;
+    let active_request = provider
+        .recorded_requests()
+        .into_iter()
+        .nth(1)
+        .expect("active plan mode request should be recorded");
+    let active_text = active_request
+        .messages()
+        .iter()
+        .map(|message| message.content().as_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(active_text.contains("<plan_mode>"));
+    assert!(active_text.contains("write_plan"));
+    assert!(active_text.contains("exit_plan_mode"));
 }
 
 #[tokio::test(flavor = "current_thread")]

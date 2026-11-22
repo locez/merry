@@ -419,7 +419,6 @@ fn task_spec_from_input(
         context_files,
         expected_output,
         reasoning_effort,
-        plan_client_key,
         workspace,
         worktree_base,
     } = input;
@@ -471,8 +470,7 @@ fn task_spec_from_input(
     }
     Ok(task
         .with_expected_output(expected_output)
-        .with_reasoning_effort(reasoning_effort)
-        .with_plan_client_key(plan_client_key))
+        .with_reasoning_effort(reasoning_effort))
 }
 
 fn succeeded_json_output<T>(tool_name: &str, output: &T) -> ToolExecutionResult

@@ -5,7 +5,7 @@ use crate::{
     runtime::{
         CompactionConfig, Runtime, RuntimeInner,
         tests::support::{
-            common::{model_configs_with_primary, runtime_session_and_plan_controller, session_id},
+            common::{model_configs_with_primary, runtime_session, session_id},
             model_provider::RecordingModelProvider,
         },
     },
@@ -29,8 +29,7 @@ where
 {
     let event_buffer_size = NonZeroUsize::new(16).expect("non-zero buffer");
     let id = session_id(session);
-    let (session_state, plan_controller) =
-        runtime_session_and_plan_controller(id.clone(), event_buffer_size);
+    let session_state = runtime_session(id.clone());
     let trajectory = crate::trajectory::RuntimeObservability::new(id.clone(), Vec::new());
     let subagent_event_sink = crate::subagent::SubagentEventSink::new(
         Arc::clone(&session_state),
@@ -74,9 +73,6 @@ where
             background_process_control: None,
             subagent_manager: None,
             coordinator_plan_tools: false,
-            plan_controller,
-            plan_subagent_control: None,
-            plan_subagent_scope: None,
             session_store: None,
             tool_batch_active: AtomicBool::new(false),
             activity_hub: Arc::new(crate::SubagentActivityHub::new()),
@@ -95,8 +91,7 @@ pub(in crate::runtime::tests) fn runtime_with_provider(
 ) -> Runtime {
     let event_buffer_size = NonZeroUsize::new(16).expect("non-zero buffer");
     let id = session_id(session);
-    let (session_state, plan_controller) =
-        runtime_session_and_plan_controller(id.clone(), event_buffer_size);
+    let session_state = runtime_session(id.clone());
     let trajectory = crate::trajectory::RuntimeObservability::new(id.clone(), Vec::new());
     let subagent_event_sink = crate::subagent::SubagentEventSink::new(
         Arc::clone(&session_state),
@@ -140,9 +135,6 @@ pub(in crate::runtime::tests) fn runtime_with_provider(
             background_process_control: None,
             subagent_manager: None,
             coordinator_plan_tools: false,
-            plan_controller,
-            plan_subagent_control: None,
-            plan_subagent_scope: None,
             session_store: None,
             tool_batch_active: AtomicBool::new(false),
             activity_hub: Arc::new(crate::SubagentActivityHub::new()),
@@ -164,8 +156,7 @@ where
 {
     let event_buffer_size = NonZeroUsize::new(16).expect("non-zero buffer");
     let id = session_id(session);
-    let (session_state, plan_controller) =
-        runtime_session_and_plan_controller(id.clone(), event_buffer_size);
+    let session_state = runtime_session(id.clone());
     let trajectory = crate::trajectory::RuntimeObservability::new(id.clone(), Vec::new());
     let subagent_event_sink = crate::subagent::SubagentEventSink::new(
         Arc::clone(&session_state),
@@ -209,9 +200,6 @@ where
             background_process_control: None,
             subagent_manager: None,
             coordinator_plan_tools: false,
-            plan_controller,
-            plan_subagent_control: None,
-            plan_subagent_scope: None,
             session_store: None,
             tool_batch_active: AtomicBool::new(false),
             activity_hub: Arc::new(crate::SubagentActivityHub::new()),

@@ -18,15 +18,10 @@ from ._event_payloads import (
     ModelRetryAttemptStartedPayload,
     ModelRetryExhaustedPayload,
     ModelRetryScheduledPayload,
-    PlanAttemptFinishedPayload,
-    PlanAttemptProgressReportedPayload,
-    PlanDirectiveUpdatedPayload,
-    PlanLeaseStartedPayload,
-    PlanNodeReadyPayload,
-    PlanPhaseChangedPayload,
-    PlanProgressReviewRequestedPayload,
-    PlanProgressUpdatedPayload,
-    PlanUpdatedPayload,
+    PlanApprovalRequestedPayload,
+    PlanModeChangedPayload,
+    PlanReviewedPayload,
+    PlanSavedPayload,
     QueuedInputAcceptedPayload,
     QueuedInputsChangedPayload,
     ReasoningDeltaPayload,
@@ -42,6 +37,7 @@ from ._event_payloads import (
     SubagentSpawnedPayload,
     SubagentStartedPayload,
     SubagentStatusChangedPayload,
+    TodoListUpdatedPayload,
     ToolCallBatchStartedPayload,
     ToolCallFinishedPayload,
     ToolCallStartedPayload,
@@ -53,6 +49,7 @@ from ._event_types import (
     EventSource,
     EventType,
     InteractiveRunState,
+    PlanModeState,
     QueuedInput,
     QueuedInputs,
     RawEventData,
@@ -63,6 +60,8 @@ from ._event_types import (
     RuntimeToolResult,
     RuntimeToolResultStatus,
     SubagentStatus,
+    TodoItem,
+    TodoStatus,
 )
 from ._event_values import (
     _enum_value,
@@ -236,54 +235,30 @@ def _parse_payload(
                 _diagnostic(data["diagnostic"]),
                 _source(data),
             )
-        case EventType.PLAN_UPDATED:
-            return PlanUpdatedPayload(
-                RawEventData.from_value(data["snapshot"], "plan snapshot"),
-                RawEventData.from_value(data["summary"], "plan revision summary"),
+        case EventType.PLAN_MODE_CHANGED:
+            return PlanModeChangedPayload(
+                _enum_value(PlanModeState, data["mode"], "plan mode"),
                 _source(data),
             )
-        case EventType.PLAN_PHASE_CHANGED:
-            return PlanPhaseChangedPayload(
+        case EventType.PLAN_SAVED:
+            return PlanSavedPayload(
+                RawEventData.from_value(data["plan"], "plan document"),
+                _source(data),
+            )
+        case EventType.PLAN_APPROVAL_REQUESTED:
+            return PlanApprovalRequestedPayload(
+                RawEventData.from_value(data["plan"], "plan document"),
+                _source(data),
+            )
+        case EventType.PLAN_REVIEWED:
+            return PlanReviewedPayload(
                 _required_string(data, "plan_id"),
-                _required_string(data, "phase"),
+                RawEventData.from_value(data["decision"], "plan review decision"),
                 _source(data),
             )
-        case EventType.PLAN_NODE_READY:
-            return PlanNodeReadyPayload(
-                _required_string(data, "plan_id"),
-                _required_string(data, "node_id"),
-                _required_int(data, "node_revision"),
-                _source(data),
-            )
-        case EventType.PLAN_LEASE_STARTED:
-            return PlanLeaseStartedPayload(
-                RawEventData.from_value(data["lease"], "plan lease"), _source(data)
-            )
-        case EventType.PLAN_PROGRESS_UPDATED:
-            return PlanProgressUpdatedPayload(
-                RawEventData.from_value(data["progress"], "plan progress"),
-                _source(data),
-            )
-        case EventType.PLAN_PROGRESS_REVIEW_REQUESTED:
-            return PlanProgressReviewRequestedPayload(
-                _required_string(data, "plan_id"),
-                _required_string(data, "attempt_id"),
-                _required_string(data, "reason"),
-                _source(data),
-            )
-        case EventType.PLAN_ATTEMPT_PROGRESS_REPORTED:
-            return PlanAttemptProgressReportedPayload(
-                RawEventData.from_value(data["progress"], "plan attempt progress"),
-                _source(data),
-            )
-        case EventType.PLAN_DIRECTIVE_UPDATED:
-            return PlanDirectiveUpdatedPayload(
-                RawEventData.from_value(data["directive"], "plan directive"),
-                _source(data),
-            )
-        case EventType.PLAN_ATTEMPT_FINISHED:
-            return PlanAttemptFinishedPayload(
-                RawEventData.from_value(data["attempt"], "plan attempt"),
+        case EventType.TODO_LIST_UPDATED:
+            return TodoListUpdatedPayload(
+                _todo_items(data["items"]),
                 _source(data),
             )
         case EventType.RUN_FAILED:
@@ -302,6 +277,27 @@ def _parse_payload(
             return ClosedPayload()
         case EventType.UNKNOWN:
             return UnknownEventPayload(raw_type, RawEventData(data))
+
+
+def _todo_items(value: object) -> tuple[TodoItem, ...]:
+    if not isinstance(value, list):
+        raise TypeError("todo items must be a list")
+    items: list[TodoItem] = []
+    for entry in value:
+        raw = require_json_object(entry, "todo item")
+        validate_object_keys(
+            raw,
+            "todo item",
+            required={"id", "content", "status"},
+        )
+        items.append(
+            TodoItem(
+                _required_string(raw, "id"),
+                _required_string(raw, "content"),
+                _enum_value(TodoStatus, raw["status"], "todo status"),
+            )
+        )
+    return tuple(items)
 
 
 def _source(data: Mapping[str, JsonValue]) -> EventSource:

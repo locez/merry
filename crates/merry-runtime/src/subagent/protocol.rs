@@ -251,11 +251,6 @@ pub struct SpawnSubagentTaskInput {
     #[serde(default, deserialize_with = "deserialize_optional_string_tolerant")]
     pub reasoning_effort: Option<String>,
     #[schemars(
-        description = "Optional authored Plan client key from `update_plan.bindable_plan_client_keys` (never a runtime node id such as `plan-node-2`)."
-    )]
-    #[serde(default, deserialize_with = "deserialize_optional_string_tolerant")]
-    pub plan_client_key: Option<String>,
-    #[schemars(
         description = "Optional filesystem isolation mode: `shared` (default, shares parent workspace) or `worktree` (isolated detached Git worktree outside the main repository; requires a Git workspace)."
     )]
     #[serde(default, deserialize_with = "deserialize_optional_enum_tolerant")]

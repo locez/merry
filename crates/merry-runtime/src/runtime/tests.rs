@@ -6,7 +6,6 @@ mod event_cancellation;
 mod memory_activation_flow;
 mod model_role_flow;
 mod permission_execution;
-mod plan_surface;
 mod process_cancellation;
 mod process_execution;
 mod process_shell_execution;

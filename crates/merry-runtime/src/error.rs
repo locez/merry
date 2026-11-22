@@ -56,30 +56,12 @@ pub enum RuntimeError {
         operation: &'static str,
     },
 
-    /// A mutating Plan tool could not durably record its effect before execution.
-    #[error(
-        "plan effect attribution failed for tool call {call_id} in session {session_id}: {message}"
-    )]
-    PlanEffectAttribution {
-        /// Session executing the Plan tool.
-        session_id: SessionId,
-        /// Tool call that was not executed.
-        call_id: ToolCallId,
-        /// Actionable controller or persistence detail.
-        message: String,
-    },
-
-    /// A runtime bound to one Plan subagent no longer owns a live attempt.
-    #[error(
-        "plan subagent attempt is not live for tool call {call_id} in session {session_id}: {message}"
-    )]
-    PlanSubagentAttemptInactive {
-        /// Session whose bound attempt is no longer admissible.
-        session_id: SessionId,
-        /// Tool call that was not executed.
-        call_id: ToolCallId,
-        /// Actionable controller or persisted-state detail.
-        message: String,
+    /// A Plan Mode operation failed validation or referenced an unknown plan.
+    #[error("plan error: {source}")]
+    Plan {
+        /// Source plan error.
+        #[from]
+        source: crate::PlanError,
     },
 
     /// A user image or image-bearing message failed runtime validation.
@@ -397,8 +379,7 @@ impl RuntimeError {
             Self::AgentLoopConfig { .. } => "agent_loop_config",
             Self::ChildRuntimeBuild { .. } => "child_runtime_build",
             Self::InvalidSubagentSelection { .. } => "invalid_subagent_selection",
-            Self::PlanEffectAttribution { .. } => "plan_effect_attribution_failed",
-            Self::PlanSubagentAttemptInactive { .. } => "plan_subagent_attempt_inactive",
+            Self::Plan { .. } => "plan_error",
             Self::InvalidUserImageInput { .. } => "invalid_user_image_input",
             Self::UnknownToolCall { .. } => "unknown_tool_call",
             Self::BridgeToolResultBatchEmpty { .. } => "bridge_tool_result_batch_empty",

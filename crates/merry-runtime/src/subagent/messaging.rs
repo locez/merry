@@ -286,10 +286,6 @@ impl SubagentManager {
                     generation_config: default_generation_config.clone(),
                     parent_primary_model,
                     parent_generation_config,
-                    plan_subagent_control: None,
-                    plan_subagent_scope: None,
-                    plan_link: None,
-                    plan_link_runtime: self.attached_plan_link_runtime(),
                     activity_hub: self.attached_activity_hub(),
                 },
             )

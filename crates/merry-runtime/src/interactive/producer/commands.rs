@@ -148,95 +148,111 @@ impl InteractiveProducer {
                 let _ = ack_sender.send(result);
                 Some(CommandDecision::Continue)
             }
-            InteractiveCommand::EnterPlanMode { reason, ack_sender } => {
-                let result = if mode == CommandHandlingMode::Waiting {
-                    self.runtime.enter_plan_mode(&reason).await.map(|_| ())
-                } else {
-                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
-                    return Some(CommandDecision::Continue);
-                };
-                let _ = ack_sender.send(result.map_err(InteractiveError::from));
-                Some(CommandDecision::Continue)
-            }
-            InteractiveCommand::ApprovePlan { input, ack_sender } => {
-                let result = if mode == CommandHandlingMode::Waiting {
-                    self.runtime.approve_plan(input).await.map(|_| ())
-                } else {
-                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
-                    return Some(CommandDecision::Continue);
-                };
-                let should_continue = result.is_ok();
-                let _ = ack_sender.send(result.map_err(InteractiveError::from));
-                if should_continue {
-                    self.coordinator_continuation_note = Some(
-                        "The user approved the current Plan through the Plan UI. Continue the approved execution now; do not ask for approval again.".to_owned(),
-                    );
-                    Some(CommandDecision::RunContinuation)
-                } else {
-                    Some(CommandDecision::Continue)
-                }
-            }
-            InteractiveCommand::RevisePlan { reason, ack_sender } => {
-                let result = if mode == CommandHandlingMode::Waiting {
-                    self.runtime.revise_plan(&reason).await.map(|_| ())
-                } else {
-                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
-                    return Some(CommandDecision::Continue);
-                };
-                let _ = ack_sender.send(result.map_err(InteractiveError::from));
-                Some(CommandDecision::Continue)
-            }
-            InteractiveCommand::PausePlanScheduling { reason, ack_sender } => {
-                let result = if mode == CommandHandlingMode::Waiting {
-                    self.runtime
-                        .pause_plan_scheduling(&reason)
-                        .await
-                        .map(|_| ())
-                } else {
-                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
-                    return Some(CommandDecision::Continue);
-                };
-                let _ = ack_sender.send(result.map_err(InteractiveError::from));
-                Some(CommandDecision::Continue)
-            }
-            InteractiveCommand::ResumePlanScheduling { reason, ack_sender } => {
-                let result = if mode == CommandHandlingMode::Waiting {
-                    self.runtime
-                        .resume_plan_scheduling(&reason)
-                        .await
-                        .map(|_| ())
-                } else {
-                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
-                    return Some(CommandDecision::Continue);
-                };
-                let _ = ack_sender.send(result.map_err(InteractiveError::from));
-                Some(CommandDecision::Continue)
-            }
-            InteractiveCommand::RetryInterruptedPlanNode {
-                node_id,
-                reason,
+            InteractiveCommand::SetPlanMode {
+                enabled,
                 ack_sender,
             } => {
-                let result = if mode == CommandHandlingMode::Waiting {
-                    self.runtime
-                        .retry_interrupted_plan_node(node_id, &reason)
-                        .await
-                        .map(|_| ())
-                } else {
-                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
-                    return Some(CommandDecision::Continue);
-                };
-                let _ = ack_sender.send(result.map_err(InteractiveError::from));
+                let turn_in_flight = mode == CommandHandlingMode::Running;
+                match self.runtime.set_plan_mode(enabled, turn_in_flight).await {
+                    Ok(event) => {
+                        let _ = ack_sender.send(Ok(()));
+                        if let Some(event) = event
+                            && !self.send_runtime_events(vec![event]).await
+                        {
+                            return None;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = ack_sender.send(Err(InteractiveError::from(error)));
+                    }
+                }
                 Some(CommandDecision::Continue)
             }
-            InteractiveCommand::CancelPlan { reason, ack_sender } => {
-                let result = if mode == CommandHandlingMode::Waiting {
-                    self.runtime.cancel_plan(&reason).await.map(|_| ())
-                } else {
+            InteractiveCommand::ApprovePlan {
+                plan_id,
+                note,
+                ack_sender,
+            } => {
+                if mode != CommandHandlingMode::Waiting {
                     let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
                     return Some(CommandDecision::Continue);
-                };
-                let _ = ack_sender.send(result.map_err(InteractiveError::from));
+                }
+                match self.runtime.approve_plan(plan_id, note.clone()).await {
+                    Ok((doc, events)) => {
+                        let _ = ack_sender.send(Ok(()));
+                        if !self.send_runtime_events(events).await {
+                            return None;
+                        }
+                        let mut message = format!(
+                            "The user approved plan \"{}\" (`{}`). Plan Mode is now off and workspace edits are enabled. Proceed with implementing the approved plan.",
+                            doc.summary.title, doc.summary.file_name
+                        );
+                        if let Some(note) = note.as_deref().map(str::trim).filter(|n| !n.is_empty())
+                        {
+                            message.push_str("\n\nUser notes attached to approval:\n");
+                            message.push_str(note);
+                        }
+                        self.coordinator_continuation_note = Some(message);
+                        Some(CommandDecision::RunContinuation)
+                    }
+                    Err(error) => {
+                        let _ = ack_sender.send(Err(InteractiveError::from(error)));
+                        Some(CommandDecision::Continue)
+                    }
+                }
+            }
+            InteractiveCommand::RequestPlanChanges {
+                plan_id,
+                feedback,
+                ack_sender,
+            } => {
+                if mode != CommandHandlingMode::Waiting {
+                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
+                    return Some(CommandDecision::Continue);
+                }
+                match self
+                    .runtime
+                    .request_plan_changes(plan_id, feedback.clone())
+                    .await
+                {
+                    Ok((doc, events)) => {
+                        let _ = ack_sender.send(Ok(()));
+                        if !self.send_runtime_events(events).await {
+                            return None;
+                        }
+                        self.coordinator_continuation_note = Some(format!(
+                            "The user requested changes to plan \"{}\" (`{}`) and kept Plan Mode active. Revise the plan with `write_plan` and call `exit_plan_mode` when ready for review again.\n\nUser feedback:\n{}",
+                            doc.summary.title,
+                            doc.summary.file_name,
+                            feedback.trim()
+                        ));
+                        Some(CommandDecision::RunContinuation)
+                    }
+                    Err(error) => {
+                        let _ = ack_sender.send(Err(InteractiveError::from(error)));
+                        Some(CommandDecision::Continue)
+                    }
+                }
+            }
+            InteractiveCommand::AbandonPlan {
+                plan_id,
+                ack_sender,
+            } => {
+                if mode != CommandHandlingMode::Waiting {
+                    let _ = ack_sender.send(Err(InteractiveError::PlanControlRequiresIdle));
+                    return Some(CommandDecision::Continue);
+                }
+                match self.runtime.abandon_plan(plan_id).await {
+                    Ok((_doc, events)) => {
+                        let _ = ack_sender.send(Ok(()));
+                        if !self.send_runtime_events(events).await {
+                            return None;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = ack_sender.send(Err(InteractiveError::from(error)));
+                    }
+                }
                 Some(CommandDecision::Continue)
             }
             InteractiveCommand::Close { ack_sender } => {

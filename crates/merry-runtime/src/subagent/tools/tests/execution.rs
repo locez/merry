@@ -422,7 +422,6 @@ async fn tolerant_deserialization_handles_sentinels_single_task_and_singular_age
             "display_name": "null",
             "role": "explore",
             "expected_output": "none",
-            "plan_client_key": "",
             "read_scope": ["\"crates/merry-runtime\""],
             "write_scope": "undefined"
         }),

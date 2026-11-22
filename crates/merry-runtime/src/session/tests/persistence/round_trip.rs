@@ -301,12 +301,12 @@ async fn subsequent_journal_commits_only_append_deltas_and_strip_process_admissi
         "external_tool_catalog must not be written to journal.jsonl"
     );
     assert!(
-        second_commit["state"].get("active_plan").is_none(),
-        "unchanged active_plan must not repeat on later commits"
+        second_commit["state"].get("plan_mode").is_none(),
+        "unchanged plan_mode must not repeat on later commits"
     );
     assert!(
-        second_commit["state"].get("terminal_plans").is_none(),
-        "empty terminal_plans must not be serialized"
+        second_commit["state"].get("todo_list").is_none(),
+        "unchanged todo_list must not repeat on later commits"
     );
     assert!(
         second_commit["state"].get("context_entries").is_none(),

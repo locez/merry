@@ -9,6 +9,7 @@ pub mod plan;
 pub mod runtime_event;
 pub mod schema;
 pub mod subagent_activity;
+pub mod todo;
 pub mod tool;
 pub mod tool_catalog;
 pub mod trajectory;
@@ -17,22 +18,15 @@ pub mod usage;
 pub use error::CoreError;
 pub use event::{ErrorInfo, MerryErrorDomain, MerryErrorInfo, MerryRetryability};
 pub use id::{
-    PlanApprovalRequirementId, PlanAttemptId, PlanBindingId, PlanDirectiveId, PlanId, PlanLeaseId,
-    PlanNodeId, ProviderName, SessionId, SkillId, SubagentId, SubagentTaskId, ToolAdapterId,
+    PlanId, ProviderName, SessionId, SkillId, SubagentId, SubagentTaskId, ToolAdapterId,
     ToolBindingName, ToolCallBatchId, ToolCallId, ToolName, ToolSourceFingerprint, ToolSourceId,
     TrajectoryRecordId,
 };
 pub use journal::{RuntimeJournalEvent, RuntimeJournalPayload};
 pub use output_rate::{ModelOutputRate, OutputTimingQuality, OutputTokenSource};
 pub use plan::{
-    CoordinatorDirectiveSnapshot, PlanActivationSource, PlanApprovalRequirementKind,
-    PlanApprovalRequirementSnapshot, PlanApprovalRequirementStatus, PlanAttemptOutcome,
-    PlanAttemptProgressSnapshot, PlanAttemptSnapshot, PlanCapabilityEnvelopeSnapshot,
-    PlanDirectiveConstraints, PlanDirectiveKind, PlanDirectiveStatus, PlanEffectiveNodeStatus,
-    PlanExecutionSummary, PlanExecutorPolicy, PlanHarnessSnapshot, PlanLeaseSnapshot,
-    PlanLeaseStatus, PlanLinkSnapshot, PlanLinkStatus, PlanNodeResult, PlanNodeSnapshot,
-    PlanNodeStatus, PlanPhase, PlanRecoveryPolicySnapshot, PlanResourcePolicySnapshot,
-    PlanRevisionSummary, PlanSchedulerStatus, PlanSnapshot,
+    PlanDocument, PlanDocumentStatus, PlanDocumentSummary, PlanModeState, PlanReviewDecision,
+    PlanSessionSnapshot,
 };
 pub use runtime_event::{
     ImageSummary, InteractiveRunState, QueuedInputView, QueuedInputsView, RuntimeEvent,
@@ -41,6 +35,7 @@ pub use runtime_event::{
 };
 pub use schema::ToolInputSchema;
 pub use subagent_activity::{SubagentActivityPhase, SubagentActivitySnapshot};
+pub use todo::{MAX_TODO_CONTENT_BYTES, MAX_TODO_ID_BYTES, MAX_TODO_ITEMS, TodoItem, TodoStatus};
 pub use tool::{
     PendingToolCall, PendingToolCallBatch, TOOL_CANCELLED_BY_USER_CODE, ToolCallArguments,
     ToolCallResult, ToolCallResultStatus, ToolSpec,

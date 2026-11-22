@@ -86,6 +86,19 @@ impl CompletionMenu {
         self.items.get(self.selected)
     }
 
+    pub(crate) fn visible_window(&self, max_rows: usize) -> (usize, usize) {
+        if self.items.is_empty() || max_rows == 0 {
+            return (0, 0);
+        }
+        let window = max_rows.min(self.items.len());
+        let start = if self.selected >= window {
+            (self.selected + 1 - window).min(self.items.len() - window)
+        } else {
+            0
+        };
+        (start, (start + window).min(self.items.len()))
+    }
+
     pub(crate) fn select_next(&mut self) {
         if !self.items.is_empty() {
             self.selected = (self.selected + 1) % self.items.len();

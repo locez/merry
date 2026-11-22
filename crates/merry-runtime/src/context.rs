@@ -17,7 +17,6 @@ pub use budget::{
     CheckpointDecision, ContextBudget, ResolvedContextWindow, decide_checkpoint,
     resolve_context_window,
 };
-pub(crate) use input::stable_content_hash;
 pub use input::{
     CompactedCheckpoint, CompactedCheckpointSummary, ContextEntry, ContextSummary, ProjectRules,
     SessionContextSnapshot, TaskAnchor,

@@ -219,7 +219,7 @@ impl TuiState {
                 | Overlay::ReasoningPicker(_),
             ) => {}
             Some(
-                Overlay::PlanApproval(_)
+                Overlay::PlanView(_)
                 | Overlay::PermissionReview(_)
                 | Overlay::Dialog(_)
                 | Overlay::CommandDetails(_)
@@ -411,18 +411,70 @@ impl TuiState {
         self.show_dialog(MessageDialogKind::Info, title, message);
     }
 
-    pub(crate) fn open_plan_approval(&mut self) {
-        match (self.plan.approval_summary(), self.plan.approval_input()) {
-            (Ok(message), Ok(input)) => {
-                if !matches!(self.overlays.overlay, Some(Overlay::PlanApproval(_))) {
-                    self.overlays.dialog_back = self.overlays.overlay.take().map(Box::new);
-                }
-                self.overlays.overlay = Some(Overlay::plan_approval(message, input));
+    pub(crate) fn open_plan_view(&mut self, plan_id: Option<merry_core::PlanId>) {
+        let target_id = plan_id.or_else(|| self.plan.preferred_plan_id());
+        let Some(plan) = target_id
+            .as_ref()
+            .and_then(|id| self.plan.plan_by_id(id))
+            .cloned()
+        else {
+            return;
+        };
+        let overlay = crate::tui::plan_view::PlanViewOverlay::new(&plan, self);
+        self.completion_menu = None;
+        self.overlays.dialog_back = None;
+        self.overlays.provider_overlay_back = None;
+        self.overlays.overlay = Some(Overlay::PlanView(overlay));
+    }
+
+    pub(crate) fn select_plan_view(&mut self, plan_id: merry_core::PlanId) {
+        let Some(plan) = self.plan.plan_by_id(&plan_id).cloned() else {
+            return;
+        };
+        let mut overlay = match self.overlays.overlay.take() {
+            Some(Overlay::PlanView(view)) => view,
+            other => {
+                self.overlays.overlay = other;
+                return;
             }
-            (Err(error), _) | (_, Err(error)) => {
-                self.show_error_dialog("Plan approval unavailable", error)
-            }
+        };
+        overlay.select_plan(&plan, self);
+        self.overlays.overlay = Some(Overlay::PlanView(overlay));
+    }
+
+    pub(crate) fn step_plan_view(&mut self, delta: isize) {
+        let plans = self.plan.plans();
+        let count = plans.len();
+        if count <= 1 {
+            return;
         }
+        let current_id = match self.overlays.overlay.as_ref() {
+            Some(Overlay::PlanView(view)) => view.selected_plan_id().clone(),
+            _ => return,
+        };
+        let current = plans
+            .iter()
+            .position(|doc| doc.summary.id == current_id)
+            .unwrap_or(0);
+        let next = if delta < 0 {
+            if current == 0 { count - 1 } else { current - 1 }
+        } else {
+            (current + 1) % count
+        };
+        let next_id = plans[next].summary.id.clone();
+        self.select_plan_view(next_id);
+    }
+
+    pub(crate) fn refresh_open_plan_view(&mut self, plan: &merry_core::PlanDocument) {
+        let mut overlay = match self.overlays.overlay.take() {
+            Some(Overlay::PlanView(view)) => view,
+            other => {
+                self.overlays.overlay = other;
+                return;
+            }
+        };
+        overlay.refresh_plan(plan, self);
+        self.overlays.overlay = Some(Overlay::PlanView(overlay));
     }
 
     #[cfg(test)]
@@ -446,13 +498,6 @@ impl TuiState {
     pub(crate) fn set_permission_review_queue_total(&mut self, total: usize) {
         if let Some(Overlay::PermissionReview(review)) = self.overlays.overlay.as_mut() {
             review.set_queue_total(total);
-        }
-    }
-
-    pub(crate) fn plan_approval_input(&self) -> Option<merry_runtime::PlanApprovalInput> {
-        match self.overlays.overlay.as_ref() {
-            Some(Overlay::PlanApproval(approval)) => Some(approval.input().clone()),
-            _ => None,
         }
     }
 
@@ -497,7 +542,7 @@ impl TuiState {
                 Some(ProviderOverlayBack::Settings(settings)) => Some(Overlay::Settings(*settings)),
                 Some(ProviderOverlayBack::CommandPalette) | None => Some(command_palette),
             },
-            Some(Overlay::PlanApproval(_) | Overlay::PermissionReview(_) | Overlay::Dialog(_)) => {
+            Some(Overlay::PermissionReview(_) | Overlay::Dialog(_)) => {
                 self.overlays.dialog_back.take().map(|overlay| *overlay)
             }
             Some(Overlay::ModelPicker(_)) => {
@@ -519,11 +564,6 @@ impl TuiState {
     }
 
     pub(super) fn command_palette_overlay(&self) -> Overlay {
-        Overlay::command_palette_for_plan(PlanPaletteContext::from_snapshot(
-            self.plan.snapshot(),
-            self.plan.selected_node_id(),
-            self.plan.is_open(),
-            self.plan.is_focused(),
-        ))
+        Overlay::command_palette_for_plan(PlanPaletteContext::from_plan_state(&self.plan))
     }
 }

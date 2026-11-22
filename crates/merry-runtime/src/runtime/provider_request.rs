@@ -1,11 +1,7 @@
 use crate::{
     CheckpointDecision, ContextBudget, ContextCompiler, DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
     ProjectRules, PromptProfile, ResolvedContextWindow, RuntimeError, SessionContextSnapshot,
-    SkillCatalog, TaskAnchor, decide_checkpoint,
-    plan::projection::{
-        coordinator_plan_control_message, coordinator_plan_inactive_control_message,
-    },
-    resolve_context_window,
+    SkillCatalog, TaskAnchor, decide_checkpoint, resolve_context_window,
     session::{SessionState, TranscriptItemSnapshot},
     step::{StepInput, StepModelRequestParts, compile_step_model_request},
     token_estimate::{TokenEstimateScale, estimate_model_input_tokens},
@@ -103,20 +99,13 @@ impl StepRequestInputs {
     pub(super) fn from_session(
         session: &SessionState,
         transcript: Vec<TranscriptItemSnapshot>,
-        plan_control_override: Option<String>,
-        coordinator_plan_tools: bool,
     ) -> Self {
         Self {
             snapshot: session.context_snapshot(),
             skill_catalog: session.skill_catalog(),
             project_rules: session.project_rules(),
             task_anchor: session.task_anchor(),
-            plan_control: plan_control_override.or_else(|| {
-                session.active_plan().map_or_else(
-                    || coordinator_plan_tools.then(coordinator_plan_inactive_control_message),
-                    |plan| Some(coordinator_plan_control_message(plan.snapshot())),
-                )
-            }),
+            plan_control: session.dynamic_plan_and_todo_context(),
             transcript,
             memory_context: None,
         }
@@ -145,16 +134,9 @@ pub(super) enum StepRequestCompileError {
 
 pub(super) fn step_request_inputs_from_session(
     session: &SessionState,
-    plan_control_override: Option<String>,
-    coordinator_plan_tools: bool,
 ) -> Result<StepRequestInputs, RuntimeError> {
     let transcript = session.provider_transcript_snapshot();
-    Ok(StepRequestInputs::from_session(
-        session,
-        transcript,
-        plan_control_override,
-        coordinator_plan_tools,
-    ))
+    Ok(StepRequestInputs::from_session(session, transcript))
 }
 
 pub(super) fn compile_step_request_from_inputs(
@@ -366,7 +348,7 @@ mod tests {
         let input = StepInput::user_text("current input").expect("valid step input");
         let model = ModelName::new("test/model").expect("valid model name");
 
-        let without_checkpoint = StepRequestInputs::from_session(&session, Vec::new(), None, false);
+        let without_checkpoint = StepRequestInputs::from_session(&session, Vec::new());
         let baseline = estimate_compaction_fixed_dynamic_tokens(
             &input,
             &model,
@@ -382,7 +364,7 @@ mod tests {
         session.set_compacted_checkpoint(
             CompactedCheckpoint::new("checkpoint body ".repeat(200)).expect("valid checkpoint"),
         );
-        let with_checkpoint = StepRequestInputs::from_session(&session, Vec::new(), None, false);
+        let with_checkpoint = StepRequestInputs::from_session(&session, Vec::new());
         let checkpoint_estimates = estimate_compaction_fixed_dynamic_tokens(
             &input,
             &model,
@@ -403,12 +385,8 @@ mod tests {
         session
             .close_model_response(turn_id, false)
             .expect("history turn completes");
-        let with_history = StepRequestInputs::from_session(
-            &session,
-            session.provider_transcript_snapshot(),
-            None,
-            false,
-        );
+        let with_history =
+            StepRequestInputs::from_session(&session, session.provider_transcript_snapshot());
         let history_estimates = estimate_compaction_fixed_dynamic_tokens(
             &input,
             &model,
@@ -428,7 +406,7 @@ mod tests {
             SessionState::new(SessionId::new("memory-context-estimate").expect("valid session id"));
         let input = StepInput::user_text("current input").expect("valid step input");
         let model = ModelName::new("test/model").expect("valid model name");
-        let without = StepRequestInputs::from_session(&session, Vec::new(), None, false);
+        let without = StepRequestInputs::from_session(&session, Vec::new());
         let baseline = estimate_compaction_fixed_dynamic_tokens(
             &input,
             &model,

@@ -246,13 +246,21 @@ pub(crate) enum ControllerEffect {
         reasoning_effort: merry_llm::ReasoningEffort,
         target: ModelPickerTarget,
     },
-    EnterPlanMode,
-    ApprovePlan(merry_runtime::PlanApprovalInput),
+    SetPlanMode {
+        enabled: bool,
+        initial_prompt: Option<String>,
+    },
+    ApprovePlan {
+        plan_id: merry_core::PlanId,
+        note: Option<String>,
+    },
+    RequestPlanChanges {
+        plan_id: merry_core::PlanId,
+        feedback: String,
+    },
+    AbandonPlan(merry_core::PlanId),
     ApprovePermission(String),
     DenyPermission(String),
-    RevisePlan,
-    RetryPlanNode(merry_core::PlanNodeId),
-    CancelPlan,
     SaveSession,
     ShowTasks,
     RefreshSubagents,
@@ -285,8 +293,6 @@ fn cockpit_rects(terminal_size: Size, state: &TuiState) -> super::layout::Timeli
             input: pane_heights.input,
             status: render::STATUS_HEIGHT,
         },
-        state.plan().is_open(),
-        state.plan().is_focused(),
     )
 }
 
@@ -316,9 +322,7 @@ pub(crate) async fn run_controller(
         tokio::sync::broadcast::Receiver<merry_core::RuntimeEvent>,
     )> = None;
     let run_result: Result<(), CliError> = async {
-        state
-            .plan_mut()
-            .update_subagent_activity(session.subagent_activity.borrow().clone());
+        state.update_subagent_activity(&session.subagent_activity.borrow().clone());
         state.sync_background_processes(session.runtime().background_processes());
         let mut refresh_interval = new_refresh_interval();
         refresh_interval.tick().await;
@@ -516,7 +520,6 @@ pub(crate) async fn run_controller(
                     match activity {
                         Ok(()) => {
                             let snapshots = session.subagent_activity.borrow().clone();
-                            state.plan_mut().update_subagent_activity(snapshots.clone());
                             state.update_subagent_activity(&snapshots);
                             render_once(&mut terminal, &mut state)?;
                         }
