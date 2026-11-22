@@ -316,7 +316,12 @@ async fn request_permissions_path_capability_uses_model_review_before_host_fallb
     assert_eq!(runner.call_count(), 1);
     let review_requests = review_provider.recorded_requests();
     let user_prompt = review_requests[0].messages()[1].content().as_text();
-    assert!(user_prompt.contains("\"path\":\"/tmp\""));
+    let expected_path =
+        crate::RequestedPathCapability::new("/tmp".to_owned(), crate::PathAccess::ReadWrite)
+            .expect("test path should normalize");
+    let expected_path_json =
+        serde_json::to_string(expected_path.path()).expect("path should serialize");
+    assert!(user_prompt.contains(&format!("\"path\":{expected_path_json}")));
     assert!(user_prompt.contains("\"access\":\"rw\""));
     let result = resolved_tool_result(&events);
     let payload = resolved_artifact_json(&runtime, result, "path process").await;

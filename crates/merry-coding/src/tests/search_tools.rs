@@ -74,8 +74,14 @@ fn probe_reports_that_no_modern_search_tool_is_installed() {
 fn probe_builds_candidates_only_from_named_path_directories() {
     let (_temp, path) = tool_directory(&["rg"]);
     let mut probed = Vec::<PathBuf>::new();
-    let mixed_path = format!("::{path}:");
-    let availability = SearchToolAvailability::detect(OsStr::new(&mixed_path), |candidate| {
+    let mixed_path = std::env::join_paths([
+        Path::new(""),
+        Path::new(""),
+        Path::new(&path),
+        Path::new(""),
+    ])
+    .expect("mixed PATH should join");
+    let availability = SearchToolAvailability::detect(&mixed_path, |candidate| {
         probed.push(candidate.to_path_buf());
         candidate.exists()
     });
@@ -84,6 +90,13 @@ fn probe_builds_candidates_only_from_named_path_directories() {
         availability.summary_line().contains("`rg` is installed"),
         "{probed:?}"
     );
+    assert!(
+        probed
+            .iter()
+            .all(|candidate| candidate.parent() == Some(Path::new(&path))),
+        "probed candidates should come only from the named PATH directory: {probed:?}"
+    );
+    #[cfg(not(windows))]
     assert_eq!(
         probed,
         vec![
@@ -92,6 +105,12 @@ fn probe_builds_candidates_only_from_named_path_directories() {
             Path::new(&path).join("fdfind"),
         ]
     );
+    #[cfg(windows)]
+    {
+        assert!(probed.contains(&Path::new(&path).join("rg")));
+        assert!(probed.contains(&Path::new(&path).join("fd")));
+        assert!(probed.contains(&Path::new(&path).join("fdfind")));
+    }
 }
 
 #[test]

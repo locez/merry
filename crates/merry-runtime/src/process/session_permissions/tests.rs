@@ -32,9 +32,10 @@ impl PermissionedProcessRunnerFactory for Backend {
                 let RequestedCapability::Path(path) = capability else {
                     return None;
                 };
-                let constraint = if path.path().starts_with("/reviewed") {
+                let path_ref = Path::new(path.path());
+                let constraint = if path_ref.starts_with("/reviewed") {
                     ProcessPathGrantConstraint::ReviewRequired
-                } else if path.path().starts_with("/metadata") {
+                } else if path_ref.starts_with("/metadata") {
                     ProcessPathGrantConstraint::ProtectedMetadata
                 } else {
                     ProcessPathGrantConstraint::Ordinary

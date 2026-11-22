@@ -41,6 +41,7 @@ fn init_git_repo(dir: &Path) {
     run(&["config", "user.name", "Merry Test"]);
     run(&["config", "user.email", "merry-test@example.com"]);
     run(&["config", "commit.gpgsign", "false"]);
+    run(&["config", "core.autocrlf", "false"]);
     fs::create_dir_all(dir.join("src")).expect("src dir");
     fs::write(dir.join("src/app.txt"), "v1 committed\n").expect("seed app.txt");
     run(&["add", "-A"]);

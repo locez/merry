@@ -211,6 +211,12 @@ fn create_patch_parent_directories(path: &Path) -> Result<(), DomainError> {
 
     for component in parent.components() {
         current.push(component);
+        if matches!(
+            component,
+            std::path::Component::Prefix(_) | std::path::Component::RootDir
+        ) {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(metadata) => validate_patch_parent_metadata(&metadata)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {

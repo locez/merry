@@ -223,9 +223,10 @@ impl SkillCatalog {
     }
 
     pub(crate) fn find_by_skill_md_path(&self, path: &str) -> Option<&SkillMetadata> {
+        let target = normalized_skill_path_str(path);
         self.skills
             .iter()
-            .find(|skill| skill.skill_md_path.to_string_lossy() == path)
+            .find(|skill| normalized_skill_path_display(&skill.skill_md_path) == target)
     }
 
     /// Renders this catalog as a cacheable stable-prefix message.
@@ -248,7 +249,7 @@ impl SkillCatalog {
                 "- {}: {} (file: {})",
                 skill.name,
                 skill.description,
-                skill.skill_md_path.display()
+                normalized_skill_path_display(&skill.skill_md_path)
             ));
         }
         lines.push("### How to use skills".to_owned());
@@ -334,6 +335,14 @@ fn validate_skill_path(path: &Path) -> Result<(), SkillError> {
 
 fn normalized_skill_name(name: &str) -> String {
     name.trim().to_ascii_lowercase()
+}
+
+fn normalized_skill_path_display(path: &Path) -> String {
+    normalized_skill_path_str(&path.to_string_lossy())
+}
+
+fn normalized_skill_path_str(path: &str) -> String {
+    path.replace('\\', "/")
 }
 
 const SKILLS_FILENAME: &str = "SKILL.md";

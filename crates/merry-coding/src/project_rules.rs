@@ -16,11 +16,12 @@ pub const MAX_ROOT_PROJECT_RULES_BYTES: usize = 1024 * 1024;
 
 /// Loads the root `AGENTS.md` file without following a file symlink.
 pub fn load_root_project_rules(root: &Path) -> Result<Option<ProjectRules>, ProjectRulesLoadError> {
-    let canonical_root =
-        fs::canonicalize(root).map_err(|source| ProjectRulesLoadError::ProjectRulesRead {
+    let canonical_root = merry_core::host_paths::canonicalize_clean(root).map_err(|source| {
+        ProjectRulesLoadError::ProjectRulesRead {
             path: root.to_path_buf(),
             source,
-        })?;
+        }
+    })?;
     let path = canonical_root.join(ROOT_PROJECT_RULES_FILE);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -199,10 +200,16 @@ mod tests {
         assert_eq!(rules.text(), "Use CRLF rule.\nSecond line.\n");
     }
 
+    fn expected_rules_path(root: &Path) -> PathBuf {
+        merry_core::host_paths::canonicalize_clean(root)
+            .expect("canonical root")
+            .join("AGENTS.md")
+    }
+
     #[test]
     fn lone_carriage_return_remains_invalid() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("AGENTS.md");
+        let path = expected_rules_path(temp.path());
         std::fs::write(&path, "Use rule.\rNot a CRLF line.").expect("write lone CR rules");
 
         let error = load_root_project_rules(temp.path()).expect_err("lone CR rules reject");
@@ -225,7 +232,7 @@ mod tests {
     #[test]
     fn blank_root_agents_is_a_path_aware_validation_error() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("AGENTS.md");
+        let path = expected_rules_path(temp.path());
         std::fs::write(&path, " \n\t").expect("write blank rules");
 
         let error = load_root_project_rules(temp.path()).expect_err("blank rules reject");
@@ -239,7 +246,7 @@ mod tests {
     #[test]
     fn directory_root_agents_is_not_a_regular_file() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("AGENTS.md");
+        let path = expected_rules_path(temp.path());
         std::fs::create_dir(&path).expect("create directory at rules path");
 
         let error =
@@ -273,7 +280,7 @@ mod tests {
     #[test]
     fn oversized_root_agents_is_rejected() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("AGENTS.md");
+        let path = expected_rules_path(temp.path());
         std::fs::write(&path, vec![b'a'; MAX_ROOT_PROJECT_RULES_BYTES + 1])
             .expect("write oversized rules");
 
@@ -305,7 +312,7 @@ mod tests {
     #[test]
     fn invalid_utf8_root_agents_preserves_invalid_data_source() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("AGENTS.md");
+        let path = expected_rules_path(temp.path());
         std::fs::write(&path, [0xff]).expect("write invalid UTF-8 rules");
 
         let error = load_root_project_rules(temp.path()).expect_err("invalid UTF-8 rejects");

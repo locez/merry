@@ -137,6 +137,7 @@ jobs:
 
       - name: Run Windows cross-platform unit tests
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           cargo test --locked -p merry-core -p merry-llm -p merry-provider-openai -p merry-provider-anthropic -p merry-mcp -p merry-tools-macros
           cargo test --locked -p merry-runtime --lib
           cargo test --locked -p merry-process --lib

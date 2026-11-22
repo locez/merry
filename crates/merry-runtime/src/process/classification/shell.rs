@@ -191,7 +191,8 @@ pub(super) fn shell_process_input_from_argv(argv: &[String]) -> Option<ShellProc
                 })
             }
             [shell, flag, script]
-                if executable_name(shell) == "bash" && matches!(flag.as_str(), "-c" | "-lc") =>
+                if matches!(executable_name(shell).as_str(), "bash" | "sh" | "zsh")
+                    && matches!(flag.as_str(), "-c" | "-lc") =>
             {
                 Some(ShellProcessInput {
                     kind: ShellKind::Bash,
