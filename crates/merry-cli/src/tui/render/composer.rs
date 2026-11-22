@@ -16,7 +16,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-pub(super) const MAX_COMPLETION_PREVIEW_HEIGHT: u16 = 6;
+pub(super) const MAX_COMPLETION_PREVIEW_HEIGHT: u16 = 8;
 
 pub(super) const MAX_INPUT_VISIBLE_ROWS: usize = 5;
 
@@ -603,6 +603,31 @@ pub(super) fn completion_lines(state: &TuiState, region: Rect) -> Vec<Line<'stat
     let surface_bg = state.theme().bg_color(SemanticColor::SurfaceSubtle);
     let selected_bg = state.theme().bg_color(SemanticColor::SelectionBackground);
     let (start, end) = menu.visible_window(usize::from(region.height));
+    let total_items = menu.items().len();
+    let show_counter = total_items > (end - start);
+    let pad = if region.width >= 40 { "  " } else { "" };
+    let label_width = UnicodeWidthStr::width(pad) + 2;
+    let content_width = usize::from(region.width).saturating_sub(label_width);
+    let has_any_detail = menu
+        .items()
+        .iter()
+        .any(|item| item.detail().is_some_and(|detail| !detail.is_empty()));
+    // Measure across the entire menu so the description column never shifts as
+    // the user scrolls through items of varying name lengths.
+    let value_col_width = if has_any_detail {
+        menu.items()
+            .iter()
+            .map(|item| {
+                UnicodeWidthStr::width(item.value())
+                    + item.suffix().map_or(0, UnicodeWidthStr::width)
+            })
+            .max()
+            .unwrap_or(12)
+            .min(content_width / 2)
+    } else {
+        content_width
+    };
+
     menu.items()[start..end]
         .iter()
         .enumerate()
@@ -612,39 +637,85 @@ pub(super) fn completion_lines(state: &TuiState, region: Rect) -> Vec<Line<'stat
             let row_bg = if selected { selected_bg } else { surface_bg };
             let with_bg = |style: Style| row_bg.map_or(style, |bg| style.bg(bg));
             let base_style = with_bg(if selected {
-                semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD)
+                semantic_style(state, SemanticColor::Assistant).add_modifier(Modifier::BOLD)
             } else {
                 semantic_style(state, SemanticColor::TextSecondary)
             });
+            let highlight_style =
+                with_bg(semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD));
+            let suffix_style = with_bg(semantic_style(state, SemanticColor::Muted));
             let detail_style = with_bg(semantic_style(state, SemanticColor::Muted));
-            let pad = if region.width >= 40 { "  " } else { "" };
             let marker = if selected { "> " } else { "  " };
             let label_text = format!("{pad}{marker}");
-            let content_width = usize::from(region.width)
-                .saturating_sub(UnicodeWidthStr::width(label_text.as_str()));
-            let detail_width = if item.detail().is_some_and(|detail| !detail.is_empty()) {
-                content_width / 2
+
+            let counter_text = if selected && show_counter {
+                format!(" {}/{total_items}", index + 1)
+            } else {
+                String::new()
+            };
+            let counter_width = UnicodeWidthStr::width(counter_text.as_str());
+            let row_content_width = content_width.saturating_sub(counter_width);
+
+            let col1_budget = if has_any_detail {
+                value_col_width.min(row_content_width)
+            } else {
+                row_content_width
+            };
+            let value_text = truncate_chars(item.value(), col1_budget);
+            let value_width = UnicodeWidthStr::width(value_text.as_str());
+            let suffix_budget = col1_budget.saturating_sub(value_width);
+            let suffix_text = item
+                .suffix()
+                .filter(|suffix| !suffix.is_empty() && suffix_budget > 0)
+                .map(|suffix| truncate_chars(suffix, suffix_budget))
+                .unwrap_or_default();
+            let col1_used = value_width + UnicodeWidthStr::width(suffix_text.as_str());
+
+            let detail_pad = if has_any_detail
+                && item.detail().is_some_and(|detail| !detail.is_empty())
+            {
+                col1_budget.saturating_sub(col1_used) + 2
             } else {
                 0
             };
+            let detail_budget = row_content_width
+                .saturating_sub(col1_used)
+                .saturating_sub(detail_pad);
             let detail_text = item
                 .detail()
-                .filter(|detail| !detail.is_empty() && detail_width > 2)
-                .map(|detail| format!("  {}", truncate_chars(detail, detail_width - 2)))
+                .filter(|detail| !detail.is_empty() && detail_budget > 0)
+                .map(|detail| {
+                    format!(
+                        "{}{}",
+                        " ".repeat(detail_pad),
+                        truncate_chars(detail, detail_budget)
+                    )
+                })
                 .unwrap_or_default();
-            let value_width =
-                content_width.saturating_sub(UnicodeWidthStr::width(detail_text.as_str()));
-            let value_text = truncate_chars(item.value(), value_width);
+
             let used = UnicodeWidthStr::width(label_text.as_str())
-                + UnicodeWidthStr::width(value_text.as_str())
-                + UnicodeWidthStr::width(detail_text.as_str());
+                + col1_used
+                + UnicodeWidthStr::width(detail_text.as_str())
+                + counter_width;
             let trailing = " ".repeat(usize::from(region.width).saturating_sub(used));
-            Line::from(vec![
-                Span::styled(label_text, base_style),
-                Span::styled(value_text, base_style),
-                Span::styled(detail_text, detail_style),
-                Span::styled(trailing, detail_style),
-            ])
+
+            let mut spans = vec![Span::styled(label_text, highlight_style)];
+            crate::tui::skills_overlay::push_position_highlighted_spans(
+                &mut spans,
+                &value_text,
+                item.match_positions(),
+                base_style,
+                highlight_style,
+            );
+            if !suffix_text.is_empty() {
+                spans.push(Span::styled(suffix_text, suffix_style));
+            }
+            spans.push(Span::styled(detail_text, detail_style));
+            spans.push(Span::styled(trailing, detail_style));
+            if !counter_text.is_empty() {
+                spans.push(Span::styled(counter_text, detail_style));
+            }
+            Line::from(spans)
         })
         .collect()
 }

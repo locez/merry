@@ -14,6 +14,7 @@ mod project_rules;
 mod runtime;
 mod search_tools;
 mod subagent_roles;
+mod workflow_commands;
 mod workspace;
 mod worktree;
 
@@ -39,6 +40,7 @@ pub use subagent_roles::{
     SubagentRoleOverlay, SubagentRoleSpec, SubagentWorkspaceAccess, load_workspace_prompt_file,
     resolve_subagent_runtime,
 };
+pub use workflow_commands::CodingWorkflowCommand;
 pub use worktree::{
     WorktreeError, WorktreeGcReport, WorktreeIsolationManager, cleanup_orphaned_worktrees,
     cleanup_orphaned_worktrees_default, default_worktree_base_dir,

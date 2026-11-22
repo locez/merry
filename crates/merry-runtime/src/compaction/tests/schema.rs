@@ -70,6 +70,7 @@ fn payload_compaction_request_asks_for_prose_not_a_schema() {
         )
         .expect("valid source"),
         crate::compaction::CompactionRequestMode::Payload,
+        None,
         Some(&merry_llm::ReasoningEffort::new("high").expect("valid reasoning effort")),
         input.resolved_budget().output_token_limit(),
     )

@@ -35,6 +35,7 @@ mod completion;
 mod controller;
 mod controller_provider;
 mod copy_controls;
+mod fuzzy;
 pub(crate) mod glyphs;
 mod highlight;
 mod input;
@@ -62,6 +63,7 @@ mod render;
 mod runtime;
 pub(crate) mod session_list;
 mod session_picker;
+mod skills_overlay;
 mod state;
 mod status;
 mod subagent_view;
@@ -190,7 +192,8 @@ pub(crate) async fn run(
         settings_defaults = TuiSettingsDefaults::from_config(active_config.as_ref())
             .map_err(crate::cli_error::unexpected)?;
     }
-    let selection = match launch_mode {
+    let input_history_store = InputHistoryStore::for_workspace(paths.state_dir(), &workspace_root);
+    let mut selection = match launch_mode {
         LaunchMode::New => SessionPickerSelection::New,
         LaunchMode::ResumePicker => {
             session_picker::pick_session(
@@ -202,77 +205,120 @@ pub(crate) async fn run(
             .await?
         }
     };
-    if matches!(selection, SessionPickerSelection::Quit) {
-        return Ok(());
-    }
-    let session = runtime::start_tui_runtime_session(
-        active_config.as_ref(),
-        session_store,
-        selection,
-        &preferences,
-        runtime::TuiSessionLaunch {
-            sandbox_mode,
-            permission_mode,
-            auto_fallback,
-            workspace_root,
-            workspace_writable: workspace.writable,
-        },
-    )
-    .await?;
-    let mut state = TuiState::new(
-        session.workspace_root.clone(),
-        session.model_label.clone(),
-        keymap,
-        configured_theme,
-    )
-    .with_successful_command_output(tui_config.show_successful_command_output)
-    .with_mouse_scroll_lines(tui_config.mouse_scroll_lines)
-    .with_animations(tui_config.animations)
-    .with_max_reading_width(tui_config.max_reading_width)
-    .with_text_sizing(tui_config.text_sizing)
-    .with_brand_mark(tui_config.brand_mark)
-    .with_header_items(tui_config.header_items);
-    let input_history_store =
-        InputHistoryStore::for_workspace(paths.state_dir(), &session.workspace_root);
-    state.set_input_history(input_history_store.load().await);
-    state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
-    state.set_completion_skills(session.skills.clone());
-    state.configure_preferences(preferences, settings_defaults);
-    let plan_snapshot = session.plan_session_snapshot().await;
-    let plan_docs = session.plan_documents().await;
-    state.plan_mut().hydrate(plan_snapshot, plan_docs);
-    let todo_items = session.todo_items().await;
-    state.todo_dock_mut().set_items(todo_items);
-    if session.resumed {
-        let transcript = session.session_transcript().await?;
-        if transcript.is_empty() {
+    let mut announce_new_session = false;
+    loop {
+        if matches!(selection, SessionPickerSelection::Quit) {
+            return Ok(());
+        }
+        let session = runtime::start_tui_runtime_session(
+            active_config.as_ref(),
+            session_store.clone(),
+            selection,
+            &preferences,
+            runtime::TuiSessionLaunch {
+                sandbox_mode,
+                permission_mode,
+                auto_fallback,
+                workspace_root: workspace_root.clone(),
+                workspace_writable: workspace.writable,
+            },
+        )
+        .await?;
+        let mut state = TuiState::new(
+            session.workspace_root.clone(),
+            session.model_label.clone(),
+            keymap.clone(),
+            configured_theme.clone(),
+        )
+        .with_successful_command_output(tui_config.show_successful_command_output)
+        .with_mouse_scroll_lines(tui_config.mouse_scroll_lines)
+        .with_animations(tui_config.animations)
+        .with_max_reading_width(tui_config.max_reading_width)
+        .with_text_sizing(tui_config.text_sizing)
+        .with_brand_mark(tui_config.brand_mark)
+        .with_header_items(tui_config.header_items.clone());
+        state.set_input_history(input_history_store.load().await);
+        state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
+        state.set_completion_skills(session.skills.clone());
+        state.configure_preferences(preferences.clone(), settings_defaults.clone());
+        let plan_snapshot = session.plan_session_snapshot().await;
+        let plan_docs = session.plan_documents().await;
+        state.plan_mut().hydrate(plan_snapshot, plan_docs);
+        let todo_items = session.todo_items().await;
+        state.todo_dock_mut().set_items(todo_items);
+        if session.resumed {
+            let transcript = session.session_transcript().await?;
+            if transcript.is_empty() {
+                state.push_timeline_item(state::TimelineItem::Muted {
+                    title: "Resumed".to_owned(),
+                    detail: session.metadata.session_id.as_str().to_owned(),
+                });
+            } else {
+                let mut projector = TuiProjector::default();
+                for item in transcript {
+                    projector.apply_transcript_item(item, &mut state);
+                }
+            }
+            if let Some(subagents) = session.runtime().subagent_snapshot().await {
+                state.apply_subagent_status_views(&subagents);
+            }
+            if let Some(usage) = session.runtime().usage().await {
+                state.set_usage(usage);
+            }
+        } else if announce_new_session {
             state.push_timeline_item(state::TimelineItem::Muted {
-                title: "Resumed".to_owned(),
+                title: "New session".to_owned(),
                 detail: session.metadata.session_id.as_str().to_owned(),
             });
-        } else {
-            let mut projector = TuiProjector::default();
-            for item in transcript {
-                projector.apply_transcript_item(item, &mut state);
+        }
+        project_mcp_startup_warnings(&mut state, &session.startup_warnings);
+        let exit = controller::run_controller(
+            &mut terminal,
+            session,
+            state,
+            &preferences_store,
+            &input_history_store,
+            &mut provider_management,
+        )
+        .await?;
+
+        active_config = provider_management
+            .config()
+            .cloned()
+            .or_else(|| merry_config.cloned());
+        settings_defaults = TuiSettingsDefaults::from_config(active_config.as_ref())
+            .map_err(crate::cli_error::unexpected)?;
+        preferences = preferences_store
+            .load_with_default_provider(settings_defaults.provider.as_deref())
+            .await
+            .map_err(crate::cli_error::unexpected)?;
+        let picker_transparent = preferences
+            .transparent_background
+            .unwrap_or(settings_defaults.transparent_background);
+        let picker_theme = preferences
+            .theme_preset
+            .map(TuiTheme::from_preset)
+            .unwrap_or_else(|| configured_theme.clone())
+            .with_transparent_background(picker_transparent);
+
+        match exit {
+            controller::ControllerExit::Quit => return Ok(()),
+            controller::ControllerExit::NewSession => {
+                announce_new_session = true;
+                selection = SessionPickerSelection::New;
+            }
+            controller::ControllerExit::ResumeSession => {
+                announce_new_session = false;
+                selection = session_picker::pick_session(
+                    &mut terminal,
+                    &session_store,
+                    &workspace_root,
+                    &picker_theme,
+                )
+                .await?;
             }
         }
-        if let Some(subagents) = session.runtime().subagent_snapshot().await {
-            state.apply_subagent_status_views(&subagents);
-        }
-        if let Some(usage) = session.runtime().usage().await {
-            state.set_usage(usage);
-        }
     }
-    project_mcp_startup_warnings(&mut state, &session.startup_warnings);
-    controller::run_controller(
-        terminal,
-        session,
-        state,
-        preferences_store,
-        input_history_store,
-        provider_management,
-    )
-    .await
 }
 
 fn project_mcp_startup_warnings(state: &mut TuiState, warnings: &[merry_mcp::McpServerDiagnostic]) {

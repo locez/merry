@@ -219,3 +219,169 @@ async fn close_during_running_model_reaches_closed_event() {
     .await
     .expect("close while running should reach closed event");
 }
+
+#[tokio::test]
+async fn interactive_control_compacts_at_waiting_boundary_and_passes_focus() {
+    let provider = RecordingProvider::new();
+    let policy = merry_runtime::CitationCompactionPolicy::new(Some(128), Some(4096), 1)
+        .expect("valid compaction policy");
+    let runtime = Runtime::builder(session_id("interactive-compact-waiting"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .automatic_compaction(merry_runtime::CompactionConfig::enabled(policy))
+        .build()
+        .expect("runtime builds");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("initial waiting state");
+
+    input.submit("turn one").await.expect("turn one queued");
+    wait_for_interactive_waiting(&mut stream).await;
+    input.submit("turn two").await.expect("turn two queued");
+    wait_for_interactive_waiting(&mut stream).await;
+
+    let compact_control = control.clone();
+    let compact_task = tokio::spawn(async move {
+        compact_control
+            .compact_context(Some("preserve auth invariant".to_owned()))
+            .await
+    });
+
+    let mut saw_started = false;
+    let mut saw_completed = false;
+    while let Some(event) = stream.next_event().await.expect("stream error") {
+        match event {
+            RuntimeEvent::CompactionStarted { .. } => saw_started = true,
+            RuntimeEvent::CompactionCompleted { .. } => saw_completed = true,
+            RuntimeEvent::InteractiveRunStateChanged {
+                state: InteractiveRunState::WaitingForInput,
+            } if saw_completed => break,
+            _ => {}
+        }
+    }
+
+    let outcome = compact_task
+        .await
+        .expect("compact task joins")
+        .expect("manual compaction succeeds")
+        .expect("history should compact");
+    assert!(saw_started);
+    assert!(saw_completed);
+    assert!(outcome.covered_model_turn_count() >= 1);
+
+    let requests = provider.recorded_requests();
+    let compact_request = requests.last().expect("compaction request recorded");
+    let last_text = compact_request
+        .messages()
+        .last()
+        .expect("directive message")
+        .content()
+        .as_text();
+    assert!(
+        last_text.contains("preserve auth invariant"),
+        "compaction request should include user focus: {last_text}"
+    );
+
+    control.close().await.expect("interactive run closes");
+    stream
+        .wait_until_closed()
+        .await
+        .expect("interactive stream should close");
+}
+
+#[tokio::test]
+async fn interactive_control_compact_returns_none_when_nothing_to_compact() {
+    let provider = RecordingProvider::new();
+    let runtime = Runtime::builder(session_id("interactive-compact-empty"))
+        .model_provider(Arc::new(provider.clone()), model_name())
+        .build()
+        .expect("runtime builds");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, _input, control) = run.split();
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("initial waiting state");
+
+    let compact_control = control.clone();
+    let compact_task = tokio::spawn(async move { compact_control.compact_context(None).await });
+
+    let mut saw_started = false;
+    while let Some(event) = stream.next_event().await.expect("stream error") {
+        match event {
+            RuntimeEvent::CompactionStarted { .. } => saw_started = true,
+            RuntimeEvent::InteractiveRunStateChanged {
+                state: InteractiveRunState::WaitingForInput,
+            } => break,
+            _ => {}
+        }
+    }
+
+    let outcome = compact_task
+        .await
+        .expect("compact task joins")
+        .expect("empty compaction returns Ok(None)");
+    assert!(outcome.is_none());
+    assert!(!saw_started);
+    assert!(provider.recorded_requests().is_empty());
+
+    control.close().await.expect("interactive run closes");
+    stream
+        .wait_until_closed()
+        .await
+        .expect("interactive stream should close");
+}
+
+#[tokio::test]
+async fn interactive_control_compact_rejects_while_model_turn_is_active() {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (_release_tx, release_rx) = oneshot::channel();
+    let provider = BlockingFirstProvider::new(started_tx, release_rx);
+    let runtime = Runtime::builder(session_id("interactive-compact-running"))
+        .model_provider(Arc::new(provider), model_name())
+        .build()
+        .expect("runtime builds");
+
+    let run = runtime
+        .start_interactive_agent_run(
+            StepContext::new(CancellationToken::new()),
+            AgentLoopConfig::default(),
+        )
+        .expect("interactive run starts");
+    let (mut stream, input, control) = run.split();
+    let _ = stream
+        .next_event()
+        .await
+        .expect("stream error")
+        .expect("initial waiting state");
+    input.submit("initial").await.expect("initial queued");
+    started_rx.await.expect("provider step starts");
+
+    let error = control
+        .compact_context(None)
+        .await
+        .expect_err("compaction while running should reject");
+    assert!(matches!(error, InteractiveError::CompactRequiresIdle));
+
+    control.close().await.expect("close accepted");
+    stream
+        .wait_until_closed()
+        .await
+        .expect("stream should close");
+}

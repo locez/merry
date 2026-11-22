@@ -25,6 +25,12 @@ fn overlay_pointer_effect(pointer: OverlayPointer, state: &mut TuiState) -> Cont
             }
             press_overlay(state, KeyCode::Enter)
         }
+        OverlayPointer::Skill(index) => {
+            if let Some(Overlay::Skills(picker)) = state.overlay_mut() {
+                picker.select(index);
+            }
+            press_overlay(state, KeyCode::Enter)
+        }
         OverlayPointer::Setting(item) => {
             if settings_editor_open(state) {
                 return ControllerEffect::None;
@@ -247,6 +253,7 @@ fn scroll_active_overlay(state: &mut TuiState, up: bool, lines: usize) -> bool {
         }
         Overlay::CommandPalette(_)
         | Overlay::Settings(_)
+        | Overlay::Skills(_)
         | Overlay::ProviderManager(_)
         | Overlay::ModelPicker(_)
         | Overlay::ReasoningPicker(_) => {

@@ -42,7 +42,7 @@ pub(crate) async fn dispatch_effect(
     effect: &ControllerEffect,
     session: &mut TuiRuntimeSession,
     state: &mut TuiState,
-) -> Option<bool> {
+) -> bool {
     match effect {
         ControllerEffect::SetPlanMode {
             enabled,
@@ -50,7 +50,7 @@ pub(crate) async fn dispatch_effect(
         } => {
             if let Err(error) = session.control.set_plan_mode(*enabled).await {
                 state.show_error_dialog("Plan Mode failed", error.to_string());
-                return Some(false);
+                return true;
             }
             if let Some(prompt) = initial_prompt
                 && let Ok(message) = merry_runtime::UserMessageInput::text_only(prompt)
@@ -86,7 +86,7 @@ pub(crate) async fn dispatch_effect(
                 state.show_error_dialog("Plan abandon failed", error.to_string());
             }
         }
-        _ => return None,
+        _ => return false,
     }
-    Some(false)
+    true
 }

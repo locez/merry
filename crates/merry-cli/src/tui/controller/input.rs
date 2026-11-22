@@ -518,6 +518,11 @@ fn overlay_key_effect(result: OverlayKeyResult, state: &mut TuiState) -> Control
             state.close_overlay();
             ControllerEffect::DenyPermission(approval_id)
         }
+        OverlayKeyResult::InsertSkill(name) => {
+            state.close_overlay();
+            state.insert_skill_token(&name);
+            ControllerEffect::None
+        }
         OverlayKeyResult::Provider(action) => {
             crate::tui::controller_provider::provider_overlay_effect(action)
         }

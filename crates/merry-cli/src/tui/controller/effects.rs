@@ -6,7 +6,8 @@ use crate::{
     cli_error::{CliError, unexpected},
     tui::{
         controller::{
-            ClipboardImageCompletion, CommandOutputCompletion, ControllerEffect, ProviderController,
+            ClipboardImageCompletion, CommandOutputCompletion, CompactionCompletion,
+            ControllerEffect, ControllerExit, ProviderController,
         },
         input_history_store::InputHistoryStore,
         preferences::TuiPreferencesStore,
@@ -28,6 +29,7 @@ pub(super) struct ControllerServices<'a> {
     pub(super) providers: ProviderController<'a>,
     pub(super) clipboard_image_tx: &'a mpsc::Sender<ClipboardImageCompletion>,
     pub(super) command_output_tx: &'a mpsc::Sender<CommandOutputCompletion>,
+    pub(super) compaction_tx: &'a mpsc::Sender<CompactionCompletion>,
     pub(super) terminal: &'a mut crate::tui::terminal::TerminalSession,
     #[cfg(feature = "web")]
     pub(super) web_service: &'a mut RuntimeWebService,
@@ -43,26 +45,25 @@ pub(super) async fn dispatch_effect(
     session: &mut TuiRuntimeSession,
     state: &mut TuiState,
     services: ControllerServices<'_>,
-) -> Result<bool, CliError> {
+) -> Result<Option<ControllerExit>, CliError> {
     let ControllerServices {
         preferences_store,
         input_history,
         providers,
         clipboard_image_tx,
         command_output_tx,
+        compaction_tx,
         terminal,
         #[cfg(feature = "web")]
         web_service,
         background_tasks,
         subagent_live_stream,
     } = services;
-    if let Some(should_quit) =
-        crate::tui::plan_controller::dispatch_effect(&effect, session, state).await
-    {
-        return Ok(should_quit);
+    if crate::tui::plan_controller::dispatch_effect(&effect, session, state).await {
+        return Ok(None);
     }
     if crate::tui::controller_provider::is_provider_effect(&effect) {
-        return crate::tui::controller_provider::dispatch_provider_effect(
+        let should_quit = crate::tui::controller_provider::dispatch_provider_effect(
             effect,
             session,
             state,
@@ -70,10 +71,11 @@ pub(super) async fn dispatch_effect(
             providers,
             background_tasks,
         )
-        .await;
+        .await?;
+        return Ok(should_quit.then_some(ControllerExit::Quit));
     }
     match effect {
-        ControllerEffect::None => Ok(false),
+        ControllerEffect::None => Ok(None),
         ControllerEffect::LoadCommandOutput(call_id) => {
             let runtime = session.runtime().clone();
             let sender = command_output_tx.clone();
@@ -84,7 +86,7 @@ pub(super) async fn dispatch_effect(
                     .send(CommandOutputCompletion::new(call_id, generation, result))
                     .await;
             });
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::CopyText(text) => {
             let system = write_system_clipboard(&text).await;
@@ -95,7 +97,7 @@ pub(super) async fn dispatch_effect(
                 system.as_ref().err().map(String::as_str).unwrap_or(""),
             );
             show_copy_feedback(state, feedback, failed);
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::CopyTextTooLarge => {
             show_copy_feedback(
@@ -103,7 +105,7 @@ pub(super) async fn dispatch_effect(
                 "Copy failed: selected text exceeds the 1 MiB clipboard limit".to_owned(),
                 true,
             );
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::Submit(submission) => {
             let (message, history_text) = submission
@@ -121,13 +123,13 @@ pub(super) async fn dispatch_effect(
                 input_history.warning_shown,
             )
             .await;
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::SetPendingPaused(paused) => {
             if let Err(error) = session.input.set_paused(paused).await {
                 tracing::debug!(error = %error, paused, "pending pause update ignored");
             }
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::UpdatePendingInput { id, text, resume } => {
             match session
@@ -151,7 +153,7 @@ pub(super) async fn dispatch_effect(
             if resume && let Err(error) = session.input.set_paused(false).await {
                 tracing::debug!(error = %error, "pending resume after edit ignored");
             }
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::RemovePendingInput { id, resume } => {
             match session
@@ -174,15 +176,15 @@ pub(super) async fn dispatch_effect(
             {
                 tracing::debug!(error = %error, resume, "pending pause restore after remove ignored");
             }
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::FlushPendingInputs => {
             session.input.flush().await.map_err(unexpected)?;
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::PasteImage => {
             start_clipboard_image_read(clipboard_image_tx.clone(), background_tasks);
-            Ok(false)
+            Ok(None)
         }
         #[cfg(feature = "web")]
         ControllerEffect::OpenSessionInBrowser => {
@@ -193,7 +195,7 @@ pub(super) async fn dispatch_effect(
                         title: "Web service unavailable".to_owned(),
                         body: error.to_string(),
                     });
-                    return Ok(false);
+                    return Ok(None);
                 }
             };
             match open_in_browser(&url).await {
@@ -206,19 +208,19 @@ pub(super) async fn dispatch_effect(
                     body: format!("{error}. Open this URL manually: {url}"),
                 }),
             }
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::ApprovePermission(approval_id) => {
             if let Some(next) = session.resolve_permission_review(&approval_id, true)? {
                 state.open_permission_review_view(next);
             }
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::DenyPermission(approval_id) => {
             if let Some(next) = session.resolve_permission_review(&approval_id, false)? {
                 state.open_permission_review_view(next);
             }
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::Interrupt => {
             let control = session.control.clone();
@@ -227,7 +229,7 @@ pub(super) async fn dispatch_effect(
                     tracing::warn!(error = %error, "interactive interrupt request failed");
                 }
             });
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::ShowTasks => {
             let processes = session.runtime().background_processes();
@@ -240,7 +242,7 @@ pub(super) async fn dispatch_effect(
                 title: "Tasks".to_owned(),
                 body: crate::tui::tasks::tasks_body(&processes, subagents.as_deref()),
             });
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::RefreshSubagents => {
             state.sync_background_processes(session.runtime().background_processes());
@@ -258,7 +260,7 @@ pub(super) async fn dispatch_effect(
                 );
                 *subagent_live_stream = Some((agent_id, inspect.events));
             }
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::SendSubagentMessage { agent_id, message } => {
             if let Ok(id) = merry_core::SubagentId::new(&agent_id) {
@@ -289,7 +291,7 @@ pub(super) async fn dispatch_effect(
                     state.apply_subagent_status_views(&views);
                 }
             }
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::CancelSubagent(agent_id) => {
             if let Ok(id) = merry_core::SubagentId::new(&agent_id) {
@@ -298,7 +300,7 @@ pub(super) async fn dispatch_effect(
                     state.apply_subagent_status_views(&views);
                 }
             }
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::InspectBackgroundProcess(process_id) => {
             state.sync_background_processes(session.runtime().background_processes());
@@ -309,7 +311,7 @@ pub(super) async fn dispatch_effect(
                 },
                 Err(message) => state.update_background_task_error(&process_id, message),
             }
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::StopBackgroundProcess(process_id) => {
             if let Ok(id) = merry_runtime::BackgroundProcessId::new(process_id.clone()) {
@@ -322,7 +324,16 @@ pub(super) async fn dispatch_effect(
                 }
             }
             state.sync_background_processes(session.runtime().background_processes());
-            Ok(false)
+            Ok(None)
+        }
+        ControllerEffect::CompactContext { focus } => {
+            let control = session.control.clone();
+            let sender = compaction_tx.clone();
+            background_tasks.spawn(async move {
+                let result = control.compact_context(focus).await;
+                let _ = sender.send(CompactionCompletion::new(result)).await;
+            });
+            Ok(None)
         }
         ControllerEffect::SaveSession => {
             session.set_topic_if_empty(state.first_user_input_topic());
@@ -340,14 +351,14 @@ pub(super) async fn dispatch_effect(
                     });
                 }
             }
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::PersistPreferences(preferences) => {
             preferences_store
                 .save(&preferences)
                 .await
                 .map_err(unexpected)?;
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::ApplyRuntimePreferences(preferences) => {
             session.apply_preferences(&preferences).await?;
@@ -357,25 +368,46 @@ pub(super) async fn dispatch_effect(
                 .map_err(unexpected)?;
             state.set_model_label(session.model_label.clone());
             state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
-            Ok(false)
+            Ok(None)
         }
         ControllerEffect::SetPlanMode { .. }
         | ControllerEffect::ApprovePlan { .. }
         | ControllerEffect::RequestPlanChanges { .. }
         | ControllerEffect::AbandonPlan(_) => unreachable!("plan effect handled above"),
+        ControllerEffect::NewSession => {
+            let should_save = session.resumed || state.first_user_input_topic().is_some();
+            close_session(session, state, should_save).await?;
+            Ok(Some(ControllerExit::NewSession))
+        }
+        ControllerEffect::ResumeSession => {
+            let should_save = session.resumed || state.first_user_input_topic().is_some();
+            close_session(session, state, should_save).await?;
+            Ok(Some(ControllerExit::ResumeSession))
+        }
         ControllerEffect::Quit => {
-            session.set_topic_if_empty(state.first_user_input_topic());
-            session.control.close().await.map_err(unexpected)?;
-            session
-                .stream
-                .wait_until_closed()
-                .await
-                .map_err(unexpected)?;
-            session.save_on_exit().await?;
-            Ok(true)
+            close_session(session, state, true).await?;
+            Ok(Some(ControllerExit::Quit))
         }
         _ => unreachable!("provider effect handled by the provider dispatcher"),
     }
+}
+
+async fn close_session(
+    session: &mut TuiRuntimeSession,
+    state: &TuiState,
+    save_session: bool,
+) -> Result<(), CliError> {
+    session.set_topic_if_empty(state.first_user_input_topic());
+    session.control.close().await.map_err(unexpected)?;
+    session
+        .stream
+        .wait_until_closed()
+        .await
+        .map_err(unexpected)?;
+    if save_session {
+        session.save_on_exit().await?;
+    }
+    Ok(())
 }
 
 async fn write_system_clipboard(text: &str) -> Result<(), String> {

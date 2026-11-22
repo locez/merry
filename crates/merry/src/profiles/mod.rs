@@ -7,7 +7,7 @@ pub use merry_coding::{
     CodingAgentRunPolicy, CodingAgentRunPolicyError, CodingAutoFallback, CodingFinalReportPolicy,
     CodingModelRoleConfig, CodingModelRoleConfigError, CodingPermissionMode,
     CodingPermissionPolicy, CodingPermissionPolicyError, CodingRuntime, CodingRuntimeBuildError,
-    CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig,
+    CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig, CodingWorkflowCommand,
     DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS,
     MAX_ROLE_PROMPT_FILE_BYTES, MAX_ROOT_PROJECT_RULES_BYTES, MIN_CODING_SUBAGENT_MODEL_TURNS,
     ProjectRulesLoadError, ROOT_PROJECT_RULES_FILE, ResolvedSubagentRuntime,

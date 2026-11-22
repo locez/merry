@@ -4,7 +4,7 @@ use super::{
     types::{InputRecord, InputRecords},
 };
 use crate::bridge::BridgeToolResultCommand;
-use crate::{FileSessionStore, UserMessageInput};
+use crate::{CompactionOutcome, FileSessionStore, UserMessageInput};
 use merry_core::{PendingToolCallBatch, PlanId, RuntimeEvent, ToolCallBatchId, ToolCallId};
 use std::sync::{
     Arc,
@@ -661,6 +661,30 @@ impl AgentLoopControl {
         let (ack_sender, ack_receiver) = oneshot::channel();
         self.command_sender
             .send(InteractiveCommand::SaveSession { store, ack_sender })
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?;
+        ack_receiver
+            .await
+            .map_err(|_| InteractiveError::CommandChannelClosed {
+                run_id: self.run_id,
+            })?
+    }
+
+    /// Manually compacts session history at an idle boundary, optionally
+    /// emphasizing `focus` instructions in the generated summary.
+    ///
+    /// Returns `Ok(None)` when no compressible history exists before the
+    /// retained tail, and [`InteractiveError::CompactRequiresIdle`] immediately
+    /// when a model, tool, compaction, or interrupt phase is already active.
+    pub async fn compact_context(
+        &self,
+        focus: Option<String>,
+    ) -> Result<Option<CompactionOutcome>, InteractiveError> {
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.command_sender
+            .send(InteractiveCommand::CompactContext { focus, ack_sender })
             .await
             .map_err(|_| InteractiveError::CommandChannelClosed {
                 run_id: self.run_id,

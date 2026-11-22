@@ -136,6 +136,8 @@ pub(super) struct CompactionRequestBudget {
     pub(super) dynamic_body_estimated_tokens: u64,
     /// Initial coverage, before the measured request chooses a fallback.
     pub(super) shape: CompactionShape,
+    /// Optional caller-supplied focus instruction for manual compaction.
+    pub(super) user_context: Option<String>,
 }
 
 impl CompactionRequestBudget {
@@ -171,7 +173,16 @@ impl CompactionRequestBudget {
             primary_window_tokens,
             dynamic_body_estimated_tokens: request_budget.dynamic_body_estimated_tokens,
             shape: CompactionShape::SinglePass,
+            user_context: None,
         })
+    }
+
+    /// Attaches an optional caller-provided compaction focus instruction.
+    pub(super) fn with_user_context(mut self, user_context: Option<String>) -> Self {
+        self.user_context = user_context
+            .map(|text| text.trim().to_owned())
+            .filter(|text| !text.is_empty());
+        self
     }
 
     /// Returns the destination body budget the installed checkpoint should reach.

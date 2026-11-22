@@ -148,6 +148,13 @@ impl InteractiveProducer {
                 let _ = ack_sender.send(result);
                 Some(CommandDecision::Continue)
             }
+            InteractiveCommand::CompactContext { focus, ack_sender } => {
+                if mode != CommandHandlingMode::Waiting {
+                    let _ = ack_sender.send(Err(InteractiveError::CompactRequiresIdle));
+                    return Some(CommandDecision::Continue);
+                }
+                Some(CommandDecision::RunCompaction { focus, ack_sender })
+            }
             InteractiveCommand::SetPlanMode {
                 enabled,
                 ack_sender,

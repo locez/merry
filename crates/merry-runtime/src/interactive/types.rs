@@ -108,4 +108,6 @@ pub enum InteractiveError {
     PlanControlRequiresIdle,
     #[error("session save requires an idle interactive boundary")]
     SessionSaveRequiresIdle,
+    #[error("context compaction requires an idle interactive boundary")]
+    CompactRequiresIdle,
 }

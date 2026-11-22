@@ -50,6 +50,7 @@ pub(crate) enum CompactionRequestMode {
 pub(crate) struct CompactionRequestProjection<'a> {
     pub(crate) source: &'a CompactionRequestSource,
     pub(crate) mode: CompactionRequestMode,
+    pub(crate) user_context: Option<&'a str>,
 }
 
 /// Compiles one compaction request from a session source.
@@ -62,6 +63,7 @@ pub(crate) fn compile_citation_compaction_model_request(
     model: &ModelName,
     source: &CompactionRequestSource,
     mode: CompactionRequestMode,
+    user_context: Option<&str>,
     reasoning_effort: Option<&ReasoningEffort>,
     output_ceiling_tokens: u64,
 ) -> Result<ModelRequest, ModelError> {
@@ -82,9 +84,10 @@ pub(crate) fn compile_citation_compaction_model_request(
             )
         }
     };
+    let user_context = user_context.map(str::trim).filter(|text| !text.is_empty());
     let directive = format!(
         "{}\n\n{history_note}\nAim for at most {} tokens. That number is guidance for length, not a schema, and a usable summary is installed even when it misses the target.",
-        citation_compaction_tail_directive(None),
+        citation_compaction_tail_directive(user_context),
         input.resolved_budget().target_output_tokens(),
     );
     items.push(ModelInputItem::Message(ModelMessage::new(

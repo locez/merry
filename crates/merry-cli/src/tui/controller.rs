@@ -158,6 +158,49 @@ struct ClipboardImageCompletion {
     result: Result<DraftImage, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControllerExit {
+    Quit,
+    NewSession,
+    ResumeSession,
+}
+
+pub(super) struct CompactionCompletion {
+    result: Result<Option<merry_runtime::CompactionOutcome>, merry_runtime::InteractiveError>,
+}
+
+impl CompactionCompletion {
+    pub(super) fn new(
+        result: Result<Option<merry_runtime::CompactionOutcome>, merry_runtime::InteractiveError>,
+    ) -> Self {
+        Self { result }
+    }
+
+    pub(super) fn apply(self, state: &mut TuiState) {
+        match self.result {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                state.follow_latest();
+                state.push_timeline_item(crate::tui::state::TimelineItem::LocalCommand {
+                    title: "Nothing to compact".to_owned(),
+                    body: "Conversation history is already within the retained tail.".to_owned(),
+                });
+            }
+            Err(merry_runtime::InteractiveError::CompactRequiresIdle) => {
+                state.follow_latest();
+                state.push_timeline_item(crate::tui::state::TimelineItem::LocalCommand {
+                    title: "Compaction unavailable".to_owned(),
+                    body: "Stop the active run before compacting context.".to_owned(),
+                });
+            }
+            Err(_) => {
+                // Runtime compaction failures and cancellations emit RunFailed /
+                // RunCancelled events that TuiProjector already renders.
+            }
+        }
+    }
+}
+
 pub(super) struct CommandOutputCompletion {
     call_id: merry_core::ToolCallId,
     generation: u64,
@@ -261,6 +304,11 @@ pub(crate) enum ControllerEffect {
     AbandonPlan(merry_core::PlanId),
     ApprovePermission(String),
     DenyPermission(String),
+    NewSession,
+    ResumeSession,
+    CompactContext {
+        focus: Option<String>,
+    },
     SaveSession,
     ShowTasks,
     RefreshSubagents,
@@ -297,18 +345,19 @@ fn cockpit_rects(terminal_size: Size, state: &TuiState) -> super::layout::Timeli
 }
 
 pub(crate) async fn run_controller(
-    mut terminal: TerminalSession,
+    terminal: &mut TerminalSession,
     mut session: TuiRuntimeSession,
     mut state: TuiState,
-    preferences_store: TuiPreferencesStore,
-    input_history_store: InputHistoryStore,
-    mut provider_management: ProviderManagementService,
-) -> Result<(), CliError> {
+    preferences_store: &TuiPreferencesStore,
+    input_history_store: &InputHistoryStore,
+    provider_management: &mut ProviderManagementService,
+) -> Result<ControllerExit, CliError> {
     let mut projector = TuiProjector::default();
     let mut background_tasks = JoinSet::new();
     let (model_discovery_tx, mut model_discovery_rx) = mpsc::channel(4);
     let (clipboard_image_tx, mut clipboard_image_rx) = mpsc::channel(4);
     let (command_output_tx, mut command_output_rx) = mpsc::channel(4);
+    let (compaction_tx, mut compaction_rx) = mpsc::channel(2);
     let mut model_discovery_generation = 0_u64;
     let mut model_discovery_token: Option<CancellationToken> = None;
     let mut subagent_activity_open = true;
@@ -321,13 +370,14 @@ pub(crate) async fn run_controller(
         String,
         tokio::sync::broadcast::Receiver<merry_core::RuntimeEvent>,
     )> = None;
-    let run_result: Result<(), CliError> = async {
+    let run_result: Result<ControllerExit, CliError> = async {
         state.update_subagent_activity(&session.subagent_activity.borrow().clone());
         state.sync_background_processes(session.runtime().background_processes());
         let mut refresh_interval = new_refresh_interval();
         refresh_interval.tick().await;
-        render_once(&mut terminal, &mut state)?;
+        render_once(terminal, &mut state)?;
 
+        let mut exit_reason = ControllerExit::Quit;
         loop {
             tokio::select! {
                 Some(result) = background_tasks.join_next(), if !background_tasks.is_empty() => {
@@ -358,7 +408,7 @@ pub(crate) async fn run_controller(
                         }
                     }
                     refresh_interactions(&mut state, terminal.size().map_err(unexpected)?);
-                    render_once(&mut terminal, &mut state)?;
+                    render_once(terminal, &mut state)?;
                 }
                 event = terminal.next_event() => {
                     let Some(first_event) = event.map_err(unexpected)? else {
@@ -371,7 +421,7 @@ pub(crate) async fn run_controller(
                     raw_batch.extend(extra);
 
                     let coalesced = coalesce_terminal_events(raw_batch, state.mouse_scroll_lines());
-                    let mut should_exit = false;
+                    let mut pending_exit: Option<ControllerExit> = None;
                     for item in coalesced {
                         let effect = match item {
                             CoalescedTerminalEvent::Event(TerminalEvent::Key(key)) => {
@@ -414,32 +464,35 @@ pub(crate) async fn run_controller(
                         {
                             project_local_effect(&effect, &mut state);
                             if needs_pre_dispatch_render(&effect) {
-                                render_once(&mut terminal, &mut state)?;
+                                render_once(terminal, &mut state)?;
                             }
                             let providers = ProviderController {
-                                management: &mut provider_management,
+                                management: provider_management,
                                 discovery_tx: &model_discovery_tx,
                                 discovery_generation: &mut model_discovery_generation,
                                 discovery_token: &mut model_discovery_token,
                             };
                             let input_history = InputHistoryController {
-                                store: &input_history_store,
+                                store: input_history_store,
                                 warning_shown: &mut input_history_warning_shown,
                             };
                             let services = ControllerServices {
-                                preferences_store: &preferences_store,
+                                preferences_store,
                                 input_history,
                                 providers,
                                 clipboard_image_tx: &clipboard_image_tx,
                                 command_output_tx: &command_output_tx,
-                                terminal: &mut terminal,
+                                compaction_tx: &compaction_tx,
+                                terminal,
                                 #[cfg(feature = "web")]
                                 web_service: &mut web_service,
                                 background_tasks: &mut background_tasks,
                                 subagent_live_stream: &mut subagent_live_stream,
                             };
-                            if dispatch_effect(effect, &mut session, &mut state, services).await? {
-                                should_exit = true;
+                            if let Some(exit) =
+                                dispatch_effect(effect, &mut session, &mut state, services).await?
+                            {
+                                pending_exit = Some(exit);
                                 break;
                             }
                         }
@@ -447,10 +500,11 @@ pub(crate) async fn run_controller(
                     if state.inspected_subagent_id().is_none() {
                         subagent_live_stream = None;
                     }
-                    if should_exit {
+                    if let Some(exit) = pending_exit {
+                        exit_reason = exit;
                         break;
                     }
-                    render_once(&mut terminal, &mut state)?;
+                    render_once(terminal, &mut state)?;
                 }
                 subagent_event = recv_subagent_live_event(&mut subagent_live_stream), if subagent_live_stream.is_some() => {
                     match subagent_event {
@@ -464,7 +518,7 @@ pub(crate) async fn run_controller(
                             );
                             state.apply_subagent_live_event(&agent_id, event);
                             if !stream_progress || !needs_refresh(&state) {
-                                render_once(&mut terminal, &mut state)?;
+                                render_once(terminal, &mut state)?;
                             }
                         }
                         None => {
@@ -500,7 +554,7 @@ pub(crate) async fn run_controller(
                                     .await;
                             }
                             if !stream_progress || !state.is_active_run() {
-                                render_once(&mut terminal, &mut state)?;
+                                render_once(terminal, &mut state)?;
                             }
                         }
                         InteractiveRunMessage::ToolInvocations { batch } => {
@@ -521,7 +575,7 @@ pub(crate) async fn run_controller(
                         Ok(()) => {
                             let snapshots = session.subagent_activity.borrow().clone();
                             state.update_subagent_activity(&snapshots);
-                            render_once(&mut terminal, &mut state)?;
+                            render_once(terminal, &mut state)?;
                         }
                         Err(_) => {
                             subagent_activity_open = false;
@@ -540,7 +594,7 @@ pub(crate) async fn run_controller(
                             session.pending_permission_review_count(),
                         );
                     }
-                    render_once(&mut terminal, &mut state)?;
+                    render_once(terminal, &mut state)?;
                 }
                 completion = model_discovery_rx.recv() => {
                     let Some(completion) = completion else {
@@ -548,7 +602,7 @@ pub(crate) async fn run_controller(
                     };
                     if completion.generation == model_discovery_generation {
                         state.update_model_picker(&completion.alias, completion.result);
-                        render_once(&mut terminal, &mut state)?;
+                        render_once(terminal, &mut state)?;
                     }
                 }
                 completion = clipboard_image_rx.recv() => {
@@ -556,16 +610,20 @@ pub(crate) async fn run_controller(
                         continue;
                     };
                     apply_clipboard_image_completion(completion.result, &mut state);
-                    render_once(&mut terminal, &mut state)?;
+                    render_once(terminal, &mut state)?;
                 }
                 Some(completion) = command_output_rx.recv() => {
                     completion.apply(&mut state);
-                    render_once(&mut terminal, &mut state)?;
+                    render_once(terminal, &mut state)?;
+                }
+                Some(completion) = compaction_rx.recv() => {
+                    completion.apply(&mut state);
+                    render_once(terminal, &mut state)?;
                 }
             }
         }
 
-        Ok(())
+        Ok(exit_reason)
     }.await;
 
     session.stream.request_cancel();
@@ -575,6 +633,7 @@ pub(crate) async fn run_controller(
     model_discovery_rx.close();
     clipboard_image_rx.close();
     command_output_rx.close();
+    compaction_rx.close();
     let session_result = session.stream.wait_until_closed().await.map_err(unexpected);
     let tasks_result = drain_background_tasks(&mut background_tasks).await;
     #[cfg(feature = "web")]
@@ -590,7 +649,10 @@ pub(crate) async fn run_controller(
             }
         }
     }
-    run_result.and(cleanup_result)
+    match (run_result, cleanup_result) {
+        (Ok(exit), Ok(())) => Ok(exit),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
 }
 
 async fn drain_background_tasks(tasks: &mut JoinSet<()>) -> Result<(), CliError> {

@@ -78,6 +78,7 @@ pub(super) fn compile_fitted_compaction_request(
             model,
             projection.source,
             projection.mode,
+            projection.user_context,
             reasoning_effort,
             output_ceiling_tokens,
         )

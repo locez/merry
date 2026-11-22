@@ -35,6 +35,7 @@ pub(crate) enum StatusAction {
 pub(crate) enum OverlayPointer {
     CloseModal,
     Palette(usize),
+    Skill(usize),
     Setting(crate::tui::overlay::SettingItem),
     PlanView(crate::tui::plan_view::PlanViewPointer),
     PermissionAllow,

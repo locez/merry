@@ -65,6 +65,11 @@ impl InteractiveProducer {
                         return self.stop_result();
                     }
                 }
+                CommandDecision::RunCompaction { focus, ack_sender } => {
+                    if !self.run_manual_compaction(focus, ack_sender).await {
+                        return self.stop_result();
+                    }
+                }
                 CommandDecision::Close => {
                     break;
                 }
@@ -228,6 +233,127 @@ impl InteractiveProducer {
                 self.send_state(InteractiveRunState::WaitingForInput).await
             }
             BoundaryAction::Continuation => true,
+        }
+    }
+
+    pub(super) async fn run_manual_compaction(
+        &mut self,
+        focus: Option<String>,
+        ack_sender: tokio::sync::oneshot::Sender<
+            Result<Option<crate::CompactionOutcome>, InteractiveError>,
+        >,
+    ) -> bool {
+        self.interrupted = false;
+        let phase_token = self.loop_token.child_token();
+        self.phase_token = Some(phase_token.clone());
+        if !self.send_state(InteractiveRunState::RunningModel).await {
+            self.phase_token = None;
+            return false;
+        }
+
+        let (started_tx, mut started_rx) = tokio::sync::oneshot::channel();
+        let runtime = self.runtime.clone();
+        let permit = self.loop_permit.clone();
+        let compact_fut = runtime.compact_context_with_active_permit(
+            focus,
+            phase_token.clone(),
+            permit,
+            started_tx,
+        );
+        tokio::pin!(compact_fut);
+
+        let mut started_emitted = false;
+        let mut commands_open = true;
+        let result = loop {
+            tokio::select! {
+                result = &mut compact_fut => break result,
+                started = &mut started_rx, if !started_emitted => {
+                    started_emitted = true;
+                    if started.is_ok() {
+                        let event = self.runtime.record_manual_compaction_started().await;
+                        if !self.send_runtime_events(vec![event]).await {
+                            self.phase_token = None;
+                            return false;
+                        }
+                    }
+                }
+                command = self.command_receiver.recv(), if commands_open => {
+                    let Some(command) = command else {
+                        commands_open = false;
+                        continue;
+                    };
+                    if self
+                        .handle_command(command, CommandHandlingMode::Running)
+                        .await
+                        .is_none()
+                    {
+                        self.phase_token = None;
+                        return false;
+                    }
+                }
+                subagent_event = self.subagent_event_receiver.recv() => {
+                    if !self.forward_subagent_event(subagent_event).await {
+                        self.phase_token = None;
+                        return false;
+                    }
+                }
+            }
+        };
+
+        self.phase_token = None;
+        if !started_emitted && started_rx.try_recv().is_ok() {
+            let event = self.runtime.record_manual_compaction_started().await;
+            if !self.send_runtime_events(vec![event]).await {
+                return false;
+            }
+        }
+
+        match result {
+            Ok(Some(outcome)) => {
+                let event = self
+                    .runtime
+                    .record_manual_compaction_completed(&outcome)
+                    .await;
+                if !self.send_runtime_events(vec![event]).await {
+                    return false;
+                }
+                let _ = ack_sender.send(Ok(Some(outcome)));
+            }
+            Ok(None) => {
+                let _ = ack_sender.send(Ok(None));
+            }
+            Err(error) => {
+                if self.interrupted
+                    || (phase_token.is_cancelled() && !self.loop_token.is_cancelled())
+                {
+                    let event = self
+                        .runtime
+                        .record_manual_compaction_cancelled("compaction cancelled by user")
+                        .await;
+                    if !self.send_runtime_events(vec![event]).await {
+                        return false;
+                    }
+                } else if !self.loop_token.is_cancelled() {
+                    let event = self
+                        .runtime
+                        .record_manual_compaction_failed(&error.to_string())
+                        .await;
+                    if !self.send_runtime_events(vec![event]).await {
+                        return false;
+                    }
+                }
+                let _ = ack_sender.send(Err(InteractiveError::from(error)));
+            }
+        }
+
+        if !self.drain_ready_commands().await {
+            return false;
+        }
+        self.refresh_subagent_continuation_request().await;
+        match self.boundary_action(false) {
+            BoundaryAction::UserInput { accepted } => self.run_accepted_steps(accepted).await,
+            BoundaryAction::Continuation => self.run_coordinator_continuation().await,
+            BoundaryAction::Wait => self.send_state(InteractiveRunState::WaitingForInput).await,
         }
     }
 

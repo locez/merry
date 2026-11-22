@@ -65,6 +65,20 @@ impl TuiState {
         self.overlays.overlay = Some(Overlay::settings());
     }
 
+    pub(crate) fn open_skills_picker(&mut self) -> bool {
+        let skills = self.completion_sources.skills().to_vec();
+        if skills.is_empty() {
+            return false;
+        }
+        self.completion_menu = None;
+        self.overlays.dialog_back = None;
+        self.overlays.provider_overlay_back = None;
+        self.overlays.overlay = Some(Overlay::Skills(
+            crate::tui::skills_overlay::SkillsOverlay::new(skills),
+        ));
+        true
+    }
+
     pub(crate) fn open_command_details(
         &mut self,
         details: crate::tui::command_details::CommandDetails,
@@ -225,6 +239,7 @@ impl TuiState {
                 | Overlay::CommandDetails(_)
                 | Overlay::SubagentInspect(_)
                 | Overlay::BackgroundTaskInspect(_)
+                | Overlay::Skills(_)
                 | Overlay::Shortcuts(_),
             )
             | None => {

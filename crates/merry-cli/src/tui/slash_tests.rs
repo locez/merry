@@ -89,21 +89,40 @@ fn slash_completion_uses_the_shared_registry_only_at_the_input_start() {
     let all = sources
         .menu_for_input("/", 1, None)
         .expect("slash completion");
-    assert_eq!(all.items().len(), 8);
+    let values = all
+        .items()
+        .iter()
+        .map(|item| item.value())
+        .collect::<Vec<_>>();
     assert!(
         all.items()
             .iter()
             .all(|item| item.kind() == &CompletionKind::Slash)
     );
-    assert_eq!(
-        all.items()
-            .iter()
-            .map(|item| item.value())
-            .collect::<Vec<_>>(),
-        vec![
-            "/exit", "/help", "/plan", "/plans", "/save", "/status", "/stop", "/tasks"
-        ]
-    );
+    for expected in [
+        "/code-review",
+        "/compact",
+        "/exit",
+        "/help",
+        "/model",
+        "/new",
+        "/plan",
+        "/plans",
+        "/resume",
+        "/save",
+        "/security-review",
+        "/settings",
+        "/shortcuts",
+        "/skills",
+        "/status",
+        "/stop",
+        "/tasks",
+    ] {
+        assert!(
+            values.contains(&expected),
+            "{expected} missing from slash completions: {values:?}"
+        );
+    }
 
     let save = sources
         .menu_for_input("/sa", 3, None)
@@ -114,11 +133,35 @@ fn slash_completion_uses_the_shared_registry_only_at_the_input_start() {
     assert!(sources.menu_for_input("hello /sa", 9, None).is_none());
     assert!(sources.menu_for_input("/xyz", 4, None).is_none());
 
+    // Alias and substring queries surface matching canonical slash commands.
+    let clear = sources
+        .menu_for_input("/clear", 6, None)
+        .expect("clear alias completion");
+    assert_eq!(clear.items()[0].value(), "/new");
+    assert_eq!(clear.selected_index(), 0);
+
+    let review = sources
+        .menu_for_input("/rev", 4, None)
+        .expect("review substring completion");
+    assert_eq!(
+        review
+            .items()
+            .iter()
+            .map(|item| item.value())
+            .collect::<Vec<_>>(),
+        vec!["/code-review", "/security-review"]
+    );
+
     let middle = sources
         .menu_for_input("/save", 3, None)
         .expect("mid-token slash completion");
     assert_eq!(middle.replacement_range(), 0..5);
     assert_eq!(middle.replacement_text(), Some("/save".to_owned()));
+
+    let compact = sources
+        .menu_for_input("/comp", 5, None)
+        .expect("compact completion");
+    assert_eq!(compact.replacement_text(), Some("/compact ".to_owned()));
 }
 
 #[test]
@@ -245,11 +288,18 @@ fn help_and_status_render_complete_bodies_at_supported_terminal_sizes() {
         let help_text = render::render_to_text(&help, width, height);
         for expected in [
             "Command help",
+            "/new",
+            "/clear",
+            "/compact",
+            "/code-review",
+            "/security-review",
+            "/model",
+            "/resume",
+            "/settings",
             "/help",
             "/save",
             "/status",
             "/stop",
-            "List slash commands",
             "Submit",
             "Commands",
             "Stop",
@@ -387,6 +437,14 @@ fn help_remains_complete_at_80_by_16() {
     let rendered = render::render_to_text(&state, 80, 16);
     for expected in [
         "Command help",
+        "/new",
+        "/clear",
+        "/resume",
+        "/compact",
+        "/code-review",
+        "/security-review",
+        "/model",
+        "/settings",
         "/help",
         "/plan",
         "/plans",
@@ -757,6 +815,11 @@ fn slash_completion_renders_all_commands_at_compact_and_standard_sizes() {
     for (width, height) in [(80, 16), (120, 24)] {
         let mut state = state();
         state.insert_input_str("/");
+        let total_items = state
+            .completion_menu()
+            .expect("slash completion menu")
+            .items()
+            .len();
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
@@ -768,20 +831,16 @@ fn slash_completion_renders_all_commands_at_compact_and_standard_sizes() {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        for command in ["/exit", "/help", "/plan", "/plans", "/save", "/status"] {
+        for command in ["/code-review", "/compact", "/exit", "/help", "/model", "/new"] {
             assert!(
                 text.contains(command),
                 "{command} should render at {width}x{height}"
             );
         }
-        // Navigating down reveals the remaining slash commands in the bounded popup.
-        state.select_next_completion();
-        state.select_next_completion();
-        state.select_next_completion();
-        state.select_next_completion();
-        state.select_next_completion();
-        state.select_next_completion();
-        state.select_next_completion();
+        // Navigating to the end reveals the remaining slash commands in the bounded popup.
+        for _ in 0..total_items.saturating_sub(1) {
+            state.select_next_completion();
+        }
         terminal
             .draw(|frame| render::render(frame, &state))
             .expect("render scrolled slash completion");
@@ -799,4 +858,267 @@ fn slash_completion_renders_all_commands_at_compact_and_standard_sizes() {
             );
         }
     }
+}
+
+#[test]
+fn new_resume_and_compact_slash_commands_respect_run_state_and_aliases() {
+    for input in ["/new", "/clear"] {
+        let mut idle = state();
+        idle.insert_input_str(input);
+        assert_eq!(
+            handle_key_action(KeyAction::Submit, &mut idle),
+            ControllerEffect::NewSession
+        );
+        assert_eq!(idle.input_text(), "");
+
+        let mut running = state();
+        running.set_run_state(InteractiveRunState::RunningModel);
+        running.insert_input_str(input);
+        assert_eq!(
+            handle_key_action(KeyAction::Submit, &mut running),
+            ControllerEffect::None
+        );
+        assert!(matches!(
+            running.timeline().last(),
+            Some(TimelineItem::LocalCommand { title, .. }) if title == "New session unavailable"
+        ));
+    }
+
+    let mut resume_idle = state();
+    resume_idle.insert_input_str("/resume");
+    assert_eq!(
+        handle_key_action(KeyAction::Submit, &mut resume_idle),
+        ControllerEffect::ResumeSession
+    );
+
+    let mut resume_running = state();
+    resume_running.set_run_state(InteractiveRunState::RunningTool);
+    resume_running.insert_input_str("/resume");
+    assert_eq!(
+        handle_key_action(KeyAction::Submit, &mut resume_running),
+        ControllerEffect::None
+    );
+    assert!(matches!(
+        resume_running.timeline().last(),
+        Some(TimelineItem::LocalCommand { title, .. }) if title == "Resume unavailable"
+    ));
+
+    let mut compact_idle = state();
+    compact_idle.insert_input_str("/compact keep auth invariants");
+    assert_eq!(
+        handle_key_action(KeyAction::Submit, &mut compact_idle),
+        ControllerEffect::CompactContext {
+            focus: Some("keep auth invariants".to_owned()),
+        }
+    );
+
+    let mut compact_running = state();
+    compact_running.set_run_state(InteractiveRunState::RunningModel);
+    compact_running.insert_input_str("/compact");
+    assert_eq!(
+        handle_key_action(KeyAction::Submit, &mut compact_running),
+        ControllerEffect::None
+    );
+    assert!(matches!(
+        compact_running.timeline().last(),
+        Some(TimelineItem::LocalCommand { title, .. }) if title == "Compaction unavailable"
+    ));
+}
+
+#[test]
+fn review_workflow_slash_commands_submit_structured_prompts_with_compact_history() {
+    for (input, expected_scope, expected_phrase) in [
+        ("/code-review", "git diff", "CONFIRMED"),
+        ("/review main..HEAD", "main..HEAD", "role: \"review\""),
+        ("/security-review", "git diff", "Hard Exclusions"),
+        (
+            "/sec-review crates/merry-tools/src/ssrf.rs",
+            "crates/merry-tools/src/ssrf.rs",
+            "security review",
+        ),
+    ] {
+        let mut s = state();
+        s.insert_input_str(input);
+        let effect = handle_key_action(KeyAction::Submit, &mut s);
+        let ControllerEffect::Submit(submission) = effect else {
+            panic!("expected workflow submit for {input}, got {effect:?}");
+        };
+        assert_eq!(submission.history_text, input);
+        assert!(
+            submission.text.contains(expected_scope),
+            "{input} prompt missing scope {expected_scope:?}"
+        );
+        assert!(
+            submission.text.contains(expected_phrase),
+            "{input} prompt missing phrase {expected_phrase:?}"
+        );
+        assert_eq!(s.input_text(), "");
+    }
+}
+
+#[test]
+fn quick_ui_and_quit_slash_commands_route_to_existing_overlays_and_effects() {
+    for input in ["/model", "/provider", "/providers"] {
+        let mut s = state();
+        s.insert_input_str(input);
+        assert_eq!(
+            handle_key_action(KeyAction::Submit, &mut s),
+            ControllerEffect::OpenProviderManager
+        );
+    }
+
+    for input in ["/settings", "/config"] {
+        let mut s = state();
+        s.insert_input_str(input);
+        assert_eq!(
+            handle_key_action(KeyAction::Submit, &mut s),
+            ControllerEffect::None
+        );
+        assert!(matches!(s.overlay(), Some(Overlay::Settings(_))));
+    }
+
+    for input in ["/shortcuts", "/keys"] {
+        let mut s = state();
+        s.insert_input_str(input);
+        assert_eq!(
+            handle_key_action(KeyAction::Submit, &mut s),
+            ControllerEffect::None
+        );
+        assert!(matches!(s.overlay(), Some(Overlay::Shortcuts(_))));
+    }
+
+    for input in ["/exit", "/quit"] {
+        let mut s = state();
+        s.insert_input_str(input);
+        assert_eq!(
+            handle_key_action(KeyAction::Submit, &mut s),
+            ControllerEffect::Quit
+        );
+    }
+}
+
+#[test]
+fn tab_on_argument_slash_command_appends_space_while_enter_executes_immediately() {
+    let mut tab_state = state();
+    tab_state.insert_input_str("/comp");
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut tab_state,
+        ),
+        ControllerEffect::None
+    );
+    assert_eq!(tab_state.input_text(), "/compact ");
+
+    let mut enter_state = state();
+    enter_state.insert_input_str("/comp");
+    let enter_state_effect = handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut enter_state,
+    );
+    assert_eq!(
+        enter_state_effect,
+        ControllerEffect::CompactContext { focus: None }
+    );
+}
+
+#[test]
+fn slash_fuzzy_acronym_completion_matches_review_commands() {
+    let sources = CompletionSources::from_skill_names("/repo".into(), &[]);
+    let cr = sources
+        .menu_for_input("/cr", 3, None)
+        .expect("fuzzy acronym match for /code-review");
+    assert_eq!(cr.items()[0].value(), "/code-review");
+    assert!(!cr.items()[0].match_positions().is_empty());
+
+    let sr = sources
+        .menu_for_input("/sr", 3, None)
+        .expect("fuzzy acronym match for /security-review");
+    assert_eq!(sr.items()[0].value(), "/security-review");
+}
+
+#[test]
+fn skills_slash_command_opens_fuzzy_picker_and_inserts_skill_token() {
+    let mut empty = state();
+    empty.insert_input_str("/skills");
+    assert_eq!(
+        handle_key_action(KeyAction::Submit, &mut empty),
+        ControllerEffect::None
+    );
+    assert!(empty.overlay().is_none());
+    assert!(matches!(
+        empty.timeline().last(),
+        Some(TimelineItem::LocalCommand { title, body })
+            if title == "Skills" && body.contains("No skills loaded")
+    ));
+
+    let skills = vec![
+        merry_runtime::SkillMetadata::new(
+            "brainstorming",
+            "Explore intent and architecture collaboratively.",
+            std::path::PathBuf::from("skills/brainstorming/SKILL.md"),
+            std::path::PathBuf::from("/skills"),
+        )
+        .expect("valid skill"),
+        merry_runtime::SkillMetadata::new(
+            "frontend-design",
+            "Create distinctive production UI.",
+            std::path::PathBuf::from("skills/frontend-design/SKILL.md"),
+            std::path::PathBuf::from("/skills"),
+        )
+        .expect("valid skill"),
+    ];
+    let mut populated = state();
+    populated.set_completion_skills(skills);
+    populated.insert_input_str("/skill");
+    assert_eq!(
+        handle_key_action(KeyAction::Submit, &mut populated),
+        ControllerEffect::None
+    );
+    assert!(matches!(populated.overlay(), Some(Overlay::Skills(_))));
+
+    let rendered = render::render_to_text(&populated, 100, 24);
+    assert!(rendered.contains("Skills"));
+    assert!(rendered.contains("$brainstorming"));
+    assert!(rendered.contains("$frontend-design"));
+
+    // Filter live by acronym `fd` and insert `$frontend-design ` into composer.
+    for ch in ['f', 'd'] {
+        assert_eq!(
+            handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), &mut populated),
+            ControllerEffect::None
+        );
+    }
+    assert_eq!(
+        handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut populated),
+        ControllerEffect::None
+    );
+    assert!(populated.overlay().is_none());
+    assert_eq!(populated.input_text(), "$frontend-design ");
+    assert!(populated.completion_menu().is_none());
+}
+
+#[test]
+fn slash_completion_aligns_description_column_across_commands() {
+    let mut s = state();
+    s.insert_input_str("/");
+    let rendered = render::render_to_text(&s, 110, 20);
+    let col_of = |needle: &str| {
+        rendered
+            .lines()
+            .find_map(|line| line.find(needle))
+            .unwrap_or_else(|| panic!("{needle:?} not found in rendered completion:\n{rendered}"))
+    };
+    let review_col = col_of("Review recent changes");
+    let compact_col = col_of("Compact conversation history");
+    let quit_col = col_of("Quit Merry");
+    let help_col = col_of("List slash commands");
+    let model_col = col_of("Switch provider or model");
+    let new_col = col_of("Start a fresh session");
+
+    assert_eq!(compact_col, review_col);
+    assert_eq!(quit_col, review_col);
+    assert_eq!(help_col, review_col);
+    assert_eq!(model_col, review_col);
+    assert_eq!(new_col, review_col);
 }

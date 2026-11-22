@@ -132,6 +132,7 @@ pub(super) async fn fit_compaction_plan(
             CompactionRequestProjection {
                 source: &budget.source,
                 mode,
+                user_context: budget.user_context.as_deref(),
             },
             reasoning_effort,
             limits,

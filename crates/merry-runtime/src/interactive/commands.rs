@@ -3,7 +3,7 @@ use super::{
     queue::AcceptedQueuedInput,
     types::{InputRecords, QueuedInputId},
 };
-use crate::{FileSessionStore, UserMessageInput};
+use crate::{CompactionOutcome, FileSessionStore, UserMessageInput};
 use merry_core::PlanId;
 use tokio::sync::oneshot;
 
@@ -47,6 +47,10 @@ pub(super) enum InteractiveCommand {
         store: FileSessionStore,
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
     },
+    CompactContext {
+        focus: Option<String>,
+        ack_sender: oneshot::Sender<Result<Option<CompactionOutcome>, InteractiveError>>,
+    },
     SetPlanMode {
         enabled: bool,
         ack_sender: oneshot::Sender<Result<(), InteractiveError>>,
@@ -76,11 +80,14 @@ pub(super) enum CommandHandlingMode {
     Running,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CommandDecision {
     Continue,
     RunContinuation,
     RunPending,
+    RunCompaction {
+        focus: Option<String>,
+        ack_sender: oneshot::Sender<Result<Option<CompactionOutcome>, InteractiveError>>,
+    },
     Close,
 }
 

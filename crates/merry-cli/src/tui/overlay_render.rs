@@ -119,6 +119,7 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
             frame.set_cursor_position(Position::new(cursor_x, rows[0].y));
         }
         Overlay::Settings(_) => render_settings(frame, state),
+        Overlay::Skills(picker) => super::skills_overlay::render_skills_overlay(frame, state, picker),
         Overlay::ProviderManager(manager) => {
             super::provider_render::render_provider_manager(frame, state, manager)
         }
@@ -577,6 +578,17 @@ pub(crate) fn overlay_pointer(
                 return Some(OverlayPointer::CloseModal);
             }
             settings_item_at(state, modal.inner, position).map(OverlayPointer::Setting)
+        }
+        Overlay::Skills(picker) => {
+            match super::skills_overlay::skills_overlay_pointer(area, picker, position) {
+                Some(super::skills_overlay::SkillsPointer::Close) => {
+                    Some(OverlayPointer::CloseModal)
+                }
+                Some(super::skills_overlay::SkillsPointer::Row(index)) => {
+                    Some(OverlayPointer::Skill(index))
+                }
+                None => None,
+            }
         }
         Overlay::PlanView(_) => {
             super::plan_view::plan_view_pointer(state, area, position).map(OverlayPointer::PlanView)

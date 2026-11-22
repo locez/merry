@@ -27,6 +27,7 @@ impl PlanPaletteContext {
 pub(crate) enum Overlay {
     CommandPalette(CommandPalette),
     Settings(SettingsOverlay),
+    Skills(super::skills_overlay::SkillsOverlay),
     ProviderManager(ProviderManagerOverlay),
     ProviderForm(ProviderFormOverlay),
     ModelPicker(ModelPickerOverlay),
@@ -199,6 +200,7 @@ pub(crate) enum OverlayKeyResult {
     OpenShortcuts,
     ApprovePermission(String),
     DenyPermission(String),
+    InsertSkill(String),
     Provider(ProviderOverlayAction),
     SubagentPrevious,
     SubagentNext,
@@ -240,8 +242,8 @@ impl CommandPalette {
                     || fuzzy_matches(command.label, &query)
                     || fuzzy_matches(command.category, &query)
                     || command
-                        .slash_name()
-                        .is_some_and(|name| fuzzy_matches(name, slash_query))
+                        .all_slash_names()
+                        .any(|name| fuzzy_matches(name, slash_query))
             })
             .collect()
     }
@@ -484,6 +486,13 @@ impl Overlay {
             Self::CommandPalette(palette) => palette.handle_key(key),
             Self::CommandDetails(details) => details.handle_key(key),
             Self::Settings(settings) => settings.handle_key(key),
+            Self::Skills(picker) => match picker.handle_key(key) {
+                super::skills_overlay::SkillsOverlayAction::Consumed => OverlayKeyResult::Consumed,
+                super::skills_overlay::SkillsOverlayAction::Close => OverlayKeyResult::Close,
+                super::skills_overlay::SkillsOverlayAction::Select(name) => {
+                    OverlayKeyResult::InsertSkill(name)
+                }
+            },
             Self::ProviderManager(manager) => match manager.handle_key(key) {
                 ProviderOverlayAction::Back => OverlayKeyResult::Back,
                 action => OverlayKeyResult::Provider(action),
@@ -598,6 +607,7 @@ impl Overlay {
         match self {
             Self::CommandPalette(palette) => palette.insert_paste(text),
             Self::Settings(settings) => settings.insert_paste(text),
+            Self::Skills(picker) => picker.insert_paste(text),
             Self::ProviderForm(form) => form.insert_paste(text),
             Self::ProviderManager(manager) => manager.insert_paste(text),
             Self::SubagentInspect(takeover) => takeover.insert_paste(text),

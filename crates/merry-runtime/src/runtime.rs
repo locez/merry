@@ -790,6 +790,18 @@ impl Runtime {
         policy: CitationCompactionPolicy,
         context: StepContext,
     ) -> Result<Option<CompactionOutcome>, RuntimeError> {
+        self.compact_context_once_with_focus(policy, None, context)
+            .await
+    }
+
+    /// Reduces history toward the destination budget while incorporating optional
+    /// user-supplied `focus` instructions into the summary directive.
+    pub async fn compact_context_once_with_focus(
+        &self,
+        policy: CitationCompactionPolicy,
+        focus: Option<String>,
+        context: StepContext,
+    ) -> Result<Option<CompactionOutcome>, RuntimeError> {
         let active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
             .ok_or_else(|| RuntimeError::StepAlreadyActive {
                 session_id: self.inner.session_id.clone(),
@@ -804,7 +816,76 @@ impl Runtime {
             });
         }
 
-        compact_context_once_inner(&self.inner, policy, token, active_permit).await
+        compact_context_once_inner(&self.inner, policy, focus, token, active_permit, None).await
+    }
+
+    pub(crate) async fn compact_context_with_active_permit(
+        &self,
+        focus: Option<String>,
+        token: CancellationToken,
+        active_permit: ActiveStepPermit,
+        started_notify: tokio::sync::oneshot::Sender<()>,
+    ) -> Result<Option<CompactionOutcome>, RuntimeError> {
+        let policy = self.inner.automatic_compaction.read().await.policy();
+        compact_context_once_inner(
+            &self.inner,
+            policy,
+            focus,
+            token,
+            active_permit,
+            Some(started_notify),
+        )
+        .await
+    }
+
+    pub(crate) async fn record_manual_compaction_started(&self) -> merry_core::RuntimeJournalEvent {
+        let event = {
+            let mut session = self.inner.session.lock().await;
+            session.record_compaction_started()
+        };
+        self.inner.commit_journal_events(std::slice::from_ref(&event)).await;
+        event
+    }
+
+    pub(crate) async fn record_manual_compaction_completed(
+        &self,
+        outcome: &CompactionOutcome,
+    ) -> merry_core::RuntimeJournalEvent {
+        let event = {
+            let mut session = self.inner.session.lock().await;
+            session.record_compaction_completed(
+                outcome.checkpoint_id().as_str().to_owned(),
+                outcome.covered_history_item_count(),
+            )
+        };
+        self.inner.commit_journal_events(std::slice::from_ref(&event)).await;
+        event
+    }
+
+    pub(crate) async fn record_manual_compaction_cancelled(
+        &self,
+        message: &str,
+    ) -> merry_core::RuntimeJournalEvent {
+        let diagnostic = diagnostic_from_text("manual_compaction_cancelled", message);
+        let event = {
+            let mut session = self.inner.session.lock().await;
+            session.record_cancelled(diagnostic)
+        };
+        self.inner.commit_journal_events(std::slice::from_ref(&event)).await;
+        event
+    }
+
+    pub(crate) async fn record_manual_compaction_failed(
+        &self,
+        message: &str,
+    ) -> merry_core::RuntimeJournalEvent {
+        let diagnostic = diagnostic_from_text("manual_compaction", message);
+        let event = {
+            let mut session = self.inner.session.lock().await;
+            session.record_failed(diagnostic)
+        };
+        self.inner.commit_journal_events(std::slice::from_ref(&event)).await;
+        event
     }
 }
 

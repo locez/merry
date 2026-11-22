@@ -35,6 +35,24 @@ impl TuiState {
         self.pending_empty_input_quit = false;
     }
 
+    /// Inserts `$<skill-name> ` at the cursor without expanding `SKILL.md`,
+    /// preserving any existing draft text and keeping the completion menu closed.
+    pub(crate) fn insert_skill_token(&mut self, name: &str) {
+        let cursor = self.input.cursor_byte_index();
+        let needs_leading_space = self.input.text()[..cursor]
+            .chars()
+            .last()
+            .is_some_and(|ch| !ch.is_whitespace());
+        let token = if needs_leading_space {
+            format!(" ${name} ")
+        } else {
+            format!("${name} ")
+        };
+        self.input.insert_str(&token);
+        self.completion_menu = None;
+        self.pending_empty_input_quit = false;
+    }
+
     #[cfg(test)]
     pub(crate) fn has_input_selection(&self) -> bool {
         self.input.has_selection()

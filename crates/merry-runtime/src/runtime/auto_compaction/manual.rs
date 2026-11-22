@@ -7,12 +7,16 @@ use super::{
 };
 use crate::{CitationCompactionPolicy, CompactionOutcome, RuntimeError, events::ActiveStepPermit};
 use std::sync::Arc;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+
 pub(in crate::runtime) async fn compact_context_once_inner(
     inner: &Arc<RuntimeInner>,
     policy: CitationCompactionPolicy,
+    user_context: Option<String>,
     token: CancellationToken,
     active_permit: ActiveStepPermit,
+    mut started_notify: Option<oneshot::Sender<()>>,
 ) -> Result<Option<CompactionOutcome>, RuntimeError> {
     if token.is_cancelled() {
         return Err(compaction_cancelled_before_request());
@@ -26,7 +30,9 @@ pub(in crate::runtime) async fn compact_context_once_inner(
         .await
         .reasoning_effort()
         .cloned();
-    let mut budget = manual_compaction_budget(inner, policy).await?;
+    let mut budget = manual_compaction_budget(inner, policy)
+        .await?
+        .with_user_context(user_context.clone());
     let mut progress = CompactionProgress::new(budget.dynamic_body_estimated_tokens);
     let mut outcome: Option<CompactionOutcome> = None;
     loop {
@@ -65,6 +71,9 @@ pub(in crate::runtime) async fn compact_context_once_inner(
             }
             CompactionAttempt::Generate(plan) => plan,
         };
+        if let Some(sender) = started_notify.take() {
+            let _ = sender.send(());
+        }
         let next = generate_and_install_compaction(
             inner,
             plan,
@@ -78,7 +87,9 @@ pub(in crate::runtime) async fn compact_context_once_inner(
             Some(previous) => previous.followed_by(next)?,
             None => next,
         });
-        budget = manual_compaction_budget(inner, policy).await?;
+        budget = manual_compaction_budget(inner, policy)
+            .await?
+            .with_user_context(user_context.clone());
         if progress.observe(
             budget.dynamic_body_estimated_tokens,
             budget.target_dynamic_body_tokens(),

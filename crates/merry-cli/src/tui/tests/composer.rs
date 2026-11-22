@@ -203,6 +203,250 @@ fn completion_sources_include_skill_descriptions_as_detail() {
 }
 
 #[test]
+fn path_completion_skips_build_dirs_ranks_basename_and_supports_nested_slashes_and_dotfiles() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join("target/debug")).expect("mkdir target");
+    fs::write(temp.path().join("target/debug/render.rs"), "").expect("write target file");
+    fs::create_dir_all(temp.path().join("node_modules/pkg")).expect("mkdir node_modules");
+    fs::write(temp.path().join("node_modules/pkg/render.js"), "").expect("write nm file");
+    fs::create_dir_all(temp.path().join(".git/objects")).expect("mkdir .git");
+    fs::write(temp.path().join(".git/HEAD"), "").expect("write .git/HEAD");
+    fs::create_dir_all(temp.path().join(".merry/roles")).expect("mkdir .merry");
+    fs::write(temp.path().join(".merry/roles/custom.toml"), "").expect("write role");
+    fs::create_dir_all(temp.path().join("a_r/b_e/c_n/d_d/e_e")).expect("mkdir scattered");
+    fs::write(temp.path().join("a_r/b_e/c_n/d_d/e_e/f_r.txt"), "").expect("write scattered");
+    fs::create_dir_all(temp.path().join("src/tui")).expect("mkdir src/tui");
+    fs::write(temp.path().join("src/tui/render.rs"), "").expect("write render.rs");
+    fs::write(temp.path().join("build.rs"), "").expect("write build.rs");
+
+    let sources = CompletionSources::from_skill_names(temp.path().to_path_buf(), &[]);
+
+    let render = sources
+        .menu_for_input("check @render", "check @render".len(), None)
+        .expect("render completion");
+    let values = render
+        .items()
+        .iter()
+        .map(|item| item.value())
+        .collect::<Vec<_>>();
+    assert_eq!(values[0], "src/tui/render.rs");
+    assert!(
+        values
+            .iter()
+            .all(|v| !v.starts_with("target/") && !v.starts_with("node_modules/")),
+        "build/dependency dirs should be excluded: {values:?}"
+    );
+    assert!(!render.items()[0].match_positions().is_empty());
+
+    // Files named `build.rs` must not be filtered out by the `build/` directory rule.
+    let build_file = sources
+        .menu_for_input("@build", "@build".len(), None)
+        .expect("build.rs completion");
+    assert_eq!(build_file.items()[0].value(), "build.rs");
+
+    // Slashes inside `@` path queries remain active.
+    let slashed = sources
+        .menu_for_input("edit @src/tui/ren", "edit @src/tui/ren".len(), None)
+        .expect("slashed path completion");
+    assert_eq!(slashed.items()[0].value(), "src/tui/render.rs");
+
+    // Explicit leading dot queries surface dotfiles while keeping `.git/` ignored.
+    let hidden = sources
+        .menu_for_input("@.merry", "@.merry".len(), None)
+        .expect("hidden path completion");
+    assert!(
+        hidden
+            .items()
+            .iter()
+            .any(|item| item.value() == ".merry/roles/custom.toml")
+    );
+    assert!(
+        hidden
+            .items()
+            .iter()
+            .all(|item| !item.value().starts_with(".git/"))
+    );
+}
+
+#[test]
+fn skill_completion_supports_fuzzy_name_and_description_matching() {
+    let skills = vec![
+        SkillMetadata::new(
+            "brainstorming",
+            "Use for collaborative design work.",
+            PathBuf::from("skills/brainstorming/SKILL.md"),
+            PathBuf::from("/skills"),
+        )
+        .expect("valid skill"),
+        SkillMetadata::new(
+            "frontend-design",
+            "Build polished web interfaces.",
+            PathBuf::from("skills/frontend-design/SKILL.md"),
+            PathBuf::from("/skills"),
+        )
+        .expect("valid skill"),
+    ];
+    let sources = CompletionSources::new(std::env::current_dir().expect("cwd"), skills);
+
+    // Acronym fuzzy match on skill name.
+    let fd = sources
+        .menu_for_input("$fd", "$fd".len(), None)
+        .expect("acronym skill match");
+    assert_eq!(fd.items()[0].value(), "frontend-design");
+    assert!(!fd.items()[0].match_positions().is_empty());
+
+    // Description fallback match when name doesn't match.
+    let collab = sources
+        .menu_for_input("$collab", "$collab".len(), None)
+        .expect("description skill match");
+    assert_eq!(collab.items()[0].value(), "brainstorming");
+}
+
+#[test]
+fn path_completion_supports_absolute_paths_directory_drilldown_and_parent_relative_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    let external = temp.path().join("external");
+    fs::create_dir_all(&workspace).expect("mkdir workspace");
+    fs::create_dir_all(external.join("configs")).expect("mkdir configs");
+    fs::write(external.join("configs/app.toml"), "").expect("write app.toml");
+    fs::write(external.join("configs/.secret.env"), "").expect("write hidden file");
+    fs::write(external.join("notes.md"), "").expect("write notes.md");
+
+    let external_abs = external.to_string_lossy().replace('\\', "/");
+    let mut state = TuiState::new(
+        workspace,
+        "model".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+
+    // Absolute directory query fuzzy-matches entries outside the workspace.
+    let query = format!("read @{external_abs}/cfg");
+    state.insert_input_str(&query);
+    let menu = state.completion_menu().expect("absolute path menu");
+    assert_eq!(menu.items()[0].value(), format!("{external_abs}/configs/"));
+    assert!(!menu.items()[0].match_positions().is_empty());
+
+    // Accepting a directory keeps no trailing space and immediately opens its children.
+    let effect = handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state);
+    assert_eq!(effect, ControllerEffect::None);
+    assert_eq!(state.input_text(), format!("read @{external_abs}/configs/"));
+    let child_menu = state
+        .completion_menu()
+        .expect("directory completion drills into children");
+    assert_eq!(
+        child_menu.items()[0].value(),
+        format!("{external_abs}/configs/app.toml")
+    );
+
+    // Accepting a file appends a trailing space and closes the menu.
+    let effect = handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    assert_eq!(effect, ControllerEffect::None);
+    assert_eq!(
+        state.input_text(),
+        format!("read @{external_abs}/configs/app.toml ")
+    );
+    assert!(state.completion_menu().is_none());
+
+    // Hidden files appear when the segment explicitly starts with `.`.
+    state.clear_input();
+    state.insert_input_str(&format!("@{external_abs}/configs/.sec"));
+    let hidden_menu = state.completion_menu().expect("hidden absolute file menu");
+    assert_eq!(
+        hidden_menu.items()[0].value(),
+        format!("{external_abs}/configs/.secret.env")
+    );
+
+    // Explicit `../` relative traversal also works cleanly.
+    state.clear_input();
+    state.insert_input_str("@../external/not");
+    let parent_menu = state.completion_menu().expect("parent relative menu");
+    assert_eq!(parent_menu.items()[0].value(), "../external/notes.md");
+}
+
+#[test]
+fn path_completion_escapes_spaces_and_continues_drilling_into_spaced_directories() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let workspace = temp.path().join("workspace");
+    let spaced_ws_dir = workspace.join("my docs");
+    fs::create_dir_all(&spaced_ws_dir).expect("mkdir workspace spaced dir");
+    fs::write(spaced_ws_dir.join("read me.md"), "").expect("write workspace spaced file");
+
+    let external = temp.path().join("external");
+    let spaced_ext_dir = external.join("My Folder").join("Sub Dir");
+    fs::create_dir_all(&spaced_ext_dir).expect("mkdir external spaced dir");
+    fs::write(spaced_ext_dir.join("hello world.txt"), "").expect("write external spaced file");
+
+    let external_abs = external.to_string_lossy().replace('\\', "/");
+    let mut state = TuiState::new(
+        workspace,
+        "model".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+
+    // Absolute path with spaces: Tab escapes spaces and keeps drilling into children.
+    state.insert_input_str(&format!("inspect @{external_abs}/My"));
+    let level1 = state.completion_menu().expect("level 1 spaced dir menu");
+    assert_eq!(
+        level1.items()[0].value(),
+        format!("{external_abs}/My Folder/")
+    );
+
+    handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state);
+    assert_eq!(
+        state.input_text(),
+        format!("inspect @{external_abs}/My\\ Folder/")
+    );
+    let level2 = state
+        .completion_menu()
+        .expect("drilling into escaped spaced directory stays open");
+    assert_eq!(
+        level2.items()[0].value(),
+        format!("{external_abs}/My Folder/Sub Dir/")
+    );
+
+    // Second level spaced dir -> file with spaces.
+    handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state);
+    assert_eq!(
+        state.input_text(),
+        format!("inspect @{external_abs}/My\\ Folder/Sub\\ Dir/")
+    );
+    state.insert_input_str("hel");
+    let file_menu = state
+        .completion_menu()
+        .expect("filtering inside nested spaced directory");
+    assert_eq!(
+        file_menu.items()[0].value(),
+        format!("{external_abs}/My Folder/Sub Dir/hello world.txt")
+    );
+
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    assert_eq!(
+        state.input_text(),
+        format!("inspect @{external_abs}/My\\ Folder/Sub\\ Dir/hello\\ world.txt ")
+    );
+    assert!(state.completion_menu().is_none());
+
+    // Workspace-relative spaced directory also escapes and keeps completing.
+    state.clear_input();
+    state.insert_input_str("@my\\ docs/read");
+    let ws_menu = state
+        .completion_menu()
+        .expect("workspace spaced path menu");
+    assert_eq!(ws_menu.items()[0].value(), "my docs/read me.md");
+    handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state);
+    assert_eq!(state.input_text(), "@my\\ docs/read\\ me.md ");
+}
+
+#[test]
 fn controller_accepts_completion_before_submit() {
     let mut state = TuiState::new(
         std::env::current_dir().expect("cwd"),
