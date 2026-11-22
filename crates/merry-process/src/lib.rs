@@ -6,6 +6,10 @@
 //! platform can replace the concrete backend without changing coding
 //! composition or runtime call sites.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod confinement;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[path = "confinement/unsupported.rs"]
 mod confinement;
 mod gpg;
 mod host_path;
@@ -721,7 +725,9 @@ mod tests {
         AcceptedLocalWorkspaceProcessAdmission, PermissionedProcessRunnerFactory, ProcessRunner,
         StaticPermissionedProcessRunnerFactory,
     };
-    use std::{path::PathBuf, sync::Arc};
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use std::path::PathBuf;
+    use std::sync::Arc;
 
     #[test]
     fn session_keeps_admission_with_runner_capabilities() {
@@ -775,12 +781,13 @@ mod tests {
     #[test]
     fn isolated_backend_reports_unavailable_platform() {
         let temp = tempfile::tempdir().expect("temporary workspace should be created");
-        let error = LocalProcessBackend::new(
+        let Err(error) = LocalProcessBackend::new(
             temp.path(),
             ProcessBackendMode::Isolated,
             ProcessBackendOptions::new(),
-        )
-        .expect_err("isolated backend should report unsupported platforms");
+        ) else {
+            panic!("isolated backend should report unsupported platforms");
+        };
 
         assert!(matches!(
             error,

@@ -7,13 +7,15 @@ use merry_llm::{
     FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse, ModelToolCall,
     ModelToolCallId, ToolArguments, testing::FakeModelProvider,
 };
-use merry_process::{
-    LocalProcessBackend, ProcessBackend, ProcessBackendMode, ProcessBackendOptions,
-};
+#[cfg(target_os = "linux")]
+use merry_process::ProcessBackend;
+use merry_process::{LocalProcessBackend, ProcessBackendMode, ProcessBackendOptions};
 use merry_runtime::{
-    AgentLoopConfig, ProcessActionIntent, ProcessEnvPolicy, ProcessRunnerContext, StepContext,
-    StepInput, SubagentConfig, SubagentWorkspaceMode, SubagentWorktreeBase,
+    AgentLoopConfig, StepContext, StepInput, SubagentConfig, SubagentWorkspaceMode,
+    SubagentWorktreeBase,
 };
+#[cfg(target_os = "linux")]
+use merry_runtime::{ProcessActionIntent, ProcessEnvPolicy, ProcessRunnerContext};
 use serde_json::json;
 use std::{
     fs,

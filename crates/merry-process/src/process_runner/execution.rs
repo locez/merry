@@ -1,14 +1,18 @@
-use super::{
-    background::{self, BackgroundSupervisor},
-    permissions::WorkspaceProcessRunner,
-};
+use super::background::{self, BackgroundSupervisor};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::permissions::WorkspaceProcessRunner;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::confinement::{self, SandboxLaunch};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use merry_runtime::{BackgroundProcessControl, ProcessRunner, ProcessRunnerFuture};
 use merry_runtime::{
-    BackgroundProcessControl, ProcessActionIntent, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+    ProcessActionIntent, ProcessRunnerContext, ProcessRunnerError, ProcessRunnerOutput,
 };
-use std::{fs, io, process::Stdio, sync::Arc};
+use std::io;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::{fs, process::Stdio, sync::Arc};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl ProcessRunner for WorkspaceProcessRunner {
     fn run<'a>(
         &'a self,
@@ -36,6 +40,7 @@ impl ProcessRunner for WorkspaceProcessRunner {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn run_sandbox_launch(
     launch: SandboxLaunch,
     intent: ProcessActionIntent,

@@ -16,7 +16,7 @@ use merry_runtime::{
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use std::{
-    env, fs,
+    env,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -546,7 +546,7 @@ fn find_program_in_path(program: &str, path: &str) -> Option<String> {
 fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
 
-    let Ok(metadata) = fs::metadata(path) else {
+    let Ok(metadata) = std::fs::metadata(path) else {
         return false;
     };
     metadata.is_file() && metadata.permissions().mode() & 0o111 != 0

@@ -413,7 +413,7 @@ pub(crate) async fn prepared_action_process_backend_options(
 #[cfg(all(test, target_os = "linux"))]
 mod network_tests;
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 fn temp_home_outside_baseline_writes() -> tempfile::TempDir {
     let parent = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -427,7 +427,7 @@ fn temp_home_outside_baseline_writes() -> tempfile::TempDir {
     tempfile::tempdir_in(parent).expect("fixture home outside the baseline write allow list")
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 fn is_baseline_write_path(path: &Path) -> bool {
     [
         "/tmp",
@@ -446,10 +446,9 @@ fn is_baseline_write_path(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        action_process_backend_options, generation_config, temp_home_outside_baseline_writes,
-        validate_loaded_config,
-    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    use super::temp_home_outside_baseline_writes;
+    use super::{action_process_backend_options, generation_config, validate_loaded_config};
     use crate::config::{MerryConfig, XdgPaths};
     use merry_llm::ServiceTier;
     use merry_runtime::{MemoryLayout, PathAccessRuleSource};

@@ -1,18 +1,27 @@
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::{permission_request, request_process_intent};
+use crate::process_runner::TokioProcessRunner;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::process_runner::{
-    TokioProcessRunner, WorkspaceProcessEnvironment, WorkspaceProcessRunner,
-    WorkspaceProcessRunnerFactory,
+    WorkspaceProcessEnvironment, WorkspaceProcessRunner, WorkspaceProcessRunnerFactory,
 };
+#[cfg(unix)]
+use merry_runtime::ProcessRunnerOutput;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use merry_runtime::{
     PathAccess, PathAccessRule, PathAccessRuleSource, PermissionedProcessRunnerFactory,
-    ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerOutput,
 };
+use merry_runtime::{
+    ProcessActionIntent, ProcessEnvPolicy, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
+};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use serde_json::json;
 use std::ffi::OsString;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn permissioned_factory_runner_for_invalid_request_fails_closed() {
     let factory = WorkspaceProcessRunnerFactory::new_at_workspace_root("/workspace/merry")
@@ -43,6 +52,7 @@ async fn permissioned_factory_runner_for_invalid_request_fails_closed() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn tokio_process_runner_inherits_current_process_environment() {
     let Ok(path) = std::env::var("PATH") else {
@@ -74,6 +84,7 @@ async fn tokio_process_runner_inherits_current_process_environment() {
     assert_eq!(output.stdout_text(), format!("{path}\n{home}"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn tokio_process_runner_applies_validated_environment_overrides() {
     let intent = ProcessActionIntent::new(
@@ -99,6 +110,36 @@ async fn tokio_process_runner_applies_validated_environment_overrides() {
 
     assert_eq!(output.status(), ProcessExitStatus::Exited(0));
     assert_eq!(output.stdout_text(), "host");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn tokio_process_runner_executes_powershell_and_applies_env_overrides() {
+    let intent = ProcessActionIntent::new(
+        vec![
+            "powershell.exe".to_owned(),
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-Command".to_owned(),
+            "Write-Output \"$env:MERRY_TEST_MODE|你好\"".to_owned(),
+        ],
+        None,
+        ProcessEnvPolicy::empty(),
+        None,
+        64 * 1024,
+        1024,
+    )
+    .expect("process intent should be valid");
+
+    let output = TokioProcessRunner::new()
+        .with_environment_overrides([(OsString::from("MERRY_TEST_MODE"), OsString::from("host"))])
+        .expect("environment override should validate")
+        .run(intent, ProcessRunnerContext::new(CancellationToken::new()))
+        .await
+        .expect("Windows PowerShell process should run");
+
+    assert_eq!(output.status(), ProcessExitStatus::Exited(0));
+    assert_eq!(output.stdout_text().trim(), "host|你好");
 }
 
 #[cfg(unix)]
