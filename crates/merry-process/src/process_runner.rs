@@ -25,6 +25,7 @@ pub use tokio_runner::TokioProcessRunner;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use background::BackgroundSupervisor;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use environment::process_current_dir;
 
 #[cfg(test)]

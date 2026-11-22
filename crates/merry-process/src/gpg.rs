@@ -242,14 +242,24 @@ mod tests {
 
     #[test]
     fn parses_native_and_auxiliary_endpoints_without_conflating_protocols() {
-        let sockets = GpgAgentSockets::parse("homedir:/home/user/custom%3ahome\nagent-socket:/run/agent/native\nagent-ssh-socket:/run/agent/ssh\nagent-extra-socket:/run/agent/extra\nagent-browser-socket:/run/agent/browser\nkeyboxd-socket:/run/agent/keyboxd\n").unwrap();
-        assert_eq!(sockets.home(), Path::new("/home/user/custom:home"));
-        assert_eq!(sockets.agent(), Path::new("/run/agent/native"));
+        let root = if cfg!(windows) { "C:" } else { "" };
+        let output = format!(
+            "homedir:{root}/home/user/custom%3ahome\nagent-socket:{root}/run/agent/native\nagent-ssh-socket:{root}/run/agent/ssh\nagent-extra-socket:{root}/run/agent/extra\nagent-browser-socket:{root}/run/agent/browser\nkeyboxd-socket:{root}/run/agent/keyboxd\n"
+        );
+        let sockets = GpgAgentSockets::parse(&output).unwrap();
+        assert_eq!(
+            sockets.home(),
+            Path::new(&format!("{root}/home/user/custom:home"))
+        );
+        assert_eq!(
+            sockets.agent(),
+            Path::new(&format!("{root}/run/agent/native"))
+        );
         assert_eq!(sockets.paths().count(), 5);
         assert!(
             sockets
                 .paths()
-                .any(|path| path == Path::new("/run/agent/keyboxd"))
+                .any(|path| path == Path::new(&format!("{root}/run/agent/keyboxd")))
         );
     }
 
