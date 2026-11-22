@@ -54,7 +54,9 @@ jobs:
           sudo apt-get install --no-install-recommends --yes fish ripgrep gnupg openssh-client
 
       - name: Run deterministic Rust suite
-        run: cargo test --locked --workspace --features merry-cli/web
+        run: |
+          cargo build --locked -p merry-process --bin merry-sandbox-helper
+          cargo test --locked --workspace --features merry-cli/web
 
       - name: Verify required reliability and security scenarios
         run: |
