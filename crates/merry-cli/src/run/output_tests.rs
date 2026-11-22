@@ -86,6 +86,7 @@ async fn writer_prints_final_output_without_event_jsonl() {
         subagents: CodingSubagentsConfig::default(),
         workspace_tool_limits: None,
         workspace_writable: true,
+        denied_absolute_paths: Vec::new(),
     })
     .expect("runtime should build");
 
@@ -154,6 +155,7 @@ async fn writer_streams_progress_commentary_before_final_output() {
         subagents: CodingSubagentsConfig::default(),
         workspace_tool_limits: None,
         workspace_writable: true,
+        denied_absolute_paths: Vec::new(),
     })
     .expect("runtime should build");
 
@@ -213,6 +215,7 @@ async fn jsonl_writer_streams_agent_loop_result() {
         subagents: CodingSubagentsConfig::default(),
         workspace_tool_limits: None,
         workspace_writable: true,
+        denied_absolute_paths: Vec::new(),
     })
     .expect("runtime should build");
 
@@ -279,6 +282,7 @@ async fn writer_returns_incomplete_when_agent_loop_blocks() {
         subagents: CodingSubagentsConfig::default(),
         workspace_tool_limits: None,
         workspace_writable: true,
+        denied_absolute_paths: Vec::new(),
     })
     .expect("runtime should build");
 

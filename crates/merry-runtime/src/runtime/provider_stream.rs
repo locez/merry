@@ -57,23 +57,33 @@ pub(super) async fn stream_model_with_retry_policy(
     }
 }
 
+pub(super) enum ModelStreamPoll {
+    Cancelled,
+    RetryScheduled,
+    Item(Option<Result<ModelEvent, ModelError>>),
+}
+
 pub(super) async fn wait_for_model_stream_item(
     inner: &RuntimeInner,
     sender: &mpsc::Sender<RuntimeJournalEventBatch>,
     token: &CancellationToken,
     stream: &mut Pin<Box<dyn futures_core::Stream<Item = Result<ModelEvent, ModelError>> + Send>>,
     retry_events: &mut mpsc::Receiver<ModelRetryEvent>,
-) -> Option<Option<Result<ModelEvent, ModelError>>> {
+) -> ModelStreamPoll {
     loop {
         tokio::select! {
             biased;
-            () = token.cancelled() => return None,
+            () = token.cancelled() => return ModelStreamPoll::Cancelled,
             Some(event) = retry_events.recv() => {
+                let retry_scheduled = matches!(event, ModelRetryEvent::RetryScheduled { .. });
                 if !send_model_retry_event(inner, sender, token, event).await {
-                    return None;
+                    return ModelStreamPoll::Cancelled;
+                }
+                if retry_scheduled {
+                    return ModelStreamPoll::RetryScheduled;
                 }
             }
-            item = stream.next() => return Some(item),
+            item = stream.next() => return ModelStreamPoll::Item(item),
         }
     }
 }

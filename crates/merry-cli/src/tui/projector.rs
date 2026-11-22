@@ -102,6 +102,12 @@ impl TuiProjector {
                     Some(state.append_assistant_delta(self.streaming_assistant_index, &delta));
             }
             RuntimeEvent::AssistantMessageDelta { .. } => {}
+            RuntimeEvent::ModelRetryScheduled { .. } => {
+                state.finish_reasoning();
+                if let Some(index) = self.streaming_assistant_index.take() {
+                    state.discard_streaming_assistant(index);
+                }
+            }
             RuntimeEvent::InteractiveRunStateChanged { state: run_state } => {
                 state.apply_runtime_run_state(run_state);
             }

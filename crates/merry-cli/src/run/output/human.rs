@@ -147,6 +147,7 @@ where
             error_kind,
             ..
         } => {
+            *pending_commentary = None;
             let line = format!(
                 "model retry: attempt {attempt}/{max_attempts} failed with {error_kind}; retrying attempt {next_attempt}/{max_attempts} in {}",
                 format_delay_ms(*delay_ms)

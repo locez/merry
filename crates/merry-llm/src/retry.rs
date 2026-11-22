@@ -359,54 +359,72 @@ async fn run_retry_stream(
         };
 
         let mut observed_progress = false;
+        let mut committed = false;
         let error = match setup {
-            Ok(mut stream) => {
-                let mut committed = false;
-                loop {
-                    let item = tokio::select! {
-                        biased;
-                        () = token.cancelled() => {
+            Ok(mut stream) => loop {
+                let item = tokio::select! {
+                    biased;
+                    () = token.cancelled() => {
+                        send_cancelled_if_open(&sender);
+                        return;
+                    }
+                    () = sender.closed() => return,
+                    item = stream.next() => item,
+                };
+
+                match item {
+                    Some(Ok(ModelEvent::Started)) => {}
+                    Some(Ok(event)) => {
+                        observed_progress |= matches!(event, ModelEvent::OutputProgress { .. });
+                        committed |= commits_output(&event);
+                        let completed = matches!(event, ModelEvent::Completed { .. });
+                        if !send_stream_item(&sender, &token, Ok(event)).await {
                             send_cancelled_if_open(&sender);
                             return;
                         }
-                        () = sender.closed() => return,
-                        item = stream.next() => item,
-                    };
+                        if completed {
+                            return;
+                        }
+                    }
+                    Some(Err(error)) if committed && !can_retry_after_committed_output(&error) => {
+                        let _ = send_stream_item(&sender, &token, Err(error)).await;
+                        return;
+                    }
+                    Some(Err(error)) => break error,
+                    None if committed => {
+                        let _ = send_stream_item(
+                            &sender,
+                            &token,
+                            Err(model_stream_ended_before_completion()),
+                        )
+                        .await;
+                        return;
+                    }
+                    None => break model_stream_ended_before_completion(),
+                }
+            },
+            Err(error) => error,
+        };
 
-                    match item {
-                        Some(Ok(ModelEvent::Started)) => {}
-                        Some(Ok(event)) => {
-                            observed_progress |= matches!(event, ModelEvent::OutputProgress { .. });
-                            committed |= commits_output(&event);
-                            let completed = matches!(event, ModelEvent::Completed { .. });
-                            if !send_stream_item(&sender, &token, Ok(event)).await {
-                                send_cancelled_if_open(&sender);
-                                return;
-                            }
-                            if completed {
-                                return;
-                            }
-                        }
-                        Some(Err(error)) if committed => {
-                            let _ = send_stream_item(&sender, &token, Err(error)).await;
-                            return;
-                        }
-                        Some(Err(error)) => break error,
-                        None if committed => {
-                            let _ = send_stream_item(
-                                &sender,
-                                &token,
-                                Err(model_stream_ended_before_completion()),
-                            )
-                            .await;
-                            return;
-                        }
-                        None => break model_stream_ended_before_completion(),
+        // When the failed attempt already streamed items onto `sender`, wait for
+        // the consumer to drain them before emitting `RetryScheduled` or
+        // `RetryExhausted` on the side-band retry channel. That keeps partial
+        // deltas from the failed attempt strictly ordered before the reset.
+        if committed && policy.can_retry() && policy.is_retryable(&error) {
+            tokio::select! {
+                biased;
+                () = token.cancelled() => {
+                    send_cancelled_if_open(&sender);
+                    return;
+                }
+                () = sender.closed() => return,
+                reserved = sender.reserve_many(RETRY_STREAM_BUFFER) => {
+                    if reserved.is_err() {
+                        return;
                     }
                 }
             }
-            Err(error) => error,
-        };
+        }
 
         let Some(delay) = retry_delay(policy, &context, started, attempt, &error).await else {
             let _ = send_stream_item(&sender, &token, Err(error)).await;
@@ -489,6 +507,14 @@ fn commits_output(event: &ModelEvent) -> bool {
             | ModelEvent::ToolCallRequested { .. }
             | ModelEvent::Completed { .. }
     )
+}
+
+/// Invalid tool-call decode failures (for example truncated JSON arguments)
+/// commonly happen after the model streams brief progress commentary or an
+/// earlier parallel tool call, before the turn commits. They remain retryable
+/// because nothing from the failed attempt has been executed or persisted.
+fn can_retry_after_committed_output(error: &ModelError) -> bool {
+    error.kind() == ProviderErrorKind::InvalidToolCall
 }
 
 fn model_stream_ended_before_completion() -> ModelError {

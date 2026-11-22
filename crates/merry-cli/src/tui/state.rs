@@ -427,6 +427,32 @@ impl TuiState {
         }
     }
 
+    /// Removes an uncommitted streaming assistant item when its attempt is
+    /// discarded for a model retry, so the retried attempt streams cleanly
+    /// without duplicating partial commentary from the failed attempt.
+    pub(crate) fn discard_streaming_assistant(&mut self, index: usize) {
+        let Some(TimelineItem::Assistant { .. }) = self.timeline.get(index) else {
+            return;
+        };
+        self.note_timeline_update();
+        self.timeline.remove(index);
+        self.timeline_versions.remove(index);
+        if let Some(anchor) = &mut self.timeline_anchor {
+            if anchor.item_index == index {
+                self.timeline_anchor = None;
+            } else if anchor.item_index > index {
+                anchor.item_index -= 1;
+            }
+        }
+        if let Some(review_index) = &mut self.timeline_review_user_index {
+            if *review_index == index {
+                self.timeline_review_user_index = None;
+            } else if *review_index > index {
+                *review_index -= 1;
+            }
+        }
+    }
+
     /// Appends reasoning text to the open thinking block, or starts one.
     pub(crate) fn append_reasoning_delta(&mut self, delta: &str) {
         if delta.is_empty() {

@@ -314,6 +314,107 @@ async fn retrying_provider_retries_invalid_tool_call_before_visible_output() {
     assert_eq!(inner.attempts_remaining(), 0);
 }
 
+#[tokio::test]
+async fn retrying_provider_retries_invalid_tool_call_after_commentary_and_tool_call() {
+    let call_one = crate::ModelToolCall::new(
+        crate::ModelToolCallId::new("call_1").expect("valid call id"),
+        merry_core::ToolName::new("run_process").expect("valid tool name"),
+        crate::ToolArguments::try_from(serde_json::json!({ "command": "echo one" }))
+            .expect("valid arguments"),
+    );
+    let call_two = crate::ModelToolCall::new(
+        crate::ModelToolCallId::new("call_2").expect("valid call id"),
+        merry_core::ToolName::new("run_process").expect("valid tool name"),
+        crate::ToolArguments::try_from(serde_json::json!({ "command": "echo two" }))
+            .expect("valid arguments"),
+    );
+    let inner = AttemptScriptProvider::new(vec![
+        vec![
+            Ok(ModelEvent::Started),
+            Ok(ModelEvent::OutputTextDelta {
+                delta: "commentary before truncated tool call".to_owned(),
+            }),
+            Ok(ModelEvent::ToolCallRequested {
+                call: call_one.clone(),
+            }),
+            Err(ModelError::provider(
+                ProviderErrorKind::InvalidToolCall,
+                "function call arguments must be valid JSON: EOF while parsing an object",
+            )),
+        ],
+        vec![
+            Ok(ModelEvent::Started),
+            Ok(ModelEvent::OutputTextDelta {
+                delta: "retried commentary".to_owned(),
+            }),
+            Ok(ModelEvent::ToolCallRequested {
+                call: call_two.clone(),
+            }),
+            Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![
+                        ModelOutput::text("retried commentary"),
+                        ModelOutput::tool_call(call_two.clone()),
+                    ],
+                    FinishReason::ToolCalls,
+                    None,
+                ),
+            }),
+        ],
+    ]);
+    let retrying = RetryingModelProvider::new(
+        Arc::new(inner.clone()),
+        ModelRetryPolicy::new(
+            true,
+            3,
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+            Duration::from_millis(200),
+            false,
+        )
+        .expect("valid policy"),
+    );
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+
+    let events = retrying
+        .stream_model_with_retry_events(
+            request(),
+            RetryModelStreamContext::new(ModelStreamContext::default()).with_retry_events(sender),
+        )
+        .await
+        .expect("retry stream setup should succeed")
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("post-commentary invalid tool call should retry and recover");
+
+    assert_eq!(inner.attempts_remaining(), 0);
+    assert!(matches!(
+        events.last(),
+        Some(ModelEvent::Completed { response })
+            if response.finish_reason() == FinishReason::ToolCalls
+                && response.outputs()
+                    == [
+                        ModelOutput::text("retried commentary"),
+                        ModelOutput::tool_call(call_two),
+                    ]
+    ));
+    let mut retry_events = Vec::new();
+    while let Ok(event) = receiver.try_recv() {
+        retry_events.push(event);
+    }
+    assert!(retry_events.iter().any(|event| matches!(
+        event,
+        super::ModelRetryEvent::RetryScheduled {
+            attempt: 1,
+            next_attempt: 2,
+            error_kind: ProviderErrorKind::InvalidToolCall,
+            ..
+        }
+    )));
+}
+
 #[derive(Clone)]
 struct GatedProvider {
     name: ProviderName,

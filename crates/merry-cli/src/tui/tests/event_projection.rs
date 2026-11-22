@@ -199,6 +199,64 @@ fn projector_resets_streaming_assistant_after_terminal_error() {
 }
 
 #[test]
+fn projector_discards_streaming_assistant_on_model_retry_scheduled() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::AssistantMessageDelta {
+            delta: "板框是 1 条闭合折线 (layer 11) 。算尺寸。".to_owned(),
+            source: source(),
+        },
+        &mut state,
+    );
+    assert_eq!(state.timeline().len(), 1);
+
+    projector.apply(
+        RuntimeEvent::ModelRetryScheduled {
+            attempt: 1,
+            next_attempt: 2,
+            max_attempts: 3,
+            delay_ms: 200,
+            error_kind: "invalid_tool_call".to_owned(),
+            source: source(),
+        },
+        &mut state,
+    );
+    assert!(
+        state.timeline().is_empty(),
+        "partial commentary from a retried attempt must be discarded before the next attempt"
+    );
+
+    projector.apply(
+        RuntimeEvent::AssistantMessageDelta {
+            delta: "重试后的回复".to_owned(),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::AssistantMessage {
+            text: "重试后的回复".to_owned(),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(
+        state.timeline(),
+        [TimelineItem::Assistant {
+            text: "重试后的回复".to_owned()
+        }]
+    );
+}
+
+#[test]
 fn projector_replaces_compaction_progress_with_a_durable_timeline_trace() {
     let mut state = TuiState::new(
         "/repo".into(),

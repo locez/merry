@@ -16,7 +16,7 @@ use super::super::{
     model_turn_lifecycle::{cancel_model_turn, fail_model_turn},
     output_rate::OutputRateTracker,
     provider_request::StepUsageContextSnapshot,
-    provider_stream::wait_for_model_stream_item,
+    provider_stream::{ModelStreamPoll, wait_for_model_stream_item},
 };
 use crate::{
     events::{RuntimeJournalEventBatch, RuntimeRateUpdateSender},
@@ -67,8 +67,14 @@ pub(super) async fn consume_model_stream(
         .await;
 
         let item = match item {
-            Some(item) => item,
-            None => {
+            ModelStreamPoll::Item(item) => item,
+            ModelStreamPoll::RetryScheduled => {
+                commentary_text.clear();
+                streamed_tool_calls.clear();
+                output_rate = OutputRateTracker::default();
+                continue;
+            }
+            ModelStreamPoll::Cancelled => {
                 cancel_model_turn(inner, sender, turn_id).await;
                 return;
             }
