@@ -135,9 +135,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run Windows build and lint gate
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
-
       - name: Run Windows cross-platform unit tests
         run: |
           cargo test --locked -p merry-core -p merry-llm -p merry-provider-openai -p merry-provider-anthropic -p merry-mcp -p merry-tools-macros
@@ -146,6 +143,9 @@ jobs:
           cargo test --locked -p merry-tools --lib
           cargo test --locked -p merry-coding --lib
           cargo test --locked -p merry-cli --bin merry
+
+      - name: Run Windows lint gate
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   web:
     name: Web trajectory contract

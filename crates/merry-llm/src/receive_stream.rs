@@ -25,7 +25,6 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 /// Slow semantic delivery marks timing as consumer-limited rather than reporting
 /// a misleading rate. Completion awaits the task; dropping the stream cancels
 /// and aborts it, dropping its input stream and network resources.
-#[must_use]
 pub fn receive_model_stream(
     source: ModelEventStream,
     token: &CancellationToken,
