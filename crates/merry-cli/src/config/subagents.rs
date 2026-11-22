@@ -445,7 +445,7 @@ pub fn load_project_subagent_roles(
         let parsed: SubagentRoleToml =
             toml::from_str(&text).map_err(|source| ConfigError::Parse {
                 path: path.clone(),
-                source,
+                source: Box::new(source),
             })?;
         let effective = parsed.to_effective(stem, config)?;
         roles.insert(stem.to_owned(), effective);

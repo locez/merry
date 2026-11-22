@@ -352,26 +352,26 @@ impl TuiPreferencesStore {
         let version = toml::from_str::<PreferencesVersion>(&text)
             .map_err(|source| PreferencesError::Parse {
                 path: self.path.clone(),
-                source,
+                source: Box::new(source),
             })?
             .version;
         let preferences = match version {
             1 => toml::from_str::<LegacyTuiPreferences>(&text)
                 .map_err(|source| PreferencesError::Parse {
                     path: self.path.clone(),
-                    source,
+                    source: Box::new(source),
                 })?
                 .migrate(default_provider)?,
             2 => toml::from_str::<StoredTuiPreferencesV2>(&text)
                 .map_err(|source| PreferencesError::Parse {
                     path: self.path.clone(),
-                    source,
+                    source: Box::new(source),
                 })?
                 .migrate(default_provider)?,
             PREFERENCES_VERSION => toml::from_str::<TuiPreferences>(&text).map_err(|source| {
                 PreferencesError::Parse {
                     path: self.path.clone(),
-                    source,
+                    source: Box::new(source),
                 }
             })?,
             path_version => {
@@ -638,7 +638,7 @@ pub(crate) enum PreferencesError {
     Parse {
         path: PathBuf,
         #[source]
-        source: toml::de::Error,
+        source: Box<toml::de::Error>,
     },
     #[error("failed to serialize TUI preferences: {0}")]
     Serialize(#[source] toml::ser::Error),

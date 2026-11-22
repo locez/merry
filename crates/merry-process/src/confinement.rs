@@ -776,10 +776,19 @@ fn os_to_string(value: &std::ffi::OsStr, label: &str) -> Result<String, ProcessR
 
 fn cargo_debug_helper(current: &Path) -> Option<PathBuf> {
     let parent = current.parent()?;
-    if parent.file_name()? != "deps" {
+    let profile_dir = if parent.file_name()? == "deps" {
+        parent.parent()?
+    } else if parent.file_name()? == "out" {
+        // Cargo 1.100+ places test binaries at `<profile>/build/<pkg>/<hash>/out/<bin>`.
+        let build_dir = parent.parent()?.parent()?.parent()?;
+        if build_dir.file_name()? != "build" {
+            return None;
+        }
+        build_dir.parent()?
+    } else {
         return None;
-    }
-    let helper = parent.parent()?.join("merry-sandbox-helper");
+    };
+    let helper = profile_dir.join("merry-sandbox-helper");
     helper.is_file().then_some(helper)
 }
 

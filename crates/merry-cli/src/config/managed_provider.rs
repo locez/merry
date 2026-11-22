@@ -382,7 +382,7 @@ impl ManagedProviderStore {
                 let registry = toml::from_str::<ManagedProvidersToml>(&text).map_err(|source| {
                     ConfigError::Parse {
                         path: self.providers_file.clone(),
-                        source,
+                        source: Box::new(source),
                     }
                 })?;
                 if registry.version != MANAGED_PROVIDER_VERSION {
@@ -652,7 +652,7 @@ pub(super) fn parse_managed_providers(
     let managed =
         toml::from_str::<ManagedProvidersToml>(text).map_err(|source| ConfigError::Parse {
             path: path.to_path_buf(),
-            source,
+            source: Box::new(source),
         })?;
     if managed.version != MANAGED_PROVIDER_VERSION {
         return Err(ConfigError::Invalid(format!(

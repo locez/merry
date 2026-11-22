@@ -49,7 +49,7 @@ pub enum ConfigError {
     Parse {
         path: PathBuf,
         #[source]
-        source: toml::de::Error,
+        source: Box<toml::de::Error>,
     },
     #[error("Merry config is invalid: {0}")]
     Invalid(String),
@@ -361,7 +361,7 @@ fn read_optional_config_text(path: &Path) -> Result<Option<String>, ConfigError>
 fn parse_config_text(text: &str, path: &Path) -> Result<MerryConfigToml, ConfigError> {
     toml::from_str::<MerryConfigToml>(text).map_err(|source| ConfigError::Parse {
         path: path.to_path_buf(),
-        source,
+        source: Box::new(source),
     })
 }
 

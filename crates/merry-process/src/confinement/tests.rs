@@ -256,3 +256,25 @@ fn is_baseline_write(path: &Path) -> bool {
     .iter()
     .any(|root| path == Path::new(root) || path.starts_with(root))
 }
+
+#[test]
+fn cargo_debug_helper_resolves_legacy_deps_and_build_dir_layouts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let profile = temp.path().join("target/debug");
+    let helper = profile.join("merry-sandbox-helper");
+    let deps_bin = profile.join("deps/merry-123456");
+    let build_bin = profile.join("build/merry-cli/abcdef01/out/merry-abcdef01");
+    fs::create_dir_all(deps_bin.parent().expect("deps dir")).expect("create deps dir");
+    fs::create_dir_all(build_bin.parent().expect("out dir")).expect("create out dir");
+    fs::write(&helper, b"").expect("create helper stub");
+
+    assert_eq!(
+        cargo_debug_helper(&deps_bin).as_deref(),
+        Some(helper.as_path())
+    );
+    assert_eq!(
+        cargo_debug_helper(&build_bin).as_deref(),
+        Some(helper.as_path())
+    );
+    assert_eq!(cargo_debug_helper(&profile.join("merry")), None);
+}
