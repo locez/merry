@@ -191,7 +191,7 @@ pub(super) fn shell_process_input_from_argv(argv: &[String]) -> Option<ShellProc
                 })
             }
             [shell, flag, script]
-                if matches!(executable_name(shell).as_str(), "bash" | "sh" | "zsh")
+                if is_supported_plain_bash_token(shell)
                     && matches!(flag.as_str(), "-c" | "-lc") =>
             {
                 Some(ShellProcessInput {
@@ -225,11 +225,24 @@ pub(super) fn shell_process_input_from_argv(argv: &[String]) -> Option<ShellProc
 pub(super) fn is_supported_plain_shell_token(shell: &str) -> bool {
     #[cfg(windows)]
     {
-        matches!(executable_name(shell).as_str(), "powershell" | "pwsh")
+        !shell.contains(['/', '\\'])
+            && matches!(executable_name(shell).as_str(), "powershell" | "pwsh")
     }
 
     #[cfg(not(windows))]
     matches!(shell, "bash" | "sh" | "zsh")
+}
+
+#[cfg(windows)]
+fn is_supported_plain_bash_token(shell: &str) -> bool {
+    if !shell.contains(['/', '\\']) {
+        return matches!(executable_name(shell).as_str(), "bash" | "sh" | "zsh");
+    }
+    matches!(
+        windows_shell::detect_windows_shell(),
+        windows_shell::WindowsShell::GitBash(path)
+            if path.to_string_lossy().eq_ignore_ascii_case(shell)
+    )
 }
 
 pub(crate) fn stable_process_input_fingerprint(bytes: &[u8]) -> String {
