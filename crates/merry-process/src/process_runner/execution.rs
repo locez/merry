@@ -116,15 +116,17 @@ pub(super) async fn run_spawned_process(
         ProcessRunnerError::infrastructure("process stderr pipe was not available")
     })?;
     background::finish_process(
-        child,
-        #[cfg(windows)]
-        windows_job,
-        stdout,
-        stderr,
+        background::SpawnedProcess {
+            child,
+            #[cfg(windows)]
+            windows_job,
+            stdout,
+            stderr,
+            program_for_error,
+        },
         intent,
         context,
         background,
-        program_for_error,
     )
     .await
 }

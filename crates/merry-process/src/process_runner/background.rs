@@ -124,19 +124,37 @@ impl Drop for SupervisorInner {
     }
 }
 
+/// Owned child process, stdio pipes, and display label passed into [`finish_process`].
+pub(super) struct SpawnedProcess<Stdout, Stderr> {
+    pub(super) child: Child,
+    #[cfg(windows)]
+    pub(super) windows_job: Option<super::windows_job::WindowsProcessJob>,
+    pub(super) stdout: Stdout,
+    pub(super) stderr: Stderr,
+    pub(super) program_for_error: String,
+}
+
 /// Waits for a spawned process up to its background settle window or foreground
 /// wait timeout, retaining it in `BackgroundSupervisor` without killing it if it
 /// is still alive when the wait window elapses.
-pub(super) async fn finish_process(
-    mut child: Child,
-    #[cfg(windows)] windows_job: Option<super::windows_job::WindowsProcessJob>,
-    stdout: impl AsyncRead + Unpin + Send + 'static,
-    stderr: impl AsyncRead + Unpin + Send + 'static,
+pub(super) async fn finish_process<Stdout, Stderr>(
+    spawned: SpawnedProcess<Stdout, Stderr>,
     intent: ProcessActionIntent,
     context: ProcessRunnerContext,
     supervisor: BackgroundSupervisor,
-    program_for_error: String,
-) -> Result<ProcessRunnerOutput, ProcessRunnerError> {
+) -> Result<ProcessRunnerOutput, ProcessRunnerError>
+where
+    Stdout: AsyncRead + Unpin + Send + 'static,
+    Stderr: AsyncRead + Unpin + Send + 'static,
+{
+    let SpawnedProcess {
+        mut child,
+        #[cfg(windows)]
+        windows_job,
+        stdout,
+        stderr,
+        program_for_error,
+    } = spawned;
     let explicit_background = intent.background();
     let wait_timeout_secs = (!explicit_background).then(|| intent.effective_wait_timeout_secs());
     let wait_window = match wait_timeout_secs {
