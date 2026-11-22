@@ -44,7 +44,7 @@ impl CompiledToolInputValidator {
             .iter_errors(&arguments)
             .map(|error| ToolInputViolation {
                 path: instance_path(&error),
-                schema_path: error.schema_path.to_string(),
+                schema_path: error.schema_path().to_string(),
                 message: error.to_string(),
             })
             .collect();
@@ -145,7 +145,7 @@ impl ToolInputViolation {
 }
 
 fn instance_path(error: &jsonschema::ValidationError<'_>) -> String {
-    let path = error.instance_path.to_string();
+    let path = error.instance_path().to_string();
     if path.is_empty() {
         "$".to_owned()
     } else {

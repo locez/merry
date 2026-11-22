@@ -58,10 +58,13 @@ impl McpServerConfig {
                 merry_core::ToolBindingName::new(name)?;
             }
         }
-        let fingerprint = merry_core::ToolSourceFingerprint::new(&format!(
-            "{:x}",
-            Sha256::digest(url.as_str().as_bytes())
-        ))?;
+        let digest = Sha256::digest(url.as_str().as_bytes());
+        let mut hex = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+        }
+        let fingerprint = merry_core::ToolSourceFingerprint::new(&hex)?;
         Ok((source, fingerprint))
     }
 
