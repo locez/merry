@@ -62,9 +62,21 @@ pub(crate) fn fuzzy_match(candidate: &str, query: &str) -> Option<FuzzyMatch> {
     let c_len = cand_lower.len();
 
     let (mut score, positions) = if q_len.saturating_mul(c_len) <= MAX_DP_CELLS {
-        optimal_alignment(&cand_chars, &cand_lower, &query_chars, &query_lower, &bonuses)
+        optimal_alignment(
+            &cand_chars,
+            &cand_lower,
+            &query_chars,
+            &query_lower,
+            &bonuses,
+        )
     } else {
-        greedy_alignment(&cand_chars, &cand_lower, &query_chars, &query_lower, &bonuses)
+        greedy_alignment(
+            &cand_chars,
+            &cand_lower,
+            &query_chars,
+            &query_lower,
+            &bonuses,
+        )
     };
 
     // Gently prefer tighter candidates when match quality is otherwise identical,
@@ -213,7 +225,11 @@ fn optimal_alignment(
                 if qi == 0 {
                     // Prefer earlier offsets for mid-word starts while keeping
                     // equal word-boundary starts tied for alphabetical stability.
-                    let start_penalty = if bonuses[ci] > 0 { 0 } else { (ci as i32).min(8) };
+                    let start_penalty = if bonuses[ci] > 0 {
+                        0
+                    } else {
+                        (ci as i32).min(8)
+                    };
                     m_score[0][ci] = char_score - start_penalty;
                 } else {
                     let consec = if m_score[qi - 1][ci - 1] > NEG_INF {
@@ -335,8 +351,8 @@ mod tests {
 
         let file = fuzzy_match_path("crates/merry-cli/src/tui/render.rs", "render")
             .expect("render.rs matches");
-        let dir =
-            fuzzy_match_path("crates/merry-cli/src/tui/render/", "render").expect("render/ matches");
+        let dir = fuzzy_match_path("crates/merry-cli/src/tui/render/", "render")
+            .expect("render/ matches");
         assert!(file.score > dir.score);
     }
 

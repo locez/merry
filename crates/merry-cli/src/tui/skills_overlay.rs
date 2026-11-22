@@ -282,7 +282,8 @@ pub(crate) fn render_skills_overlay(
                 } else {
                     String::new()
                 };
-                let used = 2 + token_width + pad_after_name + UnicodeWidthStr::width(desc_shown.as_str());
+                let used =
+                    2 + token_width + pad_after_name + UnicodeWidthStr::width(desc_shown.as_str());
                 let trailing = " ".repeat(list_width.saturating_sub(used));
 
                 let shifted_positions = matched

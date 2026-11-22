@@ -565,7 +565,10 @@ fn active_completion_token(text: &str, cursor: usize) -> Option<CompletionToken<
 }
 
 fn is_ignored_dir(name: &str, include_hidden: bool) -> bool {
-    if matches!(name, ".git" | ".hg" | ".svn" | ".venv" | ".next" | ".nuxt" | ".turbo" | ".cache") {
+    if matches!(
+        name,
+        ".git" | ".hg" | ".svn" | ".venv" | ".next" | ".nuxt" | ".turbo" | ".cache"
+    ) {
         return true;
     }
     if !include_hidden && name.starts_with('.') {

@@ -831,7 +831,14 @@ fn slash_completion_renders_all_commands_at_compact_and_standard_sizes() {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        for command in ["/code-review", "/compact", "/exit", "/help", "/model", "/new"] {
+        for command in [
+            "/code-review",
+            "/compact",
+            "/exit",
+            "/help",
+            "/model",
+            "/new",
+        ] {
             assert!(
                 text.contains(command),
                 "{command} should render at {width}x{height}"
@@ -1085,12 +1092,18 @@ fn skills_slash_command_opens_fuzzy_picker_and_inserts_skill_token() {
     // Filter live by acronym `fd` and insert `$frontend-design ` into composer.
     for ch in ['f', 'd'] {
         assert_eq!(
-            handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), &mut populated),
+            handle_key_event(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                &mut populated
+            ),
             ControllerEffect::None
         );
     }
     assert_eq!(
-        handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut populated),
+        handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut populated
+        ),
         ControllerEffect::None
     );
     assert!(populated.overlay().is_none());

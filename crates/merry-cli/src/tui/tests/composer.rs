@@ -438,9 +438,7 @@ fn path_completion_escapes_spaces_and_continues_drilling_into_spaced_directories
     // Workspace-relative spaced directory also escapes and keeps completing.
     state.clear_input();
     state.insert_input_str("@my\\ docs/read");
-    let ws_menu = state
-        .completion_menu()
-        .expect("workspace spaced path menu");
+    let ws_menu = state.completion_menu().expect("workspace spaced path menu");
     assert_eq!(ws_menu.items()[0].value(), "my docs/read me.md");
     handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut state);
     assert_eq!(state.input_text(), "@my\\ docs/read\\ me.md ");

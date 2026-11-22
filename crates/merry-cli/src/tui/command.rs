@@ -163,14 +163,9 @@ const COMMANDS: &[CommandSpec] = &[
         Some(KeyAction::Interrupt),
     )
     .with_slash("stop", "Interrupt the active run"),
-    CommandSpec::new(
-        PaletteCommand::NewSession,
-        "Session",
-        "New session",
-        None,
-    )
-    .with_slash("new", "Start a fresh session")
-    .with_slash_aliases(&["clear"]),
+    CommandSpec::new(PaletteCommand::NewSession, "Session", "New session", None)
+        .with_slash("new", "Start a fresh session")
+        .with_slash_aliases(&["clear"]),
     CommandSpec::new(
         PaletteCommand::ResumeSession,
         "Session",
@@ -232,18 +227,13 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec::new(PaletteCommand::OpenSkills, "Workflow", "Skills", None)
         .with_slash("skills", "Browse and insert a skill ($skill-name)")
         .with_slash_aliases(&["skill"]),
-    CommandSpec::new(
-        PaletteCommand::CodeReview,
-        "Workflow",
-        "Code review",
-        None,
-    )
-    .with_slash_args(
-        CodingWorkflowCommand::CodeReview.name(),
-        "[scope]",
-        CodingWorkflowCommand::CodeReview.description(),
-    )
-    .with_slash_aliases(CodingWorkflowCommand::CodeReview.aliases()),
+    CommandSpec::new(PaletteCommand::CodeReview, "Workflow", "Code review", None)
+        .with_slash_args(
+            CodingWorkflowCommand::CodeReview.name(),
+            "[scope]",
+            CodingWorkflowCommand::CodeReview.description(),
+        )
+        .with_slash_aliases(CodingWorkflowCommand::CodeReview.aliases()),
     CommandSpec::new(
         PaletteCommand::SecurityReview,
         "Workflow",
@@ -312,7 +302,10 @@ pub(crate) fn find_slash_matches(query: &str) -> Vec<&'static CommandSpec> {
         })
         .collect::<Vec<_>>();
     scored.sort_by_key(|(rank, score, primary, _)| (*rank, *score, *primary));
-    scored.into_iter().map(|(_, _, _, command)| command).collect()
+    scored
+        .into_iter()
+        .map(|(_, _, _, command)| command)
+        .collect()
 }
 
 pub(crate) fn match_slash_input(input: &str) -> SlashCommandMatch<'_> {
@@ -352,7 +345,8 @@ pub(crate) fn slash_help_body(keymap: &Keymap) -> String {
         "Config    /model (/provider) · /settings (/config) · /shortcuts · /web · /help".to_owned(),
     );
     #[cfg(not(feature = "web"))]
-    lines.push("Config    /model (/provider) · /settings (/config) · /shortcuts · /help".to_owned());
+    lines
+        .push("Config    /model (/provider) · /settings (/config) · /shortcuts · /help".to_owned());
     lines.push("Type / to search commands with descriptions.".to_owned());
     lines.push(format!(
         "Submit {}  Commands {}  Stop {}",
@@ -452,7 +446,9 @@ mod tests {
         assert!(find_slash_exact("unknown").is_none());
 
         assert_eq!(
-            find_slash_matches("sa").first().and_then(|c| c.slash_name()),
+            find_slash_matches("sa")
+                .first()
+                .and_then(|c| c.slash_name()),
             Some("save")
         );
         assert_eq!(
@@ -463,7 +459,9 @@ mod tests {
             vec!["save"]
         );
         assert_eq!(
-            find_slash_matches("cr").first().and_then(|c| c.slash_name()),
+            find_slash_matches("cr")
+                .first()
+                .and_then(|c| c.slash_name()),
             Some("code-review")
         );
         // Alias prefix and substring matching surface review commands naturally.

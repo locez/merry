@@ -119,7 +119,9 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
             frame.set_cursor_position(Position::new(cursor_x, rows[0].y));
         }
         Overlay::Settings(_) => render_settings(frame, state),
-        Overlay::Skills(picker) => super::skills_overlay::render_skills_overlay(frame, state, picker),
+        Overlay::Skills(picker) => {
+            super::skills_overlay::render_skills_overlay(frame, state, picker)
+        }
         Overlay::ProviderManager(manager) => {
             super::provider_render::render_provider_manager(frame, state, manager)
         }

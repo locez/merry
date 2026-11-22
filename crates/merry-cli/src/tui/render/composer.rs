@@ -671,13 +671,12 @@ pub(super) fn completion_lines(state: &TuiState, region: Rect) -> Vec<Line<'stat
                 .unwrap_or_default();
             let col1_used = value_width + UnicodeWidthStr::width(suffix_text.as_str());
 
-            let detail_pad = if has_any_detail
-                && item.detail().is_some_and(|detail| !detail.is_empty())
-            {
-                col1_budget.saturating_sub(col1_used) + 2
-            } else {
-                0
-            };
+            let detail_pad =
+                if has_any_detail && item.detail().is_some_and(|detail| !detail.is_empty()) {
+                    col1_budget.saturating_sub(col1_used) + 2
+                } else {
+                    0
+                };
             let detail_budget = row_content_width
                 .saturating_sub(col1_used)
                 .saturating_sub(detail_pad);
