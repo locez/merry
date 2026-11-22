@@ -10,7 +10,7 @@ fn parses_no_subcommand_as_tui_entrypoint() {
     let cli = Cli::try_parse_from(["merry"]).expect("root args should parse");
 
     assert!(cli.command.is_none());
-    assert_eq!(cli.sandbox_mode(), SandboxMode::Workspace);
+    assert_eq!(cli.sandbox_mode(), SandboxMode::default());
     assert_eq!(cli.permission_mode(), PermissionMode::Auto);
     assert_eq!(cli.auto_fallback(), AutoFallback::Ask);
 }
@@ -218,7 +218,7 @@ fn cmd_usage_renders_cmd_help() {
 #[test]
 fn parses_debug_defaults() {
     let cli = Cli::try_parse_from(["merry", "debug"]).expect("debug args should parse");
-    assert_eq!(cli.sandbox_mode(), SandboxMode::Workspace);
+    assert_eq!(cli.sandbox_mode(), SandboxMode::default());
 
     match cli.command.expect("command should be present") {
         CliCommand::Debug(debug) => {

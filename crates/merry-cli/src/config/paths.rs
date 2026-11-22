@@ -1,4 +1,7 @@
 use super::ConfigError;
+use merry_core::host_paths::{
+    platform_config_base, platform_state_base, strip_home_tilde_prefix, user_home_dir,
+};
 use std::{
     env,
     path::{Path, PathBuf},
@@ -15,17 +18,21 @@ pub struct XdgPaths {
 
 impl XdgPaths {
     pub fn from_env() -> Result<Self, ConfigError> {
-        let home = env::var_os("HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .ok_or(ConfigError::HomeMissingOrRelative)?;
-        Ok(Self::from_parts(
+        let home = user_home_dir().ok_or(ConfigError::HomeMissingOrRelative)?;
+        let xdg_config_home = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+        let xdg_state_home = env::var_os("XDG_STATE_HOME").map(PathBuf::from);
+        let appdata = env::var_os("APPDATA").map(PathBuf::from);
+        let local_appdata = env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        Ok(Self::from_env_parts(
             home,
-            env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-            env::var_os("XDG_STATE_HOME").map(PathBuf::from),
+            xdg_config_home.as_deref(),
+            xdg_state_home.as_deref(),
+            appdata.as_deref(),
+            local_appdata.as_deref(),
         ))
     }
 
+    #[cfg(test)]
     pub fn from_parts(
         home: PathBuf,
         xdg_config_home: Option<PathBuf>,
@@ -34,10 +41,29 @@ impl XdgPaths {
         let home = normalize_path_lexically(&home);
         let config_base = absolute_or_default(xdg_config_home, home.join(".config"));
         let state_base = absolute_or_default(xdg_state_home, home.join(".local/state"));
+        Self::from_resolved_bases(home, config_base, state_base)
+    }
+
+    fn from_env_parts(
+        home: PathBuf,
+        xdg_config_home: Option<&Path>,
+        xdg_state_home: Option<&Path>,
+        appdata: Option<&Path>,
+        local_appdata: Option<&Path>,
+    ) -> Self {
+        let home = normalize_path_lexically(&home);
+        let config_base =
+            normalize_path_lexically(&platform_config_base(&home, xdg_config_home, appdata));
+        let state_base =
+            normalize_path_lexically(&platform_state_base(&home, xdg_state_home, local_appdata));
+        Self::from_resolved_bases(home, config_base, state_base)
+    }
+
+    fn from_resolved_bases(home: PathBuf, config_base: PathBuf, state_base: PathBuf) -> Self {
         let config_dir = config_base.join("merry");
         let state_dir = state_base.join("merry");
         let config_file = config_dir.join("config.toml");
-        let default_log_file = state_dir.join("logs/merry.jsonl");
+        let default_log_file = state_dir.join("logs").join("merry.jsonl");
         Self {
             home,
             config_dir,
@@ -88,6 +114,7 @@ impl XdgPaths {
     }
 }
 
+#[cfg(test)]
 fn absolute_or_default(value: Option<PathBuf>, default: PathBuf) -> PathBuf {
     let path = match value {
         Some(path) if path.is_absolute() && !path.as_os_str().is_empty() => path,
@@ -101,7 +128,7 @@ pub(super) fn resolve_user_path(
     config_dir: &Path,
     home: &Path,
 ) -> Result<PathBuf, ConfigError> {
-    if let Some(rest) = value.strip_prefix("~/") {
+    if let Some(rest) = strip_home_tilde_prefix(value) {
         return Ok(home.join(rest));
     }
     let path = PathBuf::from(value);
@@ -122,7 +149,7 @@ pub(super) fn resolve_config_relative_path(
     let path = PathBuf::from(value);
     if path.is_absolute() {
         Ok(path)
-    } else if value.starts_with("~/") {
+    } else if strip_home_tilde_prefix(value).is_some() {
         resolve_user_path(value, config_dir, home)
     } else {
         Ok(config_dir.join(path))

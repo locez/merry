@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod event;
+pub mod host_paths;
 pub mod id;
 pub mod journal;
 pub mod output_rate;

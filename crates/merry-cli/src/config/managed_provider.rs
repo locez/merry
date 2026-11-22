@@ -474,6 +474,10 @@ async fn write_new_private_file(
     file.sync_all()
         .await
         .map_err(|source| store_io("sync", path, source))?;
+    drop(file);
+    #[cfg(windows)]
+    restrict_file_to_current_user(path)
+        .map_err(|source| store_io("set permissions on", path, source))?;
     Ok(())
 }
 
@@ -521,6 +525,124 @@ fn store_io(operation: &'static str, path: &Path, source: io::Error) -> ManagedP
 fn unix_permissions(mode: u32) -> std::fs::Permissions {
     use std::os::unix::fs::PermissionsExt;
     std::fs::Permissions::from_mode(mode)
+}
+
+/// Restricts a newly created Windows secret/config file to the current user's
+/// SID by replacing its DACL with a protected single-ACE ACL (equivalent to
+/// Unix `0o600`).
+///
+/// Reviewed FFI boundary: Win32 security descriptors require `windows_sys`.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn restrict_file_to_current_user(path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, GENERIC_ALL, HANDLE, LocalFree},
+        Security::{
+            ACL,
+            Authorization::{
+                EXPLICIT_ACCESS_W, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SET_ACCESS,
+                SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_USER,
+                TRUSTEE_W,
+            },
+            DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
+            TOKEN_QUERY, TOKEN_USER, TokenUser,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: `GetCurrentProcess` returns a pseudo-handle; `OpenProcessToken`
+    // writes an owned token handle into `token` on success.
+    let ok = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let result = (|| -> io::Result<()> {
+        let mut needed: u32 = 0;
+        // SAFETY: Passing a null buffer queries the required byte length.
+        unsafe {
+            GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
+        }
+        if needed == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut buffer = vec![0u8; needed as usize];
+        // SAFETY: `buffer` has at least `needed` writable bytes for `TOKEN_USER`.
+        let ok = unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // SAFETY: `GetTokenInformation(TokenUser)` initializes `TOKEN_USER` at
+        // the start of `buffer` and `buffer` stays alive until `SetEntriesInAclW`
+        // completes.
+        let user_sid = unsafe { (*(buffer.as_ptr().cast::<TOKEN_USER>())).User.Sid };
+        let explicit_access = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: GENERIC_ALL,
+            grfAccessMode: SET_ACCESS,
+            grfInheritance: 0,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: std::ptr::null_mut(),
+                MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_USER,
+                ptstrName: user_sid.cast(),
+            },
+        };
+
+        let mut new_acl: *mut ACL = std::ptr::null_mut();
+        // SAFETY: `explicit_access` is valid for 1 entry and `new_acl` receives
+        // a LocalAlloc-owned ACL freed with `LocalFree` below.
+        let status =
+            unsafe { SetEntriesInAclW(1, &explicit_access, std::ptr::null(), &mut new_acl) };
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+
+        let wide_path: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide_path` is NUL-terminated UTF-16 and `new_acl` is a valid
+        // ACL created by `SetEntriesInAclW`.
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                wide_path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                new_acl,
+                std::ptr::null(),
+            )
+        };
+        // SAFETY: `new_acl` was allocated by `SetEntriesInAclW` and is freed once.
+        unsafe {
+            LocalFree(new_acl.cast());
+        }
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        Ok(())
+    })();
+
+    // SAFETY: `token` was opened by `OpenProcessToken` above and is closed once.
+    unsafe {
+        CloseHandle(token);
+    }
+    result
 }
 
 pub(super) fn parse_managed_providers(

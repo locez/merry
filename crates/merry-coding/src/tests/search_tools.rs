@@ -110,3 +110,19 @@ fn coding_profile_reports_search_tool_availability_for_this_host() {
     assert!(summary.contains("Coding file capabilities:"), "{summary}");
     assert!(summary.contains("Action PATH search tools:"), "{summary}");
 }
+
+#[test]
+fn windows_shell_summary_reports_powershell_guidance_without_unix_fallbacks() {
+    let (_temp, path) = tool_directory(&[]);
+    let availability = SearchToolAvailability::detect(OsStr::new(&path), Path::exists);
+    let summary = availability.summary_line_for_shell("pwsh", false, "&&");
+
+    assert!(summary.contains("Select-String"), "{summary}");
+    assert!(summary.contains("Get-ChildItem"), "{summary}");
+    assert!(summary.contains("Host shell is `pwsh`"), "{summary}");
+    assert!(summary.contains("chain commands with `&&`"), "{summary}");
+    assert!(!summary.contains("grep -r"), "{summary}");
+
+    let ps5 = availability.summary_line_for_shell("powershell", false, ";");
+    assert!(ps5.contains("chain commands with `;`"), "{ps5}");
+}

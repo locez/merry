@@ -627,3 +627,55 @@ fn tree_sitter_bash_analysis_detects_env_injection_and_ignores_comments_or_quote
         );
     }
 }
+
+#[test]
+fn windows_executable_extensions_and_host_paths_are_classified() {
+    for argv in [
+        vec![
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "Invoke-Expression $x",
+        ],
+        vec!["cmd.exe", "/C", "dir"],
+        vec!["git.exe", "push", "origin", "main"],
+    ] {
+        let intent = ProcessActionIntent::new(
+            argv.into_iter().map(str::to_owned).collect(),
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("valid process intent");
+        assert!(
+            requires_process_action_review(&intent),
+            "Windows executable variant must require review: {:?}",
+            intent.argv()
+        );
+    }
+
+    for argv in [
+        vec!["rg", "secret", r"C:\Users\Alice\.ssh\id_rsa"],
+        vec!["rg", "secret", r"..\outside\file.txt"],
+        vec!["rg", "secret", r"\\fileserver\share\secret.txt"],
+        vec!["rg", "secret", r"$env:USERPROFILE\.gitconfig"],
+        vec!["rg", "secret", r"%APPDATA%\merry\config.toml"],
+    ] {
+        let intent = ProcessActionIntent::new(
+            argv.into_iter().map(str::to_owned).collect(),
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .expect("valid process intent");
+        assert!(
+            requires_host_process_path_review(&intent),
+            "Windows host path token must trigger host path review: {:?}",
+            intent.argv()
+        );
+    }
+}

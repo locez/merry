@@ -55,6 +55,8 @@ struct RetainedProcess {
     pid: u32,
     life: Life,
     child: Child,
+    #[cfg(windows)]
+    windows_job: Option<super::windows_job::WindowsProcessJob>,
     readers: Vec<JoinHandle<Result<(), ProcessRunnerError>>>,
     stdout: Arc<Capture>,
     stderr: Arc<Capture>,
@@ -127,6 +129,7 @@ impl Drop for SupervisorInner {
 /// is still alive when the wait window elapses.
 pub(super) async fn finish_process(
     mut child: Child,
+    #[cfg(windows)] windows_job: Option<super::windows_job::WindowsProcessJob>,
     stdout: impl AsyncRead + Unpin + Send + 'static,
     stderr: impl AsyncRead + Unpin + Send + 'static,
     intent: ProcessActionIntent,
@@ -178,6 +181,10 @@ pub(super) async fn finish_process(
             detach_live_sink(&live_sink);
             stdout_task.abort();
             stderr_task.abort();
+            #[cfg(windows)]
+            if let Some(job) = windows_job.as_ref() {
+                job.terminate();
+            }
             kill_child_group(&mut child);
             let _ = child.wait().await;
             Err(ProcessRunnerError::Cancelled)
@@ -201,6 +208,10 @@ pub(super) async fn finish_process(
             if context.cancellation_token().is_cancelled() {
                 stdout_task.abort();
                 stderr_task.abort();
+                #[cfg(windows)]
+                if let Some(job) = windows_job.as_ref() {
+                    job.terminate();
+                }
                 kill_child_group(&mut child);
                 let _ = child.wait().await;
                 return Err(ProcessRunnerError::Cancelled);
@@ -210,6 +221,10 @@ pub(super) async fn finish_process(
             if let Some(message) = crate::confinement::setup_failure(&stderr_bytes) {
                 stdout_task.abort();
                 stderr_task.abort();
+                #[cfg(windows)]
+                if let Some(job) = windows_job.as_ref() {
+                    job.terminate();
+                }
                 kill_child_group(&mut child);
                 let _ = child.wait().await;
                 return Err(ProcessRunnerError::infrastructure(message));
@@ -229,6 +244,10 @@ pub(super) async fn finish_process(
             let Some(pid) = pid else {
                 stdout_task.abort();
                 stderr_task.abort();
+                #[cfg(windows)]
+                if let Some(job) = windows_job.as_ref() {
+                    job.terminate();
+                }
                 kill_child_group(&mut child);
                 let _ = child.wait().await;
                 return Err(ProcessRunnerError::infrastructure(
@@ -254,6 +273,8 @@ pub(super) async fn finish_process(
                 pid,
                 life: Life::Running,
                 child,
+                #[cfg(windows)]
+                windows_job,
                 readers: vec![stdout_task, stderr_task],
                 stdout: stdout_capture,
                 stderr: stderr_capture,
@@ -487,12 +508,7 @@ fn fallback_display_name(command: &str) -> Option<String> {
 }
 
 fn display_command(intent: &ProcessActionIntent) -> String {
-    let argv = intent.argv();
-    let raw = if argv.len() >= 3 && matches!(argv[1].as_str(), "-lc" | "-c") {
-        argv[2].clone()
-    } else {
-        argv.join(" ")
-    };
+    let raw = unwrap_shell_display_command(intent.argv());
     if raw.chars().count() <= DISPLAY_COMMAND_LIMIT {
         raw
     } else {
@@ -502,9 +518,37 @@ fn display_command(intent: &ProcessActionIntent) -> String {
     }
 }
 
+fn unwrap_shell_display_command(argv: &[String]) -> String {
+    match argv {
+        [_, no_profile, non_interactive, flag, script]
+            if no_profile.eq_ignore_ascii_case("-NoProfile")
+                && non_interactive.eq_ignore_ascii_case("-NonInteractive")
+                && flag.eq_ignore_ascii_case("-Command") =>
+        {
+            script.clone()
+        }
+        [_, no_profile, flag, script]
+            if no_profile.eq_ignore_ascii_case("-NoProfile")
+                && flag.eq_ignore_ascii_case("-Command") =>
+        {
+            script.clone()
+        }
+        [_, flag, script]
+            if matches!(flag.as_str(), "-lc" | "-c") || flag.eq_ignore_ascii_case("/C") =>
+        {
+            script.clone()
+        }
+        _ => argv.join(" "),
+    }
+}
+
 fn stop_retained(process: &mut RetainedProcess) {
     for reader in &process.readers {
         reader.abort();
+    }
+    #[cfg(windows)]
+    if let Some(job) = process.windows_job.as_ref() {
+        job.terminate();
     }
     reap_child(&mut process.child);
 }
@@ -601,4 +645,48 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::unwrap_shell_display_command;
+
+    #[test]
+    fn unwrap_shell_display_command_handles_unix_and_windows_wrappers() {
+        assert_eq!(
+            unwrap_shell_display_command(&[
+                "bash".to_owned(),
+                "-lc".to_owned(),
+                "cargo test".to_owned(),
+            ]),
+            "cargo test"
+        );
+        assert_eq!(
+            unwrap_shell_display_command(&[
+                "pwsh".to_owned(),
+                "-NoProfile".to_owned(),
+                "-NonInteractive".to_owned(),
+                "-Command".to_owned(),
+                "cargo test".to_owned(),
+            ]),
+            "cargo test"
+        );
+        assert_eq!(
+            unwrap_shell_display_command(&[
+                "powershell.exe".to_owned(),
+                "-NoProfile".to_owned(),
+                "-Command".to_owned(),
+                "Get-ChildItem".to_owned(),
+            ]),
+            "Get-ChildItem"
+        );
+        assert_eq!(
+            unwrap_shell_display_command(&[
+                "cmd.exe".to_owned(),
+                "/C".to_owned(),
+                "dir".to_owned(),
+            ]),
+            "dir"
+        );
+    }
 }

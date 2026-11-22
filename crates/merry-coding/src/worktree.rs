@@ -558,17 +558,23 @@ pub fn cleanup_orphaned_worktrees(base_dir: &Path) -> WorktreeGcReport {
 /// Returns the default base directory for isolated subagent Git worktrees.
 #[must_use]
 pub fn default_worktree_base_dir() -> PathBuf {
-    if let Some(xdg_cache) = env::var_os("XDG_CACHE_HOME") {
-        let path = PathBuf::from(xdg_cache);
-        if path.is_absolute() {
-            return path.join("merry").join("worktrees");
-        }
+    let xdg_cache = env::var_os("XDG_CACHE_HOME").map(PathBuf::from);
+    if let Some(path) = xdg_cache.as_deref().filter(|path| path.is_absolute()) {
+        return path.join("merry").join("worktrees");
     }
-    if let Some(home) = env::var_os("HOME") {
-        let path = PathBuf::from(home);
-        if path.is_absolute() {
-            return path.join(".cache").join("merry").join("worktrees");
-        }
+    let local_appdata = env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    if cfg!(windows)
+        && let Some(path) = local_appdata.as_deref().filter(|path| path.is_absolute())
+    {
+        return path.join("merry").join("worktrees");
+    }
+    if let Some(home) = merry_core::host_paths::user_home_dir() {
+        let cache_base = merry_core::host_paths::platform_cache_base(
+            &home,
+            xdg_cache.as_deref(),
+            local_appdata.as_deref(),
+        );
+        return cache_base.join("merry").join("worktrees");
     }
     env::temp_dir().join("merry-worktrees")
 }

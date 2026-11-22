@@ -12,14 +12,19 @@ pub(crate) type ActionProcessBackend = Arc<dyn ProcessBackend>;
 pub(crate) type ActionProcessBackendOptions = ProcessBackendOptions;
 
 /// Selects whether process actions run in the workspace sandbox or on the host.
+///
+/// Defaults to [`SandboxMode::Workspace`] on Linux and macOS, and to
+/// [`SandboxMode::Off`] on Windows where no kernel workspace sandbox is
+/// available yet (explicit `--sandbox workspace` still fails closed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[value(rename_all = "kebab-case")]
 pub(crate) enum SandboxMode {
     /// Confine each action to the workspace sandbox.
-    #[default]
+    #[cfg_attr(not(windows), default)]
     Workspace,
     /// Run actions in the host process environment.
+    #[cfg_attr(windows, default)]
     Off,
 }
 

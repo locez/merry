@@ -1,7 +1,4 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 /// Resolves a host path through the last existing prefix.
 ///
@@ -14,7 +11,7 @@ pub fn resolve_host_path(path: &Path) -> PathBuf {
     let mut unresolved = Vec::new();
 
     loop {
-        if let Ok(resolved) = fs::canonicalize(&current) {
+        if let Ok(resolved) = merry_core::host_paths::canonicalize_clean(&current) {
             let mut result = resolved;
             for component in unresolved.iter().rev() {
                 result.push(component);

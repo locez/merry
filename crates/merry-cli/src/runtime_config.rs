@@ -10,7 +10,7 @@ use merry_runtime::{
 use std::{
     env,
     ffi::OsString,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 pub(crate) fn validate_loaded_config(
@@ -246,6 +246,39 @@ fn default_development_path_rules_with_env(
         }
     }
 
+    // Windows CLI dev toolchains and caches live under `%LOCALAPPDATA%` /
+    // `%APPDATA%` / `%USERPROFILE%\scoop`. Grant only explicit dev
+    // subdirectories, never the whole AppData tree.
+    #[cfg(windows)]
+    {
+        if let Some(local_appdata) = env_path("LOCALAPPDATA") {
+            for subdir in [
+                "go-build",
+                "pip",
+                "uv",
+                "pnpm",
+                "Yarn",
+                "node-gyp",
+                "npm-cache",
+            ] {
+                let candidate = local_appdata.join(subdir);
+                if candidate.exists() {
+                    rules.push((candidate, PathAccess::ReadWrite));
+                }
+            }
+            for subdir in ["fnm", "Programs\\Python", "Programs\\Git"] {
+                let candidate = local_appdata.join(subdir);
+                if candidate.exists() {
+                    rules.push((candidate, PathAccess::ReadOnly));
+                }
+            }
+        }
+        let scoop_shims = home.join("scoop").join("shims");
+        if scoop_shims.exists() {
+            rules.push((scoop_shims, PathAccess::ReadOnly));
+        }
+    }
+
     rules
         .into_iter()
         .filter(|(path, _)| is_clean_absolute_path(path))
@@ -260,10 +293,7 @@ fn default_development_path_rules_with_env(
 }
 
 fn is_clean_absolute_path(path: &Path) -> bool {
-    path.is_absolute()
-        && path
-            .components()
-            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+    merry_core::host_paths::is_clean_absolute_path(path)
 }
 
 /// Builds the action backend inputs that need no asynchronous discovery.
@@ -277,8 +307,14 @@ fn action_process_backend_options(
 ) -> Result<ActionProcessBackendOptions, config::ConfigError> {
     let home = config
         .map(|config| config.home().to_path_buf())
-        .or_else(|| env::var_os("HOME").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("/home/merry"));
+        .or_else(merry_core::host_paths::user_home_dir)
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                env::temp_dir()
+            } else {
+                PathBuf::from("/home/merry")
+            }
+        });
     let mut path_rules = default_development_path_rules(&home);
     if let Some(config) = config {
         path_rules.extend(config.trusted_global_path_rules()?);

@@ -265,10 +265,24 @@ impl SessionStoreCommitPause {
 
 impl FileSessionStore {
     pub fn default_sessions_dir() -> Result<PathBuf, SessionStoreError> {
-        sessions_dir_from_env(
-            env::var_os("XDG_STATE_HOME").as_deref(),
-            env::var_os("HOME").as_deref(),
-        )
+        let xdg_state_home = env::var_os("XDG_STATE_HOME");
+        if let Some(root) = non_empty_os_str(xdg_state_home.as_deref()) {
+            return Ok(PathBuf::from(root).join("merry").join("sessions"));
+        }
+        let local_appdata = env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        if cfg!(windows)
+            && let Some(local) = local_appdata
+                .as_deref()
+                .filter(|path| !path.as_os_str().is_empty() && path.is_absolute())
+        {
+            return Ok(local.join("merry").join("sessions"));
+        }
+        let Some(home) = merry_core::host_paths::user_home_dir() else {
+            return Err(SessionStoreError::StateHomeUnavailable);
+        };
+        let state_base =
+            merry_core::host_paths::platform_state_base(&home, None, local_appdata.as_deref());
+        Ok(state_base.join("merry").join("sessions"))
     }
 
     pub fn default_store() -> Result<Self, SessionStoreError> {
@@ -639,6 +653,7 @@ impl FileSessionStore {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn sessions_dir_from_env(
     xdg_state_home: Option<&OsStr>,
     home: Option<&OsStr>,

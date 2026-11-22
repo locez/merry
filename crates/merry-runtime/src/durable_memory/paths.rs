@@ -64,18 +64,20 @@ impl MemoryLayout {
 
     /// Directory that contains `global/` and `workspaces/`.
     ///
-    /// An absolute `XDG_DATA_HOME` wins. Otherwise the root is
-    /// `$HOME/.local/share/merry/memory`. `HOME` must still be absolute.
+    /// An absolute `XDG_DATA_HOME` wins. On Windows, falls back to
+    /// `%LOCALAPPDATA%/merry/memory` or `<home>/AppData/Local/merry/memory`.
+    /// On Unix, falls back to `$HOME/.local/share/merry/memory`.
     pub fn memory_root_from_env() -> Result<PathBuf, DurableMemoryError> {
-        let home = env::var_os("HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .ok_or(DurableMemoryError::HomeMissing)?;
-        let data_home = env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .unwrap_or_else(|| home.join(".local/share"));
-        Ok(data_home.join("merry/memory"))
+        let home =
+            merry_core::host_paths::user_home_dir().ok_or(DurableMemoryError::HomeMissing)?;
+        let xdg_data_home = env::var_os("XDG_DATA_HOME").map(PathBuf::from);
+        let local_appdata = env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let data_home = merry_core::host_paths::platform_data_base(
+            &home,
+            xdg_data_home.as_deref(),
+            local_appdata.as_deref(),
+        );
+        Ok(data_home.join("merry").join("memory"))
     }
 
     #[must_use]
@@ -118,10 +120,12 @@ fn canonical_directory(path: &Path) -> Result<PathBuf, DurableMemoryError> {
             path: path.to_path_buf(),
         });
     }
-    let canonical = fs::canonicalize(path).map_err(|source| DurableMemoryError::Io {
-        operation: "canonicalize workspace root",
-        path: path.to_path_buf(),
-        source,
+    let canonical = merry_core::host_paths::canonicalize_clean(path).map_err(|source| {
+        DurableMemoryError::Io {
+            operation: "canonicalize workspace root",
+            path: path.to_path_buf(),
+            source,
+        }
     })?;
     if !canonical.is_dir() {
         return Err(DurableMemoryError::WorkspaceNotDirectory { path: canonical });

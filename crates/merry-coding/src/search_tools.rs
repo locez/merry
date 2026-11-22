@@ -7,7 +7,7 @@
 //! an action on a binary that is not installed.
 
 use merry_process::action_process_path;
-use std::{env, ffi::OsStr, path::Path};
+use std::{ffi::OsStr, path::Path};
 
 /// Program names probed on the action PATH, in prompt preference order.
 const RIPGREP_PROGRAM: &str = "rg";
@@ -46,18 +46,51 @@ impl SearchToolAvailability {
     /// The line always starts with the same marker so the prompt reports a
     /// definite answer for this host, including when no modern tool is present.
     pub(crate) fn summary_line(&self) -> String {
+        self.summary_line_for_shell(
+            merry_runtime::host_shell_name(),
+            merry_runtime::host_shell_has_unix_utilities(),
+            merry_runtime::host_shell_chain_separator(),
+        )
+    }
+
+    pub(crate) fn summary_line_for_shell(
+        &self,
+        shell_name: &str,
+        has_unix_utilities: bool,
+        chain_separator: &str,
+    ) -> String {
+        if has_unix_utilities {
+            return match (self.ripgrep, self.fd) {
+                (true, true) => format!(
+                    "Action PATH search tools: `{RIPGREP_PROGRAM}` and `fd` are installed; use them for content search and path lookup."
+                ),
+                (true, false) => format!(
+                    "Action PATH search tools: `{RIPGREP_PROGRAM}` is installed; use it for content and file search. Neither `fd` nor `fdfind` is installed here, so use bounded `find` commands for path lookup by name."
+                ),
+                (false, true) => format!(
+                    "Action PATH search tools: `fd` is installed; use it for path lookup by name. `{RIPGREP_PROGRAM}` is not installed here, so use bounded `grep -r` commands for content search."
+                ),
+                (false, false) => format!(
+                    "Action PATH search tools: neither `{RIPGREP_PROGRAM}` nor `fd` is installed on the action PATH; use bounded `grep -r` and `find` commands and keep their output small."
+                ),
+            };
+        }
+
+        let shell_note = format!(
+            "Host shell is `{shell_name}` (chain commands with `{chain_separator}`; Unix `grep`/`find`/`sed` are unavailable—use `read_text` for reading files and PowerShell cmdlets when needed)."
+        );
         match (self.ripgrep, self.fd) {
             (true, true) => format!(
-                "Action PATH search tools: `{RIPGREP_PROGRAM}` and `fd` are installed; use them for content search and path lookup."
+                "Action PATH search tools: `{RIPGREP_PROGRAM}` and `fd` are installed; use them for content search and path lookup. {shell_note}"
             ),
             (true, false) => format!(
-                "Action PATH search tools: `{RIPGREP_PROGRAM}` is installed; use it for content and file search. Neither `fd` nor `fdfind` is installed here, so use bounded `find` commands for path lookup by name."
+                "Action PATH search tools: `{RIPGREP_PROGRAM}` is installed; use it for content and file search. Neither `fd` nor `fdfind` is installed here, so use `rg --files` or bounded `Get-ChildItem` for path lookup. {shell_note}"
             ),
             (false, true) => format!(
-                "Action PATH search tools: `fd` is installed; use it for path lookup by name. `{RIPGREP_PROGRAM}` is not installed here, so use bounded `grep -r` commands for content search."
+                "Action PATH search tools: `fd` is installed; use it for path lookup by name. `{RIPGREP_PROGRAM}` is not installed here, so use bounded `Select-String` commands for content search. {shell_note}"
             ),
             (false, false) => format!(
-                "Action PATH search tools: neither `{RIPGREP_PROGRAM}` nor `fd` is installed on the action PATH; use bounded `grep -r` and `find` commands and keep their output small."
+                "Action PATH search tools: neither `{RIPGREP_PROGRAM}` nor `fd` is installed on the action PATH; use bounded `Select-String` and `Get-ChildItem` commands and keep their output small. {shell_note}"
             ),
         }
     }
@@ -68,9 +101,7 @@ fn program_is_on_path(
     names: &[&str],
     file_exists: &mut impl FnMut(&Path) -> bool,
 ) -> bool {
-    env::split_paths(path)
-        .filter(|directory| !directory.as_os_str().is_empty())
-        .any(|directory| names.iter().any(|name| file_exists(&directory.join(name))))
+    merry_core::host_paths::find_executable_in_path(path, names, file_exists).is_some()
 }
 
 /// Whether one PATH candidate is a file this process could execute.

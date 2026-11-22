@@ -117,6 +117,36 @@ jobs:
             echo "- runtime event, artifact, ledger, trajectory, and test-result links are asserted by the named scenario"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  rust-windows:
+    name: Rust Windows compatibility
+    needs: web
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download tested Web assets
+        uses: actions/download-artifact@v4
+        with:
+          name: merry-web-dist
+          path: web/dist
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Windows build and lint gate
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run Windows cross-platform unit tests
+        run: |
+          cargo test --locked -p merry-core -p merry-llm -p merry-provider-openai -p merry-provider-anthropic -p merry-mcp -p merry-tools-macros
+          cargo test --locked -p merry-runtime --lib
+          cargo test --locked -p merry-process --lib
+          cargo test --locked -p merry-tools --lib
+          cargo test --locked -p merry-coding --lib
+          cargo test --locked -p merry-cli --bin merry
+
   web:
     name: Web trajectory contract
     runs-on: ubuntu-latest

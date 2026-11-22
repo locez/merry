@@ -64,8 +64,13 @@ impl WorkspaceProcessEnvironment {
     #[must_use]
     pub fn from_current_process() -> Self {
         let path = action_process_path();
-        let home = absolute_env_path("HOME", ACTION_SANDBOX_HOME_FALLBACK);
-        let tmp_source = absolute_env_path("TMPDIR", ACTION_SANDBOX_TMPDIR);
+        let home = merry_core::host_paths::user_home_dir()
+            .unwrap_or_else(|| absolute_env_path("HOME", ACTION_SANDBOX_HOME_FALLBACK));
+        let tmp_source = if cfg!(windows) {
+            merry_core::host_paths::simplify_verbatim_path(&env::temp_dir())
+        } else {
+            absolute_env_path("TMPDIR", ACTION_SANDBOX_TMPDIR)
+        };
         Self {
             path,
             home,
@@ -448,11 +453,7 @@ fn validate_clean_absolute_path(path: &Path, label: &str) -> Result<(), ProcessR
             "{label} must not contain NUL"
         )));
     }
-    if !path.is_absolute()
-        || !path
-            .components()
-            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
-    {
+    if !merry_core::host_paths::is_clean_absolute_path(path) {
         return Err(ProcessRunnerError::infrastructure(format!(
             "{label} must be a clean absolute path"
         )));
@@ -461,10 +462,7 @@ fn validate_clean_absolute_path(path: &Path, label: &str) -> Result<(), ProcessR
 }
 
 fn is_clean_absolute_path(path: &Path) -> bool {
-    path.is_absolute()
-        && path
-            .components()
-            .all(|component| matches!(component, Component::RootDir | Component::Normal(_)))
+    merry_core::host_paths::is_clean_absolute_path(path)
 }
 
 fn session_bus_socket_path(address: &OsStr) -> Option<PathBuf> {
@@ -623,6 +621,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn standard_and_xdg_runtime_temp_paths_remain_supported() {
         assert!(is_supported_temp_path_for(Path::new("/tmp"), false, None));

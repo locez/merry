@@ -94,6 +94,15 @@ fn main() -> CliExit {
         Err(error) => return CliExit::Unexpected(error.to_string()),
     };
 
+    if cli.is_product_surface() && cli.is_implicit_windows_host_fallback() {
+        tracing::warn!(
+            "Windows has no kernel workspace sandbox; defaulting to host mode (--sandbox off)"
+        );
+        eprintln!(
+            "merry: Windows has no kernel workspace sandbox; running in host mode (--sandbox off). Pass --sandbox off explicitly to silence this notice."
+        );
+    }
+
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

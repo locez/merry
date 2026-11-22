@@ -121,7 +121,8 @@ pub use process::{
     ProcessOutputChunk, ProcessOutputEnvelope, ProcessOutputSink, ProcessOutputStream,
     ProcessPermissionProfileId, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
     ProcessRunnerFuture, ProcessRunnerOutput, ProcessRunnerResult,
-    StaticPermissionedProcessRunnerFactory, is_low_risk_process_action_intent,
+    StaticPermissionedProcessRunnerFactory, host_shell_chain_separator,
+    host_shell_has_unix_utilities, host_shell_name, is_low_risk_process_action_intent,
     is_read_only_shell_process_action_intent, shell_command_for_argv,
 };
 pub use process::{

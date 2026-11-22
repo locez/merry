@@ -1,9 +1,25 @@
-//! Narrow shell-wrapper recognition and tree-sitter-bash AST normalization;
-//! policy stays in the classifier.
+//! Narrow shell-wrapper recognition, tree-sitter-bash AST normalization, and
+//! Windows PowerShell detection/analysis; policy stays in the classifier.
 
 use crate::process::contracts::ProcessActionIntent;
 use tree_sitter::{Node, Parser, Tree};
 use tree_sitter_bash::LANGUAGE as BASH_LANGUAGE;
+
+#[cfg(windows)]
+use super::windows_shell;
+
+/// Shell grammar family represented by one recognized shell wrapper argv.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShellKind {
+    /// POSIX/Bash-compatible shell (`bash`, `sh`, `zsh`, Git Bash).
+    Bash,
+    /// PowerShell (`pwsh`, `powershell`, `powershell.exe`).
+    #[cfg(windows)]
+    PowerShell,
+    /// Windows Command Prompt (`cmd`, `cmd.exe`).
+    #[cfg(windows)]
+    Cmd,
+}
 
 /// Exact shell-wrapper input plus payload-free metadata helpers.
 ///
@@ -11,12 +27,17 @@ use tree_sitter_bash::LANGUAGE as BASH_LANGUAGE;
 /// shell read-only lane. It does not authorize execution by itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ShellProcessInput<'a> {
+    pub(super) kind: ShellKind,
     pub(super) shell: &'a str,
     pub(super) flag: &'a str,
     pub(super) script: &'a str,
 }
 
 impl<'a> ShellProcessInput<'a> {
+    pub(crate) const fn kind(self) -> ShellKind {
+        self.kind
+    }
+
     pub(crate) const fn shell(self) -> &'a str {
         self.shell
     }
@@ -47,12 +68,7 @@ pub(crate) fn shell_process_input(intent: &ProcessActionIntent) -> Option<ShellP
 pub(crate) fn shell_command_argv(command: &str) -> Vec<String> {
     #[cfg(windows)]
     {
-        vec![
-            "powershell".to_owned(),
-            "-NoProfile".to_owned(),
-            "-Command".to_owned(),
-            command.to_owned(),
-        ]
+        windows_shell::detect_windows_shell().command_argv(command)
     }
 
     #[cfg(not(windows))]
@@ -66,8 +82,28 @@ pub(crate) fn shell_command_from_argv(argv: &[String]) -> Option<&str> {
     #[cfg(windows)]
     {
         match argv {
+            [shell, no_profile, non_interactive, flag, command]
+                if matches!(executable_name(shell).as_str(), "powershell" | "pwsh")
+                    && no_profile.eq_ignore_ascii_case("-NoProfile")
+                    && non_interactive.eq_ignore_ascii_case("-NonInteractive")
+                    && flag.eq_ignore_ascii_case("-Command") =>
+            {
+                Some(command)
+            }
             [shell, no_profile, flag, command]
-                if shell == "powershell" && no_profile == "-NoProfile" && flag == "-Command" =>
+                if matches!(executable_name(shell).as_str(), "powershell" | "pwsh")
+                    && no_profile.eq_ignore_ascii_case("-NoProfile")
+                    && flag.eq_ignore_ascii_case("-Command") =>
+            {
+                Some(command)
+            }
+            [shell, flag, command]
+                if executable_name(shell) == "bash" && matches!(flag.as_str(), "-c" | "-lc") =>
+            {
+                Some(command)
+            }
+            [shell, flag, command]
+                if executable_name(shell) == "cmd" && flag.eq_ignore_ascii_case("/C") =>
             {
                 Some(command)
             }
@@ -128,20 +164,44 @@ pub(super) fn is_safe_shell_word_byte(byte: u8) -> bool {
 pub(super) fn shell_process_input_from_argv(argv: &[String]) -> Option<ShellProcessInput<'_>> {
     #[cfg(windows)]
     {
-        let [shell, no_profile, flag, script] = argv else {
-            return None;
-        };
-        if !is_supported_plain_shell_token(shell)
-            || no_profile != "-NoProfile"
-            || flag != "-Command"
-        {
-            return None;
+        match argv {
+            [shell, no_profile, non_interactive, flag, script]
+                if is_supported_plain_shell_token(shell)
+                    && no_profile.eq_ignore_ascii_case("-NoProfile")
+                    && non_interactive.eq_ignore_ascii_case("-NonInteractive")
+                    && flag.eq_ignore_ascii_case("-Command") =>
+            {
+                Some(ShellProcessInput {
+                    kind: ShellKind::PowerShell,
+                    shell,
+                    flag,
+                    script,
+                })
+            }
+            [shell, no_profile, flag, script]
+                if is_supported_plain_shell_token(shell)
+                    && no_profile.eq_ignore_ascii_case("-NoProfile")
+                    && flag.eq_ignore_ascii_case("-Command") =>
+            {
+                Some(ShellProcessInput {
+                    kind: ShellKind::PowerShell,
+                    shell,
+                    flag,
+                    script,
+                })
+            }
+            [shell, flag, script]
+                if executable_name(shell) == "bash" && matches!(flag.as_str(), "-c" | "-lc") =>
+            {
+                Some(ShellProcessInput {
+                    kind: ShellKind::Bash,
+                    shell,
+                    flag,
+                    script,
+                })
+            }
+            _ => None,
         }
-        Some(ShellProcessInput {
-            shell,
-            flag,
-            script,
-        })
     }
 
     #[cfg(not(windows))]
@@ -153,6 +213,7 @@ pub(super) fn shell_process_input_from_argv(argv: &[String]) -> Option<ShellProc
             return None;
         }
         Some(ShellProcessInput {
+            kind: ShellKind::Bash,
             shell,
             flag,
             script,
@@ -183,20 +244,55 @@ pub(crate) fn stable_process_input_fingerprint(bytes: &[u8]) -> String {
 pub(super) fn shell_like_process_input_from_argv(argv: &[String]) -> Option<ShellProcessInput<'_>> {
     #[cfg(windows)]
     {
-        let [shell, no_profile, flag, script] = argv else {
-            return None;
-        };
-        if !is_supported_shell_executable_name(shell)
-            || no_profile != "-NoProfile"
-            || flag != "-Command"
-        {
-            return None;
+        match argv {
+            [shell, no_profile, non_interactive, flag, script]
+                if matches!(executable_name(shell).as_str(), "powershell" | "pwsh")
+                    && no_profile.eq_ignore_ascii_case("-NoProfile")
+                    && non_interactive.eq_ignore_ascii_case("-NonInteractive")
+                    && flag.eq_ignore_ascii_case("-Command") =>
+            {
+                Some(ShellProcessInput {
+                    kind: ShellKind::PowerShell,
+                    shell,
+                    flag,
+                    script,
+                })
+            }
+            [shell, no_profile, flag, script]
+                if matches!(executable_name(shell).as_str(), "powershell" | "pwsh")
+                    && no_profile.eq_ignore_ascii_case("-NoProfile")
+                    && flag.eq_ignore_ascii_case("-Command") =>
+            {
+                Some(ShellProcessInput {
+                    kind: ShellKind::PowerShell,
+                    shell,
+                    flag,
+                    script,
+                })
+            }
+            [shell, flag, script]
+                if matches!(executable_name(shell).as_str(), "bash" | "sh" | "zsh")
+                    && matches!(flag.as_str(), "-c" | "-lc") =>
+            {
+                Some(ShellProcessInput {
+                    kind: ShellKind::Bash,
+                    shell,
+                    flag,
+                    script,
+                })
+            }
+            [shell, flag, script]
+                if executable_name(shell) == "cmd" && flag.eq_ignore_ascii_case("/C") =>
+            {
+                Some(ShellProcessInput {
+                    kind: ShellKind::Cmd,
+                    shell,
+                    flag,
+                    script,
+                })
+            }
+            _ => None,
         }
-        Some(ShellProcessInput {
-            shell,
-            flag,
-            script,
-        })
     }
 
     #[cfg(not(windows))]
@@ -208,6 +304,7 @@ pub(super) fn shell_like_process_input_from_argv(argv: &[String]) -> Option<Shel
             return None;
         }
         Some(ShellProcessInput {
+            kind: ShellKind::Bash,
             shell,
             flag,
             script,
@@ -215,13 +312,8 @@ pub(super) fn shell_like_process_input_from_argv(argv: &[String]) -> Option<Shel
     }
 }
 
+#[cfg(not(windows))]
 pub(super) fn is_supported_shell_executable_name(shell: &str) -> bool {
-    #[cfg(windows)]
-    {
-        matches!(executable_name(shell).as_str(), "powershell" | "pwsh")
-    }
-
-    #[cfg(not(windows))]
     matches!(executable_name(shell).as_str(), "bash" | "sh" | "zsh")
 }
 
@@ -619,13 +711,32 @@ fn decode_security_word(node: Node<'_>, src: &str) -> String {
 }
 
 pub(super) fn executable_name(argument: &str) -> String {
-    argument
+    let base = argument
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(argument)
-        .to_ascii_lowercase()
+        .to_ascii_lowercase();
+    for suffix in [".exe", ".cmd", ".bat", ".com"] {
+        if let Some(stripped) = base.strip_suffix(suffix)
+            && !stripped.is_empty()
+        {
+            return stripped.to_owned();
+        }
+    }
+    base
 }
 
 pub(super) fn executable_token_is(argument: &str, expected: &str) -> bool {
-    argument == expected
+    #[cfg(windows)]
+    {
+        argument.eq_ignore_ascii_case(expected)
+            || argument
+                .strip_suffix(".exe")
+                .or_else(|| argument.strip_suffix(".EXE"))
+                .is_some_and(|stripped| stripped.eq_ignore_ascii_case(expected))
+    }
+    #[cfg(not(windows))]
+    {
+        argument == expected
+    }
 }

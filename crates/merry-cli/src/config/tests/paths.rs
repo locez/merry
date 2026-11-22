@@ -27,6 +27,7 @@ fn xdg_paths_use_defaults_when_env_is_missing_empty_or_relative() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn xdg_paths_use_absolute_env_values() {
     let paths = XdgPaths::from_parts(
@@ -46,6 +47,7 @@ fn xdg_paths_use_absolute_env_values() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn xdg_paths_normalize_absolute_environment_values() {
     let paths = XdgPaths::from_parts(

@@ -119,7 +119,7 @@ pub(crate) fn validate_workspace_path_argument(
     let requested = Path::new(raw_path);
     let (anchored, relative_text, clamp) = if requested.is_absolute() {
         match strip_workspace_root(requested, workspace_root)? {
-            Some(stripped) => (None, Cow::Borrowed(stripped), false),
+            Some(stripped) => (None, Cow::Owned(stripped), false),
             None => {
                 let (anchor, remainder) = split_filesystem_root(requested)?;
                 (Some(anchor), Cow::Owned(remainder), true)
@@ -195,14 +195,31 @@ pub(crate) fn validate_workspace_path_argument(
 
 /// Converts an absolute argument inside a workspace root into a relative path.
 ///
-/// Returns `None` when the argument is outside the root. The root is canonical
-/// and the comparison is lexical over path components, so a path that only
-/// shares a prefix string with the root does not match it.
-fn strip_workspace_root<'a>(
-    requested: &'a Path,
+/// Returns `None` when the argument is outside the root. Verbatim `\\?\`
+/// prefixes on Windows are simplified before comparison, and Windows component
+/// comparison is ASCII case-insensitive so `c:\Repo\src\lib.rs` matches a
+/// canonical `\\?\C:\Repo` root.
+fn strip_workspace_root(
+    requested: &Path,
     workspace_root: &Path,
-) -> Result<Option<&'a str>, PathValidationError> {
-    let Ok(stripped) = requested.strip_prefix(workspace_root) else {
+) -> Result<Option<String>, PathValidationError> {
+    let requested = merry_core::host_paths::simplify_verbatim_path(requested);
+    let workspace_root = merry_core::host_paths::simplify_verbatim_path(workspace_root);
+
+    let stripped = if let Ok(stripped) = requested.strip_prefix(&workspace_root) {
+        Some(stripped.to_path_buf())
+    } else {
+        #[cfg(windows)]
+        {
+            strip_prefix_case_insensitive(&requested, &workspace_root)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    };
+
+    let Some(stripped) = stripped else {
         return Ok(None);
     };
     let Some(stripped) = stripped.to_str() else {
@@ -219,7 +236,36 @@ fn strip_workspace_root<'a>(
             None,
         ));
     }
-    Ok(Some(stripped))
+    Ok(Some(stripped.to_owned()))
+}
+
+#[cfg(windows)]
+fn strip_prefix_case_insensitive(path: &Path, root: &Path) -> Option<PathBuf> {
+    let mut path_components = path.components();
+    for root_component in root.components() {
+        let candidate = path_components.next()?;
+        let same = match (candidate, root_component) {
+            (Component::RootDir, Component::RootDir) => true,
+            (Component::Prefix(a), Component::Prefix(b)) => a
+                .as_os_str()
+                .to_str()
+                .zip(b.as_os_str().to_str())
+                .is_some_and(|(lhs, rhs)| lhs.eq_ignore_ascii_case(rhs)),
+            (Component::Normal(a), Component::Normal(b)) => a
+                .to_str()
+                .zip(b.to_str())
+                .is_some_and(|(lhs, rhs)| lhs.eq_ignore_ascii_case(rhs)),
+            _ => candidate == root_component,
+        };
+        if !same {
+            return None;
+        }
+    }
+    let mut remainder = PathBuf::new();
+    for component in path_components {
+        remainder.push(component.as_os_str());
+    }
+    Some(remainder)
 }
 
 /// Splits an absolute path into its filesystem anchor and the text below it.

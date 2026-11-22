@@ -443,9 +443,45 @@ pub(super) fn is_pid_alive(pid: u32) -> bool {
             Err(_) => true,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        is_windows_pid_alive(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         true
     }
+}
+
+/// Checks whether a Windows process ID is still running via
+/// `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` and `GetExitCodeProcess`.
+///
+/// Reviewed FFI boundary: Win32 exposes no safe std API for checking arbitrary
+/// PID liveness.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn is_windows_pid_alive(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    // SAFETY: `OpenProcess` takes only plain integer flags/PID and returns a
+    // nullable OS handle that we close before returning.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        // SAFETY: `GetLastError` reads thread-local Win32 error state.
+        return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
+    }
+
+    let mut exit_code: u32 = 0;
+    // SAFETY: `handle` is a valid non-null process handle owned by this
+    // function, and `exit_code` is a valid writable `u32` pointer.
+    let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+    // SAFETY: `handle` was returned by `OpenProcess` above and is closed once.
+    unsafe {
+        CloseHandle(handle);
+    }
+    ok != 0 && exit_code == STILL_ACTIVE as u32
 }

@@ -121,6 +121,8 @@ async fn run_tokio_process(
     }
 
     let mut command = tokio::process::Command::new(&program);
+    #[cfg(windows)]
+    let args = prepare_windows_spawn_command(&mut command, &program, args);
     command
         .args(&args)
         .current_dir(process_current_dir(cwd_root, &intent))
@@ -135,4 +137,52 @@ async fn run_tokio_process(
         .kill_on_drop(true);
 
     run_spawned_process(command, intent, context, program_for_error, background).await
+}
+
+/// Applies Windows-specific UTF-8 and shell-invocation defaults before caller
+/// environment overrides so `intent.argv()` stays untainted for classification,
+/// permissions, and trajectory logging.
+#[cfg(windows)]
+fn prepare_windows_spawn_command(
+    command: &mut tokio::process::Command,
+    program: &str,
+    mut args: Vec<String>,
+) -> Vec<String> {
+    // Prevent Python/CLI tools from falling back to legacy Windows ANSI codepages.
+    command
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8:surrogateescape");
+
+    let lower = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+
+    // Disable MSYS2 path conversion when invoking Git Bash so `/flag` arguments
+    // for native Windows toolchains (MSBuild, cl.exe) pass through unchanged.
+    if lower == "bash" || lower == "bash.exe" {
+        command
+            .env("MSYS_NO_PATHCONV", "1")
+            .env("MSYS2_ARG_CONV_EXCL", "*");
+        return args;
+    }
+
+    // Force UTF-8 console output for PowerShell piped stdout/stderr without
+    // modifying `$LASTEXITCODE`.
+    if matches!(
+        lower.as_str(),
+        "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe"
+    ) && let Some(command_index) = args
+        .iter()
+        .position(|arg| arg.eq_ignore_ascii_case("-Command"))
+        && let Some(script) = args.get_mut(command_index + 1)
+    {
+        const UTF8_PREAMBLE: &str = "$OutputEncoding = [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; ";
+        if !script.starts_with(UTF8_PREAMBLE) {
+            script.insert_str(0, UTF8_PREAMBLE);
+        }
+    }
+
+    args
 }

@@ -373,6 +373,7 @@ fn discover_chrome_executable(explicit: Option<&std::path::Path>) -> Result<Path
         "chromium",
         "chromium-browser",
         "chrome",
+        "msedge",
     ] {
         if let Some(found) = find_in_path(candidate) {
             return Ok(found);
@@ -390,19 +391,41 @@ fn discover_chrome_executable(explicit: Option<&std::path::Path>) -> Result<Path
             return Ok(p);
         }
     }
+    #[cfg(windows)]
+    if let Some(found) = find_windows_browser_binary() {
+        return Ok(found);
+    }
     Err(
         "No headless Chrome or Chromium executable found (checked MERRY_CHROME_PATH, PATH, and standard system paths)."
             .to_owned(),
     )
 }
 
-fn find_in_path(binary: &str) -> Option<PathBuf> {
-    let path_var = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(binary);
-        if candidate.is_file() {
-            return Some(candidate);
+#[cfg(windows)]
+fn find_windows_browser_binary() -> Option<PathBuf> {
+    let roots = [
+        std::env::var_os("PROGRAMFILES"),
+        std::env::var_os("PROGRAMFILES(X86)"),
+        std::env::var_os("LOCALAPPDATA"),
+    ];
+    let relative_candidates = [
+        r"Google\Chrome\Application\chrome.exe",
+        r"Chromium\Application\chrome.exe",
+        r"Microsoft\Edge\Application\msedge.exe",
+    ];
+    for root in roots.into_iter().flatten() {
+        let base = PathBuf::from(root);
+        for rel in relative_candidates {
+            let candidate = base.join(rel);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
     None
+}
+
+fn find_in_path(binary: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    merry_core::host_paths::find_executable_in_path(&path_var, &[binary], std::path::Path::is_file)
 }

@@ -78,6 +78,10 @@ impl Cli {
         self.sandbox.unwrap_or_default()
     }
 
+    pub(crate) fn is_implicit_windows_host_fallback(&self) -> bool {
+        cfg!(windows) && self.sandbox.is_none()
+    }
+
     pub(crate) fn permission_mode(&self) -> PermissionMode {
         if self.always_approve {
             PermissionMode::AlwaysApprove

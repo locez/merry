@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+merry-core = { path = "../merry-core", version = "0.1.0" }
 merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true
@@ -15,6 +16,9 @@ tracing.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.7"
@@ -26,7 +30,6 @@ name = "merry-sandbox-helper"
 path = "src/bin/merry-sandbox-helper.rs"
 
 [dev-dependencies]
-merry-core = { path = "../merry-core", version = "0.1.0" }
 serde_json.workspace = true
 tempfile.workspace = true
 tokio-util.workspace = true

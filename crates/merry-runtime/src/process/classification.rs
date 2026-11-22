@@ -1,6 +1,10 @@
+#[cfg(windows)]
+use crate::process::classification::windows_shell::{
+    analyze_powershell_script, parse_plain_powershell_command_sequence,
+};
 use crate::process::{
     classification::shell::{
-        command_words_have_env_injection, executable_name, executable_token_is,
+        ShellKind, command_words_have_env_injection, executable_name, executable_token_is,
         parse_bash_security_analysis, parse_plain_shell_command_sequence,
         shell_like_process_input_from_argv, shell_process_input_from_argv,
     },
@@ -12,8 +16,12 @@ use crate::process::{
 pub use shell::shell_command_for_argv;
 pub(crate) use shell::{shell_command_argv, shell_process_input, stable_process_input_fingerprint};
 use std::path::Path;
+pub use windows_shell::{
+    host_shell_chain_separator, host_shell_has_unix_utilities, host_shell_name,
+};
 
 mod shell;
+mod windows_shell;
 
 impl AcceptedLocalWorkspaceProcessAdmission {
     pub(crate) fn matches_intent(self, intent: &ProcessActionIntent) -> bool {
@@ -117,6 +125,14 @@ fn is_read_only_direct_process_argv(argv: &[String]) -> bool {
         [executable, file] if executable_token_is(executable, "cat") => {
             is_workspace_relative_file_argument(file)
         }
+        [executable] if executable.eq_ignore_ascii_case("get-location") => true,
+        [executable] if executable.eq_ignore_ascii_case("get-childitem") => true,
+        [executable, file] if executable.eq_ignore_ascii_case("get-childitem") => {
+            is_workspace_relative_file_argument(file)
+        }
+        [executable, file] if executable.eq_ignore_ascii_case("get-content") => {
+            is_workspace_relative_file_argument(file)
+        }
         _ => false,
     }
 }
@@ -143,7 +159,15 @@ fn is_read_only_plain_shell_process_argv(argv: &[String]) -> bool {
         return false;
     };
 
-    parse_plain_shell_command_sequence(shell_input.script()).is_some_and(|commands| {
+    let commands = match shell_input.kind() {
+        ShellKind::Bash => parse_plain_shell_command_sequence(shell_input.script()),
+        #[cfg(windows)]
+        ShellKind::PowerShell => parse_plain_powershell_command_sequence(shell_input.script()),
+        #[cfg(windows)]
+        ShellKind::Cmd => None,
+    };
+
+    commands.is_some_and(|commands| {
         !commands.is_empty()
             && commands
                 .iter()
@@ -223,11 +247,25 @@ fn is_positive_decimal(value: &str) -> bool {
 }
 
 fn is_workspace_relative_file_argument(argument: &str) -> bool {
-    !argument.starts_with('-')
-        && !Path::new(argument).is_absolute()
-        && !argument.split('/').any(|segment| {
+    if argument.starts_with('-')
+        || Path::new(argument).is_absolute()
+        || has_windows_drive_prefix(argument)
+    {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        !argument.starts_with(['/', '\\'])
+            && !argument
+                .split(['/', '\\'])
+                .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    }
+    #[cfg(not(windows))]
+    {
+        !argument.split('/').any(|segment| {
             segment.is_empty() || segment == "." || segment == ".." || segment.contains('\\')
         })
+    }
 }
 
 fn is_read_only_git_command(subcommand: &str, args: &[String]) -> bool {
@@ -300,7 +338,7 @@ pub(crate) fn is_safe_cargo_package_token(package: &str) -> bool {
 
 fn is_forbidden_process_argv(argv: &[String]) -> bool {
     if let Some(shell_input) = shell_like_process_input_from_argv(argv) {
-        return shell_script_contains_forbidden_process(shell_input.script());
+        return shell_script_contains_forbidden_process(shell_input.kind(), shell_input.script());
     }
 
     is_forbidden_direct_process_argv(argv)
@@ -428,16 +466,34 @@ fn git_subcommand_and_args(argv: &[String]) -> Option<(&str, &[String])> {
     None
 }
 
-fn shell_script_contains_forbidden_process(script: &str) -> bool {
-    let Some(analysis) = parse_bash_security_analysis(script) else {
-        // Syntax error or unparseable shell structure: fail closed.
-        return true;
-    };
-    analysis.env_injection
-        || analysis
-            .commands
-            .iter()
-            .any(|command| is_forbidden_direct_process_argv(command))
+fn shell_script_contains_forbidden_process(kind: ShellKind, script: &str) -> bool {
+    match kind {
+        ShellKind::Bash => {
+            let Some(analysis) = parse_bash_security_analysis(script) else {
+                // Syntax error or unparseable shell structure: fail closed.
+                return true;
+            };
+            analysis.env_injection
+                || analysis
+                    .commands
+                    .iter()
+                    .any(|command| is_forbidden_direct_process_argv(command))
+        }
+        #[cfg(windows)]
+        ShellKind::PowerShell => {
+            let Some(analysis) = analyze_powershell_script(script) else {
+                return true;
+            };
+            analysis.env_or_eval_injection
+                || analysis.has_destructive_delete
+                || analysis
+                    .commands
+                    .iter()
+                    .any(|command| is_forbidden_direct_process_argv(command))
+        }
+        #[cfg(windows)]
+        ShellKind::Cmd => true,
+    }
 }
 
 const FORBIDDEN_PROCESS_EXECUTABLES: &[&str] = &[
@@ -592,8 +648,8 @@ pub(crate) fn requires_process_action_review(intent: &ProcessActionIntent) -> bo
 /// approval here cannot be treated as an operating-system capability grant.
 pub(crate) fn requires_host_process_path_review(intent: &ProcessActionIntent) -> bool {
     if let Some(shell_input) = shell_like_process_input_from_argv(intent.argv()) {
-        return shell_script_contains_git_metadata_write(shell_input.script())
-            || shell_script_contains_host_path(shell_input.script())
+        return shell_script_contains_git_metadata_write(shell_input.kind(), shell_input.script())
+            || shell_script_contains_host_path(shell_input.kind(), shell_input.script())
             || intent
                 .argv()
                 .first()
@@ -607,17 +663,36 @@ pub(crate) fn requires_host_process_path_review(intent: &ProcessActionIntent) ->
             .any(|argument| is_explicit_host_path_token(argument))
 }
 
-fn shell_script_contains_host_path(script: &str) -> bool {
-    let Some(analysis) = parse_bash_security_analysis(script) else {
-        return true;
-    };
-    analysis.has_command_substitution
-        || analysis.path_check_tokens.iter().any(|token| {
-            is_explicit_host_path_token(token) || contains_embedded_absolute_path(token)
-        })
+fn shell_script_contains_host_path(kind: ShellKind, script: &str) -> bool {
+    match kind {
+        ShellKind::Bash => {
+            let Some(analysis) = parse_bash_security_analysis(script) else {
+                return true;
+            };
+            analysis.has_command_substitution
+                || analysis.path_check_tokens.iter().any(|token| {
+                    is_explicit_host_path_token(token) || contains_embedded_absolute_path(token)
+                })
+        }
+        #[cfg(windows)]
+        ShellKind::PowerShell => {
+            let Some(analysis) = analyze_powershell_script(script) else {
+                return true;
+            };
+            analysis.has_command_substitution
+                || analysis.path_check_tokens.iter().any(|token| {
+                    is_explicit_host_path_token(token) || contains_embedded_absolute_path(token)
+                })
+        }
+        #[cfg(windows)]
+        ShellKind::Cmd => true,
+    }
 }
 
 fn contains_embedded_absolute_path(value: &str) -> bool {
+    if contains_embedded_windows_drive_path(value) {
+        return true;
+    }
     value.char_indices().any(|(index, character)| {
         if character != '/' {
             return false;
@@ -633,6 +708,27 @@ fn contains_embedded_absolute_path(value: &str) -> bool {
         }
         matches!(previous, '"' | '\'' | '(' | '[' | '{' | '=' | ':' | ',')
     })
+}
+
+fn contains_embedded_windows_drive_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < 3 {
+        return false;
+    }
+    for i in 0..=bytes.len() - 3 {
+        if bytes[i].is_ascii_alphabetic()
+            && bytes[i + 1] == b':'
+            && matches!(bytes[i + 2], b'\\' | b'/')
+            && (i == 0
+                || matches!(
+                    bytes[i - 1],
+                    b'"' | b'\'' | b'(' | b'[' | b'{' | b'=' | b',' | b';'
+                ))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Returns whether the `/` at `slash_index` is the `://` separator of a
@@ -653,15 +749,32 @@ fn is_non_file_url_scheme_separator(value: &str, slash_index: usize) -> bool {
     )
 }
 
-fn shell_script_contains_git_metadata_write(script: &str) -> bool {
-    let Some(analysis) = parse_bash_security_analysis(script) else {
-        return true;
-    };
-    analysis
-        .commands
-        .iter()
-        .map(Vec::as_slice)
-        .any(is_git_metadata_write_argv)
+fn shell_script_contains_git_metadata_write(kind: ShellKind, script: &str) -> bool {
+    match kind {
+        ShellKind::Bash => {
+            let Some(analysis) = parse_bash_security_analysis(script) else {
+                return true;
+            };
+            analysis
+                .commands
+                .iter()
+                .map(Vec::as_slice)
+                .any(is_git_metadata_write_argv)
+        }
+        #[cfg(windows)]
+        ShellKind::PowerShell => {
+            let Some(analysis) = analyze_powershell_script(script) else {
+                return true;
+            };
+            analysis
+                .commands
+                .iter()
+                .map(Vec::as_slice)
+                .any(is_git_metadata_write_argv)
+        }
+        #[cfg(windows)]
+        ShellKind::Cmd => true,
+    }
 }
 
 fn is_git_metadata_write_argv(argv: &[String]) -> bool {
@@ -871,15 +984,35 @@ fn is_explicit_host_path_token(argument: &str) -> bool {
     let argument = argument
         .find(['>', '<'])
         .map_or(argument, |index| &argument[index + 1..]);
+    let lower = argument.to_ascii_lowercase();
     argument == ".."
         || argument.starts_with("../")
+        || argument.starts_with("..\\")
         || argument.contains("/../")
+        || argument.contains("\\..\\")
         || argument.starts_with('/')
+        || argument.starts_with("\\\\")
+        || has_windows_drive_prefix(argument)
         || argument == "~"
         || argument.starts_with("~/")
+        || argument.starts_with("~\\")
         || argument.starts_with("$HOME/")
         || argument.starts_with("${HOME}/")
+        || lower.starts_with("$env:userprofile")
+        || lower.starts_with("$env:appdata")
+        || lower.starts_with("$env:localappdata")
+        || lower.starts_with("%userprofile%")
+        || lower.starts_with("%appdata%")
+        || lower.starts_with("%localappdata%")
         || argument
             .split_once('=')
             .is_some_and(|(_, value)| is_explicit_host_path_token(value))
+}
+
+fn has_windows_drive_prefix(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes.len() == 2 || matches!(bytes[2], b'\\' | b'/'))
 }

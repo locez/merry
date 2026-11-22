@@ -43,8 +43,8 @@ async fn helper_simulated_sandbox_runs_local_workspace_effect_with_fake_runner()
 
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
-        runner.observed_argv(),
-        vec![vec!["bash", "-lc", "cargo test -p merry-runtime"]]
+        merry_runtime::shell_command_for_argv(&runner.observed_argv()[0]),
+        "cargo test -p merry-runtime"
     );
     let text = String::from_utf8(output).expect("output should be utf-8");
     assert_eq!(text, "simulated cargo success\n");

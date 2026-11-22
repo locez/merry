@@ -87,6 +87,13 @@ tempfile = "3"
 two-face = { version = "0.5", default-features = false, features = ["syntect-default-onig"] }
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [workspace.lints.rust]
 # `deny` so one reviewed call can use `allow`. Tokio 1.54 deprecated the safe

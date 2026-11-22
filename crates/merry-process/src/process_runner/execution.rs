@@ -72,6 +72,13 @@ pub(super) async fn run_spawned_process(
     // children without signaling Merry's own group.
     #[cfg(unix)]
     command.process_group(0);
+    // On Windows, detach from the parent console without `DETACHED_PROCESS`
+    // (which breaks stdio pipe inheritance for grandchildren like cmd -> node).
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+    }
     let mut child = command.spawn().map_err(|source| {
         if source.kind() == io::ErrorKind::NotFound {
             ProcessRunnerError::infrastructure(format!(
@@ -83,6 +90,20 @@ pub(super) async fn run_spawned_process(
             ))
         }
     })?;
+    #[cfg(windows)]
+    let windows_job = child.id().and_then(
+        |pid| match super::windows_job::WindowsProcessJob::for_pid(pid) {
+            Ok(job) => Some(job),
+            Err(error) => {
+                tracing::debug!(
+                    pid,
+                    error = %error,
+                    "failed to attach Windows child process to job object"
+                );
+                None
+            }
+        },
+    );
     let stdout = child.stdout.take().ok_or_else(|| {
         ProcessRunnerError::infrastructure("process stdout pipe was not available")
     })?;
@@ -91,6 +112,8 @@ pub(super) async fn run_spawned_process(
     })?;
     background::finish_process(
         child,
+        #[cfg(windows)]
+        windows_job,
         stdout,
         stderr,
         intent,

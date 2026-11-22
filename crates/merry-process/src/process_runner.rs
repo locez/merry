@@ -9,6 +9,8 @@ mod execution;
 mod permissions;
 mod review;
 mod tokio_runner;
+#[cfg(windows)]
+mod windows_job;
 
 pub use environment::{WorkspaceProcessEnvironment, action_process_path};
 pub use permissions::{

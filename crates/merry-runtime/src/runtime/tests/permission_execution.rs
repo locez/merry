@@ -139,7 +139,7 @@ async fn request_permissions_approved_by_review_executes_exact_process_action() 
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         runner.observed_intents()[0].argv(),
-        ["bash", "-lc", "cargo test"]
+        crate::process::shell_command_argv("cargo test")
     );
     assert_eq!(
         resolved_tool_result(&events).status(),
@@ -263,7 +263,7 @@ async fn run_process_inline_permissions_review_before_execution() {
     assert_eq!(runner.call_count(), 1);
     assert_eq!(
         runner.observed_intents()[0].argv(),
-        ["bash", "-lc", "cargo fetch"]
+        crate::process::shell_command_argv("cargo fetch")
     );
     let result = resolved_tool_result(&events);
     assert_eq!(result.status(), ToolCallResultStatus::Succeeded);

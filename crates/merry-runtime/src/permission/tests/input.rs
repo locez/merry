@@ -25,7 +25,10 @@ fn permission_request_parses_process_action_and_network_capability() {
         [RequestedCapability::Network]
     ));
     let PermissionedAction::Process(intent) = request.action();
-    assert_eq!(intent.argv(), ["bash", "-lc", "cargo test"]);
+    assert_eq!(
+        intent.argv(),
+        crate::process::shell_command_argv("cargo test")
+    );
     assert_eq!(intent.cwd(), Some("."));
 }
 
@@ -214,7 +217,10 @@ fn permission_request_treats_empty_process_cwd_as_workspace_root() {
     .expect("request should parse");
 
     let PermissionedAction::Process(intent) = request.action();
-    assert_eq!(intent.argv(), ["bash", "-lc", "ping -c 1 baidu.com"]);
+    assert_eq!(
+        intent.argv(),
+        crate::process::shell_command_argv("ping -c 1 baidu.com")
+    );
     assert_eq!(intent.cwd(), None);
 }
 

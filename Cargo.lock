@@ -1653,6 +1653,7 @@ dependencies = [
  "tracing-subscriber",
  "two-face",
  "unicode-width",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1672,6 +1673,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1742,6 +1744,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
