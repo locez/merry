@@ -63,17 +63,17 @@ cargo install --locked --path crates/merry-cli --features web
 
 ## TUI Shortcuts
 
-On macOS, `Alt` maps to `Option`. Customize bindings in `[tui.keymap]`.
+Customize bindings in `[tui.keymap]` (config accepts both `alt+` and `option+`). On macOS, `Option` shortcuts below work out of the box on the standard ABC layout; enable **"Use Option as Meta Key"** in your terminal if you use a non-ABC layout or dead-key chords such as `Option+U`.
 
-| Key | Action |
-| --- | --- |
-| `Alt+X` | Command palette & Settings (models, themes, transparency) |
-| `Alt+P` | Toggle Plan Mode |
-| `Alt+C` | Quote timeline text and attach inline review comments |
-| `Alt+T` | Inspect full output of executed commands |
-| `Alt+G` | Open local Web trajectory viewer (`--features web`) |
-| `Ctrl+V` | Paste image from clipboard |
-| `Esc` | Interrupt active turn |
+| Linux | macOS | Action |
+| --- | --- | --- |
+| `Alt+X` | `Option+X` | Command palette & Settings (models, themes, transparency) |
+| `Alt+P` | `Option+P` | Toggle Plan Mode |
+| `Alt+C` | `Option+C` | Quote timeline text and attach inline review comments |
+| `Alt+T` | `Option+T` | Inspect full output of executed commands |
+| `Alt+G` | `Option+G` | Open local Web trajectory viewer (`--features web`) |
+| `Ctrl+V` | `Ctrl+V` / `⌘+V` | Paste image from clipboard |
+| `Esc` | `Esc` | Interrupt active turn |
 
 ---
 
