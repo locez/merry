@@ -15,6 +15,7 @@ from _support import (
 from pydantic import BaseModel, ConfigDict, Field
 
 import merry
+from merry import events
 from merry._protocol import parse_message
 from merry._run import AgentRun
 
@@ -73,11 +74,11 @@ class InvalidResultNative:
 def test_agent_run_preserves_event_order_and_terminal_result() -> None:
     async def scenario() -> merry.RunResult[BaseModel]:
         agent = fake_agent("hello", session_id="event-order")
-        run = agent.stream("Say hello.")
         seen_messages: list[merry.Event | merry.ToolCallBatch] = []
-        async for message in run:
-            seen_messages.append(message)
-        return await run.result()
+        async with agent.stream("Say hello.") as run:
+            async for message in run:
+                seen_messages.append(message)
+            return await run.result()
 
     result = asyncio.run(scenario())
 
@@ -95,35 +96,35 @@ def test_agent_run_preserves_event_order_and_terminal_result() -> None:
 
 def test_agent_run_preserves_multiline_assistant_output() -> None:
     async def scenario() -> merry.RunResult[BaseModel]:
-        run = fake_agent("first line\nsecond line", session_id="multiline-run").stream(
-            "Return two lines."
-        )
-        while await run.next() is not None:
-            pass
-        return await run.result()
+        async with fake_agent(
+            "first line\nsecond line", session_id="multiline-run"
+        ).stream("Return two lines.") as run:
+            while await run.next() is not None:
+                pass
+            return await run.result()
 
     result = asyncio.run(scenario())
 
     assert result.final_output == "first line\nsecond line"
     message = result.events[2]
-    assert isinstance(message.payload, merry.AssistantMessagePayload)
+    assert isinstance(message.payload, events.AssistantMessagePayload)
     assert message.payload.text == "first line\nsecond line"
 
 
 def test_pure_newline_delta_keeps_run_active() -> None:
     async def scenario() -> tuple[merry.RunResult[BaseModel], list[str]]:
-        run = streamed_text_delta_agent(
+        deltas: list[str] = []
+        async with streamed_text_delta_agent(
             delta="\r\n",
             final_text="Order loaded.",
             session_id="newline-delta",
-        ).stream("Stream a result.")
-        deltas: list[str] = []
-        while (event := await run.next()) is not None:
-            if isinstance(event, merry.Event) and isinstance(
-                event.payload, merry.AssistantMessageDeltaPayload
-            ):
-                deltas.append(event.payload.delta)
-        return await run.result(), deltas
+        ).stream("Stream a result.") as run:
+            while (event := await run.next()) is not None:
+                if isinstance(event, merry.Event) and isinstance(
+                    event.payload, events.AssistantMessageDeltaPayload
+                ):
+                    deltas.append(event.payload.delta)
+            return await run.result(), deltas
 
     result, deltas = asyncio.run(scenario())
 
@@ -131,7 +132,7 @@ def test_pure_newline_delta_keeps_run_active() -> None:
     assert result.final_output == "Order loaded."
     assert deltas == ["\r\n"]
     assert not any(
-        isinstance(event.payload, merry.AssistantMessageDeltaPayload)
+        isinstance(event.payload, events.AssistantMessageDeltaPayload)
         for event in result.events
     )
 
@@ -162,6 +163,29 @@ def test_result_requires_eof_and_cancel_is_idempotent() -> None:
 
     assert first.status is merry.RunStatus.CANCELLED
     assert second == first
+
+
+def test_async_with_cancels_unfinished_run_on_early_break() -> None:
+    async def scenario() -> merry.RunResult[BaseModel]:
+        native = pending_native_agent("async-with-cancel")
+        async with merry.Agent._from_native(native).stream("Close on exit.") as run:
+            first = await run.next()
+            assert isinstance(first, merry.Event)
+        return await run.result()
+
+    result = asyncio.run(scenario())
+    assert result.status is merry.RunStatus.CANCELLED
+
+
+def test_close_after_terminal_error_does_not_re_raise() -> None:
+    async def scenario() -> None:
+        native = InvalidMessageNative()
+        with pytest.raises(merry.MerryInternalError) as raised:
+            async with AgentRun[BaseModel](native, None) as run:
+                await run.next()
+        assert raised.value.code == "protocol.native_message_invalid"
+
+    asyncio.run(scenario())
 
 
 def test_invalid_invocation_fields_are_rejected_at_the_protocol_boundary() -> None:
@@ -218,37 +242,37 @@ def test_retryable_tool_result_error_keeps_the_batch_active() -> None:
             final_text="Order loaded.",
             session_id="retryable-result",
         )
-        run = merry.Agent._from_native(native).stream("Load the order.")
-        batch: merry.ToolCallBatch | None = None
-        while batch is None:
-            message = await run.next()
-            assert message is not None
-            if isinstance(message, merry.ToolCallBatch):
-                batch = message
+        async with merry.Agent._from_native(native).stream("Load the order.") as run:
+            batch: merry.ToolCallBatch | None = None
+            while batch is None:
+                message = await run.next()
+                assert message is not None
+                if isinstance(message, merry.ToolCallBatch):
+                    batch = message
 
-        with pytest.raises(merry.MerryRuntimeError) as raised:
-            await batch.submit(
+            with pytest.raises(merry.MerryRuntimeError) as raised:
+                await batch.submit(
+                    [
+                        merry.ToolResult.succeeded(
+                            batch.invocations[0].id, merry.TextContent("")
+                        )
+                    ]
+                )
+            assert raised.value.code == "unsupported_tool_result_content"
+            assert not run.finished
+
+            submission = await batch.submit(
                 [
                     merry.ToolResult.succeeded(
-                        batch.invocations[0].id, merry.TextContent("")
+                        batch.invocations[0].id,
+                        merry.TextContent("loaded"),
                     )
                 ]
             )
-        assert raised.value.code == "unsupported_tool_result_content"
-        assert not run.finished
-
-        submission = await batch.submit(
-            [
-                merry.ToolResult.succeeded(
-                    batch.invocations[0].id,
-                    merry.TextContent("loaded"),
-                )
-            ]
-        )
-        assert submission is merry.ToolSubmission.ACCEPTED
-        while await run.next() is not None:
-            pass
-        return await run.result()
+            assert submission is merry.ToolSubmission.ACCEPTED
+            while await run.next() is not None:
+                pass
+            return await run.result()
 
     result = asyncio.run(scenario())
 
@@ -265,26 +289,26 @@ def test_explicit_tool_batch_must_be_submitted_before_run_advances() -> None:
             session_id="manual-batch",
         )
         agent = merry.Agent._from_native(native)
-        run = agent.stream("Load the order.")
-        batch: merry.ToolCallBatch | None = None
-        while batch is None:
-            message = await run.next()
-            assert message is not None
-            if isinstance(message, merry.ToolCallBatch):
-                batch = message
+        async with agent.stream("Load the order.") as run:
+            batch: merry.ToolCallBatch | None = None
+            while batch is None:
+                message = await run.next()
+                assert message is not None
+                if isinstance(message, merry.ToolCallBatch):
+                    batch = message
 
-        with pytest.raises(merry.MerryToolError) as raised:
-            await batch.submit([])
-        assert raised.value.code == "tool_batch_mismatch"
+            with pytest.raises(merry.MerryToolError) as raised:
+                await batch.submit([])
+            assert raised.value.code == "tool_batch_mismatch"
 
-        invocation = batch.invocations[0]
-        submission = await batch.submit(
-            [merry.ToolResult.succeeded(invocation.id, merry.TextContent("loaded"))]
-        )
-        assert submission is merry.ToolSubmission.ACCEPTED
-        while await run.next() is not None:
-            pass
-        return await run.result()
+            invocation = batch.invocations[0]
+            submission = await batch.submit(
+                [merry.ToolResult.succeeded(invocation.id, merry.TextContent("loaded"))]
+            )
+            assert submission is merry.ToolSubmission.ACCEPTED
+            while await run.next() is not None:
+                pass
+            return await run.result()
 
     result = asyncio.run(scenario())
 
@@ -317,18 +341,16 @@ def test_session_store_save_and_resume_preserves_session_identity(
             model="gpt-test",
             base_url="https://api.example.test/v1",
         )
-        agent = (
-            merry.AgentBuilder("resume-test")
-            .provider(provider)
-            .session_store(store_root)
-            .build()
+        agent = merry.Agent(
+            session_id="resume-test",
+            provider=provider,
+            session_store=store_root,
         )
         await agent.save_session()
-        resumed = await (
-            merry.AgentBuilder("resume-test")
-            .provider(provider)
-            .session_store(store_root)
-            .resume()
+        resumed = await merry.Agent.resume(
+            "resume-test",
+            provider=provider,
+            session_store=store_root,
         )
         return resumed.session_id
 

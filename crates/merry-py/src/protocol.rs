@@ -1,7 +1,8 @@
 //! Strict provider-neutral JSON conversion at the Python boundary.
 
 use merry::{
-    AgentLoopBlockedReason, AgentLoopStatus, RunResult,
+    AgentLoopBlockedReason, AgentLoopStatus, InteractiveInputItem, InteractiveInputSnapshot,
+    RunResult,
     binding::{
         OwnedAgentRunMessage, OwnedToolInvocationBatch, ToolInvocation, ToolInvocationContent,
         ToolInvocationResult, ToolInvocationSubmission,
@@ -252,6 +253,53 @@ pub(crate) fn submission_to_json(
         _ => return Err(unsupported_protocol_variant("tool invocation submission")),
     };
     serde_json::to_string(&NativeSubmission { status })
+}
+
+#[derive(Serialize)]
+struct NativeInteractiveInputItem<'a> {
+    id: u64,
+    text: &'a str,
+}
+
+#[derive(Serialize)]
+struct NativeQueuedInput<'a> {
+    id: u64,
+    text: &'a str,
+    position: usize,
+}
+
+#[derive(Serialize)]
+struct NativeInteractiveSnapshot<'a> {
+    items: Vec<NativeQueuedInput<'a>>,
+    paused: bool,
+}
+
+pub(crate) fn interactive_input_item_to_json(
+    item: &InteractiveInputItem,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&NativeInteractiveInputItem {
+        id: item.id().as_u64(),
+        text: item.text(),
+    })
+}
+
+pub(crate) fn interactive_input_snapshot_to_json(
+    snapshot: &InteractiveInputSnapshot,
+) -> Result<String, serde_json::Error> {
+    let items = snapshot
+        .items
+        .iter()
+        .enumerate()
+        .map(|(position, item)| NativeQueuedInput {
+            id: item.id().as_u64(),
+            text: item.text(),
+            position,
+        })
+        .collect();
+    serde_json::to_string(&NativeInteractiveSnapshot {
+        items,
+        paused: snapshot.paused,
+    })
 }
 
 fn unsupported_protocol_variant(kind: &str) -> serde_json::Error {

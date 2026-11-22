@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import json
-from typing import Protocol, TypeVar, runtime_checkable
-
-from pydantic import BaseModel
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 import merry
 from merry import _merry
-from merry._json import JsonObject
-
-InputT = TypeVar("InputT", bound=BaseModel)
-OutputT = TypeVar("OutputT", bound=BaseModel)
+from merry._json import JsonObject, JsonValue
+from merry._tools import ToolRegistration
 
 
 @runtime_checkable
@@ -33,6 +31,46 @@ class _ScriptedToolFactory(Protocol):
         tool_name: str,
         arguments_json: str,
         final_text: str,
+        /,
+    ) -> _merry.Agent: ...
+
+
+@runtime_checkable
+class _ParallelToolCallsFactory(Protocol):
+    def __call__(
+        self,
+        session_id: str,
+        calls_json: str,
+        final_text: str,
+        /,
+    ) -> _merry.Agent: ...
+
+
+@runtime_checkable
+class _ScriptedTurnsFactory(Protocol):
+    def __call__(
+        self,
+        session_id: str,
+        turns_json: str,
+        tool_names: list[str],
+        session_store_path: str | None,
+        /,
+    ) -> _merry.Agent: ...
+
+
+@runtime_checkable
+class _EchoRequestFactory(Protocol):
+    def __call__(
+        self,
+        session_id: str,
+        base_instructions: str | None,
+        progress_commentary: bool | None,
+        progress_commentary_instructions: str | None,
+        stable_blocks: list[tuple[str, str]],
+        max_output_tokens: int | None,
+        parallel_tool_calls: str | None,
+        reasoning_effort: str | None,
+        service_tier: str | None,
         /,
     ) -> _merry.Agent: ...
 
@@ -116,7 +154,7 @@ def scripted_native_agent(
 
 
 def scripted_agent(
-    tool: merry.Tool[InputT, OutputT],
+    tool: ToolRegistration,
     *,
     arguments: JsonObject,
     final_text: str = "done",
@@ -129,6 +167,68 @@ def scripted_agent(
         session_id=session_id,
     )
     return merry.Agent._from_native(native, tools=(tool,))
+
+
+def parallel_tools_agent(
+    tools: Sequence[ToolRegistration],
+    *,
+    calls: Sequence[JsonObject],
+    final_text: str = "done",
+    session_id: str = "python-parallel-tools",
+) -> merry.Agent:
+    factory: object = getattr(_merry, "test_agent_with_parallel_tool_calls", None)
+    if not isinstance(factory, _ParallelToolCallsFactory):
+        raise TypeError("test-utils native extension is required")
+    calls_json = json.dumps(list(calls), ensure_ascii=False, separators=(",", ":"))
+    native = factory(session_id, calls_json, final_text)
+    return merry.Agent._from_native(native, tools=tuple(tools))
+
+
+def scripted_turns_agent(
+    turns: Sequence[JsonValue],
+    *,
+    tools: Sequence[ToolRegistration] = (),
+    session_store: Path | None = None,
+    session_id: str = "python-scripted-turns",
+) -> merry.Agent:
+    factory: object = getattr(_merry, "test_agent_with_scripted_turns", None)
+    if not isinstance(factory, _ScriptedTurnsFactory):
+        raise TypeError("test-utils native extension is required")
+    turns_json = json.dumps(list(turns), ensure_ascii=False, separators=(",", ":"))
+    native = factory(
+        session_id,
+        turns_json,
+        [item.name for item in tools],
+        None if session_store is None else str(session_store),
+    )
+    return merry.Agent._from_native(native, tools=tuple(tools))
+
+
+def echo_request_agent(
+    *,
+    session_id: str = "python-echo-request",
+    prompt: merry.PromptProfile | None = None,
+    generation: merry.GenerationConfig | None = None,
+) -> merry.Agent:
+    factory: object = getattr(_merry, "test_agent_echoing_request", None)
+    if not isinstance(factory, _EchoRequestFactory):
+        raise TypeError("test-utils native extension is required")
+    native = factory(
+        session_id,
+        None if prompt is None else prompt.base_instructions,
+        None if prompt is None else prompt.progress_commentary,
+        None if prompt is None else prompt.progress_commentary_instructions,
+        []
+        if prompt is None
+        else [(block.tag, block.text) for block in prompt.stable_blocks],
+        None if generation is None else generation.max_output_tokens,
+        None if generation is None else generation.parallel_tool_calls.value,
+        None if generation is None else generation.reasoning_effort,
+        None
+        if generation is None or generation.service_tier is None
+        else generation.service_tier.value,
+    )
+    return merry.Agent._from_native(native)
 
 
 def final_output_agent(

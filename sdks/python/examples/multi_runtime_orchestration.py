@@ -35,21 +35,19 @@ class RuntimeReport:
 
 
 def build_runtime(label: str) -> merry.Agent:
-    return (
-        merry.AgentBuilder(f"python-runtime-orchestration-{label}")
-        .provider(provider_from_env())
-        .build()
+    return merry.Agent(
+        session_id=f"python-runtime-orchestration-{label}",
+        provider=provider_from_env(),
     )
 
 
 async def run_runtime(label: str) -> RuntimeReport:
     runtime = build_runtime(label)
-    run = runtime.stream(
+    event_types: list[str] = []
+    async with runtime.stream(
         f"You are the {label} reviewer. Give two concise observations about "
         "why a Rust-owned agent runtime should expose a typed Python SDK."
-    )
-    event_types: list[str] = []
-    try:
+    ) as run:
         async for message in run:
             if isinstance(message, merry.Event):
                 event_types.append(message.type.value)
@@ -60,8 +58,6 @@ async def run_runtime(label: str) -> RuntimeReport:
                     f"Runtime {label!r} received an unhandled host tool invocation."
                 )
         result = await run.result()
-    finally:
-        await run.close()
     return RuntimeReport(
         label=label,
         session_id=runtime.session_id,

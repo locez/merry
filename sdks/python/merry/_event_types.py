@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import ClassVar
 
 from ._json import (
@@ -15,7 +15,7 @@ from ._json import (
 )
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """Stable runtime event discriminant projected from Rust."""
 
     SESSION_STARTED = "session_started"
@@ -136,14 +136,14 @@ class RuntimeToolCallBatch:
             raise ValueError("runtime tool call batch ids must be unique")
 
 
-class RuntimeToolResultStatus(str, Enum):
+class RuntimeToolResultStatus(StrEnum):
     """Status of a tool result recorded by Rust."""
 
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 
 
-class RuntimeToolOutputKind(str, Enum):
+class RuntimeToolOutputKind(StrEnum):
     """Content kind for a recorded tool result."""
 
     TEXT = "text"
@@ -208,7 +208,7 @@ class RuntimeToolResult:
             raise ValueError("failed runtime tool results must have a diagnostic")
 
 
-class SubagentStatus(str, Enum):
+class SubagentStatus(StrEnum):
     """Lifecycle status of a runtime-owned subagent."""
 
     QUEUED = "queued"
@@ -219,7 +219,7 @@ class SubagentStatus(str, Enum):
     BLOCKED = "blocked"
 
 
-class PlanModeState(str, Enum):
+class PlanModeState(StrEnum):
     """Session Plan Mode lifecycle state."""
 
     INACTIVE = "inactive"
@@ -228,7 +228,7 @@ class PlanModeState(str, Enum):
     EXIT_PENDING = "exit_pending"
 
 
-class TodoStatus(str, Enum):
+class TodoStatus(StrEnum):
     """Status of one lightweight session todo item."""
 
     PENDING = "pending"
@@ -252,7 +252,7 @@ class TodoItem:
             raise TypeError("todo item status must be a TodoStatus")
 
 
-class InteractiveRunState(str, Enum):
+class InteractiveRunState(StrEnum):
     """Interactive driver state projected through the runtime event stream."""
 
     WAITING_FOR_INPUT = "waiting_for_input"

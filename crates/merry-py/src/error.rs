@@ -1,6 +1,6 @@
 //! Stable error translation for the Python boundary.
 
-use merry_core::{CoreError, MerryErrorDomain, MerryErrorInfo, MerryRetryability};
+use merry_core::{MerryErrorDomain, MerryErrorInfo, MerryRetryability};
 use pyo3::{
     create_exception,
     exceptions::{PyException, PyValueError},
@@ -251,9 +251,4 @@ fn bounded_message(message: &str) -> String {
     } else {
         bounded
     }
-}
-
-#[allow(dead_code)]
-pub(crate) fn core_error_to_py(error: CoreError) -> PyErr {
-    config_message_to_py(error.to_string())
 }

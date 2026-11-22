@@ -7,6 +7,7 @@
 mod agent;
 mod builder;
 mod error;
+mod interactive;
 mod protocol;
 mod run;
 mod run_state;
@@ -27,6 +28,7 @@ fn merry_py(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<builder::PyAgentBuilder>()?;
     module.add_class::<agent::PyAgent>()?;
     module.add_class::<run::PyAgentRun>()?;
+    module.add_class::<interactive::PyInteractiveRun>()?;
     #[cfg(feature = "test-utils")]
     testing::register(module)?;
     module.add_function(wrap_pyfunction!(version, module)?)?;

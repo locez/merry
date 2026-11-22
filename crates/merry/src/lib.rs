@@ -51,11 +51,15 @@ pub use interactive::{
 };
 pub use merry_core::RuntimeEvent;
 pub use merry_core::SessionId;
-pub use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
+pub use merry_llm::{
+    GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy, ParallelToolCalls,
+    ReasoningEffort, ServiceTier,
+};
 pub use merry_runtime::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus,
     CompactionConfig, FINAL_OUTPUT_TOOL_NAME, FileSessionStore, FinalOutput,
-    InteractivePrimaryModel, StructuredOutputRetryPolicy,
+    InteractivePrimaryModel, InterruptReason, PromptBlock, PromptError, PromptProfile,
+    QueuedInputId, StructuredOutputRetryPolicy,
 };
 pub use profile::{AgentProfile, AgentProfileContext};
 pub use stream::{AgentEventStream, StructuredAgentEventStream, StructuredRunResult};

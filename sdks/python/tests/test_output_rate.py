@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 import merry
+from merry import events
 from merry._event_parser import parse_event
 from merry._json import JsonObject, JsonValue
 
@@ -23,12 +24,12 @@ def rate_event() -> JsonObject:
 def test_output_rate_event_exposes_typed_provider_receive_timing() -> None:
     event = parse_event(rate_event())
     assert event.type is merry.EventType.MODEL_OUTPUT_RATE_UPDATED
-    assert isinstance(event.payload, merry.ModelOutputRateUpdatedPayload)
-    assert event.payload.rate == merry.ModelOutputRate(
+    assert isinstance(event.payload, events.ModelOutputRateUpdatedPayload)
+    assert event.payload.rate == events.ModelOutputRate(
         2400,
         8_000_000_000,
-        merry.OutputTokenSource.PROVIDER_USAGE,
-        merry.OutputTimingQuality.RECEIVE_WINDOW,
+        events.OutputTokenSource.PROVIDER_USAGE,
+        events.OutputTimingQuality.RECEIVE_WINDOW,
     )
     assert event.payload.source.sequence == 3
 
@@ -37,7 +38,7 @@ def test_output_rate_reset_does_not_conflate_missing_with_zero_usage() -> None:
     data = rate_event()
     data["rate"] = None
     event = parse_event(data)
-    assert isinstance(event.payload, merry.ModelOutputRateUpdatedPayload)
+    assert isinstance(event.payload, events.ModelOutputRateUpdatedPayload)
     assert event.payload.rate is None
 
 

@@ -112,6 +112,20 @@ impl AgentBuilder {
         self
     }
 
+    /// Sets the stable prompt composition for this session.
+    #[must_use]
+    pub fn prompt_profile(mut self, profile: merry_runtime::PromptProfile) -> Self {
+        self.runtime_builder = self.runtime_builder.prompt_profile(profile);
+        self
+    }
+
+    /// Controls whether the runtime asks the model to emit brief tool-progress commentary.
+    #[must_use]
+    pub fn progress_commentary(mut self, enabled: bool) -> Self {
+        self.runtime_builder = self.runtime_builder.progress_commentary(enabled);
+        self
+    }
+
     /// Registers one typed application tool.
     #[must_use]
     pub fn tool(mut self, tool: Tool) -> Self {
@@ -377,6 +391,14 @@ impl Agent {
             .start_interactive_agent_run(self.step_context(), self.loop_config.clone())
             .map(InteractiveRun::new)
             .map_err(AgentError::from)
+    }
+
+    /// Starts an owned interactive run for foreign-language bindings.
+    pub fn start_interactive_owned(
+        &self,
+    ) -> Result<crate::binding::OwnedInteractiveRun, AgentError> {
+        self.start_interactive()
+            .map(crate::binding::OwnedInteractiveRun::new)
     }
 
     /// Saves the current resume-safe session state to its configured store.

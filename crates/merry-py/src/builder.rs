@@ -3,7 +3,10 @@
 use crate::{agent::PyAgent, error, protocol};
 use merry::profiles::WorkspaceToolLimits;
 use merry::providers::OpenAiProtocol;
-use merry::{AgentBuilder, AgentLoopConfig, FileSessionStore};
+use merry::{
+    AgentBuilder, AgentLoopConfig, FileSessionStore, GenerationConfig, ParallelToolCalls,
+    PromptBlock, PromptProfile, ReasoningEffort, ServiceTier,
+};
 use merry_core::ToolName;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
@@ -14,6 +17,8 @@ use std::{num::NonZeroUsize, path::PathBuf};
 pub(crate) struct PyAgentBuilder {
     inner: Option<AgentBuilder>,
     session_store_path: Option<String>,
+    prompt_profile: Option<PromptProfile>,
+    progress_commentary: Option<bool>,
 }
 
 #[pymethods]
@@ -25,6 +30,8 @@ impl PyAgentBuilder {
         Ok(Self {
             inner: Some(AgentBuilder::new(session_id)),
             session_store_path: None,
+            prompt_profile: None,
+            progress_commentary: None,
         })
     }
 
@@ -77,6 +84,76 @@ impl PyAgentBuilder {
             .map_err(|error| error::provider_message_to_py(error.to_string()))?;
         let builder = self.take_builder()?;
         self.inner = Some(builder.provider(provider));
+        Ok(())
+    }
+
+    fn with_prompt_profile(
+        &mut self,
+        base_instructions: Option<String>,
+        progress_commentary: Option<bool>,
+        progress_commentary_instructions: Option<String>,
+        stable_blocks: Vec<(String, String)>,
+    ) -> PyResult<()> {
+        if self.inner.is_none() {
+            return Err(error::builder_consumed_to_py());
+        }
+        let mut profile = PromptProfile::default();
+        if let Some(base) = base_instructions {
+            profile = profile
+                .with_base_instructions(base)
+                .map_err(|error| error::config_message_to_py(error.to_string()))?;
+        }
+        if let Some(commentary) = progress_commentary_instructions {
+            profile = profile
+                .with_progress_commentary_instructions(commentary)
+                .map_err(|error| error::config_message_to_py(error.to_string()))?;
+        }
+        for (tag, text) in stable_blocks {
+            let block = PromptBlock::new(tag, text)
+                .map_err(|error| error::config_message_to_py(error.to_string()))?;
+            profile = profile
+                .with_stable_block(block)
+                .map_err(|error| error::config_message_to_py(error.to_string()))?;
+        }
+        self.prompt_profile = Some(profile);
+        self.progress_commentary = progress_commentary;
+        Ok(())
+    }
+
+    fn with_generation_config(
+        &mut self,
+        max_output_tokens: Option<u64>,
+        parallel_tool_calls: Option<String>,
+        reasoning_effort: Option<String>,
+        service_tier: Option<String>,
+    ) -> PyResult<()> {
+        let parallel = match parallel_tool_calls.as_deref() {
+            None | Some("auto") => ParallelToolCalls::Auto,
+            Some("enabled") => ParallelToolCalls::Enabled,
+            Some("disabled") => ParallelToolCalls::Disabled,
+            Some(other) => {
+                return Err(error::config_message_to_py(format!(
+                    "unsupported parallel_tool_calls mode: {other}"
+                )));
+            }
+        };
+        let reasoning = reasoning_effort
+            .as_deref()
+            .map(ReasoningEffort::new)
+            .transpose()
+            .map_err(|error| error::config_message_to_py(error.to_string()))?;
+        let tier = service_tier
+            .as_deref()
+            .map(ServiceTier::new)
+            .transpose()
+            .map_err(|error| error::config_message_to_py(error.to_string()))?;
+        let config = GenerationConfig::new(max_output_tokens, false)
+            .map_err(|error| error::config_message_to_py(error.to_string()))?
+            .with_parallel_tool_calls(parallel)
+            .with_reasoning_effort(reasoning)
+            .with_service_tier(tier);
+        let builder = self.take_builder()?;
+        self.inner = Some(builder.generation_config(config));
         Ok(())
     }
 
@@ -174,9 +251,10 @@ impl PyAgentBuilder {
     }
 
     fn build(&mut self) -> PyResult<PyAgent> {
-        let builder = self.take_builder()?;
+        let builder = self.take_finalized_builder()?;
+        let session_store_path = self.session_store_path.clone();
         let agent = builder.build().map_err(error::agent_build_error_to_py)?;
-        Ok(PyAgent::new(agent))
+        Ok(PyAgent::new(agent, session_store_path))
     }
 
     #[doc(hidden)]
@@ -189,19 +267,23 @@ impl PyAgentBuilder {
         py: Python<'py>,
         path: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let path = path
+        let resolved_path = path
             .or_else(|| self.session_store_path.clone())
             .ok_or_else(|| {
                 error::config_message_to_py(
                     "resume requires a path or a previously configured session store",
                 )
             })?;
-        let builder = self.take_builder()?;
-        let store = FileSessionStore::new(path);
+        let builder = self.take_finalized_builder()?;
+        let session_store_path = self
+            .session_store_path
+            .clone()
+            .or_else(|| Some(resolved_path.clone()));
+        let store = FileSessionStore::new(resolved_path);
         future_into_py(py, async move {
             let result = builder.resume_from_store(store).await;
             result
-                .map(PyAgent::new)
+                .map(|agent| PyAgent::new(agent, session_store_path))
                 .map_err(error::agent_build_error_to_py)
         })
     }
@@ -210,6 +292,17 @@ impl PyAgentBuilder {
 impl PyAgentBuilder {
     fn take_builder(&mut self) -> PyResult<AgentBuilder> {
         self.inner.take().ok_or_else(error::builder_consumed_to_py)
+    }
+
+    fn take_finalized_builder(&mut self) -> PyResult<AgentBuilder> {
+        let mut builder = self.take_builder()?;
+        if let Some(profile) = self.prompt_profile.take() {
+            builder = builder.prompt_profile(profile);
+        }
+        if let Some(enabled) = self.progress_commentary.take() {
+            builder = builder.progress_commentary(enabled);
+        }
+        Ok(builder)
     }
 }
 

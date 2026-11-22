@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from os import PathLike
 from pathlib import Path
 from typing import Literal, TypeAlias
+
+from ._json import _contains_control
 
 PathInput: TypeAlias = str | PathLike[str]
 
@@ -20,11 +23,13 @@ def require_positive_int(name: str, value: int) -> None:
         raise ValueError(f"{name} must be greater than zero")
 
 
-def _require_text(name: str, value: str) -> None:
+def _require_text(name: str, value: str, *, allow_newline_tab: bool = False) -> None:
     if type(value) is not str:
         raise TypeError(f"{name} must be a string")
     if not value.strip():
         raise ValueError(f"{name} must not be blank")
+    if _contains_control(value, allow_newline_tab=allow_newline_tab):
+        raise ValueError(f"{name} must not contain control characters")
 
 
 def _paths(value: Sequence[PathInput], label: str) -> tuple[Path, ...]:
@@ -79,6 +84,115 @@ class Anthropic:
             "Anthropic(api_key='<redacted>', "
             f"model={self.model!r}, base_url={base_url!r})"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PromptBlock:
+    """One named stable prompt block placed in the cached session prefix."""
+
+    tag: str
+    text: str
+
+    def __post_init__(self) -> None:
+        _require_text("prompt block tag", self.tag)
+        if not all(
+            ch.isascii() and (ch.isalnum() or ch in {"_", "-"}) for ch in self.tag
+        ):
+            raise ValueError(
+                "prompt block tag must contain only ASCII letters, digits, '_' or '-'"
+            )
+        _require_text("prompt block text", self.text, allow_newline_tab=True)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class PromptProfile:
+    """Stable prompt composition applied to the session's cached prefix."""
+
+    base_instructions: str | None
+    progress_commentary: bool | None
+    progress_commentary_instructions: str | None
+    stable_blocks: tuple[PromptBlock, ...]
+
+    def __init__(
+        self,
+        base_instructions: str | None = None,
+        *,
+        progress_commentary: bool | None = None,
+        progress_commentary_instructions: str | None = None,
+        stable_blocks: Sequence[PromptBlock] = (),
+    ) -> None:
+        if base_instructions is not None:
+            _require_text(
+                "base_instructions", base_instructions, allow_newline_tab=True
+            )
+        if progress_commentary is not None and not isinstance(
+            progress_commentary, bool
+        ):
+            raise TypeError("progress_commentary must be a boolean or None")
+        if progress_commentary_instructions is not None:
+            _require_text(
+                "progress_commentary_instructions",
+                progress_commentary_instructions,
+                allow_newline_tab=True,
+            )
+        blocks = tuple(stable_blocks)
+        seen_tags: set[str] = set()
+        for block in blocks:
+            if not isinstance(block, PromptBlock):
+                raise TypeError("stable_blocks must contain PromptBlock instances")
+            if block.tag in seen_tags:
+                raise ValueError(f"duplicate prompt block tag: {block.tag!r}")
+            seen_tags.add(block.tag)
+        object.__setattr__(self, "base_instructions", base_instructions)
+        object.__setattr__(self, "progress_commentary", progress_commentary)
+        object.__setattr__(
+            self,
+            "progress_commentary_instructions",
+            progress_commentary_instructions,
+        )
+        object.__setattr__(self, "stable_blocks", blocks)
+
+
+class ParallelToolCalls(StrEnum):
+    """Provider-neutral preference for model-generated parallel tool calls."""
+
+    AUTO = "auto"
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+
+
+class ServiceTier(StrEnum):
+    """Provider service tier selecting request processing priority and pricing."""
+
+    ULTRAFAST = "ultrafast"
+    AUTO = "auto"
+    DEFAULT = "default"
+    FAST = "fast"
+    FLEX = "flex"
+    PRIORITY = "priority"
+    SCALE = "scale"
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationConfig:
+    """Provider-neutral model generation controls."""
+
+    max_output_tokens: int | None = None
+    parallel_tool_calls: ParallelToolCalls = ParallelToolCalls.AUTO
+    reasoning_effort: str | None = None
+    service_tier: ServiceTier | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_output_tokens is not None:
+            require_positive_int("max_output_tokens", self.max_output_tokens)
+        if not isinstance(self.parallel_tool_calls, ParallelToolCalls):
+            raise TypeError("parallel_tool_calls must be a ParallelToolCalls value")
+        if self.reasoning_effort is not None:
+            _require_text("reasoning_effort", self.reasoning_effort)
+        if self.service_tier is not None and not isinstance(
+            self.service_tier, ServiceTier
+        ):
+            raise TypeError("service_tier must be a ServiceTier value or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,4 +283,4 @@ class WorkspaceConfig:
         )
 
 
-Provider = OpenAICompatible | Anthropic
+Provider: TypeAlias = OpenAICompatible | Anthropic

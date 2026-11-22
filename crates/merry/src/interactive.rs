@@ -103,6 +103,66 @@ impl InteractiveEventStream {
             .await
             .map_err(AgentError::from)
     }
+
+    pub(crate) fn request_cancel(&self) {
+        self.inner.request_cancel();
+    }
+
+    pub(crate) async fn cancel_and_wait_until_closed(&mut self) -> Result<(), AgentError> {
+        self.inner
+            .cancel_and_wait_until_closed()
+            .await
+            .map_err(AgentError::from)
+    }
+
+    pub(crate) async fn next_owned_message(
+        &mut self,
+    ) -> Result<Option<crate::binding::OwnedAgentRunMessage>, AgentError> {
+        let message = self.inner.next_message().await.map_err(AgentError::from)?;
+        match message {
+            Some(RuntimeInteractiveMessage::Event(event)) => Ok(Some(
+                crate::binding::OwnedAgentRunMessage::Event(Box::new(event)),
+            )),
+            Some(RuntimeInteractiveMessage::ToolInvocations { batch }) => {
+                let Some(batch) = crate::binding::OwnedToolInvocationBatch::new(
+                    batch.id().clone(),
+                    batch.calls().to_vec(),
+                ) else {
+                    return Err(AgentError::InteractiveProtocol {
+                        message: "runtime emitted an empty tool invocation batch",
+                    });
+                };
+                Ok(Some(
+                    crate::binding::OwnedAgentRunMessage::ToolInvocations { batch },
+                ))
+            }
+            None => Ok(None),
+            _ => Err(AgentError::InteractiveProtocol {
+                message: "runtime emitted an unsupported interactive message",
+            }),
+        }
+    }
+
+    pub(crate) async fn submit_owned_tool_invocation_results(
+        &mut self,
+        batch_id: &ToolCallBatchId,
+        invocations: &[ToolInvocation],
+        results: Vec<ToolInvocationResult>,
+    ) -> Result<ToolInvocationSubmission, AgentError> {
+        let ordered_results = order_tool_invocation_results(invocations, results)?;
+        let result = self
+            .inner
+            .submit_tool_invocation_outcomes(batch_id, ordered_results)
+            .await
+            .map_err(AgentError::from);
+        match result {
+            Ok(()) => Ok(ToolInvocationSubmission::Accepted),
+            Err(AgentError::Runtime {
+                source: merry_runtime::RuntimeError::BridgeToolResultRejected { .. },
+            }) => Ok(ToolInvocationSubmission::RejectedAndRecorded),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 /// Message returned by an interactive facade stream.

@@ -197,6 +197,31 @@ impl PromptProfile {
         })
     }
 
+    /// Replaces the runtime base instructions while preserving existing blocks.
+    pub fn with_base_instructions(
+        mut self,
+        base_instructions: impl Into<String>,
+    ) -> Result<Self, PromptError> {
+        let base_instructions = base_instructions.into();
+        validate_text("base instructions", &base_instructions)?;
+        self.base_instructions = base_instructions;
+        Ok(self)
+    }
+
+    /// Replaces the progress-commentary instructions while preserving existing blocks.
+    pub fn with_progress_commentary_instructions(
+        mut self,
+        progress_commentary_instructions: impl Into<String>,
+    ) -> Result<Self, PromptError> {
+        let progress_commentary_instructions = progress_commentary_instructions.into();
+        validate_text(
+            "progress commentary instructions",
+            &progress_commentary_instructions,
+        )?;
+        self.progress_commentary_instructions = progress_commentary_instructions;
+        Ok(self)
+    }
+
     /// Adds one stable block after runtime instructions and before dynamic context.
     pub fn with_stable_block(mut self, block: PromptBlock) -> Result<Self, PromptError> {
         if self

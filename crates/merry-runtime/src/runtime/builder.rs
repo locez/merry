@@ -245,6 +245,20 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets the stable prompt composition used by runtime request compilation.
+    #[must_use]
+    pub fn prompt_profile(mut self, profile: PromptProfile) -> Self {
+        self.prompt_profile = profile;
+        self
+    }
+
+    /// Controls whether the runtime asks the model to emit brief tool-progress commentary.
+    #[must_use]
+    pub fn progress_commentary(mut self, enabled: bool) -> Self {
+        self.progress_commentary = enabled;
+        self
+    }
+
     /// Registers a runtime-owned tool executor.
     ///
     /// Registering a tool makes its spec available to provider requests and

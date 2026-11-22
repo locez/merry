@@ -313,6 +313,22 @@ impl InteractiveRunEventStream {
         self.inner.take();
         self.finish_producer().await
     }
+
+    /// Cancels the producer, drains all buffered events and handoffs, and waits
+    /// for durable shutdown (including settling any pending bridge tool calls).
+    pub async fn cancel_and_wait_until_closed(&mut self) -> Result<(), InteractiveError> {
+        self.cancellation_token.cancel();
+        self.pending_tool_invocations = None;
+        self.unread_message = None;
+        while let Some(message) = self.receive_message().await {
+            self.observe_terminal_message(&message);
+            if self.closed_event_observed {
+                break;
+            }
+        }
+        self.inner.take();
+        self.finish_producer().await
+    }
 }
 
 impl Drop for InteractiveRunEventStream {

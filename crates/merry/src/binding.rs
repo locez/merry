@@ -9,7 +9,10 @@ pub use crate::agent::{
     ToolInvocation, ToolInvocationContent, ToolInvocationContentError, ToolInvocationResult,
     ToolInvocationSubmission,
 };
-use crate::{AgentError, RunResult, RuntimeEvent, agent::AgentRun};
+use crate::{
+    AgentError, InteractiveControl, InteractiveEventStream, InteractiveInput, InteractiveRun,
+    RunResult, RuntimeEvent, agent::AgentRun,
+};
 use merry_core::{PendingToolCall, ToolCallBatchId};
 
 /// An owned message returned by a foreign-language agent run.
@@ -180,5 +183,101 @@ impl OwnedAgentRun {
 impl From<AgentRun> for OwnedAgentRun {
     fn from(run: AgentRun) -> Self {
         run.into_owned()
+    }
+}
+
+/// Owned single-consumer interactive output stream for foreign-language bindings.
+pub struct OwnedInteractiveStream {
+    inner: InteractiveEventStream,
+    pending_batch: Option<OwnedToolInvocationBatch>,
+}
+
+impl OwnedInteractiveStream {
+    pub(crate) fn new(inner: InteractiveEventStream) -> Self {
+        Self {
+            inner,
+            pending_batch: None,
+        }
+    }
+
+    /// Returns the next runtime event or host tool invocation batch.
+    pub async fn next_message(&mut self) -> Result<Option<OwnedAgentRunMessage>, AgentError> {
+        let message = self.inner.next_owned_message().await?;
+        match &message {
+            Some(OwnedAgentRunMessage::ToolInvocations { batch }) => {
+                self.pending_batch = Some(batch.clone());
+            }
+            Some(OwnedAgentRunMessage::Event(_)) | None => {
+                self.pending_batch = None;
+            }
+        }
+        Ok(message)
+    }
+
+    /// Submits the complete result set for the active interactive tool batch.
+    pub async fn submit_tool_invocation_results(
+        &mut self,
+        batch_id: &ToolCallBatchId,
+        results: Vec<ToolInvocationResult>,
+    ) -> Result<ToolInvocationSubmission, AgentError> {
+        let Some(batch) = self.pending_batch.as_ref() else {
+            return Err(AgentError::ToolInvocationBatchNotPending);
+        };
+        let invocations = batch.invocations.clone();
+        let result = self
+            .inner
+            .submit_owned_tool_invocation_results(batch_id, &invocations, results)
+            .await;
+        match &result {
+            Ok(_) => {
+                self.pending_batch = None;
+            }
+            Err(AgentError::Interactive {
+                source:
+                    merry_runtime::InteractiveError::NoPendingToolInvocations { .. }
+                    | merry_runtime::InteractiveError::RunClosed { .. },
+            }) => {
+                self.pending_batch = None;
+            }
+            Err(_) => {}
+        }
+        result
+    }
+
+    /// Requests cancellation of the interactive producer without awaiting shutdown.
+    pub fn request_cancel(&self) {
+        self.inner.request_cancel();
+    }
+
+    /// Cancels the interactive producer, drains buffered messages, and waits
+    /// for durable shutdown (releasing the session's active step permit).
+    pub async fn cancel_and_wait_until_closed(&mut self) -> Result<(), AgentError> {
+        self.pending_batch = None;
+        self.inner.cancel_and_wait_until_closed().await
+    }
+}
+
+/// Owned interactive run handle intended for foreign-language bindings.
+pub struct OwnedInteractiveRun {
+    stream: OwnedInteractiveStream,
+    input: InteractiveInput,
+    control: InteractiveControl,
+}
+
+impl OwnedInteractiveRun {
+    pub(crate) fn new(run: InteractiveRun) -> Self {
+        let (stream, input, control) = run.split();
+        Self {
+            stream: OwnedInteractiveStream::new(stream),
+            input,
+            control,
+        }
+    }
+
+    /// Splits this interactive run into its owned output stream, input queue
+    /// handle, and control handle.
+    #[must_use]
+    pub fn split(self) -> (OwnedInteractiveStream, InteractiveInput, InteractiveControl) {
+        (self.stream, self.input, self.control)
     }
 }

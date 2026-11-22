@@ -1,4 +1,4 @@
-"""Shared validation for Pydantic models used at SDK boundaries."""
+"""Shared validation and schema synthesis for Pydantic models at SDK boundaries."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ from enum import Enum
 from types import UnionType
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, create_model
+from pydantic.fields import FieldInfo
 
 
 def validate_model(model: type[BaseModel], label: str) -> None:
-    """Validate a model contract before emitting its JSON Schema."""
+    """Validate a strict schema-emitting input or final-output Pydantic model."""
 
     if not inspect.isclass(model) or not issubclass(model, BaseModel):
         raise TypeError(f"{label} must be a Pydantic BaseModel subclass.")
@@ -28,6 +29,66 @@ def validate_model(model: type[BaseModel], label: str) -> None:
             f"{', '.join(non_strict)}"
         )
     _validate_model_annotations(model, label, set())
+
+
+def validate_output_model(model: type[BaseModel], label: str) -> None:
+    """Validate an output Pydantic model without requiring input-only schema constraints."""
+
+    if not inspect.isclass(model) or not issubclass(model, BaseModel):
+        raise TypeError(f"{label} must be a Pydantic BaseModel subclass.")
+    _validate_model_annotations(model, label, set())
+
+
+def synthesize_input_model(
+    model_name: str,
+    parameters: Sequence[inspect.Parameter],
+    type_hints: Mapping[str, object],
+    *,
+    label: str,
+) -> type[BaseModel]:
+    """Build a strict Pydantic input model from annotated Python function parameters."""
+
+    # pydantic.create_model accepts dynamic field descriptors typed as Any at its boundary.
+    fields: dict[str, Any] = {}
+    for parameter in parameters:
+        if parameter.kind not in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            raise TypeError(
+                f"Tool parameter {parameter.name!r} in {label} must accept keyword arguments."
+            )
+        annotation = type_hints.get(parameter.name)
+        if annotation is None:
+            raise TypeError(
+                f"Tool input parameter {parameter.name!r} must be annotated."
+            )
+        base_type, field_info = _extract_field_info(annotation, parameter.default)
+        fields[parameter.name] = (base_type, field_info)
+
+    synthesized: type[BaseModel] = create_model(
+        model_name,
+        __config__=ConfigDict(extra="forbid"),
+        **fields,
+    )
+    validate_model(synthesized, f"{label} input model")
+    return synthesized
+
+
+def _extract_field_info(annotation: object, default: object) -> tuple[object, object]:
+    is_annotated = get_origin(annotation) is Annotated
+    if isinstance(default, FieldInfo):
+        if is_annotated and any(
+            isinstance(meta, FieldInfo) for meta in get_args(annotation)[1:]
+        ):
+            raise ValueError(
+                "Do not supply Field(...) both in Annotated[...] and as a default value."
+            )
+        unwrapped = get_args(annotation)[0] if is_annotated else annotation
+        return unwrapped, default
+    if default is inspect.Parameter.empty:
+        return annotation, ...
+    return annotation, default
 
 
 def _missing_field_descriptions(

@@ -14,6 +14,7 @@ import pytest
 from pydantic import BaseModel
 
 import merry
+from merry import events
 
 
 class SchemaProperty(BaseModel):
@@ -144,7 +145,7 @@ def run_workspace_tool(
     limits: merry.WorkspaceLimits,
     name: Literal["read_text", "apply_patch"],
     arguments: ReadArguments | PatchArguments,
-) -> merry.ToolCallFinishedPayload:
+) -> events.ToolCallFinishedPayload:
     chunk = json.dumps(
         {
             "choices": [
@@ -197,13 +198,13 @@ def run_workspace_tool(
             assert result.status is merry.RunStatus.COMPLETED
             return result.events
 
-        events = asyncio.run(run())
+        emitted_events = asyncio.run(run())
         assert requests.qsize() == 2
 
     finished = [
         event.payload
-        for event in events
-        if isinstance(event.payload, merry.ToolCallFinishedPayload)
+        for event in emitted_events
+        if isinstance(event.payload, events.ToolCallFinishedPayload)
     ]
     assert len(finished) == 1
     return finished[0]
@@ -333,12 +334,12 @@ def test_invalid_limits_are_rejected_instead_of_inheriting_defaults(
 
 
 def assert_tool_status(
-    finished: merry.ToolCallFinishedPayload, expected_error: str | None
+    finished: events.ToolCallFinishedPayload, expected_error: str | None
 ) -> None:
     if expected_error is None:
-        assert finished.result.status is merry.RuntimeToolResultStatus.SUCCEEDED
+        assert finished.result.status is events.RuntimeToolResultStatus.SUCCEEDED
         assert finished.result.diagnostic is None
     else:
-        assert finished.result.status is merry.RuntimeToolResultStatus.FAILED
+        assert finished.result.status is events.RuntimeToolResultStatus.FAILED
         assert finished.result.diagnostic is not None
         assert finished.result.diagnostic.code == expected_error

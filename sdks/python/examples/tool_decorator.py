@@ -3,24 +3,26 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 import merry
 
 logger = logging.getLogger(__name__)
 
 
-class LookupOrderInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    order_id: str = Field(description="Stable order identifier to look up.")
-
-
 class LookupOrderOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    order_id: str
+    status: str
 
-    status: str = Field(description="Current fulfillment status for the order.")
+
+@merry.tool(parallel_safe=True)
+async def lookup_order(
+    order_id: Annotated[str, Field(description="Stable order identifier to look up.")],
+) -> LookupOrderOutput:
+    """Look up an order by id."""
+    return LookupOrderOutput(order_id=order_id, status="shipped")
 
 
 def build_agent() -> merry.Agent:
@@ -31,20 +33,15 @@ def build_agent() -> merry.Agent:
             "Set MERRY_OPENAI_API_KEY and MERRY_OPENAI_MODEL before running."
         )
 
-    builder = merry.AgentBuilder("python-tool-example").provider(
-        merry.OpenAICompatible(
+    return merry.Agent(
+        session_id="python-tool-example",
+        provider=merry.OpenAICompatible(
             api_key=api_key,
             model=model,
             base_url=os.environ.get("MERRY_OPENAI_BASE_URL"),
-        )
+        ),
+        tools=[lookup_order],
     )
-
-    @builder.tool
-    async def lookup_order(args: LookupOrderInput) -> LookupOrderOutput:
-        """Look up an order by id."""
-        return LookupOrderOutput(status="shipped")
-
-    return builder.build()
 
 
 async def main() -> None:

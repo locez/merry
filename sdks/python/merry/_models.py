@@ -6,8 +6,8 @@ import json
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from enum import Enum
-from typing import TYPE_CHECKING, Generic, TypeVar
+from enum import StrEnum
+from typing import TYPE_CHECKING, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
 
@@ -25,9 +25,16 @@ from ._json import (
 
 if TYPE_CHECKING:
     from ._events import Event
-    from ._run import AgentRun
 
 OutputT = TypeVar("OutputT", bound=BaseModel)
+
+
+class _BatchSubmitter(Protocol):
+    async def _submit_batch(
+        self,
+        batch_id: str,
+        results: Sequence[ToolResult],
+    ) -> ToolSubmission: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +177,7 @@ class ToolResult:
         return result
 
 
-class ToolSubmission(str, Enum):
+class ToolSubmission(StrEnum):
     """Outcome of a complete Rust-owned tool batch submission."""
 
     ACCEPTED = "accepted"
@@ -178,12 +185,12 @@ class ToolSubmission(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class ToolCallBatch(Generic[OutputT]):
+class ToolCallBatch:
     """An exclusive batch lease that must be submitted before the run advances."""
 
     id: str
     invocations: tuple[ToolCall, ...]
-    _run: AgentRun[OutputT]
+    _submitter: _BatchSubmitter
 
     def __post_init__(self) -> None:
         _validate_identifier("tool call batch id", self.id, 128)
@@ -196,10 +203,10 @@ class ToolCallBatch(Generic[OutputT]):
     async def submit(self, results: Sequence[ToolResult]) -> ToolSubmission:
         """Submit one result for every invocation in this batch."""
 
-        return await self._run._submit_batch(self.id, results)
+        return await self._submitter._submit_batch(self.id, results)
 
 
-class RunStatus(str, Enum):
+class RunStatus(StrEnum):
     """Terminal status reported by the Rust agent loop."""
 
     COMPLETED = "completed"

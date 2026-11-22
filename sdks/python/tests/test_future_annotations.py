@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from pydantic import BaseModel, ConfigDict, Field
 
 import merry
@@ -28,3 +30,17 @@ def test_tool_from_function_resolves_future_annotations() -> None:
     assert tool.description == "Echo a value."
     assert tool.input_model is FutureInput
     assert tool.output_model is FutureOutput
+
+
+def test_multi_param_tool_resolves_future_annotations() -> None:
+    @merry.tool
+    async def greet(
+        name: Annotated[str, Field(description="Recipient name.")],
+        times: Annotated[int, Field(description="Repeat count.")] = 1,
+    ) -> str:
+        """Greet a user."""
+        return ",".join([name] * times)
+
+    assert greet.name == "greet"
+    assert "Recipient name." in str(greet.schema)
+    assert "Repeat count." in str(greet.schema)

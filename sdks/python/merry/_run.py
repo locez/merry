@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Sequence
-from typing import Generic, Protocol, TypeVar
+from types import TracebackType
+from typing import Generic, Protocol, Self, TypeVar
 
 from pydantic import BaseModel
 
@@ -51,7 +52,7 @@ _NON_TERMINAL_ERROR_CODES = frozenset(
 
 
 class AgentRun(Generic[OutputT]):
-    """Single-consumer async run with explicit tool batch handoff."""
+    """Single-consumer async run with explicit tool batch handoff and async context management."""
 
     def __init__(self, native: _NativeRun, output_model: type[OutputT] | None) -> None:
         self._native = native
@@ -60,16 +61,30 @@ class AgentRun(Generic[OutputT]):
         self._result: RunResult[OutputT] | None = None
         self._terminal_error: MerryError | None = None
 
-    def __aiter__(self) -> AgentRun[OutputT]:
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __anext__(self) -> Event | ToolCallBatch[OutputT]:
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        if exc_type is asyncio.CancelledError:
+            await self._cancel_after_task_cancellation()
+            return
+        await self.close()
+
+    def __aiter__(self) -> Self:
+        return self
+
+    async def __anext__(self) -> Event | ToolCallBatch:
         message = await self.next()
         if message is None:
             raise StopAsyncIteration
         return message
 
-    async def next(self) -> Event | ToolCallBatch[OutputT] | None:
+    async def next(self) -> Event | ToolCallBatch | None:
         """Return the next event or tool batch, or `None` at message EOF."""
 
         self._raise_terminal_error()
@@ -158,12 +173,12 @@ class AgentRun(Generic[OutputT]):
     async def close(self) -> None:
         """Cancel an unfinished run and wait for its terminal result.
 
-        A run that already reached EOF or a terminal result keeps that result;
-        its status is not rewritten to `CANCELLED`.
+        A run that already reached EOF, a terminal result, or a terminal error
+        completes cleanup cleanly without rewriting its status or re-raising.
         """
 
         if self._terminal_error is not None:
-            self._raise_terminal_error()
+            return
         if not self.finished:
             await self.cancel()
         elif self._result is None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 import merry
+from merry import errors
 from merry._errors import _decode_native_error
 
 
@@ -33,7 +34,7 @@ def test_invalid_session_id_is_mapped_at_the_binding_boundary() -> None:
 
 
 def test_native_error_mapping_preserves_hint_retryability_and_context() -> None:
-    native_error = merry.NativeMerryError(
+    native_error = errors.NativeMerryError(
         '{"code":"provider.timeout","domain":"provider",'
         '"message":"Provider request timed out.",'
         '"hint":"Retry after checking the endpoint.",'
@@ -50,7 +51,7 @@ def test_native_error_mapping_preserves_hint_retryability_and_context() -> None:
 
 
 def test_malformed_native_error_becomes_internal_error() -> None:
-    error = _decode_native_error(merry.NativeMerryError("not-json"))
+    error = _decode_native_error(errors.NativeMerryError("not-json"))
 
     assert isinstance(error, merry.MerryInternalError)
     assert error.code == "protocol.native_error_invalid"
@@ -71,7 +72,7 @@ def test_tool_domain_error_keeps_model_visible_json_content() -> None:
 
 def test_error_info_rejects_unbounded_or_unknown_context() -> None:
     error = _decode_native_error(
-        merry.NativeMerryError(
+        errors.NativeMerryError(
             '{"code":"invalid.domain","domain":"unknown",'
             '"message":"Invalid domain.","hint":null,'
             '"retryability":"not_retryable","context":{}}'

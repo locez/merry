@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, NoReturn, overload
+from collections.abc import Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING, NoReturn, Self, overload
 from uuid import uuid4
+
+from pydantic import BaseModel
 
 from . import _merry
 from ._config import (
     Anthropic,
+    GenerationConfig,
     OpenAICompatible,
     PathInput,
+    PromptProfile,
     Provider,
     WorkspaceConfig,
     require_positive_int,
@@ -23,7 +27,7 @@ from ._errors import (
     builder_consumed_error,
 )
 from ._json import dump_json
-from ._tools import InputT, OutputT, Tool, ToolHandler, ToolRegistration
+from ._tools import Tool, ToolOutputValue, ToolRegistration
 
 if TYPE_CHECKING:
     from ._agent import Agent
@@ -45,7 +49,7 @@ class AgentBuilder:
         self._provider_configured = False
         self._consumed = False
 
-    def provider(self, provider: Provider) -> AgentBuilder:
+    def provider(self, provider: Provider) -> Self:
         """Configure the primary model provider."""
 
         self._ensure_open()
@@ -66,14 +70,54 @@ class AgentBuilder:
             else:
                 raise TypeError("provider must be OpenAICompatible or Anthropic")
         except NativeMerryError as error:
-            raise _decode_native_error(error) from error
+            self._handle_native_error(error)
         self._provider_configured = True
         return self
 
-    def workspace(self, config: WorkspaceConfig) -> AgentBuilder:
+    def system_prompt(self, prompt: str | PromptProfile) -> Self:
+        """Configure stable system instructions or a full PromptProfile."""
+
+        self._ensure_open()
+        if isinstance(prompt, str):
+            profile = PromptProfile(base_instructions=prompt)
+        elif isinstance(prompt, PromptProfile):
+            profile = prompt
+        else:
+            raise TypeError("system_prompt must be a string or PromptProfile")
+        try:
+            self._native.with_prompt_profile(
+                profile.base_instructions,
+                profile.progress_commentary,
+                profile.progress_commentary_instructions,
+                [(block.tag, block.text) for block in profile.stable_blocks],
+            )
+        except NativeMerryError as error:
+            self._handle_native_error(error)
+        return self
+
+    def generation(self, config: GenerationConfig) -> Self:
+        """Configure provider-neutral model generation controls."""
+
+        self._ensure_open()
+        if not isinstance(config, GenerationConfig):
+            raise TypeError("generation must be a GenerationConfig")
+        try:
+            self._native.with_generation_config(
+                config.max_output_tokens,
+                config.parallel_tool_calls.value,
+                config.reasoning_effort,
+                None if config.service_tier is None else config.service_tier.value,
+            )
+        except NativeMerryError as error:
+            self._handle_native_error(error)
+        return self
+
+    def workspace(self, config: WorkspaceConfig) -> Self:
         """Configure the Rust-owned workspace profile."""
 
         self._ensure_open()
+        if not isinstance(config, WorkspaceConfig):
+            raise TypeError("workspace must be a WorkspaceConfig")
         patch_scope: list[str] | None = None
         patch_forbidden: Sequence[str] = ()
         if config.patch is not None:
@@ -97,7 +141,7 @@ class AgentBuilder:
             self._handle_native_error(error)
         return self
 
-    def session_store(self, path: PathInput) -> AgentBuilder:
+    def session_store(self, path: PathInput) -> Self:
         """Configure the directory-backed store used by save and resume."""
 
         self._ensure_open()
@@ -107,7 +151,7 @@ class AgentBuilder:
             self._handle_native_error(error)
         return self
 
-    def max_model_turns(self, value: int) -> AgentBuilder:
+    def max_model_turns(self, value: int) -> Self:
         """Set the maximum number of model turns for a run."""
 
         self._ensure_open()
@@ -118,7 +162,7 @@ class AgentBuilder:
             self._handle_native_error(error)
         return self
 
-    def event_buffer_size(self, value: int) -> AgentBuilder:
+    def event_buffer_size(self, value: int) -> Self:
         """Set the bounded runtime event buffer size."""
 
         self._ensure_open()
@@ -129,19 +173,27 @@ class AgentBuilder:
             self._handle_native_error(error)
         return self
 
-    def register_tool(self, tool: Tool[InputT, OutputT]) -> Tool[InputT, OutputT]:
+    def register_tool(self, tool_obj: ToolRegistration) -> Self:
         """Register one typed host tool."""
 
         self._ensure_open()
-        self._register_tool(tool)
-        return tool
+        self._register_tool(tool_obj)
+        return self
+
+    def tools(self, tools: Sequence[ToolRegistration]) -> Self:
+        """Register multiple typed host tools in provider-visible order."""
+
+        self._ensure_open()
+        for item in tools:
+            self._register_tool(item)
+        return self
 
     @overload
     def tool(
         self,
-        handler: ToolHandler[InputT, OutputT],
+        handler: Callable[..., Awaitable[ToolOutputValue]],
         /,
-    ) -> Tool[InputT, OutputT]: ...
+    ) -> Tool: ...
 
     @overload
     def tool(
@@ -149,43 +201,43 @@ class AgentBuilder:
         *,
         name: str | None = None,
         description: str | None = None,
-        input_model: type[InputT] | None = None,
-        output_model: type[OutputT] | None = None,
-    ) -> Callable[[ToolHandler[InputT, OutputT]], Tool[InputT, OutputT]]: ...
+        input_model: type[BaseModel] | None = None,
+        output_model: type[BaseModel] | None = None,
+        parallel_safe: bool = False,
+    ) -> Callable[[Callable[..., Awaitable[ToolOutputValue]]], Tool]: ...
 
     def tool(
         self,
-        handler: ToolHandler[InputT, OutputT] | None = None,
+        handler: Callable[..., Awaitable[ToolOutputValue]] | None = None,
         *,
         name: str | None = None,
         description: str | None = None,
-        input_model: type[InputT] | None = None,
-        output_model: type[OutputT] | None = None,
-    ) -> (
-        Tool[InputT, OutputT]
-        | Callable[[ToolHandler[InputT, OutputT]], Tool[InputT, OutputT]]
-    ):
+        input_model: type[BaseModel] | None = None,
+        output_model: type[BaseModel] | None = None,
+        parallel_safe: bool = False,
+    ) -> Tool | Callable[[Callable[..., Awaitable[ToolOutputValue]]], Tool]:
+        """Decorate an async function and register it on this builder."""
+
         self._ensure_open()
 
-        def decorate(
-            function: ToolHandler[InputT, OutputT],
-        ) -> Tool[InputT, OutputT]:
-            tool = Tool.from_function(
+        def decorate(function: Callable[..., Awaitable[ToolOutputValue]]) -> Tool:
+            built = Tool.from_function(
                 function,
                 name=name,
                 description=description,
                 input_model=input_model,
                 output_model=output_model,
+                parallel_safe=parallel_safe,
             )
-            self._register_tool(tool)
-            return tool
+            self._register_tool(built)
+            return built
 
         if handler is None:
             return decorate
         return decorate(handler)
 
     def build(self) -> Agent:
-        """Consume this builder and create a lazy Rust-owned Agent."""
+        """Consume this builder and eagerly create a Rust-owned Agent."""
 
         self._ensure_open()
         if not self._provider_configured:
@@ -200,13 +252,12 @@ class AgentBuilder:
             )
         from ._agent import Agent
 
-        native_builder = self._native
+        try:
+            native_agent = self._native.build()
+        except NativeMerryError as error:
+            self._handle_native_error(error)
         self._consumed = True
-        return Agent._from_builder(
-            native_builder,
-            tools=tuple(self._tools.values()),
-            session_id=self._session_id,
-        )
+        return Agent._from_native(native_agent, tools=tuple(self._tools.values()))
 
     async def resume(self, path: PathInput | None = None) -> Agent:
         """Consume this builder and resume from its configured or explicit store."""
@@ -225,33 +276,34 @@ class AgentBuilder:
         from ._agent import Agent
 
         resolved_path = None if path is None else str(path)
-        self._consumed = True
         try:
-            native_agent = await self._native.resume(resolved_path)
+            awaitable = self._native.resume(resolved_path)
+            self._consumed = True
+            native_agent = await awaitable
         except NativeMerryError as error:
-            raise _decode_native_error(error) from error
+            self._handle_native_error(error)
         return Agent._from_native(native_agent, tools=tuple(self._tools.values()))
 
-    def _register_tool(self, tool: ToolRegistration) -> None:
-        if tool.name in self._tools:
+    def _register_tool(self, tool_obj: ToolRegistration) -> None:
+        if tool_obj.name in self._tools:
             raise MerryConfigError(
                 MerryErrorInfo(
                     code="tool.duplicate_registration",
                     domain="tool",
-                    message=f"Tool {tool.name!r} is already registered.",
+                    message=f"Tool {tool_obj.name!r} is already registered.",
                     hint="Use one unique provider-visible name per Agent.",
                     retryability="user_action_required",
                 )
             )
         try:
             self._native.register_bridge_tool(
-                tool.name,
-                tool.description,
-                dump_json(tool.schema, "tool input schema"),
+                tool_obj.name,
+                tool_obj.description,
+                dump_json(tool_obj.schema, "tool input schema"),
             )
         except NativeMerryError as error:
             self._handle_native_error(error)
-        self._tools[tool.name] = tool
+        self._tools[tool_obj.name] = tool_obj
 
     def _handle_native_error(self, error: NativeMerryError) -> NoReturn:
         if self._native.is_consumed():

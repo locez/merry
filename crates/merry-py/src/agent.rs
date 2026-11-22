@@ -1,6 +1,6 @@
 //! PyO3 adapter for the built Rust agent.
 
-use crate::{error, protocol, run::PyAgentRun};
+use crate::{error, interactive::PyInteractiveRun, protocol, run::PyAgentRun};
 use merry::Agent;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
@@ -10,12 +10,14 @@ use std::sync::Arc;
 #[pyclass(name = "Agent")]
 pub(crate) struct PyAgent {
     inner: Arc<Agent>,
+    session_store_path: Option<String>,
 }
 
 impl PyAgent {
-    pub(crate) fn new(agent: Agent) -> Self {
+    pub(crate) fn new(agent: Agent, session_store_path: Option<String>) -> Self {
         Self {
             inner: Arc::new(agent),
+            session_store_path,
         }
     }
 }
@@ -28,6 +30,7 @@ impl PyAgent {
 
     fn stream(
         &self,
+        py: Python<'_>,
         task: String,
         final_output_schema_json: Option<String>,
     ) -> PyResult<PyAgentRun> {
@@ -37,7 +40,8 @@ impl PyAgent {
             .map(protocol::parse_input_schema)
             .transpose()
             .map_err(error::protocol_message_to_py)?;
-        let result = pyo3_async_runtimes::tokio::get_runtime().block_on(async move {
+        let result = py.detach(move || {
+            let _guard = pyo3_async_runtimes::tokio::get_runtime().enter();
             match schema {
                 Some(schema) => agent.stream_with_owned_tool_handoff_and_schema(&task, schema),
                 None => agent.stream_with_owned_tool_handoff(&task),
@@ -45,6 +49,18 @@ impl PyAgent {
         });
         result
             .map(PyAgentRun::new)
+            .map_err(error::agent_error_to_py)
+    }
+
+    fn start_interactive(&self, py: Python<'_>) -> PyResult<PyInteractiveRun> {
+        let agent = Arc::clone(&self.inner);
+        let session_store_path = self.session_store_path.clone();
+        let result = py.detach(move || {
+            let _guard = pyo3_async_runtimes::tokio::get_runtime().enter();
+            agent.start_interactive_owned()
+        });
+        result
+            .map(|run| PyInteractiveRun::new(run, session_store_path))
             .map_err(error::agent_error_to_py)
     }
 

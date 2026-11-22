@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from types import MappingProxyType
+from typing import Annotated, Literal
 
 import pytest
-from _support import scripted_agent
+from _support import parallel_tools_agent, scripted_agent
 from pydantic import BaseModel, ConfigDict, Field
 
 import merry
+from merry import events
 
 
 class LookupInput(BaseModel):
@@ -16,9 +20,7 @@ class LookupInput(BaseModel):
 
 
 class LookupOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: str = Field(description="Current order status.")
+    status: str
 
 
 def test_tool_handler_accepts_wider_inputs_and_narrower_outputs() -> None:
@@ -26,14 +28,14 @@ def test_tool_handler_accepts_wider_inputs_and_narrower_outputs() -> None:
         region: str = Field(description="Order fulfillment region.")
 
     class DetailedLookupOutput(LookupOutput):
-        order_id: str = Field(description="Stable order identifier.")
+        order_id: str
 
     async def lookup(arguments: LookupInput) -> DetailedLookupOutput:
         return DetailedLookupOutput(status="shipped", order_id=arguments.order_id)
 
     original: merry.ToolHandler[LookupInput, DetailedLookupOutput] = lookup
     compatible: merry.ToolHandler[RegionalLookupInput, LookupOutput] = original
-    tool: merry.Tool[RegionalLookupInput, LookupOutput] = merry.Tool.from_function(
+    tool = merry.Tool.from_function(
         compatible,
         name="lookup_order",
         description="Look up an order using a compatible handler.",
@@ -48,13 +50,135 @@ def test_tool_handler_accepts_wider_inputs_and_narrower_outputs() -> None:
     assert output.order_id == "A123"
 
 
+def test_standalone_tool_supports_multi_param_signature_and_relaxed_outputs() -> None:
+    @merry.tool
+    async def get_weather(
+        city: Annotated[str, Field(description="City to query.")],
+        unit: Annotated[
+            Literal["c", "f"], Field(description="Temperature unit.")
+        ] = "c",
+    ) -> str:
+        """Fetch weather for a city."""
+        return f"{city}:22{unit}"
+
+    agent = scripted_agent(
+        get_weather,
+        arguments={"city": "Tokyo"},
+        final_text="Tokyo is 22c.",
+        session_id="multi-param-tool",
+    )
+    result = asyncio.run(agent.run("Check Tokyo weather."))
+
+    assert result.status is merry.RunStatus.COMPLETED
+    finished = next(
+        event.payload
+        for event in result.events
+        if isinstance(event.payload, events.ToolCallFinishedPayload)
+    )
+    assert finished.result.status is events.RuntimeToolResultStatus.SUCCEEDED
+    assert finished.output == events.RuntimeToolOutput(
+        kind=events.RuntimeToolOutputKind.TEXT,
+        value="Tokyo:22c",
+    )
+
+
+def test_zero_parameter_tool_returning_json_dict_works() -> None:
+    @merry.tool
+    async def server_status() -> dict[str, str]:
+        """Return current server health."""
+        return {"state": "ok"}
+
+    result = asyncio.run(
+        server_status.execute(merry.ToolCall("call-1", "server_status", {}))
+    )
+
+    assert result.diagnostic is None
+    assert result.content == merry.JsonContent('{"state":"ok"}')
+
+
+def test_tool_returning_tuple_and_readonly_mapping_serializes_as_json() -> None:
+    @merry.tool
+    async def list_tags() -> tuple[str, ...]:
+        """Return immutable tuple of tags."""
+        return ("alpha", "beta")
+
+    @merry.tool
+    async def read_counts() -> MappingProxyType[str, int]:
+        """Return read-only mapping of counts."""
+        return MappingProxyType({"ok": 2})
+
+    tuple_result = asyncio.run(
+        list_tags.execute(merry.ToolCall("call-1", "list_tags", {}))
+    )
+    mapping_result = asyncio.run(
+        read_counts.execute(merry.ToolCall("call-2", "read_counts", {}))
+    )
+
+    assert tuple_result.content == merry.JsonContent('["alpha","beta"]')
+    assert mapping_result.content == merry.JsonContent('{"ok":2}')
+
+
+def test_parallel_safe_tools_execute_concurrently_and_exclusive_acts_as_barrier() -> (
+    None
+):
+    first_entered = asyncio.Event()
+    second_entered = asyncio.Event()
+    trace: list[str] = []
+
+    @merry.tool(parallel_safe=True)
+    async def fetch_a(
+        key: Annotated[str, Field(description="Lookup key.")],
+    ) -> str:
+        """Fetch record A concurrently."""
+        trace.append(f"start:{key}")
+        first_entered.set()
+        await asyncio.wait_for(second_entered.wait(), timeout=2.0)
+        trace.append(f"end:{key}")
+        return f"a:{key}"
+
+    @merry.tool(parallel_safe=True)
+    async def fetch_b(
+        key: Annotated[str, Field(description="Lookup key.")],
+    ) -> str:
+        """Fetch record B concurrently."""
+        trace.append(f"start:{key}")
+        second_entered.set()
+        await asyncio.wait_for(first_entered.wait(), timeout=2.0)
+        trace.append(f"end:{key}")
+        return f"b:{key}"
+
+    @merry.tool(parallel_safe=False)
+    async def commit_step(
+        tag: Annotated[str, Field(description="Commit marker.")],
+    ) -> str:
+        """Commit after concurrent reads complete."""
+        trace.append(f"exclusive:{tag}")
+        return f"committed:{tag}"
+
+    agent = parallel_tools_agent(
+        [fetch_a, fetch_b, commit_step],
+        calls=[
+            {"id": "call-1", "name": "fetch_a", "arguments": {"key": "k1"}},
+            {"id": "call-2", "name": "fetch_b", "arguments": {"key": "k2"}},
+            {"id": "call-3", "name": "commit_step", "arguments": {"tag": "c1"}},
+        ],
+        final_text="All three finished.",
+        session_id="parallel-wave-tools",
+    )
+
+    result = asyncio.run(agent.run("Run two parallel reads then commit."))
+
+    assert result.status is merry.RunStatus.COMPLETED
+    assert result.final_output == "All three finished."
+    assert set(trace[:2]) == {"start:k1", "start:k2"}
+    assert trace[-1] == "exclusive:c1"
+
+
 def test_tool_decorator_executes_through_rust_batch_handoff() -> None:
     calls: list[str] = []
 
     async def scenario() -> merry.RunResult[BaseModel]:
-        builder = merry.AgentBuilder("decorated-tool")
-
-        @builder.tool
+        @merry.tool
         async def lookup_order(args: LookupInput) -> LookupOutput:
             """Look up an order by id."""
             calls.append(args.order_id)
@@ -76,19 +200,40 @@ def test_tool_decorator_executes_through_rust_batch_handoff() -> None:
     finished_event = next(
         event
         for event in result.events
-        if isinstance(event.payload, merry.ToolCallFinishedPayload)
+        if isinstance(event.payload, events.ToolCallFinishedPayload)
     )
     payload = finished_event.payload
-    assert isinstance(payload, merry.ToolCallFinishedPayload)
-    result_data = payload.result
-    assert result_data.status is merry.RuntimeToolResultStatus.SUCCEEDED
+    assert isinstance(payload, events.ToolCallFinishedPayload)
+    assert payload.result.status is events.RuntimeToolResultStatus.SUCCEEDED
+
+
+def test_agent_execute_tool_batch_reuses_registered_tools_in_stream() -> None:
+    @merry.tool
+    async def lookup_order(args: LookupInput) -> LookupOutput:
+        """Look up an order by id."""
+        return LookupOutput(status=f"found:{args.order_id}")
+
+    async def scenario() -> merry.RunResult[BaseModel]:
+        agent = scripted_agent(
+            lookup_order,
+            arguments={"order_id": "B456"},
+            final_text="Done.",
+            session_id="stream-execute-batch",
+        )
+        async with agent.stream("Check B456.") as run:
+            async for message in run:
+                if isinstance(message, merry.ToolCallBatch):
+                    submission = await agent.execute_tool_batch(message)
+                    assert submission is merry.ToolSubmission.ACCEPTED
+            return await run.result()
+
+    result = asyncio.run(scenario())
+    assert result.status is merry.RunStatus.COMPLETED
 
 
 def test_tool_domain_error_is_recorded_and_model_loop_continues() -> None:
     async def scenario() -> merry.RunResult[BaseModel]:
-        builder = merry.AgentBuilder("domain-tool")
-
-        @builder.tool
+        @merry.tool
         async def lookup_order(args: LookupInput) -> LookupOutput:
             """Look up an order by id."""
             raise merry.ToolDomainError(
@@ -116,25 +261,24 @@ def test_tool_domain_error_is_recorded_and_model_loop_continues() -> None:
     finished_event = next(
         event
         for event in result.events
-        if isinstance(event.payload, merry.ToolCallFinishedPayload)
+        if isinstance(event.payload, events.ToolCallFinishedPayload)
     )
     payload = finished_event.payload
-    assert isinstance(payload, merry.ToolCallFinishedPayload)
-    result_data = payload.result
-    assert result_data.status is merry.RuntimeToolResultStatus.FAILED
-    assert result_data.diagnostic == merry.EventDiagnostic(
+    assert isinstance(payload, events.ToolCallFinishedPayload)
+    assert payload.result.status is events.RuntimeToolResultStatus.FAILED
+    assert payload.result.diagnostic == events.EventDiagnostic(
         code="order.not_found",
         message="Order missing was not found.",
     )
 
 
-def test_unexpected_tool_exception_is_typed_and_cancels_run() -> None:
+def test_unexpected_tool_exception_is_typed_logged_without_secrets_and_cancels_run(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     secret = "database-password-that-must-not-leak"
 
     async def scenario() -> None:
-        builder = merry.AgentBuilder("exception-tool")
-
-        @builder.tool
+        @merry.tool
         async def lookup_order(args: LookupInput) -> LookupOutput:
             """Look up an order by id."""
             raise RuntimeError(f"database unavailable: {secret}")
@@ -144,7 +288,10 @@ def test_unexpected_tool_exception_is_typed_and_cancels_run() -> None:
             arguments={"order_id": "A123"},
             session_id="exception-tool",
         )
-        with pytest.raises(merry.MerryToolError) as raised:
+        with (
+            caplog.at_level(logging.WARNING, logger="merry._tools"),
+            pytest.raises(merry.MerryToolError) as raised,
+        ):
             await agent.run("Check order A123.")
         assert raised.value.code == "tool.handler_exception"
         assert raised.value.retryability == "not_retryable"
@@ -152,11 +299,13 @@ def test_unexpected_tool_exception_is_typed_and_cancels_run() -> None:
         assert secret not in raised.value.info.message
         assert raised.value.__cause__ is None
         assert raised.value.__context__ is None
+        assert any("RuntimeError" in record.message for record in caplog.records)
+        assert all(secret not in record.message for record in caplog.records)
 
     asyncio.run(scenario())
 
 
-def test_tool_requires_described_models() -> None:
+def test_tool_requires_described_input_models() -> None:
     class UndescribedInput(BaseModel):
         value: str
 

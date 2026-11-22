@@ -109,23 +109,37 @@ Declare typed async tools with `#[merry::tool]` and register them explicitly via
 ### Python (`sdks/python`)
 
 ```python
+from typing import Annotated
+from pydantic import Field
 import merry
+from merry import events
 
-agent = (
-    merry.Agent.builder("example")
-    .provider(merry.Anthropic(api_key="sk-ant-...", model="claude-sonnet-4-5"))
-    .build()
+
+@merry.tool(parallel_safe=True)
+async def lookup_order(
+    order_id: Annotated[str, Field(description="Order identifier.")],
+) -> str:
+    """Look up an order status by id."""
+    return f"order {order_id}: shipped"
+
+
+agent = merry.Agent(
+    session_id="example",
+    provider=merry.Anthropic(api_key="sk-ant-...", model="claude-sonnet-4-5"),
+    system_prompt="You are a concise assistant.",
+    tools=[lookup_order],
 )
 
-run = agent.stream("Inspect the repository")
-async for message in run:
-    if isinstance(message, merry.Event):
-        print(message.type.value)
-
-result = await run.result()
+async with agent.stream("Check order A123.") as run:
+    async for message in run:
+        if isinstance(message, merry.ToolCallBatch):
+            await agent.execute_tool_batch(message)
+        elif isinstance(message.payload, events.AssistantMessageDeltaPayload):
+            print(message.payload.delta, end="")
+    result = await run.result()
 ```
 
-See [`sdks/python/README.md`](sdks/python/README.md) and [`sdks/python/CAPABILITY_MATRIX.md`](sdks/python/CAPABILITY_MATRIX.md).
+Supports direct `Agent(...)` / `await Agent.resume(...)` construction, `@merry.tool` decorators (multi-parameter signatures or single `BaseModel` input), concurrent `parallel_safe` tool batches, structured outputs, and long-lived interactive sessions (`async with agent.interactive() as session:`). See [`sdks/python/README.md`](sdks/python/README.md) and [`sdks/python/CAPABILITY_MATRIX.md`](sdks/python/CAPABILITY_MATRIX.md).
 
 ---
 

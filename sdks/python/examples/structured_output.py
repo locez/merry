@@ -26,16 +26,13 @@ def build_agent() -> merry.Agent:
         raise SystemExit(
             "Set MERRY_OPENAI_API_KEY and MERRY_OPENAI_MODEL before running."
         )
-    return (
-        merry.AgentBuilder("python-structured-example")
-        .provider(
-            merry.OpenAICompatible(
-                api_key=api_key,
-                model=model,
-                base_url=os.environ.get("MERRY_OPENAI_BASE_URL"),
-            )
-        )
-        .build()
+    return merry.Agent(
+        session_id="python-structured-example",
+        provider=merry.OpenAICompatible(
+            api_key=api_key,
+            model=model,
+            base_url=os.environ.get("MERRY_OPENAI_BASE_URL"),
+        ),
     )
 
 

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, TypeVar
+from typing import TypeVar
 
 from pydantic import BaseModel
 
 from ._errors import output_decode_error
 from ._event_parser import parse_event
-from ._event_types import EventDiagnostic
+from ._event_types import EventDiagnostic, QueuedInput, QueuedInputs
 from ._events import Event
 from ._json import (
     JsonObject,
@@ -26,17 +26,13 @@ from ._models import (
     ToolCall,
     ToolCallBatch,
     ToolSubmission,
+    _BatchSubmitter,
 )
-
-if TYPE_CHECKING:
-    from ._run import AgentRun
 
 OutputT = TypeVar("OutputT", bound=BaseModel)
 
 
-def parse_message(
-    payload: str, run: AgentRun[OutputT]
-) -> Event | ToolCallBatch[OutputT]:
+def parse_message(payload: str, submitter: _BatchSubmitter) -> Event | ToolCallBatch:
     decoded: object = _decode_json(payload, "native run message")
     data = require_json_object(decoded, "native run message")
     kind = _required_string(data, "kind")
@@ -50,11 +46,11 @@ def parse_message(
             "native tool invocation message",
             required={"kind", "id", "invocations"},
         )
-        return _parse_batch(data, run)
+        return _parse_batch(data, submitter)
     raise TypeError(f"native run message kind is unsupported: {kind}")
 
 
-def _parse_batch(data: JsonObject, run: AgentRun[OutputT]) -> ToolCallBatch[OutputT]:
+def _parse_batch(data: JsonObject, submitter: _BatchSubmitter) -> ToolCallBatch:
     validate_object_keys(
         data,
         "native tool invocation batch",
@@ -82,7 +78,11 @@ def _parse_batch(data: JsonObject, run: AgentRun[OutputT]) -> ToolCallBatch[Outp
                 arguments=arguments,
             )
         )
-    return ToolCallBatch(id=batch_id, invocations=tuple(invocations), _run=run)
+    return ToolCallBatch(
+        id=batch_id,
+        invocations=tuple(invocations),
+        _submitter=submitter,
+    )
 
 
 def parse_submission(payload: str) -> ToolSubmission:
@@ -97,6 +97,53 @@ def parse_submission(payload: str) -> ToolSubmission:
         raise TypeError(
             f"native tool submission status is unsupported: {status}"
         ) from error
+
+
+def parse_interactive_input_item(payload: str) -> tuple[int, str]:
+    data = require_json_object(
+        _decode_json(payload, "native interactive input item"),
+        "native interactive input item",
+    )
+    validate_object_keys(
+        data,
+        "native interactive input item",
+        required={"id", "text"},
+    )
+    return _required_int(data, "id"), _required_string(data, "text")
+
+
+def parse_interactive_snapshot(payload: str) -> QueuedInputs:
+    data = require_json_object(
+        _decode_json(payload, "native interactive snapshot"),
+        "native interactive snapshot",
+    )
+    validate_object_keys(
+        data,
+        "native interactive snapshot",
+        required={"items", "paused"},
+    )
+    paused = data["paused"]
+    if not isinstance(paused, bool):
+        raise TypeError("native interactive snapshot paused flag must be a bool")
+    raw_items = data["items"]
+    if not isinstance(raw_items, list):
+        raise TypeError("native interactive snapshot items must be a list")
+    items: list[QueuedInput] = []
+    for entry in raw_items:
+        item_data = require_json_object(entry, "native queued input")
+        validate_object_keys(
+            item_data,
+            "native queued input",
+            required={"id", "text", "position"},
+        )
+        items.append(
+            QueuedInput(
+                id=_required_int(item_data, "id"),
+                text=_required_string(item_data, "text"),
+                position=_required_int(item_data, "position"),
+            )
+        )
+    return QueuedInputs(items=tuple(items), paused=paused)
 
 
 def parse_run_result(

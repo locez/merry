@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 import merry
+from merry import events
 from merry._event_parser import parse_event
 
 
@@ -16,7 +17,7 @@ def test_event_parser_returns_typed_payloads() -> None:
     )
 
     assert event.type is merry.EventType.ASSISTANT_MESSAGE
-    assert isinstance(event.payload, merry.AssistantMessagePayload)
+    assert isinstance(event.payload, events.AssistantMessagePayload)
     assert event.payload.text == "hello"
     assert event.payload.source.sequence == 1
 
@@ -37,9 +38,9 @@ def test_event_parser_preserves_line_breaks_in_assistant_text() -> None:
         }
     )
 
-    assert isinstance(delta.payload, merry.AssistantMessageDeltaPayload)
+    assert isinstance(delta.payload, events.AssistantMessageDeltaPayload)
     assert delta.payload.delta == "line one\r\nline two\tcontinued"
-    assert isinstance(message.payload, merry.AssistantMessagePayload)
+    assert isinstance(message.payload, events.AssistantMessagePayload)
     assert message.payload.text == "line one\r\nline two\tcontinued"
 
 
@@ -59,9 +60,9 @@ def test_event_parser_accepts_blank_assistant_text_and_delta() -> None:
         }
     )
 
-    assert isinstance(delta.payload, merry.AssistantMessageDeltaPayload)
+    assert isinstance(delta.payload, events.AssistantMessageDeltaPayload)
     assert delta.payload.delta == ""
-    assert isinstance(message.payload, merry.AssistantMessagePayload)
+    assert isinstance(message.payload, events.AssistantMessagePayload)
     assert message.payload.text == ""
 
 
@@ -75,7 +76,7 @@ def test_event_parser_accepts_reasoning_delta() -> None:
     )
 
     assert event.type is merry.EventType.REASONING_DELTA
-    assert isinstance(event.payload, merry.ReasoningDeltaPayload)
+    assert isinstance(event.payload, events.ReasoningDeltaPayload)
     assert event.payload.delta == "thinking\nmore"
     assert event.payload.source.sequence == 3
 
@@ -89,19 +90,19 @@ def test_event_parser_retains_unknown_variants_without_string_dispatch() -> None
     )
 
     assert event.type is merry.EventType.UNKNOWN
-    assert isinstance(event.payload, merry.UnknownEventPayload)
+    assert isinstance(event.payload, events.UnknownEventPayload)
     assert event.payload.raw_type == "future_runtime_event"
     assert event.payload.data.value["future_field"] == {"value": "retained"}
 
 
 def test_event_envelope_rejects_mismatched_discriminants() -> None:
-    source = merry.EventSource("session-1", 1)
+    source = events.EventSource("session-1", 1)
     with pytest.raises(ValueError, match="discriminants"):
-        merry.Event(merry.EventType.CLOSED, merry.SessionStartedPayload(source))
+        merry.Event(merry.EventType.CLOSED, events.SessionStartedPayload(source))
 
 
 def test_event_value_objects_validate_nested_types_and_json_kind() -> None:
-    diagnostic = merry.EventDiagnostic("tool.failed", "Tool failed.")
+    diagnostic = events.EventDiagnostic("tool.failed", "Tool failed.")
 
     with pytest.raises(TypeError, match="event diagnostic"):
         parse_event(
@@ -117,11 +118,11 @@ def test_event_value_objects_validate_nested_types_and_json_kind() -> None:
             }
         )
     with pytest.raises(ValueError, match="valid JSON"):
-        merry.RuntimeToolOutput(merry.RuntimeToolOutputKind.JSON, "not-json")
+        events.RuntimeToolOutput(events.RuntimeToolOutputKind.JSON, "not-json")
 
-    result = merry.RuntimeToolResult(
+    result = events.RuntimeToolResult(
         call_id="call-1",
-        status=merry.RuntimeToolResultStatus.FAILED,
+        status=events.RuntimeToolResultStatus.FAILED,
         diagnostic=diagnostic,
     )
     assert result.diagnostic == diagnostic
@@ -198,11 +199,11 @@ def test_event_parser_parses_single_pending_queue_events() -> None:
         }
     )
     assert changed.type is merry.EventType.QUEUED_INPUTS_CHANGED
-    assert isinstance(changed.payload, merry.QueuedInputsChangedPayload)
+    assert isinstance(changed.payload, events.QueuedInputsChangedPayload)
     assert changed.payload.inputs.paused is True
     assert changed.payload.inputs.items == (
-        merry.QueuedInput(id=1, text="first pending", position=0),
-        merry.QueuedInput(id=2, text="second pending", position=1),
+        events.QueuedInput(id=1, text="first pending", position=0),
+        events.QueuedInput(id=2, text="second pending", position=1),
     )
 
     accepted = parse_event(
@@ -214,9 +215,9 @@ def test_event_parser_parses_single_pending_queue_events() -> None:
         }
     )
     assert accepted.type is merry.EventType.QUEUED_INPUT_ACCEPTED
-    assert isinstance(accepted.payload, merry.QueuedInputAcceptedPayload)
+    assert isinstance(accepted.payload, events.QueuedInputAcceptedPayload)
     assert accepted.payload.inputs == (
-        merry.QueuedInput(id=1, text="first pending", position=0),
+        events.QueuedInput(id=1, text="first pending", position=0),
     )
 
     with pytest.raises(TypeError):
@@ -244,7 +245,7 @@ def test_event_parser_supports_enriched_subagent_events_and_usage_rollup() -> No
         }
     )
     assert spawned.type is merry.EventType.SUBAGENT_SPAWNED
-    assert isinstance(spawned.payload, merry.SubagentSpawnedPayload)
+    assert isinstance(spawned.payload, events.SubagentSpawnedPayload)
     assert spawned.payload.display_name == "auditor"
     assert spawned.payload.role == "explore"
 
@@ -257,8 +258,8 @@ def test_event_parser_supports_enriched_subagent_events_and_usage_rollup() -> No
             "source": {"session_id": "session-1", "sequence": 4},
         }
     )
-    assert isinstance(blocked.payload, merry.SubagentStatusChangedPayload)
-    assert blocked.payload.status is merry.SubagentStatus.BLOCKED
+    assert isinstance(blocked.payload, events.SubagentStatusChangedPayload)
+    assert blocked.payload.status is events.SubagentStatus.BLOCKED
 
     completed = parse_event(
         {
@@ -278,7 +279,7 @@ def test_event_parser_supports_enriched_subagent_events_and_usage_rollup() -> No
             "source": {"session_id": "session-1", "sequence": 5},
         }
     )
-    assert isinstance(completed.payload, merry.SubagentCompletedPayload)
+    assert isinstance(completed.payload, events.SubagentCompletedPayload)
     assert completed.payload.usage is not None
     assert completed.payload.usage.total_tokens == 150
 
@@ -323,8 +324,8 @@ def test_event_parser_supports_plan_mode_and_todo_list_events() -> None:
         }
     )
     assert mode_changed.type is merry.EventType.PLAN_MODE_CHANGED
-    assert isinstance(mode_changed.payload, merry.PlanModeChangedPayload)
-    assert mode_changed.payload.mode is merry.PlanModeState.ACTIVE
+    assert isinstance(mode_changed.payload, events.PlanModeChangedPayload)
+    assert mode_changed.payload.mode is events.PlanModeState.ACTIVE
 
     plan_doc = {
         "id": "plan-001",
@@ -341,7 +342,7 @@ def test_event_parser_supports_plan_mode_and_todo_list_events() -> None:
         }
     )
     assert saved.type is merry.EventType.PLAN_SAVED
-    assert isinstance(saved.payload, merry.PlanSavedPayload)
+    assert isinstance(saved.payload, events.PlanSavedPayload)
     assert saved.payload.plan.value["id"] == "plan-001"
 
     approval = parse_event(
@@ -352,7 +353,7 @@ def test_event_parser_supports_plan_mode_and_todo_list_events() -> None:
         }
     )
     assert approval.type is merry.EventType.PLAN_APPROVAL_REQUESTED
-    assert isinstance(approval.payload, merry.PlanApprovalRequestedPayload)
+    assert isinstance(approval.payload, events.PlanApprovalRequestedPayload)
     assert approval.payload.plan.value["title"] == "Auth Refactor"
 
     reviewed = parse_event(
@@ -364,7 +365,7 @@ def test_event_parser_supports_plan_mode_and_todo_list_events() -> None:
         }
     )
     assert reviewed.type is merry.EventType.PLAN_REVIEWED
-    assert isinstance(reviewed.payload, merry.PlanReviewedPayload)
+    assert isinstance(reviewed.payload, events.PlanReviewedPayload)
     assert reviewed.payload.plan_id == "plan-001"
     assert reviewed.payload.decision.value["kind"] == "approve"
 
@@ -379,17 +380,17 @@ def test_event_parser_supports_plan_mode_and_todo_list_events() -> None:
         }
     )
     assert todos.type is merry.EventType.TODO_LIST_UPDATED
-    assert isinstance(todos.payload, merry.TodoListUpdatedPayload)
+    assert isinstance(todos.payload, events.TodoListUpdatedPayload)
     assert todos.payload.items == (
-        merry.TodoItem(
+        events.TodoItem(
             id="1",
             content="Inspect runtime",
-            status=merry.TodoStatus.COMPLETED,
+            status=events.TodoStatus.COMPLETED,
         ),
-        merry.TodoItem(
+        events.TodoItem(
             id="2",
             content="Update tests",
-            status=merry.TodoStatus.IN_PROGRESS,
+            status=events.TodoStatus.IN_PROGRESS,
         ),
     )
 

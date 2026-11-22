@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import ClassVar
 
 from ._event_types import (
@@ -17,14 +17,14 @@ from ._event_values import _enum_value, _required_int
 from ._json import JsonValue, require_json_object, validate_object_keys
 
 
-class OutputTokenSource(str, Enum):
+class OutputTokenSource(StrEnum):
     """Source of the output-token numerator."""
 
     ESTIMATED = "estimated"
     PROVIDER_USAGE = "provider_usage"
 
 
-class OutputTimingQuality(str, Enum):
+class OutputTimingQuality(StrEnum):
     """Limitations of the client receive interval, not a server decode clock."""
 
     RECEIVE_WINDOW = "receive_window"

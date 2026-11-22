@@ -5,6 +5,7 @@ import logging
 import os
 
 import merry
+from merry import events
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +25,15 @@ def provider_from_env() -> merry.OpenAICompatible:
 
 
 def build_agent() -> merry.Agent:
-    return (
-        merry.AgentBuilder("python-basic-example").provider(provider_from_env()).build()
+    return merry.Agent(
+        session_id="python-basic-example",
+        provider=provider_from_env(),
+        system_prompt="You are a concise assistant verifying SDK connectivity.",
     )
 
 
 def handle_event(event: merry.Event) -> None:
-    if isinstance(event.payload, merry.AssistantMessagePayload):
+    if isinstance(event.payload, events.AssistantMessagePayload):
         logger.info("assistant_message=%s", event.payload.text)
         return
     if event.type in {
@@ -43,10 +46,10 @@ def handle_event(event: merry.Event) -> None:
 
 
 async def main() -> None:
-    run = build_agent().stream(
+    agent = build_agent()
+    async with agent.stream(
         "Reply in one short sentence confirming the Merry Python SDK is connected."
-    )
-    try:
+    ) as run:
         async for message in run:
             if isinstance(message, merry.Event):
                 handle_event(message)
@@ -56,8 +59,6 @@ async def main() -> None:
                     "The basic example received a tool call without a registered host tool."
                 )
         result = await run.result()
-    finally:
-        await run.close()
     logger.info(
         "status=%s turns=%d output=%s",
         result.status.value,
