@@ -1,4 +1,6 @@
-use crate::tui::{copy_controls::MAX_CLIPBOARD_BYTES, text_interaction::MouseInput};
+use crate::tui::{
+    copy_controls::MAX_CLIPBOARD_BYTES, text_interaction::MouseInput, theme::quantize_for_256,
+};
 use crossterm::{
     cursor::{Hide, SetCursorStyle, Show},
     event::{
@@ -13,12 +15,197 @@ use crossterm::{
     },
 };
 use futures_util::StreamExt;
-use ratatui::layout::Size;
-use ratatui::{Frame, Terminal, backend::CrosstermBackend, layout::Position};
+use ratatui::{
+    Frame, Terminal,
+    backend::{Backend, ClearType, CrosstermBackend, WindowSize},
+    buffer::Cell,
+    layout::{Position, Size},
+};
 use std::{
     io::{self, Stdout, Write, stdout},
     time::Duration,
 };
+
+/// Color depth supported by the attached terminal emulator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ColorSupport {
+    /// Terminal supports 24-bit RGB SGR sequences (`38;2;r;g;b` / `48;2;r;g;b`).
+    TrueColor,
+    /// Terminal supports at most 256-color indexed SGR sequences (`38;5;n` / `48;5;n`).
+    Ansi256,
+}
+
+impl ColorSupport {
+    /// Detects terminal color capability from the current process environment.
+    pub(crate) fn detect_from_env() -> Self {
+        Self::from_env_vars(
+            std::env::var("COLORTERM").ok().as_deref(),
+            std::env::var("TERM_PROGRAM").ok().as_deref(),
+            std::env::var("TERM").ok().as_deref(),
+            std::env::var("KITTY_WINDOW_ID").ok().as_deref(),
+            std::env::var("WT_SESSION").ok().as_deref(),
+        )
+    }
+
+    /// Resolves terminal color support from explicit environment values.
+    ///
+    /// Checks explicit truecolor markers (`COLORTERM=truecolor|24bit`) first so
+    /// newer terminals (including Apple Terminal on macOS Tahoe) keep 24-bit
+    /// color, while older Apple Terminal (`TERM_PROGRAM=Apple_Terminal` without
+    /// `COLORTERM`) and other 256-color terminals safely quantize RGB cells.
+    pub(crate) fn from_env_vars(
+        colorterm: Option<&str>,
+        term_program: Option<&str>,
+        term: Option<&str>,
+        kitty_window_id: Option<&str>,
+        wt_session: Option<&str>,
+    ) -> Self {
+        if let Some(colorterm) = colorterm {
+            let lower = colorterm.to_ascii_lowercase();
+            if lower.contains("truecolor") || lower.contains("24bit") {
+                return Self::TrueColor;
+            }
+        }
+        if kitty_window_id.is_some_and(|value| !value.is_empty())
+            || wt_session.is_some_and(|value| !value.is_empty())
+        {
+            return Self::TrueColor;
+        }
+        if let Some(program) = term_program {
+            let lower = program.to_ascii_lowercase();
+            if lower == "apple_terminal" {
+                return Self::Ansi256;
+            }
+            if matches!(
+                lower.as_str(),
+                "iterm.app"
+                    | "ghostty"
+                    | "wezterm"
+                    | "hyper"
+                    | "vscode"
+                    | "warpterminal"
+                    | "rio"
+                    | "tabby"
+                    | "contour"
+                    | "zed"
+            ) {
+                return Self::TrueColor;
+            }
+        }
+        if let Some(term) = term {
+            let lower = term.to_ascii_lowercase();
+            if lower.contains("direct")
+                || lower.contains("truecolor")
+                || lower.contains("24bit")
+                || lower.contains("kitty")
+                || lower.contains("ghostty")
+                || lower.contains("wezterm")
+                || lower.contains("alacritty")
+            {
+                return Self::TrueColor;
+            }
+        }
+        Self::Ansi256
+    }
+}
+
+/// Ratatui backend wrapper around [`CrosstermBackend`] that quantizes 24-bit
+/// `Color::Rgb` cells to xterm-256 palette indices when the terminal does not
+/// advertise TrueColor support.
+pub(crate) struct TerminalBackend<W: Write> {
+    inner: CrosstermBackend<W>,
+    color_support: ColorSupport,
+    quantized_scratch: Vec<(u16, u16, Cell)>,
+}
+
+impl<W: Write> TerminalBackend<W> {
+    pub(crate) fn new(writer: W, color_support: ColorSupport) -> Self {
+        Self {
+            inner: CrosstermBackend::new(writer),
+            color_support,
+            quantized_scratch: Vec::new(),
+        }
+    }
+}
+
+impl<W: Write> Write for TerminalBackend<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Write::flush(&mut self.inner)
+    }
+}
+
+impl<W: Write> Backend for TerminalBackend<W> {
+    type Error = io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        match self.color_support {
+            ColorSupport::TrueColor => self.inner.draw(content),
+            ColorSupport::Ansi256 => {
+                self.quantized_scratch.clear();
+                self.quantized_scratch.extend(content.map(|(x, y, cell)| {
+                    let mut quantized = cell.clone();
+                    quantized.fg = quantize_for_256(quantized.fg);
+                    quantized.bg = quantize_for_256(quantized.bg);
+                    (x, y, quantized)
+                }));
+                let result = self.inner.draw(
+                    self.quantized_scratch
+                        .iter()
+                        .map(|(x, y, cell)| (*x, *y, cell)),
+                );
+                self.quantized_scratch.clear();
+                result
+            }
+        }
+    }
+
+    fn append_lines(&mut self, n: u16) -> io::Result<()> {
+        self.inner.append_lines(n)
+    }
+
+    fn hide_cursor(&mut self) -> io::Result<()> {
+        self.inner.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> io::Result<()> {
+        self.inner.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        self.inner.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        self.inner.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn size(&self) -> io::Result<Size> {
+        self.inner.size()
+    }
+
+    fn window_size(&mut self) -> io::Result<WindowSize> {
+        self.inner.window_size()
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Backend::flush(&mut self.inner)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TerminalEvent {
@@ -31,7 +218,7 @@ pub(crate) enum TerminalEvent {
 }
 
 pub(crate) struct TerminalSession {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    terminal: Terminal<TerminalBackend<Stdout>>,
     events: EventStream,
 }
 
@@ -58,7 +245,7 @@ impl TerminalSession {
             SetCursorStyle::BlinkingBar
         );
 
-        let backend = CrosstermBackend::new(stdout);
+        let backend = TerminalBackend::new(stdout, ColorSupport::detect_from_env());
         let terminal = match Terminal::new(backend) {
             Ok(terminal) => terminal,
             Err(err) => {
@@ -131,13 +318,13 @@ impl TerminalSession {
 /// Wraps a ratatui frame in DECSET/DECRST 2026 synchronized update markers so
 /// terminals present the whole frame atomically without mid-draw tearing.
 pub(crate) fn draw_synchronized<W: Write>(
-    terminal: &mut Terminal<CrosstermBackend<W>>,
+    terminal: &mut Terminal<TerminalBackend<W>>,
     draw: impl FnOnce(&mut Frame<'_>),
 ) -> io::Result<()> {
     queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
     let draw_result = terminal.draw(draw).map(|_| ());
     let end_result = queue!(terminal.backend_mut(), EndSynchronizedUpdate)
-        .and_then(|()| terminal.backend_mut().flush());
+        .and_then(|()| Write::flush(terminal.backend_mut()));
     draw_result.and(end_result)
 }
 
@@ -231,15 +418,40 @@ fn mouse_event(mouse: MouseEvent) -> Option<TerminalEvent> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TerminalEvent, draw_synchronized, mouse_capture_enabled, mouse_event};
+    use super::{
+        ColorSupport, TerminalBackend, TerminalEvent, draw_synchronized, mouse_capture_enabled,
+        mouse_event,
+    };
     use crate::tui::text_interaction::MouseInput;
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::{
         Terminal,
-        backend::CrosstermBackend,
         layout::{Position, Rect},
+        style::{Color, Style},
         widgets::Paragraph,
     };
+
+    #[derive(Clone, Default)]
+    struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SharedBuf {
+        fn take_utf8(&self) -> String {
+            let mut bytes = self.0.lock().expect("lock");
+            let taken = std::mem::take(&mut *bytes);
+            String::from_utf8(taken).expect("utf-8")
+        }
+    }
 
     fn mouse(kind: MouseEventKind) -> MouseEvent {
         MouseEvent {
@@ -322,22 +534,8 @@ mod tests {
 
     #[test]
     fn synchronized_draw_wraps_frame_output_in_decset_2026_markers() {
-        #[derive(Clone, Default)]
-        struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-        impl std::io::Write for SharedBuf {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().expect("lock").extend_from_slice(buf);
-                Ok(buf.len())
-            }
-
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
         let shared = SharedBuf::default();
-        let backend = CrosstermBackend::new(shared.clone());
+        let backend = TerminalBackend::new(shared.clone(), ColorSupport::TrueColor);
         let options = ratatui::TerminalOptions {
             viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 20, 4)),
         };
@@ -347,7 +545,7 @@ mod tests {
         })
         .expect("synchronized draw");
 
-        let written = String::from_utf8(shared.0.lock().expect("lock").clone()).expect("utf-8");
+        let written = shared.take_utf8();
         assert!(
             written.starts_with("\x1b[?2026h"),
             "expected BeginSynchronizedUpdate prefix, got {written:?}"
@@ -357,5 +555,180 @@ mod tests {
             "expected EndSynchronizedUpdate suffix, got {written:?}"
         );
         assert!(written.contains("merry"), "expected frame text in output");
+    }
+
+    #[test]
+    fn detects_apple_terminal_as_ansi256_and_truecolor_terminals_accurately() {
+        // Legacy Apple Terminal (pre-Tahoe) sets TERM_PROGRAM=Apple_Terminal without COLORTERM.
+        assert_eq!(
+            ColorSupport::from_env_vars(
+                None,
+                Some("Apple_Terminal"),
+                Some("xterm-256color"),
+                None,
+                None
+            ),
+            ColorSupport::Ansi256
+        );
+        // Newer Apple Terminal advertising COLORTERM=truecolor keeps 24-bit color.
+        assert_eq!(
+            ColorSupport::from_env_vars(
+                Some("truecolor"),
+                Some("Apple_Terminal"),
+                Some("xterm-256color"),
+                None,
+                None
+            ),
+            ColorSupport::TrueColor
+        );
+        assert_eq!(
+            ColorSupport::from_env_vars(Some("24bit"), None, Some("xterm-256color"), None, None),
+            ColorSupport::TrueColor
+        );
+        assert_eq!(
+            ColorSupport::from_env_vars(
+                None,
+                Some("iTerm.app"),
+                Some("xterm-256color"),
+                None,
+                None
+            ),
+            ColorSupport::TrueColor
+        );
+        assert_eq!(
+            ColorSupport::from_env_vars(None, Some("ghostty"), Some("xterm-256color"), None, None),
+            ColorSupport::TrueColor
+        );
+        assert_eq!(
+            ColorSupport::from_env_vars(None, None, Some("xterm-direct"), None, None),
+            ColorSupport::TrueColor
+        );
+        assert_eq!(
+            ColorSupport::from_env_vars(None, None, Some("xterm-256color"), Some("1"), None),
+            ColorSupport::TrueColor
+        );
+        assert_eq!(
+            ColorSupport::from_env_vars(None, None, Some("xterm-256color"), None, Some("wt-1")),
+            ColorSupport::TrueColor
+        );
+        // Plain 256-color terminals and SSH sessions without COLORTERM safely degrade to 256-color.
+        assert_eq!(
+            ColorSupport::from_env_vars(None, None, Some("xterm-256color"), None, None),
+            ColorSupport::Ansi256
+        );
+        assert_eq!(
+            ColorSupport::from_env_vars(None, Some("tmux"), Some("tmux-256color"), None, None),
+            ColorSupport::Ansi256
+        );
+    }
+
+    #[test]
+    fn ansi256_backend_quantizes_rgb_cells_and_never_emits_truecolor_sgr() {
+        let shared = SharedBuf::default();
+        let backend = TerminalBackend::new(shared.clone(), ColorSupport::Ansi256);
+        let options = ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 20, 2)),
+        };
+        let mut terminal = Terminal::with_options(backend, options).expect("terminal");
+
+        let style = Style::default()
+            .fg(Color::Rgb(255, 122, 200))
+            .bg(Color::Rgb(35, 38, 39));
+        draw_synchronized(&mut terminal, |frame| {
+            frame.render_widget(Paragraph::new("merry").style(style), frame.area());
+        })
+        .expect("ansi256 draw");
+
+        let frame1 = shared.take_utf8();
+        assert!(
+            !frame1.contains("38;2;") && !frame1.contains("48;2;"),
+            "Ansi256 backend must never emit 24-bit RGB SGR codes: {frame1:?}"
+        );
+        assert!(
+            frame1.contains("38;5;") && frame1.contains("48;5;235"),
+            "expected quantized 256-color foreground and background SGR codes, got {frame1:?}"
+        );
+
+        // Second diff frame with updated RGB colors also emits only 256-color SGR codes.
+        let style2 = Style::default()
+            .fg(Color::Rgb(216, 180, 255))
+            .bg(Color::Rgb(54, 30, 48));
+        draw_synchronized(&mut terminal, |frame| {
+            frame.render_widget(Paragraph::new("hello").style(style2), frame.area());
+        })
+        .expect("second ansi256 draw");
+
+        let frame2 = shared.take_utf8();
+        assert!(
+            !frame2.contains("38;2;") && !frame2.contains("48;2;"),
+            "Ansi256 diff frame must never emit 24-bit RGB SGR codes: {frame2:?}"
+        );
+        assert!(
+            frame2.contains("hello"),
+            "expected updated text in diff frame"
+        );
+    }
+
+    #[test]
+    fn truecolor_backend_preserves_24bit_rgb_sgr_sequences() {
+        let shared = SharedBuf::default();
+        let backend = TerminalBackend::new(shared.clone(), ColorSupport::TrueColor);
+        let options = ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 20, 2)),
+        };
+        let mut terminal = Terminal::with_options(backend, options).expect("terminal");
+
+        let style = Style::default()
+            .fg(Color::Rgb(255, 122, 200))
+            .bg(Color::Rgb(35, 38, 39));
+        draw_synchronized(&mut terminal, |frame| {
+            frame.render_widget(Paragraph::new("merry").style(style), frame.area());
+        })
+        .expect("truecolor draw");
+
+        let written = shared.take_utf8();
+        assert!(
+            written.contains("38;2;255;122;200") && written.contains("48;2;35;38;39"),
+            "TrueColor backend should preserve 24-bit RGB SGR sequences, got {written:?}"
+        );
+    }
+
+    #[test]
+    fn full_sakura_tui_frame_under_ansi256_emits_zero_truecolor_sequences() {
+        let mut state = crate::tui::state::TuiState::new(
+            "/Users/demo/ask".into(),
+            "deepseek-flash".to_owned(),
+            crate::tui::keymap::Keymap::default(),
+            crate::tui::theme::TuiTheme::default(),
+        );
+        state.push_timeline_item(crate::tui::state::TimelineItem::User {
+            text: "merry resume".to_owned(),
+        });
+        state.push_timeline_item(crate::tui::state::TimelineItem::Assistant {
+            text: "Use `merry resume`:\n```rust\nfn main() { println!(\"ok\"); }\n```".to_owned(),
+        });
+
+        let shared = SharedBuf::default();
+        let backend = TerminalBackend::new(shared.clone(), ColorSupport::Ansi256);
+        let options = ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+        };
+        let mut terminal = Terminal::with_options(backend, options).expect("terminal");
+        draw_synchronized(&mut terminal, |frame| {
+            crate::tui::render::render(frame, &state);
+        })
+        .expect("full TUI ansi256 draw");
+
+        let written = shared.take_utf8();
+        assert!(
+            !written.contains("38;2;") && !written.contains("48;2;"),
+            "full TUI frame under Ansi256 must not emit any 24-bit RGB SGR codes"
+        );
+        assert!(
+            written.contains("38;5;") && written.contains("48;5;"),
+            "expected quantized 256-color SGR codes in full TUI frame"
+        );
+        assert!(written.contains("deepseek-flash"));
+        assert!(written.contains("merry resume"));
     }
 }

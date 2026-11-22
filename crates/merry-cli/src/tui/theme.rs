@@ -641,7 +641,6 @@ fn blend_channel(from: u8, to: u8, t: f32) -> u8 {
 }
 
 /// Quantizes an RGB color to the nearest xterm-256 palette entry for non-truecolor terminals.
-#[allow(dead_code)]
 pub(crate) fn quantize_for_256(color: Color) -> Color {
     let Color::Rgb(red, green, blue) = color else {
         return color;
@@ -669,8 +668,8 @@ pub(crate) fn quantize_for_256(color: Color) -> Color {
         ),
     );
 
-    let avg = ((u16::from(red) + u16::from(green) + u16::from(blue)) / 3) as u8;
-    let gray_step = avg.saturating_sub(8).min(230) / 10;
+    let avg = ((u16::from(red) + u16::from(green) + u16::from(blue) + 1) / 3) as u8;
+    let gray_step = (avg.saturating_sub(8).saturating_add(5) / 10).min(23);
     let gray_val = 8 + gray_step * 10;
     let gray_index = 232 + gray_step;
     let gray_dist = rgb_dist_sq((red, green, blue), (gray_val, gray_val, gray_val));
@@ -755,6 +754,14 @@ mod tests {
         assert_eq!(
             quantize_for_256(Color::Rgb(128, 128, 128)),
             Color::Indexed(244)
+        );
+        assert_eq!(
+            quantize_for_256(Color::Rgb(35, 38, 39)),
+            Color::Indexed(235)
+        );
+        assert_eq!(
+            quantize_for_256(Color::Rgb(42, 44, 48)),
+            Color::Indexed(236)
         );
         assert_eq!(quantize_for_256(Color::LightMagenta), Color::LightMagenta);
     }
