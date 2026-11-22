@@ -8,12 +8,14 @@ pub(crate) const OPENAI_ENV_HELP: &str = "\
 Environment:
   MERRY_OPENAI_DEBUG=1       Required opt-in before any network attempt
   XDG_CONFIG_HOME            Optional base for merry/config.toml
+  XDG_DATA_HOME              Optional base for Merry provider credentials
 
-Provider/model/base URL/API key source come from
-`$XDG_CONFIG_HOME/merry/config.toml` or `~/.config/merry/config.toml`.
-Set exactly one of `[providers.openai-compatible].api_key` or `api_key_file`.
-For sandboxed model debugging, prefer config-relative `api_key_file =
-\"secrets/openai.key\"` so credentials are not passed through process argv.
+Default provider/model selection comes from `$XDG_CONFIG_HOME/merry/config.toml`
+or `~/.config/merry/config.toml`.
+Provider endpoints and API keys live under `$XDG_DATA_HOME/merry/providers/`
+(default `~/.local/share/merry/providers/`), managed in Merry Settings or edited
+directly there so credentials are not placed in `config.toml` and stay isolated
+from the sandbox.
 ";
 
 #[derive(Debug, Parser)]

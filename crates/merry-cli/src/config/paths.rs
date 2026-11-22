@@ -1,6 +1,7 @@
 use super::ConfigError;
 use merry_core::host_paths::{
-    platform_config_base, platform_state_base, strip_home_tilde_prefix, user_home_dir,
+    platform_config_base, platform_data_base, platform_state_base, strip_home_tilde_prefix,
+    user_home_dir,
 };
 use std::{
     env,
@@ -13,6 +14,7 @@ pub struct XdgPaths {
     config_dir: PathBuf,
     config_file: PathBuf,
     state_dir: PathBuf,
+    data_dir: PathBuf,
     default_log_file: PathBuf,
 }
 
@@ -21,12 +23,14 @@ impl XdgPaths {
         let home = user_home_dir().ok_or(ConfigError::HomeMissingOrRelative)?;
         let xdg_config_home = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
         let xdg_state_home = env::var_os("XDG_STATE_HOME").map(PathBuf::from);
+        let xdg_data_home = env::var_os("XDG_DATA_HOME").map(PathBuf::from);
         let appdata = env::var_os("APPDATA").map(PathBuf::from);
         let local_appdata = env::var_os("LOCALAPPDATA").map(PathBuf::from);
         Ok(Self::from_env_parts(
             home,
             xdg_config_home.as_deref(),
             xdg_state_home.as_deref(),
+            xdg_data_home.as_deref(),
             appdata.as_deref(),
             local_appdata.as_deref(),
         ))
@@ -41,13 +45,22 @@ impl XdgPaths {
         let home = normalize_path_lexically(&home);
         let config_base = absolute_or_default(xdg_config_home, home.join(".config"));
         let state_base = absolute_or_default(xdg_state_home, home.join(".local/state"));
-        Self::from_resolved_bases(home, config_base, state_base)
+        let data_base = normalize_path_lexically(&home.join(".local/share"));
+        Self::from_resolved_bases(home, config_base, state_base, data_base)
+    }
+
+    #[cfg(test)]
+    pub fn with_data_home(mut self, xdg_data_home: PathBuf) -> Self {
+        let data_base = absolute_or_default(Some(xdg_data_home), self.home.join(".local/share"));
+        self.data_dir = data_base.join("merry");
+        self
     }
 
     fn from_env_parts(
         home: PathBuf,
         xdg_config_home: Option<&Path>,
         xdg_state_home: Option<&Path>,
+        xdg_data_home: Option<&Path>,
         appdata: Option<&Path>,
         local_appdata: Option<&Path>,
     ) -> Self {
@@ -56,12 +69,20 @@ impl XdgPaths {
             normalize_path_lexically(&platform_config_base(&home, xdg_config_home, appdata));
         let state_base =
             normalize_path_lexically(&platform_state_base(&home, xdg_state_home, local_appdata));
-        Self::from_resolved_bases(home, config_base, state_base)
+        let data_base =
+            normalize_path_lexically(&platform_data_base(&home, xdg_data_home, local_appdata));
+        Self::from_resolved_bases(home, config_base, state_base, data_base)
     }
 
-    fn from_resolved_bases(home: PathBuf, config_base: PathBuf, state_base: PathBuf) -> Self {
+    fn from_resolved_bases(
+        home: PathBuf,
+        config_base: PathBuf,
+        state_base: PathBuf,
+        data_base: PathBuf,
+    ) -> Self {
         let config_dir = config_base.join("merry");
         let state_dir = state_base.join("merry");
+        let data_dir = data_base.join("merry");
         let config_file = config_dir.join("config.toml");
         let default_log_file = state_dir.join("logs").join("merry.jsonl");
         Self {
@@ -69,6 +90,7 @@ impl XdgPaths {
             config_dir,
             config_file,
             state_dir,
+            data_dir,
             default_log_file,
         }
     }
@@ -98,6 +120,12 @@ impl XdgPaths {
     }
 
     pub fn managed_config_dir(&self) -> PathBuf {
+        self.data_dir.join("providers")
+    }
+
+    /// Previous location of the managed provider registry before it moved out
+    /// of writable `$XDG_CONFIG_HOME/merry`.
+    pub(super) fn legacy_managed_config_dir(&self) -> PathBuf {
         self.config_dir.join("managed")
     }
 
@@ -154,6 +182,24 @@ pub(super) fn resolve_config_relative_path(
     } else {
         Ok(config_dir.join(path))
     }
+}
+
+/// Resolves a provider `api_key_file` relative to `$XDG_DATA_HOME/merry/providers`.
+///
+/// Compatibility shim for registries relocated from `$XDG_CONFIG_HOME/merry/managed`,
+/// whose `providers.toml` stored `managed/secrets/<file>` relative to `config_dir`.
+/// TODO: Remove the `managed/secrets/` prefix compatibility once pre-relocation
+/// managed registries are no longer supported.
+pub(super) fn resolve_provider_api_key_file_path(
+    value: &str,
+    providers_dir: &Path,
+    home: &Path,
+) -> Result<PathBuf, ConfigError> {
+    let normalized = value
+        .strip_prefix("managed/")
+        .filter(|rest| rest.starts_with("secrets/"))
+        .unwrap_or(value);
+    resolve_config_relative_path(normalized, providers_dir, home)
 }
 
 pub(super) fn resolve_path_access_rule_path(

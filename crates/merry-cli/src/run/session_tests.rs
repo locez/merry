@@ -84,6 +84,7 @@ fn headless_input<'a>(
         subagents: CodingSubagentsConfig::default(),
         workspace_tool_limits: None,
         workspace_writable: true,
+        denied_absolute_paths: Vec::new(),
     }
 }
 

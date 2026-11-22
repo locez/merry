@@ -13,7 +13,7 @@ use crate::provider_config::{
 };
 use crate::runtime_config::{
     automatic_compaction_config, main_reasoning_effort, prepared_action_process_backend_options,
-    subagents_config,
+    private_tool_paths, subagents_config,
 };
 use crate::tui::preferences::{CompactionStrategy, TuiPreferences};
 use crate::tui::session_list::{TuiSessionMetadata, TuiSessionStore, now_unix_ms};
@@ -158,6 +158,7 @@ pub(crate) async fn start_tui_runtime_session(
             .transpose()
             .map_err(unexpected)?
             .unwrap_or_default(),
+        denied_absolute_paths: private_tool_paths(merry_config).map_err(unexpected)?,
         subagents: coding_subagents,
         workspace_tool_limits: None,
         workspace_writable,
@@ -594,17 +595,22 @@ mod tests {
     #[test]
     fn tui_reasoning_preference_overrides_provider_default() {
         let paths = XdgPaths::from_parts(std::path::PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "compat"
 model = "gpt-test"
 reasoning_effort = "low"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
 
 [providers.compat]
 type = "openai-compatible"
-api_key = "sk-test"
+api_key_file = "managed/secrets/compat.key"
 "#,
             ),
             &paths,
@@ -631,22 +637,27 @@ api_key = "sk-test"
     #[test]
     fn selected_provider_reasoning_effort_is_used_when_preference_is_inherited() {
         let paths = XdgPaths::from_parts(std::path::PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "compat"
 model = "gpt-test"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
 
 [providers.compat]
 type = "openai-compatible"
-api_key = "sk-test"
+api_key_file = "managed/secrets/compat.key"
 
 [providers.alt]
 type = "openai-compatible"
 default_model = "alt-model"
 reasoning_effort = "high"
-api_key = "sk-alt-test"
+api_key_file = "managed/secrets/alt.key"
 "#,
             ),
             &paths,
@@ -668,22 +679,27 @@ api_key = "sk-alt-test"
     #[test]
     fn selected_provider_does_not_inherit_the_default_provider_service_tier() {
         let paths = XdgPaths::from_parts(std::path::PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "compat"
 model = "gpt-test"
 service_tier = "priority"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
 
 [providers.compat]
 type = "openai-compatible"
-api_key = "sk-test"
+api_key_file = "managed/secrets/compat.key"
 
 [providers.alt]
 type = "openai-compatible"
 default_model = "alt-model"
-api_key = "sk-alt-test"
+api_key_file = "managed/secrets/alt.key"
 "#,
             ),
             &paths,

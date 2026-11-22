@@ -660,23 +660,28 @@ mod tests {
     #[test]
     fn settings_defaults_keep_reasoning_effort_per_provider() {
         let paths = crate::config::XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = crate::config::MerryConfig::load_optional_from_text(
+        let config = crate::config::MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "compat"
 model = "gpt-test"
 reasoning_effort = "high"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
 
 [providers.compat]
 type = "openai-compatible"
 reasoning_effort = "low"
-api_key = "sk-compat-test"
+api_key_file = "managed/secrets/compat.key"
 
 [providers.alt]
 type = "openai-compatible"
 reasoning_effort = "max ultra"
-api_key = "sk-alt-test"
+api_key_file = "managed/secrets/alt.key"
 "#,
             ),
             &paths,

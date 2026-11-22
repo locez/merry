@@ -2,9 +2,7 @@ use crate::cli_error::CliError;
 use crate::coding::{AutoFallback, PermissionMode, SandboxMode};
 use crate::config::{MerryConfig, XdgPaths};
 use crate::config::{ProviderAlias, derive_provider_alias};
-use crate::provider_management::{
-    ProviderDiscoveryDraft, ProviderManagementError, ProviderManagementService,
-};
+use crate::provider_management::{ProviderDiscoveryDraft, ProviderManagementService};
 use crate::workspace_trust::{self, TrustWorkspace, WorkspaceLaunch};
 
 use crossterm::event::KeyCode;
@@ -452,17 +450,7 @@ async fn run_provider_setup(
                                 let editable = match provider_management.editable_provider(&alias) {
                                     Ok(editable) => editable,
                                     Err(error) => {
-                                        if matches!(
-                                            &error,
-                                            ProviderManagementError::ReadOnlyProvider { .. }
-                                        ) {
-                                            state.show_info_dialog(
-                                                "Read-only provider",
-                                                error.to_string(),
-                                            );
-                                        } else {
-                                            state.set_provider_overlay_error(error.to_string());
-                                        }
+                                        state.set_provider_overlay_error(error.to_string());
                                         continue;
                                     }
                                 };
@@ -744,7 +732,6 @@ fn open_setup_provider_manager(
                 profile.alias().as_str(),
                 profile.display_name(),
                 profile.kind(),
-                profile.source(),
                 profile.protocol(),
                 model,
             )
@@ -862,14 +849,17 @@ mod provider_setup_tests {
     #[test]
     fn provider_setup_is_required_only_until_provider_and_model_resolve() {
         let paths = XdgPaths::from_parts(std::path::PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
+            None,
             Some(
                 r#"
+version = 1
+
 [providers.opencode]
 display_name = "OpenCode"
 default_model = "deepseek-v4-pro"
 type = "openai-compatible"
-api_key = "sk-test"
+api_key_file = "managed/secrets/opencode.key"
 "#,
             ),
             &paths,

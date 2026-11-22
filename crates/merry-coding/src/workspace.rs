@@ -54,6 +54,7 @@ pub(crate) struct WorkspaceCodingProfileBuilder {
     pub(crate) read_scope: Option<Vec<PathBuf>>,
     pub(crate) patch_write_scope: Option<Vec<PathBuf>>,
     pub(crate) forbidden_paths: Vec<PathBuf>,
+    pub(crate) denied_absolute_paths: Vec<PathBuf>,
     pub(crate) enable_patch_tool: bool,
     pub(crate) enable_web_tools: bool,
     pub(crate) process_runner: Option<WorkspaceProcessRunnerConfig>,
@@ -71,6 +72,7 @@ impl WorkspaceCodingProfileBuilder {
             read_scope: None,
             patch_write_scope: None,
             forbidden_paths: Vec::new(),
+            denied_absolute_paths: Vec::new(),
             enable_patch_tool: false,
             enable_web_tools: false,
             process_runner: None,
@@ -145,6 +147,15 @@ impl WorkspaceCodingProfileBuilder {
         self
     }
 
+    pub(crate) fn denied_absolute_paths<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.denied_absolute_paths = paths.into_iter().map(Into::into).collect();
+        self
+    }
+
     pub(crate) fn read_only_process_runner(mut self, runner: Arc<dyn ProcessRunner>) -> Self {
         self.process_runner = Some(WorkspaceProcessRunnerConfig::ReadOnly(runner));
         self
@@ -164,7 +175,8 @@ impl WorkspaceCodingProfileBuilder {
             .with_limits(self.limits)
             .with_read_scope(self.read_scope)
             .with_patch_write_scope(self.patch_write_scope)
-            .with_forbidden_paths(self.forbidden_paths);
+            .with_forbidden_paths(self.forbidden_paths)
+            .with_denied_absolute_paths(self.denied_absolute_paths);
         if let Some(memory) = self.durable_memory.clone() {
             config = config.with_durable_memory(memory);
         }
@@ -306,6 +318,13 @@ impl WorkspaceCodingProfileBuilder {
         }
         for path in &self.forbidden_paths {
             append_hash_field(&mut material, "forbidden-path", &path.to_string_lossy());
+        }
+        for path in &self.denied_absolute_paths {
+            append_hash_field(
+                &mut material,
+                "denied-absolute-path",
+                &path.to_string_lossy(),
+            );
         }
         for (name, value) in [
             ("max-read-bytes", self.limits.max_read_bytes),

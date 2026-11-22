@@ -538,17 +538,12 @@ mod tests {
     #[test]
     fn parses_subagents_default_roles_toggle_and_project_role_files() {
         let paths = XdgPaths::from_parts(home(), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-4.1"
-
-[providers.openai-compatible]
-type = "openai-compatible"
-base_url = "https://api.openai.com/v1"
-api_key = "test-key"
 
 [subagents]
 max_threads = 8
@@ -577,6 +572,16 @@ description = "UI verification specialist"
 model = "gpt-4.1-mini"
 allowed_tools = ["browser_tab", "browser_network", "web_fetch", "read_text"]
 instructions = "Check console errors."
+"#,
+            ),
+            Some(
+                r#"
+version = 1
+
+[providers.openai-compatible]
+type = "openai-compatible"
+base_url = "https://api.openai.com/v1"
+api_key_file = "managed/secrets/openai.key"
 "#,
             ),
             &paths,

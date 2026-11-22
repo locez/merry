@@ -843,7 +843,9 @@ impl Runtime {
             let mut session = self.inner.session.lock().await;
             session.record_compaction_started()
         };
-        self.inner.commit_journal_events(std::slice::from_ref(&event)).await;
+        self.inner
+            .commit_journal_events(std::slice::from_ref(&event))
+            .await;
         event
     }
 
@@ -858,7 +860,9 @@ impl Runtime {
                 outcome.covered_history_item_count(),
             )
         };
-        self.inner.commit_journal_events(std::slice::from_ref(&event)).await;
+        self.inner
+            .commit_journal_events(std::slice::from_ref(&event))
+            .await;
         event
     }
 
@@ -871,7 +875,9 @@ impl Runtime {
             let mut session = self.inner.session.lock().await;
             session.record_cancelled(diagnostic)
         };
-        self.inner.commit_journal_events(std::slice::from_ref(&event)).await;
+        self.inner
+            .commit_journal_events(std::slice::from_ref(&event))
+            .await;
         event
     }
 
@@ -884,7 +890,9 @@ impl Runtime {
             let mut session = self.inner.session.lock().await;
             session.record_failed(diagnostic)
         };
-        self.inner.commit_journal_events(std::slice::from_ref(&event)).await;
+        self.inner
+            .commit_journal_events(std::slice::from_ref(&event))
+            .await;
         event
     }
 }

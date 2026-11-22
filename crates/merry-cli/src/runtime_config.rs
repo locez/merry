@@ -319,20 +319,46 @@ fn action_process_backend_options(
     if let Some(config) = config {
         path_rules.extend(config.trusted_global_path_rules()?);
     }
-    let private_paths = if let Some(config) = config {
-        config.private_process_paths()?
+    let (config_dir, skill_roots, private_paths) = if let Some(config) = config {
+        (
+            config.config_dir().to_path_buf(),
+            config.skill_roots()?,
+            config.private_process_paths()?,
+        )
     } else {
         let paths = XdgPaths::from_env()?;
-        vec![
-            paths.config_dir().to_path_buf(),
-            paths.state_dir().to_path_buf(),
-        ]
+        let config_dir = paths.config_dir().to_path_buf();
+        let default_skills = config_dir.join("skills");
+        (
+            config_dir,
+            vec![default_skills],
+            vec![paths.state_dir().to_path_buf(), paths.managed_config_dir()],
+        )
     };
+    // Merry's own non-secret config directory and configured skill roots stay
+    // writable so the agent can update config.toml and skills directly. State
+    // and Settings-managed credentials live under state_dir and stay denied.
+    if is_clean_absolute_path(&config_dir) {
+        path_rules.push(PathAccessRule::new(
+            config_dir,
+            PathAccess::ReadWrite,
+            PathAccessRuleSource::ProductConfig,
+        ));
+    }
+    for skill_root in skill_roots {
+        if is_clean_absolute_path(&skill_root) {
+            path_rules.push(PathAccessRule::new(
+                skill_root,
+                PathAccess::ReadWrite,
+                PathAccessRuleSource::ProductConfig,
+            ));
+        }
+    }
     path_rules.extend(private_paths.into_iter().map(|path| {
         PathAccessRule::new(path, PathAccess::Deny, PathAccessRuleSource::ProductPrivate)
     }));
     // The memory tree is outside the workspace. Grant only that root, whether
-    // or not the workspace itself is writable. Config and state stay denied.
+    // or not the workspace itself is writable. State and credentials stay denied.
     if let Ok(memory_root) = MemoryLayout::memory_root_from_env()
         && is_clean_absolute_path(&memory_root)
     {
@@ -360,6 +386,20 @@ fn action_process_backend_options(
                 .map(MerryConfig::host_integrations)
                 .unwrap_or_default(),
         ))
+}
+
+pub(crate) fn private_tool_paths(
+    config: Option<&MerryConfig>,
+) -> Result<Vec<PathBuf>, config::ConfigError> {
+    if let Some(config) = config {
+        config.private_process_paths()
+    } else {
+        let paths = XdgPaths::from_env()?;
+        Ok(vec![
+            paths.state_dir().to_path_buf(),
+            paths.managed_config_dir(),
+        ])
+    }
 }
 
 pub(crate) fn configured_runtime_builder(
@@ -660,7 +700,7 @@ display_name = "OpenCode"
 default_model = "deepseek-v4-pro"
 type = "openai-compatible"
 base_url = "https://opencode.example.test/v1"
-api_key_file = "managed/secrets/opencode.key"
+api_key_file = "secrets/opencode.key"
 "#,
         )
         .expect("managed provider registry");
@@ -682,28 +722,102 @@ api_key_file = "managed/secrets/opencode.key"
             fixture.path().to_path_buf(),
             Some(fixture.path().join("config")),
             Some(fixture.path().join("state")),
-        );
-        fs::create_dir_all(paths.config_dir()).unwrap();
+        )
+        .with_data_home(fixture.path().join("data"));
+        let custom_skills = fixture.path().join("custom-skills");
+        fs::create_dir_all(paths.config_dir().join("skills")).unwrap();
+        fs::create_dir_all(&custom_skills).unwrap();
         fs::create_dir_all(paths.state_dir()).unwrap();
+        fs::create_dir_all(paths.managed_secrets_dir()).unwrap();
         let workspace = fixture.path().join("workspace");
         fs::create_dir(&workspace).unwrap();
-        fs::write(paths.config_file(), "private config fixture").unwrap();
+        let user_config = format!(
+            "[skills]\nroots = [\"{}\"]\n",
+            custom_skills.to_str().expect("utf8 skill root")
+        );
+        fs::write(paths.config_file(), &user_config).unwrap();
+        let default_skill = paths.config_dir().join("skills/default.md");
+        fs::write(&default_skill, "default skill fixture").unwrap();
+        let custom_skill = custom_skills.join("custom.md");
+        fs::write(&custom_skill, "custom skill fixture").unwrap();
         fs::write(paths.state_dir().join("session"), "private session fixture").unwrap();
-        let credential = paths
-            .config_dir()
-            .parent()
-            .expect("merry config dir has a parent")
-            .join("provider-key");
+        let credential = paths.managed_secrets_dir().join("test.key");
         fs::write(&credential, "synthetic credential fixture").unwrap();
-        let config = MerryConfig::load_optional_from_text(Some("[providers.test]\ntype = 'openai-compatible'\nbase_url = 'https://provider.example.test'\napi_key_file = '../provider-key'\n"), &paths).unwrap().unwrap();
+        fs::write(
+            paths.managed_providers_file(),
+            r#"
+version = 1
+
+[providers.test]
+type = "openai-compatible"
+base_url = "https://provider.example.test"
+api_key_file = "secrets/test.key"
+"#,
+        )
+        .unwrap();
+        let config = MerryConfig::load_optional(&paths).unwrap().unwrap();
         let options = action_process_backend_options(Some(&config)).unwrap();
         let backend =
             LocalProcessBackend::new(&workspace, ProcessBackendMode::Isolated, options).unwrap();
         let session = backend.new_session();
+
+        // Merry's own non-secret config directory and configured skill roots are
+        // readable and writable by sandboxed actions.
+        for (path, expected) in [
+            (paths.config_file().to_path_buf(), user_config.as_str()),
+            (default_skill.clone(), "default skill fixture"),
+            (custom_skill.clone(), "custom skill fixture"),
+        ] {
+            let intent = ProcessActionIntent::new(
+                vec!["/bin/cat".into(), path.to_str().unwrap().into()],
+                None,
+                ProcessEnvPolicy::empty(),
+                None,
+                1024,
+                1024,
+            )
+            .unwrap();
+            let output = session
+                .runner()
+                .run(intent, ProcessRunnerContext::new(Default::default()))
+                .await
+                .unwrap();
+            assert_eq!(output.stdout_text(), expected, "{output:?}");
+        }
+        for writable in [
+            paths.config_dir().join("agent-note.toml"),
+            paths.config_dir().join("skills/added.md"),
+            custom_skills.join("added.md"),
+        ] {
+            let intent = ProcessActionIntent::new(
+                vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "printf 'ok' > \"$1\"".into(),
+                    "sh".into(),
+                    writable.to_str().unwrap().into(),
+                ],
+                None,
+                ProcessEnvPolicy::empty(),
+                None,
+                1024,
+                1024,
+            )
+            .unwrap();
+            let output = session
+                .runner()
+                .run(intent, ProcessRunnerContext::new(Default::default()))
+                .await
+                .unwrap();
+            assert_eq!(output.status().exit_code(), Some(0), "{output:?}");
+            assert_eq!(fs::read_to_string(&writable).unwrap(), "ok");
+        }
+
+        // Merry state and managed credentials remain strictly unreadable and unwritable.
         for path in [
-            paths.config_file().to_path_buf(),
             paths.state_dir().join("session"),
-            credential,
+            paths.managed_providers_file(),
+            credential.clone(),
         ] {
             let intent = ProcessActionIntent::new(
                 vec!["/bin/cat".into(), path.to_str().unwrap().into()],
@@ -721,22 +835,52 @@ api_key_file = "managed/secrets/opencode.key"
                 .unwrap();
             assert_eq!(output.stdout_text(), "", "{output:?}");
         }
+        let write_secret = ProcessActionIntent::new(
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'tampered' > \"$1\"".into(),
+                "sh".into(),
+                credential.to_str().unwrap().into(),
+            ],
+            None,
+            ProcessEnvPolicy::empty(),
+            None,
+            1024,
+            1024,
+        )
+        .unwrap();
+        let output = session
+            .runner()
+            .run(write_secret, ProcessRunnerContext::new(Default::default()))
+            .await
+            .unwrap();
+        assert_ne!(output.status().exit_code(), Some(0), "{output:?}");
+        assert_eq!(
+            fs::read_to_string(&credential).unwrap(),
+            "synthetic credential fixture"
+        );
     }
 
     #[test]
     fn generation_config_uses_provider_default_reasoning_effort() {
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-test"
 reasoning_effort = "high"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
 
 [providers.openai-compatible]
 reasoning_effort = "low"
-api_key = "sk-test"
+api_key_file = "secrets/openai.key"
 "#,
             ),
             &paths,
@@ -755,15 +899,20 @@ api_key = "sk-test"
     #[test]
     fn generation_config_preserves_provider_reasoning_default_when_unset() {
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-test"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
 
 [providers.openai-compatible]
-api_key = "sk-test"
+api_key_file = "secrets/openai.key"
 "#,
             ),
             &paths,
@@ -782,17 +931,22 @@ api_key = "sk-test"
     #[test]
     fn generation_config_uses_provider_default_service_tier_over_named_provider() {
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-test"
 service_tier = "priority"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
 
 [providers.openai-compatible]
 service_tier = "flex"
-api_key = "sk-test"
+api_key_file = "secrets/openai.key"
 "#,
             ),
             &paths,
@@ -808,16 +962,21 @@ api_key = "sk-test"
     #[test]
     fn generation_config_falls_back_to_named_provider_service_tier() {
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-test"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
 
 [providers.openai-compatible]
 service_tier = "flex"
-api_key = "sk-test"
+api_key_file = "secrets/openai.key"
 "#,
             ),
             &paths,
@@ -833,15 +992,20 @@ api_key = "sk-test"
     #[test]
     fn generation_config_omits_service_tier_when_unset() {
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-test"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
 
 [providers.openai-compatible]
-api_key = "sk-test"
+api_key_file = "secrets/openai.key"
 "#,
             ),
             &paths,
@@ -857,16 +1021,21 @@ api_key = "sk-test"
     #[test]
     fn invalid_service_tier_is_rejected() {
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-test"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
 
 [providers.openai-compatible]
 service_tier = "turbo"
-api_key = "sk-test"
+api_key_file = "secrets/openai.key"
 "#,
             ),
             &paths,
@@ -887,16 +1056,21 @@ api_key = "sk-test"
     #[test]
     fn service_tier_is_rejected_for_anthropic_providers() {
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "anthropic"
 model = "claude-test"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
 
 [providers.anthropic]
 service_tier = "priority"
-api_key = "sk-test"
+api_key_file = "secrets/anthropic.key"
 "#,
             ),
             &paths,
@@ -917,16 +1091,21 @@ api_key = "sk-test"
     #[test]
     fn default_level_service_tier_is_rejected_for_anthropic_providers() {
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "anthropic"
 model = "claude-test"
 service_tier = "priority"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
 
 [providers.anthropic]
-api_key = "sk-test"
+api_key_file = "secrets/anthropic.key"
 "#,
             ),
             &paths,

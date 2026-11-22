@@ -1,13 +1,12 @@
-//! Right-hand detail panes for the Provider Workbench (inline editor, read-only, empty).
+//! Right-hand detail panes for the Provider Workbench (inline editor and empty state).
 
-use super::{form_field_index, form_field_label, protocol_display_label};
+use super::{form_field_index, form_field_label};
 use crate::{
-    config::{ConfiguredProviderKind, ManagedProviderKind},
+    config::ManagedProviderKind,
     tui::{
-        click_target::truncate_columns,
         modal_frame::{modal_selection_style, modal_surface_style},
         overlay_render::semantic_style,
-        provider_overlay::{ProviderFormField, ProviderFormOverlay, ProviderListItem},
+        provider_overlay::{ProviderFormField, ProviderFormOverlay},
         state::TuiState,
         theme::SemanticColor,
     },
@@ -322,101 +321,6 @@ fn form_action_chips_line(
     Line::from(spans)
 }
 
-pub(super) fn render_readonly_detail_pane(
-    frame: &mut Frame<'_>,
-    state: &TuiState,
-    item: &ProviderListItem,
-    is_active: bool,
-    area: Rect,
-) {
-    if area.is_empty() {
-        return;
-    }
-    let surface = modal_surface_style(state);
-    let label_style = semantic_style(state, SemanticColor::TextSecondary).patch(surface);
-    let val_style = semantic_style(state, SemanticColor::Assistant).patch(surface);
-    let kw_style = semantic_style(state, SemanticColor::ToolKeyword).patch(surface);
-    let muted = semantic_style(state, SemanticColor::Muted).patch(surface);
-
-    let kind_label = match item.kind() {
-        ConfiguredProviderKind::OpenAiCompatible => "OpenAI-compatible",
-        ConfiguredProviderKind::Anthropic => "Anthropic",
-    };
-    let protocol_label = protocol_display_label(item.kind(), item.protocol());
-    let base_url = item.base_url().unwrap_or("(default)");
-    let model = item.model().unwrap_or("(none)");
-    let reasoning = item.reasoning_effort().unwrap_or("(unset)");
-
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                item.display_name().to_owned(),
-                semantic_style(state, SemanticColor::Heading)
-                    .add_modifier(Modifier::BOLD)
-                    .patch(surface),
-            ),
-            Span::styled(
-                if is_active {
-                    "  [active · config.toml]"
-                } else {
-                    "  [config.toml · read-only]"
-                },
-                semantic_style(
-                    state,
-                    if is_active {
-                        SemanticColor::Success
-                    } else {
-                        SemanticColor::Muted
-                    },
-                )
-                .patch(surface),
-            ),
-        ]),
-        Line::styled("", surface),
-        kv_line("Config alias", item.alias(), label_style, kw_style),
-        kv_line("API type", kind_label, label_style, val_style),
-        kv_line("Protocol", protocol_label, label_style, val_style),
-        kv_line(
-            "Base URL",
-            &truncate_columns(base_url, usize::from(area.width).saturating_sub(18)),
-            label_style,
-            kw_style,
-        ),
-        kv_line("Model", model, label_style, kw_style),
-        kv_line("Thinking mode", reasoning, label_style, val_style),
-        Line::styled("", surface),
-        Line::from(Span::styled(
-            "  Edit ~/.config/merry/config.toml to modify this provider.",
-            muted,
-        )),
-        Line::styled("", surface),
-    ];
-
-    let chip_bg = state.theme().bg_color(SemanticColor::ChipBackground);
-    let make_chip = |label: &str, color: SemanticColor| {
-        let mut st = semantic_style(state, color).add_modifier(Modifier::BOLD);
-        if let Some(bg) = chip_bg {
-            st = st.bg(bg);
-        }
-        Span::styled(format!("[{label}]"), st)
-    };
-    lines.push(Line::from(vec![
-        Span::styled("  ", surface),
-        make_chip(
-            if is_active { "Active" } else { "Set active" },
-            if is_active {
-                SemanticColor::Success
-            } else {
-                SemanticColor::Focus
-            },
-        ),
-        Span::styled("  ", surface),
-        make_chip("Models", SemanticColor::ToolKeyword),
-    ]));
-
-    frame.render_widget(Paragraph::new(lines).style(surface), area);
-}
-
 pub(super) fn render_empty_detail_pane(frame: &mut Frame<'_>, state: &TuiState, area: Rect) {
     let surface = modal_surface_style(state);
     let lines = vec![
@@ -462,11 +366,4 @@ fn radio_pills(state: &TuiState, options: &[(&str, bool)], base: Style) -> Vec<S
         }
     }
     spans
-}
-
-fn kv_line(label: &str, value: &str, label_style: Style, value_style: Style) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("  {label:<16}"), label_style),
-        Span::styled(value.to_owned(), value_style),
-    ])
 }

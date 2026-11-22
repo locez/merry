@@ -41,6 +41,7 @@ pub(crate) struct HeadlessCodingRuntimeInput<'a> {
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
     pub(crate) approval_review: Option<RuntimeRoleProviderConfig>,
     pub(crate) skill_roots: Vec<PathBuf>,
+    pub(crate) denied_absolute_paths: Vec<PathBuf>,
     pub(crate) subagents: super::CodingSubagentsConfig,
     pub(crate) workspace_tool_limits: Option<merry_tools::WorkspaceToolLimits>,
     /// When false, `AGENTS.md` stays unloaded and `apply_patch` cannot write.
@@ -164,6 +165,7 @@ pub(crate) fn build_coding_runtime(
         context_compaction: options.context_compaction,
         approval_review: options.approval_review,
         skill_roots: options.skill_roots,
+        denied_absolute_paths: Vec::new(),
         subagents: options.subagents,
         workspace_tool_limits: options.workspace_tool_limits,
         workspace_writable: true,
@@ -191,6 +193,7 @@ fn build_coding_runtime_from_headless_input(
     .with_extra_tools(input.extra_tools)
     .with_automatic_compaction(input.automatic_compaction)
     .with_skill_roots(input.skill_roots)
+    .with_denied_absolute_paths(input.denied_absolute_paths)
     .with_subagents(input.subagents)
     .with_permission_review_rules(review_rules);
     if let Some(limit) = max_parallel_tool_calls {

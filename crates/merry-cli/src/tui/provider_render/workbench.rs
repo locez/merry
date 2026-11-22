@@ -2,27 +2,22 @@
 
 use super::{
     action_hint_line, protocol_display_label,
-    workbench_detail::{
-        render_empty_detail_pane, render_form_detail_pane, render_readonly_detail_pane,
-    },
+    workbench_detail::{render_empty_detail_pane, render_form_detail_pane},
     workbench_layout,
 };
-use crate::{
-    config::ProviderConfigSource,
-    tui::{
-        click_target::truncate_columns,
-        modal_frame::{
-            modal_selection_style, modal_surface_style, render_divider, render_modal_frame,
-            render_vertical_divider,
-        },
-        overlay_render::semantic_style,
-        provider_overlay::{
-            ProviderFormField, ProviderFormOverlay, ProviderListItem, ProviderManagerOverlay,
-            ProviderWorkbenchFocus,
-        },
-        state::TuiState,
-        theme::SemanticColor,
+use crate::tui::{
+    click_target::truncate_columns,
+    modal_frame::{
+        modal_selection_style, modal_surface_style, render_divider, render_modal_frame,
+        render_vertical_divider,
     },
+    overlay_render::semantic_style,
+    provider_overlay::{
+        ProviderFormField, ProviderFormOverlay, ProviderListItem, ProviderManagerOverlay,
+        ProviderWorkbenchFocus,
+    },
+    state::TuiState,
+    theme::SemanticColor,
 };
 use ratatui::{
     Frame,
@@ -73,14 +68,6 @@ pub(in crate::tui) fn render_provider_manager(
                 manager.current_alias() == manager.selected_item().map(ProviderListItem::alias),
                 layout.right_pane,
             );
-        } else if let Some(item) = manager.selected_item() {
-            render_readonly_detail_pane(
-                frame,
-                state,
-                item,
-                manager.current_alias() == Some(item.alias()),
-                layout.right_pane,
-            );
         } else {
             render_empty_detail_pane(frame, state, layout.right_pane);
         }
@@ -101,13 +88,7 @@ pub(in crate::tui) fn render_provider_manager(
     }
 
     render_divider(frame, state, layout.footer_divider);
-    let notice = manager.notice().unwrap_or_else(|| {
-        if !manager.is_adding() && manager.selected_source() == Some(ProviderConfigSource::User) {
-            "config.toml provider · connection settings are read-only"
-        } else {
-            ""
-        }
-    });
+    let notice = manager.notice().unwrap_or("");
     let actions: &[(&str, &str)] = if manager.focus() == ProviderWorkbenchFocus::Detail {
         &[
             ("Tab", "Next"),
@@ -115,7 +96,7 @@ pub(in crate::tui) fn render_provider_manager(
             ("Ctrl+S", "Save"),
             ("Esc", "List"),
         ]
-    } else if manager.selected_source() == Some(ProviderConfigSource::Managed) {
+    } else if manager.selected_item().is_some() {
         &[
             ("N", "Add"),
             ("Enter", "Switch"),
@@ -126,12 +107,7 @@ pub(in crate::tui) fn render_provider_manager(
             ("Esc", "Back"),
         ]
     } else {
-        &[
-            ("N", "Add"),
-            ("Enter", "Switch"),
-            ("M", "Models"),
-            ("Esc", "Back"),
-        ]
+        &[("N", "Add"), ("Esc", "Back")]
     };
     render_workbench_footer(frame, state, notice, actions, layout.footer);
 }
@@ -253,20 +229,14 @@ fn render_provider_list_column(
         } else {
             base
         };
-        let tag = match item.source() {
-            ProviderConfigSource::User => "cfg",
-            ProviderConfigSource::Managed => "mng",
-        };
-        let tag_width = UnicodeWidthStr::width(tag) + 1;
-        let name_budget = width.saturating_sub(4 + tag_width).max(1);
+        let name_budget = width.saturating_sub(4).max(1);
         let name = truncate_columns(item.display_name(), name_budget);
-        let pad = width.saturating_sub(4 + UnicodeWidthStr::width(name.as_str()) + tag_width);
+        let pad = width.saturating_sub(4 + UnicodeWidthStr::width(name.as_str()));
         lines.push(Line::from(vec![
             Span::styled(bar, bar_style),
             Span::styled(dot, dot_style),
             Span::styled(name, base.add_modifier(Modifier::BOLD)),
-            Span::styled(" ".repeat(pad.saturating_add(1)), base),
-            Span::styled(tag, semantic_style(state, SemanticColor::Muted).patch(base)),
+            Span::styled(" ".repeat(pad), base),
         ]));
     }
     if items.is_empty() {

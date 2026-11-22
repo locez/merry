@@ -19,7 +19,7 @@ use crate::{
     },
     runtime_config::{
         automatic_compaction_config, generation_config, prepared_action_process_backend_options,
-        subagents_config,
+        private_tool_paths, subagents_config,
     },
     workspace_trust::{self, TrustWorkspace},
 };
@@ -261,6 +261,7 @@ pub(crate) async fn run(
             .transpose()
             .map_err(unexpected)?
             .unwrap_or_default(),
+        denied_absolute_paths: private_tool_paths(merry_config).map_err(unexpected)?,
         subagents: coding_subagents,
         workspace_tool_limits: None,
         workspace_writable: workspace.writable,

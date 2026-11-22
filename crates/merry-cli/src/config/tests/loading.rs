@@ -1,6 +1,5 @@
 use super::home;
 use crate::coding::{AutoFallback, PermissionMode};
-use crate::config::provider::{EffectiveOpenAiApiKeySource, ProviderConfigSource};
 use crate::config::{
     BrandMarkMode, CliDefaults, EffectiveProviderConfig, LogFormat, LogLevel, MerryConfig, XdgPaths,
 };
@@ -42,7 +41,7 @@ display_name = "OpenCode"
 default_model = "deepseek-v4-pro"
 type = "openai-compatible"
 base_url = "https://opencode.example.test/v1"
-api_key_file = "managed/secrets/opencode.key"
+api_key_file = "secrets/opencode.key"
 "#,
     )
     .expect("managed providers file");
@@ -55,7 +54,6 @@ api_key_file = "managed/secrets/opencode.key"
         .expect("managed profile should resolve");
 
     assert_eq!(profile.display_name(), "OpenCode");
-    assert_eq!(profile.source(), ProviderConfigSource::Managed);
     let EffectiveProviderConfig::OpenAiCompatible(provider) = config
         .provider_by_alias("opencode")
         .expect("managed provider should materialize")
@@ -66,47 +64,6 @@ api_key_file = "managed/secrets/opencode.key"
         provider.resolve_api_key().expect("key should resolve"),
         "sk-test"
     );
-}
-
-#[test]
-fn rejects_user_and_managed_alias_collision() {
-    let temp = tempfile::tempdir().expect("temp dir");
-    let paths = XdgPaths::from_parts(
-        temp.path().join("home"),
-        Some(temp.path().join("config")),
-        Some(temp.path().join("state")),
-    );
-    fs::create_dir_all(paths.managed_config_dir()).expect("managed config dir");
-    fs::write(
-        paths.config_file(),
-        r#"
-[providers.default]
-provider = "opencode"
-model = "model-a"
-
-[providers.opencode]
-api_key = "sk-user"
-"#,
-    )
-    .expect("user config");
-    fs::write(
-        paths.managed_providers_file(),
-        r#"
-version = 1
-
-[providers.opencode]
-display_name = "Managed OpenCode"
-default_model = "model-b"
-type = "openai-compatible"
-api_key = "sk-managed"
-"#,
-    )
-    .expect("managed config");
-
-    let error = MerryConfig::load_optional(&paths).expect_err("collision should fail");
-
-    assert!(error.to_string().contains("opencode"));
-    assert!(error.to_string().contains("both user and managed"));
 }
 
 #[test]
@@ -414,26 +371,12 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
     assert_eq!(tui.keymap.history_search.as_deref(), Some("ctrl+r"));
     assert_eq!(tui.keymap.toggle_comment.as_deref(), Some("alt+c"));
 
-    let provider = config
-        .openai_compatible_provider()
-        .expect("example provider should validate");
-    assert_eq!(provider.model.as_deref(), Some("gpt-4.1-mini"));
-    assert_eq!(
-        provider
-            .reasoning_effort
-            .as_ref()
-            .map(|effort| effort.as_str()),
-        None
-    );
-    assert_eq!(
-        provider.base_url.as_deref(),
-        Some("https://api.openai.com/v1")
-    );
-    assert_eq!(
-        provider.api_key,
-        EffectiveOpenAiApiKeySource::File(PathBuf::from(
-            "/home/alice/.config/merry/secrets/openai.key"
-        ))
+    assert!(
+        config
+            .configured_default_provider()
+            .expect("example config without credentials should validate")
+            .is_none(),
+        "example config.toml must not define inline or file-based provider credentials"
     );
     let retry = config
         .provider_retry_policy()
@@ -480,16 +423,8 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
     let models = config
         .runtime_models()
         .expect("example runtime model roles should validate");
-    let context_compaction = models
-        .context_compaction
-        .expect("example should configure context compaction model role");
-    assert_eq!(context_compaction.provider, "openai-compatible");
-    assert_eq!(context_compaction.model, "gpt-4.1-mini");
-    let approval_review = models
-        .approval_review
-        .expect("example should configure approval review model role");
-    assert_eq!(approval_review.provider, "openai-compatible");
-    assert_eq!(approval_review.model, "gpt-4.1-mini");
+    assert!(models.context_compaction.is_none());
+    assert!(models.approval_review.is_none());
 
     let subagents = config
         .subagents_config()
@@ -561,4 +496,111 @@ fn rejects_invalid_log_level_format_and_relative_log_path() {
         .effective_log_settings(&paths)
         .expect_err("relative log path should fail");
     assert!(relative_path.to_string().contains("absolute"));
+}
+
+#[test]
+fn relocates_legacy_managed_provider_directory_and_resolves_legacy_secret_paths() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = XdgPaths::from_parts(
+        temp.path().join("home"),
+        Some(temp.path().join("config")),
+        Some(temp.path().join("state")),
+    )
+    .with_data_home(temp.path().join("data"));
+
+    let legacy_dir = paths.config_dir().join("managed");
+    let legacy_secrets = legacy_dir.join("secrets");
+    std::fs::create_dir_all(&legacy_secrets).expect("create legacy secrets dir");
+    std::fs::write(
+        legacy_secrets.join("deepseek-1-0.key"),
+        "sk-legacy-secret\n",
+    )
+    .expect("write legacy secret");
+    std::fs::write(
+        legacy_dir.join("providers.toml"),
+        r#"
+version = 1
+
+[providers.deepseek]
+display_name = "DeepSeek"
+default_model = "deepseek-chat"
+type = "openai-compatible"
+protocol = "chat_completions"
+base_url = "https://api.deepseek.com/v1"
+api_key_file = "managed/secrets/deepseek-1-0.key"
+"#,
+    )
+    .expect("write legacy registry");
+
+    let config = MerryConfig::load_optional(&paths)
+        .expect("config should relocate and load")
+        .expect("relocated registry should be loaded");
+
+    assert!(
+        !legacy_dir.exists(),
+        "legacy managed directory should be moved out of writable config_dir"
+    );
+    assert!(paths.managed_providers_file().is_file());
+    let expected_secret = paths.managed_secrets_dir().join("deepseek-1-0.key");
+    assert_eq!(
+        std::fs::read_to_string(&expected_secret).expect("moved secret should be readable"),
+        "sk-legacy-secret\n"
+    );
+
+    let provider = config
+        .provider_by_alias("deepseek")
+        .expect("relocated provider should resolve");
+    match provider {
+        crate::config::EffectiveProviderConfig::OpenAiCompatible(openai) => {
+            assert_eq!(openai.api_key_file, expected_secret);
+            assert_eq!(
+                openai.resolve_api_key().expect("key should read"),
+                "sk-legacy-secret"
+            );
+        }
+        other => panic!("expected openai-compatible provider, got {other:?}"),
+    }
+    assert_eq!(
+        config
+            .private_process_paths()
+            .expect("private process paths should resolve"),
+        vec![paths.state_dir().to_path_buf(), paths.managed_config_dir(),],
+        "relocated managed/secrets/... path should stay covered by providers_dir"
+    );
+}
+
+#[test]
+fn does_not_overwrite_existing_providers_dir_when_legacy_managed_dir_also_exists() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let paths = XdgPaths::from_parts(
+        temp.path().join("home"),
+        Some(temp.path().join("config")),
+        Some(temp.path().join("state")),
+    )
+    .with_data_home(temp.path().join("data"));
+
+    let legacy_dir = paths.config_dir().join("managed");
+    std::fs::create_dir_all(&legacy_dir).expect("create legacy dir");
+    std::fs::write(
+        legacy_dir.join("providers.toml"),
+        "version = 1\n[providers.legacy]\ntype = \"openai-compatible\"\napi_key_file = \"managed/secrets/old.key\"\n",
+    )
+    .expect("write legacy registry");
+
+    std::fs::create_dir_all(paths.managed_secrets_dir()).expect("create new providers dir");
+    std::fs::write(
+        paths.managed_providers_file(),
+        "version = 1\n[providers.current]\ntype = \"openai-compatible\"\napi_key_file = \"secrets/new.key\"\n",
+    )
+    .expect("write new registry");
+
+    let config = MerryConfig::load_optional(&paths)
+        .expect("config should load existing providers dir")
+        .expect("config should be present");
+
+    assert_eq!(config.provider_aliases(), vec!["current".to_owned()]);
+    assert!(
+        legacy_dir.exists(),
+        "legacy directory should be left untouched when target already exists"
+    );
 }

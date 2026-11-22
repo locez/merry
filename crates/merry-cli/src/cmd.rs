@@ -5,7 +5,7 @@ use crate::provider_config::{
     RuntimePrimaryProviderConfig, RuntimeProviderBundle, openai_provider_bundle,
     openai_provider_config_bundle,
 };
-use crate::runtime_config::automatic_compaction_config;
+use crate::runtime_config::{automatic_compaction_config, private_tool_paths};
 use merry::profiles::{CodingRuntime, CodingRuntimeBuilder, CodingRuntimeInput};
 use merry_core::{ErrorInfo, PendingToolCall, SessionId, ToolInputSchema};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
@@ -111,6 +111,7 @@ pub(crate) async fn run(args: &Args, merry_config: Option<&MerryConfig>) -> Resu
             .transpose()
             .map_err(unexpected)?
             .unwrap_or_default(),
+        denied_absolute_paths: private_tool_paths(merry_config).map_err(unexpected)?,
     })?;
     let plan = generate_command_plan(&runtime, &args.request, &environment).await?;
     if args.json {
@@ -192,6 +193,7 @@ pub(crate) struct RuntimeInput<'a> {
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
     pub(crate) skill_roots: Vec<PathBuf>,
+    pub(crate) denied_absolute_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -267,6 +269,7 @@ pub(crate) fn build_runtime(input: RuntimeInput<'_>) -> Result<Runtime, CliError
         CodingRuntimeInput::read_only(session_id, input.root, input.provider, input.model)
             .with_automatic_compaction(input.automatic_compaction)
             .with_skill_roots(input.skill_roots)
+            .with_denied_absolute_paths(input.denied_absolute_paths)
             .with_extra_tools([cmd_check_command_tool(input.environment)?]);
     if let Some(role_provider) = input.context_compaction {
         coding_input = coding_input.with_model_role(role_provider);

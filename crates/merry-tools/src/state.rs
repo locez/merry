@@ -18,6 +18,7 @@ pub(crate) struct WorkspaceToolState {
     pub(crate) patch_write_scope: Option<Vec<String>>,
     pub(crate) read_forbidden_paths: Vec<String>,
     pub(crate) forbidden_paths: Vec<String>,
+    pub(crate) denied_absolute_paths: Vec<PathBuf>,
     pub(crate) durable_memory: Option<Arc<DurableMemory>>,
 }
 
@@ -48,6 +49,7 @@ impl WorkspaceToolState {
         if !forbidden_paths.iter().any(|path| path == ".git") {
             forbidden_paths.push(".git".to_owned());
         }
+        let denied_absolute_paths = normalize_denied_absolute_paths(config.denied_absolute_paths);
 
         Ok(Self {
             root,
@@ -57,8 +59,22 @@ impl WorkspaceToolState {
             patch_write_scope,
             read_forbidden_paths,
             forbidden_paths,
+            denied_absolute_paths,
             durable_memory: config.durable_memory,
         })
+    }
+
+    /// Returns whether `path` falls inside any host-level denied directory or
+    /// file (such as Merry's private state or credential store).
+    pub(crate) fn is_denied_absolute_path(&self, path: &std::path::Path) -> bool {
+        if self.denied_absolute_paths.is_empty() {
+            return false;
+        }
+        let lexical = normalize_path_lexically(path);
+        let resolved = resolve_path_with_existing_ancestor(&lexical);
+        self.denied_absolute_paths
+            .iter()
+            .any(|denied| lexical.starts_with(denied) || resolved.starts_with(denied))
     }
 
     /// Returns the workspace root followed by every read-only resource root.
@@ -184,4 +200,59 @@ fn validate_limits(limits: &WorkspaceToolLimits) -> Result<(), WorkspaceToolConf
     }
 
     Ok(())
+}
+
+fn normalize_denied_absolute_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut normalized = BTreeSet::new();
+    for path in paths {
+        if !path.is_absolute() {
+            continue;
+        }
+        let lexical = normalize_path_lexically(&path);
+        let resolved = resolve_path_with_existing_ancestor(&lexical);
+        normalized.insert(lexical);
+        normalized.insert(resolved);
+    }
+    normalized.into_iter().collect()
+}
+
+fn resolve_path_with_existing_ancestor(path: &std::path::Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+    let mut suffix = Vec::new();
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        if let Some(name) = current.file_name() {
+            suffix.push(name.to_os_string());
+        }
+        if let Ok(canonical_parent) = fs::canonicalize(parent) {
+            let mut resolved = canonical_parent;
+            for part in suffix.into_iter().rev() {
+                resolved.push(part);
+            }
+            return resolved;
+        }
+        current = parent;
+    }
+    path.to_path_buf()
+}
+
+fn normalize_path_lexically(path: &std::path::Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    let is_absolute = path.is_absolute();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() && !is_absolute {
+                    normalized.push("..");
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
 }

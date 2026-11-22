@@ -58,7 +58,48 @@ pub(crate) fn profile(launch: &SandboxLaunch) -> String {
             escaped = quote(path)
         ));
     }
+    // Seatbelt evaluates matching rules last-wins, so emitting explicit deny
+    // rules after allows still protects private subtrees when a user grants a
+    // broader parent directory (such as `~/.local/share` or `~`).
+    for path in &launch.deny {
+        let escaped = quote(path);
+        lines.push(format!("(deny file-read* (subpath {escaped}))"));
+        lines.push(format!("(deny file-write* (subpath {escaped}))"));
+    }
     lines.join("\n")
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn command_args(launch: &SandboxLaunch) -> Vec<String> {
+    let mut args = Vec::with_capacity(launch.args.len() + 4);
+    args.push("-p".to_owned());
+    args.push(profile(launch));
+    args.push("--".to_owned());
+    args.push(launch.program.clone());
+    args.extend(launch.args.iter().cloned());
+    args
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn build_tokio_command(launch: &SandboxLaunch) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("/usr/bin/sandbox-exec");
+    command
+        .args(command_args(launch))
+        .current_dir(&launch.cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    for (name, value) in &launch.env {
+        command.env(name, value);
+    }
+    for name in &launch.remove_env {
+        command.env_remove(name);
+    }
+    command
+        .env_remove(super::HELPER_ENV)
+        .env_remove(super::POLICY_ENV);
+    command
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -88,12 +129,7 @@ pub(super) fn apply(launch: &SandboxLaunch) -> Result<(), String> {
     use std::process::Command;
 
     let mut command = Command::new("/usr/bin/sandbox-exec");
-    command
-        .arg("-p")
-        .arg(profile(launch))
-        .arg("--")
-        .arg(&launch.program)
-        .args(&launch.args);
+    command.args(command_args(launch));
     command.current_dir(&launch.cwd);
     for (name, value) in &launch.env {
         command.env(name, value);

@@ -91,6 +91,8 @@ pub(crate) struct SandboxLaunch {
     network: bool,
     read_only: Vec<String>,
     read_write: Vec<String>,
+    #[serde(default)]
+    deny: Vec<String>,
     traverse: Vec<String>,
 }
 
@@ -210,6 +212,7 @@ pub(crate) fn prepare_launch(
     append_host_integration_env(environment, &mut env, &mut remove_env)?;
 
     let traverse = traverse_ancestors(&read_only, &read_write);
+    let deny = denied_paths(path_rules);
     Ok(SandboxLaunch {
         program: program.clone(),
         args: args.to_vec(),
@@ -219,21 +222,48 @@ pub(crate) fn prepare_launch(
         network: network_allowed,
         read_only: strings_from_paths(&read_only)?,
         read_write: strings_from_paths(&read_write)?,
+        deny: strings_from_paths(&deny)?,
         traverse: strings_from_paths(&traverse)?,
     })
 }
 
 pub(crate) fn helper_program() -> PathBuf {
-    if let Some(path) = env::var_os(HELPER_ENV).filter(|value| Path::new(value).is_file()) {
-        return PathBuf::from(path);
+    if let Some(path) = explicit_helper_program() {
+        return path;
+    }
+    if let Ok(current) = env::current_exe()
+        && let Some(helper) = cargo_debug_helper(&current)
+    {
+        return helper;
+    }
+    // On Linux, `env::current_exe()` reads `/proc/self/exe` into a path string
+    // that becomes `... (deleted)` once the running binary is replaced or
+    // unlinked during an in-place upgrade, causing `ENOENT` on spawn. Spawning
+    // `/proc/self/exe` directly executes the kernel's live open inode for this
+    // process, avoiding both `ENOENT` and policy-schema skew against a newer
+    // binary installed at the old path.
+    #[cfg(target_os = "linux")]
+    {
+        let proc_self_exe = Path::new("/proc/self/exe");
+        if proc_self_exe.exists() {
+            return proc_self_exe.to_path_buf();
+        }
     }
     if let Ok(current) = env::current_exe() {
-        if let Some(helper) = cargo_debug_helper(&current) {
-            return helper;
-        }
         return current;
     }
     PathBuf::from("merry")
+}
+
+pub(crate) fn explicit_helper_program() -> Option<PathBuf> {
+    env::var_os(HELPER_ENV)
+        .filter(|value| Path::new(value).is_file())
+        .map(PathBuf::from)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn direct_seatbelt_command(launch: &SandboxLaunch) -> tokio::process::Command {
+    seatbelt::build_tokio_command(launch)
 }
 
 pub(crate) fn write_policy(launch: &SandboxLaunch) -> Result<PathBuf, ProcessRunnerError> {
@@ -434,6 +464,16 @@ fn blocked_by_policy(path: &Path, rules: &[PathAccessRule]) -> bool {
     })
 }
 
+fn denied_paths(rules: &[PathAccessRule]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for rule in rules {
+        if rule.access() == PathAccess::Deny && !rule.review_required() {
+            push_path(&mut paths, &resolve_host_path(rule.path()));
+        }
+    }
+    paths
+}
+
 fn ensure_exclusions_are_enforceable(
     workspace: &Path,
     temporary_directory: &Path,
@@ -454,6 +494,18 @@ fn ensure_exclusions_are_enforceable(
             .chain(read_only.iter())
             .find(|grant| path == **grant || path.starts_with(grant));
         if let Some(grant) = covered {
+            // Respect user-requested broad grants (such as `~/.local/share` or
+            // `~`) instead of refusing to start: macOS Seatbelt still denies
+            // `ProductPrivate` subtrees via last-match rules, while Linux
+            // Landlock cannot subtract a subdirectory from an allowed parent.
+            if rule.source() == PathAccessRuleSource::ProductPrivate && !rule.review_required() {
+                tracing::warn!(
+                    private_path = %path.display(),
+                    allowed_path = %grant.display(),
+                    "allowed sandbox directory covers Merry private directory; continuing per user grant (Linux Landlock cannot exclude subdirectories from an allowed parent)"
+                );
+                continue;
+            }
             conflicts.push(sandbox_rule_conflict(
                 rule,
                 &path,
@@ -560,6 +612,12 @@ fn allowed_directory_label(
             (PathAccessRuleSource::DurableMemory, PathAccess::ReadWrite) => {
                 format!("the writable memory directory `{}`", grant.display())
             }
+            (PathAccessRuleSource::ProductConfig, PathAccess::ReadWrite) => {
+                format!(
+                    "Merry's writable config/skills directory `{}`",
+                    grant.display()
+                )
+            }
             _ => format!("allowed directory `{}`", grant.display()),
         };
     }
@@ -582,7 +640,7 @@ fn conflict_fix(
 ) -> String {
     if rule.source() == PathAccessRuleSource::ProductPrivate && !rule.review_required() {
         return format!(
-            "Move Merry's config and state directories out of `{}`, or pass --sandbox off.",
+            "Move Merry's state and credentials directory out of `{}`, or pass --sandbox off.",
             grant.display()
         );
     }

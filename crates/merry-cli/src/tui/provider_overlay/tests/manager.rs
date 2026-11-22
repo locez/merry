@@ -1,4 +1,4 @@
-use crate::config::{ConfiguredProviderKind, ProviderConfigSource};
+use crate::config::ConfiguredProviderKind;
 use crate::tui::provider_overlay::{
     ProviderListItem, ProviderManagerOverlay, ProviderOverlayAction,
 };
@@ -13,7 +13,6 @@ fn provider_manager_keeps_duplicate_endpoint_profiles_as_distinct_rows() {
                 "work",
                 "OpenCode Work",
                 ConfiguredProviderKind::OpenAiCompatible,
-                ProviderConfigSource::Managed,
                 Some(OpenAiProtocol::ChatCompletions),
                 Some("model-work"),
             ),
@@ -21,7 +20,6 @@ fn provider_manager_keeps_duplicate_endpoint_profiles_as_distinct_rows() {
                 "personal",
                 "OpenCode Personal",
                 ConfiguredProviderKind::OpenAiCompatible,
-                ProviderConfigSource::Managed,
                 Some(OpenAiProtocol::ChatCompletions),
                 Some("model-personal"),
             ),
@@ -41,7 +39,6 @@ fn provider_manager_requires_confirmation_before_deleting_managed_provider() {
             "opencode",
             "OpenCode",
             ConfiguredProviderKind::OpenAiCompatible,
-            ProviderConfigSource::Managed,
             Some(OpenAiProtocol::ChatCompletions),
             Some("model-a"),
         )],
@@ -67,7 +64,6 @@ fn provider_manager_enter_switches_the_resolved_model_and_e_edits() {
         "opencode",
         "OpenCode",
         ConfiguredProviderKind::OpenAiCompatible,
-        ProviderConfigSource::Managed,
         Some(OpenAiProtocol::ChatCompletions),
         Some("model-a"),
     );
@@ -96,7 +92,6 @@ fn provider_manager_enter_opens_models_when_no_model_is_resolved() {
             "opencode",
             "OpenCode",
             ConfiguredProviderKind::OpenAiCompatible,
-            ProviderConfigSource::Managed,
             Some(OpenAiProtocol::ChatCompletions),
             None,
         )],
@@ -110,35 +105,13 @@ fn provider_manager_enter_opens_models_when_no_model_is_resolved() {
 }
 
 #[test]
-fn provider_manager_refuses_to_delete_user_or_active_provider() {
+fn provider_manager_refuses_to_delete_active_provider() {
     let delete = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE);
-    let mut user_manager = ProviderManagerOverlay::new(
-        vec![ProviderListItem::new(
-            "user-config",
-            "User Config",
-            ConfiguredProviderKind::OpenAiCompatible,
-            ProviderConfigSource::User,
-            Some(OpenAiProtocol::ChatCompletions),
-            Some("model-a"),
-        )],
-        None,
-    );
-    assert_eq!(
-        user_manager.handle_key(delete),
-        ProviderOverlayAction::Consumed
-    );
-    assert!(
-        user_manager
-            .notice()
-            .is_some_and(|notice| notice.contains("read-only"))
-    );
-
     let mut active_manager = ProviderManagerOverlay::new(
         vec![ProviderListItem::new(
             "active",
             "Active",
             ConfiguredProviderKind::Anthropic,
-            ProviderConfigSource::Managed,
             None,
             Some("model-b"),
         )],

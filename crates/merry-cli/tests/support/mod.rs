@@ -80,6 +80,21 @@ pub fn write_xdg_config(temp: &tempfile::TempDir, text: &str) {
     fs::write(config_dir.join("config.toml"), text).expect("config should write");
 }
 
+pub fn write_managed_providers(
+    temp: &tempfile::TempDir,
+    providers_toml: &str,
+    secrets: &[(&str, &str)],
+) {
+    let providers_dir = temp.path().join("data/merry/providers");
+    let secrets_dir = providers_dir.join("secrets");
+    fs::create_dir_all(&secrets_dir).expect("managed secrets dir should be created");
+    for (name, value) in secrets {
+        fs::write(secrets_dir.join(name), value).expect("managed secret should write");
+    }
+    fs::write(providers_dir.join("providers.toml"), providers_toml)
+        .expect("managed providers should write");
+}
+
 pub fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()

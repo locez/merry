@@ -3,7 +3,7 @@ use crate::{
     config::{
         ConfigError, ConfiguredProviderProfile, EffectiveProviderConfig, ManagedProviderDefinition,
         ManagedProviderKind, ManagedProviderStore, ManagedProviderStoreError, MerryConfig,
-        ProviderAlias, ProviderConfigSource, XdgPaths,
+        ProviderAlias, XdgPaths,
     },
     provider_config::materialized_provider_from_config,
 };
@@ -315,11 +315,6 @@ impl ProviderManagementService {
             ProviderManagementError::Invalid("no providers are configured".to_owned())
         })?;
         let profile = config.provider_profile(alias.as_str())?;
-        if profile.source() != ProviderConfigSource::Managed {
-            return Err(ProviderManagementError::ReadOnlyProvider {
-                alias: alias.clone(),
-            });
-        }
         let default_model = profile.default_model().cloned().ok_or_else(|| {
             ProviderManagementError::Invalid(format!(
                 "managed provider {:?} has no default model",
@@ -358,14 +353,10 @@ impl ProviderManagementService {
         draft: ProviderDraft,
     ) -> Result<(), ProviderManagementError> {
         if let Some(config) = self.config.as_ref()
-            && let Ok(profile) = config.provider_profile(draft.alias().as_str())
+            && config.provider_profile(draft.alias().as_str()).is_ok()
         {
-            let reason = match profile.source() {
-                ProviderConfigSource::User => "is owned by user config and is read-only",
-                ProviderConfigSource::Managed => "already exists; choose another provider name",
-            };
             return Err(ProviderManagementError::Invalid(format!(
-                "provider alias {:?} {reason}",
+                "provider alias {:?} already exists; choose another provider name",
                 draft.alias().as_str()
             )));
         }
@@ -403,18 +394,13 @@ impl ProviderManagementService {
         original_alias: &ProviderAlias,
         draft: ProviderDraft,
     ) -> Result<(), ProviderManagementError> {
-        let profile = self
+        let _profile = self
             .config
             .as_ref()
             .ok_or_else(|| {
                 ProviderManagementError::Invalid("no providers are configured".to_owned())
             })?
             .provider_profile(original_alias.as_str())?;
-        if profile.source() != ProviderConfigSource::Managed {
-            return Err(ProviderManagementError::ReadOnlyProvider {
-                alias: original_alias.clone(),
-            });
-        }
         if draft.alias() != original_alias {
             return Err(ProviderManagementError::Invalid(
                 "provider config alias is a stable ID and cannot be renamed".to_owned(),
@@ -454,18 +440,13 @@ impl ProviderManagementService {
         &mut self,
         alias: &ProviderAlias,
     ) -> Result<(), ProviderManagementError> {
-        let profile = self
+        let _profile = self
             .config
             .as_ref()
             .ok_or_else(|| {
                 ProviderManagementError::Invalid("no providers are configured".to_owned())
             })?
             .provider_profile(alias.as_str())?;
-        if profile.source() != ProviderConfigSource::Managed {
-            return Err(ProviderManagementError::ReadOnlyProvider {
-                alias: alias.clone(),
-            });
-        }
         self.managed_store.delete(alias).await?;
         self.config = MerryConfig::load_optional(&self.paths)?;
         let cache_path = self.model_cache_path(alias);
@@ -552,12 +533,7 @@ impl ProviderManagementService {
         let config = self.config.as_ref().ok_or_else(|| {
             ProviderManagementError::Invalid("no providers are configured".to_owned())
         })?;
-        let profile = config.provider_profile(original_alias.as_str())?;
-        if profile.source() != ProviderConfigSource::Managed {
-            return Err(ProviderManagementError::ReadOnlyProvider {
-                alias: original_alias.clone(),
-            });
-        }
+        let _profile = config.provider_profile(original_alias.as_str())?;
         match config.provider_by_alias(original_alias.as_str())? {
             EffectiveProviderConfig::OpenAiCompatible(provider) => {
                 provider.resolve_api_key().map_err(Into::into)
@@ -734,8 +710,6 @@ pub(crate) enum ProviderManagementError {
     },
     #[error("failed to serialize model cache: {0}")]
     CacheSerialize(#[from] serde_json::Error),
-    #[error("provider {alias} is defined in config.toml and is read-only in the TUI")]
-    ReadOnlyProvider { alias: ProviderAlias },
     #[error("invalid provider management request: {0}")]
     Invalid(String),
 }

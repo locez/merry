@@ -3,7 +3,7 @@ use merry_runtime::{
 };
 use serde::Deserialize;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
 };
@@ -14,7 +14,10 @@ pub(crate) mod managed_provider;
 mod mcp;
 mod paths;
 pub use paths::XdgPaths;
-use paths::{resolve_config_relative_path, resolve_path_access_rule_path, resolve_user_path};
+use paths::{
+    resolve_config_relative_path, resolve_path_access_rule_path,
+    resolve_provider_api_key_file_path, resolve_user_path,
+};
 mod provider;
 mod runtime;
 mod subagents;
@@ -26,11 +29,9 @@ pub(crate) use managed_provider::{
     ManagedProviderStoreError, ProviderAlias, derive_provider_alias,
 };
 use mcp::McpToml;
-use provider::ProvidersToml;
-pub(crate) use provider::{
-    ConfiguredProviderKind, ConfiguredProviderProfile, ProviderConfigSource,
-};
+pub(crate) use provider::{ConfiguredProviderKind, ConfiguredProviderProfile};
 pub use provider::{EffectiveOpenAiProviderConfig, EffectiveProviderConfig};
+use provider::{NamedProviderToml, ProvidersToml};
 use runtime::RuntimeToml;
 use subagents::SubagentsToml;
 pub use subagents::{EffectiveSubagentRoleConfig, SubagentsConfig, load_project_subagent_roles};
@@ -60,8 +61,9 @@ pub struct MerryConfig {
     raw: MerryConfigToml,
     config_dir: PathBuf,
     state_dir: PathBuf,
+    providers_dir: PathBuf,
     home: PathBuf,
-    managed_provider_aliases: BTreeSet<String>,
+    managed_providers: BTreeMap<String, NamedProviderToml>,
 }
 
 impl MerryConfig {
@@ -70,40 +72,43 @@ impl MerryConfig {
         &self.home
     }
 
+    /// Returns the absolute Merry config directory (`$XDG_CONFIG_HOME/merry`).
+    pub fn config_dir(&self) -> &Path {
+        &self.config_dir
+    }
+
     pub fn load_optional(paths: &XdgPaths) -> Result<Option<Self>, ConfigError> {
+        relocate_legacy_managed_dir(paths)?;
         let user_text = read_optional_config_text(paths.config_file())?;
-        let managed_path = paths.managed_providers_file();
-        let managed_text = read_optional_config_text(&managed_path)?;
+        let managed_text = read_optional_managed_config_text(&paths.managed_providers_file())?;
+        Self::from_texts(user_text.as_deref(), managed_text.as_deref(), paths)
+    }
+
+    fn from_texts(
+        user_text: Option<&str>,
+        managed_text: Option<&str>,
+        paths: &XdgPaths,
+    ) -> Result<Option<Self>, ConfigError> {
         if user_text.is_none() && managed_text.is_none() {
             return Ok(None);
         }
-
-        let mut raw = user_text
-            .as_deref()
+        let raw = user_text
             .map(|text| parse_config_text(text, paths.config_file()))
             .transpose()?
             .unwrap_or_default();
-        let mut managed_provider_aliases = BTreeSet::new();
-        if let Some(text) = managed_text.as_deref() {
-            let managed = managed_provider::parse_managed_providers(text, &managed_path)?;
-            let providers = raw.providers.get_or_insert_with(ProvidersToml::default);
-            for (alias, provider) in managed {
-                if providers.named.contains_key(&alias) {
-                    return Err(ConfigError::Invalid(format!(
-                        "provider alias {alias:?} exists in both user and managed config"
-                    )));
-                }
-                managed_provider_aliases.insert(alias.clone());
-                providers.named.insert(alias, provider);
-            }
-        }
-
+        let managed_providers = managed_text
+            .map(|text| {
+                managed_provider::parse_managed_providers(text, &paths.managed_providers_file())
+            })
+            .transpose()?
+            .unwrap_or_default();
         Ok(Some(Self {
             raw,
             config_dir: paths.config_dir().to_path_buf(),
             state_dir: paths.state_dir().to_path_buf(),
+            providers_dir: paths.managed_config_dir(),
             home: paths.home().to_path_buf(),
-            managed_provider_aliases,
+            managed_providers,
         }))
     }
 
@@ -112,17 +117,16 @@ impl MerryConfig {
         text: Option<&str>,
         paths: &XdgPaths,
     ) -> Result<Option<Self>, ConfigError> {
-        let Some(text) = text else {
-            return Ok(None);
-        };
-        let raw = parse_config_text(text, paths.config_file())?;
-        Ok(Some(Self {
-            raw,
-            config_dir: paths.config_dir().to_path_buf(),
-            state_dir: paths.state_dir().to_path_buf(),
-            home: paths.home().to_path_buf(),
-            managed_provider_aliases: BTreeSet::new(),
-        }))
+        Self::from_texts(text, None, paths)
+    }
+
+    #[cfg(test)]
+    pub fn load_with_managed_from_text(
+        user_text: Option<&str>,
+        managed_text: Option<&str>,
+        paths: &XdgPaths,
+    ) -> Result<Option<Self>, ConfigError> {
+        Self::from_texts(user_text, managed_text, paths)
     }
 
     pub fn effective_log_settings(
@@ -155,20 +159,28 @@ impl MerryConfig {
         self.raw.global.profile.as_deref()
     }
 
-    /// Resolves product-owned directories and credential files without reading secrets.
+    /// Resolves product-owned state and credential paths without reading secrets.
+    ///
+    /// Merry's own non-secret config directory (`$XDG_CONFIG_HOME/merry`) and
+    /// configured skill roots are intentionally excluded here so sandboxed
+    /// actions may read and update user config and skills while state
+    /// (`$XDG_STATE_HOME/merry`) and provider credentials
+    /// (`$XDG_DATA_HOME/merry/providers`) remain protected.
     pub(crate) fn private_process_paths(&self) -> Result<Vec<PathBuf>, ConfigError> {
-        let mut paths = vec![self.config_dir.clone(), self.state_dir.clone()];
-        if let Some(providers) = &self.raw.providers {
-            for path in providers
-                .named
-                .values()
-                .filter_map(|provider| provider.api_key_file.as_deref())
+        let mut paths = vec![self.state_dir.clone(), self.providers_dir.clone()];
+        for path in self
+            .managed_providers
+            .values()
+            .filter_map(|provider| provider.api_key_file.as_deref())
+        {
+            let resolved =
+                resolve_provider_api_key_file_path(path, &self.providers_dir, &self.home)?;
+            // Files already inside `providers_dir` or `state_dir` are covered by
+            // the directory denies above; skipping them keeps the denied path
+            // list (and profile hash) stable as providers change in Settings.
+            if !resolved.starts_with(&self.providers_dir) && !resolved.starts_with(&self.state_dir)
             {
-                paths.push(resolve_config_relative_path(
-                    path,
-                    &self.config_dir,
-                    &self.home,
-                )?);
+                paths.push(resolved);
             }
         }
         Ok(paths)
@@ -347,10 +359,191 @@ impl MerryConfig {
     }
 }
 
+/// Moves a legacy `$XDG_CONFIG_HOME/merry/managed` directory to
+/// `$XDG_DATA_HOME/merry/providers` when the new directory does not yet exist.
+///
+/// Compatibility shim so existing users keep their Settings-managed providers
+/// and secrets when `config_dir` becomes writable by sandboxed actions.
+/// TODO: Remove once pre-relocation managed directories are no longer supported.
+fn relocate_legacy_managed_dir(paths: &XdgPaths) -> Result<(), ConfigError> {
+    let legacy_dir = paths.legacy_managed_config_dir();
+    let target_dir = paths.managed_config_dir();
+    if legacy_dir == target_dir {
+        return Ok(());
+    }
+    match fs::symlink_metadata(&legacy_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => return Ok(()),
+        Err(source)
+            if matches!(
+                source.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(source) => {
+            return Err(ConfigError::Read {
+                path: legacy_dir,
+                source,
+            });
+        }
+    }
+    let legacy_registry = legacy_dir.join("providers.toml");
+    if !fs::symlink_metadata(&legacy_registry).is_ok_and(|metadata| metadata.file_type().is_file())
+    {
+        return Ok(());
+    }
+    match fs::symlink_metadata(&target_dir) {
+        Ok(_) => {
+            tracing::warn!(
+                legacy = %legacy_dir.display(),
+                target = %target_dir.display(),
+                "legacy managed provider directory still exists alongside the active providers directory; leaving it untouched"
+            );
+            return Ok(());
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+        Err(source) if source.kind() == io::ErrorKind::NotADirectory => return Ok(()),
+        Err(source) => {
+            return Err(ConfigError::Read {
+                path: target_dir,
+                source,
+            });
+        }
+    }
+
+    if let Some(parent) = target_dir.parent() {
+        fs::create_dir_all(parent).map_err(|source| {
+            ConfigError::Invalid(format!(
+                "failed to create parent directory {} for legacy provider relocation: {source}",
+                parent.display()
+            ))
+        })?;
+    }
+    match fs::rename(&legacy_dir, &target_dir) {
+        Ok(()) => {
+            tracing::info!(
+                from = %legacy_dir.display(),
+                to = %target_dir.display(),
+                "relocated legacy managed provider directory"
+            );
+            Ok(())
+        }
+        Err(source)
+            if matches!(
+                source.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+            ) && target_dir.exists() =>
+        {
+            Ok(())
+        }
+        Err(source) if source.kind() == io::ErrorKind::CrossesDevices => {
+            move_managed_dir_cross_device(&legacy_dir, &target_dir).map_err(|copy_err| {
+                ConfigError::Invalid(format!(
+                    "failed to move legacy provider directory {} to {}: {copy_err}",
+                    legacy_dir.display(),
+                    target_dir.display()
+                ))
+            })?;
+            tracing::info!(
+                from = %legacy_dir.display(),
+                to = %target_dir.display(),
+                "relocated legacy managed provider directory across filesystems"
+            );
+            Ok(())
+        }
+        Err(source) => Err(ConfigError::Invalid(format!(
+            "failed to move legacy provider directory {} to {}: {source}",
+            legacy_dir.display(),
+            target_dir.display()
+        ))),
+    }
+}
+
+fn move_managed_dir_cross_device(legacy_dir: &Path, target_dir: &Path) -> io::Result<()> {
+    let parent = target_dir.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "target providers directory has no parent",
+        )
+    })?;
+    let temp_dir = parent.join(format!(".providers.relocate-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp_dir);
+    let copy_result = (|| -> io::Result<()> {
+        create_private_dir_sync(&temp_dir)?;
+        copy_private_file_sync(
+            &legacy_dir.join("providers.toml"),
+            &temp_dir.join("providers.toml"),
+        )?;
+        let legacy_secrets = legacy_dir.join("secrets");
+        if fs::symlink_metadata(&legacy_secrets).is_ok_and(|metadata| metadata.file_type().is_dir())
+        {
+            let temp_secrets = temp_dir.join("secrets");
+            create_private_dir_sync(&temp_secrets)?;
+            for entry in fs::read_dir(&legacy_secrets)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    copy_private_file_sync(&entry.path(), &temp_secrets.join(entry.file_name()))?;
+                }
+            }
+        }
+        fs::rename(&temp_dir, target_dir)
+    })();
+    if let Err(error) = copy_result {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Err(error);
+    }
+    let _ = fs::remove_dir_all(legacy_dir);
+    Ok(())
+}
+
+fn create_private_dir_sync(path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn copy_private_file_sync(from: &Path, to: &Path) -> io::Result<()> {
+    let content = fs::read(from)?;
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(to)?;
+    io::Write::write_all(&mut file, &content)?;
+    file.sync_all()
+}
+
 fn read_optional_config_text(path: &Path) -> Result<Option<String>, ConfigError> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(ConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn read_optional_managed_config_text(path: &Path) -> Result<Option<String>, ConfigError> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(source)
+            if matches!(
+                source.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(None)
+        }
         Err(source) => Err(ConfigError::Read {
             path: path.to_path_buf(),
             source,

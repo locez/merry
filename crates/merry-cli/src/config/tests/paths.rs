@@ -54,13 +54,14 @@ fn xdg_paths_normalize_absolute_environment_values() {
         PathBuf::from("/home/alice/../alice"),
         Some(PathBuf::from("/tmp/config/../config")),
         Some(PathBuf::from("/tmp/state/./nested/..")),
-    );
+    )
+    .with_data_home(PathBuf::from("/tmp/data/../data"));
 
     assert_eq!(paths.home(), Path::new("/home/alice"));
     assert_eq!(paths.config_dir(), Path::new("/tmp/config/merry"));
     assert_eq!(paths.state_dir(), Path::new("/tmp/state/merry"));
     assert_eq!(
         paths.managed_config_dir(),
-        Path::new("/tmp/config/merry/managed")
+        Path::new("/tmp/data/merry/providers")
     );
 }

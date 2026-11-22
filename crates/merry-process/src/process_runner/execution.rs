@@ -50,6 +50,23 @@ async fn run_sandbox_launch(
     if context.cancellation_token().is_cancelled() {
         return Err(ProcessRunnerError::Cancelled);
     }
+    // On macOS, invoke `/usr/bin/sandbox-exec` directly instead of re-execing
+    // the running `merry` binary. Overwriting the running binary on disk
+    // (for example `cp -p target/release/merry ~/.cargo/bin/merry`) invalidates
+    // its kernel code signature cache on macOS and causes any re-exec of
+    // `current_exe()` to die immediately with SIGKILL.
+    #[cfg(target_os = "macos")]
+    if confinement::explicit_helper_program().is_none() {
+        let command = confinement::direct_seatbelt_command(&launch);
+        return run_spawned_process(
+            command,
+            intent,
+            context,
+            "/usr/bin/sandbox-exec".to_owned(),
+            background,
+        )
+        .await;
+    }
     let policy = confinement::write_policy(&launch)?;
     let helper = confinement::helper_program();
     let mut command = tokio::process::Command::new(&helper);

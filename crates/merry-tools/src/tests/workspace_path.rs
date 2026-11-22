@@ -404,3 +404,92 @@ fn workspace_path_reads_hidden_components_after_normalization() {
     );
     assert_eq!(json_content(&outcome)["content"], "[core]\n");
 }
+
+#[test]
+fn denied_absolute_paths_block_read_text_and_apply_patch() {
+    let temp = TempWorkspace::new("path-denied-absolute");
+    let root = canonical_root(&temp);
+    let private_dir = sibling_of(&root, "-private-state");
+    let secret_file = private_dir.join("managed/secrets/openai.key");
+    fs::create_dir_all(secret_file.parent().expect("secret parent"))
+        .expect("private dir should be created");
+    fs::write(&secret_file, "sk-top-secret\n").expect("secret file should write");
+
+    let allowed_dir = sibling_of(&root, "-config-dir");
+    let allowed_file = allowed_dir.join("config.toml");
+    fs::create_dir_all(&allowed_dir).expect("allowed dir should be created");
+    fs::write(&allowed_file, "profile = 'coding'\n").expect("allowed file should write");
+
+    let tools = WorkspaceTools::new(
+        WorkspaceToolsConfig::new(temp.path().to_path_buf())
+            .with_denied_absolute_paths(vec![private_dir.clone()]),
+    )
+    .expect("workspace tools should construct");
+
+    let secret_text = secret_file.to_str().expect("secret path should be utf8");
+    let read_denied = read_outcome(&tools, secret_text);
+    assert_eq!(read_denied.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        read_denied.diagnostic().expect("diagnostic").code(),
+        ERROR_PATH_DENIED
+    );
+
+    let climbed = format!(
+        "../{}/managed/secrets/openai.key",
+        private_dir
+            .file_name()
+            .expect("private dir name")
+            .to_str()
+            .expect("utf8")
+    );
+    let climbed_read_denied = read_outcome(&tools, &climbed);
+    assert_eq!(climbed_read_denied.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        climbed_read_denied.diagnostic().expect("diagnostic").code(),
+        ERROR_PATH_DENIED
+    );
+
+    let update_denied = patch_text_outcome(
+        &tools,
+        &update_patch(secret_text, "sk-top-secret", "sk-tampered"),
+    );
+    assert_eq!(update_denied.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        update_denied.diagnostic().expect("diagnostic").code(),
+        ERROR_PATH_DENIED
+    );
+
+    let added_secret = private_dir.join("managed/secrets/new.key");
+    let add_denied = patch_text_outcome(
+        &tools,
+        &add_patch(added_secret.to_str().expect("utf8"), &["sk-new"]),
+    );
+    assert_eq!(add_denied.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        add_denied.diagnostic().expect("diagnostic").code(),
+        ERROR_PATH_DENIED
+    );
+    assert!(!added_secret.exists());
+
+    let delete_denied = patch_text_outcome(&tools, &delete_patch(secret_text));
+    assert_eq!(delete_denied.status(), ToolCallResultStatus::Failed);
+    assert_eq!(
+        delete_denied.diagnostic().expect("diagnostic").code(),
+        ERROR_PATH_DENIED
+    );
+    assert_eq!(read_text(&secret_file), "sk-top-secret\n");
+
+    // Paths outside denied_absolute_paths remain readable and editable.
+    let allowed_text = allowed_file.to_str().expect("allowed path should be utf8");
+    let read_allowed = read_outcome(&tools, allowed_text);
+    assert_eq!(read_allowed.status(), ToolCallResultStatus::Succeeded);
+    let update_allowed = patch_text_outcome(
+        &tools,
+        &update_patch(allowed_text, "profile = 'coding'", "profile = 'updated'"),
+    );
+    assert_eq!(update_allowed.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(read_text(&allowed_file), "profile = 'updated'\n");
+
+    fs::remove_dir_all(&private_dir).expect("private dir should be removable");
+    fs::remove_dir_all(&allowed_dir).expect("allowed dir should be removable");
+}

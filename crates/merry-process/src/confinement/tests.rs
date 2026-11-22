@@ -278,3 +278,81 @@ fn cargo_debug_helper_resolves_legacy_deps_and_build_dir_layouts() {
     );
     assert_eq!(cargo_debug_helper(&profile.join("merry")), None);
 }
+
+#[test]
+fn seatbelt_command_args_invokes_sandbox_exec_directly_with_profile_and_target() {
+    let launch = sample_launch(false, true);
+    let args = super::seatbelt::command_args(&launch);
+    assert_eq!(args[0], "-p");
+    assert_eq!(args[1], super::seatbelt::profile(&launch));
+    assert_eq!(args[2], "--");
+    assert_eq!(args[3], "pwd");
+    assert_eq!(args.len(), 4);
+}
+
+#[test]
+fn seatbelt_profile_emits_deny_rules_after_allows_for_product_private() {
+    let environment =
+        WorkspaceProcessEnvironment::new("/usr/bin", "/home/alice", "/tmp").expect("environment");
+    let rules = [
+        PathAccessRule::new(
+            PathBuf::from("/home/alice/.local/share"),
+            PathAccess::ReadWrite,
+            PathAccessRuleSource::TrustedGlobalConfig,
+        ),
+        PathAccessRule::new(
+            PathBuf::from("/home/alice/.local/share/merry/providers"),
+            PathAccess::Deny,
+            PathAccessRuleSource::ProductPrivate,
+        ),
+    ];
+    let launch = prepare_launch(
+        &sample_intent(),
+        Path::new("/workspace/merry"),
+        &environment,
+        false,
+        &rules,
+        true,
+    )
+    .expect("user grant covering ProductPrivate should still prepare a launch");
+    let profile = super::seatbelt::profile(&launch);
+    let allow_idx = profile
+        .find("(allow file-write* (subpath \"/home/alice/.local/share\"))")
+        .expect("allow rule for parent grant");
+    let deny_read_idx = profile
+        .find("(deny file-read* (subpath \"/home/alice/.local/share/merry/providers\"))")
+        .expect("deny read rule for ProductPrivate");
+    let deny_write_idx = profile
+        .find("(deny file-write* (subpath \"/home/alice/.local/share/merry/providers\"))")
+        .expect("deny write rule for ProductPrivate");
+    assert!(deny_read_idx > allow_idx);
+    assert!(deny_write_idx > allow_idx);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn proc_self_exe_remains_executable_after_unlinking_running_binary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sh_source = fs::canonicalize("/bin/sh").expect("canonical /bin/sh");
+    let sh_copy = temp.path().join("ephemeral-sh");
+    fs::copy(&sh_source, &sh_copy).expect("copy sh binary");
+
+    let output = Command::new(&sh_copy)
+        .arg("-c")
+        .arg("rm -f \"$1\" && exec /proc/self/exe -c 'printf still-alive'")
+        .arg("ephemeral-sh")
+        .arg(&sh_copy)
+        .output()
+        .expect("spawn copied shell");
+
+    assert!(
+        output.status.success(),
+        "re-exec via /proc/self/exe should survive binary unlink: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "still-alive");
+    assert!(
+        !sh_copy.exists(),
+        "copied binary should have been unlinked before re-exec"
+    );
+}

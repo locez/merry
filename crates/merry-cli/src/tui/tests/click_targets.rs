@@ -1,5 +1,5 @@
 use crate::{
-    config::{ConfiguredProviderKind, ProviderConfigSource},
+    config::ConfiguredProviderKind,
     tui::{
         controller::{ControllerEffect, handle_mouse_input},
         keymap::Keymap,
@@ -183,7 +183,6 @@ fn provider_and_model_and_reasoning_rows_activate_on_click() {
             "alpha",
             "Alpha Provider",
             ConfiguredProviderKind::OpenAiCompatible,
-            ProviderConfigSource::Managed,
             Some(OpenAiProtocol::ChatCompletions),
             Some("alpha-model"),
         ),
@@ -191,7 +190,6 @@ fn provider_and_model_and_reasoning_rows_activate_on_click() {
             "beta",
             "Beta Provider",
             ConfiguredProviderKind::OpenAiCompatible,
-            ProviderConfigSource::Managed,
             Some(OpenAiProtocol::Responses),
             Some("beta-model"),
         ),

@@ -228,6 +228,7 @@ pub struct CodingRuntimeInput {
     retry_policy: Option<ModelRetryPolicy>,
     model_roles: Vec<CodingModelRoleConfig>,
     skill_roots: Vec<PathBuf>,
+    denied_absolute_paths: Vec<PathBuf>,
     subagents: CodingSubagentsConfig,
     workspace_tool_limits: WorkspaceToolLimits,
     /// When false, the workspace is read-only: `AGENTS.md` stays unloaded and
@@ -259,6 +260,7 @@ impl CodingRuntimeInput {
             retry_policy: None,
             model_roles: Vec::new(),
             skill_roots: Vec::new(),
+            denied_absolute_paths: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
             workspace_tool_limits: WorkspaceToolLimits::default(),
             workspace_writable: true,
@@ -297,6 +299,7 @@ impl CodingRuntimeInput {
             retry_policy: None,
             model_roles: Vec::new(),
             skill_roots: Vec::new(),
+            denied_absolute_paths: Vec::new(),
             subagents: CodingSubagentsConfig::default(),
             workspace_tool_limits: WorkspaceToolLimits::default(),
             workspace_writable: true,
@@ -365,6 +368,19 @@ impl CodingRuntimeInput {
         P: Into<PathBuf>,
     {
         self.skill_roots = roots.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets absolute host paths that in-process file tools (`read_text` and
+    /// `apply_patch`) must never read or modify, inherited by parent and child
+    /// runtimes.
+    #[must_use]
+    pub fn with_denied_absolute_paths<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.denied_absolute_paths = paths.into_iter().map(Into::into).collect();
         self
     }
 
@@ -521,6 +537,7 @@ impl CodingRuntimeBuilder {
             retry_policy,
             model_roles,
             skill_roots,
+            denied_absolute_paths,
             subagents,
             workspace_tool_limits,
             workspace_writable,
@@ -574,6 +591,7 @@ impl CodingRuntimeBuilder {
 
         let mut profile_builder: CodingAgentProfileBuilder = coding_agent(&root)
             .readonly_resource_roots(skill_roots.clone())
+            .denied_absolute_paths(denied_absolute_paths)
             .limits(workspace_tool_limits)
             .register_tools(extra_tools);
         if !workspace_writable {

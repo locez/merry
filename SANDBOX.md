@@ -41,16 +41,28 @@ when that directory is absolute and different. `~/.git-credentials` is not
 granted.
 
 Writable: the workspace, `/tmp`, `/var/tmp`, `/dev`, `/dev/shm`, `/dev/pts`,
-`TMPDIR`, the Cargo registry and git database, the XDG cache, and durable
-memory at `$XDG_DATA_HOME/merry/memory` (default
-`~/.local/share/merry/memory`). The memory grant stays writable when the
-workspace itself is read-only. Cargo `bin` and rustup toolchains are
-read-only.
+`TMPDIR`, the Cargo registry and git database, the XDG cache, Merry's own
+non-secret config directory (`$XDG_CONFIG_HOME/merry`, default
+`~/.config/merry`), configured `[skills] roots` (default
+`~/.config/merry/skills`), and durable memory at `$XDG_DATA_HOME/merry/memory`
+(default `~/.local/share/merry/memory`). The config, skill, and memory grants
+stay writable when the workspace itself is read-only. Cargo `bin` and rustup
+toolchains are read-only.
 
 The rest of the home directory can be traversed so those granted paths can be
-opened. It is not listed or read. Private keys, `~/.aws`, `~/.config/gh`, and
-Merry's own config and state stay out. The memory grant does not include
-those directories.
+opened. It is not listed or read. Private keys, `~/.aws`, `~/.config/gh`,
+Merry's state under `$XDG_STATE_HOME/merry` (default `~/.local/state/merry`),
+and provider credentials under `$XDG_DATA_HOME/merry/providers` (default
+`~/.local/share/merry/providers`) stay out of both the process sandbox and
+in-process file tools (`read_text` and `apply_patch`). Provider definitions and
+credentials are not stored in `config.toml`; they live in
+`$XDG_DATA_HOME/merry/providers/` (edited in Merry Settings or directly on
+disk). The config, skill, and memory grants do not include those credential or
+state directories. If a user explicitly grants a broad parent directory (such
+as `~/.local/share` or `~`), Merry still starts rather than blocking the user:
+macOS Seatbelt continues denying those private subtrees, while Linux Landlock
+logs a warning because Landlock cannot subtract a subdirectory from an allowed
+parent.
 
 Network is off for an ordinary action. After permission review approves
 `network: true` for that action, the seccomp filter is not installed. The next

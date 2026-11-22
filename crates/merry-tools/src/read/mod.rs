@@ -238,6 +238,12 @@ fn validate_read_boundary(
     path: &ValidatedToolPath,
     resolved: &Path,
 ) -> Result<(), DomainError> {
+    if state.is_denied_absolute_path(resolved) {
+        return Err(DomainError::new(
+            ERROR_PATH_DENIED,
+            "path is denied by Merry security policy",
+        ));
+    }
     if state
         .readonly_resource_roots
         .iter()

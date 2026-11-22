@@ -211,7 +211,6 @@ impl ManagedProviderDefinition {
             base_url: Some(self.base_url),
             api_version: None,
             default_max_output_tokens: None,
-            api_key: None,
             api_key_file: Some(api_key_file),
         }
     }
@@ -263,7 +262,7 @@ impl ManagedProviderStore {
         write_new_private_file(&secret_path, api_key.as_bytes()).await?;
         registry.providers.insert(
             alias,
-            definition.into_toml(format!("managed/secrets/{secret_name}")),
+            definition.into_toml(format!("secrets/{secret_name}")),
         );
         #[cfg(test)]
         if self.fail_registry_replace {
@@ -316,7 +315,7 @@ impl ManagedProviderStore {
             let secret_path = self.secrets_dir.join(&secret_name);
             write_new_private_file(&secret_path, api_key.as_bytes()).await?;
             new_secret_path = Some(secret_path);
-            format!("managed/secrets/{secret_name}")
+            format!("secrets/{secret_name}")
         } else {
             existing.api_key_file.ok_or_else(|| {
                 ConfigError::Invalid(format!(

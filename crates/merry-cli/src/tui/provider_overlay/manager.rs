@@ -1,7 +1,5 @@
 use super::{ProviderFormField, ProviderFormOverlay, ProviderFormSeed, ProviderOverlayAction};
-use crate::config::{
-    ConfiguredProviderKind, ManagedProviderKind, ProviderConfigSource, derive_provider_alias,
-};
+use crate::config::{ConfiguredProviderKind, ManagedProviderKind, derive_provider_alias};
 use crossterm::event::{KeyCode, KeyEvent};
 use merry_llm::ReasoningEffort;
 use merry_provider_openai::OpenAiProtocol;
@@ -20,7 +18,6 @@ pub(crate) struct ProviderListItem {
     alias: String,
     display_name: String,
     kind: ConfiguredProviderKind,
-    source: ProviderConfigSource,
     protocol: Option<OpenAiProtocol>,
     model: Option<String>,
     base_url: Option<String>,
@@ -32,7 +29,6 @@ impl ProviderListItem {
         alias: &str,
         display_name: &str,
         kind: ConfiguredProviderKind,
-        source: ProviderConfigSource,
         protocol: Option<OpenAiProtocol>,
         model: Option<&str>,
     ) -> Self {
@@ -40,7 +36,6 @@ impl ProviderListItem {
             alias: alias.to_owned(),
             display_name: display_name.to_owned(),
             kind,
-            source,
             protocol,
             model: model.map(str::to_owned),
             base_url: None,
@@ -70,10 +65,6 @@ impl ProviderListItem {
         self.kind
     }
 
-    pub(crate) fn source(&self) -> ProviderConfigSource {
-        self.source
-    }
-
     pub(crate) fn model(&self) -> Option<&str> {
         self.model.as_deref()
     }
@@ -82,18 +73,7 @@ impl ProviderListItem {
         self.protocol
     }
 
-    pub(crate) fn base_url(&self) -> Option<&str> {
-        self.base_url.as_deref()
-    }
-
-    pub(crate) fn reasoning_effort(&self) -> Option<&str> {
-        self.reasoning_effort.as_deref()
-    }
-
-    fn to_form_seed(&self) -> Option<ProviderFormSeed> {
-        if self.source != ProviderConfigSource::Managed {
-            return None;
-        }
+    fn to_form_seed(&self) -> ProviderFormSeed {
         let kind = match self.kind {
             ConfiguredProviderKind::OpenAiCompatible => ManagedProviderKind::OpenAiCompatible,
             ConfiguredProviderKind::Anthropic => ManagedProviderKind::Anthropic,
@@ -106,7 +86,7 @@ impl ProviderListItem {
             .reasoning_effort
             .as_deref()
             .and_then(|value| ReasoningEffort::new(value).ok());
-        Some(ProviderFormSeed {
+        ProviderFormSeed {
             original_alias: self.alias.clone(),
             display_name: self.display_name.clone(),
             alias: self.alias.clone(),
@@ -118,7 +98,7 @@ impl ProviderListItem {
                 .unwrap_or_else(|| default_url.to_owned()),
             model: self.model.clone().unwrap_or_default(),
             reasoning_effort,
-        })
+        }
     }
 }
 
@@ -255,10 +235,6 @@ impl ProviderManagerOverlay {
         let Some(item) = self.items.get(self.selected) else {
             return ProviderOverlayAction::Consumed;
         };
-        if item.source() == ProviderConfigSource::User {
-            self.notice = Some("User config providers are read-only".to_owned());
-            return ProviderOverlayAction::Consumed;
-        }
         if self.current_alias() == Some(item.alias()) {
             self.notice = Some("Switch provider before deleting the active one".to_owned());
             return ProviderOverlayAction::Consumed;
@@ -274,10 +250,6 @@ impl ProviderManagerOverlay {
 
     pub(crate) fn current_alias(&self) -> Option<&str> {
         self.current_alias.as_deref()
-    }
-
-    pub(crate) fn selected_source(&self) -> Option<ProviderConfigSource> {
-        self.items.get(self.selected).map(ProviderListItem::source)
     }
 
     pub(crate) fn notice(&self) -> Option<&str> {
@@ -322,12 +294,7 @@ impl ProviderManagerOverlay {
                 ProviderOverlayAction::Consumed
             }
             KeyCode::Tab | KeyCode::Right => {
-                if !self.focus_detail()
-                    && self.selected_source() == Some(ProviderConfigSource::User)
-                {
-                    self.notice =
-                        Some("config.toml provider · connection settings are read-only".to_owned());
-                }
+                let _ = self.focus_detail();
                 ProviderOverlayAction::Consumed
             }
             KeyCode::Enter => self.items.get(self.selected).map_or(
@@ -340,7 +307,6 @@ impl ProviderManagerOverlay {
             KeyCode::Char('e') => self
                 .items
                 .get(self.selected)
-                .filter(|item| item.source() == ProviderConfigSource::Managed)
                 .map_or(ProviderOverlayAction::Consumed, |item| {
                     ProviderOverlayAction::OpenProviderEditor(item.alias().to_owned())
                 }),
@@ -368,7 +334,6 @@ impl ProviderManagerOverlay {
         self.detail_form = self
             .items
             .get(self.selected)
-            .and_then(ProviderListItem::to_form_seed)
-            .map(|seed| ProviderFormOverlay::edit(seed, used));
+            .map(|item| ProviderFormOverlay::edit(item.to_form_seed(), used));
     }
 }

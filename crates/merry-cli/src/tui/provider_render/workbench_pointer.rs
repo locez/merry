@@ -30,22 +30,16 @@ pub(crate) fn provider_manager_pointer(
                 position,
             );
         }
-        if layout.right_pane.contains(position) {
-            if let Some(form) = manager.detail_form() {
-                return form_detail_pointer(
-                    layout.right_pane,
-                    form,
-                    !manager.is_adding(),
-                    manager.current_alias() == manager.selected_item().map(ProviderListItem::alias),
-                    position,
-                );
-            } else if manager.selected_item().is_some() {
-                return readonly_detail_pointer(
-                    layout.right_pane,
-                    manager.current_alias() == manager.selected_item().map(ProviderListItem::alias),
-                    position,
-                );
-            }
+        if layout.right_pane.contains(position)
+            && let Some(form) = manager.detail_form()
+        {
+            return form_detail_pointer(
+                layout.right_pane,
+                form,
+                !manager.is_adding(),
+                manager.current_alias() == manager.selected_item().map(ProviderListItem::alias),
+                position,
+            );
         }
         return None;
     }
@@ -186,27 +180,6 @@ fn form_detail_pointer(
             Some(2) => return Some(ProviderWorkbenchPointer::DeleteSelected),
             _ => {}
         }
-    }
-    None
-}
-
-fn readonly_detail_pointer(
-    pane: Rect,
-    is_active: bool,
-    position: Position,
-) -> Option<ProviderWorkbenchPointer> {
-    let local_y = usize::from(position.y.saturating_sub(pane.y));
-    if local_y == 11 {
-        let chips = [if is_active { "Active" } else { "Set active" }, "Models"];
-        return match chip_hit(
-            Position::new(pane.x.saturating_add(2), position.y),
-            &chips,
-            position,
-        ) {
-            Some(0) => Some(ProviderWorkbenchPointer::SetActive),
-            Some(1) => Some(ProviderWorkbenchPointer::BrowseModels),
-            _ => None,
-        };
     }
     None
 }

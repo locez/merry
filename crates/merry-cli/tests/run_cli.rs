@@ -1,30 +1,44 @@
 mod support;
 
 use std::{io::Write, process::Stdio};
-use support::{merry_without_openai_env_and_xdg, write_xdg_config};
+use support::{merry_without_openai_env_and_xdg, write_managed_providers, write_xdg_config};
 
 /// Config that resolves a provider without reaching one: session selection and
 /// resume run before the first model call, so an offline endpoint is enough.
-const OFFLINE_PROVIDER_CONFIG: &str = "\
+const OFFLINE_PROVIDER_DEFAULT_CONFIG: &str = "\
 [providers.default]
 provider = \"openai-compatible\"
 model = \"offline-model\"
+";
+
+const OFFLINE_MANAGED_PROVIDERS: &str = "\
+version = 1
 
 [providers.openai-compatible]
 type = \"openai-compatible\"
 protocol = \"responses\"
 base_url = \"http://127.0.0.1:9/v1\"
-api_key = \"sk-offline-not-used\"
+api_key_file = \"secrets/openai.key\"
 ";
+
+fn write_offline_provider_config(temp: &tempfile::TempDir, extra_user_config: &str) {
+    write_xdg_config(
+        temp,
+        &format!("{OFFLINE_PROVIDER_DEFAULT_CONFIG}{extra_user_config}"),
+    );
+    write_managed_providers(
+        temp,
+        OFFLINE_MANAGED_PROVIDERS,
+        &[("openai.key", "sk-offline-not-used\n")],
+    );
+}
 
 #[test]
 fn mcp_outage_warns_on_stderr_but_reaches_the_runtime_and_preserves_jsonl_output() {
     let temp = tempfile::tempdir().unwrap();
-    write_xdg_config(
+    write_offline_provider_config(
         &temp,
-        &format!(
-            "{OFFLINE_PROVIDER_CONFIG}\n[providers.retry]\nenabled = false\n[mcp.offline]\nurl = 'http://127.0.0.1:9/mcp'\n"
-        ),
+        "\n[providers.retry]\nenabled = false\n[mcp.offline]\nurl = 'http://127.0.0.1:9/mcp'\n",
     );
     let output = merry_without_openai_env_and_xdg(&temp)
         .args([
@@ -64,7 +78,7 @@ fn mcp_outage_warns_on_stderr_but_reaches_the_runtime_and_preserves_jsonl_output
 #[test]
 fn run_refuses_a_whitespace_only_stdin_task_before_emitting_events() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
-    write_xdg_config(&temp, OFFLINE_PROVIDER_CONFIG);
+    write_offline_provider_config(&temp, "");
 
     let mut child = merry_without_openai_env_and_xdg(&temp)
         .args(["--sandbox", "off", "run", "-"])
@@ -158,7 +172,7 @@ fn run_refuses_to_both_start_and_resume_a_session() {
 #[test]
 fn run_reports_an_unknown_resume_id_without_starting_a_session() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
-    write_xdg_config(&temp, OFFLINE_PROVIDER_CONFIG);
+    write_offline_provider_config(&temp, "");
 
     let output = merry_without_openai_env_and_xdg(&temp)
         .args([
@@ -205,7 +219,7 @@ fn session_metadata_path(temp: &tempfile::TempDir, session_id: &str) -> std::pat
 #[test]
 fn a_headless_run_writes_picker_metadata_with_headless_origin() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
-    write_xdg_config(&temp, OFFLINE_PROVIDER_CONFIG);
+    write_offline_provider_config(&temp, "");
 
     let output = merry_without_openai_env_and_xdg(&temp)
         .args([
@@ -240,7 +254,7 @@ fn a_headless_run_writes_picker_metadata_with_headless_origin() {
 #[test]
 fn run_refuses_a_session_id_that_already_has_saved_state() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
-    write_xdg_config(&temp, OFFLINE_PROVIDER_CONFIG);
+    write_offline_provider_config(&temp, "");
     let state_path = session_state_path(&temp, "taken");
     std::fs::create_dir_all(state_path.parent().expect("state path has a session dir"))
         .expect("session dir should be created");
@@ -275,7 +289,7 @@ fn run_refuses_a_session_id_that_already_has_saved_state() {
 #[test]
 fn a_saved_run_blocks_reusing_its_session_id_but_not_resuming_it() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
-    write_xdg_config(&temp, OFFLINE_PROVIDER_CONFIG);
+    write_offline_provider_config(&temp, "");
 
     let first = merry_without_openai_env_and_xdg(&temp)
         .args([

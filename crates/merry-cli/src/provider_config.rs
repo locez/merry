@@ -664,15 +664,42 @@ mod tests {
     use merry_runtime::RuntimeModelRole;
     use std::path::PathBuf;
 
+    fn load_managed_test_config(
+        user_text: Option<&str>,
+        managed_text: &str,
+        secrets: &[(&str, &str)],
+    ) -> (tempfile::TempDir, MerryConfig) {
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let paths = XdgPaths::from_parts(
+            PathBuf::from("/home/alice"),
+            Some(temp.path().join("config")),
+            Some(temp.path().join("state")),
+        )
+        .with_data_home(temp.path().join("data"));
+        std::fs::create_dir_all(paths.managed_secrets_dir()).expect("secrets dir should exist");
+        for (name, value) in secrets {
+            std::fs::write(paths.managed_secrets_dir().join(name), value)
+                .expect("secret file should write");
+        }
+        let config =
+            MerryConfig::load_with_managed_from_text(user_text, Some(managed_text), &paths)
+                .expect("config should parse")
+                .expect("config should exist");
+        (temp, config)
+    }
+
     #[test]
     fn materialized_provider_exposes_profile_and_catalog_boundaries() {
-        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let (_temp, config) = load_managed_test_config(
             Some(
                 r#"
 [providers.default]
 provider = "opencode"
 model = "deepseek-v4-pro"
+"#,
+            ),
+            r#"
+version = 1
 
 [providers.opencode]
 display_name = "OpenCode"
@@ -680,13 +707,10 @@ default_model = "deepseek-v4-pro"
 type = "openai-compatible"
 protocol = "chat_completions"
 base_url = "https://opencode.example.test/v1"
-api_key = "sk-test"
+api_key_file = "secrets/opencode.key"
 "#,
-            ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should exist");
+            &[("opencode.key", "sk-test\n")],
+        );
 
         let resolved = super::materialized_provider_from_config(
             &config,
@@ -703,22 +727,20 @@ api_key = "sk-test"
 
     #[test]
     fn managed_only_provider_selection_builds_without_global_default() {
-        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
-            Some(
-                r#"
+        let (_temp, config) = load_managed_test_config(
+            None,
+            r#"
+version = 1
+
 [providers.opencode]
 display_name = "OpenCode"
 default_model = "deepseek-v4-pro"
 type = "openai-compatible"
 protocol = "chat_completions"
-api_key = "sk-test"
+api_key_file = "secrets/opencode.key"
 "#,
-            ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should exist");
+            &[("opencode.key", "sk-test\n")],
+        );
 
         let primary = super::runtime_primary_provider_from_config_with_override(
             Some(&config),
@@ -734,26 +756,12 @@ api_key = "sk-test"
 
     #[test]
     fn openai_debug_config_uses_xdg_toml_provider_and_secret_file() {
-        let temp = tempfile::tempdir().expect("tempdir should be created");
-        let config_dir = temp.path().join("config/merry");
-        std::fs::create_dir_all(config_dir.join("secrets")).expect("config dir should be created");
-        std::fs::write(config_dir.join("secrets/openai.key"), "sk-test\n")
-            .expect("secret file should write");
-        let paths = XdgPaths::from_parts(
-            PathBuf::from("/home/alice"),
-            Some(temp.path().join("config")),
-            Some(temp.path().join("state")),
-        );
-        let config = MerryConfig::load_optional_from_text(
+        let (_temp, config) = load_managed_test_config(
             Some(
                 r#"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-test"
-
-[providers.openai-compatible]
-base_url = "https://api.example.test/v1"
-api_key_file = "secrets/openai.key"
 
 [models.context_compaction]
 model = "gpt-compact"
@@ -762,10 +770,15 @@ model = "gpt-compact"
 model = "gpt-review"
 "#,
             ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should be present");
+            r#"
+version = 1
+
+[providers.openai-compatible]
+base_url = "https://api.example.test/v1"
+api_key_file = "secrets/openai.key"
+"#,
+            &[("openai.key", "sk-test\n")],
+        );
 
         let loaded = config_with_env(None, Some(&config), |name| {
             Ok((name == super::MERRY_OPENAI_DEBUG_ENV).then(|| "1".to_owned()))
@@ -796,17 +809,12 @@ model = "gpt-review"
 
     #[test]
     fn openai_debug_model_flag_overrides_only_primary_model() {
-        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let (_temp, config) = load_managed_test_config(
             Some(
                 r#"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-primary"
-
-[providers.openai-compatible]
-protocol = "chat_completions"
-api_key = "sk-inline-secret"
 
 [models.context_compaction]
 provider = "openai-compatible"
@@ -817,10 +825,15 @@ provider = "openai-compatible"
 model = "gpt-review"
 "#,
             ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should be present");
+            r#"
+version = 1
+
+[providers.openai-compatible]
+protocol = "chat_completions"
+api_key_file = "secrets/openai.key"
+"#,
+            &[("openai.key", "sk-managed-secret\n")],
+        );
 
         let loaded = config_with_env(Some("gpt-flag"), Some(&config), |name| {
             Ok((name == super::MERRY_OPENAI_DEBUG_ENV).then(|| "1".to_owned()))
@@ -846,32 +859,35 @@ model = "gpt-review"
 
     #[test]
     fn runtime_bundle_builds_anthropic_primary_and_openai_role_override() {
-        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let (_temp, config) = load_managed_test_config(
             Some(
                 r#"
 [providers.default]
 provider = "claude"
 model = "claude-primary"
 
-[providers.claude]
-type = "anthropic"
-api_key = "sk-ant-test"
-
-[providers.compat]
-type = "openai-compatible"
-protocol = "chat_completions"
-api_key = "sk-openai-test"
-
 [models.context_compaction]
 provider = "compat"
 model = "gpt-compact"
 "#,
             ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should exist");
+            r#"
+version = 1
+
+[providers.claude]
+type = "anthropic"
+api_key_file = "secrets/claude.key"
+
+[providers.compat]
+type = "openai-compatible"
+protocol = "chat_completions"
+api_key_file = "secrets/compat.key"
+"#,
+            &[
+                ("claude.key", "sk-ant-test\n"),
+                ("compat.key", "sk-openai-test\n"),
+            ],
+        );
 
         let bundle = super::runtime_provider_bundle_from_config(
             Some(&config),
@@ -889,31 +905,34 @@ model = "gpt-compact"
 
     #[test]
     fn runtime_bundle_overrides_only_the_primary_provider_and_model() {
-        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let (_temp, config) = load_managed_test_config(
             Some(
                 r#"
 [providers.default]
 provider = "compat"
 model = "gpt-default"
 
-[providers.compat]
-type = "openai-compatible"
-api_key = "sk-openai-test"
-
-[providers.claude]
-type = "anthropic"
-api_key = "sk-ant-test"
-
 [models.context_compaction]
 provider = "compat"
 model = "gpt-compact"
 "#,
             ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should exist");
+            r#"
+version = 1
+
+[providers.compat]
+type = "openai-compatible"
+api_key_file = "secrets/compat.key"
+
+[providers.claude]
+type = "anthropic"
+api_key_file = "secrets/claude.key"
+"#,
+            &[
+                ("compat.key", "sk-openai-test\n"),
+                ("claude.key", "sk-ant-test\n"),
+            ],
+        );
 
         let bundle = super::runtime_provider_bundle_from_config_with_primary_override(
             Some(&config),
@@ -934,17 +953,12 @@ model = "gpt-compact"
 
     #[test]
     fn openai_provider_bundle_materializes_models_and_roles() {
-        let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let (_temp, config) = load_managed_test_config(
             Some(
                 r#"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-primary"
-
-[providers.openai-compatible]
-protocol = "chat_completions"
-api_key = "sk-inline-secret"
 
 [providers.retry]
 enabled = true
@@ -957,10 +971,15 @@ model = "gpt-compact"
 model = "gpt-review"
 "#,
             ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should be present");
+            r#"
+version = 1
+
+[providers.openai-compatible]
+protocol = "chat_completions"
+api_key_file = "secrets/openai.key"
+"#,
+            &[("openai.key", "sk-managed-secret\n")],
+        );
         let runtime_config = super::openai_provider_config_bundle(None, Some(&config), |message| {
             crate::cli_error::CliError::Unexpected(message)
         })

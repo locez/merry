@@ -1,19 +1,18 @@
 use super::{
     ConfigError, MerryConfig, default_true, managed_provider::ProviderAlias,
-    resolve_config_relative_path,
+    resolve_provider_api_key_file_path,
 };
 use merry_llm::{ModelName, ModelRetryPolicy, ModelRetryPolicyError, ReasoningEffort, ServiceTier};
 use merry_provider_openai::OpenAiProtocol;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt, fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 impl MerryConfig {
     pub fn provider_aliases(&self) -> Vec<String> {
-        self.raw
-            .providers
-            .as_ref()
-            .map(|providers| providers.named.keys().cloned().collect())
-            .unwrap_or_default()
+        self.managed_providers.keys().cloned().collect()
     }
 
     pub(crate) fn provider_profile(
@@ -21,15 +20,10 @@ impl MerryConfig {
         alias: &str,
     ) -> Result<ConfiguredProviderProfile, ConfigError> {
         let alias = ProviderAlias::new(alias)?;
-        let providers = self
-            .raw
-            .providers
-            .as_ref()
-            .ok_or_else(|| ConfigError::Invalid(format!("[providers.{alias}] is required")))?;
-        let provider = providers
-            .named
+        let provider = self
+            .managed_providers
             .get(alias.as_str())
-            .ok_or_else(|| ConfigError::Invalid(format!("[providers.{alias}] is required")))?;
+            .ok_or_else(|| self.missing_provider_error(alias.as_str()))?;
         let kind = match provider.kind.as_deref().unwrap_or(alias.as_str()) {
             "openai-compatible" => ConfiguredProviderKind::OpenAiCompatible,
             "anthropic" => ConfiguredProviderKind::Anthropic,
@@ -48,20 +42,16 @@ impl MerryConfig {
             .default_model
             .as_deref()
             .or_else(|| {
-                providers
-                    .default
+                self.raw
+                    .providers
                     .as_ref()
+                    .and_then(|providers| providers.default.as_ref())
                     .filter(|default| default.provider == alias.as_str())
                     .map(|default| default.model.as_str())
             })
             .map(ModelName::new)
             .transpose()
             .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-        let source = if self.managed_provider_aliases.contains(alias.as_str()) {
-            ProviderConfigSource::Managed
-        } else {
-            ProviderConfigSource::User
-        };
         let reasoning_effort = parse_reasoning_effort(
             &format!("providers.{alias}.reasoning_effort"),
             provider.reasoning_effort.as_deref(),
@@ -89,7 +79,6 @@ impl MerryConfig {
             protocol,
             reasoning_effort,
             service_tier,
-            source,
         })
     }
 
@@ -163,14 +152,16 @@ impl MerryConfig {
     }
 
     pub fn validate_provider_settings_if_present(&self) -> Result<(), ConfigError> {
-        let Some(providers) = self.raw.providers.as_ref() else {
-            return Ok(());
-        };
-        for alias in providers.named.keys() {
+        for alias in self.managed_providers.keys() {
             let _ = self.provider_profile(alias)?;
             let _ = self.provider_by_alias(alias)?;
         }
-        if providers.default.is_some() {
+        if self
+            .raw
+            .providers
+            .as_ref()
+            .is_some_and(|providers| providers.default.is_some())
+        {
             let _ = self.default_provider()?;
         }
         Ok(())
@@ -185,11 +176,7 @@ impl MerryConfig {
             .map(|default| default.provider.as_str());
         if let Some(alias) = default_alias
             && alias != "openai-compatible"
-            && self
-                .raw
-                .providers
-                .as_ref()
-                .is_some_and(|providers| !providers.named.contains_key(alias))
+            && !self.managed_providers.contains_key(alias)
         {
             return Err(ConfigError::Invalid(format!(
                 "unsupported default provider {alias}"
@@ -235,17 +222,13 @@ impl MerryConfig {
     }
 
     pub fn provider_by_alias(&self, alias: &str) -> Result<EffectiveProviderConfig, ConfigError> {
-        let providers = self
-            .raw
-            .providers
-            .as_ref()
-            .ok_or_else(|| ConfigError::Invalid(format!("[providers.{alias}] is required")))?;
-        let provider = providers
-            .named
+        let provider = self
+            .managed_providers
             .get(alias)
-            .ok_or_else(|| ConfigError::Invalid(format!("[providers.{alias}] is required")))?;
+            .ok_or_else(|| self.missing_provider_error(alias))?;
         let kind = provider.kind.as_deref().unwrap_or(alias);
-        let api_key = resolve_api_key_source(alias, provider, &self.config_dir, &self.home)?;
+        let api_key_file =
+            resolve_api_key_file_path(alias, provider, &self.providers_dir, &self.home)?;
         let reasoning_effort = parse_reasoning_effort(
             &format!("providers.{alias}.reasoning_effort"),
             provider.reasoning_effort.as_deref(),
@@ -270,7 +253,7 @@ impl MerryConfig {
                         alias: alias.to_owned(),
                         protocol,
                         base_url: provider.base_url.clone(),
-                        api_key,
+                        api_key_file,
                     },
                 ))
             }
@@ -290,7 +273,7 @@ impl MerryConfig {
                         base_url: provider.base_url.clone(),
                         api_version: provider.api_version.clone(),
                         default_max_output_tokens: provider.default_max_output_tokens,
-                        api_key,
+                        api_key_file,
                     },
                 ))
             }
@@ -303,6 +286,13 @@ impl MerryConfig {
     pub(super) fn validate_provider_alias(&self, alias: &str) -> Result<(), ConfigError> {
         let _ = self.provider_by_alias(alias)?;
         Ok(())
+    }
+
+    fn missing_provider_error(&self, alias: &str) -> ConfigError {
+        ConfigError::Invalid(format!(
+            "provider {alias:?} is not configured in {} (add it in Merry Settings or edit that file directly)",
+            self.providers_dir.join("providers.toml").display()
+        ))
     }
 
     fn legacy_openai_provider(&self) -> Result<EffectiveOpenAiProviderConfig, ConfigError> {
@@ -330,35 +320,18 @@ impl MerryConfig {
     }
 }
 
-fn resolve_api_key_source(
+fn resolve_api_key_file_path(
     alias: &str,
     provider: &NamedProviderToml,
-    config_dir: &std::path::Path,
-    home: &std::path::Path,
-) -> Result<EffectiveOpenAiApiKeySource, ConfigError> {
-    let api_key = match (
-        provider.api_key.as_deref(),
-        provider.api_key_file.as_deref(),
-    ) {
-        (Some(_), Some(_)) => {
-            return Err(ConfigError::Invalid(format!(
-                "providers.{alias} must not set both api_key and api_key_file; choose one"
-            )));
-        }
-        (Some(value), None) => {
-            validate_api_key_text("api_key", value)?;
-            EffectiveOpenAiApiKeySource::Inline(value.to_owned())
-        }
-        (None, Some(path)) => {
-            EffectiveOpenAiApiKeySource::File(resolve_config_relative_path(path, config_dir, home)?)
-        }
-        (None, None) => {
-            return Err(ConfigError::Invalid(format!(
-                "providers.{alias} must set exactly one of api_key or api_key_file"
-            )));
-        }
-    };
-    Ok(api_key)
+    providers_dir: &Path,
+    home: &Path,
+) -> Result<PathBuf, ConfigError> {
+    let path = provider.api_key_file.as_deref().ok_or_else(|| {
+        ConfigError::Invalid(format!(
+            "managed provider {alias:?} is missing api_key_file"
+        ))
+    })?;
+    resolve_provider_api_key_file_path(path, providers_dir, home)
 }
 
 /// Parses one reasoning-effort config value under its own config path.
@@ -424,12 +397,6 @@ pub struct EffectiveDefaultProviderConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProviderConfigSource {
-    User,
-    Managed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfiguredProviderKind {
     OpenAiCompatible,
     Anthropic,
@@ -444,7 +411,6 @@ pub(crate) struct ConfiguredProviderProfile {
     protocol: Option<OpenAiProtocol>,
     reasoning_effort: Option<ReasoningEffort>,
     service_tier: Option<ServiceTier>,
-    source: ProviderConfigSource,
 }
 
 impl ConfiguredProviderProfile {
@@ -475,10 +441,6 @@ impl ConfiguredProviderProfile {
     pub(crate) fn service_tier(&self) -> Option<ServiceTier> {
         self.service_tier
     }
-
-    pub(crate) fn source(&self) -> ProviderConfigSource {
-        self.source
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -487,7 +449,7 @@ pub enum EffectiveProviderConfig {
     Anthropic(EffectiveAnthropicProviderConfig),
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveOpenAiProviderConfig {
     pub model: Option<String>,
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -495,103 +457,46 @@ pub struct EffectiveOpenAiProviderConfig {
     pub alias: String,
     pub protocol: OpenAiProtocol,
     pub base_url: Option<String>,
-    pub api_key: EffectiveOpenAiApiKeySource,
+    pub api_key_file: PathBuf,
 }
 
-impl fmt::Debug for EffectiveOpenAiProviderConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("EffectiveOpenAiProviderConfig")
-            .field("model", &self.model)
-            .field("reasoning_effort", &self.reasoning_effort)
-            .field("service_tier", &self.service_tier)
-            .field("alias", &self.alias)
-            .field("protocol", &self.protocol)
-            .field("base_url", &self.base_url)
-            .field("api_key", &self.api_key)
-            .finish()
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveAnthropicProviderConfig {
     pub alias: String,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub base_url: Option<String>,
     pub api_version: Option<String>,
     pub default_max_output_tokens: Option<u64>,
-    pub api_key: EffectiveOpenAiApiKeySource,
-}
-
-impl fmt::Debug for EffectiveAnthropicProviderConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("EffectiveAnthropicProviderConfig")
-            .field("alias", &self.alias)
-            .field("reasoning_effort", &self.reasoning_effort)
-            .field("base_url", &self.base_url)
-            .field("api_version", &self.api_version)
-            .field("default_max_output_tokens", &self.default_max_output_tokens)
-            .field("api_key", &self.api_key)
-            .finish()
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-pub enum EffectiveOpenAiApiKeySource {
-    Inline(String),
-    File(PathBuf),
-}
-
-impl fmt::Debug for EffectiveOpenAiApiKeySource {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Inline(_) => formatter.write_str("Inline(<redacted>)"),
-            Self::File(path) => formatter.debug_tuple("File").field(path).finish(),
-        }
-    }
+    pub api_key_file: PathBuf,
 }
 
 impl EffectiveOpenAiProviderConfig {
     pub fn resolve_api_key(&self) -> Result<String, ConfigError> {
-        match &self.api_key {
-            EffectiveOpenAiApiKeySource::Inline(value) => Ok(value.clone()),
-            EffectiveOpenAiApiKeySource::File(path) => {
-                let value = fs::read_to_string(path).map_err(|source| ConfigError::Read {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
-                let value = value.trim().to_owned();
-                validate_api_key_text(&format!("api_key_file {}", path.display()), &value)?;
-                Ok(value)
-            }
-        }
+        read_api_key_file(&self.api_key_file)
     }
 }
 
 impl EffectiveAnthropicProviderConfig {
     pub fn resolve_api_key(&self) -> Result<String, ConfigError> {
-        match &self.api_key {
-            EffectiveOpenAiApiKeySource::Inline(value) => Ok(value.clone()),
-            EffectiveOpenAiApiKeySource::File(path) => {
-                let value = fs::read_to_string(path).map_err(|source| ConfigError::Read {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
-                let value = value.trim().to_owned();
-                validate_api_key_text(&format!("api_key_file {}", path.display()), &value)?;
-                Ok(value)
-            }
-        }
+        read_api_key_file(&self.api_key_file)
     }
 }
 
+fn read_api_key_file(path: &Path) -> Result<String, ConfigError> {
+    let value = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let value = value.trim().to_owned();
+    validate_api_key_text(&format!("api_key_file {}", path.display()), &value)?;
+    Ok(value)
+}
+
 #[derive(Debug, Deserialize, Default, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ProvidersToml {
     pub(super) default: Option<DefaultProviderToml>,
     retry: Option<ProviderRetryToml>,
-    #[serde(flatten)]
-    pub(super) named: BTreeMap<String, NamedProviderToml>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -617,7 +522,6 @@ pub(super) struct NamedProviderToml {
     pub(super) base_url: Option<String>,
     pub(super) api_version: Option<String>,
     pub(super) default_max_output_tokens: Option<u64>,
-    pub(super) api_key: Option<String>,
     pub(super) api_key_file: Option<String>,
 }
 

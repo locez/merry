@@ -126,6 +126,7 @@ async fn command_generation_runtime_is_read_only_workspace_only() {
         retry_policy: None,
         context_compaction: None,
         skill_roots: Vec::new(),
+        denied_absolute_paths: Vec::new(),
     })
     .expect("runtime should build");
 
@@ -185,6 +186,7 @@ async fn generate_command_plan_reads_structured_final_output() {
         retry_policy: None,
         context_compaction: None,
         skill_roots: Vec::new(),
+        denied_absolute_paths: Vec::new(),
     })
     .expect("runtime should build");
 
@@ -247,6 +249,7 @@ async fn cmd_check_command_tool_reports_path_availability() {
         retry_policy: None,
         context_compaction: None,
         skill_roots: Vec::new(),
+        denied_absolute_paths: Vec::new(),
     })
     .expect("runtime should build");
     let events = collect_runtime_step_events(

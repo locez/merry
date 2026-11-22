@@ -371,18 +371,23 @@ retained_raw_tail_items = 10
     #[test]
     fn context_compaction_model_role_defaults_to_default_provider() {
         let paths = XdgPaths::from_parts(home(), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-primary"
 
-[providers.openai-compatible]
-api_key = "sk-inline-secret"
-
 [models.context_compaction]
 model = "gpt-compact"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
+
+[providers.openai-compatible]
+api_key_file = "managed/secrets/openai.key"
 "#,
             ),
             &paths,
@@ -403,18 +408,23 @@ model = "gpt-compact"
     #[test]
     fn approval_review_model_role_defaults_to_default_provider() {
         let paths = XdgPaths::from_parts(home(), None, None);
-        let config = MerryConfig::load_optional_from_text(
+        let config = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-primary"
 
-[providers.openai-compatible]
-api_key = "sk-inline-secret"
-
 [models.approval_review]
 model = "gpt-review"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
+
+[providers.openai-compatible]
+api_key_file = "managed/secrets/openai.key"
 "#,
             ),
             &paths,
@@ -461,19 +471,24 @@ model = "gpt-other"
         .expect_err("unknown runtime model role should fail parsing");
         assert!(unknown_role.to_string().contains("tool_planner"));
 
-        let unknown_provider = MerryConfig::load_optional_from_text(
+        let unknown_provider = MerryConfig::load_with_managed_from_text(
             Some(
                 r#"
 [providers.default]
 provider = "openai-compatible"
 model = "gpt-primary"
 
-[providers.openai-compatible]
-api_key = "sk-inline-secret"
-
 [models.context_compaction]
 provider = "not-configured"
 model = "gpt-compact"
+"#,
+            ),
+            Some(
+                r#"
+version = 1
+
+[providers.openai-compatible]
+api_key_file = "managed/secrets/openai.key"
 "#,
             ),
             &paths,

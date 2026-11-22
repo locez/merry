@@ -36,6 +36,7 @@ fn headless_input<'a>(
         context_compaction: None,
         approval_review: None,
         skill_roots: Vec::new(),
+        denied_absolute_paths: Vec::new(),
         subagents: CodingSubagentsConfig::default(),
         workspace_tool_limits: None,
         workspace_writable: true,

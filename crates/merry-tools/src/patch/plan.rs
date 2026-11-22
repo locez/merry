@@ -390,6 +390,7 @@ fn plan_apply_patch_file(
                     });
                 }
             };
+            ensure_not_denied_absolute_path(state, &path, &display)?;
             plan_new_apply_patch_file(relative, path, lines, state, is_cancelled).map_err(|error| {
                 match error {
                     BlockingToolError::Domain(error) => WorkspacePatchFilePlanError::Domain {
@@ -448,7 +449,10 @@ fn resolve_existing_patch_path(
         return Err(WorkspacePatchFilePlanError::Cancelled);
     }
     match resolve_existing_path(&relative, std::iter::once(&state.root)) {
-        Ok(Some(path)) => Ok((relative, path)),
+        Ok(Some(path)) => {
+            ensure_not_denied_absolute_path(state, &path, &relative.display)?;
+            Ok((relative, path))
+        }
         Ok(None) => Err(WorkspacePatchFilePlanError::Domain {
             error: DomainError::new(ERROR_FILE_NOT_FOUND, "workspace file was not found"),
             path: relative.display,
@@ -468,20 +472,41 @@ fn file_plan_error(error: BlockingToolError, path: String) -> WorkspacePatchFile
     }
 }
 
+fn ensure_not_denied_absolute_path(
+    state: &WorkspaceToolState,
+    path: &Path,
+    display: &str,
+) -> Result<(), WorkspacePatchFilePlanError> {
+    if state.is_denied_absolute_path(path) {
+        return Err(WorkspacePatchFilePlanError::Domain {
+            error: DomainError::new(ERROR_PATH_DENIED, "path is denied by Merry security policy"),
+            path: display.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_patch_write_boundary(
     state: &WorkspaceToolState,
     path: &ValidatedToolPath,
 ) -> Result<(), DomainError> {
+    let candidate = Path::new(path.display.as_str());
+    if candidate.is_absolute() && state.is_denied_absolute_path(candidate) {
+        return Err(DomainError::new(
+            ERROR_PATH_DENIED,
+            "path is denied by Merry security policy",
+        ));
+    }
     // Scope patterns are root-relative, so a target outside the workspace root
     // has no scope spelling and cannot be authorized by a relative pattern.
     // That keeps a child agent inside the scope its parent gave it, which is a
     // deliberate narrowing rather than sandbox policy. Durable memory lives
     // outside that root and is governed by its own write rules.
-    if let Some(memory) = &state.durable_memory {
-        let candidate = Path::new(path.display.as_str());
-        if candidate.is_absolute() && memory.governs_path(candidate) {
-            return Ok(());
-        }
+    if let Some(memory) = &state.durable_memory
+        && candidate.is_absolute()
+        && memory.governs_path(candidate)
+    {
+        return Ok(());
     }
 
     let scope_path = path.relative_spelling();

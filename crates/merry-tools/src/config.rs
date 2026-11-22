@@ -41,6 +41,7 @@ pub struct WorkspaceToolsConfig {
     pub(crate) read_scope: Option<Vec<PathBuf>>,
     pub(crate) patch_write_scope: Option<Vec<PathBuf>>,
     pub(crate) forbidden_paths: Vec<PathBuf>,
+    pub(crate) denied_absolute_paths: Vec<PathBuf>,
     pub(crate) durable_memory: Option<Arc<DurableMemory>>,
 }
 
@@ -59,6 +60,7 @@ impl WorkspaceToolsConfig {
             read_scope: None,
             patch_write_scope: None,
             forbidden_paths: Vec::new(),
+            denied_absolute_paths: Vec::new(),
             durable_memory: None,
         }
     }
@@ -147,6 +149,20 @@ impl WorkspaceToolsConfig {
     #[must_use]
     pub fn with_forbidden_paths(mut self, paths: Vec<PathBuf>) -> Self {
         self.forbidden_paths = paths;
+        self
+    }
+
+    /// Returns absolute host paths denied to both `read_text` and `apply_patch`
+    /// (for example Merry's private state and credential directories).
+    #[must_use]
+    pub fn denied_absolute_paths(&self) -> &[PathBuf] {
+        &self.denied_absolute_paths
+    }
+
+    /// Sets absolute host paths denied to both `read_text` and `apply_patch`.
+    #[must_use]
+    pub fn with_denied_absolute_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.denied_absolute_paths = paths;
         self
     }
 }

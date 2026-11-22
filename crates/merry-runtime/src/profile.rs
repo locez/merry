@@ -60,8 +60,13 @@ pub enum PathAccessRuleSource {
     /// This is intentionally higher trust than project-local configuration,
     /// because normal coding-agent runs may edit files inside the project.
     TrustedGlobalConfig,
-    /// Product-owned configuration, credentials, and state unavailable to actions.
+    /// Product-owned credentials and state unavailable to actions.
     ProductPrivate,
+    /// Merry's own non-secret configuration and skill directories.
+    ///
+    /// These directories live outside the workspace and hold no credentials, so
+    /// sandboxed commands may read and update user config and skills directly.
+    ProductConfig,
     /// Automatically applied read-only protection for Git metadata paths.
     ///
     /// A reviewed action may temporarily overlay this rule for one process

@@ -1,5 +1,5 @@
 use crate::{
-    config::{ConfiguredProviderKind, ProviderConfigSource},
+    config::ConfiguredProviderKind,
     tui::{
         controller::{
             ControllerEffect, handle_key_event, handle_mouse_scroll_up, handle_paste_event,
@@ -111,7 +111,6 @@ fn provider_manager_escape_returns_to_command_palette() {
         "opencode",
         "OpenCode",
         ConfiguredProviderKind::OpenAiCompatible,
-        ProviderConfigSource::Managed,
         Some(merry_provider_openai::OpenAiProtocol::ChatCompletions),
         Some("model-a"),
     )]);

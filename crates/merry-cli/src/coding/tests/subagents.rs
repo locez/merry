@@ -641,6 +641,7 @@ async fn subagent_emits_journal_events_rolls_up_usage_persists_and_resumes_with_
         ),
         workspace_tool_limits: None,
         workspace_writable: true,
+        denied_absolute_paths: Vec::new(),
     };
 
     let runtime = build_headless_coding_with_policy_composition(
@@ -920,6 +921,7 @@ async fn child_permission_request_carries_subagent_actor_attribution() {
             ),
             workspace_tool_limits: None,
             workspace_writable: true,
+            denied_absolute_paths: Vec::new(),
         },
         CodingPermissionPolicy::host_decision_only(Arc::new(source)),
         PermissionReviewRules::default(),

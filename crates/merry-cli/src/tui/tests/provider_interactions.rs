@@ -1,5 +1,5 @@
 use crate::{
-    config::{ConfiguredProviderKind, ProviderConfigSource},
+    config::ConfiguredProviderKind,
     tui::{
         controller::{ControllerEffect, handle_key_event, handle_paste_event},
         keymap::Keymap,
@@ -167,7 +167,6 @@ fn provider_error_dialog_wraps_and_restores_provider_manager() {
         "opencode",
         "OpenCode",
         ConfiguredProviderKind::OpenAiCompatible,
-        ProviderConfigSource::Managed,
         Some(merry_provider_openai::OpenAiProtocol::Responses),
         Some("model-a"),
     )]);
@@ -275,7 +274,6 @@ fn provider_surfaces_fit_supported_terminal_sizes_without_secret_exposure() {
         "opencode",
         "OpenCode Gateway",
         ConfiguredProviderKind::OpenAiCompatible,
-        ProviderConfigSource::Managed,
         Some(merry_provider_openai::OpenAiProtocol::ChatCompletions),
         Some("deepseek-v4-pro"),
     )]);
@@ -467,7 +465,6 @@ fn provider_workbench_supports_inline_two_column_editing_adding_and_close_click(
             "alpha",
             "Alpha Managed",
             ConfiguredProviderKind::OpenAiCompatible,
-            ProviderConfigSource::Managed,
             Some(merry_provider_openai::OpenAiProtocol::Responses),
             Some("gpt-5"),
         )
@@ -476,10 +473,9 @@ fn provider_workbench_supports_inline_two_column_editing_adding_and_close_click(
             Some("medium".to_owned()),
         ),
         ProviderListItem::new(
-            "cfg",
-            "User Config",
+            "beta",
+            "Beta Anthropic",
             ConfiguredProviderKind::Anthropic,
-            ProviderConfigSource::User,
             None,
             Some("claude-sonnet"),
         )
@@ -520,20 +516,6 @@ fn provider_workbench_supports_inline_two_column_editing_adding_and_close_click(
     let adding = render_to_text(&state, size.width, size.height);
     assert!(adding.contains("Add provider"), "{adding}");
 
-    // Clicking the read-only config.toml provider switches the right pane to read-only details.
-    let buffer = render_to_buffer(&state, size.width, size.height);
-    let (cfg_x, cfg_y) = find_text_position(&buffer, "User Config").expect("User Config");
-    assert_eq!(
-        handle_mouse_input(
-            MouseInput::Down(Position::new(cfg_x, cfg_y)),
-            size,
-            &mut state
-        ),
-        ControllerEffect::None
-    );
-    let readonly = render_to_text(&state, size.width, size.height);
-    assert!(readonly.contains("config.toml"), "{readonly}");
-
     // Mouse-wheel scroll navigates by exactly 1 item per notch (never jumping straight to bottom).
     let four_items: Vec<ProviderListItem> = (1..=4)
         .map(|idx| {
@@ -541,7 +523,6 @@ fn provider_workbench_supports_inline_two_column_editing_adding_and_close_click(
                 &format!("p{idx}"),
                 &format!("Provider {idx}"),
                 ConfiguredProviderKind::OpenAiCompatible,
-                ProviderConfigSource::Managed,
                 Some(merry_provider_openai::OpenAiProtocol::Responses),
                 Some(&format!("m{idx}")),
             )

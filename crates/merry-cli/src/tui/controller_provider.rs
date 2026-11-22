@@ -130,11 +130,7 @@ pub(super) async fn dispatch_provider_effect(
             let editable = match providers.management.editable_provider(&alias) {
                 Ok(editable) => editable,
                 Err(error) => {
-                    if matches!(&error, ProviderManagementError::ReadOnlyProvider { .. }) {
-                        state.show_info_dialog("Read-only provider", error.to_string());
-                    } else {
-                        state.set_provider_overlay_error(error.to_string());
-                    }
+                    state.set_provider_overlay_error(error.to_string());
                     return Ok(false);
                 }
             };
@@ -492,7 +488,6 @@ fn provider_list_items(
                 alias,
                 profile.display_name(),
                 profile.kind(),
-                profile.source(),
                 profile.protocol(),
                 model,
             )

@@ -359,6 +359,18 @@ impl CodingAgentProfileBuilder {
         self
     }
 
+    /// Sets absolute host paths that `read_text` and `apply_patch` must never
+    /// read or modify (such as Merry's private state and credential store).
+    #[must_use]
+    pub fn denied_absolute_paths<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<PathBuf>,
+    {
+        self.workspace = self.workspace.denied_absolute_paths(paths);
+        self
+    }
+
     /// Includes read-only process execution lanes.
     #[must_use]
     pub fn read_only_process_runner(mut self, runner: Arc<dyn ProcessRunner>) -> Self {

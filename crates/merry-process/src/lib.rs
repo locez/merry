@@ -806,12 +806,12 @@ mod tests {
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
-    fn sandboxed_backend_rejects_a_private_directory_inside_a_grant_before_any_command() {
+    fn sandboxed_backend_allows_user_grant_covering_product_private_directory() {
         use merry_runtime::{PathAccess, PathAccessRule, PathAccessRuleSource};
 
         let workspace = tempfile::tempdir().expect("workspace");
         let parent = PathBuf::from("/var/merry-path-check");
-        let private = parent.join("merry");
+        let private = parent.join("merry/providers");
         let options = ProcessBackendOptions::new().with_path_rules([
             PathAccessRule::new(
                 parent,
@@ -825,13 +825,8 @@ mod tests {
             ),
         ]);
 
-        let Err(error) = LocalProcessBackend::sandboxed(workspace.path(), options) else {
-            panic!("a grant over Merry's directory must fail before a command");
-        };
-        let message = error.to_string();
-        assert!(message.contains("conflicting sandbox rules"), "{message}");
-        assert!(message.contains("readonly_paths"), "{message}");
-        assert!(message.contains("/var/merry-path-check/merry"), "{message}");
+        LocalProcessBackend::sandboxed(workspace.path(), options)
+            .expect("explicit user grant covering a ProductPrivate path must not block startup");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

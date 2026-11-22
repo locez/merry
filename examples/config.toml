@@ -4,20 +4,15 @@
 #   ~/.config/merry/config.toml        (Linux / macOS)
 #   %APPDATA%\merry\config.toml        (Windows)
 #
-# Usually required edits:
-# - Set [providers.default].model for your provider.
-# - Set [providers.openai-compatible].base_url for non-OpenAI-compatible hosts.
-# - Set protocol = "chat_completions" for vendors that expose Chat Completions
-#   instead of the OpenAI Responses API.
-# - Set exactly one credential source in [providers.openai-compatible]:
-#     api_key = "sk-..."
-#   or:
-#     api_key_file = "secrets/openai.key"
+# Credentials are NOT allowed in config.toml.
+# Configure model providers and API keys in Merry Settings (Alt+X -> Settings ->
+# Providers) or edit `$XDG_DATA_HOME/merry/providers/providers.toml` directly
+# (default `~/.local/share/merry/providers/`). That directory stays isolated
+# from both the action sandbox and in-process file tools.
 #
-# Keep credentials out of this file when committing changes.
-# Provider profiles created in the TUI are stored separately in
-# $XDG_CONFIG_HOME/merry/managed/providers.toml. This tracked example remains
-# the contract for user-authored config.toml.
+# Meanwhile, `$XDG_CONFIG_HOME/merry` (this file and your `[skills] roots`)
+# stays readable and writable to sandboxed actions so Merry can maintain config
+# and skills without ever having access to your credentials.
 
 [global]
 profile = "default"
@@ -349,9 +344,10 @@ format = "json"
 #   ~/.local/state/merry/logs/merry.jsonl
 # path = "~/.local/state/merry/logs/merry.jsonl"
 
-[providers.default]
-provider = "openai-compatible"
-model = "gpt-4.1-mini"
+# [providers.default]
+# Select a provider alias created in Merry Settings (Alt+X -> Settings -> Providers).
+# provider = "openai"
+# model = "gpt-4.1-mini"
 # Optional. Sent as Responses API reasoning.effort when supported by the model.
 # Leave unset to use provider/model defaults. The TUI presets include minimal,
 # low, medium, high, xhigh, max, and ultra; custom provider-supported values
@@ -373,13 +369,14 @@ max_delay_ms = 120000
 max_elapsed_ms = 300000
 jitter = true
 
-[models.context_compaction]
+# [models.context_compaction]
 # Optional model override. Omit this table to use [providers.default] for
 # checkpoint compaction. If provider is omitted, [providers.default].provider is
 # reused.
-model = "gpt-4.1-mini"
+# provider = "openai"
+# model = "gpt-4.1-mini"
 
-[models.approval_review]
+# [models.approval_review]
 # Optional model override for permission admission review. Omit this table to
 # review with [providers.default].model.
 #
@@ -387,33 +384,10 @@ model = "gpt-4.1-mini"
 # effort and its own fixed output budget, independently of the primary
 # provider's reasoning_effort. Point this role at a provider that accepts a
 # reasoning effort, and prefer a small fast model over a deep-reasoning one.
-model = "gpt-4.1-mini"
+# provider = "openai"
+# model = "gpt-4.1-mini"
 
-[providers.openai-compatible]
-display_name = "OpenAI"
-default_model = "gpt-4.1-mini"
-type = "openai-compatible"
-protocol = "responses"
-base_url = "https://api.openai.com/v1"
-# Optional provider-specific default used when this provider is selected in TUI.
-# The value may be any provider-supported reasoning identifier.
-# reasoning_effort = "medium"
-# Optional provider-specific service tier (openai-compatible providers only).
-# The ultrafast tier additionally requires protocol = "responses".
-# service_tier = "default"
-# Prefer api_key_file for local sandboxed smoke runs so the key stays in the
-# mounted config directory instead of argv or process environment.
-api_key_file = "secrets/openai.key"
-
-# Anthropic Messages can be selected by changing
-# [providers.default].provider to "anthropic" and using a Claude model.
-#
-# [providers.anthropic]
-# display_name = "Anthropic"
-# default_model = "claude-sonnet-4-5"
-# type = "anthropic"
-# reasoning_effort = "medium"
-# base_url = "https://api.anthropic.com"
-# api_version = "2023-06-01"
-# default_max_output_tokens = 4096
-# api_key_file = "secrets/anthropic.key"
+# Provider definitions and credentials are not placed in config.toml.
+# Add OpenAI-compatible or Anthropic providers through Merry Settings
+# (Alt+X -> Settings -> Providers) or edit `$XDG_DATA_HOME/merry/providers/providers.toml`
+# directly so secrets stay isolated from the sandbox.
