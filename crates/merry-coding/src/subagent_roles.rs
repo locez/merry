@@ -165,7 +165,7 @@ impl SubagentRoleCatalog {
                 description: "fast read-only codebase researcher".to_owned(),
                 enabled: true,
                 workspace_access: SubagentWorkspaceAccess::ReadOnlyWorkspace,
-                default_allowed_tools: Some(tool_names(&["read_text", "run_process", "web_fetch"])),
+                default_allowed_tools: Some(tool_names(&["read_file", "run_process", "web_fetch"])),
                 default_max_model_turns: 30,
                 max_model_turns_override: None,
                 default_timeout_secs: Some(180),
@@ -200,7 +200,7 @@ impl SubagentRoleCatalog {
                 enabled: true,
                 workspace_access: SubagentWorkspaceAccess::ReadWriteWorkspace,
                 default_allowed_tools: Some(tool_names(&[
-                    "read_text",
+                    "read_file",
                     "run_process",
                     "request_permissions",
                     "web_fetch",

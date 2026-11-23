@@ -5,7 +5,7 @@ use merry::profiles::CODING_LOOP_PROCESS_TOOL;
 use merry_core::{RuntimeJournalPayload, ToolOutput};
 use merry_llm::{FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse};
 use merry_runtime::{StepContext, StepInput, ToolExecutionContext};
-use merry_tools::{APPLY_PATCH_TOOL, READ_TEXT_TOOL};
+use merry_tools::{APPLY_PATCH_TOOL, READ_FILE_TOOL};
 use serde_json::Value;
 use std::{
     io,
@@ -144,7 +144,7 @@ async fn command_generation_runtime_is_read_only_workspace_only() {
         .iter()
         .map(|tool| tool.name().as_str())
         .collect::<Vec<_>>();
-    assert!(tool_names.contains(&READ_TEXT_TOOL));
+    assert!(tool_names.contains(&READ_FILE_TOOL));
     assert!(tool_names.contains(&CHECK_COMMAND_TOOL_NAME));
     assert!(!tool_names.contains(&APPLY_PATCH_TOOL));
     assert!(!tool_names.contains(&CODING_LOOP_PROCESS_TOOL));

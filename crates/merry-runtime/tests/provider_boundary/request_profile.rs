@@ -330,7 +330,7 @@ async fn compiled_provider_request_skill_metadata_enters_stable_prefix_before_pr
         request.stable_prefix_messages()[1]
             .content()
             .as_text()
-            .contains("read_text")
+            .contains("read_file")
     );
     assert!(
         request.stable_prefix_messages()[1]

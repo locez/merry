@@ -1,6 +1,7 @@
 //! Bounded whole-file reads shared by the workspace tools.
 //!
-//! `read_text` streams a line range and never needs the complete file, while
+//! Text `read_file` streams a line range and never needs the complete file, while
+//! image `read_file` and `apply_patch` read complete files up to a byte budget.
 //! `apply_patch` needs every byte twice: once while planning a preimage and
 //! once immediately before it mutates the file. Both patch reads must enforce
 //! the same configured byte budget and report the same failures, so the

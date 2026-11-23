@@ -77,7 +77,7 @@ impl SearchToolAvailability {
         }
 
         let shell_note = format!(
-            "Host shell is `{shell_name}` (chain commands with `{chain_separator}`; Unix `grep`/`find`/`sed` are unavailable—use `read_text` for reading files and PowerShell cmdlets when needed)."
+            "Host shell is `{shell_name}` (chain commands with `{chain_separator}`; Unix `grep`/`find`/`sed` are unavailable—use `read_file` for reading files and PowerShell cmdlets when needed)."
         );
         match (self.ripgrep, self.fd) {
             (true, true) => format!(

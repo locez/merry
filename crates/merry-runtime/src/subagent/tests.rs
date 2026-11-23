@@ -253,11 +253,11 @@ fn wait_output_serializes_compact_status_and_paths() {
 fn allowed_tools_are_validated_as_tool_names() {
     let task = SubagentTaskSpec::new("Read files.", 4)
         .expect("valid task")
-        .with_allowed_tools([ToolName::new("read_text").expect("valid tool name")]);
+        .with_allowed_tools([ToolName::new("read_file").expect("valid tool name")]);
 
     assert_eq!(
         task.allowed_tools(),
-        &[ToolName::new("read_text").expect("valid tool name")]
+        &[ToolName::new("read_file").expect("valid tool name")]
     );
 }
 
@@ -270,7 +270,7 @@ fn task_capability_fields_record_whether_the_parent_authored_them() {
     assert!(!omitted.forbidden_paths_are_explicit());
 
     let explicit = omitted
-        .with_allowed_tools([ToolName::new("read_text").expect("valid tool")])
+        .with_allowed_tools([ToolName::new("read_file").expect("valid tool")])
         .with_read_scope([PathBuf::from("crates")])
         .expect("valid read scope")
         .with_write_scope([PathBuf::from("tmp")])
@@ -299,7 +299,7 @@ fn omitted_child_capabilities_inherit_and_explicit_values_cannot_expand() {
         true,
     );
     manager.attach_parent_capabilities(
-        vec![ToolName::new("read_text").expect("valid tool")],
+        vec![ToolName::new("read_file").expect("valid tool")],
         ChildWorkspaceScope {
             read_scope: vec![PathBuf::from("crates")],
             write_scope: vec![PathBuf::from("tmp")],

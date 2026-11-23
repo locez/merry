@@ -302,7 +302,7 @@ mod tests {
             "max_lines": 50
         });
 
-        let detail = format_tool_call_detail("read_text", arguments.as_object().unwrap());
+        let detail = format_tool_call_detail("read_file", arguments.as_object().unwrap());
 
         assert_eq!(
             detail.as_deref(),

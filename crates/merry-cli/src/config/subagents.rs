@@ -570,7 +570,7 @@ timeout_secs = 120
 base = "review"
 description = "UI verification specialist"
 model = "gpt-4.1-mini"
-allowed_tools = ["browser_tab", "browser_network", "web_fetch", "read_text"]
+allowed_tools = ["browser_tab", "browser_network", "web_fetch", "read_file"]
 instructions = "Check console errors."
 "#,
             ),

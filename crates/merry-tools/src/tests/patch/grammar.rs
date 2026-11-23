@@ -45,7 +45,7 @@ fn apply_patch_executor_rejects_a_context_only_envelope_with_recovery_hint() {
     );
     assert_eq!(
         outcome.diagnostic().expect("diagnostic").message(),
-        "workspace patch contains no `+` or `-` lines, so nothing would change. Send the added or removed lines as `+`/`-` hunk lines to edit the file, or use `read_text` when you only need to inspect the current content"
+        "workspace patch contains no `+` or `-` lines, so nothing would change. Send the added or removed lines as `+`/`-` hunk lines to edit the file, or use `read_file` when you only need to inspect the current content"
     );
     assert!(
         json_content(&outcome)["guidance"]["message"]

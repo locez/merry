@@ -23,7 +23,7 @@ async fn spawn_tool_returns_structured_output_and_preserves_task_input() {
                 "task": "Review the runtime module.",
                 "display_name": "Runtime review",
                 "max_model_turns": 3,
-                "allowed_tools": ["read_text"],
+                "allowed_tools": ["read_file"],
                 "read_scope": ["crates/merry-runtime/src"],
                 "write_scope": ["tmp/subagent-output"],
                 "forbidden_paths": ["target", ".git"],
@@ -60,11 +60,11 @@ async fn spawn_tool_returns_structured_output_and_preserves_task_input() {
     assert_eq!(captured[0].task.max_model_turns(), 3);
     assert_eq!(
         captured[0].task.allowed_tools(),
-        &[ToolName::new("read_text").expect("valid tool name")]
+        &[ToolName::new("read_file").expect("valid tool name")]
     );
     assert_eq!(
         captured[0].allowed_tools,
-        vec![ToolName::new("read_text").expect("valid tool name")]
+        vec![ToolName::new("read_file").expect("valid tool name")]
     );
     assert_eq!(
         captured[0].task.read_scope(),
@@ -703,7 +703,7 @@ async fn send_subagent_message_wakes_blocked_max_turns_child_and_settles_danglin
     impl ChildRuntimeFactory for BlockedChildFactory {
         fn build_child(&self, input: ChildRuntimeInput) -> Result<Runtime, RuntimeError> {
             let tool_spec = ToolSpec::new(
-                ToolName::new("read_text").expect("valid"),
+                ToolName::new("read_file").expect("valid"),
                 "Read text",
                 ToolInputSchema::new(
                     schemars::Schema::try_from(json!({
@@ -736,7 +736,7 @@ async fn send_subagent_message_wakes_blocked_max_turns_child_and_settles_danglin
         ModelResponse::new(
             vec![ModelOutput::tool_call(ModelToolCall::new(
                 ModelToolCallId::new("call-dangling").expect("valid"),
-                ToolName::new("read_text").expect("valid"),
+                ToolName::new("read_file").expect("valid"),
                 ToolArguments::try_from(json!({ "path": "src/lib.rs" })).expect("valid"),
             ))],
             FinishReason::ToolCalls,

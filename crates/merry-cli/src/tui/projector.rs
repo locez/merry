@@ -3,7 +3,7 @@ use crate::tui::{
     projector::tool_output::{
         compact_tool_output, completed_plan_or_todo_view, completed_process_view,
         completed_tool_title, expanded_tool_title, failed_tool_body, parse_apply_patch_view,
-        permission_output_bodies, read_text_output_preview, started_tool_title_and_detail,
+        permission_output_bodies, read_file_output_preview, started_tool_title_and_detail,
         tool_output_text,
     },
     state::{CommandView, TimelineItem, ToolOutputPreview, TuiState},
@@ -13,7 +13,7 @@ use merry_core::{
     ToolCallResultStatus, ToolName,
 };
 use merry_runtime::SessionTranscriptItem;
-use merry_tools::{APPLY_PATCH_TOOL, READ_TEXT_TOOL};
+use merry_tools::{APPLY_PATCH_TOOL, READ_FILE_TOOL};
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::time::Instant;
@@ -229,13 +229,13 @@ impl TuiProjector {
                         state.push_timeline_item(patch_item);
                     }
                 } else if let Some(tool) = tool.as_ref()
-                    && tool.name.as_str() == READ_TEXT_TOOL
+                    && tool.name.as_str() == READ_FILE_TOOL
                 {
                     state.replace_timeline_item(
                         tool.timeline_index,
                         TimelineItem::Read {
                             title: expanded_tool_title(tool),
-                            preview: read_text_output_preview(&text)
+                            preview: read_file_output_preview(&text)
                                 .unwrap_or_else(|| ToolOutputPreview::new(text.lines(), false)),
                             expanded: false,
                         },

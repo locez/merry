@@ -18,7 +18,7 @@ fn successful_read_output_follows_display_policy_live_and_on_resume() {
                 ToolOutput::Json {
                     json: json!({
                         "ok": true,
-                        "tool": "read_text",
+                        "tool": "read_file",
                         "path": "notes.txt",
                         "start_line": 2,
                         "end_line": 4,
@@ -43,7 +43,7 @@ fn successful_read_output_follows_display_policy_live_and_on_resume() {
                 );
 
                 let collapsed = render_to_text(&state, 120, 24);
-                assert!(collapsed.contains("Read read_text"));
+                assert!(collapsed.contains("Read read_file"));
                 assert!(collapsed.contains("path=notes.txt"));
                 assert!(collapsed.contains("start_line=2"));
                 assert!(collapsed.contains("max_lines=3"));
@@ -77,7 +77,7 @@ fn failed_read_output_stays_visible_live_and_on_resume() {
             let output = ToolOutput::Json {
                 json: json!({
                     "ok": false,
-                    "tool": "read_text",
+                    "tool": "read_file",
                     "path": "notes.txt",
                     "error": {
                         "code": "file_not_found",
@@ -126,7 +126,7 @@ fn read_preview_preserves_truncation_and_follows_render_time_settings() {
             let output = ToolOutput::Json {
                 json: json!({
                     "ok": true,
-                    "tool": "read_text",
+                    "tool": "read_file",
                     "path": "notes.txt",
                     "content": content,
                     "truncated": source_truncated,
@@ -167,7 +167,7 @@ fn successful_read_shows_decoded_content_and_arguments_without_completion_noise(
         let output = ToolOutput::Json {
             json: json!({
                 "ok": true,
-                "tool": "read_text",
+                "tool": "read_file",
                 "path": "AGENTS.md",
                 "bytes": 19704,
                 "content": "large raw content",
@@ -183,7 +183,7 @@ fn successful_read_shows_decoded_content_and_arguments_without_completion_noise(
         assert!(!collapsed.contains("large raw content"), "{collapsed}");
         state.toggle_command_expanded(0);
         let rendered = render_to_text(&state, 120, 24);
-        assert!(rendered.contains("Read read_text"));
+        assert!(rendered.contains("Read read_file"));
         assert_eq!(rendered.contains("path=AGENTS.md"), has_path);
         assert!(rendered.contains("large raw content"));
         assert!(!rendered.contains("AGENTS.md:1"));
@@ -202,13 +202,13 @@ fn read_projection_retains_only_bounded_previews_for_json_text_and_empty_files()
             },
             ToolOutput::Json {
                 json: json!({
-                    "ok": true, "tool": "read_text", "path": "notes.txt", "content": content,
+                    "ok": true, "tool": "read_file", "path": "notes.txt", "content": content,
                 })
                 .to_string(),
             },
             ToolOutput::Json {
                 json: json!({
-                    "ok": true, "tool": "read_text", "path": content, "content": "",
+                    "ok": true, "tool": "read_file", "path": content, "content": "",
                 })
                 .to_string(),
             },
@@ -237,6 +237,74 @@ fn read_projection_retains_only_bounded_previews_for_json_text_and_empty_files()
     }
 }
 
+#[test]
+fn successful_read_file_image_and_pdf_outputs_project_summaries_live_and_on_resume() {
+    for replay in [false, true] {
+        let mut state = read_state(true);
+        let result = successful_read_result();
+        let output = ToolOutput::Json {
+            json: json!({
+                "ok": true,
+                "tool": "read_file",
+                "kind": "image",
+                "path": "assets/mockup.webp",
+                "source_format": "webp",
+                "source_width": 640,
+                "source_height": 480,
+                "width": 640,
+                "height": 480,
+                "resized": false,
+                "source_bytes": 12345,
+                "png_bytes": 23456,
+            })
+            .to_string(),
+        };
+
+        project_read_result(
+            &mut state,
+            replay,
+            result,
+            output,
+            json!({"path": "assets/mockup.webp"}),
+        );
+
+        let collapsed = render_to_text(&state, 120, 24);
+        assert!(collapsed.contains("Read read_file path=assets/mockup.webp"));
+        assert!(!collapsed.contains("640x480"));
+        state.toggle_command_expanded(0);
+        let expanded = render_to_text(&state, 120, 24);
+        assert!(expanded.contains("assets/mockup.webp (640x480, webp, 23456 bytes PNG attached)"));
+        assert!(!expanded.contains(r#""source_format""#));
+
+        let mut pdf_state = read_state(true);
+        let pdf_output = ToolOutput::Json {
+            json: json!({
+                "ok": true,
+                "tool": "read_file",
+                "kind": "pdf_pages",
+                "path": "spec.pdf",
+                "total_pages": 5,
+                "rendered_pages": [1, 2],
+                "source_bytes": 9000,
+                "total_png_bytes": 45000,
+            })
+            .to_string(),
+        };
+        project_read_result(
+            &mut pdf_state,
+            replay,
+            successful_read_result(),
+            pdf_output,
+            json!({"path": "spec.pdf", "pages": "1-2"}),
+        );
+        pdf_state.toggle_command_expanded(0);
+        let pdf_expanded = render_to_text(&pdf_state, 120, 24);
+        assert!(
+            pdf_expanded.contains("spec.pdf (PDF: rendered 2/5 pages, 45000 bytes PNG attached)")
+        );
+    }
+}
+
 fn read_state(show_output: bool) -> TuiState {
     TuiState::new(
         "/repo".into(),
@@ -259,7 +327,7 @@ fn project_read_result(
     arguments: serde_json::Value,
 ) {
     let mut projector = TuiProjector::default();
-    let call = pending_call_with_args(result.call_id().as_str(), "read_text", arguments);
+    let call = pending_call_with_args(result.call_id().as_str(), "read_file", arguments);
     if replay {
         projector.apply_transcript_item(SessionTranscriptItem::ToolCall { call }, state);
         projector.apply_transcript_item(

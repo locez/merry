@@ -22,7 +22,7 @@ fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
 
     projector.apply(
         RuntimeEvent::ToolCallStarted {
-            call: pending_call("call-read", "read_text"),
+            call: pending_call("call-read", "read_file"),
             source: source(),
         },
         &mut state,
@@ -57,7 +57,7 @@ fn projector_keeps_successful_non_patch_tool_compact_and_expands_patch_tool() {
 
     assert_eq!(state.timeline().len(), 2);
     let collapsed = render_to_text(&state, 120, 24);
-    assert!(collapsed.contains("Read read_text"));
+    assert!(collapsed.contains("Read read_file"));
     assert!(collapsed.contains('▸'), "{collapsed}");
     assert!(!collapsed.contains("file contents"), "{collapsed}");
     state.toggle_command_expanded(0);
@@ -307,7 +307,7 @@ fn projector_expands_tool_batches_in_model_order() {
             batch: pending_batch(
                 "batch-1",
                 vec![
-                    pending_call_with_args("call-first", "read_text", json!({"path": "first.rs"})),
+                    pending_call_with_args("call-first", "read_file", json!({"path": "first.rs"})),
                     pending_call_with_args(
                         "call-second",
                         "run_process",
@@ -323,7 +323,7 @@ fn projector_expands_tool_batches_in_model_order() {
     assert_eq!(state.timeline().len(), 2);
     let rendered = render_to_text(&state, 120, 24);
     let read_position = rendered
-        .find("Read read_text path=first.rs")
+        .find("Read read_file path=first.rs")
         .expect("read call is visible");
     let process_position = rendered.find("Running ").expect("process call is running");
     assert!(read_position < process_position);

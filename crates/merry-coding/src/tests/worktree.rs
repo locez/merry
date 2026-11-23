@@ -413,7 +413,7 @@ async fn parallel_worktree_subagents_collect_run_process_changes_and_enforce_cle
                         "role": "coder",
                         "workspace": "worktree",
                         "write_scope": ["."],
-                        "allowed_tools": ["read_text"]
+                        "allowed_tools": ["read_file"]
                     }
                 ]
             }),

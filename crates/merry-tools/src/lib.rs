@@ -1,7 +1,7 @@
 //! Built-in tools for Merry runtimes.
 //!
 //! This crate owns Merry-provided tool implementations and adapts filesystem
-//! bounded text reads and opt-in constrained workspace edits into
+//! bounded text/image reads and opt-in constrained workspace edits into
 //! runtime-registered tools without making the runtime own real workspace
 //! access policy. The public `merry::tool` declaration macro is re-exported by
 //! the facade crate; this crate only contains the implementation dependency.
@@ -46,11 +46,12 @@ pub use patch::envelope::{
     WorkspacePatchOperationKind, WorkspacePatchSuccess, WorkspacePatchSuccessChange,
     WorkspacePatchSuccessLine, WorkspacePatchSuccessLineKind,
 };
+pub use read::{WorkspaceReadImageSuccess, WorkspaceReadPdfPagesSuccess};
 pub use registry::WorkspaceTools;
 pub use web_fetch::{WEB_FETCH_TOOL, WebFetchConfig, WebFetchTool};
 
-/// Registered tool name for bounded read-only text ranges.
-pub const READ_TEXT_TOOL: &str = "read_text";
+/// Registered tool name for bounded read-only file reads (UTF-8 text, images, PDFs, Office docs, and notebooks).
+pub const READ_FILE_TOOL: &str = "read_file";
 /// Registered tool name for opt-in constrained file patches.
 pub const APPLY_PATCH_TOOL: &str = "apply_patch";
 

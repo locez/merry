@@ -11,7 +11,7 @@ pub(super) use merry_llm::{
 };
 pub(super) use merry_runtime::{Runtime, StepContext, StepInput, ToolExecutionContext};
 pub(super) use merry_tools::{
-    APPLY_PATCH_TOOL, READ_TEXT_TOOL, WorkspaceTools, WorkspaceToolsConfig,
+    APPLY_PATCH_TOOL, READ_FILE_TOOL, WorkspaceTools, WorkspaceToolsConfig,
 };
 pub(super) use serde_json::{Map, Value};
 pub(super) use std::{
@@ -51,6 +51,14 @@ impl TempWorkspace {
         }
         fs::write(path, content).expect("workspace file should be written");
     }
+
+    pub(super) fn write_bytes(&self, relative: &str, content: &[u8]) {
+        let path = self.root.join(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent directory should be created");
+        }
+        fs::write(path, content).expect("workspace binary file should be written");
+    }
 }
 
 impl Drop for TempWorkspace {
@@ -86,10 +94,10 @@ fn pending_workspace_call(
     }
 }
 
-pub(super) fn pending_read_text_call(path: &str) -> ModelEvent {
+pub(super) fn pending_read_file_call(path: &str) -> ModelEvent {
     let mut arguments = Map::new();
     arguments.insert("path".to_owned(), Value::String(path.to_owned()));
-    pending_workspace_call("workspace-read-call", READ_TEXT_TOOL, arguments)
+    pending_workspace_call("workspace-read-call", READ_FILE_TOOL, arguments)
 }
 
 pub(super) fn pending_patch_call(path: &str, old_text: &str, new_text: &str) -> ModelEvent {

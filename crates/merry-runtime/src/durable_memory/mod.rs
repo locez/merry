@@ -145,7 +145,7 @@ Workspace memory, specific to this workspace:
 
 `topics/` holds durable preferences, conventions, architecture, decisions, recurring workflows, and other facts worth reusing. `observations/_inbox/` holds new observations that may later be consolidated into topics. Paths in the index are relative to the scope root named in its header.
 
-Use `read_text` to read memory files and `apply_patch` to create or edit them. Search with `run_process` when a memory file points at a path you still need to find. Existing files must be read successfully before editing. Writes are allowed only to `.md` files directly under `topics/` or `observations/_inbox/`. Those memory paths stay writable when the workspace itself is read-only. Generated indexes, archives, state files, and other internals are protected.
+Use `read_file` to read memory files and `apply_patch` to create or edit them. Search with `run_process` when a memory file points at a path you still need to find. Existing files must be read successfully before editing. Writes are allowed only to `.md` files directly under `topics/` or `observations/_inbox/`. Those memory paths stay writable when the workspace itself is read-only. Generated indexes, archives, state files, and other internals are protected.
 
 Remember information when the user explicitly asks, or when it is stable, specific, useful across sessions, and not already available from the repository or its documentation. Do not store secrets, credentials, transient task state, speculative conclusions, or facts that are likely to become stale. A single failed tool call or a guess about the local machine is not an observation. Prefer one focused topic file over duplicating the same fact in several places.
 
@@ -392,9 +392,9 @@ Treat memory as historical context, not current truth. Verify paths, commands, r
         match saved.get(&key) {
             Some(existing) if existing == &hash => Ok(()),
             Some(_) => Err(policy::deny(
-                "memory file changed since it was read; read_text it again before editing",
+                "memory file changed since it was read; read_file it again before editing",
             )),
-            None => Err(policy::deny("read_text the memory file before editing it")),
+            None => Err(policy::deny("read_file the memory file before editing it")),
         }
     }
 

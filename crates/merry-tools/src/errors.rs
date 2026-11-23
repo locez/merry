@@ -48,6 +48,9 @@ workspace_error_codes! {
     ERROR_NOT_DIRECTORY = "workspace_path_not_directory",
     ERROR_FILE_TOO_LARGE = "workspace_file_too_large",
     ERROR_NOT_UTF8 = "workspace_file_not_utf8",
+    ERROR_INVALID_IMAGE = "workspace_image_invalid",
+    ERROR_IMAGE_TOO_LARGE = "workspace_image_too_large",
+    ERROR_INVALID_DOCUMENT = "workspace_document_invalid",
     ERROR_READ_FAILED = "workspace_read_failed",
     ERROR_WRITE_FAILED = "workspace_write_failed",
     ERROR_PROPOSAL_MISMATCH = "apply_patch_approved_mismatch",
@@ -66,10 +69,11 @@ const MAX_FAILURE_DIAGNOSTIC_CHARS: usize = 512;
 
 const GUIDANCE_INVALID_ARGUMENTS: &str = "Fix the workspace tool arguments before retrying. Use the tool schema exactly; a path field names a file either relative to a workspace root or as an absolute path, and no path shape is rejected.";
 const GUIDANCE_PATH_RECOVERY: &str = "Use the path that names the target file: relative to a configured workspace root or absolute, including a file outside the workspace, where the sandbox decides what is reachable and writable. If the target is unclear, use `run_process` for focused discovery when available, or ask for the exact path before retrying.";
-const GUIDANCE_FILE_TOO_LARGE: &str = "Do not assume omitted content or rejected patch content is irrelevant. Narrow the read or patch range, split the change, use `read_text` for focused ranges, or use an authorized process command for exact inspection when available.";
+const GUIDANCE_FILE_TOO_LARGE: &str = "Do not assume omitted content or rejected patch content is irrelevant. Narrow the read or patch range, split the change, use `read_file` for focused ranges, or use an authorized process command for exact inspection when available.";
+const GUIDANCE_IMAGE_TOO_LARGE: &str = "The image exceeds the supported `read_file` image limits (20 MiB source file, 64 million pixel decode cap, or could not fit within the 3 MiB normalized PNG budget after downscaling). Crop or resize a copy before calling `read_file`, or inspect its metadata with an authorized process command.";
 const GUIDANCE_PATCH_PREIMAGE: &str = "Re-read the target file at the reported lines, then retry with a smaller unique preimage that matches the current bytes exactly. Do not guess file state from an old observation.";
-const GUIDANCE_PATCH_SYNTAX: &str = "Fix the patch text itself: send exactly one `*** Begin Patch` ... `*** End Patch` envelope, at most one `*** Add File:` or `*** Delete File:` section per file, and prefix every hunk line with one space, `+`, or `-`. Repeated `*** Update File:` sections for one file merge into a single change. Use `read_text` for the exact current lines instead of guessing them.";
-const GUIDANCE_PATCH_NOOP: &str = "The patch had no `+` or `-` lines, so nothing was written. Add the added or removed lines to the hunk when you mean to edit the file, or use `read_text` when you only need to inspect it.";
+const GUIDANCE_PATCH_SYNTAX: &str = "Fix the patch text itself: send exactly one `*** Begin Patch` ... `*** End Patch` envelope, at most one `*** Add File:` or `*** Delete File:` section per file, and prefix every hunk line with one space, `+`, or `-`. Repeated `*** Update File:` sections for one file merge into a single change. Use `read_file` for the exact current lines instead of guessing them.";
+const GUIDANCE_PATCH_NOOP: &str = "The patch had no `+` or `-` lines, so nothing was written. Add the added or removed lines to the hunk when you mean to edit the file, or use `read_file` when you only need to inspect it.";
 const GUIDANCE_PATCH_PLAN_CHANGED: &str = "The approved patch no longer matches current workspace state. Re-read the target file and submit a fresh localized patch.";
 
 /// A failure raised by a workspace tool operation, with a stable code.
@@ -218,6 +222,8 @@ enum FailureClass {
     PathRecovery,
     /// Requested content or the resulting file exceeds a configured limit.
     FileTooLarge,
+    /// The image exceeds size or decode pixel limits for `read_file`.
+    ImageTooLarge,
     /// A failure with no recovery text of its own.
     Other,
 }
@@ -237,6 +243,7 @@ impl FailureClass {
             | ERROR_NOT_FILE
             | ERROR_NOT_DIRECTORY => Self::PathRecovery,
             ERROR_FILE_TOO_LARGE => Self::FileTooLarge,
+            ERROR_IMAGE_TOO_LARGE => Self::ImageTooLarge,
             _ => Self::Other,
         }
     }
@@ -284,6 +291,10 @@ impl FailureClass {
             Self::FileTooLarge => Some(WorkspaceGuidance {
                 kind: "workspace_file_too_large",
                 message: GUIDANCE_FILE_TOO_LARGE,
+            }),
+            Self::ImageTooLarge => Some(WorkspaceGuidance {
+                kind: "workspace_image_too_large",
+                message: GUIDANCE_IMAGE_TOO_LARGE,
             }),
             Self::Other => None,
         }

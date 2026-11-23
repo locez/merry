@@ -9,7 +9,7 @@ use crate::{
 use merry_core::ToolCallResultStatus;
 use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelResponse};
 use merry_runtime::{StepContext, StepInput, ToolExecutionContext};
-use merry_tools::READ_TEXT_TOOL;
+use merry_tools::READ_FILE_TOOL;
 use std::sync::Arc;
 
 #[tokio::test(flavor = "current_thread")]
@@ -72,7 +72,7 @@ async fn projects_skill_metadata_without_body() {
     assert!(stable_text.contains("Use for demo tasks."));
     assert!(stable_text.contains("demo/SKILL.md"));
     assert!(stable_text.contains("$skill-name"));
-    assert!(request_text.contains("read_text"));
+    assert!(request_text.contains("read_file"));
     assert!(request_text.contains("Coding file capabilities"));
     assert!(request_text.contains("user's current input language"));
     assert!(request_text.contains("configured sandbox/profile"));
@@ -96,7 +96,7 @@ async fn includes_skill_roots_in_workspace_read_tools() {
 
     let provider = ScriptedProvider::new(vec![vec![Ok(workspace_tool_call(
         "call-read-skill",
-        READ_TEXT_TOOL,
+        READ_FILE_TOOL,
         [(
             "path",
             serde_json::Value::String("demo/SKILL.md".to_owned()),

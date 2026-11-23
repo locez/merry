@@ -319,7 +319,7 @@ impl CodingAgentProfileBuilder {
         self
     }
 
-    /// Sets workspace-relative paths that `read_text` may read.
+    /// Sets workspace-relative paths that `read_file` may read.
     #[must_use]
     pub fn read_scope<I, P>(mut self, paths: I) -> Self
     where
@@ -359,7 +359,7 @@ impl CodingAgentProfileBuilder {
         self
     }
 
-    /// Sets absolute host paths that `read_text` and `apply_patch` must never
+    /// Sets absolute host paths that `read_file` and `apply_patch` must never
     /// read or modify (such as Merry's private state and credential store).
     #[must_use]
     pub fn denied_absolute_paths<I, P>(mut self, paths: I) -> Self

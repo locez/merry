@@ -10,9 +10,9 @@ use thiserror::Error;
 /// Limits applied by workspace tools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceToolLimits {
-    /// Maximum bytes returned or scanned by one `read_text` request.
+    /// Maximum bytes returned or scanned by one text `read_file` request.
     pub max_read_bytes: usize,
-    /// Maximum lines returned by one `read_text` request, also used when omitted.
+    /// Maximum lines returned by one text `read_file` request, also used when omitted.
     /// Defaults to 2,000 lines; the independent byte limit still applies.
     pub max_read_lines: usize,
     /// Maximum bytes written to one file by `apply_patch`.
@@ -99,7 +99,7 @@ impl WorkspaceToolsConfig {
         &self.limits
     }
 
-    /// Returns the optional workspace-relative read scope for `read_text`.
+    /// Returns the optional workspace-relative read scope for `read_file`.
     #[must_use]
     pub fn read_scope(&self) -> Option<&[PathBuf]> {
         self.read_scope.as_deref()
@@ -111,7 +111,7 @@ impl WorkspaceToolsConfig {
         self.patch_write_scope.as_deref()
     }
 
-    /// Returns workspace-relative paths forbidden to `apply_patch` and `read_text`.
+    /// Returns workspace-relative paths forbidden to `apply_patch` and `read_file`.
     #[must_use]
     pub fn forbidden_paths(&self) -> &[PathBuf] {
         &self.forbidden_paths
@@ -124,7 +124,7 @@ impl WorkspaceToolsConfig {
         self
     }
 
-    /// Sets the optional root-relative read scope for `read_text`.
+    /// Sets the optional root-relative read scope for `read_file`.
     ///
     /// `None` preserves existing unrestricted workspace read behavior.
     /// `Some([])` denies all workspace file reads (read-only resource roots
@@ -152,14 +152,14 @@ impl WorkspaceToolsConfig {
         self
     }
 
-    /// Returns absolute host paths denied to both `read_text` and `apply_patch`
+    /// Returns absolute host paths denied to both `read_file` and `apply_patch`
     /// (for example Merry's private state and credential directories).
     #[must_use]
     pub fn denied_absolute_paths(&self) -> &[PathBuf] {
         &self.denied_absolute_paths
     }
 
-    /// Sets absolute host paths denied to both `read_text` and `apply_patch`.
+    /// Sets absolute host paths denied to both `read_file` and `apply_patch`.
     #[must_use]
     pub fn with_denied_absolute_paths(mut self, paths: Vec<PathBuf>) -> Self {
         self.denied_absolute_paths = paths;

@@ -261,7 +261,7 @@ pub(crate) enum TimelineItem {
     Command {
         view: CommandView,
     },
-    /// Active non-process tool call (`read_text`, `apply_patch`, `MCP`, etc.).
+    /// Active non-process tool call (`read_file`, `apply_patch`, `MCP`, etc.).
     /// Shares the same spinner, soft lavender-pink flow shimmer, and single-line
     /// collapse behavior as running shell commands.
     ToolRunning {

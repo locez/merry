@@ -204,7 +204,7 @@ async fn execute_registered_tool_success_records_artifact_resolves_and_compiles_
 async fn reading_catalog_skill_file_emits_skill_used_event() {
     let call = model_tool_call_with_args(
         "call-read-skill",
-        "read_text",
+        "read_file",
         Map::from_iter([("path".to_owned(), Value::String("demo/SKILL.md".to_owned()))]),
     );
     let provider = ScriptedModelProvider::new(vec![vec![Ok(completed_outputs_event(
@@ -224,7 +224,7 @@ async fn reading_catalog_skill_file_emits_skill_used_event() {
     let runtime = Runtime::builder(session_id("provider-skill-used"))
         .skill_catalog(catalog)
         .register_tool(RegisteredTool::read_only(
-            path_tool_spec("read_text"),
+            path_tool_spec("read_file"),
             Arc::new(ScriptedToolExecutor::succeeding_text("# Demo\n")),
         ))
         .model_provider(Arc::new(provider), model_name())

@@ -55,6 +55,7 @@ async fn parent_builder_composes_full_coding_runtime_and_loop_policy() {
         "request_permissions",
         "read_background_process",
         "stop_background_process",
+        "read_file",
         "apply_patch",
         "web_fetch",
         "browser_tab",
@@ -112,7 +113,7 @@ async fn command_generation_builder_is_read_only_even_with_full_policy_inputs() 
         .into_iter()
         .map(ToolName::as_str)
         .collect::<Vec<_>>();
-    assert!(tool_names.contains(&"read_text"));
+    assert!(tool_names.contains(&"read_file"));
     for tool in [
         "run_process",
         "request_permissions",

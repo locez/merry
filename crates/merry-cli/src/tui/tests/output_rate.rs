@@ -110,7 +110,7 @@ fn tools_idle_cancellation_and_failure_do_not_extend_provider_receive_time() {
     rate.observe(&rate_event(100, 2, true));
     for event in [
         RuntimeEvent::ToolCallStarted {
-            call: pending_call("read", "read_text"),
+            call: pending_call("read", "read_file"),
             source: source(),
         },
         RuntimeEvent::InteractiveRunStateChanged {

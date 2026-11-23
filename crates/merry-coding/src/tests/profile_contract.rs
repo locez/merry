@@ -23,7 +23,7 @@ fn workspace_profile_builds_read_tools_and_coding_defaults() {
         .iter()
         .map(|tool| tool.spec().name().as_str())
         .collect::<Vec<_>>();
-    assert!(tool_names.contains(&"read_text"));
+    assert!(tool_names.contains(&"read_file"));
     assert!(!tool_names.contains(&"apply_patch"));
     assert!(profile.runtime_profile().progress_commentary());
     assert_eq!(
@@ -45,7 +45,7 @@ fn coding_agent_profile_has_one_canonical_workspace_tool_order() {
         .map(ToolName::as_str)
         .collect::<Vec<_>>();
 
-    assert_eq!(tool_names, vec!["read_text",]);
+    assert_eq!(tool_names, vec!["read_file"]);
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn coding_agent_profile_owns_process_permission_and_patch_order() {
             "request_permissions",
             "read_background_process",
             "stop_background_process",
-            "read_text",
+            "read_file",
             "apply_patch",
         ]
     );
@@ -190,7 +190,7 @@ fn coding_agent_profile_hash_includes_advertised_tool_order() {
             .into_iter()
             .map(ToolName::as_str)
             .collect::<Vec<_>>(),
-        vec!["read_text", "alpha", "beta"]
+        vec!["read_file", "alpha", "beta"]
     );
 }
 
@@ -330,7 +330,7 @@ fn coding_agent_profile_appends_memory_instructions_after_policy() {
     assert_eq!(blocks[0].tag(), "merry_coding_policy");
     assert_eq!(blocks[0].text(), CODING_AGENT_POLICY_PROMPT);
     assert_eq!(blocks[1].tag(), "merry_memory");
-    assert!(blocks[1].text().contains("`read_text`"));
+    assert!(blocks[1].text().contains("`read_file`"));
     assert!(blocks[1].text().contains("`apply_patch`"));
     assert!(blocks[1].text().contains("never read or edit MEMORY.md"));
     assert_ne!(without.profile_hash(), profile.profile_hash());
@@ -405,7 +405,7 @@ fn workspace_profile_web_tools_registers_web_and_browser_tools_in_order() {
         .collect::<Vec<_>>();
     assert_eq!(
         names,
-        vec!["read_text", "web_fetch", "browser_tab", "browser_network"]
+        vec!["read_file", "web_fetch", "browser_tab", "browser_network"]
     );
     assert_ne!(bare.profile_hash(), with_web.profile_hash());
     assert!(CODING_AGENT_POLICY_PROMPT.contains("browser_tab"));

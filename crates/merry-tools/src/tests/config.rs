@@ -102,7 +102,7 @@ fn config_rejects_invalid_patch_scope_paths() {
 }
 
 #[test]
-fn into_registered_tools_exposes_read_text_only() {
+fn into_registered_tools_exposes_read_file_only() {
     let temp = TempWorkspace::new("registered-tools");
     let tools = tools_for(temp.path()).into_registered_tools();
     let names: Vec<_> = tools
@@ -110,7 +110,7 @@ fn into_registered_tools_exposes_read_text_only() {
         .map(|tool| tool.spec().name().as_str())
         .collect();
 
-    assert_eq!(names, [READ_TEXT_TOOL]);
+    assert_eq!(names, [READ_FILE_TOOL]);
     assert!(
         tools
             .iter()

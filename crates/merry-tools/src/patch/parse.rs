@@ -226,7 +226,7 @@ pub(super) fn parse_apply_patch(
 
     if !files.iter().any(WorkspacePatchFile::has_edit) {
         return Err(WorkspacePatchParseError::noop(
-            "workspace patch contains no `+` or `-` lines, so nothing would change. Send the added or removed lines as `+`/`-` hunk lines to edit the file, or use `read_text` when you only need to inspect the current content",
+            "workspace patch contains no `+` or `-` lines, so nothing would change. Send the added or removed lines as `+`/`-` hunk lines to edit the file, or use `read_file` when you only need to inspect the current content",
             match files.as_slice() {
                 [file] => Some(file.path.clone()),
                 _ => None,

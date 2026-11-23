@@ -36,7 +36,7 @@ fn run_cancelled_event() -> RuntimeEvent {
 fn pending_tool_call(id: &str) -> PendingToolCall {
     PendingToolCall::new(
         ToolCallId::new(id).expect("tool call id"),
-        ToolName::new("read_text").expect("tool name"),
+        ToolName::new("read_file").expect("tool name"),
         ToolCallArguments::new(Default::default()),
     )
 }

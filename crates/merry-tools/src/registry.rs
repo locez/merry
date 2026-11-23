@@ -1,7 +1,7 @@
 use crate::{
     config::{WorkspaceToolConfigError, WorkspaceToolsConfig},
     patch::{self, ApplyPatchExecutor},
-    read::{self, ReadTextExecutor},
+    read::{self, ReadFileExecutor},
     state::WorkspaceToolState,
 };
 use merry_core::ToolSpec;
@@ -29,7 +29,7 @@ impl WorkspaceTools {
         })
     }
 
-    /// Returns the bounded text-read tool with parallel-safe admission.
+    /// Returns the bounded file-read tool (text and images) with parallel-safe admission.
     #[must_use]
     pub fn into_registered_tools(self) -> Vec<RegisteredTool> {
         vec![register_read(self.read_spec, self.state)]
@@ -51,6 +51,6 @@ impl WorkspaceTools {
 }
 
 fn register_read(spec: ToolSpec, state: Arc<WorkspaceToolState>) -> RegisteredTool {
-    RegisteredTool::read_only(spec, Arc::new(ReadTextExecutor { state }))
+    RegisteredTool::read_only(spec, Arc::new(ReadFileExecutor { state }))
         .with_parallel_safe_execution()
 }

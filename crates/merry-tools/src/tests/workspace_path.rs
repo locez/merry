@@ -33,7 +33,7 @@ fn sibling_of(root: &Path, suffix: &str) -> PathBuf {
 }
 
 #[test]
-fn read_text_absolute_resource_path_is_not_shadowed_by_a_workspace_file() {
+fn read_file_absolute_resource_path_is_not_shadowed_by_a_workspace_file() {
     let temp = TempWorkspace::new("path-resource-anchor");
     let tools = tools_for(temp.path());
     let root = canonical_root(&temp);
@@ -90,7 +90,7 @@ fn apply_patch_absolute_path_edits_outside_file_and_not_the_workspace_copy() {
 }
 
 #[test]
-fn read_text_accepts_absolute_path_inside_the_workspace() {
+fn read_file_accepts_absolute_path_inside_the_workspace() {
     let temp = TempWorkspace::new("path-absolute-read");
     temp.write_text("dir/note.txt", "one\ntwo\n");
     let tools = tools_for(temp.path());
@@ -143,7 +143,7 @@ fn apply_patch_accepts_absolute_path_inside_the_workspace() {
 }
 
 #[test]
-fn read_text_reads_absolute_path_outside_the_workspace() {
+fn read_file_reads_absolute_path_outside_the_workspace() {
     let temp = TempWorkspace::new("path-absolute-outside");
     let tools = tools_for(temp.path());
     let root = canonical_root(&temp);
@@ -282,7 +282,7 @@ fn read_only_write_scope_still_allows_durable_memory_observations() {
 
 #[cfg(unix)]
 #[test]
-fn read_text_follows_platform_symlinks_outside_the_workspace() {
+fn read_file_follows_platform_symlinks_outside_the_workspace() {
     let temp = TempWorkspace::new("path-outside-symlink");
     let tools = tools_for(temp.path());
     let root = canonical_root(&temp);
@@ -406,7 +406,7 @@ fn workspace_path_reads_hidden_components_after_normalization() {
 }
 
 #[test]
-fn denied_absolute_paths_block_read_text_and_apply_patch() {
+fn denied_absolute_paths_block_read_file_and_apply_patch() {
     let temp = TempWorkspace::new("path-denied-absolute");
     let root = canonical_root(&temp);
     let private_dir = sibling_of(&root, "-private-state");

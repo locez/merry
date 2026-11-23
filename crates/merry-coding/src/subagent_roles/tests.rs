@@ -42,7 +42,7 @@ fn resolves_four_level_model_and_generation_inheritance() {
     let parent_gen = GenerationConfig::default()
         .with_reasoning_effort(Some(ReasoningEffort::new("high").expect("valid")));
     let parent_tools = tool_names(&[
-        "read_text",
+        "read_file",
         "apply_patch",
         "run_process",
         "read_background_process",
@@ -201,7 +201,7 @@ fn prunes_orphaned_background_tools_when_run_process_is_absent_and_respects_togg
         .expect("browser role overlay valid");
 
     let parent_tools = tool_names(&[
-        "read_text",
+        "read_file",
         "browser_tab",
         "browser_network",
         "read_background_process",

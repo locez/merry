@@ -1,6 +1,6 @@
 //! Deterministic token estimates used by request budgeting and compaction planning.
 
-use merry_llm::{ModelContent, ModelInputItem, ModelRequest, ModelResponseFormat};
+use merry_llm::{ModelContent, ModelImage, ModelInputItem, ModelRequest, ModelResponseFormat};
 
 mod calibration;
 
@@ -65,24 +65,34 @@ fn estimate_model_input_item_tokens(item: &ModelInputItem) -> u64 {
                         .expect("tool arguments must serialize for budget estimation"),
                 )
         }
-        ModelInputItem::ToolResult(result) => estimate_text_tokens(result.content().as_str()),
+        ModelInputItem::ToolResult(result) => estimate_images_tokens(
+            estimate_text_tokens(result.content().as_str()),
+            result.images().iter(),
+        ),
     }
 }
 
 fn estimate_model_content_tokens(content: &ModelContent) -> u64 {
-    content.images().fold(
-        estimate_text_tokens(content.as_text()),
-        |estimated_tokens, image| {
-            let pixels = u64::from(image.width()) * u64::from(image.height());
-            estimated_tokens.saturating_add(pixels.div_ceil(750).max(85))
-        },
-    )
+    estimate_images_tokens(estimate_text_tokens(content.as_text()), content.images())
+}
+
+fn estimate_images_tokens<'a>(
+    base_tokens: u64,
+    images: impl Iterator<Item = &'a ModelImage>,
+) -> u64 {
+    images.fold(base_tokens, |estimated_tokens, image| {
+        let pixels = u64::from(image.width()) * u64::from(image.height());
+        estimated_tokens.saturating_add(pixels.div_ceil(750).max(85))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{estimate_model_input_item_tokens, estimate_text_tokens};
-    use merry_llm::{ModelContent, ModelImage, ModelInputItem, ModelMessage, ModelMessageRole};
+    use merry_llm::{
+        ModelContent, ModelImage, ModelInputItem, ModelMessage, ModelMessageRole, ModelToolCallId,
+        ModelToolResult, ModelToolResultContent,
+    };
     use std::sync::Arc;
 
     #[test]
@@ -104,6 +114,25 @@ mod tests {
         assert_eq!(
             estimate_model_input_item_tokens(&item),
             text_tokens + 85 + 1_000_000_u64.div_ceil(750)
+        );
+    }
+
+    #[test]
+    fn tool_result_image_token_estimate_adds_attached_images() {
+        let png = Arc::<[u8]>::from([137, 80, 78, 71, 13, 10, 26, 10]);
+        let result = ModelToolResult::succeeded(
+            ModelToolCallId::new("call-img").expect("valid call id"),
+            ModelToolResultContent::text("assets/ui.png: png image").expect("valid text"),
+        )
+        .with_images(vec![
+            ModelImage::png("assets/ui.png", png, 1_200, 800).expect("valid image"),
+        ]);
+        let text_tokens = estimate_text_tokens(result.content().as_str());
+        let item = ModelInputItem::ToolResult(result);
+
+        assert_eq!(
+            estimate_model_input_item_tokens(&item),
+            text_tokens + (1_200_u64 * 800).div_ceil(750)
         );
     }
 }

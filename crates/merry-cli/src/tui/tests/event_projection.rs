@@ -48,7 +48,7 @@ fn projector_rebuilds_resume_transcript_history() {
     )
     .with_successful_command_output(true);
     let mut projector = TuiProjector::default();
-    let call = pending_call_with_args("call-read", "read_text", json!({"path": "hello_world.py"}));
+    let call = pending_call_with_args("call-read", "read_file", json!({"path": "hello_world.py"}));
     let result = ToolCallResult::succeeded(call.id().clone());
 
     projector.apply_transcript_item(
@@ -72,7 +72,7 @@ fn projector_rebuilds_resume_transcript_history() {
             output: Some(ToolOutput::Json {
                 json: json!({
                     "ok": true,
-                    "tool": "read_text",
+                    "tool": "read_file",
                     "path": "hello_world.py",
                     "content": "print('hi')\n",
                     "bytes": 12,
@@ -93,7 +93,7 @@ fn projector_rebuilds_resume_transcript_history() {
         TimelineItem::Assistant { text } if text == "我先读一下文件。"
     ));
     let collapsed = render_to_text(&state, 120, 24);
-    assert!(collapsed.contains("Read read_text path=hello_world.py"));
+    assert!(collapsed.contains("Read read_file path=hello_world.py"));
     assert!(collapsed.contains('▸'), "{collapsed}");
     assert!(!collapsed.contains("print('hi')"), "{collapsed}");
     state.toggle_command_expanded(2);

@@ -150,7 +150,7 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
                             ),
                             (
                                 "allowed_tools".to_owned(),
-                                Value::Array(vec![Value::String("read_text".to_owned())]),
+                                Value::Array(vec![Value::String("read_file".to_owned())]),
                             ),
                             ("write_scope".to_owned(), Value::Array(Vec::new())),
                         ]))]),
@@ -267,13 +267,13 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
     assert!(child_stable_text.contains("project-rules-source:AGENTS.md"));
     assert!(child_stable_text.contains("Child must receive root rule sentinel."));
     assert!(!child_stable_text.contains("Child must not reread changed root rule sentinel."));
-    assert!(child_tool_names.contains(&"read_text"));
+    assert!(child_tool_names.contains(&"read_file"));
     assert_eq!(
         child_tool_names,
         [
             "run_process",
             "request_permissions",
-            "read_text",
+            "read_file",
             "apply_patch",
             "web_fetch",
             "browser_tab",
@@ -354,7 +354,7 @@ async fn custom_browser_role_routes_subagents_to_role_provider_and_model() {
                 allowed_tools: Some(vec![
                     ToolName::new("browser_tab").expect("valid tool"),
                     ToolName::new("browser_network").expect("valid tool"),
-                    ToolName::new("read_text").expect("valid tool"),
+                    ToolName::new("read_file").expect("valid tool"),
                 ]),
                 ..SubagentRoleOverlay::default()
             },

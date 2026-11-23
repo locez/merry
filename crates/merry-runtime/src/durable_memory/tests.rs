@@ -214,7 +214,7 @@ fn memory_writes_require_a_fresh_topic_snapshot() {
     );
 
     let before_read = memory.authorize_write(MemoryWriteKind::Update, &topic, 32);
-    assert!(denied(before_read.unwrap_err()).contains("read_text the memory file"));
+    assert!(denied(before_read.unwrap_err()).contains("read_file the memory file"));
     memory
         .note_read(&topic)
         .expect("topic read should snapshot");
@@ -363,7 +363,7 @@ fn capture_and_dream_schemas_are_json_objects() {
 fn instructions_name_the_file_tools_and_protect_the_index() {
     let temp = tempfile::tempdir().expect("tempdir should be created");
     let text = open_memory(&temp).instructions();
-    assert!(text.contains("`read_text`"));
+    assert!(text.contains("`read_file`"));
     assert!(text.contains("`apply_patch`"));
     assert!(text.contains("never read or edit MEMORY.md"));
     assert!(text.contains("pending observations"));

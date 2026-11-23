@@ -46,7 +46,7 @@ mod rendering {
         assert!(rendered.contains("frontend-design"));
         assert!(rendered.contains("Use for polished frontend implementation."));
         assert!(rendered.contains("skills/frontend-design/SKILL.md"));
-        assert!(rendered.contains("read_text"));
+        assert!(rendered.contains("read_file"));
         assert!(rendered.contains("Read only the referenced files and ranges needed"));
         assert!(!rendered.contains("# Frontend Design"));
         assert!(!rendered.contains("full skill body sentinel"));

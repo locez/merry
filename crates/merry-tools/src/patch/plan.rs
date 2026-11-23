@@ -725,7 +725,7 @@ pub(super) fn read_patch_preimage_for_path(
     let bytes = read_bounded(&mut file, max_read_bytes, is_cancelled)?;
     // A patch edits text, so a NUL byte means the caller is about to make
     // nonsense of a binary file. That is a patch decision rather than a read
-    // policy, which is why `read_text` still returns such bytes.
+    // policy, which is why `read_file` still returns such bytes.
     if bytes.contains(&0) {
         return Err(DomainError::new(ERROR_NOT_UTF8, "workspace file appears to be binary").into());
     }

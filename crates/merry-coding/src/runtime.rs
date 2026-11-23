@@ -371,7 +371,7 @@ impl CodingRuntimeInput {
         self
     }
 
-    /// Sets absolute host paths that in-process file tools (`read_text` and
+    /// Sets absolute host paths that in-process file tools (`read_file` and
     /// `apply_patch`) must never read or modify, inherited by parent and child
     /// runtimes.
     #[must_use]

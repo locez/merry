@@ -16,8 +16,8 @@ use crate::{
 use merry_core::ToolOutput;
 use merry_runtime::ProcessOutputEnvelope;
 use merry_tools::{
-    APPLY_PATCH_TOOL, WorkspacePatchOperationKind, WorkspacePatchSuccess,
-    WorkspacePatchSuccessLineKind,
+    APPLY_PATCH_TOOL, READ_FILE_TOOL, WorkspacePatchOperationKind, WorkspacePatchSuccess,
+    WorkspacePatchSuccessLineKind, WorkspaceReadImageSuccess, WorkspaceReadPdfPagesSuccess,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -64,7 +64,7 @@ pub(super) fn tui_tool_title(name: &str) -> &'static str {
 
     match name {
         "run_process" => "Ran",
-        "read_text" => "Read",
+        READ_FILE_TOOL => "Read",
         "request_permissions" => "Permission",
         "spawn_subagents" => "Delegated",
         "wait_subagents" => "Waited",
@@ -259,9 +259,55 @@ pub(super) fn permission_output_bodies(output: &str) -> Option<String> {
     Some(body)
 }
 
-pub(super) fn read_text_output_preview(output: &str) -> Option<ToolOutputPreview> {
-    let output = serde_json::from_str::<WorkspaceReadTextOutput>(output).ok()?;
-    if !output.ok || output.tool.as_deref() != Some("read_text") {
+pub(super) fn read_file_output_preview(output: &str) -> Option<ToolOutputPreview> {
+    if let Ok(image) = serde_json::from_str::<WorkspaceReadImageSuccess>(output)
+        && image.ok
+        && image.tool == READ_FILE_TOOL
+        && image.kind == "image"
+    {
+        let summary = if image.resized {
+            format!(
+                "{} ({}x{} -> {}x{}, {}, {} bytes PNG attached)",
+                image.path,
+                image.source_width,
+                image.source_height,
+                image.width,
+                image.height,
+                image.source_format,
+                image.png_bytes
+            )
+        } else {
+            format!(
+                "{} ({}x{}, {}, {} bytes PNG attached)",
+                image.path, image.width, image.height, image.source_format, image.png_bytes
+            )
+        };
+        return Some(ToolOutputPreview::new(
+            std::iter::once(summary.as_str()),
+            false,
+        ));
+    }
+
+    if let Ok(pdf) = serde_json::from_str::<WorkspaceReadPdfPagesSuccess>(output)
+        && pdf.ok
+        && pdf.tool == READ_FILE_TOOL
+        && pdf.kind == "pdf_pages"
+    {
+        let summary = format!(
+            "{} (PDF: rendered {}/{} pages, {} bytes PNG attached)",
+            pdf.path,
+            pdf.rendered_pages.len(),
+            pdf.total_pages,
+            pdf.total_png_bytes
+        );
+        return Some(ToolOutputPreview::new(
+            std::iter::once(summary.as_str()),
+            false,
+        ));
+    }
+
+    let output = serde_json::from_str::<WorkspaceReadFileTextOutput>(output).ok()?;
+    if !output.ok || output.tool.as_deref() != Some(READ_FILE_TOOL) {
         return None;
     }
 
@@ -278,7 +324,7 @@ pub(super) fn read_text_output_preview(output: &str) -> Option<ToolOutputPreview
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct WorkspaceReadTextOutput {
+pub(super) struct WorkspaceReadFileTextOutput {
     pub(super) ok: bool,
     pub(super) tool: Option<String>,
     pub(super) path: String,

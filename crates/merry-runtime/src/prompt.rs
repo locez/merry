@@ -349,7 +349,7 @@ mod tests {
     fn subagent_base_instructions_adapt_to_admitted_tools() {
         let read_only =
             super::subagent_base_instructions(&[
-                merry_core::ToolName::new("read_text").expect("valid tool")
+                merry_core::ToolName::new("read_file").expect("valid tool")
             ]);
         assert!(read_only.starts_with("<merry_subagent_instructions>\n"));
         assert!(read_only.contains("Read-only discipline:"));
@@ -358,7 +358,7 @@ mod tests {
         assert!(read_only.contains("never ask clarifying questions"));
 
         let coder = super::subagent_base_instructions(&[
-            merry_core::ToolName::new("read_text").expect("valid tool"),
+            merry_core::ToolName::new("read_file").expect("valid tool"),
             merry_core::ToolName::new("apply_patch").expect("valid tool"),
             merry_core::ToolName::new("run_process").expect("valid tool"),
         ]);

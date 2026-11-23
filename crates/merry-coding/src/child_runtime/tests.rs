@@ -432,7 +432,7 @@ async fn child_runtime_routes_configured_role_model_and_live_parent_model_switch
         vec![
             ToolName::new("browser_tab").expect("valid name"),
             ToolName::new("browser_network").expect("valid name"),
-            ToolName::new("read_text").expect("valid name"),
+            ToolName::new("read_file").expect("valid name"),
         ],
     );
     browser_input.task = browser_input
@@ -453,7 +453,7 @@ async fn child_runtime_routes_configured_role_model_and_live_parent_model_switch
     // Live switched parent model takes effect immediately for roles without explicit model override.
     let mut switched_input = child_input(
         "child-switched",
-        vec![ToolName::new("read_text").expect("valid name")],
+        vec![ToolName::new("read_file").expect("valid name")],
     );
     switched_input.parent_primary_model = Some(merry_runtime::ParentPrimaryModel {
         provider: switched_primary.clone(),
@@ -610,7 +610,7 @@ async fn child_uses_dedicated_subagent_prompt_handoff_and_shared_role_cache_key(
                 existing_worktree: None,
                 task_anchor: TaskAnchor::new("Find beta definition.").expect("anchor valid"),
                 task,
-                allowed_tools: vec![ToolName::new("read_text").expect("tool valid")],
+                allowed_tools: vec![ToolName::new("read_file").expect("tool valid")],
                 workspace_scope: scope,
                 depth: 1,
                 generation_config: GenerationConfig::default(),

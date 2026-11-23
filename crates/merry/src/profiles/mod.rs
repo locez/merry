@@ -43,7 +43,7 @@ mod tests {
                 .into_iter()
                 .map(|name| name.as_str())
                 .collect::<Vec<_>>(),
-            ["read_text"]
+            ["read_file"]
         );
         assert!(profile.profile_hash().as_str().starts_with("fnv1a64:"));
     }

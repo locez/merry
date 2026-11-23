@@ -23,7 +23,7 @@ pub use frontmatter::FrontmatterError;
 const SKILLS_INTRO: &str = "A skill is a set of local instructions stored in a `SKILL.md` file. The list below is metadata for discovery only; skill bodies stay on disk until needed.";
 const SKILLS_HOW_TO_USE: &str = r#"- If the user explicitly names a skill, including with a `$skill-name` token, use it for that turn.
 - If the task clearly matches a skill description, read that skill's `SKILL.md` before relying on it.
-- Use `read_text` with a bounded line range to read the listed `SKILL.md`; request further ranges only when the task needs them.
+- Use `read_file` with a bounded line range to read the listed `SKILL.md`; request further ranges only when the task needs them.
 - Resolve relative paths mentioned by `SKILL.md` relative to that skill directory.
 - Read only the referenced files and ranges needed for the task.
 - Do not carry a skill body across unrelated turns unless it remains in raw context or is re-read."#;

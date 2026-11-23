@@ -135,7 +135,7 @@ def test_workspace_limits_reach_rust_tool_schema(
         request = ModelRequest.model_validate_json(requests.get(timeout=1))
 
     read_tool = next(
-        tool.function for tool in request.tools if tool.function.name == "read_text"
+        tool.function for tool in request.tools if tool.function.name == "read_file"
     )
     assert read_tool.parameters.properties["max_lines"].maximum == expected_max_lines
 
@@ -143,7 +143,7 @@ def test_workspace_limits_reach_rust_tool_schema(
 def run_workspace_tool(
     root: Path,
     limits: merry.WorkspaceLimits,
-    name: Literal["read_text", "apply_patch"],
+    name: Literal["read_file", "apply_patch"],
     arguments: ReadArguments | PatchArguments,
 ) -> events.ToolCallFinishedPayload:
     chunk = json.dumps(
@@ -231,7 +231,7 @@ def test_read_byte_limits_are_enforced_without_changing_other_limits(
     encoded_content = content.encode("utf-8")
     path.write_bytes(encoded_content)
     finished = run_workspace_tool(
-        tmp_path, limits, "read_text", ReadArguments(path="note.txt")
+        tmp_path, limits, "read_file", ReadArguments(path="note.txt")
     )
 
     assert_tool_status(finished, expected_error)
@@ -254,7 +254,7 @@ def test_read_line_override_controls_default_window_and_explicit_limit(
     finished = run_workspace_tool(
         tmp_path,
         merry.WorkspaceLimits(max_read_lines=2),
-        "read_text",
+        "read_file",
         ReadArguments(path="note.txt", max_lines=requested_lines),
     )
 

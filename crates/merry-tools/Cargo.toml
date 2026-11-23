@@ -7,10 +7,12 @@ license.workspace = true
 
 [dependencies]
 base64.workspace = true
+hayro.workspace = true
 image.workspace = true
 merry-core = { path = "../merry-core", version = "0.1.0" }
 merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
 merry-tools-macros = { path = "../merry-tools-macros", version = "0.1.0" }
+quick-xml.workspace = true
 reqwest.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -20,6 +22,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["net"] }
 tracing.workspace = true
 url = "2"
+zip.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

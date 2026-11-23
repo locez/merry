@@ -7,7 +7,11 @@ use std::{
 
 use merry_runtime::DurableMemory;
 
-use crate::config::{WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceToolsConfig};
+use crate::{
+    config::{WorkspaceToolConfigError, WorkspaceToolLimits, WorkspaceToolsConfig},
+    errors::{DomainError, ERROR_PATH_DENIED},
+    path::ValidatedToolPath,
+};
 
 #[derive(Debug)]
 pub(crate) struct WorkspaceToolState {
@@ -84,6 +88,57 @@ impl WorkspaceToolState {
     /// resolves. An absolute argument names one path and ignores this order.
     pub(crate) fn read_roots(&self) -> impl Iterator<Item = &PathBuf> {
         std::iter::once(&self.root).chain(self.readonly_resource_roots.iter())
+    }
+
+    /// Validates that a resolved path is permitted by read security boundaries.
+    pub(crate) fn validate_read_boundary(
+        &self,
+        path: &ValidatedToolPath,
+        resolved: &std::path::Path,
+    ) -> Result<(), DomainError> {
+        if self.is_denied_absolute_path(resolved) {
+            return Err(DomainError::new(
+                ERROR_PATH_DENIED,
+                "path is denied by Merry security policy",
+            ));
+        }
+        if self
+            .readonly_resource_roots
+            .iter()
+            .any(|root| resolved.starts_with(root))
+        {
+            return Ok(());
+        }
+        if let Some(memory) = &self.durable_memory
+            && memory.governs_path(resolved)
+        {
+            return Ok(());
+        }
+
+        let scope_path = path.relative_spelling();
+        if let Some(scope_path) = scope_path
+            && matches_any_scope_path(scope_path, &self.read_forbidden_paths)
+        {
+            return Err(DomainError::new(
+                ERROR_PATH_DENIED,
+                "workspace read path is forbidden by the child workspace scope",
+            ));
+        }
+
+        let Some(read_scope) = &self.read_scope else {
+            return Ok(());
+        };
+        match scope_path {
+            Some(scope_path) if matches_any_scope_path(scope_path, read_scope) => Ok(()),
+            _ => {
+                let message = if read_scope.is_empty() {
+                    "workspace read path is outside the configured read scope; this read scope allows no workspace files"
+                } else {
+                    "workspace read path is outside the configured read scope"
+                };
+                Err(DomainError::new(ERROR_PATH_DENIED, message))
+            }
+        }
     }
 }
 

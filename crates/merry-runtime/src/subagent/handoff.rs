@@ -110,7 +110,7 @@ pub fn preload_context_files(
         if remaining_bytes == 0 {
             loaded.push(PreloadedContextFile {
                 label,
-                content: "[skipped: context_files byte budget exhausted; inspect directly with read_text]".to_owned(),
+                content: "[skipped: context_files byte budget exhausted; inspect directly with read_file]".to_owned(),
             });
             continue;
         }
@@ -250,7 +250,7 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_owned();
     }
-    let suffix = "\n...[truncated; inspect remaining lines with read_text]";
+    let suffix = "\n...[truncated; inspect remaining lines with read_file]";
     let limit = max_bytes.saturating_sub(suffix.len());
     let mut end = limit.min(text.len());
     while end > 0 && !text.is_char_boundary(end) {

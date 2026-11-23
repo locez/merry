@@ -2,7 +2,8 @@ use super::*;
 use crate::{
     errors::{
         ALL_WORKSPACE_ERROR_CODES, ERROR_FILE_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND,
-        ERROR_FILE_TOO_LARGE, ERROR_INVALID_ARGUMENTS, ERROR_NOT_DIRECTORY, ERROR_NOT_FILE,
+        ERROR_FILE_TOO_LARGE, ERROR_IMAGE_TOO_LARGE, ERROR_INVALID_ARGUMENTS,
+        ERROR_INVALID_DOCUMENT, ERROR_INVALID_IMAGE, ERROR_NOT_DIRECTORY, ERROR_NOT_FILE,
         ERROR_NOT_UTF8, ERROR_PATCH_NOOP, ERROR_PATCH_SYNTAX, ERROR_PATH_DENIED,
         ERROR_PREIMAGE_ABSENT, ERROR_PREIMAGE_AMBIGUOUS, ERROR_PROPOSAL_MISMATCH,
         ERROR_READ_FAILED, ERROR_WRITE_FAILED, WORKSPACE_PATCH_PLAN_CHANGED_MESSAGE,
@@ -13,7 +14,7 @@ use crate::{
         propose_apply_patch_blocking_checked, stable_content_fingerprint,
     },
     path::validate_workspace_path_argument,
-    read::{ReadTextExecutor, ReadTextInput, read_text_blocking},
+    read::{ReadFileExecutor, ReadFileInput, read_file_blocking},
     trace::{
         TRACE_PATH_MAX_CHARS, bounded_trace_text, install_patch_test_after_write_hook,
         install_patch_test_before_mutation_hook, install_trace_start_test_hook,
@@ -173,12 +174,12 @@ fn workspace_tool_schemas_describe_bounded_file_operations() {
     }
 
     assert_fields(
-        read_text_spec_default(),
-        &["path", "start_line", "max_lines"],
+        read_file_spec_default(),
+        &["path", "start_line", "max_lines", "pages", "format"],
     );
     assert_fields(apply_patch_spec(), &["patch"]);
 
-    let read_schema = serde_json::to_value(read_text_spec_default().input_schema().as_schema())
+    let read_schema = serde_json::to_value(read_file_spec_default().input_schema().as_schema())
         .expect("read schema should serialize");
     let patch_schema = serde_json::to_value(apply_patch_spec().input_schema().as_schema())
         .expect("patch schema should serialize");
@@ -204,8 +205,8 @@ fn workspace_schemas_project_session_limits() {
     let registered = tools.into_registered_tools_with_patch();
     let read = registered
         .iter()
-        .find(|tool| tool.spec().name().as_str() == READ_TEXT_TOOL)
-        .expect("read_text tool should be registered");
+        .find(|tool| tool.spec().name().as_str() == READ_FILE_TOOL)
+        .expect("read_file tool should be registered");
     let patch = registered
         .iter()
         .find(|tool| tool.spec().name().as_str() == APPLY_PATCH_TOOL)
@@ -238,12 +239,14 @@ fn workspace_schemas_project_session_limits() {
 }
 
 fn read_outcome(tools: &WorkspaceTools, path: &str) -> ToolExecutionOutcome {
-    read_text_blocking(
+    read_file_blocking(
         &tools.state,
-        ReadTextInput {
+        ReadFileInput {
             path: path.to_owned(),
             start_line: None,
             max_lines: None,
+            pages: None,
+            format: None,
         },
     )
 }
@@ -353,7 +356,7 @@ fn assert_failed_json(
     path: Option<&str>,
     host_root: &Path,
 ) {
-    assert_failed_json_for_tool(outcome, READ_TEXT_TOOL, code, path, host_root);
+    assert_failed_json_for_tool(outcome, READ_FILE_TOOL, code, path, host_root);
 }
 
 fn assert_failed_json_for_tool(
@@ -469,10 +472,18 @@ fn expected_recovery_for_code(code: &str) -> Option<ExpectedRecovery> {
             path_contract: true,
             guidance_kind: Some("workspace_file_too_large"),
         }),
+        ERROR_IMAGE_TOO_LARGE => Some(ExpectedRecovery {
+            path_contract: true,
+            guidance_kind: Some("workspace_image_too_large"),
+        }),
         // These codes explain the path contract without guidance text of their
         // own, because a failure can be about where a path points and a failed
         // read or write has no model-facing recovery step beyond retrying.
-        ERROR_NOT_UTF8 | ERROR_READ_FAILED | ERROR_WRITE_FAILED => Some(ExpectedRecovery {
+        ERROR_NOT_UTF8
+        | ERROR_INVALID_IMAGE
+        | ERROR_INVALID_DOCUMENT
+        | ERROR_READ_FAILED
+        | ERROR_WRITE_FAILED => Some(ExpectedRecovery {
             path_contract: true,
             guidance_kind: None,
         }),
@@ -531,7 +542,7 @@ fn assert_no_provider_visible_patch_metadata(outcome: &ToolExecutionOutcome) {
 }
 
 fn pending_call(arguments: Value) -> PendingToolCall {
-    pending_call_for(READ_TEXT_TOOL, arguments)
+    pending_call_for(READ_FILE_TOOL, arguments)
 }
 
 fn pending_call_with_id(tool: &str, call_id: &str, arguments: Value) -> PendingToolCall {
@@ -597,13 +608,14 @@ fn cancel_trace_start_token() {
 
 mod config;
 mod model_content;
+mod office;
 mod patch;
 mod patch_policy;
 mod read;
 mod trace;
 mod workspace_path;
 
-fn read_text_spec_default() -> ToolSpec {
+fn read_file_spec_default() -> ToolSpec {
     crate::read::spec(&WorkspaceToolLimits::default()).expect("valid read tool schema")
 }
 

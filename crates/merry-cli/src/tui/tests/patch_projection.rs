@@ -389,7 +389,7 @@ fn projector_keeps_diff_like_non_patch_output_as_a_read_preview() {
 
     projector.apply(
         RuntimeEvent::ToolCallStarted {
-            call: pending_call("call-read", "read_text"),
+            call: pending_call("call-read", "read_file"),
             source: source(),
         },
         &mut state,
@@ -408,7 +408,7 @@ fn projector_keeps_diff_like_non_patch_output_as_a_read_preview() {
     assert_eq!(state.timeline().len(), 1);
     assert!(!matches!(state.timeline()[0], TimelineItem::Patch { .. }));
     let collapsed = render_to_text(&state, 120, 24);
-    assert!(collapsed.contains("Read read_text"));
+    assert!(collapsed.contains("Read read_file"));
     assert!(collapsed.contains('▸'), "{collapsed}");
     assert!(!collapsed.contains("+not a patch result"));
     state.toggle_command_expanded(0);

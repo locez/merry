@@ -133,7 +133,7 @@ pub(super) fn command_lines(
     }
 }
 
-/// Renders an active non-process tool call (`read_text`, `apply_patch`, `MCP`,
+/// Renders an active non-process tool call (`read_file`, `apply_patch`, `MCP`,
 /// etc.) using the exact same spinner, soft lavender-pink flow shimmer, and
 /// single-line collapse behavior as running shell commands.
 pub(super) fn tool_running_lines(

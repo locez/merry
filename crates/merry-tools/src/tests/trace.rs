@@ -1,15 +1,15 @@
 use super::*;
 
 #[tokio::test(flavor = "current_thread")]
-async fn read_text_traces_start_and_finish_without_file_contents() {
+async fn read_file_traces_start_and_finish_without_file_contents() {
     let temp = TempWorkspace::new("trace-read-file");
     temp.write_text("lib.rs", "secret source text\n");
     let tools = tools_for(temp.path());
-    let executor = ReadTextExecutor {
+    let executor = ReadFileExecutor {
         state: Arc::clone(&tools.state),
     };
     let call = pending_call_with_id(
-        READ_TEXT_TOOL,
+        READ_FILE_TOOL,
         "call-trace-read-file",
         json!({ "path": "lib.rs" }),
     );
@@ -26,21 +26,21 @@ async fn read_text_traces_start_and_finish_without_file_contents() {
     assert!(logs.contains("\"event\":\"runtime.workspace_tool.start\""));
     assert!(logs.contains("\"event\":\"runtime.workspace_tool.finish\""));
     assert!(logs.contains("\"status\":\"succeeded\""));
-    assert!(logs.contains("\"tool_name\":\"read_text\""));
+    assert!(logs.contains("\"tool_name\":\"read_file\""));
     assert!(logs.contains("\"tool_call_id\":\"call-trace-read-file\""));
     assert!(logs.contains("\"path\":\"lib.rs\""));
     assert!(!logs.contains("secret source text"));
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn read_text_failure_trace_includes_diagnostic_code() {
+async fn read_file_failure_trace_includes_diagnostic_code() {
     let temp = TempWorkspace::new("trace-read-failure");
     let tools = tools_for(temp.path());
-    let executor = ReadTextExecutor {
+    let executor = ReadFileExecutor {
         state: Arc::clone(&tools.state),
     };
     let call = pending_call_with_id(
-        READ_TEXT_TOOL,
+        READ_FILE_TOOL,
         "call-trace-read-failure",
         json!({ "path": "missing.txt" }),
     );
@@ -66,13 +66,13 @@ async fn read_text_failure_trace_includes_diagnostic_code() {
 async fn workspace_path_traces_are_bounded_summaries() {
     let temp = TempWorkspace::new("trace-bounded-path");
     let tools = tools_for(temp.path());
-    let executor = ReadTextExecutor {
+    let executor = ReadFileExecutor {
         state: Arc::clone(&tools.state),
     };
     let long_path = format!("{}tail.txt", "nested/".repeat(32));
     let expected_summary = bounded_trace_text(&long_path, TRACE_PATH_MAX_CHARS);
     let call = pending_call_with_id(
-        READ_TEXT_TOOL,
+        READ_FILE_TOOL,
         "call-trace-bounded-path",
         json!({ "path": long_path }),
     );
@@ -92,11 +92,11 @@ async fn workspace_started_tool_trace_finishes_cancelled_when_token_cancels() {
     let temp = TempWorkspace::new("trace-cancelled");
     temp.write_text("note.txt", "ok\n");
     let tools = tools_for(temp.path());
-    let executor = ReadTextExecutor {
+    let executor = ReadFileExecutor {
         state: Arc::clone(&tools.state),
     };
     let call = pending_call_with_id(
-        READ_TEXT_TOOL,
+        READ_FILE_TOOL,
         "call-trace-cancelled",
         json!({ "path": "note.txt" }),
     );
@@ -154,11 +154,11 @@ async fn workspace_tool_invalid_arguments_trace_failed_without_payload() {
     let tools = tools_for(temp.path());
     let invalid_arguments = json!({ "unexpected": "sensitive invalid payload" });
 
-    let read_executor = ReadTextExecutor {
+    let read_executor = ReadFileExecutor {
         state: Arc::clone(&tools.state),
     };
     let read_call = pending_call_with_id(
-        READ_TEXT_TOOL,
+        READ_FILE_TOOL,
         "call-trace-read-invalid-args",
         invalid_arguments.clone(),
     );
@@ -170,7 +170,7 @@ async fn workspace_tool_invalid_arguments_trace_failed_without_payload() {
     assert_invalid_arguments_trace(
         read_outcome.expect("read invalid args should resolve as a failed outcome"),
         &read_logs,
-        READ_TEXT_TOOL,
+        READ_FILE_TOOL,
         "call-trace-read-invalid-args",
     );
 

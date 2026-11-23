@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn splits_stable_and_dynamic_system_blocks_and_marks_last_tool_for_prompt_caching() {
         let second_tool = ToolSpec::new(
-            ToolName::new("read_text").expect("valid name"),
+            ToolName::new("read_file").expect("valid name"),
             "Read text",
             ToolInputSchema::new(
                 Schema::try_from(json!({

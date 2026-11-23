@@ -1,7 +1,7 @@
 //! On-disk verbatim record of history a prose summary replaced.
 //!
 //! The summary is navigation. The segment file is the exact covered transcript
-//! the later turn can read with `read_text`. A write failure omits the pointer
+//! the later turn can read with `read_file`. A write failure omits the pointer
 //! and still lets the summary install.
 
 use crate::session_store::FileSessionStore;
@@ -44,7 +44,7 @@ pub(crate) async fn persist_covered_segment(
     let directory = directory.display();
     Some(format!(
         "Full verbatim rollouts of compacted history are in {directory}/segment_*.md. \
-         See {directory}/{INDEX_FILE} for the list. Use read_text to recover exact code, \
+         See {directory}/{INDEX_FILE} for the list. Use read_file to recover exact code, \
          paths, or tool output when this summary is not enough. Do not modify these files."
     ))
 }

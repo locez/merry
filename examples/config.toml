@@ -104,7 +104,7 @@ readwrite_paths = [
 
 [skills]
 # Skill metadata is projected into the cacheable stable prefix. Full SKILL.md
-# bodies remain on disk and are read through bounded read_text ranges only when used.
+# bodies remain on disk and are read through bounded read_file ranges only when used.
 enabled = true
 roots = [
   "skills",
@@ -200,7 +200,7 @@ timeout_secs = 300
 # description = "UI & browser verification specialist"
 # provider = "openai-compatible"
 # model = "gpt-4.1-mini"
-# allowed_tools = ["browser_tab", "browser_network", "web_fetch", "read_text"]
+# allowed_tools = ["browser_tab", "browser_network", "web_fetch", "read_file"]
 # prompt_file = ".merry/prompts/browser.md"
 # instructions = "Focus on live UI verification, console errors, and network failures."
 
@@ -220,7 +220,7 @@ timeout_secs = 300
 # tools = ["resolve-library-id", "get-library-docs"]
 
 [tui]
-# Show up to five output lines for process commands and read_text calls.
+# Show up to five output lines for process commands and read_file calls.
 # Timeline previews retain at most 180 Unicode characters per line; captured
 # process output remains available in full through Alt+T (Option+T on macOS).
 # Finished commands stay on one line until that row is opened. Set this to
