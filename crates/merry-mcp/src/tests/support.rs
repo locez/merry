@@ -38,6 +38,17 @@ pub(super) enum Mode {
     Oversized,
     Redirect(String),
     Paginated,
+    /// Answers `initialize` by counter-offering `negotiated_version`, rejects any
+    /// `MCP-Protocol-Version` header on `initialize`, and requires that header to
+    /// equal `negotiated_version` on every post-initialize request.
+    CounterOfferVersion(&'static str),
+    /// Rejects `initialize` with JSON-RPC `-32602` unless `params.protocolVersion`
+    /// equals the pinned legacy version (simulating version-strict servers).
+    StrictLegacyVersion(&'static str),
+    /// Modern `2026-07-28` server that answers `server/discover` and rejects `initialize`.
+    ModernDiscover,
+    /// Returns `tools/call` over SSE with an interleaved progress notification before the result.
+    SseWithProgress,
 }
 
 #[derive(Clone)]
@@ -172,6 +183,98 @@ async fn handle(
         Mode::RpcSecret => return Json(json!({"jsonrpc":"2.0", "id":request.id, "error":{"code":-32603,"message":"secret-query-value", "data":{"credential":"secret-query-value"}}})).into_response(),
         Mode::Oversized => return ([("content-type", "application/json")], "x".repeat(crate::client::MAX_RESPONSE_BYTES + 1)).into_response(),
         Mode::Redirect(target) => return (StatusCode::TEMPORARY_REDIRECT, [("location", target)]).into_response(),
+        Mode::CounterOfferVersion(version) => {
+            if request.method == "initialize" {
+                if headers.contains_key("mcp-protocol-version") {
+                    return StatusCode::BAD_REQUEST.into_response();
+                }
+                let mut response = Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": request.id,
+                    "result": {
+                        "protocolVersion": version,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "fixture", "version": "1"}
+                    }
+                }))
+                .into_response();
+                response.headers_mut().insert(
+                    "Mcp-Session-Id",
+                    HeaderValue::from_static("fixture-session"),
+                );
+                return response;
+            }
+            if request.method != "server/discover"
+                && headers.get("mcp-protocol-version").and_then(|v| v.to_str().ok()) != Some(*version)
+            {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+        }
+        Mode::StrictLegacyVersion(required) => {
+            if request.method == "initialize" {
+                let offered = request
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("protocolVersion"))
+                    .and_then(Value::as_str);
+                if offered != Some(*required) {
+                    return Json(json!({
+                        "jsonrpc": "2.0",
+                        "id": request.id,
+                        "error": {
+                            "code": -32602,
+                            "message": format!("unsupported protocolVersion: {offered:?}")
+                        }
+                    }))
+                    .into_response();
+                }
+                let mut response = Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": request.id,
+                    "result": {
+                        "protocolVersion": required,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "fixture", "version": "1"}
+                    }
+                }))
+                .into_response();
+                response.headers_mut().insert(
+                    "Mcp-Session-Id",
+                    HeaderValue::from_static("fixture-session"),
+                );
+                return response;
+            }
+        }
+        Mode::ModernDiscover => {
+            if request.method == "server/discover" {
+                return Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": request.id,
+                    "result": {
+                        "resultType": "complete",
+                        "supportedVersions": ["2026-07-28"],
+                        "capabilities": {"tools": {}},
+                        "ttlMs": 60000,
+                        "cacheScope": "private"
+                    }
+                }))
+                .into_response();
+            }
+            if request.method == "initialize" {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+            if headers.get("mcp-protocol-version").and_then(|v| v.to_str().ok()) != Some("2026-07-28") {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+        }
+        Mode::SseWithProgress if request.method == "tools/call" => {
+            let id = request.id.unwrap_or(0);
+            let sse_body = format!(
+                "event: message\ndata: {{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{{\"progressToken\":\"tok\",\"progress\":50}}}}\n\n\
+                 event: message\ndata: {{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"sse-done\"}}],\"isError\":false}}}}\n\n"
+            );
+            return ([("content-type", "text/event-stream")], sse_body).into_response();
+        }
         _ => {}
     }
     let result = match request.method.as_str() {

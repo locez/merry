@@ -37,6 +37,8 @@ pub enum McpFailureKind {
 impl McpFailureKind {
     pub(crate) fn from_error(error: &McpError) -> Self {
         match error {
+            McpError::Timeout { .. } => Self::Timeout,
+            McpError::Connection { .. } => Self::Connection,
             McpError::Http { source, .. } if source.is_timeout() => Self::Timeout,
             McpError::Http { source, .. } if source.is_connect() => Self::Connection,
             McpError::Http { source, .. } => match source.status().map(|status| status.as_u16()) {
@@ -44,6 +46,10 @@ impl McpFailureKind {
                 Some(status) => Self::Http(status),
                 None if source.is_decode() => Self::Protocol,
                 None => Self::Transport,
+            },
+            McpError::HttpStatus { status, .. } => match status {
+                401 | 403 => Self::Authentication,
+                other => Self::Http(*other),
             },
             McpError::SessionExpired { .. } => Self::SessionExpired,
             McpError::InvalidToolSchema { .. }

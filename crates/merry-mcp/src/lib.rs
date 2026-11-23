@@ -13,7 +13,6 @@ mod diagnostics;
 mod discovery;
 mod error;
 mod name_map;
-mod protocol;
 
 pub use adapter::McpToolRegistration;
 pub use config::{McpServerConfig, McpServerConfigBuilder};

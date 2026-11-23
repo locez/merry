@@ -18,6 +18,12 @@ pub enum McpError {
     /// Transport state became unavailable.
     #[error("MCP transport state unavailable for server {server_id}")]
     TransportState { server_id: String },
+    /// A bounded MCP operation timed out.
+    #[error("MCP request timed out for server {server_id}")]
+    Timeout { server_id: String },
+    /// A connection to the MCP endpoint could not be established.
+    #[error("MCP connection failed for server {server_id}")]
+    Connection { server_id: String },
     /// HTTP transport failure.
     #[error("MCP HTTP request failed for server {server_id}: {source}")]
     Http {
@@ -25,6 +31,9 @@ pub enum McpError {
         #[source]
         source: reqwest::Error,
     },
+    /// The remote endpoint returned a non-success HTTP status.
+    #[error("MCP HTTP status {status} for server {server_id}")]
+    HttpStatus { server_id: String, status: u16 },
     /// The remote endpoint no longer recognizes the MCP transport session.
     #[error("MCP session expired for server {server_id}")]
     SessionExpired { server_id: String },

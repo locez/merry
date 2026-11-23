@@ -13,12 +13,14 @@ jsonschema.workspace = true
 merry-core = { path = "../merry-core", version = "0.1.0" }
 merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
 reqwest.workspace = true
+rmcp.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
@@ -26,7 +28,6 @@ axum.workspace = true
 merry-llm = { path = "../merry-llm", version = "0.1.0", features = ["test-utils"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["net", "test-util"] }
-tokio-util.workspace = true
 
 [lints]
 workspace = true

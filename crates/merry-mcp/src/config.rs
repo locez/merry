@@ -45,6 +45,8 @@ impl McpServerConfig {
                 "host"
                     | "content-length"
                     | "transfer-encoding"
+                    | "accept"
+                    | "last-event-id"
                     | "mcp-session-id"
                     | "mcp-protocol-version"
             ) {

@@ -81,6 +81,15 @@ async fn invalid_configuration_is_fatal_before_any_server_is_contacted() {
         .header("Authorization", "secret-query-value\ninvalid")
         .build();
     assert!(discover_mcp_tools(&[bad]).await.is_err());
+    for reserved in ["Accept", "Last-Event-Id"] {
+        let bad = McpServerConfig::builder("bad", healthy.url())
+            .header(reserved, "override")
+            .build();
+        assert!(matches!(
+            discover_mcp_tools(&[bad]).await,
+            Err(McpError::InvalidConfiguration { .. })
+        ));
+    }
     assert_eq!(healthy.requests(), 0);
     healthy.stop().await;
 }
@@ -158,9 +167,12 @@ async fn dropping_discovery_stops_the_handshake_without_detached_producers() {
     let config = server.config("cancelled");
     let discovery = tokio::spawn(async move { discover_mcp_tools(&[config]).await });
     server.wait_for("initialize").await;
+    let requests_at_abort = server.requests();
     discovery.abort();
     assert!(discovery.await.unwrap_err().is_cancelled());
-    assert_eq!(server.requests(), 1);
+    // Auto mode sends `server/discover` then `initialize`; no further requests arrive after abort.
+    assert_eq!(requests_at_abort, 2);
+    assert_eq!(server.requests(), requests_at_abort);
     server.stop().await;
 }
 
@@ -180,7 +192,9 @@ async fn the_total_startup_budget_prevents_contacting_queued_servers_after_expir
     let report = discovery.await.unwrap().unwrap();
     assert!(report.registrations().is_empty());
     assert_eq!(report.diagnostics().len(), 12);
-    assert_eq!(server.requests(), 4);
+    // Only the first 4 concurrent slots ran (`server/discover` + `initialize` each);
+    // the remaining 8 queued servers were never contacted.
+    assert_eq!(server.requests(), 8);
     server.stop().await;
 }
 
@@ -236,4 +250,72 @@ async fn redirects_are_not_followed_and_invalid_schemas_disable_only_their_serve
     invalid.stop().await;
     redirect.stop().await;
     target.stop().await;
+}
+
+#[tokio::test]
+async fn negotiates_counter_offered_strict_legacy_and_modern_protocol_versions() {
+    use merry_core::ToolCallResultStatus;
+    use merry_runtime::ToolExecutionContext;
+    use tokio_util::sync::CancellationToken;
+
+    for (name, mode) in [
+        ("counter-offer", Mode::CounterOfferVersion("2025-06-18")),
+        ("strict-legacy", Mode::StrictLegacyVersion("2025-03-26")),
+        ("modern-2026", Mode::ModernDiscover),
+    ] {
+        let server = Server::start(mode, vec![tool("ping")]).await;
+        let report = discover_mcp_tools(&[server.config(name)]).await.unwrap();
+        assert!(
+            report.diagnostics().is_empty(),
+            "{name} should negotiate cleanly: {:?}",
+            report.diagnostics()
+        );
+        assert_eq!(report.registrations().len(), 1);
+        let tool_name = report.registrations()[0].tool.spec().name().clone();
+        let rt = runtime(name, report, &call_provider(&tool_name, 1));
+        let call = next_call(&rt).await;
+        let events = rt
+            .execute_tool_call(&call, ToolExecutionContext::new(CancellationToken::new()))
+            .await
+            .unwrap();
+        assert_eq!(resolved(&events).status(), ToolCallResultStatus::Succeeded);
+        assert_eq!(server.calls(), 1);
+        server.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn sse_progress_notifications_and_multiline_tool_descriptions_are_handled_cleanly() {
+    use merry_core::{ToolCallResultStatus, ToolOutput};
+    use merry_runtime::ToolExecutionContext;
+    use tokio_util::sync::CancellationToken;
+
+    let mut multiline = tool("search");
+    multiline["description"] = serde_json::json!("First line\n\tSecond line\r\nThird line");
+    let server = Server::start(Mode::SseWithProgress, vec![multiline]).await;
+
+    let report = discover_mcp_tools(&[server.config("sse")]).await.unwrap();
+    assert!(report.diagnostics().is_empty());
+    assert_eq!(report.registrations().len(), 1);
+    assert_eq!(
+        report.registrations()[0].tool.spec().description(),
+        "First line Second line Third line"
+    );
+
+    let tool_name = report.registrations()[0].tool.spec().name().clone();
+    let rt = runtime("sse-progress", report, &call_provider(&tool_name, 1));
+    let call = next_call(&rt).await;
+    let events = rt
+        .execute_tool_call(&call, ToolExecutionContext::new(CancellationToken::new()))
+        .await
+        .unwrap();
+    let result = resolved(&events);
+    assert_eq!(result.status(), ToolCallResultStatus::Succeeded);
+    assert_eq!(
+        rt.read_tool_output(result.call_id())
+            .await
+            .expect("tool output read"),
+        Some(ToolOutput::text("sse-done"))
+    );
+    server.stop().await;
 }

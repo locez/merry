@@ -1,17 +1,22 @@
 use crate::{
     connection::{McpConnection, ToolUnavailable},
     diagnostics::{McpFailureKind, McpServerIssue},
-    protocol::{McpContent, ToolsCallResult},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use image::{DynamicImage, GenericImageView, ImageReader, imageops::FilterType};
 use merry_core::{ErrorInfo, PendingToolCall, SessionToolCatalogEntry};
 use merry_runtime::{
-    MAX_USER_IMAGE_DIMENSION, MAX_USER_IMAGE_PNG_BYTES, MAX_USER_IMAGES, RegisteredTool,
-    ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
+    MAX_USER_IMAGE_DIMENSION, MAX_USER_IMAGE_PIXELS, MAX_USER_IMAGE_PNG_BYTES,
+    MAX_USER_IMAGE_TOTAL_PNG_BYTES, MAX_USER_IMAGES, RegisteredTool, ToolActionKind,
+    ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
     ToolExecutorFuture, UserImageInput, user_image_label,
 };
+use rmcp::model::{CallToolResult, ContentBlock, ResourceContents};
 use serde_json::{Value, json};
-use std::{io::Cursor, sync::Arc};
+use std::{borrow::Cow, io::Cursor, sync::Arc};
+
+const MIN_MCP_IMAGE_DIMENSION: u32 = 128;
+const MAX_MCP_IMAGE_DECODE_PIXELS: u64 = 64_000_000;
 
 /// A registered MCP tool plus its provider-visible Merry name mapping.
 #[derive(Debug)]
@@ -77,7 +82,7 @@ impl ToolExecutor for McpToolExecutor {
                     Err(ToolUnavailable::DefinitionChanged) => return unavailable_outcome("mcp_tool_definition_changed", "The MCP tool definition no longer matches this session. The tool was not executed. Start a new session to load the new catalog."),
                 },
             };
-            let arguments = Value::Object(call.arguments().as_object().clone());
+            let arguments = call.arguments().as_object().clone();
             let result = tokio::select! {
                 biased;
                 () = context.cancellation_token().cancelled() => return Err(ToolExecutionError::Cancelled),
@@ -90,9 +95,10 @@ impl ToolExecutor for McpToolExecutor {
                     connection.record_call_failure(&client, &error).await;
                     if matches!(
                         failure,
-                        McpFailureKind::Connection | McpFailureKind::SessionExpired
-                    ) || failure == McpFailureKind::Authentication
-                    {
+                        McpFailureKind::Connection
+                            | McpFailureKind::SessionExpired
+                            | McpFailureKind::Authentication
+                    ) {
                         return unavailable_outcome(
                             "mcp_server_unavailable",
                             &format!(
@@ -131,7 +137,7 @@ fn unavailable_outcome(
 fn mcp_call_result_to_outcome(
     server_id: &str,
     raw_tool_name: &str,
-    result: ToolsCallResult,
+    result: CallToolResult,
 ) -> ToolExecutionOutcome {
     let images = extract_mcp_images(&result.content);
     let is_error = result.is_error.unwrap_or(false);
@@ -169,7 +175,7 @@ fn mcp_call_result_to_outcome(
 fn failed_outcome(
     server_id: &str,
     raw_tool_name: &str,
-    result: ToolsCallResult,
+    result: CallToolResult,
 ) -> ToolExecutionOutcome {
     let text = joined_mcp_text(&result.content);
     let content = if text.trim().is_empty() {
@@ -191,31 +197,50 @@ fn failed_outcome(
     ToolExecutionOutcome::failed_text(content, diagnostic)
 }
 
-fn joined_mcp_text(content: &[McpContent]) -> String {
+fn joined_mcp_text(content: &[ContentBlock]) -> String {
     content
         .iter()
-        .filter(|item| item.kind == "text")
-        .filter_map(|item| item.text.as_deref())
-        .map(strip_inline_data_image_uris)
+        .filter_map(|item| match item {
+            ContentBlock::Text(text) => Some(strip_inline_data_image_uris(&text.text)),
+            ContentBlock::Resource(embedded) => match &embedded.resource {
+                ResourceContents::TextResourceContents { text, .. } => {
+                    Some(strip_inline_data_image_uris(text))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn sanitized_content_summary(content: &[McpContent]) -> Vec<Value> {
+fn sanitized_content_summary(content: &[ContentBlock]) -> Vec<Value> {
     content
         .iter()
-        .map(|item| match item.kind.as_str() {
-            "text" => json!({
+        .map(|item| match item {
+            ContentBlock::Text(text) => json!({
                 "type": "text",
-                "text": item.text.as_deref().map(strip_inline_data_image_uris),
+                "text": strip_inline_data_image_uris(&text.text),
             }),
-            "image" => json!({
+            ContentBlock::Image(image) => json!({
                 "type": "image",
-                "mimeType": item.extra.get("mimeType").or_else(|| item.extra.get("mime_type")),
+                "mimeType": image.mime_type,
                 "omittedBase64": true,
             }),
+            ContentBlock::Audio(audio) => json!({
+                "type": "audio",
+                "mimeType": audio.mime_type,
+                "omittedBase64": true,
+            }),
+            ContentBlock::Resource(_) => json!({
+                "type": "resource",
+            }),
+            ContentBlock::ResourceLink(link) => json!({
+                "type": "resource_link",
+                "uri": link.uri,
+            }),
             _ => json!({
-                "type": item.kind,
+                "type": "other",
             }),
         })
         .collect()
@@ -258,40 +283,44 @@ fn strip_inline_data_image_uris(input: &str) -> String {
     output
 }
 
-fn extract_mcp_images(content: &[McpContent]) -> Vec<UserImageInput> {
+fn extract_mcp_images(content: &[ContentBlock]) -> Vec<UserImageInput> {
     let mut images = Vec::new();
+    let mut total_png_bytes = 0usize;
     for item in content {
-        if images.len() >= MAX_USER_IMAGES {
+        if images.len() >= MAX_USER_IMAGES || total_png_bytes >= MAX_USER_IMAGE_TOTAL_PNG_BYTES {
             break;
         }
-        let raw_b64 = match item.kind.as_str() {
-            "image" => item.extra.get("data").and_then(Value::as_str),
-            "resource" => item.extra.get("resource").and_then(|res| {
-                let mime = res
-                    .get("mimeType")
-                    .or_else(|| res.get("mime_type"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if mime.starts_with("image/") {
-                    res.get("blob").and_then(Value::as_str)
-                } else {
-                    None
-                }
-            }),
+        let raw_b64 = match item {
+            ContentBlock::Image(image) => Some(image.data.as_str()),
+            ContentBlock::Resource(embedded) => match &embedded.resource {
+                ResourceContents::BlobResourceContents {
+                    blob,
+                    mime_type: Some(mime),
+                    ..
+                } if mime.starts_with("image/") => Some(blob.as_str()),
+                _ => None,
+            },
             _ => None,
         };
         let Some(raw_b64) = raw_b64 else {
             continue;
         };
+        let max_png_bytes = MAX_USER_IMAGE_PNG_BYTES
+            .min(MAX_USER_IMAGE_TOTAL_PNG_BYTES.saturating_sub(total_png_bytes));
         let label = user_image_label(images.len() + 1).expect("bounded 1-based image index");
-        if let Some(image) = decode_and_normalize_mcp_image(&label, raw_b64) {
+        if let Some(image) = decode_and_normalize_mcp_image(&label, raw_b64, max_png_bytes) {
+            total_png_bytes = total_png_bytes.saturating_add(image.png_bytes().len());
             images.push(image);
         }
     }
     images
 }
 
-fn decode_and_normalize_mcp_image(label: &str, raw_b64: &str) -> Option<UserImageInput> {
+fn decode_and_normalize_mcp_image(
+    label: &str,
+    raw_b64: &str,
+    max_png_bytes: usize,
+) -> Option<UserImageInput> {
     let trimmed = raw_b64.trim();
     let payload = trimmed
         .strip_prefix("data:")
@@ -299,51 +328,86 @@ fn decode_and_normalize_mcp_image(label: &str, raw_b64: &str) -> Option<UserImag
         .map_or(trimmed, |(_, data)| data);
     let cleaned: String = payload.chars().filter(|ch| !ch.is_whitespace()).collect();
     let decoded = STANDARD.decode(cleaned).ok()?;
-    let decoded_image = image::load_from_memory(&decoded).ok()?;
-    let width = decoded_image.width();
-    let height = decoded_image.height();
-    if width == 0
-        || height == 0
-        || width > MAX_USER_IMAGE_DIMENSION
-        || height > MAX_USER_IMAGE_DIMENSION
-    {
+    let (header_w, header_h) = ImageReader::new(Cursor::new(&decoded))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    let header_pixels = u64::from(header_w).checked_mul(u64::from(header_h))?;
+    if header_w == 0 || header_h == 0 || header_pixels > MAX_MCP_IMAGE_DECODE_PIXELS {
         return None;
     }
 
-    let png_bytes =
-        if decoded.starts_with(b"\x89PNG\r\n\x1a\n") && decoded.len() <= MAX_USER_IMAGE_PNG_BYTES {
-            decoded
-        } else {
-            let mut cursor = Cursor::new(Vec::new());
-            decoded_image
-                .write_to(&mut cursor, image::ImageFormat::Png)
-                .ok()?;
-            cursor.into_inner()
-        };
+    let decoded_image = image::load_from_memory(&decoded).ok()?;
+    let (orig_w, orig_h) = decoded_image.dimensions();
+    if orig_w == 0 || orig_h == 0 {
+        return None;
+    }
 
-    UserImageInput::png(label, png_bytes, width, height).ok()
+    let fits_caps = orig_w <= MAX_USER_IMAGE_DIMENSION
+        && orig_h <= MAX_USER_IMAGE_DIMENSION
+        && u64::from(orig_w) * u64::from(orig_h) <= MAX_USER_IMAGE_PIXELS;
+
+    if fits_caps
+        && decoded.starts_with(b"\x89PNG\r\n\x1a\n")
+        && decoded.len() <= max_png_bytes
+        && let Ok(input) = UserImageInput::png(label, decoded, orig_w, orig_h)
+    {
+        return Some(input);
+    }
+
+    let original_max_side = orig_w.max(orig_h);
+    let mut max_side = MAX_USER_IMAGE_DIMENSION.min(original_max_side);
+    if u64::from(orig_w) * u64::from(orig_h) > MAX_USER_IMAGE_PIXELS {
+        let scale =
+            (MAX_USER_IMAGE_PIXELS as f64 / (u64::from(orig_w) * u64::from(orig_h)) as f64).sqrt();
+        max_side = max_side.min(((f64::from(original_max_side) * scale).floor() as u32).max(1));
+    }
+
+    loop {
+        let scaled: Cow<'_, DynamicImage> = if max_side < original_max_side {
+            Cow::Owned(decoded_image.resize(max_side, max_side, FilterType::Lanczos3))
+        } else {
+            Cow::Borrowed(&decoded_image)
+        };
+        let (width, height) = scaled.dimensions();
+        let mut cursor = Cursor::new(Vec::new());
+        scaled.write_to(&mut cursor, image::ImageFormat::Png).ok()?;
+        let png_bytes = cursor.into_inner();
+        if png_bytes.len() <= max_png_bytes
+            && width <= MAX_USER_IMAGE_DIMENSION
+            && height <= MAX_USER_IMAGE_DIMENSION
+            && u64::from(width) * u64::from(height) <= MAX_USER_IMAGE_PIXELS
+        {
+            return UserImageInput::png(label, png_bytes, width, height).ok();
+        }
+        if max_side <= MIN_MCP_IMAGE_DIMENSION {
+            return None;
+        }
+        max_side = (max_side * 3 / 4).max(MIN_MCP_IMAGE_DIMENSION);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{McpContent, ToolsCallResult};
     use merry_core::{ToolCallResultStatus, ToolOutput};
+
+    fn png_base64(width: u32, height: u32, rgba: [u8; 4]) -> String {
+        let mut png = Vec::new();
+        let img = image::RgbaImage::from_pixel(width, height, image::Rgba(rgba));
+        DynamicImage::ImageRgba8(img)
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("png encodes");
+        STANDARD.encode(&png)
+    }
 
     #[test]
     fn converts_text_result_to_successful_outcome() {
         let outcome = mcp_call_result_to_outcome(
             "docs",
             "read.file",
-            ToolsCallResult {
-                content: vec![McpContent {
-                    kind: "text".to_owned(),
-                    text: Some("hello".to_owned()),
-                    extra: Default::default(),
-                }],
-                is_error: Some(false),
-                structured_content: None,
-            },
+            CallToolResult::success(vec![ContentBlock::text("hello")]),
         );
 
         assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
@@ -352,36 +416,15 @@ mod tests {
 
     #[test]
     fn extracts_mcp_image_blocks_and_sanitizes_inline_data_uris() {
-        let mut png = Vec::new();
-        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
-        image::DynamicImage::ImageRgba8(img)
-            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
-            .expect("png encodes");
-        let b64 = STANDARD.encode(&png);
-
-        let mut extra = serde_json::Map::new();
-        extra.insert("data".to_owned(), Value::String(b64.clone()));
-        extra.insert("mimeType".to_owned(), Value::String("image/png".to_owned()));
+        let b64 = png_base64(2, 2, [255, 0, 0, 255]);
 
         let outcome = mcp_call_result_to_outcome(
             "playwright",
             "screenshot",
-            ToolsCallResult {
-                content: vec![
-                    McpContent {
-                        kind: "text".to_owned(),
-                        text: Some(format!("captured data:image/png;base64,{b64} done")),
-                        extra: Default::default(),
-                    },
-                    McpContent {
-                        kind: "image".to_owned(),
-                        text: None,
-                        extra,
-                    },
-                ],
-                is_error: Some(false),
-                structured_content: None,
-            },
+            CallToolResult::success(vec![
+                ContentBlock::text(format!("captured data:image/png;base64,{b64} done")),
+                ContentBlock::image(b64, "image/png"),
+            ]),
         );
 
         assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
@@ -397,30 +440,35 @@ mod tests {
 
     #[test]
     fn image_only_mcp_error_preserves_images_and_non_blank_text() {
-        let mut png = Vec::new();
-        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255]));
-        image::DynamicImage::ImageRgba8(img)
-            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
-            .expect("png encodes");
-        let b64 = STANDARD.encode(&png);
-        let mut extra = serde_json::Map::new();
-        extra.insert("data".to_owned(), Value::String(b64));
+        let b64 = png_base64(1, 1, [0, 255, 0, 255]);
 
         let outcome = mcp_call_result_to_outcome(
             "playwright",
             "click",
-            ToolsCallResult {
-                content: vec![McpContent {
-                    kind: "image".to_owned(),
-                    text: None,
-                    extra,
-                }],
-                is_error: Some(true),
-                structured_content: None,
-            },
+            CallToolResult::error(vec![ContentBlock::image(b64, "image/png")]),
         );
 
         assert_eq!(outcome.status(), ToolCallResultStatus::Failed);
         assert_eq!(outcome.images().len(), 1);
+    }
+
+    #[test]
+    fn oversized_mcp_image_is_downscaled_instead_of_dropped() {
+        let b64 = png_base64(3_000, 1_500, [20, 40, 60, 255]);
+
+        let outcome = mcp_call_result_to_outcome(
+            "playwright",
+            "screenshot",
+            CallToolResult::success(vec![ContentBlock::image(b64, "image/png")]),
+        );
+
+        assert_eq!(outcome.status(), ToolCallResultStatus::Succeeded);
+        assert_eq!(outcome.images().len(), 1);
+        let attached = &outcome.images()[0];
+        assert!(attached.width() <= MAX_USER_IMAGE_DIMENSION);
+        assert!(attached.height() <= MAX_USER_IMAGE_DIMENSION);
+        assert!(
+            u64::from(attached.width()) * u64::from(attached.height()) <= MAX_USER_IMAGE_PIXELS
+        );
     }
 }

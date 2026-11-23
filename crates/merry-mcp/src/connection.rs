@@ -154,8 +154,7 @@ impl McpConnection {
         let mut stage = McpDiscoveryStage::Initialize;
         let result =
             tokio::time::timeout_at(deadline.min(Instant::now() + DISCOVERY_TIMEOUT), async {
-                let client = Arc::new(McpHttpClient::new(self.config.clone())?);
-                client.initialize().await?;
+                let client = Arc::new(McpHttpClient::connect(self.config.clone()).await?);
                 stage = McpDiscoveryStage::ListTools;
                 let entries = self.list_entries(&client).await?;
                 Ok::<_, McpError>(ReadyConnection { client, entries })
@@ -190,7 +189,7 @@ impl McpConnection {
         let mut cursor = None;
         let mut seen_cursors = BTreeSet::new();
         loop {
-            let page = client.list_tools(cursor.as_deref()).await?;
+            let page = client.list_tools(cursor).await?;
             tools.extend(page.tools);
             if tools.len() > MAX_TOOLS {
                 return Err(McpError::ResponseTooLarge {
@@ -209,10 +208,10 @@ impl McpConnection {
             }
         }
         let mut tools = filter_allowed_tools(tools, self.config.tools());
-        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        tools.sort_by(|left, right| left.name.as_ref().cmp(right.name.as_ref()));
         let names = tools
             .iter()
-            .map(|tool| tool.name.as_str())
+            .map(|tool| tool.name.as_ref())
             .collect::<Vec<_>>();
         if names.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(McpError::InvalidJson {
