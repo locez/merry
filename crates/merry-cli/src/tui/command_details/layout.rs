@@ -735,11 +735,11 @@ fn append_text(
             lines.push(Line::default());
         } else {
             lines.extend(wrap_styled_parts_preserving_leading_whitespace(
-                vec![StyledTextPart {
-                    text: clean,
-                    style: semantic_style(state, color),
-                    atomic: false,
-                }],
+                vec![StyledTextPart::new(
+                    clean,
+                    semantic_style(state, color),
+                    false,
+                )],
                 width,
             ));
         }

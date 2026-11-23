@@ -48,8 +48,10 @@ fn coalesces_wheel_bursts_into_single_notch_without_amplification() {
 }
 
 #[test]
-fn coalesces_consecutive_mouse_drags_and_resizes_while_preserving_barriers() {
+fn coalesces_consecutive_mouse_moves_drags_and_resizes_while_preserving_barriers() {
     let events = vec![
+        TerminalEvent::Mouse(MouseInput::Move(Position::new(1, 1))),
+        TerminalEvent::Mouse(MouseInput::Move(Position::new(4, 2))),
         TerminalEvent::Mouse(MouseInput::Down(Position::new(1, 2))),
         TerminalEvent::Mouse(MouseInput::Drag(Position::new(2, 2))),
         TerminalEvent::Mouse(MouseInput::Drag(Position::new(5, 3))),
@@ -62,6 +64,9 @@ fn coalesces_consecutive_mouse_drags_and_resizes_while_preserving_barriers() {
     assert_eq!(
         coalesce_terminal_events(events, 3),
         vec![
+            CoalescedTerminalEvent::Event(TerminalEvent::Mouse(MouseInput::Move(Position::new(
+                4, 2
+            )))),
             CoalescedTerminalEvent::Event(TerminalEvent::Mouse(MouseInput::Down(Position::new(
                 1, 2
             )))),

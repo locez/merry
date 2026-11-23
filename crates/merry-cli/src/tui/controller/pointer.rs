@@ -125,6 +125,7 @@ fn overlay_pointer_effect(pointer: OverlayPointer, state: &mut TuiState) -> Cont
                 }
                 SubagentTakeoverPointer::TimelineCopy(text) => ControllerEffect::CopyText(text),
                 SubagentTakeoverPointer::TimelineCopyTooLarge => ControllerEffect::CopyTextTooLarge,
+                SubagentTakeoverPointer::TimelineOpenUrl(url) => ControllerEffect::OpenUrl(url),
             }
         }
         OverlayPointer::BackgroundTask(pointer) => {
@@ -446,19 +447,76 @@ fn accept_completion_at(
     }
 }
 
+fn handle_mouse_move(position: Position, terminal_size: Size, state: &mut TuiState) {
+    if state.overlay().is_some() {
+        state.clear_hovered_link();
+        let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+        match state.overlay() {
+            Some(Overlay::PlanView(_)) => {
+                let timeline_rect = crate::tui::plan_view::plan_view_timeline_rect(state, area);
+                if let Some(Overlay::PlanView(view)) = state.overlay_mut() {
+                    let child = view.child_state_mut();
+                    let hovered = child
+                        .text_selection()
+                        .is_none()
+                        .then(|| {
+                            crate::tui::render::timeline_link_at(child, timeline_rect, position)
+                        })
+                        .flatten();
+                    child.set_hovered_link(hovered);
+                }
+            }
+            Some(Overlay::SubagentInspect(_)) => {
+                let timeline_rect =
+                    crate::tui::subagent_view::subagent_view_timeline_rect(state, area);
+                if let Some(Overlay::SubagentInspect(takeover)) = state.overlay_mut() {
+                    let child = takeover.child_state_mut();
+                    let hovered =
+                        crate::tui::render::timeline_link_at(child, timeline_rect, position);
+                    child.set_hovered_link(hovered);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    if state.is_composer_mouse_selecting() || state.text_selection().is_some() {
+        state.clear_hovered_link();
+        return;
+    }
+    let rects = cockpit_rects(terminal_size, state);
+    let hovered = if matches!(
+        pointer_target(state, terminal_size, position),
+        PointerTarget::Passthrough
+    ) {
+        crate::tui::render::timeline_link_at(state, rects.timeline, position)
+    } else {
+        None
+    };
+    state.set_hovered_link(hovered);
+}
+
 pub(crate) fn handle_mouse_input(
     mouse: MouseInput,
     terminal_size: Size,
     state: &mut TuiState,
 ) -> ControllerEffect {
+    if let MouseInput::Move(position) = mouse {
+        handle_mouse_move(position, terminal_size, state);
+        return ControllerEffect::None;
+    }
     if state.overlay().is_some() {
+        state.clear_hovered_link();
         state.clear_text_selection();
         state.set_composer_mouse_selecting(false);
         return match mouse {
+            MouseInput::Move(_) => unreachable!("handled above"),
             MouseInput::Down(position) => {
                 if let Some(Overlay::PlanView(view)) = state.overlay_mut() {
                     view.child_state_mut().clear_text_selection();
                 }
+                state.clear_all_hovered_links();
                 match pointer_target(state, terminal_size, position) {
                     PointerTarget::Overlay(pointer) => overlay_pointer_effect(pointer, state),
                     _ => ControllerEffect::None,
@@ -466,6 +524,7 @@ pub(crate) fn handle_mouse_input(
             }
             MouseInput::Drag(position) => {
                 if let Some(Overlay::PlanView(view)) = state.overlay_mut() {
+                    view.child_state_mut().clear_hovered_link();
                     view.child_state_mut().drag_text_selection(position);
                 }
                 ControllerEffect::None
@@ -500,6 +559,14 @@ pub(crate) fn handle_mouse_input(
                                 && (had_selection || hit.in_sticky_header)
                             {
                                 child.edit_comment(hit.index);
+                            } else if had_selection
+                                && let Some(link) = crate::tui::render::timeline_link_at(
+                                    child,
+                                    timeline_rect,
+                                    position,
+                                )
+                            {
+                                return ControllerEffect::OpenUrl(link.url);
                             }
                         }
                         Err(CopyTextError::TooLarge) => {
@@ -538,8 +605,10 @@ pub(crate) fn handle_mouse_input(
         rects.timeline,
     ));
     match mouse {
+        MouseInput::Move(_) => unreachable!("handled above"),
         MouseInput::Down(position) => {
             state.clear_text_selection();
+            state.clear_hovered_link();
             state.set_composer_mouse_selecting(false);
             match pointer_target(state, terminal_size, position) {
                 PointerTarget::Passthrough => {}
@@ -668,8 +737,15 @@ pub(crate) fn handle_mouse_input(
                         && (had_selection || hit.in_sticky_header)
                     {
                         state.edit_comment(hit.index);
+                        ControllerEffect::None
+                    } else if had_selection
+                        && let Some(link) =
+                            crate::tui::render::timeline_link_at(state, rects.timeline, position)
+                    {
+                        ControllerEffect::OpenUrl(link.url)
+                    } else {
+                        ControllerEffect::None
                     }
-                    ControllerEffect::None
                 }
                 Err(CopyTextError::TooLarge) => ControllerEffect::CopyTextTooLarge,
             }
@@ -701,6 +777,7 @@ pub(crate) fn handle_mouse_scroll_up_by(
 ) -> ControllerEffect {
     let lines = lines.max(1);
     state.clear_text_selection();
+    state.clear_all_hovered_links();
     if matches!(state.overlay(), Some(Overlay::CommandDetails(_))) {
         let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
         return crate::tui::command_details::handle_mouse_scroll(state, area, position, true);
@@ -736,6 +813,7 @@ pub(crate) fn handle_mouse_scroll_down_by(
 ) -> ControllerEffect {
     let lines = lines.max(1);
     state.clear_text_selection();
+    state.clear_all_hovered_links();
     if matches!(state.overlay(), Some(Overlay::CommandDetails(_))) {
         let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
         return crate::tui::command_details::handle_mouse_scroll(state, area, position, false);

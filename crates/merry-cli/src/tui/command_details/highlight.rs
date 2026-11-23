@@ -35,14 +35,16 @@ pub(super) fn highlight_command_lines(
             .map(|line| {
                 line.spans
                     .into_iter()
-                    .map(|span| StyledTextPart {
-                        text: sanitize_plain_fragment(&span.content),
-                        style: if span.style.fg.is_some() {
-                            span.style
-                        } else {
-                            fallback_style
-                        },
-                        atomic: false,
+                    .map(|span| {
+                        StyledTextPart::new(
+                            sanitize_plain_fragment(&span.content),
+                            if span.style.fg.is_some() {
+                                span.style
+                            } else {
+                                fallback_style
+                            },
+                            false,
+                        )
                     })
                     .collect()
             })
@@ -51,11 +53,11 @@ pub(super) fn highlight_command_lines(
         command
             .split('\n')
             .map(|line| {
-                vec![StyledTextPart {
-                    text: sanitize_plain_fragment(line),
-                    style: fallback_style,
-                    atomic: false,
-                }]
+                vec![StyledTextPart::new(
+                    sanitize_plain_fragment(line),
+                    fallback_style,
+                    false,
+                )]
             })
             .collect()
     };
@@ -64,11 +66,7 @@ pub(super) fn highlight_command_lines(
     for (index, mut parts) in raw_lines.into_iter().enumerate() {
         let prefix = if index == 0 { "$ " } else { "  " };
         let mut line_parts = Vec::with_capacity(parts.len() + 1);
-        line_parts.push(StyledTextPart {
-            text: prefix.to_owned(),
-            style: prompt_style,
-            atomic: true,
-        });
+        line_parts.push(StyledTextPart::new(prefix.to_owned(), prompt_style, true));
         line_parts.append(&mut parts);
         out.extend(wrap_styled_parts_preserving_leading_whitespace(
             line_parts, width,
@@ -162,15 +160,15 @@ fn append_syntect_output(
             .into_iter()
             .filter_map(|span| {
                 let clean = sanitize_plain_fragment(&span.content);
-                (!clean.is_empty()).then_some(StyledTextPart {
-                    text: clean,
-                    style: if span.style.fg.is_some() {
+                (!clean.is_empty()).then_some(StyledTextPart::new(
+                    clean,
+                    if span.style.fg.is_some() {
                         span.style
                     } else {
                         fallback_style
                     },
-                    atomic: false,
-                })
+                    false,
+                ))
             })
             .collect::<Vec<_>>();
         if parts.is_empty() {
@@ -190,11 +188,7 @@ fn append_plain_output(lines: &mut Vec<Line<'static>>, text: &str, style: Style,
             lines.push(Line::default());
         } else {
             lines.extend(wrap_styled_parts_preserving_leading_whitespace(
-                vec![StyledTextPart {
-                    text: clean,
-                    style,
-                    atomic: false,
-                }],
+                vec![StyledTextPart::new(clean, style, false)],
                 width,
             ));
         }

@@ -34,8 +34,8 @@ pub(crate) use timeline::{prepare_timeline_viewport, render_timeline_pane};
 #[cfg(test)]
 pub(crate) use timeline_layout::timeline_content_region;
 pub(crate) use timeline_pointer::{
-    TimelineMouseDown, timeline_mouse_down, timeline_task_dock_rect, timeline_text_area,
-    timeline_todo_dock_rect,
+    TimelineMouseDown, timeline_link_at, timeline_mouse_down, timeline_task_dock_rect,
+    timeline_text_area, timeline_todo_dock_rect,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 

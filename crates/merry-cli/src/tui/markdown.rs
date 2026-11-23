@@ -4,10 +4,11 @@ use self::table::{TableState, spans_width, table_lines};
 use super::{
     copy_controls::{CopyContent, CopyTarget, code_block_header},
     highlight::highlight_code_to_lines,
+    links::{LinkTarget, link_style, push_text_with_bare_urls},
     state::TuiState,
     text_wrap::{
-        StyledTextPart, inline_code_style, inline_code_text, semantic_style, wrap_styled_parts,
-        wrap_styled_parts_preserving_leading_whitespace,
+        StyledTextPart, WrappedLine, inline_code_style, inline_code_text, semantic_style,
+        wrap_styled_parts_preserving_leading_whitespace, wrap_styled_parts_with_links,
     },
     theme::SemanticColor,
     transcript::{SelectionPolicy, TranscriptRow},
@@ -17,17 +18,27 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
+use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
 
-/// Display lines and source-backed controls produced by the same Markdown parse.
+/// Display lines, copy controls, and hyperlink hit targets produced by the same Markdown parse.
 pub(crate) struct RenderedMarkdown {
     pub(crate) rows: Vec<TranscriptRow>,
     pub(crate) copy_targets: Vec<CopyTarget>,
+    pub(crate) link_targets: Vec<LinkTarget>,
 }
 
 impl RenderedMarkdown {
-    fn new(rows: Vec<TranscriptRow>, copy_targets: Vec<CopyTarget>) -> Self {
-        Self { rows, copy_targets }
+    fn new(
+        rows: Vec<TranscriptRow>,
+        copy_targets: Vec<CopyTarget>,
+        link_targets: Vec<LinkTarget>,
+    ) -> Self {
+        Self {
+            rows,
+            copy_targets,
+            link_targets,
+        }
     }
 }
 
@@ -53,6 +64,7 @@ struct MarkdownRenderer<'state> {
     prose_width: u16,
     rows: Vec<TranscriptRow>,
     copy_targets: Vec<CopyTarget>,
+    link_targets: Vec<LinkTarget>,
     parts: Vec<StyledTextPart>,
     style_stack: Vec<Style>,
     link_stack: Vec<LinkState>,
@@ -78,8 +90,8 @@ struct CodeBlockState {
 
 #[derive(Debug, Clone)]
 struct LinkState {
-    dest_url: String,
-    label: String,
+    dest_url: Arc<str>,
+    has_visible_text: bool,
 }
 
 impl<'state> MarkdownRenderer<'state> {
@@ -97,6 +109,7 @@ impl<'state> MarkdownRenderer<'state> {
             prose_width,
             rows: Vec::new(),
             copy_targets: Vec::new(),
+            link_targets: Vec::new(),
             parts: Vec::new(),
             style_stack: vec![semantic_style(state, SemanticColor::Assistant)],
             link_stack: Vec::new(),
@@ -238,10 +251,10 @@ impl<'state> MarkdownRenderer<'state> {
                 self.push_text("]");
             }
             Tag::HtmlBlock => {}
-            Tag::Table(_) => {
+            Tag::Table(alignments) => {
                 self.flush_parts();
                 self.push_block_gap();
-                self.table = Some(TableState::default());
+                self.table = Some(TableState::new(alignments));
             }
             Tag::TableHead
             | Tag::TableRow
@@ -380,41 +393,66 @@ impl<'state> MarkdownRenderer<'state> {
             | Event::InlineHtml(text)
             | Event::InlineMath(text)
             | Event::DisplayMath(text) => {
-                self.push_table_part(StyledTextPart {
-                    text: text.to_string(),
-                    style: self.current_style(),
-                    atomic: false,
-                });
+                self.push_table_text(text.as_ref());
             }
             Event::Code(code) => {
-                self.push_table_part(StyledTextPart {
-                    text: inline_code_text(self.state, code.as_ref()),
-                    style: inline_code_style(self.state, self.current_style()),
-                    atomic: true,
-                });
+                let link = self.current_link_url();
+                self.push_table_part(StyledTextPart::with_link(
+                    inline_code_text(self.state, code.as_ref()),
+                    inline_code_style(self.state, self.current_style()),
+                    true,
+                    link,
+                ));
             }
             Event::SoftBreak | Event::HardBreak => {
-                self.push_table_part(StyledTextPart {
-                    text: " ".to_owned(),
-                    style: self.current_style(),
-                    atomic: false,
-                });
+                let link = self.current_link_url();
+                self.push_table_part(StyledTextPart::with_link(
+                    " ".to_owned(),
+                    self.current_style(),
+                    false,
+                    link,
+                ));
             }
             Event::TaskListMarker(checked) => {
-                self.push_table_part(StyledTextPart {
-                    text: if *checked { "[x] " } else { "[ ] " }.to_owned(),
-                    style: self.current_style(),
-                    atomic: false,
-                });
+                let link = self.current_link_url();
+                self.push_table_part(StyledTextPart::with_link(
+                    if *checked { "[x] " } else { "[ ] " }.to_owned(),
+                    self.current_style(),
+                    false,
+                    link,
+                ));
             }
             Event::FootnoteReference(reference) => {
-                self.push_table_part(StyledTextPart {
-                    text: reference.to_string(),
-                    style: self.current_style(),
-                    atomic: false,
-                });
+                let link = self.current_link_url();
+                self.push_table_part(StyledTextPart::with_link(
+                    reference.to_string(),
+                    self.current_style(),
+                    false,
+                    link,
+                ));
             }
             Event::Rule | Event::Start(_) | Event::End(_) => {}
+        }
+    }
+
+    fn push_table_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(link) = self.current_link_url() {
+            self.push_table_part(StyledTextPart::with_link(
+                text.to_owned(),
+                self.current_style(),
+                false,
+                Some(link),
+            ));
+            return;
+        }
+        let base_style = self.current_style();
+        let mut bare_parts = Vec::new();
+        push_text_with_bare_urls(&mut bare_parts, self.state, text, base_style);
+        for part in bare_parts {
+            self.push_table_part(part);
         }
     }
 
@@ -430,12 +468,18 @@ impl<'state> MarkdownRenderer<'state> {
             return;
         }
         self.push_pending_list_marker();
-        self.record_link_label(text);
-        self.parts.push(StyledTextPart {
-            text: text.to_owned(),
-            style: self.current_style(),
-            atomic: false,
-        });
+        if let Some(link) = self.current_link_url() {
+            self.record_link_label(text);
+            self.parts.push(StyledTextPart::with_link(
+                text.to_owned(),
+                self.current_style(),
+                false,
+                Some(link),
+            ));
+            return;
+        }
+        let base_style = self.current_style();
+        push_text_with_bare_urls(&mut self.parts, self.state, text, base_style);
     }
 
     fn push_atomic_text(&mut self, text: String, style: Style) {
@@ -444,11 +488,9 @@ impl<'state> MarkdownRenderer<'state> {
         }
         self.push_pending_list_marker();
         self.record_link_label(&text);
-        self.parts.push(StyledTextPart {
-            text,
-            style,
-            atomic: true,
-        });
+        let link = self.current_link_url();
+        self.parts
+            .push(StyledTextPart::with_link(text, style, true, link));
     }
 
     fn push_pending_list_marker(&mut self) {
@@ -456,11 +498,11 @@ impl<'state> MarkdownRenderer<'state> {
             return;
         };
         self.active_list_indent = UnicodeWidthStr::width(marker.as_str());
-        self.parts.push(StyledTextPart {
-            text: marker,
-            style: semantic_style(self.state, SemanticColor::Muted),
-            atomic: true,
-        });
+        self.parts.push(StyledTextPart::new(
+            marker,
+            semantic_style(self.state, SemanticColor::Muted),
+            true,
+        ));
     }
 
     fn flush_parts(&mut self) {
@@ -481,27 +523,33 @@ impl<'state> MarkdownRenderer<'state> {
                     .saturating_sub(u16::try_from(list_indent).unwrap_or(u16::MAX))
                     .max(1);
                 let continuation = " ".repeat(list_indent);
-                let wrapped: Vec<Line<'static>> = wrap_styled_parts(body, body_width)
+                let wrapped: Vec<WrappedLine> = wrap_styled_parts_with_links(body, body_width)
                     .into_iter()
                     .enumerate()
-                    .map(|(index, mut line)| {
+                    .map(|(index, mut wrapped_line)| {
                         if index == 0 {
-                            line.spans
+                            wrapped_line
+                                .line
+                                .spans
                                 .insert(0, Span::styled(marker.text.clone(), marker.style));
                         } else {
-                            line.spans.insert(0, Span::raw(continuation.clone()));
+                            wrapped_line
+                                .line
+                                .spans
+                                .insert(0, Span::raw(continuation.clone()));
                         }
-                        line
+                        wrapped_line.shift_links(list_indent);
+                        wrapped_line
                     })
                     .collect();
                 if wrapped.len() > 1 {
                     self.prev_list_item_multiline = true;
                 }
-                self.push_lines(wrapped, SelectionPolicy::Keep);
+                self.push_wrapped_lines(wrapped, SelectionPolicy::Keep);
                 return;
             }
-            self.push_lines(
-                wrap_styled_parts(parts, self.prose_width),
+            self.push_wrapped_lines(
+                wrap_styled_parts_with_links(parts, self.prose_width),
                 SelectionPolicy::Keep,
             );
             return;
@@ -515,13 +563,16 @@ impl<'state> MarkdownRenderer<'state> {
             .max(1);
         let prefix_style =
             semantic_style(self.state, SemanticColor::BorderFocus).add_modifier(Modifier::BOLD);
-        self.push_lines(
-            wrap_styled_parts(parts, content_width)
+        self.push_wrapped_lines(
+            wrap_styled_parts_with_links(parts, content_width)
                 .into_iter()
-                .map(|mut line| {
-                    line.spans
+                .map(|mut wrapped_line| {
+                    wrapped_line
+                        .line
+                        .spans
                         .insert(0, Span::styled(prefix.clone(), prefix_style));
-                    line
+                    wrapped_line.shift_links(prefix_width);
+                    wrapped_line
                 })
                 .collect(),
             SelectionPolicy::Keep,
@@ -568,10 +619,8 @@ impl<'state> MarkdownRenderer<'state> {
     }
 
     fn flush_table(&mut self, table: TableState) {
-        self.push_lines(
-            table_lines(self.state, table.rows, self.region_width),
-            SelectionPolicy::Keep,
-        );
+        let wrapped = table_lines(self.state, table.rows, &table.alignments, self.region_width);
+        self.push_wrapped_lines(wrapped, SelectionPolicy::Keep);
     }
 
     fn push_row(&mut self, row: TranscriptRow) {
@@ -584,6 +633,21 @@ impl<'state> MarkdownRenderer<'state> {
                 .into_iter()
                 .map(|line| TranscriptRow::new(line, selection)),
         );
+    }
+
+    fn push_wrapped_lines(&mut self, lines: Vec<WrappedLine>, selection: SelectionPolicy) {
+        for wrapped in lines {
+            let line_index = self.rows.len();
+            for link in wrapped.links {
+                self.link_targets.push(LinkTarget::new(
+                    line_index,
+                    link.column,
+                    link.width,
+                    link.url,
+                ));
+            }
+            self.rows.push(TranscriptRow::new(wrapped.line, selection));
+        }
     }
 
     fn push_style(&mut self, style: Style) {
@@ -603,12 +667,18 @@ impl<'state> MarkdownRenderer<'state> {
             .expect("style stack always has a base style")
     }
 
+    fn current_link_url(&self) -> Option<Arc<str>> {
+        self.link_stack
+            .last()
+            .map(|link| Arc::clone(&link.dest_url))
+    }
+
     fn start_link(&mut self, dest_url: &str) {
         self.link_stack.push(LinkState {
-            dest_url: dest_url.to_owned(),
-            label: String::new(),
+            dest_url: Arc::from(dest_url),
+            has_visible_text: false,
         });
-        self.push_style(link_style(self.state, dest_url));
+        self.push_style(link_style(self.state));
     }
 
     fn finish_link(&mut self) {
@@ -616,15 +686,15 @@ impl<'state> MarkdownRenderer<'state> {
         let Some(link) = self.link_stack.pop() else {
             return;
         };
-        if link_url_is_visible_in_label(&link) {
+        if link.has_visible_text || link.dest_url.trim().is_empty() {
             return;
         }
-        let text = format!(" {}", link.dest_url);
-        let part = StyledTextPart {
-            text,
-            style: link_style(self.state, &link.dest_url),
-            atomic: true,
-        };
+        let part = StyledTextPart::with_link(
+            link.dest_url.as_ref().to_owned(),
+            link_style(self.state),
+            false,
+            Some(link.dest_url),
+        );
         if self.table.is_some() {
             self.push_table_part(part);
         } else {
@@ -634,8 +704,10 @@ impl<'state> MarkdownRenderer<'state> {
     }
 
     fn record_link_label(&mut self, text: &str) {
-        if let Some(link) = self.link_stack.last_mut() {
-            link.label.push_str(text);
+        if let Some(link) = self.link_stack.last_mut()
+            && !text.trim().is_empty()
+        {
+            link.has_visible_text = true;
         }
     }
 
@@ -647,7 +719,7 @@ impl<'state> MarkdownRenderer<'state> {
                 SelectionPolicy::Keep,
             ));
         }
-        RenderedMarkdown::new(self.rows, self.copy_targets)
+        RenderedMarkdown::new(self.rows, self.copy_targets, self.link_targets)
     }
 }
 
@@ -672,11 +744,7 @@ fn code_block_visual_lines(
     let parts = line
         .spans
         .into_iter()
-        .map(|span| StyledTextPart {
-            text: span.content.into_owned(),
-            style: span.style,
-            atomic: false,
-        })
+        .map(|span| StyledTextPart::new(span.content.into_owned(), span.style, false))
         .collect();
     let rail_style = semantic_style(state, SemanticColor::Status).add_modifier(Modifier::BOLD);
     let background = state.theme().color(SemanticColor::CodeBackground);
@@ -716,18 +784,10 @@ fn strong_style(state: &TuiState) -> Style {
     semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD)
 }
 
-fn link_style(state: &TuiState, _url: &str) -> Style {
-    semantic_style(state, SemanticColor::Link).add_modifier(Modifier::UNDERLINED)
-}
-
 fn strikethrough_style(state: &TuiState) -> Style {
     semantic_style(state, SemanticColor::Muted).add_modifier(Modifier::CROSSED_OUT)
 }
 
 fn quote_prefix(depth: usize) -> String {
     format!("{} ", ">".repeat(depth.max(1)))
-}
-
-fn link_url_is_visible_in_label(link: &LinkState) -> bool {
-    link.label.trim() == link.dest_url.trim()
 }

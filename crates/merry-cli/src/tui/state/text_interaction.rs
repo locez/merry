@@ -1,17 +1,42 @@
 use crate::tui::{
     copy_controls::CopyTextError,
+    links::HoveredLink,
+    overlay::Overlay,
     state::TuiState,
     text_interaction::{CapturedText, SelectionViewport, TextSelection},
 };
 use ratatui::layout::{Position, Rect};
 
 impl TuiState {
+    pub(crate) fn hovered_link(&self) -> Option<&HoveredLink> {
+        self.hovered_link.as_ref()
+    }
+
+    pub(crate) fn set_hovered_link(&mut self, hovered: Option<HoveredLink>) {
+        self.hovered_link = hovered;
+    }
+
+    pub(crate) fn clear_hovered_link(&mut self) {
+        self.hovered_link = None;
+    }
+
+    /// Clears hover state on the main timeline and any embedded overlay timeline.
+    pub(crate) fn clear_all_hovered_links(&mut self) {
+        self.hovered_link = None;
+        if let Some(Overlay::PlanView(view)) = self.overlay_mut() {
+            view.child_state_mut().clear_hovered_link();
+        } else if let Some(Overlay::SubagentInspect(takeover)) = self.overlay_mut() {
+            takeover.child_state_mut().clear_hovered_link();
+        }
+    }
+
     pub(crate) fn text_selection(&self) -> Option<&TextSelection> {
         self.text_selection.as_ref()
     }
 
     pub(crate) fn begin_text_selection(&mut self, selection: TextSelection) {
         self.clipboard_feedback = None;
+        self.hovered_link = None;
         self.text_selection = Some(selection);
     }
 

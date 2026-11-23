@@ -21,6 +21,7 @@ pub(crate) enum MouseInput {
     Down(Position),
     Drag(Position),
     Up(Position),
+    Move(Position),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

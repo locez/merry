@@ -73,11 +73,13 @@ fn compute_item_layout(state: &TuiState, index: usize, width: u16) -> CachedItem
     let timeline = state.timeline();
     let item = &timeline[index];
     let mut item_targets = Vec::new();
+    let mut item_link_targets = Vec::new();
     let item_rows = match item {
         TimelineItem::User { text } => user_lines(state, text, width),
         TimelineItem::Assistant { text } => {
             let rendered = assistant_lines(state, text, index, width);
             item_targets = rendered.copy_targets;
+            item_link_targets = rendered.link_targets;
             rendered.rows
         }
         TimelineItem::Thinking {
@@ -117,6 +119,7 @@ fn compute_item_layout(state: &TuiState, index: usize, width: u16) -> CachedItem
         TimelineItem::LocalCommand { title, body } => {
             let rendered = local_command_lines(state, title, body, width);
             item_targets = rendered.copy_targets;
+            item_link_targets = rendered.link_targets;
             rendered.rows
         }
         TimelineItem::Expanded {
@@ -127,10 +130,14 @@ fn compute_item_layout(state: &TuiState, index: usize, width: u16) -> CachedItem
             .into_iter()
             .map(|line| TranscriptRow::new(line, SelectionPolicy::Keep))
             .collect(),
-        TimelineItem::Diagnostic { title, body } => diagnostic_lines(state, title, body, width)
-            .into_iter()
-            .map(|line| TranscriptRow::new(line, SelectionPolicy::Keep))
-            .collect(),
+        TimelineItem::Diagnostic { title, body } => {
+            let (lines, links) = diagnostic_lines(state, title, body, width);
+            item_link_targets = links;
+            lines
+                .into_iter()
+                .map(|line| TranscriptRow::new(line, SelectionPolicy::Keep))
+                .collect()
+        }
         TimelineItem::Patch { changes, expanded } => patch_lines(state, changes, *expanded, width)
             .into_iter()
             .map(|line| TranscriptRow::new(line, SelectionPolicy::Keep))
@@ -153,7 +160,9 @@ fn compute_item_layout(state: &TuiState, index: usize, width: u16) -> CachedItem
 
     let mut rows = Vec::with_capacity(item_rows.len());
     let mut copy_targets = Vec::with_capacity(item_targets.len());
+    let mut link_targets = Vec::with_capacity(item_link_targets.len());
     let mut item_targets = item_targets.into_iter().peekable();
+    let mut item_link_targets = item_link_targets.into_iter().peekable();
     for (line_index, row) in item_rows.into_iter().enumerate() {
         while item_targets
             .peek()
@@ -162,6 +171,15 @@ fn compute_item_layout(state: &TuiState, index: usize, width: u16) -> CachedItem
             if let Some(mut target) = item_targets.next() {
                 target.line_index = rows.len();
                 copy_targets.push(target);
+            }
+        }
+        while item_link_targets
+            .peek()
+            .is_some_and(|target| target.line_index == line_index)
+        {
+            if let Some(mut target) = item_link_targets.next() {
+                target.line_index = rows.len();
+                link_targets.push(target);
             }
         }
         rows.extend(
@@ -183,7 +201,7 @@ fn compute_item_layout(state: &TuiState, index: usize, width: u16) -> CachedItem
         local_row_starts.push(next);
     }
 
-    CachedItemLayout::new(rows, local_row_starts, copy_targets)
+    CachedItemLayout::new(rows, local_row_starts, copy_targets, link_targets)
 }
 
 fn max_timeline_scroll(

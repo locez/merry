@@ -8,6 +8,7 @@
 
 use crate::tui::{
     copy_controls::CopyTarget,
+    links::LinkTarget,
     preferences::CodeTheme,
     state::TimelineAnchor,
     theme::TuiTheme,
@@ -37,6 +38,8 @@ pub(crate) struct CachedItemLayout {
     pub(crate) content_visual_height: usize,
     /// Copy controls with `line_index` relative to `self.rows`.
     pub(crate) copy_targets: Vec<CopyTarget>,
+    /// Hyperlink hit spans with `line_index` relative to `self.rows`.
+    pub(crate) link_targets: Vec<LinkTarget>,
 }
 
 impl CachedItemLayout {
@@ -44,6 +47,7 @@ impl CachedItemLayout {
         rows: Vec<TranscriptRow>,
         local_row_starts: Vec<usize>,
         copy_targets: Vec<CopyTarget>,
+        link_targets: Vec<LinkTarget>,
     ) -> Self {
         debug_assert_eq!(local_row_starts.len(), rows.len().saturating_add(1));
         let mut content_end = rows.len();
@@ -60,6 +64,7 @@ impl CachedItemLayout {
             local_row_starts,
             content_visual_height,
             copy_targets,
+            link_targets,
         }
     }
 

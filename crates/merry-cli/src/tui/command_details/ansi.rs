@@ -49,11 +49,11 @@ fn parse_ansi_line(
             EscapeState::Normal => match ch {
                 '\x1b' => {
                     if !buffer.is_empty() {
-                        parts.push(StyledTextPart {
-                            text: std::mem::take(&mut buffer),
-                            style: *current_style,
-                            atomic: false,
-                        });
+                        parts.push(StyledTextPart::new(
+                            std::mem::take(&mut buffer),
+                            *current_style,
+                            false,
+                        ));
                     }
                     EscapeState::Esc
                 }
@@ -95,11 +95,7 @@ fn parse_ansi_line(
     }
 
     if !buffer.is_empty() {
-        parts.push(StyledTextPart {
-            text: buffer,
-            style: *current_style,
-            atomic: false,
-        });
+        parts.push(StyledTextPart::new(buffer, *current_style, false));
     }
     parts
 }

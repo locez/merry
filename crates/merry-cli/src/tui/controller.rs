@@ -103,14 +103,15 @@ pub(super) fn coalesce_terminal_events(
                     });
                 }
             }
-            TerminalEvent::Mouse(crate::tui::text_interaction::MouseInput::Drag(_)) => {
+            TerminalEvent::Mouse(
+                mouse @ (crate::tui::text_interaction::MouseInput::Drag(_)
+                | crate::tui::text_interaction::MouseInput::Move(_)),
+            ) => {
+                let kind = std::mem::discriminant(mouse);
                 let mut latest = events[index].clone();
                 index += 1;
-                while index < events.len()
-                    && matches!(
-                        events[index],
-                        TerminalEvent::Mouse(crate::tui::text_interaction::MouseInput::Drag(_))
-                    )
+                while let Some(TerminalEvent::Mouse(next)) = events.get(index)
+                    && std::mem::discriminant(next) == kind
                 {
                     latest = events[index].clone();
                     index += 1;
@@ -156,6 +157,22 @@ pub(super) struct ModelDiscoveryCompletion {
 
 struct ClipboardImageCompletion {
     result: Result<DraftImage, String>,
+}
+
+pub(super) struct OpenUrlCompletion {
+    url: String,
+    result: Result<(), String>,
+}
+
+impl OpenUrlCompletion {
+    pub(super) fn new(url: String, result: Result<(), String>) -> Self {
+        Self { url, result }
+    }
+
+    pub(super) fn apply(self, state: &mut TuiState) {
+        let (message, failed) = crate::tui::links::open_url_feedback(&self.url, self.result);
+        state.show_clipboard_feedback(message, failed);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +270,7 @@ pub(crate) enum ControllerEffect {
     LoadCommandOutput(merry_core::ToolCallId),
     CopyText(String),
     CopyTextTooLarge,
+    OpenUrl(String),
     Interrupt,
     PersistPreferences(TuiPreferences),
     ApplyRuntimePreferences(TuiPreferences),
@@ -358,6 +376,7 @@ pub(crate) async fn run_controller(
     let (clipboard_image_tx, mut clipboard_image_rx) = mpsc::channel(4);
     let (command_output_tx, mut command_output_rx) = mpsc::channel(4);
     let (compaction_tx, mut compaction_rx) = mpsc::channel(2);
+    let (open_url_tx, mut open_url_rx) = mpsc::channel(4);
     let mut model_discovery_generation = 0_u64;
     let mut model_discovery_token: Option<CancellationToken> = None;
     let mut subagent_activity_open = true;
@@ -422,6 +441,16 @@ pub(crate) async fn run_controller(
 
                     let coalesced = coalesce_terminal_events(raw_batch, state.mouse_scroll_lines());
                     let mut pending_exit: Option<ControllerExit> = None;
+                    let hover_before = active_hovered_link(&state);
+                    let only_mouse_moves = !coalesced.is_empty()
+                        && coalesced.iter().all(|item| {
+                            matches!(
+                                item,
+                                CoalescedTerminalEvent::Event(TerminalEvent::Mouse(
+                                    crate::tui::text_interaction::MouseInput::Move(_)
+                                ))
+                            )
+                        });
                     for item in coalesced {
                         let effect = match item {
                             CoalescedTerminalEvent::Event(TerminalEvent::Key(key)) => {
@@ -456,6 +485,7 @@ pub(crate) async fn run_controller(
                             }
                             CoalescedTerminalEvent::Event(TerminalEvent::Resize) => {
                                 state.clear_text_selection();
+                                state.clear_all_hovered_links();
                                 None
                             }
                         };
@@ -483,6 +513,7 @@ pub(crate) async fn run_controller(
                                 clipboard_image_tx: &clipboard_image_tx,
                                 command_output_tx: &command_output_tx,
                                 compaction_tx: &compaction_tx,
+                                open_url_tx: &open_url_tx,
                                 terminal,
                                 #[cfg(feature = "web")]
                                 web_service: &mut web_service,
@@ -504,7 +535,9 @@ pub(crate) async fn run_controller(
                         exit_reason = exit;
                         break;
                     }
-                    render_once(terminal, &mut state)?;
+                    if !only_mouse_moves || active_hovered_link(&state) != hover_before {
+                        render_once(terminal, &mut state)?;
+                    }
                 }
                 subagent_event = recv_subagent_live_event(&mut subagent_live_stream), if subagent_live_stream.is_some() => {
                     match subagent_event {
@@ -620,6 +653,10 @@ pub(crate) async fn run_controller(
                     completion.apply(&mut state);
                     render_once(terminal, &mut state)?;
                 }
+                Some(completion) = open_url_rx.recv() => {
+                    completion.apply(&mut state);
+                    render_once(terminal, &mut state)?;
+                }
             }
         }
 
@@ -634,6 +671,7 @@ pub(crate) async fn run_controller(
     clipboard_image_rx.close();
     command_output_rx.close();
     compaction_rx.close();
+    open_url_rx.close();
     let session_result = session.stream.wait_until_closed().await.map_err(unexpected);
     let tasks_result = drain_background_tasks(&mut background_tasks).await;
     #[cfg(feature = "web")]
@@ -666,6 +704,19 @@ async fn drain_background_tasks(tasks: &mut JoinSet<()>) -> Result<(), CliError>
     match first_error {
         Some(error) => Err(error),
         None => Ok(()),
+    }
+}
+
+fn active_hovered_link(state: &TuiState) -> Option<crate::tui::links::HoveredLink> {
+    match state.overlay() {
+        Some(crate::tui::overlay::Overlay::PlanView(view)) => {
+            view.child_state().hovered_link().cloned()
+        }
+        Some(crate::tui::overlay::Overlay::SubagentInspect(takeover)) => {
+            takeover.child_state().hovered_link().cloned()
+        }
+        Some(_) => None,
+        None => state.hovered_link().cloned(),
     }
 }
 

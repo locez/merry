@@ -163,11 +163,7 @@ fn thinking_body(
             continue;
         }
         wrapped.extend(wrap_styled_parts(
-            vec![StyledTextPart {
-                text: paragraph.to_owned(),
-                style,
-                atomic: false,
-            }],
+            vec![StyledTextPart::new(paragraph.to_owned(), style, false)],
             region_width,
         ));
     }

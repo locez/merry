@@ -11,7 +11,7 @@ use crate::tui::{
     },
     motion::{self, MotionClock},
     overlay_render::semantic_style,
-    render::{TimelineMouseDown, render_timeline_pane, timeline_mouse_down},
+    render::{TimelineMouseDown, render_timeline_pane, timeline_link_at, timeline_mouse_down},
     state::TuiState,
     theme::SemanticColor,
 };
@@ -474,6 +474,10 @@ fn render_takeover_footer(
     frame.render_widget(Paragraph::new(Line::from(spans)).style(surface), area);
 }
 
+pub(crate) fn subagent_view_timeline_rect(state: &TuiState, area: Rect) -> Rect {
+    takeover_layout(area, state.subagents().len()).timeline
+}
+
 pub(crate) fn subagent_takeover_pointer(
     state: &TuiState,
     area: Rect,
@@ -514,7 +518,8 @@ pub(crate) fn subagent_takeover_pointer(
             }
             TimelineMouseDown::Copy(text) => Some(SubagentTakeoverPointer::TimelineCopy(text)),
             TimelineMouseDown::CopyTooLarge => Some(SubagentTakeoverPointer::TimelineCopyTooLarge),
-            _ => None,
+            _ => timeline_link_at(takeover.child_state(), layout.timeline, position)
+                .map(|link| SubagentTakeoverPointer::TimelineOpenUrl(link.url)),
         };
     }
     if layout.footer.contains(position) {

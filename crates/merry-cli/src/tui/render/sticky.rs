@@ -289,7 +289,12 @@ mod tests {
 
     fn item_layout(rows: Vec<TranscriptRow>) -> Arc<CachedItemLayout> {
         let local_row_starts = (0..=rows.len()).collect();
-        Arc::new(CachedItemLayout::new(rows, local_row_starts, Vec::new()))
+        Arc::new(CachedItemLayout::new(
+            rows,
+            local_row_starts,
+            Vec::new(),
+            Vec::new(),
+        ))
     }
 
     fn line(text: &str) -> TranscriptRow {

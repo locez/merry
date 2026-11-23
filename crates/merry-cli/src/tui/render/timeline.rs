@@ -11,11 +11,13 @@ use super::sticky::{paint_sticky_header, split_timeline_content, timeline_scroll
 use super::task_dock::{adjust_body_scroll, render_task_dock, split_dock_region};
 use crate::tui::{
     copy_controls::{CopyContent, CopyTarget, copy_header},
+    links::{LinkTarget, push_text_with_bare_urls, render_link_tooltip},
     markdown::{RenderedMarkdown, markdown_lines},
     motion::{self, MotionClock},
     state::{PatchChangeView, PatchLineKind, PatchLineView, PatchOperationView, TuiState},
     text_wrap::{
-        StyledTextPart, inline_code_spans, semantic_style, truncate_chars, wrap_styled_parts,
+        StyledTextPart, inline_code_spans, semantic_style, truncate_chars,
+        wrap_styled_parts_with_links,
     },
     theme::SemanticColor,
     transcript::{SelectionPolicy, TranscriptRow},
@@ -78,6 +80,12 @@ pub(crate) fn render_timeline_pane(frame: &mut Frame<'_>, state: &TuiState, regi
     paint_activity(frame, state, body, &timeline, body_scroll);
     paint_command_folds(frame, state, body, &folds);
     paint_comment_overlay(frame, state, &comments, &split, header, body);
+    if let Some(hovered) = state.hovered_link()
+        && let Some(screen_y) =
+            super::timeline_pointer::hovered_link_screen_y(&timeline, body, body_scroll, hovered)
+    {
+        render_link_tooltip(frame, state, region, body, hovered, screen_y);
+    }
 }
 
 pub(super) fn assistant_lines(
@@ -92,6 +100,9 @@ pub(super) fn assistant_lines(
             .rows
             .insert(0, TranscriptRow::new(header, SelectionPolicy::Skip));
         for target in &mut rendered.copy_targets {
+            target.line_index += 1;
+        }
+        for target in &mut rendered.link_targets {
             target.line_index += 1;
         }
         rendered.copy_targets.insert(
@@ -334,6 +345,10 @@ pub(super) fn local_command_lines(
         target.line_index += 1;
         target.column += 1;
     }
+    for target in &mut rendered.link_targets {
+        target.line_index += 1;
+        target.column += 1;
+    }
     rendered
 }
 
@@ -342,31 +357,45 @@ pub(super) fn diagnostic_lines(
     title: &str,
     body: &str,
     region_width: u16,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<LinkTarget>) {
     let reason = body
         .lines()
         .find(|line| !line.trim().is_empty())
         .unwrap_or("run failed");
-    wrap_styled_parts(
-        vec![
-            StyledTextPart {
-                text: "! Error  ".to_owned(),
-                style: semantic_style(state, SemanticColor::Error).add_modifier(Modifier::BOLD),
-                atomic: true,
-            },
-            StyledTextPart {
-                text: title.to_owned(),
-                style: semantic_style(state, SemanticColor::Error).add_modifier(Modifier::BOLD),
-                atomic: true,
-            },
-            StyledTextPart {
-                text: format!(": {reason}"),
-                style: semantic_style(state, SemanticColor::Assistant),
-                atomic: false,
-            },
-        ],
-        region_width,
-    )
+    let mut parts = vec![
+        StyledTextPart::new(
+            "! Error  ".to_owned(),
+            semantic_style(state, SemanticColor::Error).add_modifier(Modifier::BOLD),
+            true,
+        ),
+        StyledTextPart::new(
+            title.to_owned(),
+            semantic_style(state, SemanticColor::Error).add_modifier(Modifier::BOLD),
+            true,
+        ),
+        StyledTextPart::new(
+            ": ".to_owned(),
+            semantic_style(state, SemanticColor::Assistant),
+            false,
+        ),
+    ];
+    let body_style = semantic_style(state, SemanticColor::Assistant);
+    push_text_with_bare_urls(&mut parts, state, reason, body_style);
+    let wrapped = wrap_styled_parts_with_links(parts, region_width);
+    let mut lines = Vec::with_capacity(wrapped.len());
+    let mut link_targets = Vec::new();
+    for (line_index, item) in wrapped.into_iter().enumerate() {
+        for link in item.links {
+            link_targets.push(LinkTarget::new(
+                line_index,
+                link.column,
+                link.width,
+                link.url,
+            ));
+        }
+        lines.push(item.line);
+    }
+    (lines, link_targets)
 }
 
 pub(super) fn tool_title_line_from_parts(

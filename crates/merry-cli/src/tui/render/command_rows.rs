@@ -585,11 +585,7 @@ fn wrap_command_title(title: Line<'static>, width: u16) -> Vec<Line<'static>> {
     };
     let parts = spans
         .into_iter()
-        .map(|span| StyledTextPart {
-            text: span.content.into_owned(),
-            style: span.style,
-            atomic: false,
-        })
+        .map(|span| StyledTextPart::new(span.content.into_owned(), span.style, false))
         .collect();
     let body_width = width
         .saturating_sub(u16::try_from(indent).unwrap_or_default())

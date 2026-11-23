@@ -225,6 +225,7 @@ fn history_search_key(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
 }
 
 pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
+    state.clear_all_hovered_links();
     if state.overlay().is_none() && state.clear_text_selection() && key.code == KeyCode::Esc {
         return ControllerEffect::None;
     }

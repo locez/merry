@@ -9,7 +9,9 @@ mod render;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use render::{render_subagent_takeover, subagent_takeover_pointer};
+pub(crate) use render::{
+    render_subagent_takeover, subagent_takeover_pointer, subagent_view_timeline_rect,
+};
 
 use super::{
     motion::{self, MotionClock},
@@ -282,6 +284,7 @@ pub(crate) enum SubagentTakeoverPointer {
     TimelineToggleThinking(usize),
     TimelineCopy(String),
     TimelineCopyTooLarge,
+    TimelineOpenUrl(String),
 }
 
 impl SubagentTakeoverOverlay {

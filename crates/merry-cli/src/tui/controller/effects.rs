@@ -7,9 +7,10 @@ use crate::{
     tui::{
         controller::{
             ClipboardImageCompletion, CommandOutputCompletion, CompactionCompletion,
-            ControllerEffect, ControllerExit, ProviderController,
+            ControllerEffect, ControllerExit, OpenUrlCompletion, ProviderController,
         },
         input_history_store::InputHistoryStore,
+        links::{open_external_url, validate_external_url},
         preferences::TuiPreferencesStore,
         runtime::TuiRuntimeSession,
         state::{TimelineItem, TuiState},
@@ -30,6 +31,7 @@ pub(super) struct ControllerServices<'a> {
     pub(super) clipboard_image_tx: &'a mpsc::Sender<ClipboardImageCompletion>,
     pub(super) command_output_tx: &'a mpsc::Sender<CommandOutputCompletion>,
     pub(super) compaction_tx: &'a mpsc::Sender<CompactionCompletion>,
+    pub(super) open_url_tx: &'a mpsc::Sender<OpenUrlCompletion>,
     pub(super) terminal: &'a mut crate::tui::terminal::TerminalSession,
     #[cfg(feature = "web")]
     pub(super) web_service: &'a mut RuntimeWebService,
@@ -53,6 +55,7 @@ pub(super) async fn dispatch_effect(
         clipboard_image_tx,
         command_output_tx,
         compaction_tx,
+        open_url_tx,
         terminal,
         #[cfg(feature = "web")]
         web_service,
@@ -105,6 +108,18 @@ pub(super) async fn dispatch_effect(
                 "Copy failed: selected text exceeds the 1 MiB clipboard limit".to_owned(),
                 true,
             );
+            Ok(None)
+        }
+        ControllerEffect::OpenUrl(url) => {
+            if let Err(error) = validate_external_url(&url) {
+                state.show_clipboard_feedback(format!("Cannot open link: {error}"), true);
+                return Ok(None);
+            }
+            let sender = open_url_tx.clone();
+            background_tasks.spawn(async move {
+                let result = open_external_url(&url).await;
+                let _ = sender.send(OpenUrlCompletion::new(url, result)).await;
+            });
             Ok(None)
         }
         ControllerEffect::Submit(submission) => {

@@ -412,6 +412,7 @@ fn mouse_event(mouse: MouseEvent) -> Option<TerminalEvent> {
         MouseEventKind::Up(MouseButton::Left) if mouse.modifiers.is_empty() => {
             Some(TerminalEvent::Mouse(MouseInput::Up(position)))
         }
+        MouseEventKind::Moved => Some(TerminalEvent::Mouse(MouseInput::Move(position))),
         _ => None,
     }
 }
@@ -493,13 +494,15 @@ mod tests {
     }
 
     #[test]
-    fn ignores_drag_release_and_motion_events() {
-        for kind in [
-            MouseEventKind::Drag(MouseButton::Right),
-            MouseEventKind::Moved,
-        ] {
-            assert_eq!(mouse_event(mouse(kind)), None);
-        }
+    fn maps_pointer_motion_for_hover_and_ignores_non_left_drag_events() {
+        assert_eq!(
+            mouse_event(mouse(MouseEventKind::Moved)),
+            Some(TerminalEvent::Mouse(MouseInput::Move(Position::new(7, 9))))
+        );
+        assert_eq!(
+            mouse_event(mouse(MouseEventKind::Drag(MouseButton::Right))),
+            None
+        );
     }
 
     #[test]

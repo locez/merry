@@ -41,6 +41,7 @@ mod input_history_store;
 mod input_layout;
 pub(crate) mod keymap;
 mod layout;
+mod links;
 mod markdown;
 mod modal_frame;
 mod motion;

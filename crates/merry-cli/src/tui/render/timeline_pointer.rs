@@ -8,6 +8,7 @@ use super::timeline_cache::TimelineLayoutSnapshot;
 use super::timeline_layout::{timeline_content_region, timeline_layout, timeline_scroll_start};
 use crate::tui::{
     copy_controls::{CopyContent, CopyTextError, validate_copy_text},
+    links::HoveredLink,
     state::{TimelineItem, TuiState},
     text_interaction::TextSelection,
 };
@@ -182,6 +183,102 @@ fn copy_target_text(
         }
     }
     Ok(None)
+}
+
+/// Resolves a hyperlink under `position` inside the timeline body.
+pub(crate) fn timeline_link_at(
+    state: &TuiState,
+    region: Rect,
+    position: Position,
+) -> Option<HoveredLink> {
+    let content = timeline_content_region(region);
+    if !region.contains(position) || content.is_empty() {
+        return None;
+    }
+    let timeline = timeline_layout(state, content);
+    let scroll = timeline_scroll_start(state, &timeline, content);
+    let split = timeline_scroll_split(state, &timeline, content.height, scroll);
+    let (_, after_header) = split_timeline_content(content, split.header_rows);
+    let (dock_rect, after_task_dock) = split_dock_region(state, after_header);
+    if dock_rect.contains(position) {
+        return None;
+    }
+    let (todo_rect, body) = crate::tui::todo_dock::split_todo_dock_region(state, after_task_dock);
+    if todo_rect.contains(position) || !body.contains(position) {
+        return None;
+    }
+    let body_scroll = adjust_body_scroll(
+        split.body_scroll,
+        after_header.height,
+        body.height,
+        timeline.total_rows(),
+    );
+    link_target_at(&timeline, body, body_scroll, position)
+}
+
+/// Validates that `hovered` still corresponds to a visible link in `body` at
+/// `body_scroll` and returns its current screen row `y`.
+pub(super) fn hovered_link_screen_y(
+    timeline: &TimelineLayoutSnapshot,
+    body: Rect,
+    body_scroll: usize,
+    hovered: &HoveredLink,
+) -> Option<u16> {
+    let visible_end = body_scroll.saturating_add(usize::from(body.height));
+    if hovered.document_row < body_scroll || hovered.document_row >= visible_end {
+        return None;
+    }
+    let item = timeline.items.get(hovered.item_index)?;
+    let item_start = *timeline.item_visual_starts.get(hovered.item_index)?;
+    let still_present = item.link_targets.iter().any(|target| {
+        item.local_row_starts
+            .get(target.line_index)
+            .is_some_and(|&local_row| {
+                item_start.saturating_add(local_row) == hovered.document_row
+                    && target.column == hovered.column
+                    && target.width == hovered.width
+                    && target.url == hovered.url
+            })
+    });
+    if !still_present {
+        return None;
+    }
+    let rel_y = u16::try_from(hovered.document_row.saturating_sub(body_scroll)).ok()?;
+    Some(body.y.saturating_add(rel_y))
+}
+
+fn link_target_at(
+    timeline: &TimelineLayoutSnapshot,
+    body: Rect,
+    scroll: usize,
+    position: Position,
+) -> Option<HoveredLink> {
+    let document_row = scroll.saturating_add(usize::from(position.y - body.y));
+    let column = position.x - body.x;
+    let item_index = timeline.item_at_visual(document_row)?;
+    let item = timeline.items.get(item_index)?;
+    let item_start = timeline.item_visual_starts[item_index];
+    for target in &item.link_targets {
+        let Some(&local_row) = item.local_row_starts.get(target.line_index) else {
+            continue;
+        };
+        let target_row = item_start.saturating_add(local_row);
+        if target_row > document_row {
+            break;
+        }
+        if target_row == document_row
+            && (target.column..target.column.saturating_add(target.width)).contains(&column)
+        {
+            return Some(HoveredLink::new(
+                target.url.clone(),
+                target.column,
+                target.width,
+                document_row,
+                item_index,
+            ));
+        }
+    }
+    None
 }
 
 fn subagent_card_hit(
