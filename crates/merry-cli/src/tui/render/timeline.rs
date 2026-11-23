@@ -6,6 +6,7 @@ pub(super) use super::command_rows::{
 };
 use super::command_rows::{command_fold_marks, command_title_line, paint_command_folds};
 use super::comment_marks::{comment_overlay, paint_comment_overlay};
+use super::mcp_style::mcp_title_line;
 use super::sticky::{paint_sticky_header, split_timeline_content, timeline_scroll_split};
 use super::task_dock::{adjust_body_scroll, render_task_dock, split_dock_region};
 use crate::tui::{
@@ -380,6 +381,9 @@ pub(super) fn tool_title_line_from_parts(
     if title == "Ran" {
         return Some(command_title_line(state, "Ran", detail));
     }
+    if title == "MCP" {
+        return Some(mcp_title_line(state, detail));
+    }
     tool_title_keyword(title).map(|keyword| tool_keyword_title_line(state, keyword, detail))
 }
 
@@ -389,6 +393,10 @@ pub(super) fn tool_title_line(state: &TuiState, title: &str) -> Option<Line<'sta
         .or_else(|| title.strip_prefix("Ran: "))
     {
         return Some(command_title_line(state, "Ran", command));
+    }
+
+    if let Some(detail) = strip_tool_title_detail(title, "MCP") {
+        return Some(mcp_title_line(state, detail));
     }
 
     for keyword in TOOL_TITLE_KEYWORDS {
@@ -410,7 +418,6 @@ pub(super) fn strip_tool_title_detail<'a>(title: &'a str, keyword: &str) -> Opti
 pub(super) const TOOL_TITLE_KEYWORDS: &[&str] = &[
     "Read",
     "Searched",
-    "MCP",
     "Permission",
     "Patch",
     "Plan",

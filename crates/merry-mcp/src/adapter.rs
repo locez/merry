@@ -1,10 +1,10 @@
 use crate::{
-    connection::{McpConnection, ToolUnavailable},
-    diagnostics::{McpFailureKind, McpServerIssue},
+    McpResult,
+    registry::{DEFAULT_SEARCH_LIMIT, McpRegistry},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use image::{DynamicImage, GenericImageView, ImageReader, imageops::FilterType};
-use merry_core::{ErrorInfo, PendingToolCall, SessionToolCatalogEntry};
+use merry_core::{ErrorInfo, PendingToolCall, ToolInputSchema, ToolName, ToolSpec};
 use merry_runtime::{
     MAX_USER_IMAGE_DIMENSION, MAX_USER_IMAGE_PIXELS, MAX_USER_IMAGE_PNG_BYTES,
     MAX_USER_IMAGE_TOTAL_PNG_BYTES, MAX_USER_IMAGES, RegisteredTool, ToolActionKind,
@@ -12,46 +12,123 @@ use merry_runtime::{
     ToolExecutorFuture, UserImageInput, user_image_label,
 };
 use rmcp::model::{CallToolResult, ContentBlock, ResourceContents};
-use serde_json::{Value, json};
+use schemars::{JsonSchema, schema_for};
+use serde::Deserialize;
+use serde_json::{Map, Value, json};
 use std::{borrow::Cow, io::Cursor, sync::Arc};
+
+/// Provider-visible tool name for searching and refreshing MCP tools.
+pub const MCP_SEARCH_TOOL: &str = "mcp_search";
+
+/// Provider-visible tool name for invoking a discovered MCP tool.
+pub const MCP_CALL_TOOL: &str = "mcp_call";
 
 const MIN_MCP_IMAGE_DIMENSION: u32 = 128;
 const MAX_MCP_IMAGE_DECODE_PIXELS: u64 = 64_000_000;
 
-/// A registered MCP tool plus its provider-visible Merry name mapping.
+/// A registered MCP meta-tool exposed to the runtime.
 #[derive(Debug)]
 pub struct McpToolRegistration {
     pub tool: RegisteredTool,
 }
 
-impl McpToolRegistration {
-    pub(crate) fn new(entry: SessionToolCatalogEntry, binding: McpExecutionBinding) -> Self {
-        let executor = Arc::new(McpToolExecutor {
-            entry: entry.clone(),
-            binding,
-        });
-        Self {
-            tool: RegisteredTool::new(
-                entry.spec().clone(),
-                executor,
-                ToolActionKind::TrustedExternal,
-            )
-            .with_external_binding(entry.binding().clone()),
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct McpSearchInput {
+    /// Keyword query to search across tool names, descriptions, server IDs, and parameters. Omit to list servers and available tools.
+    query: Option<String>,
+    /// Optional configured MCP server ID to filter search or inspect all tools on that server.
+    server: Option<String>,
+    /// When true, re-fetch tool lists from connected servers and immediately retry disconnected servers.
+    #[serde(default)]
+    refresh: Option<bool>,
+    /// Maximum number of matching tool definitions to return (default 10, max 50).
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct McpCallInput {
+    /// Configured MCP server ID.
+    server: String,
+    /// Exact raw MCP tool name on the target server (from mcp_search).
+    tool: String,
+    /// JSON object of arguments matching the tool's inputSchema.
+    #[serde(default)]
+    arguments: Option<Map<String, Value>>,
+}
+
+pub(crate) fn meta_tool_registrations(
+    registry: Arc<McpRegistry>,
+) -> McpResult<Vec<McpToolRegistration>> {
+    let search_spec = mcp_search_spec(&registry)?;
+    let call_spec = mcp_call_spec()?;
+
+    let search = McpToolRegistration {
+        tool: RegisteredTool::read_only(
+            search_spec,
+            Arc::new(McpSearchExecutor {
+                registry: Arc::clone(&registry),
+            }),
+        )
+        .with_parallel_safe_execution(),
+    };
+    let call = McpToolRegistration {
+        tool: RegisteredTool::new(
+            call_spec,
+            Arc::new(McpCallExecutor { registry }),
+            ToolActionKind::TrustedExternal,
+        ),
+    };
+    Ok(vec![search, call])
+}
+
+const MAX_INLINE_DESCRIPTION_SERVER_CHARS: usize = 240;
+
+fn mcp_search_spec(registry: &McpRegistry) -> McpResult<ToolSpec> {
+    let servers = format_server_list_preview(&registry.server_ids());
+    let description = format!(
+        "Search or list tools exposed by configured MCP servers and return their parameter schemas for mcp_call. Set refresh=true to reload updated tool lists or reconnect offline servers. Configured servers: {servers}."
+    );
+    let input_schema = ToolInputSchema::new(schema_for!(McpSearchInput))?;
+    Ok(ToolSpec::new(
+        ToolName::new(MCP_SEARCH_TOOL)?,
+        &description,
+        input_schema,
+    )?)
+}
+
+fn format_server_list_preview(ids: &[&str]) -> String {
+    let mut preview = String::new();
+    for (index, id) in ids.iter().enumerate() {
+        let separator = if index == 0 { "" } else { ", " };
+        if index > 0
+            && preview.len() + separator.len() + id.len() > MAX_INLINE_DESCRIPTION_SERVER_CHARS
+        {
+            let remaining = ids.len() - index;
+            preview.push_str(&format!(", ... (+{remaining} more)"));
+            break;
         }
+        preview.push_str(separator);
+        preview.push_str(id);
     }
+    preview
 }
 
-pub(crate) enum McpExecutionBinding {
-    Connection(Arc<McpConnection>),
-    Disabled(McpServerIssue),
+fn mcp_call_spec() -> McpResult<ToolSpec> {
+    let input_schema = ToolInputSchema::new(schema_for!(McpCallInput))?;
+    Ok(ToolSpec::new(
+        ToolName::new(MCP_CALL_TOOL)?,
+        "Invoke a tool on a configured MCP server by server ID and raw tool name. Use mcp_search first to discover tool names and input schemas.",
+        input_schema,
+    )?)
 }
 
-struct McpToolExecutor {
-    entry: SessionToolCatalogEntry,
-    binding: McpExecutionBinding,
+struct McpSearchExecutor {
+    registry: Arc<McpRegistry>,
 }
 
-impl ToolExecutor for McpToolExecutor {
+impl ToolExecutor for McpSearchExecutor {
     fn execute<'a>(
         &'a self,
         call: PendingToolCall,
@@ -61,71 +138,57 @@ impl ToolExecutor for McpToolExecutor {
             if context.cancellation_token().is_cancelled() {
                 return Err(ToolExecutionError::Cancelled);
             }
-            let connection = match &self.binding {
-                McpExecutionBinding::Connection(connection) => connection,
-                McpExecutionBinding::Disabled(reason) => {
-                    return unavailable_outcome(
-                        "mcp_tool_unavailable",
-                        &format!(
-                            "MCP tool {} is disabled: {reason:?}. Start a new session after correcting configuration.",
-                            call.name()
-                        ),
-                    );
-                }
-            };
-            let client = tokio::select! {
-                biased;
-                () = context.cancellation_token().cancelled() => return Err(ToolExecutionError::Cancelled),
-                result = connection.client_for(&self.entry) => match result {
-                    Ok(client) => client,
-                    Err(ToolUnavailable::Discovery(failure)) => return unavailable_outcome("mcp_server_unavailable", &format!("MCP {} is unavailable: {}. This tool was not executed; use another tool or retry after the connection is restored.", self.entry.binding().source(), failure.kind)),
-                    Err(ToolUnavailable::DefinitionChanged) => return unavailable_outcome("mcp_tool_definition_changed", "The MCP tool definition no longer matches this session. The tool was not executed. Start a new session to load the new catalog."),
-                },
-            };
-            let arguments = call.arguments().as_object().clone();
+            let input: McpSearchInput = call.arguments().deserialize_as().map_err(|error| {
+                ToolExecutionError::infrastructure(format!("invalid mcp_search arguments: {error}"))
+            })?;
             let result = tokio::select! {
                 biased;
                 () = context.cancellation_token().cancelled() => return Err(ToolExecutionError::Cancelled),
-                result = client.call_tool(self.entry.binding().operation().as_str(), arguments) => result,
+                result = self.registry.search(
+                    input.query.as_deref(),
+                    input.server.as_deref(),
+                    input.limit.unwrap_or(DEFAULT_SEARCH_LIMIT),
+                    input.refresh.unwrap_or(false),
+                ) => result,
             };
-            let result = match result {
-                Ok(result) => result,
-                Err(error) => {
-                    let failure = McpFailureKind::from_error(&error);
-                    connection.record_call_failure(&client, &error).await;
-                    if matches!(
-                        failure,
-                        McpFailureKind::Connection
-                            | McpFailureKind::SessionExpired
-                            | McpFailureKind::Authentication
-                    ) {
-                        return unavailable_outcome(
-                            "mcp_server_unavailable",
-                            &format!(
-                                "MCP {}: {failure}. The tool could not be invoked.",
-                                self.entry.binding().source()
-                            ),
-                        );
-                    }
-                    return unavailable_outcome(
-                        "mcp_tool_outcome_unknown",
-                        &format!(
-                            "MCP {}: {failure}. The request may have executed but no valid result was received. Do not automatically repeat this operation; verify its effects first.",
-                            self.entry.binding().source()
-                        ),
-                    );
-                }
-            };
-            Ok(mcp_call_result_to_outcome(
-                self.entry.binding().source().as_str(),
-                self.entry.binding().operation().as_str(),
-                result,
-            ))
+            match result {
+                Ok(payload) => Ok(ToolExecutionOutcome::succeeded_json(payload.to_string())),
+                Err(message) => unavailable_outcome("mcp_server_not_found", &message),
+            }
         })
     }
 }
 
-fn unavailable_outcome(
+struct McpCallExecutor {
+    registry: Arc<McpRegistry>,
+}
+
+impl ToolExecutor for McpCallExecutor {
+    fn execute<'a>(
+        &'a self,
+        call: PendingToolCall,
+        context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            if context.cancellation_token().is_cancelled() {
+                return Err(ToolExecutionError::Cancelled);
+            }
+            let input: McpCallInput = call.arguments().deserialize_as().map_err(|error| {
+                ToolExecutionError::infrastructure(format!("invalid mcp_call arguments: {error}"))
+            })?;
+            self.registry
+                .call(
+                    &input.server,
+                    &input.tool,
+                    input.arguments.unwrap_or_default(),
+                    context.cancellation_token().clone(),
+                )
+                .await
+        })
+    }
+}
+
+pub(crate) fn unavailable_outcome(
     code: &str,
     message: &str,
 ) -> Result<ToolExecutionOutcome, ToolExecutionError> {
@@ -134,7 +197,7 @@ fn unavailable_outcome(
     Ok(ToolExecutionOutcome::failed_text(message, diagnostic))
 }
 
-fn mcp_call_result_to_outcome(
+pub(crate) fn mcp_call_result_to_outcome(
     server_id: &str,
     raw_tool_name: &str,
     result: CallToolResult,

@@ -1,27 +1,22 @@
 use super::support::*;
-use crate::{discover_mcp_tools, restore_mcp_tools};
+use crate::discover_mcp_tools;
 use merry_core::ToolCallResultStatus;
 use merry_runtime::{FileSessionStore, RuntimeError, ToolExecutionContext};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
-async fn offline_tools_resolve_failure_then_reconnect_without_changing_definitions() {
+async fn offline_server_recovers_mid_session_without_changing_provider_prefix() {
     let temp = tempfile::tempdir().unwrap();
     let store = FileSessionStore::new(temp.path());
-    let server = Server::start(Mode::Online, vec![tool("read")]).await;
+    let server = Server::start(Mode::Status(503), vec![tool("read")]).await;
     let config = server.config("server");
-    let original = runtime(
-        "online",
-        discover_mcp_tools(std::slice::from_ref(&config))
-            .await
-            .unwrap(),
-        &text_provider(),
-    );
-    let catalog = original.external_tool_catalog().await;
-    server.set_mode(Mode::Status(503));
-    let report = restore_mcp_tools(&[config], &catalog).await.unwrap();
-    let provider = call_provider(catalog.entries()[0].spec().name(), 2);
+    let report = discover_mcp_tools(std::slice::from_ref(&config))
+        .await
+        .unwrap();
+    assert_eq!(report.diagnostics().len(), 1);
+
+    let provider = mcp_call_provider("server", "read", 2);
     let runtime = runtime("recover", report, &provider);
     let call = next_call(&runtime).await;
     let events = runtime
@@ -45,10 +40,12 @@ async fn offline_tools_resolve_failure_then_reconnect_without_changing_definitio
     );
     runtime.save_session_to(store).await.unwrap();
     assert_eq!(server.calls(), 0);
+
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(5)).await;
     tokio::time::resume();
     server.set_mode(Mode::Online);
+
     let call = next_call(&runtime).await;
     let events = runtime
         .execute_tool_call(&call, ToolExecutionContext::new(CancellationToken::new()))
@@ -66,18 +63,9 @@ async fn offline_tools_resolve_failure_then_reconnect_without_changing_definitio
 }
 
 #[tokio::test]
-async fn authentication_failure_is_not_retried_on_each_tool_call() {
-    let server = Server::start(Mode::Online, vec![tool("read")]).await;
-    let original = runtime(
-        "auth-origin",
-        discover_mcp_tools(&[server.config("server")])
-            .await
-            .unwrap(),
-        &text_provider(),
-    );
-    let catalog = original.external_tool_catalog().await;
-    server.set_mode(Mode::Status(401));
-    let report = restore_mcp_tools(&[server.config("server")], &catalog)
+async fn authentication_failure_is_not_retried_automatically_on_each_mcp_call() {
+    let server = Server::start(Mode::Status(401), vec![tool("read")]).await;
+    let report = discover_mcp_tools(&[server.config("server")])
         .await
         .unwrap();
     let requests_before = server.requests();
@@ -85,10 +73,11 @@ async fn authentication_failure_is_not_retried_on_each_tool_call() {
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(10)).await;
     tokio::time::resume();
+
     let runtime = runtime(
         "auth-blocked",
         report,
-        &call_provider(catalog.entries()[0].spec().name(), 2),
+        &mcp_call_provider("server", "read", 2),
     );
     for _attempt in 0..2 {
         let call = next_call(&runtime).await;
@@ -112,8 +101,7 @@ async fn expired_mcp_session_reconnects_without_replaying_the_failed_call() {
     let report = discover_mcp_tools(std::slice::from_ref(&config))
         .await
         .unwrap();
-    let name = report.registrations()[0].tool.spec().name().clone();
-    let provider = call_provider(&name, 2);
+    let provider = mcp_call_provider("server", "read", 2);
     let runtime = runtime("expired-session", report, &provider);
     server.expire_session();
 
@@ -147,8 +135,11 @@ async fn call_timeout_records_unknown_outcome_without_replaying_side_effects() {
     let report = discover_mcp_tools(&[server.config("server")])
         .await
         .unwrap();
-    let name = report.registrations()[0].tool.spec().name().clone();
-    let runtime = runtime("unknown-outcome", report, &call_provider(&name, 1));
+    let runtime = runtime(
+        "unknown-outcome",
+        report,
+        &mcp_call_provider("server", "write", 1),
+    );
     let call = next_call(&runtime).await;
     server.set_mode(Mode::StallCall);
     let owned_runtime = runtime.clone();
@@ -187,8 +178,11 @@ async fn cancellation_propagates_and_stops_in_flight_tool_execution() {
     let report = discover_mcp_tools(&[server.config("server")])
         .await
         .unwrap();
-    let name = report.registrations()[0].tool.spec().name().clone();
-    let runtime = runtime("cancel-call", report, &call_provider(&name, 1));
+    let runtime = runtime(
+        "cancel-call",
+        report,
+        &mcp_call_provider("server", "write", 1),
+    );
     let call = next_call(&runtime).await;
     server.set_mode(Mode::StallCall);
     let token = CancellationToken::new();

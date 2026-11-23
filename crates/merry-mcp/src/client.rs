@@ -7,8 +7,8 @@ use rmcp::{
         Implementation, JsonObject, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
     },
     service::{
-        ClientInitializeError, ClientLifecycleMode, RunningService, ServiceError,
-        serve_client_with_lifecycle_and_ct,
+        ClientInitializeError, ClientLifecycleMode, NotificationContext, RunningService,
+        ServiceError, serve_client_with_lifecycle_and_ct,
     },
     transport::{
         DynamicTransportError,
@@ -17,7 +17,15 @@ use rmcp::{
         },
     },
 };
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -35,7 +43,9 @@ const LEGACY_FALLBACK_VERSIONS: &[ProtocolVersion] = &[
 
 #[derive(Clone)]
 struct MerryClientHandler {
+    server_id: Arc<str>,
     protocol_version: ProtocolVersion,
+    tools_dirty: Arc<AtomicBool>,
 }
 
 impl ClientHandler for MerryClientHandler {
@@ -46,6 +56,18 @@ impl ClientHandler for MerryClientHandler {
         )
         .with_protocol_version(self.protocol_version.clone())
     }
+
+    fn on_tool_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + Send + '_ {
+        self.tools_dirty.store(true, Ordering::Release);
+        tracing::debug!(
+            server = %self.server_id,
+            "MCP server notified notifications/tools/list_changed"
+        );
+        std::future::ready(())
+    }
 }
 
 /// Streamable HTTP MCP client backed by the official `rmcp` SDK with dynamic
@@ -54,13 +76,14 @@ impl ClientHandler for MerryClientHandler {
 pub(crate) struct McpHttpClient {
     server: McpServerConfig,
     service: RunningService<RoleClient, MerryClientHandler>,
+    tools_dirty: Arc<AtomicBool>,
     // Cancels `rmcp`'s background transport worker when this client is dropped.
     _cancel_on_drop: DropGuard,
 }
 
 impl McpHttpClient {
     pub(crate) async fn connect(server: McpServerConfig) -> Result<Self, McpError> {
-        server.validated_identity()?;
+        server.validated_source()?;
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(DEFAULT_TOOL_TIMEOUT)
@@ -150,6 +173,11 @@ impl McpHttpClient {
             }),
         }
     }
+
+    /// Atomically reads and clears whether the server pushed `notifications/tools/list_changed`.
+    pub(crate) fn take_tools_dirty(&self) -> bool {
+        self.tools_dirty.swap(false, Ordering::AcqRel)
+    }
 }
 
 async fn try_connect(
@@ -168,8 +196,11 @@ async fn try_connect(
     let transport = StreamableHttpClientTransport::with_client(http.clone(), transport_config);
     let ct = CancellationToken::new();
     let cancel_on_drop = ct.clone().drop_guard();
+    let tools_dirty = Arc::new(AtomicBool::new(false));
     let handler = MerryClientHandler {
+        server_id: Arc::from(server.id()),
         protocol_version: client_protocol_version,
+        tools_dirty: Arc::clone(&tools_dirty),
     };
     let service = serve_client_with_lifecycle_and_ct(handler, transport, lifecycle, ct)
         .await
@@ -177,6 +208,7 @@ async fn try_connect(
     Ok(McpHttpClient {
         server: server.clone(),
         service,
+        tools_dirty,
         _cancel_on_drop: cancel_on_drop,
     })
 }

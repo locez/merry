@@ -44,29 +44,11 @@ pub(crate) fn format_mcp_warning(diagnostic: &McpServerDiagnostic) -> String {
         McpServerIssue::Unavailable { stage, failure } => {
             format!("{stage:?}: {}", format_mcp_failure(*failure))
         }
-        McpServerIssue::NotConfigured => {
-            "server is no longer configured; execution disabled".to_owned()
-        }
-        McpServerIssue::EndpointChanged => {
-            "endpoint identity changed; execution disabled".to_owned()
-        }
-        McpServerIssue::ToolsDisallowed => "current allowlist disables saved tools".to_owned(),
-        McpServerIssue::CatalogChanged => {
-            "catalog changed; incompatible tools disabled and new tools omitted".to_owned()
-        }
-        McpServerIssue::NotInSessionCatalog => {
-            "server omitted from this session's frozen catalog".to_owned()
-        }
     };
-    let suffix = if diagnostic.retained_tools() == 0 {
-        "Merry continues; no tools loaded from this server. Start a new session after resolving the issue.".to_owned()
-    } else {
-        format!(
-            "Merry continues; {} saved tool definitions retained, affected tools unavailable. Definitions will not change on reconnect.",
-            diagnostic.retained_tools()
-        )
-    };
-    format!("MCP {}: {detail}. {suffix}", diagnostic.server_id())
+    format!(
+        "MCP {}: {detail}. Merry continues; use mcp_search with refresh=true or retry once the server is available.",
+        diagnostic.server_id()
+    )
 }
 
 fn format_mcp_failure(failure: McpFailureKind) -> String {

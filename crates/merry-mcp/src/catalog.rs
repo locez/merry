@@ -1,26 +1,63 @@
 use crate::{McpError, McpResult};
-use merry_core::{
-    ExternalToolBinding, SessionToolCatalog, SessionToolCatalogEntry, ToolAdapterId,
-    ToolBindingName, ToolInputSchema, ToolSourceFingerprint, ToolSourceId, ToolSpec,
-};
+use merry_core::ToolBindingName;
 use rmcp::model::Tool as McpTool;
-use schemars::Schema;
 use serde_json::{Map, Value};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt, sync::Arc};
 
-pub(crate) const MCP_ADAPTER_ID: &str = "mcp";
 const DEFAULT_MCP_TOOL_DESCRIPTION: &str = "MCP tool exposed by a configured server";
+const MAX_VALIDATION_ERRORS: usize = 5;
 
-pub(crate) fn mcp_catalog(catalog: &SessionToolCatalog) -> McpResult<SessionToolCatalog> {
-    SessionToolCatalog::new(
-        catalog
-            .entries()
-            .iter()
-            .filter(|entry| entry.binding().adapter().as_str() == MCP_ADAPTER_ID)
-            .cloned()
-            .collect(),
-    )
-    .map_err(McpError::from)
+/// Validated live MCP tool definition cached per server connection.
+#[derive(Clone)]
+pub(crate) struct DiscoveredMcpTool {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) input_schema: Value,
+    validator: Arc<jsonschema::Validator>,
+}
+
+impl fmt::Debug for DiscoveredMcpTool {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DiscoveredMcpTool")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DiscoveredMcpTool {
+    /// Validates candidate JSON object arguments against this tool's compiled
+    /// input schema, returning ownership of the object without cloning.
+    pub(crate) fn validate_arguments(
+        &self,
+        arguments: Map<String, Value>,
+    ) -> Result<Map<String, Value>, (Map<String, Value>, String)> {
+        let value = Value::Object(arguments);
+        let errors = self
+            .validator
+            .iter_errors(&value)
+            .take(MAX_VALIDATION_ERRORS)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        let Value::Object(arguments) = value else {
+            return Err((Map::new(), "arguments must be a JSON object".to_owned()));
+        };
+        if errors.is_empty() {
+            Ok(arguments)
+        } else {
+            Err((arguments, errors.join("; ")))
+        }
+    }
+
+    /// Returns declared top-level JSON schema property names for search matching.
+    pub(crate) fn parameter_names(&self) -> Vec<&str> {
+        self.input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .map(|properties| properties.keys().map(String::as_str).collect())
+            .unwrap_or_default()
+    }
 }
 
 pub(crate) fn filter_allowed_tools(
@@ -40,27 +77,8 @@ pub(crate) fn filter_allowed_tools(
         .collect()
 }
 
-pub(crate) fn mcp_tool_to_catalog_entry(
-    server_id: &str,
-    fingerprint: &ToolSourceFingerprint,
-    tool: &McpTool,
-    merry_name: merry_core::ToolName,
-) -> McpResult<SessionToolCatalogEntry> {
-    let spec = mcp_tool_to_spec(server_id, tool, merry_name)?;
-    let binding = ExternalToolBinding::new(
-        ToolAdapterId::new(MCP_ADAPTER_ID)?,
-        ToolSourceId::new(server_id)?,
-        ToolBindingName::new(tool.name.as_ref())?,
-        fingerprint.clone(),
-    );
-    Ok(SessionToolCatalogEntry::new(spec, binding))
-}
-
-fn mcp_tool_to_spec(
-    server_id: &str,
-    tool: &McpTool,
-    merry_name: merry_core::ToolName,
-) -> McpResult<ToolSpec> {
+pub(crate) fn parse_mcp_tool(server_id: &str, tool: &McpTool) -> McpResult<DiscoveredMcpTool> {
+    let validated_name = ToolBindingName::new(tool.name.as_ref())?;
     if tool
         .input_schema
         .get("type")
@@ -68,42 +86,29 @@ fn mcp_tool_to_spec(
     {
         return Err(McpError::InvalidToolSchema {
             server_id: server_id.to_owned(),
-            tool_name: tool.name.to_string(),
+            tool_name: validated_name.to_string(),
             message: "tool input must be an object schema".to_owned(),
         });
     }
     let normalized_schema = normalize_mcp_input_schema(tool.input_schema.as_ref().clone());
-    jsonschema::options()
+    let validator = jsonschema::options()
         .build(&normalized_schema)
         .map_err(|_| McpError::InvalidToolSchema {
             server_id: server_id.to_owned(),
-            tool_name: tool.name.to_string(),
+            tool_name: validated_name.to_string(),
             message: "tool schema cannot be compiled".to_owned(),
         })?;
-    let schema =
-        Schema::try_from(normalized_schema).map_err(|error| McpError::InvalidToolSchema {
-            server_id: server_id.to_owned(),
-            tool_name: tool.name.to_string(),
-            message: error.to_string(),
-        })?;
-    let input_schema =
-        ToolInputSchema::new(schema).map_err(|error| McpError::InvalidToolSchema {
-            server_id: server_id.to_owned(),
-            tool_name: tool.name.to_string(),
-            message: error.to_string(),
-        })?;
     let description = sanitize_mcp_description(tool.description.as_deref());
-    ToolSpec::new(merry_name, &description, input_schema).map_err(|error| {
-        McpError::InvalidToolSchema {
-            server_id: server_id.to_owned(),
-            tool_name: tool.name.to_string(),
-            message: error.to_string(),
-        }
+    Ok(DiscoveredMcpTool {
+        name: validated_name.to_string(),
+        description,
+        input_schema: normalized_schema,
+        validator: Arc::new(validator),
     })
 }
 
-/// Normalizes remote MCP tool descriptions for `merry_core::ToolSpec`, which
-/// forbids ASCII/Unicode control characters (including `\n`, `\r`, `\t`).
+/// Normalizes remote MCP tool descriptions into clean single-line text without
+/// ASCII/Unicode control characters.
 fn sanitize_mcp_description(raw: Option<&str>) -> String {
     let Some(raw) = raw else {
         return DEFAULT_MCP_TOOL_DESCRIPTION.to_owned();

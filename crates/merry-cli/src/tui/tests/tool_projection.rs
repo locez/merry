@@ -419,6 +419,165 @@ fn projector_renders_mcp_tools_with_server_and_tool_label() {
 }
 
 #[test]
+fn projector_renders_dynamic_mcp_meta_tools_with_target_details() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-mcp-meta-search",
+                merry_mcp::MCP_SEARCH_TOOL,
+                json!({ "query": "responses api", "server": "docs", "refresh": true }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-mcp-meta-call",
+                merry_mcp::MCP_CALL_TOOL,
+                json!({
+                    "server": "openaiDeveloperDocs",
+                    "tool": "search_openai_docs",
+                    "arguments": { "query": "Responses API streaming" }
+                }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    assert_eq!(state.timeline().len(), 2);
+    let TimelineItem::ToolRunning { title, detail, .. } = &state.timeline()[0] else {
+        panic!("mcp_search should render as ToolRunning");
+    };
+    assert_eq!(title, "MCP");
+    assert_eq!(detail, "refreshing docs · \"responses api\"");
+
+    let TimelineItem::ToolRunning { title, detail, .. } = &state.timeline()[1] else {
+        panic!("mcp_call should render as ToolRunning");
+    };
+    assert_eq!(title, "MCP");
+    assert_eq!(
+        detail,
+        "openaiDeveloperDocs/search_openai_docs query=\"Responses API streaming\""
+    );
+
+    // Finish both MCP calls and verify clean single-line folding, no `-> succeeded`,
+    // no raw JSON dumps, and semantic styling.
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-mcp-meta-search").expect("valid call id"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: json!({
+                    "servers": [
+                        {
+                            "server": "docs",
+                            "status": "ready",
+                            "tool_count": 2,
+                            "tools": ["search_openai_docs", "read_page"]
+                        },
+                        {
+                            "server": "offline",
+                            "status": "unavailable",
+                            "error": "HTTP 503",
+                            "tool_count": 0,
+                            "tools": []
+                        }
+                    ],
+                    "tools": [
+                        {
+                            "server": "docs",
+                            "tool": "search_openai_docs",
+                            "description": "Search OpenAI developer documentation"
+                        }
+                    ],
+                    "total_matches": 1
+                })
+                .to_string(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-mcp-meta-call").expect("valid call id"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: json!({
+                    "structuredContent": { "hits": 3, "top": "streaming" },
+                    "content": [{ "type": "text", "text": "Found 3 matching sections" }]
+                })
+                .to_string(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let collapsed = render_to_text(&state, 120, 24);
+    assert!(
+        collapsed.contains("MCP refreshed docs · \"responses api\" (1 tool, 1 offline)"),
+        "{collapsed}"
+    );
+    assert!(
+        collapsed.contains(
+            "MCP openaiDeveloperDocs/search_openai_docs query=\"Responses API streaming\""
+        ),
+        "{collapsed}"
+    );
+    assert!(!collapsed.contains("-> succeeded"), "{collapsed}");
+    assert!(collapsed.contains('▸'), "{collapsed}");
+    assert!(
+        !collapsed.contains("Found 3 matching sections"),
+        "{collapsed}"
+    );
+
+    let buffer = render_to_buffer(&state, 120, 24);
+    let theme = TuiTheme::default();
+    assert_eq!(
+        find_cell_color(&buffer, "MCP"),
+        theme.color(crate::tui::theme::SemanticColor::ToolKeyword)
+    );
+    assert_eq!(
+        find_cell_color(&buffer, "search_openai_docs"),
+        theme.color(crate::tui::theme::SemanticColor::Command)
+    );
+    assert_eq!(
+        find_cell_color(&buffer, "query="),
+        theme.color(crate::tui::theme::SemanticColor::Muted)
+    );
+
+    // Expanding shows clean structured lines instead of raw minified JSON.
+    state.toggle_command_expanded(0);
+    state.toggle_command_expanded(1);
+    let expanded = render_to_text(&state, 120, 24);
+    assert!(expanded.contains('▾'), "{expanded}");
+    assert!(
+        expanded.contains("offline · unavailable (HTTP 503)"),
+        "{expanded}"
+    );
+    assert!(
+        expanded.contains("docs/search_openai_docs — Search OpenAI developer documentation"),
+        "{expanded}"
+    );
+    assert!(expanded.contains("Found 3 matching sections"), "{expanded}");
+    assert!(!expanded.contains("\"structuredContent\""), "{expanded}");
+}
+
+#[test]
 fn projector_compacts_failed_tool_result_without_raw_artifact_json() {
     let mut state = TuiState::new(
         "/repo".into(),

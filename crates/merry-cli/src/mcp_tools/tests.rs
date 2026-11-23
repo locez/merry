@@ -65,20 +65,19 @@ async fn corrupt_resume_state_does_not_fall_back_to_discovery() {
 }
 
 #[tokio::test]
-async fn warning_writer_reports_the_server_and_retained_count_and_observes_io_errors() {
+async fn warning_writer_reports_the_server_and_observes_io_errors() {
     let warnings = vec![McpServerDiagnostic::new(
         ToolSourceId::new("offline").unwrap(),
         McpServerIssue::Unavailable {
             stage: McpDiscoveryStage::Initialize,
             failure: McpFailureKind::Timeout,
         },
-        2,
     )];
     let mut bytes = Vec::new();
     write_startup_warnings(&mut bytes, &warnings).await.unwrap();
     let rendered = String::from_utf8(bytes).unwrap();
     assert!(rendered.starts_with("Warning: MCP offline:"));
-    assert!(rendered.contains("2 saved tool definitions retained"));
+    assert!(rendered.contains("mcp_search"));
     assert!(rendered.contains("Merry continues"));
     let (mut writer, reader) = tokio::io::duplex(16);
     drop(reader);

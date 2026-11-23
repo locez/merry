@@ -1,4 +1,4 @@
-use crate::{McpDiscovery, McpServerConfig};
+use crate::{MCP_CALL_TOOL, MCP_SEARCH_TOOL, McpDiscovery, McpServerConfig};
 use axum::{
     Json, Router,
     extract::State,
@@ -9,6 +9,7 @@ use axum::{
 use futures_util::StreamExt;
 use merry_core::{
     RuntimeJournalEvent, RuntimeJournalPayload, SessionId, ToolCallId, ToolCallResult, ToolName,
+    ToolOutput,
 };
 use merry_llm::{
     FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse, ModelToolCall,
@@ -16,7 +17,7 @@ use merry_llm::{
 };
 use merry_runtime::{Runtime, StepContext, StepInput};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::{
     net::SocketAddr,
     sync::{
@@ -49,6 +50,8 @@ pub(super) enum Mode {
     ModernDiscover,
     /// Returns `tools/call` over SSE with an interleaved progress notification before the result.
     SseWithProgress,
+    /// Returns `tools/call` over SSE with a `notifications/tools/list_changed` push before the result.
+    SseNotifyToolsChanged,
 }
 
 #[derive(Clone)]
@@ -61,6 +64,7 @@ struct ServerState {
     settings: Mutex<Settings>,
     events: mpsc::Sender<String>,
     calls: AtomicUsize,
+    list_calls: AtomicUsize,
     requests: AtomicUsize,
     expire_session: AtomicBool,
     shutdown: CancellationToken,
@@ -82,6 +86,7 @@ impl Server {
             settings: Mutex::new(Settings { mode, tools }),
             events: sender,
             calls: AtomicUsize::new(0),
+            list_calls: AtomicUsize::new(0),
             requests: AtomicUsize::new(0),
             expire_session: AtomicBool::new(false),
             shutdown: CancellationToken::new(),
@@ -111,6 +116,9 @@ impl Server {
     }
     pub(super) fn calls(&self) -> usize {
         self.state.calls.load(Ordering::SeqCst)
+    }
+    pub(super) fn list_calls(&self) -> usize {
+        self.state.list_calls.load(Ordering::SeqCst)
     }
     pub(super) fn requests(&self) -> usize {
         self.state.requests.load(Ordering::SeqCst)
@@ -167,6 +175,8 @@ async fn handle(
     let _ = state.events.try_send(request.method.clone());
     if request.method == "tools/call" {
         state.calls.fetch_add(1, Ordering::SeqCst);
+    } else if request.method == "tools/list" {
+        state.list_calls.fetch_add(1, Ordering::SeqCst);
     }
     if request.method == "tools/call"
         && state.expire_session.swap(false, Ordering::SeqCst)
@@ -177,12 +187,43 @@ async fn handle(
     let settings = state.settings.lock().unwrap().clone();
     match &settings.mode {
         Mode::Status(status) => return StatusCode::from_u16(*status).unwrap().into_response(),
-        Mode::StallInitialize if request.method == "initialize" => { state.shutdown.cancelled().await; return StatusCode::SERVICE_UNAVAILABLE.into_response(); }
-        Mode::StallCall if request.method == "tools/call" => { state.shutdown.cancelled().await; return StatusCode::SERVICE_UNAVAILABLE.into_response(); }
-        Mode::InvalidJson => return ([("content-type", "application/json")], "not-json secret-query-value").into_response(),
-        Mode::RpcSecret => return Json(json!({"jsonrpc":"2.0", "id":request.id, "error":{"code":-32603,"message":"secret-query-value", "data":{"credential":"secret-query-value"}}})).into_response(),
-        Mode::Oversized => return ([("content-type", "application/json")], "x".repeat(crate::client::MAX_RESPONSE_BYTES + 1)).into_response(),
-        Mode::Redirect(target) => return (StatusCode::TEMPORARY_REDIRECT, [("location", target)]).into_response(),
+        Mode::StallInitialize if request.method == "initialize" => {
+            state.shutdown.cancelled().await;
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        Mode::StallCall if request.method == "tools/call" => {
+            state.shutdown.cancelled().await;
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        Mode::InvalidJson => {
+            return (
+                [("content-type", "application/json")],
+                "not-json secret-query-value",
+            )
+                .into_response();
+        }
+        Mode::RpcSecret => {
+            return Json(json!({
+                "jsonrpc": "2.0",
+                "id": request.id,
+                "error": {
+                    "code": -32603,
+                    "message": "secret-query-value",
+                    "data": {"credential": "secret-query-value"}
+                }
+            }))
+            .into_response();
+        }
+        Mode::Oversized => {
+            return (
+                [("content-type", "application/json")],
+                "x".repeat(crate::client::MAX_RESPONSE_BYTES + 1),
+            )
+                .into_response();
+        }
+        Mode::Redirect(target) => {
+            return (StatusCode::TEMPORARY_REDIRECT, [("location", target)]).into_response();
+        }
         Mode::CounterOfferVersion(version) => {
             if request.method == "initialize" {
                 if headers.contains_key("mcp-protocol-version") {
@@ -205,7 +246,10 @@ async fn handle(
                 return response;
             }
             if request.method != "server/discover"
-                && headers.get("mcp-protocol-version").and_then(|v| v.to_str().ok()) != Some(*version)
+                && headers
+                    .get("mcp-protocol-version")
+                    .and_then(|v| v.to_str().ok())
+                    != Some(*version)
             {
                 return StatusCode::BAD_REQUEST.into_response();
             }
@@ -263,7 +307,11 @@ async fn handle(
             if request.method == "initialize" {
                 return StatusCode::BAD_REQUEST.into_response();
             }
-            if headers.get("mcp-protocol-version").and_then(|v| v.to_str().ok()) != Some("2026-07-28") {
+            if headers
+                .get("mcp-protocol-version")
+                .and_then(|v| v.to_str().ok())
+                != Some("2026-07-28")
+            {
                 return StatusCode::BAD_REQUEST.into_response();
             }
         }
@@ -272,6 +320,14 @@ async fn handle(
             let sse_body = format!(
                 "event: message\ndata: {{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{{\"progressToken\":\"tok\",\"progress\":50}}}}\n\n\
                  event: message\ndata: {{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"sse-done\"}}],\"isError\":false}}}}\n\n"
+            );
+            return ([("content-type", "text/event-stream")], sse_body).into_response();
+        }
+        Mode::SseNotifyToolsChanged if request.method == "tools/call" => {
+            let id = request.id.unwrap_or(0);
+            let sse_body = format!(
+                "event: message\ndata: {{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}}\n\n\
+                 event: message\ndata: {{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"notified\"}}],\"isError\":false}}}}\n\n"
             );
             return ([("content-type", "text/event-stream")], sse_body).into_response();
         }
@@ -295,7 +351,15 @@ async fn handle(
             }
         }
         "tools/list" => json!({"tools":settings.tools}),
-        "tools/call" => json!({"content":[{"type":"text","text":"done"}],"isError":false}),
+        "tools/call" => {
+            let called_name = request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            json!({"content":[{"type":"text","text":format!("done:{called_name}")}],"isError":false})
+        }
         _ => return StatusCode::BAD_REQUEST.into_response(),
     };
     let mut response =
@@ -319,16 +383,22 @@ pub(super) fn text_provider() -> FakeModelProvider {
     })])
 }
 
-pub(super) fn call_provider(name: &ToolName, count: usize) -> FakeModelProvider {
+pub(super) fn sequence_provider(calls: Vec<(&str, Value)>) -> FakeModelProvider {
     FakeModelProvider::new_turns(
-        (0..count)
-            .map(|index| {
+        calls
+            .into_iter()
+            .enumerate()
+            .map(|(index, (tool_name, args))| {
+                let object: Map<String, Value> = match args {
+                    Value::Object(map) => map,
+                    other => panic!("expected object tool arguments, got {other}"),
+                };
                 vec![Ok(ModelEvent::Completed {
                     response: ModelResponse::new(
                         vec![ModelOutput::tool_call(ModelToolCall::new(
                             ModelToolCallId::new(&format!("call-{index}")).unwrap(),
-                            name.clone(),
-                            ToolArguments::new(Default::default()),
+                            ToolName::new(tool_name).unwrap(),
+                            ToolArguments::new(object),
                         ))],
                         FinishReason::ToolCalls,
                         None,
@@ -337,6 +407,26 @@ pub(super) fn call_provider(name: &ToolName, count: usize) -> FakeModelProvider 
             })
             .collect(),
     )
+}
+
+pub(super) fn mcp_call_args(server: &str, tool_name: &str, arguments: Value) -> Value {
+    json!({
+        "server": server,
+        "tool": tool_name,
+        "arguments": arguments,
+    })
+}
+
+pub(super) fn mcp_call_provider(server: &str, tool_name: &str, count: usize) -> FakeModelProvider {
+    sequence_provider(
+        (0..count)
+            .map(|_| (MCP_CALL_TOOL, mcp_call_args(server, tool_name, json!({}))))
+            .collect(),
+    )
+}
+
+pub(super) fn mcp_search_call(args: Value) -> (&'static str, Value) {
+    (MCP_SEARCH_TOOL, args)
 }
 
 pub(super) fn runtime(id: &str, discovery: McpDiscovery, provider: &FakeModelProvider) -> Runtime {
@@ -388,4 +478,17 @@ pub(super) fn resolved(events: &[RuntimeJournalEvent]) -> &ToolCallResult {
             _ => None,
         })
         .expect("tool call resolves durably")
+}
+
+pub(super) async fn read_json_output(runtime: &Runtime, result: &ToolCallResult) -> Value {
+    match runtime
+        .read_tool_output(result.call_id())
+        .await
+        .expect("tool output read")
+        .expect("tool output present")
+    {
+        ToolOutput::Json { json } | ToolOutput::Text { text: json } => {
+            serde_json::from_str(&json).expect("valid JSON tool output")
+        }
+    }
 }

@@ -43,6 +43,7 @@ mod activity;
 mod command_rows;
 mod command_style;
 mod comment_marks;
+mod mcp_style;
 pub(crate) use pending_queue::{PendingQueuePointer, pending_queue_pointer_at};
 mod pending_queue;
 mod sticky;

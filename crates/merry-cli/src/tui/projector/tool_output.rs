@@ -5,7 +5,7 @@ use crate::{
     tool_display::format_tool_call_detail,
     tui::{
         process_output::process_output_preview,
-        projector::StartedToolView,
+        projector::{StartedToolView, mcp_output::parse_mcp_tool_name},
         state::{
             CommandFailure, CommandView, PatchChangeView, PatchLineKind, PatchLineView,
             PatchOperationView, TimelineItem, ToolOutputPreview,
@@ -58,7 +58,9 @@ pub(super) fn started_tool_title_and_detail(
 }
 
 pub(super) fn tui_tool_title(name: &str) -> &'static str {
-    if parse_mcp_tool_name(name).is_some() {
+    if matches!(name, merry_mcp::MCP_CALL_TOOL | merry_mcp::MCP_SEARCH_TOOL)
+        || parse_mcp_tool_name(name).is_some()
+    {
         return "MCP";
     }
 
@@ -79,6 +81,12 @@ pub(super) fn tui_tool_title(name: &str) -> &'static str {
 }
 
 pub(super) fn tui_tool_detail(name: &str, arguments: &serde_json::Map<String, Value>) -> String {
+    if matches!(name, merry_mcp::MCP_CALL_TOOL | merry_mcp::MCP_SEARCH_TOOL) {
+        return format_tool_call_detail(name, arguments)
+            .filter(|detail| !detail.is_empty())
+            .unwrap_or_else(|| name.to_owned());
+    }
+
     if let Some((server, tool)) = parse_mcp_tool_name(name) {
         let detail = format_tool_call_detail(name, arguments);
         return match detail {
@@ -235,15 +243,6 @@ pub(super) fn completed_plan_or_todo_view(
         }
         _ => None,
     }
-}
-
-pub(super) fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
-    let rest = name.strip_prefix("mcp_")?;
-    let (server, tool) = rest.split_once('_')?;
-    if server.is_empty() || tool.is_empty() {
-        return None;
-    }
-    Some((server, tool))
 }
 
 pub(super) fn permission_output_bodies(output: &str) -> Option<String> {

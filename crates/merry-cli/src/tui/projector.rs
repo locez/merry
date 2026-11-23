@@ -1,10 +1,13 @@
 use crate::tui::{
     process_output::process_exit_code,
-    projector::tool_output::{
-        compact_tool_output, completed_plan_or_todo_view, completed_process_view,
-        completed_tool_title, expanded_tool_title, failed_tool_body, parse_apply_patch_view,
-        permission_output_bodies, read_file_output_preview, started_tool_title_and_detail,
-        tool_output_text,
+    projector::{
+        mcp_output::{McpSearchDisplay, completed_mcp_view, parse_mcp_search_display},
+        tool_output::{
+            compact_tool_output, completed_plan_or_todo_view, completed_process_view,
+            completed_tool_title, expanded_tool_title, failed_tool_body, parse_apply_patch_view,
+            permission_output_bodies, read_file_output_preview, started_tool_title_and_detail,
+            tool_output_text,
+        },
     },
     state::{CommandView, TimelineItem, ToolOutputPreview, TuiState},
 };
@@ -18,6 +21,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tokio::time::Instant;
 
+mod mcp_output;
 mod tool_output;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -35,6 +39,7 @@ struct StartedToolView {
     title: String,
     detail: String,
     patch_argument: Option<String>,
+    mcp_search: Option<McpSearchDisplay>,
     command: String,
     cwd: String,
     started_at: Option<Instant>,
@@ -254,6 +259,10 @@ impl TuiProjector {
                     );
                 } else if let Some(tool) = tool.as_ref()
                     && let Some(item) = completed_plan_or_todo_view(tool, &text)
+                {
+                    state.replace_timeline_item(tool.timeline_index, item);
+                } else if let Some(tool) = tool.as_ref()
+                    && let Some(item) = completed_mcp_view(tool, &text)
                 {
                     state.replace_timeline_item(tool.timeline_index, item);
                 } else if let Some(tool) = tool.as_ref() {
@@ -550,6 +559,8 @@ impl TuiProjector {
         self.started_tools.insert(
             call_id,
             StartedToolView {
+                mcp_search: (tool_name.as_str() == merry_mcp::MCP_SEARCH_TOOL)
+                    .then(|| parse_mcp_search_display(call.arguments().as_object())),
                 name: tool_name,
                 timeline_index,
                 title,

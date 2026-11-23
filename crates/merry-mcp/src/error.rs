@@ -61,14 +61,4 @@ pub enum McpError {
         tool_name: String,
         message: String,
     },
-    /// The configured server id could not be represented in a Merry tool name.
-    #[error("invalid MCP server id `{id}`: {message}")]
-    InvalidServerId { id: String, message: String },
-    /// A raw MCP tool name could not be mapped into Merry's tool-name grammar.
-    #[error("invalid MCP tool name `{name}` from server `{server_id}`: {message}")]
-    InvalidToolName {
-        server_id: String,
-        name: String,
-        message: String,
-    },
 }

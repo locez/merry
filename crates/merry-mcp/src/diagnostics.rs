@@ -7,7 +7,7 @@ use std::fmt;
 pub enum McpDiscoveryStage {
     /// Initialize and acknowledge the transport session.
     Initialize,
-    /// Retrieve and validate the complete tool catalog.
+    /// Retrieve and validate the server's tool catalog.
     ListTools,
 }
 
@@ -52,9 +52,7 @@ impl McpFailureKind {
                 other => Self::Http(*other),
             },
             McpError::SessionExpired { .. } => Self::SessionExpired,
-            McpError::InvalidToolSchema { .. }
-            | McpError::InvalidToolName { .. }
-            | McpError::Core(_) => Self::InvalidToolDefinition,
+            McpError::InvalidToolSchema { .. } | McpError::Core(_) => Self::InvalidToolDefinition,
             McpError::ResponseTooLarge { .. } => Self::ResponseTooLarge,
             McpError::TransportState { .. } => Self::Transport,
             _ => Self::Protocol,
@@ -99,35 +97,20 @@ pub enum McpServerIssue {
         stage: McpDiscoveryStage,
         failure: McpFailureKind,
     },
-    /// The source was removed from the current configuration.
-    NotConfigured,
-    /// The saved source identity no longer matches the configured endpoint.
-    EndpointChanged,
-    /// Current configuration revoked access to saved tools.
-    ToolsDisallowed,
-    /// Existing definitions changed or tools were added; the saved surface stays fixed.
-    CatalogChanged,
-    /// A configured source has no definitions in this session's catalog.
-    NotInSessionCatalog,
 }
 
-/// A retained, safe startup diagnostic; tool counts distinguish missing and frozen definitions.
+/// A retained, safe startup diagnostic for one configured MCP server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerDiagnostic {
     server_id: ToolSourceId,
     issue: McpServerIssue,
-    retained_tools: usize,
 }
 
 impl McpServerDiagnostic {
-    /// Creates a safe diagnostic from a validated identity and structured failure.
+    /// Creates a safe diagnostic from a validated server identity and structured issue.
     #[must_use]
-    pub fn new(server_id: ToolSourceId, issue: McpServerIssue, retained_tools: usize) -> Self {
-        Self {
-            server_id,
-            issue,
-            retained_tools,
-        }
+    pub fn new(server_id: ToolSourceId, issue: McpServerIssue) -> Self {
+        Self { server_id, issue }
     }
 
     /// Returns the non-secret configured server identity.
@@ -140,11 +123,5 @@ impl McpServerDiagnostic {
     #[must_use]
     pub fn issue(&self) -> &McpServerIssue {
         &self.issue
-    }
-
-    /// Returns how many provider-visible definitions were retained for this server.
-    #[must_use]
-    pub fn retained_tools(&self) -> usize {
-        self.retained_tools
     }
 }

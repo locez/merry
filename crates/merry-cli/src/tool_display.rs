@@ -22,8 +22,63 @@ pub(crate) fn format_tool_call_detail(
         "read_plan" => format_read_plan_call_detail(arguments),
         "exit_plan_mode" => format_exit_plan_call_detail(arguments),
         "update_todos" => format_update_todos_call_detail(arguments),
+        merry_mcp::MCP_CALL_TOOL => format_mcp_call_detail(arguments),
+        merry_mcp::MCP_SEARCH_TOOL => format_mcp_search_detail(arguments),
         _ => format_generic_tool_call_detail(arguments),
     }
+}
+
+fn format_mcp_call_detail(arguments: &Map<String, Value>) -> Option<String> {
+    let server = arguments.get("server").and_then(Value::as_str)?;
+    let tool = arguments.get("tool").and_then(Value::as_str)?;
+    let header = format!(
+        "{}/{}",
+        crate::text::without_control_chars(server),
+        crate::text::without_control_chars(tool)
+    );
+    let inner = arguments
+        .get("arguments")
+        .and_then(Value::as_object)
+        .and_then(format_generic_tool_call_detail);
+    match inner {
+        Some(detail) if !detail.is_empty() => Some(format!("{header} {detail}")),
+        _ => Some(header),
+    }
+}
+
+fn format_mcp_search_detail(arguments: &Map<String, Value>) -> Option<String> {
+    let refresh = arguments
+        .get("refresh")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let query = arguments
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|query| !query.is_empty());
+    let server = arguments
+        .get("server")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|server| !server.is_empty())
+        .map(crate::text::without_control_chars);
+
+    let verb = if refresh {
+        "refreshing"
+    } else if query.is_some() {
+        "searching"
+    } else {
+        "listing"
+    };
+    let detail = match (server.as_deref(), query) {
+        (Some(server), Some(query)) => {
+            format!("{verb} {server} · \"{}\"", compact_inline(query, 60))
+        }
+        (None, Some(query)) => format!("{verb} \"{}\"", compact_inline(query, 60)),
+        (Some(server), None) => format!("{verb} {server}"),
+        (None, None) => format!("{verb} servers"),
+    };
+    Some(detail)
 }
 
 fn format_write_plan_call_detail(arguments: &Map<String, Value>) -> Option<String> {

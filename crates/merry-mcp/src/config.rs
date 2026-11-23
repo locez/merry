@@ -8,15 +8,10 @@ pub struct McpServerConfig {
 }
 
 impl McpServerConfig {
-    pub(crate) fn validated_identity(
-        &self,
-    ) -> Result<(merry_core::ToolSourceId, merry_core::ToolSourceFingerprint), crate::McpError>
-    {
+    pub(crate) fn validated_source(&self) -> Result<merry_core::ToolSourceId, crate::McpError> {
         use reqwest::header::{HeaderName, HeaderValue};
-        use sha2::{Digest, Sha256};
 
         let source = merry_core::ToolSourceId::new(&self.id)?;
-        crate::map_mcp_tool_names(&self.id, &[])?;
         let url =
             reqwest::Url::parse(&self.url).map_err(|_| crate::McpError::InvalidConfiguration {
                 reason: "MCP endpoint must be a valid absolute HTTP(S) URL",
@@ -60,14 +55,7 @@ impl McpServerConfig {
                 merry_core::ToolBindingName::new(name)?;
             }
         }
-        let digest = Sha256::digest(url.as_str().as_bytes());
-        let mut hex = String::with_capacity(digest.len() * 2);
-        for byte in digest {
-            use std::fmt::Write as _;
-            let _ = write!(hex, "{byte:02x}");
-        }
-        let fingerprint = merry_core::ToolSourceFingerprint::new(&hex)?;
-        Ok((source, fingerprint))
+        Ok(source)
     }
 
     /// Creates a builder for one trusted HTTP MCP server.
@@ -81,7 +69,7 @@ impl McpServerConfig {
         }
     }
 
-    /// Returns the stable config id used for tool-name namespacing.
+    /// Returns the stable config id identifying this server.
     #[must_use]
     pub fn id(&self) -> &str {
         &self.id
@@ -141,7 +129,7 @@ impl McpServerConfigBuilder {
         self
     }
 
-    /// Restricts discovery to the provided raw MCP tool names.
+    /// Restricts discovery and execution to the provided raw MCP tool names.
     #[must_use]
     pub fn tools(mut self, tools: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.tools = Some(tools.into_iter().map(Into::into).collect());
