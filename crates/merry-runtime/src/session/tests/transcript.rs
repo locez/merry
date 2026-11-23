@@ -207,6 +207,8 @@ fn user_message_transcript_id_exhaustion_leaves_state_unchanged() {
             .collect(),
         model_turn_sequences: std::collections::BTreeMap::new(),
         next_model_turn_id: 2,
+        pruned_through: None,
+        pruned_external_turns: 0,
     })
     .expect("exhausted transcript fixture should restore");
     let transcript_before = session.transcript.persisted();

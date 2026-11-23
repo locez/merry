@@ -1,4 +1,4 @@
-use super::config::CompactionConfig;
+use super::config::{CompactionConfig, HistoryRetention};
 use super::state::AcceptedLocalWorkspaceProcessRunner;
 use super::{Runtime, RuntimeInner};
 use crate::{
@@ -53,6 +53,7 @@ pub struct RuntimeBuilder {
     model_configs: RuntimeModelConfigs,
     model_retry_policy: ModelRetryPolicy,
     automatic_compaction: CompactionConfig,
+    history_retention: HistoryRetention,
     capabilities: RuntimeCapabilities,
     prompt_profile: PromptProfile,
     progress_commentary: bool,
@@ -99,6 +100,7 @@ impl RuntimeBuilder {
             model_configs: RuntimeModelConfigs::default(),
             model_retry_policy: ModelRetryPolicy::default(),
             automatic_compaction: CompactionConfig::default(),
+            history_retention: HistoryRetention::default(),
             capabilities: RuntimeCapabilities::default(),
             prompt_profile: PromptProfile::default(),
             progress_commentary: false,
@@ -592,6 +594,13 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Configures how compacted session history is retained in memory and on disk.
+    #[must_use]
+    pub fn history_retention(mut self, retention: HistoryRetention) -> Self {
+        self.history_retention = retention;
+        self
+    }
+
     /// Installs a session that was already loaded by the runtime boundary.
     #[must_use]
     pub fn with_loaded_session(mut self, loaded: LoadedSession) -> Self {
@@ -799,6 +808,7 @@ impl RuntimeBuilder {
                 model_configs: self.model_configs,
                 role_model_overrides: RwLock::new(std::collections::BTreeMap::new()),
                 automatic_compaction: RwLock::new(self.automatic_compaction),
+                history_retention: self.history_retention,
                 context_window_tokens: RwLock::new(None),
                 capabilities: self.capabilities,
                 prompt_profile: self.prompt_profile,

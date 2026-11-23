@@ -18,8 +18,9 @@ pub(in crate::runtime) async fn install_summary_compaction_transactionally(
     active_permit: ActiveStepPermit,
 ) -> Result<CompactionOutcome, RuntimeError> {
     let summary = summary.to_owned();
+    let retention = inner.history_retention;
     let outcome = install_compaction_transaction(inner, &token, active_permit, move |session| {
-        session.prepare_summary_compaction_install(input, &summary)
+        session.prepare_summary_compaction_install_with_retention(input, &summary, &retention)
     })
     .await?;
     Ok(outcome.expect("prepared summary replacement must carry an outcome"))
@@ -59,8 +60,9 @@ async fn install_compaction_transaction(
     }
 
     let prepared = prepare(&session)?;
-    let bundle = session.persistable_bundle_with_compaction(&prepared)?;
+    let bundle = session.persistable_bundle_with_compaction(&prepared, &inner.history_retention)?;
     let cursor = bundle.cursor.clone();
+    let rotated = bundle.rotation.is_some();
     let Some(store) = store else {
         if token.is_cancelled() {
             return Err(compaction_cancelled_before_install());
@@ -82,7 +84,16 @@ async fn install_compaction_transaction(
                 return Err(compaction_cancelled_before_install());
             }
             let staged = store.stage_bundle(bundle).await?;
-            complete_staged_compaction(inner, staged, prepared, cursor, token, active_permit).await
+            complete_staged_compaction(
+                inner,
+                staged,
+                prepared,
+                cursor,
+                rotated,
+                token,
+                active_permit,
+            )
+            .await
         }
         .await;
         if let Err(error) = &result {
@@ -114,6 +125,7 @@ async fn complete_staged_compaction(
     staged: StagedSessionBundle,
     prepared: PreparedCompactionInstall,
     cursor: JournalCursor,
+    rotated: bool,
     token: CancellationToken,
     _active_permit: ActiveStepPermit,
 ) -> Result<Option<CompactionOutcome>, RuntimeError> {
@@ -132,7 +144,11 @@ async fn complete_staged_compaction(
     let outcome = {
         let mut session = inner.session.lock().await;
         let outcome = session.commit_prepared_compaction_install(prepared);
-        session.adopt_journal_cursor(cursor);
+        if rotated {
+            session.replace_journal_cursor(cursor);
+        } else {
+            session.adopt_journal_cursor(cursor);
+        }
         outcome
     };
     commit.require_durable()?;

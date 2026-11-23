@@ -45,7 +45,14 @@ async fn staged_journal_append_does_not_mutate_disk_until_commit_and_discard_is_
     let discarded = b"{\"type\":\"commit\",\"state\":{\"next_sequence\":2}}\n";
 
     store
-        .stage_journal_append(&session_id, header.to_vec(), first.to_vec(), &[], None)
+        .stage_journal_append(
+            &session_id,
+            header.to_vec(),
+            first.to_vec(),
+            &[],
+            None,
+            None,
+        )
         .await
         .expect("first append stages")
         .commit()
@@ -55,7 +62,14 @@ async fn staged_journal_append_does_not_mutate_disk_until_commit_and_discard_is_
         .expect("first append is durable");
 
     let staged = store
-        .stage_journal_append(&session_id, header.to_vec(), discarded.to_vec(), &[], None)
+        .stage_journal_append(
+            &session_id,
+            header.to_vec(),
+            discarded.to_vec(),
+            &[],
+            None,
+            None,
+        )
         .await
         .expect("second append stages");
 
@@ -86,7 +100,14 @@ async fn injected_commit_failure_keeps_committed_journal_unchanged() {
     let header = b"{\"type\":\"header\"}\n";
     let old_commit = b"{\"type\":\"commit\",\"v\":1}\n";
     store
-        .stage_journal_append(&session_id, header.to_vec(), old_commit.to_vec(), &[], None)
+        .stage_journal_append(
+            &session_id,
+            header.to_vec(),
+            old_commit.to_vec(),
+            &[],
+            None,
+            None,
+        )
         .await
         .expect("initial append stages")
         .commit()
@@ -102,6 +123,7 @@ async fn injected_commit_failure_keeps_committed_journal_unchanged() {
             header.to_vec(),
             b"{\"type\":\"commit\",\"v\":2}\n".to_vec(),
             &[],
+            None,
             None,
         )
         .await
@@ -137,6 +159,7 @@ async fn stage_pause_blocks_before_commit_and_only_once() {
                 b"{\"type\":\"commit\",\"v\":1}\n".to_vec(),
                 &[],
                 None,
+                None,
             )
             .await
     });
@@ -158,6 +181,7 @@ async fn stage_pause_blocks_before_commit_and_only_once() {
             b"{\"type\":\"header\"}\n".to_vec(),
             b"{\"type\":\"commit\",\"v\":2}\n".to_vec(),
             &[],
+            None,
             None,
         )
         .await
@@ -187,6 +211,7 @@ async fn contains_session_reports_only_committed_state() {
             b"{\"type\":\"header\"}\n".to_vec(),
             b"{\"type\":\"commit\"}\n".to_vec(),
             &[],
+            None,
             None,
         )
         .await
@@ -263,11 +288,25 @@ async fn journal_appends_write_header_once_and_serialize_concurrent_commits() {
     let second = b"{\"type\":\"commit\",\"v\":2}\n";
 
     let staged_a = store_a
-        .stage_journal_append(&session_id, header.to_vec(), first.to_vec(), &[], None)
+        .stage_journal_append(
+            &session_id,
+            header.to_vec(),
+            first.to_vec(),
+            &[],
+            None,
+            None,
+        )
         .await
         .expect("first append stages");
     let staged_b = store_b
-        .stage_journal_append(&session_id, header.to_vec(), second.to_vec(), &[], None)
+        .stage_journal_append(
+            &session_id,
+            header.to_vec(),
+            second.to_vec(),
+            &[],
+            None,
+            None,
+        )
         .await
         .expect("second append stages");
 

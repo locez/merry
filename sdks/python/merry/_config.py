@@ -283,4 +283,67 @@ class WorkspaceConfig:
         )
 
 
+class HistoryRetentionMode(StrEnum):
+    """Policy governing how compacted session history is retained."""
+
+    FULL = "full"
+    CONTEXT_ONLY = "context_only"
+    SEGMENTED_ARCHIVE = "segmented_archive"
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryRetention:
+    """Typed compaction history retention policy orthogonal to session_store."""
+
+    mode: HistoryRetentionMode = HistoryRetentionMode.FULL
+    max_segments: int | None = None
+    max_bytes: int | None = None
+    export_markdown: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.mode, HistoryRetentionMode):
+            raise TypeError("mode must be a HistoryRetentionMode value")
+        if type(self.export_markdown) is not bool:
+            raise TypeError("export_markdown must be a boolean")
+        if self.max_segments is not None:
+            require_positive_int("max_segments", self.max_segments)
+        if self.max_bytes is not None:
+            require_positive_int("max_bytes", self.max_bytes)
+        if self.mode != HistoryRetentionMode.SEGMENTED_ARCHIVE and (
+            self.max_segments is not None or self.max_bytes is not None
+        ):
+            raise ValueError(
+                "max_segments and max_bytes are only valid for segmented_archive retention"
+            )
+
+    @classmethod
+    def full(cls) -> HistoryRetention:
+        """Retain all history in hot memory and append-only journal.jsonl."""
+
+        return cls(mode=HistoryRetentionMode.FULL, export_markdown=False)
+
+    @classmethod
+    def context_only(cls) -> HistoryRetention:
+        """Prune compacted history from hot memory and live journal.jsonl."""
+
+        return cls(mode=HistoryRetentionMode.CONTEXT_ONLY, export_markdown=False)
+
+    @classmethod
+    def segmented_archive(
+        cls,
+        *,
+        max_segments: int | None = None,
+        max_bytes: int | None = None,
+        export_markdown: bool = True,
+    ) -> HistoryRetention:
+        """Rotate compacted history into bounded archive segments on disk."""
+
+        return cls(
+            mode=HistoryRetentionMode.SEGMENTED_ARCHIVE,
+            max_segments=max_segments,
+            max_bytes=max_bytes,
+            export_markdown=export_markdown,
+        )
+
+
 Provider: TypeAlias = OpenAICompatible | Anthropic

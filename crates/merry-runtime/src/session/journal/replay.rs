@@ -61,6 +61,8 @@ struct ReplayedSideState {
     next_model_turn_id: Option<u64>,
     topic: Option<String>,
     subagents: Vec<crate::subagent::PersistedSubagentRecord>,
+    pruned_through: Option<ModelTurnId>,
+    pruned_external_turns: u32,
 }
 
 impl ReplayedSideState {
@@ -110,6 +112,15 @@ impl ReplayedSideState {
         }
         if let Some(subagents) = delta.subagents {
             self.subagents = subagents;
+        }
+        if let Some(pruned_through) = delta.pruned_through {
+            self.pruned_through = Some(
+                self.pruned_through
+                    .map_or(pruned_through, |prev| prev.max(pruned_through)),
+            );
+        }
+        if let Some(pruned_external_turns) = delta.pruned_external_turns {
+            self.pruned_external_turns = self.pruned_external_turns.max(pruned_external_turns);
         }
         Ok(())
     }
@@ -209,7 +220,7 @@ pub(crate) async fn session_from_journal(
         .keys()
         .map(|id| id.as_u64() + 1)
         .max()
-        .unwrap_or(1);
+        .unwrap_or_else(|| state.pruned_through.map_or(1, |id| id.as_u64() + 1));
     let next_model_turn_id = state
         .next_model_turn_id
         .unwrap_or(derived_next_model_turn_id);
@@ -223,6 +234,8 @@ pub(crate) async fn session_from_journal(
         state.model_turns,
         state.model_turn_sequences,
         next_model_turn_id,
+        state.pruned_through,
+        state.pruned_external_turns,
     )
     .map_err(runtime_error_to_invalid_document)?;
 

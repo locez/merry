@@ -192,6 +192,8 @@ fn compaction_structure_errors_map_to_stale_window() {
             model_turns: model_turns.into_iter().collect(),
             model_turn_sequences: BTreeMap::new(),
             next_model_turn_id,
+            pruned_through: None,
+            pruned_external_turns: 0,
         };
 
         let error = session

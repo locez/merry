@@ -4,13 +4,17 @@ use crate::{agent::PyAgent, error, protocol};
 use merry::profiles::WorkspaceToolLimits;
 use merry::providers::OpenAiProtocol;
 use merry::{
-    AgentBuilder, AgentLoopConfig, FileSessionStore, GenerationConfig, ParallelToolCalls,
-    PromptBlock, PromptProfile, ReasoningEffort, ServiceTier,
+    AgentBuilder, AgentLoopConfig, FileSessionStore, GenerationConfig, HistoryRetention,
+    ParallelToolCalls, PromptBlock, PromptProfile, ReasoningEffort, SegmentedArchiveConfig,
+    ServiceTier,
 };
 use merry_core::ToolName;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::tokio::future_into_py;
-use std::{num::NonZeroUsize, path::PathBuf};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    path::PathBuf,
+};
 
 /// Mutable construction state exposed to Python before an agent is built.
 #[pyclass(name = "AgentBuilder")]
@@ -233,6 +237,19 @@ impl PyAgentBuilder {
         Ok(())
     }
 
+    fn with_history_retention(
+        &mut self,
+        mode: &str,
+        max_segments: Option<usize>,
+        max_bytes: Option<u64>,
+        export_markdown: Option<bool>,
+    ) -> PyResult<()> {
+        let retention = parse_history_retention(mode, max_segments, max_bytes, export_markdown)?;
+        let builder = self.take_builder()?;
+        self.inner = Some(builder.history_retention(retention));
+        Ok(())
+    }
+
     fn with_max_model_turns(&mut self, max_model_turns: usize) -> PyResult<()> {
         let config = AgentLoopConfig::new(max_model_turns)
             .map_err(|error| error::config_message_to_py(error.to_string()))?;
@@ -312,6 +329,56 @@ fn parse_openai_protocol(value: &str) -> PyResult<OpenAiProtocol> {
         "chat_completions" | "chat-completions" => Ok(OpenAiProtocol::ChatCompletions),
         _ => Err(error::config_message_to_py(format!(
             "unsupported OpenAI-compatible protocol: {value}"
+        ))),
+    }
+}
+
+fn parse_history_retention(
+    mode: &str,
+    max_segments: Option<usize>,
+    max_bytes: Option<u64>,
+    export_markdown: Option<bool>,
+) -> PyResult<HistoryRetention> {
+    match mode {
+        "full" => {
+            if max_segments.is_some() || max_bytes.is_some() || export_markdown == Some(true) {
+                return Err(error::config_message_to_py(
+                    "max_segments, max_bytes, and export_markdown are only valid for segmented_archive retention",
+                ));
+            }
+            Ok(HistoryRetention::Full)
+        }
+        "context_only" => {
+            if max_segments.is_some() || max_bytes.is_some() || export_markdown == Some(true) {
+                return Err(error::config_message_to_py(
+                    "max_segments, max_bytes, and export_markdown are only valid for segmented_archive retention",
+                ));
+            }
+            Ok(HistoryRetention::ContextOnly)
+        }
+        "segmented_archive" => {
+            let max_segments = max_segments
+                .map(|value| {
+                    NonZeroUsize::new(value).ok_or_else(|| {
+                        error::config_message_to_py("max_segments must be greater than zero")
+                    })
+                })
+                .transpose()?;
+            let max_bytes = max_bytes
+                .map(|value| {
+                    NonZeroU64::new(value).ok_or_else(|| {
+                        error::config_message_to_py("max_bytes must be greater than zero")
+                    })
+                })
+                .transpose()?;
+            let config = SegmentedArchiveConfig::new()
+                .with_max_segments(max_segments)
+                .with_max_bytes(max_bytes)
+                .with_export_markdown(export_markdown.unwrap_or(true));
+            Ok(HistoryRetention::SegmentedArchive(config))
+        }
+        other => Err(error::config_message_to_py(format!(
+            "unsupported history_retention mode: {other}"
         ))),
     }
 }

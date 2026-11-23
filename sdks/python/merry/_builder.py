@@ -12,6 +12,7 @@ from . import _merry
 from ._config import (
     Anthropic,
     GenerationConfig,
+    HistoryRetention,
     OpenAICompatible,
     PathInput,
     PromptProfile,
@@ -147,6 +148,23 @@ class AgentBuilder:
         self._ensure_open()
         try:
             self._native.with_session_store(str(path))
+        except NativeMerryError as error:
+            self._handle_native_error(error)
+        return self
+
+    def history_retention(self, retention: HistoryRetention) -> Self:
+        """Configure how compacted history is retained in memory and on disk."""
+
+        self._ensure_open()
+        if not isinstance(retention, HistoryRetention):
+            raise TypeError("history_retention must be a HistoryRetention")
+        try:
+            self._native.with_history_retention(
+                retention.mode.value,
+                retention.max_segments,
+                retention.max_bytes,
+                retention.export_markdown,
+            )
         except NativeMerryError as error:
             self._handle_native_error(error)
         return self

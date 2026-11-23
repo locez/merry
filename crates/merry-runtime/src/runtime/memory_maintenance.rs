@@ -59,12 +59,15 @@ async fn maintain(inner: &Arc<RuntimeInner>, memory: &Arc<DurableMemory>) {
         tracing::warn!("durable memory maintenance skipped because no model is configured");
         return;
     };
-    let transcript = {
+    let (transcript, pruned_external_turns) = {
         let session = inner.session.lock().await;
-        session.full_transcript_snapshot()
+        (
+            session.full_transcript_snapshot(),
+            session.pruned_external_turns(),
+        )
     };
     let session_id = inner.session_id.as_str().to_owned();
-    let turns = count_external_turns(&transcript);
+    let turns = pruned_external_turns.saturating_add(count_external_turns(&transcript));
     let cursor = match blocking(Arc::clone(memory), {
         let session_id = session_id.clone();
         move |memory| memory.captured_turns(&session_id)
@@ -116,9 +119,12 @@ async fn maintain(inner: &Arc<RuntimeInner>, memory: &Arc<DurableMemory>) {
             &config,
             &owner,
             &session_id,
-            &transcript,
-            cursor.saturating_add(1),
-            turns,
+            CaptureSlice {
+                transcript: &transcript,
+                pruned_external_turns,
+                from_turn: cursor.saturating_add(1),
+                through_turn: turns,
+            },
         )
         .await;
     }
@@ -137,15 +143,26 @@ async fn capture_added_notes(memory: &Arc<DurableMemory>) -> bool {
     }
 }
 
+struct CaptureSlice<'a> {
+    transcript: &'a [TranscriptItemSnapshot],
+    pruned_external_turns: u32,
+    from_turn: u32,
+    through_turn: u32,
+}
+
 async fn capture_range(
     memory: &Arc<DurableMemory>,
     config: &ModelProviderConfig,
     owner: &str,
     session_id: &str,
-    transcript: &[TranscriptItemSnapshot],
-    from_turn: u32,
-    through_turn: u32,
+    slice: CaptureSlice<'_>,
 ) {
+    let CaptureSlice {
+        transcript,
+        pruned_external_turns,
+        from_turn,
+        through_turn,
+    } = slice;
     if blocking(Arc::clone(memory), {
         let session_id = session_id.to_owned();
         move |memory| Ok(memory.observation_exists(&session_id, from_turn, through_turn))
@@ -160,7 +177,12 @@ async fn capture_range(
         if !refresh_lease(memory, owner).await {
             return;
         }
-        let condensed = match condense::condense_turn_range(transcript, from_turn, through_turn) {
+        let condensed = match condense::condense_turn_range_with_offset(
+            transcript,
+            pruned_external_turns,
+            from_turn,
+            through_turn,
+        ) {
             Ok(condensed) => condensed,
             Err(error) => {
                 tracing::warn!(error = %error, "durable memory transcript was not condensed");

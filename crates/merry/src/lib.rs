@@ -57,9 +57,9 @@ pub use merry_llm::{
 };
 pub use merry_runtime::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus,
-    CompactionConfig, FINAL_OUTPUT_TOOL_NAME, FileSessionStore, FinalOutput,
+    CompactionConfig, FINAL_OUTPUT_TOOL_NAME, FileSessionStore, FinalOutput, HistoryRetention,
     InteractivePrimaryModel, InterruptReason, PromptBlock, PromptError, PromptProfile,
-    QueuedInputId, StructuredOutputRetryPolicy,
+    QueuedInputId, SegmentedArchiveConfig, StructuredOutputRetryPolicy,
 };
 pub use profile::{AgentProfile, AgentProfileContext};
 pub use stream::{AgentEventStream, StructuredAgentEventStream, StructuredRunResult};

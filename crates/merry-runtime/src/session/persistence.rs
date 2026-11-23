@@ -3,8 +3,8 @@ use super::{
     checkpoint_window::ArchivedRefManifest,
     journal::{
         JournalAppendInput, JournalCursor, JournalImageFile, PreparedJournalAppend,
-        ReplayedJournal, images_dir, journal_file_has_header, prepare_journal_append,
-        session_from_journal,
+        PreparedJournalRotation, ReplayedJournal, images_dir, journal_file_has_header,
+        prepare_journal_append, prepare_journal_rotation, session_from_journal,
     },
     transcript::{
         ToolCallPromptProjection, ToolResultPromptProjection, Transcript, TranscriptItem,
@@ -29,6 +29,7 @@ pub(crate) struct PersistableSessionBundle {
     pub(crate) images: Vec<JournalImageFile>,
     pub(crate) cursor: JournalCursor,
     pub(crate) search_user_text: Option<String>,
+    pub(crate) rotation: Option<PreparedJournalRotation>,
 }
 
 struct PersistableSessionView<'a> {
@@ -151,8 +152,21 @@ impl SessionState {
     pub(crate) fn persistable_bundle_with_compaction(
         &self,
         prepared: &PreparedCompactionInstall,
+        retention: &crate::HistoryRetention,
     ) -> Result<PersistableSessionBundle, SessionStoreError> {
-        self.persistable_bundle_for(
+        let untracked_cursor = JournalCursor::untracked();
+        let (cursor, rotation) = match prepared.pruned_segment() {
+            Some(pruned) => (
+                &untracked_cursor,
+                Some(prepare_journal_rotation(
+                    &self.session_id,
+                    pruned,
+                    retention,
+                )?),
+            ),
+            None => (&self.journal_cursor, None),
+        };
+        let mut bundle = self.persistable_bundle_for(
             PersistableSessionView {
                 transcript: prepared.transcript(),
                 prompt_history_projection: prepared.prompt_history_projection(),
@@ -165,8 +179,10 @@ impl SessionState {
                 plan_state: &self.plan_state,
                 todo_list: &self.todo_list,
             },
-            &self.journal_cursor,
-        )
+            cursor,
+        )?;
+        bundle.rotation = rotation;
+        Ok(bundle)
     }
 
     fn persistable_bundle_for(
@@ -233,6 +249,7 @@ impl SessionState {
             images,
             cursor,
             search_user_text,
+            rotation: None,
         })
     }
 
@@ -414,6 +431,7 @@ impl FileSessionStore {
             bundle.document_bytes,
             &bundle.images,
             bundle.search_user_text,
+            bundle.rotation,
         )
         .await
     }

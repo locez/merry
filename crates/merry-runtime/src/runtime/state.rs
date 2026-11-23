@@ -1,4 +1,4 @@
-use super::config::CompactionConfig;
+use super::config::{CompactionConfig, HistoryRetention};
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, FileSessionStore, ProcessRunner, RuntimeCapabilities,
     RuntimeModelRole,
@@ -39,6 +39,7 @@ pub(super) struct RuntimeInner {
     pub(super) role_model_overrides:
         RwLock<BTreeMap<RuntimeModelRole, Option<ModelProviderConfig>>>,
     pub(super) automatic_compaction: RwLock<CompactionConfig>,
+    pub(super) history_retention: HistoryRetention,
     pub(super) context_window_tokens: RwLock<Option<NonZeroU64>>,
     pub(super) capabilities: RuntimeCapabilities,
     pub(super) prompt_profile: crate::PromptProfile,

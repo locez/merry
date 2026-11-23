@@ -28,7 +28,8 @@ mod usage;
 
 pub(crate) use self::checkpoint_window::PreparedCompactionInstall;
 pub(crate) use self::journal::{
-    JournalCursor, JournalImageFile, extract_search_snapshot, is_image_id,
+    JournalCursor, JournalImageFile, PreparedJournalRotation, PrunedCompactionSegment,
+    commit_journal_rotation, extract_search_snapshot, is_image_id, read_archived_tool_output,
 };
 pub(crate) use self::{
     model_turns::{ModelTurn, ModelTurnId, ModelTurnStatus, PromptHistoryProjection},
@@ -177,6 +178,10 @@ impl SessionState {
 
     pub(crate) fn transcript(&self) -> &Transcript {
         &self.transcript
+    }
+
+    pub(crate) const fn pruned_external_turns(&self) -> u32 {
+        self.transcript.pruned_external_turns()
     }
 
     pub(crate) fn external_tool_catalog(&self) -> &merry_core::SessionToolCatalog {

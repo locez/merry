@@ -201,6 +201,10 @@ pub(super) struct JournalStateDelta {
     pub(super) topic: Option<FieldPatch<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) subagents: Option<Vec<crate::subagent::PersistedSubagentRecord>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) pruned_through: Option<ModelTurnId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) pruned_external_turns: Option<u32>,
 }
 
 impl JournalStateDelta {
@@ -218,6 +222,8 @@ impl JournalStateDelta {
             && self.next_model_turn_id.is_none()
             && self.topic.is_none()
             && self.subagents.is_none()
+            && self.pruned_through.is_none()
+            && self.pruned_external_turns.is_none()
     }
 }
 
@@ -253,4 +259,58 @@ pub(super) fn complete_journal_prefix(bytes: &[u8]) -> (&[u8], Option<u64>) {
 pub(super) fn complete_journal_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     let (complete, _) = complete_journal_prefix(bytes);
     complete.split(|byte| *byte == b'\n')
+}
+
+/// Collects all content-addressed image ids referenced by any commit line in `bytes`.
+pub(super) fn collect_journal_image_ids(bytes: &[u8]) -> std::collections::BTreeSet<String> {
+    let mut ids = std::collections::BTreeSet::new();
+    for line in complete_journal_lines(bytes) {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(JournalRecord::Commit { items, .. }) = serde_json::from_slice::<JournalRecord>(line)
+        else {
+            continue;
+        };
+        for item in items {
+            let images = match item {
+                JournalItem::UserMessage { images, .. }
+                | JournalItem::ToolResult { images, .. } => images,
+                JournalItem::AssistantText { .. } | JournalItem::ToolCall { .. } => continue,
+            };
+            for image in images {
+                ids.insert(image.id);
+            }
+        }
+    }
+    ids
+}
+
+/// Scans a journal byte buffer for a recorded tool result matching `call_id`.
+pub(super) fn find_tool_output_in_journal_bytes(
+    bytes: &[u8],
+    call_id: &ToolCallId,
+) -> Option<ToolOutput> {
+    let mut found = None;
+    for line in complete_journal_lines(bytes) {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(JournalRecord::Commit { items, .. }) = serde_json::from_slice::<JournalRecord>(line)
+        else {
+            continue;
+        };
+        for item in items {
+            if let JournalItem::ToolResult {
+                call_id: candidate,
+                full_output,
+                ..
+            } = item
+                && &candidate == call_id
+            {
+                found = Some(full_output);
+            }
+        }
+    }
+    found
 }

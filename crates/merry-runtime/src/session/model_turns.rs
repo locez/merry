@@ -81,7 +81,12 @@ impl PromptHistoryProjection {
         }
 
         let current = self.compacted_through;
-        let mut found_target = false;
+        let target_is_pruned = transcript
+            .pruned_through()
+            .is_some_and(|pruned| compacted_through <= pruned)
+            && compacted_through.as_u64() >= 1
+            && compacted_through < transcript.next_model_turn_id();
+        let mut found_target = target_is_pruned;
         for turn in transcript.model_turns()? {
             if current.is_some_and(|current| turn.id() <= current) {
                 continue;
@@ -122,8 +127,25 @@ impl PromptHistoryProjection {
                 "restore prompt history projection without checkpoint",
             ));
         }
-        transcript
-            .model_turns()?
+        let turns = transcript.model_turns()?;
+        if transcript
+            .pruned_through()
+            .is_some_and(|pruned| compacted_through <= pruned)
+        {
+            if compacted_through.as_u64() >= 1
+                && compacted_through < transcript.next_model_turn_id()
+                && !turns
+                    .iter()
+                    .any(|turn| turn.id() <= compacted_through && turn.status().is_open())
+            {
+                return Ok(());
+            }
+            return Err(invalid_turn_transition(
+                compacted_through,
+                "restore invalid prompt history projection",
+            ));
+        }
+        turns
             .into_iter()
             .find(|turn| turn.id() == compacted_through && !turn.status().is_open())
             .ok_or_else(|| {
@@ -362,7 +384,21 @@ impl Transcript {
             }
         }
         let next_model_turn_id = self.next_model_turn_id.as_u64();
-        let mut expected_turn_id = 1_u64;
+        let mut expected_turn_id = match self.pruned_through {
+            Some(pruned) => {
+                if pruned.as_u64() == 0 || pruned.as_u64() >= next_model_turn_id {
+                    return Err(RuntimeError::InvalidModelTurnTransition {
+                        model_turn_id: pruned.as_u64(),
+                        attempted: "restore invalid pruned model turn boundary",
+                    });
+                }
+                pruned
+                    .as_u64()
+                    .checked_add(1)
+                    .ok_or(RuntimeError::ModelTurnIdExhausted)?
+            }
+            None => 1_u64,
+        };
         for turn_id in self
             .model_turns
             .keys()
@@ -502,6 +538,8 @@ mod tests {
             model_turns: BTreeMap::new(),
             model_turn_sequences: BTreeMap::new(),
             next_model_turn_id: ModelTurnId::new(u64::MAX),
+            pruned_through: None,
+            pruned_external_turns: 0,
         };
         let before = transcript.persisted();
 

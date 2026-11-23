@@ -3,6 +3,7 @@ mod builder_checkpoint;
 mod compaction_transaction;
 mod context_cache;
 mod event_cancellation;
+mod history_retention;
 mod memory_activation_flow;
 mod model_role_flow;
 mod permission_execution;

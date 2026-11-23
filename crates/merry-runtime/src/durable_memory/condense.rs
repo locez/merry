@@ -64,12 +64,24 @@ impl CondensationStats {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn condense_turn_range(
     items: &[TranscriptItemSnapshot],
     from_turn: u32,
     through_turn: u32,
 ) -> Result<CondensedTranscript, String> {
-    let selected = select_turn_range(items, from_turn, through_turn)?;
+    condense_turn_range_with_offset(items, 0, from_turn, through_turn)
+}
+
+/// Condenses external turns in `from_turn..=through_turn` when `pruned_external_turns`
+/// earlier external user turns have already been pruned from `items`.
+pub(crate) fn condense_turn_range_with_offset(
+    items: &[TranscriptItemSnapshot],
+    pruned_external_turns: u32,
+    from_turn: u32,
+    through_turn: u32,
+) -> Result<CondensedTranscript, String> {
+    let selected = select_turn_range(items, pruned_external_turns, from_turn, through_turn)?;
     let mut stats = CondensationStats::default();
     let mut rendered = Vec::with_capacity(selected.len());
     for item in selected {
@@ -115,13 +127,15 @@ pub(crate) fn count_external_turns(items: &[TranscriptItemSnapshot]) -> u32 {
 
 fn select_turn_range(
     items: &[TranscriptItemSnapshot],
+    pruned_external_turns: u32,
     from_turn: u32,
     through_turn: u32,
 ) -> Result<Vec<&TranscriptItemSnapshot>, String> {
-    if from_turn == 0 || through_turn < from_turn {
+    let effective_from = from_turn.max(pruned_external_turns.saturating_add(1));
+    if from_turn == 0 || through_turn < effective_from {
         return Err("memory capture range is empty".to_owned());
     }
-    let mut external = 0u32;
+    let mut external = pruned_external_turns;
     let mut started = false;
     let mut selected = Vec::new();
     for item in items {
@@ -130,11 +144,11 @@ fn select_turn_range(
             ..
         } = item
         {
-            external += 1;
+            external = external.saturating_add(1);
             if external > through_turn && started {
                 break;
             }
-            if external == from_turn {
+            if external == effective_from {
                 started = true;
             }
         }

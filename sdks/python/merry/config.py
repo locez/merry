@@ -3,6 +3,8 @@
 from ._config import (
     Anthropic,
     GenerationConfig,
+    HistoryRetention,
+    HistoryRetentionMode,
     OpenAICompatible,
     ParallelToolCalls,
     PatchConfig,
@@ -18,6 +20,8 @@ from ._config import (
 __all__ = [
     "Anthropic",
     "GenerationConfig",
+    "HistoryRetention",
+    "HistoryRetentionMode",
     "OpenAICompatible",
     "ParallelToolCalls",
     "PatchConfig",

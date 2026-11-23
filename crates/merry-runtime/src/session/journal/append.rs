@@ -45,6 +45,8 @@ pub(crate) struct JournalCursor {
     flushed_topic: Option<String>,
     flushed_subagents: Vec<crate::subagent::PersistedSubagentRecord>,
     flushed_user_message_count: usize,
+    flushed_pruned_through: Option<ModelTurnId>,
+    flushed_pruned_external_turns: u32,
 }
 
 impl JournalCursor {
@@ -103,6 +105,12 @@ impl JournalCursor {
         self.flushed_user_message_count = self
             .flushed_user_message_count
             .max(committed.flushed_user_message_count);
+        if committed.flushed_pruned_through > self.flushed_pruned_through {
+            self.flushed_pruned_through = committed.flushed_pruned_through;
+        }
+        self.flushed_pruned_external_turns = self
+            .flushed_pruned_external_turns
+            .max(committed.flushed_pruned_external_turns);
     }
 }
 
@@ -251,6 +259,8 @@ pub(super) fn cursor_after_load(session: &SessionState) -> JournalCursor {
         flushed_topic: session.topic.clone(),
         flushed_subagents: session.persisted_subagents.clone(),
         flushed_user_message_count: user_message_count,
+        flushed_pruned_through: session.transcript.pruned_through(),
+        flushed_pruned_external_turns: session.transcript.pruned_external_turns(),
     }
 }
 
@@ -327,7 +337,12 @@ fn build_state_delta(
         .keys()
         .map(|id| id.as_u64() + 1)
         .max()
-        .unwrap_or(1);
+        .unwrap_or_else(|| {
+            input
+                .transcript
+                .pruned_through()
+                .map_or(1, |id| id.as_u64() + 1)
+        });
     let next_model_turn_id_val = input.transcript.next_model_turn_id().as_u64();
     let next_model_turn_id = (next_model_turn_id_val != derived_next_turn_id
         && cursor.flushed_next_model_turn_id != Some(next_model_turn_id_val))
@@ -339,6 +354,15 @@ fn build_state_delta(
     let subagents_current = input.subagents.to_vec();
     let subagents =
         (cursor.flushed_subagents != subagents_current).then(|| subagents_current.clone());
+
+    let pruned_through_current = input.transcript.pruned_through();
+    let pruned_through = (pruned_through_current != cursor.flushed_pruned_through)
+        .then_some(pruned_through_current)
+        .flatten();
+    let pruned_external_turns_current = input.transcript.pruned_external_turns();
+    let pruned_external_turns = (pruned_external_turns_current
+        != cursor.flushed_pruned_external_turns)
+        .then_some(pruned_external_turns_current);
 
     let delta = JournalStateDelta {
         next_sequence,
@@ -354,6 +378,8 @@ fn build_state_delta(
         next_model_turn_id,
         topic,
         subagents,
+        pruned_through,
+        pruned_external_turns,
     };
 
     let next_cursor = JournalCursor {
@@ -376,6 +402,8 @@ fn build_state_delta(
         flushed_topic: topic_current,
         flushed_subagents: subagents_current,
         flushed_user_message_count: user_message_count,
+        flushed_pruned_through: pruned_through_current,
+        flushed_pruned_external_turns: pruned_external_turns_current,
     };
 
     (delta, next_cursor)
@@ -411,6 +439,31 @@ fn journal_context_entry(entry: &ContextEntry) -> JournalContextEntry {
         id: summary.id().to_owned(),
         text: summary.text().to_owned(),
     }
+}
+
+pub(super) fn encode_pruned_segment_journal(
+    session_id: &SessionId,
+    pruned_items: &[TranscriptItem],
+    compacted_through: ModelTurnId,
+    summary: &str,
+) -> Result<(Vec<u8>, Vec<JournalImageFile>), SessionStoreError> {
+    let mut images = Vec::new();
+    let items = pruned_items
+        .iter()
+        .map(|item| journal_item_from_transcript(item, &mut images))
+        .collect::<Vec<_>>();
+    let mut bytes = encode_header_line(session_id)?;
+    let commit = encode_record_line(&JournalRecord::Commit {
+        items,
+        compaction: Some(JournalCompaction {
+            summary: Some(summary.to_owned()),
+            compacted_through: Some(compacted_through),
+            archived_tool_call_ids: Vec::new(),
+        }),
+        state: Box::default(),
+    })?;
+    bytes.extend_from_slice(&commit);
+    Ok((bytes, images))
 }
 
 fn journal_item_from_transcript(

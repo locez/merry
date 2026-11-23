@@ -6,7 +6,9 @@
 //! manifest, and the in-memory trajectory are rebuilt on load.
 
 mod append;
+mod archive;
 mod images;
+mod markdown_archive;
 mod replay;
 mod wire;
 
@@ -14,6 +16,10 @@ use super::SessionState;
 
 pub(crate) use self::append::{
     JournalAppendInput, JournalCursor, PreparedJournalAppend, prepare_journal_append,
+};
+pub(crate) use self::archive::{
+    PreparedJournalRotation, PrunedCompactionSegment, commit_journal_rotation,
+    prepare_journal_rotation, read_archived_tool_output,
 };
 pub(crate) use self::images::{JournalImageFile, images_dir, is_image_id};
 pub(crate) use self::replay::{
@@ -35,5 +41,10 @@ pub(crate) fn last_commit_json(bytes: &[u8]) -> serde_json::Value {
 impl SessionState {
     pub(crate) fn adopt_journal_cursor(&mut self, cursor: JournalCursor) {
         self.journal_cursor.merge_committed(cursor);
+    }
+
+    /// Replaces the tracked cursor after a full journal rotation rewrites `journal.jsonl`.
+    pub(crate) fn replace_journal_cursor(&mut self, cursor: JournalCursor) {
+        self.journal_cursor = cursor;
     }
 }

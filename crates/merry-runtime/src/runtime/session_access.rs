@@ -223,26 +223,54 @@ impl Runtime {
 
     /// Reads the full recorded output for one resolved tool call.
     ///
+    /// Checks hot in-memory session state first, then falls back to archived
+    /// compacted segments on disk when a session store is attached.
     /// Returns `Ok(None)` when `call_id` has no recorded result in this session.
     pub async fn read_tool_output(
         &self,
         call_id: &ToolCallId,
     ) -> Result<Option<ToolOutput>, RuntimeError> {
-        let session = self.inner.session.lock().await;
-        Ok(session.read_tool_output(call_id))
+        let hot = {
+            let session = self.inner.session.lock().await;
+            session.read_tool_output(call_id)
+        };
+        if hot.is_some() {
+            return Ok(hot);
+        }
+        let Some(store) = self.inner.session_store.as_ref() else {
+            return Ok(None);
+        };
+        Ok(
+            crate::session::read_archived_tool_output(store, &self.inner.session_id, call_id)
+                .await?,
+        )
     }
 
     /// Reads a bounded UTF-8 preview of one resolved tool call without cloning
-    /// the full output.
+    /// the full output when it is still in hot memory.
     ///
-    /// Returns `Ok(None)` when `call_id` has no recorded result in this session.
+    /// Falls back to archived compacted segments on disk when a session store
+    /// is attached. Returns `Ok(None)` when `call_id` has no recorded result
+    /// in this session.
     pub async fn read_tool_output_preview(
         &self,
         call_id: &ToolCallId,
         max_bytes: usize,
     ) -> Result<Option<ToolOutputPreview>, RuntimeError> {
-        let session = self.inner.session.lock().await;
-        Ok(session.read_tool_output_preview(call_id, max_bytes))
+        let hot = {
+            let session = self.inner.session.lock().await;
+            session.read_tool_output_preview(call_id, max_bytes)
+        };
+        if hot.is_some() {
+            return Ok(hot);
+        }
+        let Some(store) = self.inner.session_store.as_ref() else {
+            return Ok(None);
+        };
+        let archived =
+            crate::session::read_archived_tool_output(store, &self.inner.session_id, call_id)
+                .await?;
+        Ok(archived.map(|output| output.bounded_preview(max_bytes)))
     }
 
     /// Records a structured context entry into the owning session.

@@ -1,5 +1,132 @@
 use crate::CitationCompactionPolicy;
 use merry_llm::ReasoningEffort;
+use std::num::{NonZeroU64, NonZeroUsize};
+
+/// Policy governing how compacted session history is retained in memory and on disk.
+///
+/// Orthogonal to persistence (`session_store`):
+/// - When no `session_store` is attached, nothing is written to disk. [`Self::ContextOnly`]
+///   still prunes compacted turns (`<= compacted_through`) from hot in-memory session state
+///   so long-lived in-memory agents keep bounded RAM.
+/// - When a `session_store` is attached:
+///   - [`Self::Full`] preserves every historical turn in hot memory and append-only `journal.jsonl`.
+///   - [`Self::ContextOnly`] rewrites `journal.jsonl` on compaction to hold only the active tail
+///     and compacted checkpoint summary, and deletes unreferenced sidecar images.
+///   - [`Self::SegmentedArchive`] moves compacted history out of hot memory and live `journal.jsonl`
+///     into `<session_dir>/archive/seg_NNNN.jsonl` (plus deterministic Markdown files when enabled),
+///     enforces segment/byte retention caps, garbage-collects unreferenced sidecar images, and
+///     supports on-demand `read_tool_output` lookup across archived segments.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HistoryRetention {
+    /// Keep all historical turns in hot memory and append-only `journal.jsonl`.
+    #[default]
+    Full,
+    /// Retain only the active post-compaction tail and compacted checkpoint summary.
+    ContextOnly,
+    /// Bound hot memory and live `journal.jsonl` to the active tail while rotating compacted
+    /// segments into `<session_dir>/archive/`.
+    SegmentedArchive(SegmentedArchiveConfig),
+}
+
+impl HistoryRetention {
+    /// Retains all history in hot memory and append-only `journal.jsonl`.
+    #[must_use]
+    pub const fn full() -> Self {
+        Self::Full
+    }
+
+    /// Retains only the active context tail and compaction summary.
+    #[must_use]
+    pub const fn context_only() -> Self {
+        Self::ContextOnly
+    }
+
+    /// Rotates compacted segments into `<session_dir>/archive/`.
+    #[must_use]
+    pub const fn segmented_archive(config: SegmentedArchiveConfig) -> Self {
+        Self::SegmentedArchive(config)
+    }
+
+    /// Whether compacted turns should be pruned from hot memory and live `journal.jsonl`.
+    #[must_use]
+    pub(crate) const fn prunes_compacted_history(&self) -> bool {
+        matches!(self, Self::ContextOnly | Self::SegmentedArchive(_))
+    }
+
+    /// Returns archive settings when [`Self::SegmentedArchive`] is active.
+    #[must_use]
+    pub const fn segmented_archive_config(&self) -> Option<&SegmentedArchiveConfig> {
+        match self {
+            Self::SegmentedArchive(config) => Some(config),
+            Self::Full | Self::ContextOnly => None,
+        }
+    }
+}
+
+/// Configuration for [`HistoryRetention::SegmentedArchive`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentedArchiveConfig {
+    max_segments: Option<NonZeroUsize>,
+    max_bytes: Option<NonZeroU64>,
+    export_markdown: bool,
+}
+
+impl SegmentedArchiveConfig {
+    /// Creates archive settings with deterministic Markdown export enabled and no size cap.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            max_segments: None,
+            max_bytes: None,
+            export_markdown: true,
+        }
+    }
+
+    /// Sets the maximum number of archived segments to retain on disk.
+    #[must_use]
+    pub const fn with_max_segments(mut self, max_segments: Option<NonZeroUsize>) -> Self {
+        self.max_segments = max_segments;
+        self
+    }
+
+    /// Sets the maximum total byte size across archived segment files.
+    #[must_use]
+    pub const fn with_max_bytes(mut self, max_bytes: Option<NonZeroU64>) -> Self {
+        self.max_bytes = max_bytes;
+        self
+    }
+
+    /// Enables or disables deterministic Markdown archive export (`seg_NNNN.md` + `INDEX.md`).
+    #[must_use]
+    pub const fn with_export_markdown(mut self, export_markdown: bool) -> Self {
+        self.export_markdown = export_markdown;
+        self
+    }
+
+    /// Maximum number of archived segments retained on disk, if bounded.
+    #[must_use]
+    pub const fn max_segments(&self) -> Option<NonZeroUsize> {
+        self.max_segments
+    }
+
+    /// Maximum total bytes retained across archived segment files, if bounded.
+    #[must_use]
+    pub const fn max_bytes(&self) -> Option<NonZeroU64> {
+        self.max_bytes
+    }
+
+    /// Whether deterministic Markdown archives (`seg_NNNN.md` + `INDEX.md`) are written.
+    #[must_use]
+    pub const fn export_markdown(&self) -> bool {
+        self.export_markdown
+    }
+}
+
+impl Default for SegmentedArchiveConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 fn default_automatic_compaction_policy() -> CitationCompactionPolicy {
     CitationCompactionPolicy::default()

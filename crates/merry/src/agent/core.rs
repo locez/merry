@@ -15,8 +15,9 @@ use crate::{
 use merry_core::{SessionId, ToolInputSchema, ToolName, ToolSpec};
 use merry_llm::{GenerationConfig, ModelName, ModelProvider};
 use merry_runtime::{
-    AgentLoopConfig, FileSessionStore, FinalOutputContract, Runtime, RuntimeBuilder,
-    RuntimeModelRole, RuntimeProfile, StepContext, StepInput, StructuredOutputRetryPolicy,
+    AgentLoopConfig, FileSessionStore, FinalOutputContract, HistoryRetention, Runtime,
+    RuntimeBuilder, RuntimeModelRole, RuntimeProfile, StepContext, StepInput,
+    StructuredOutputRetryPolicy,
 };
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -196,6 +197,13 @@ impl AgentBuilder {
     #[must_use]
     pub fn session_store(mut self, store: FileSessionStore) -> Self {
         self.runtime_builder = self.runtime_builder.session_store(store);
+        self
+    }
+
+    /// Configures how compacted session history is retained in memory and on disk.
+    #[must_use]
+    pub fn history_retention(mut self, retention: HistoryRetention) -> Self {
+        self.runtime_builder = self.runtime_builder.history_retention(retention);
         self
     }
 

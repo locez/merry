@@ -54,7 +54,7 @@ use self::auto_compaction::{
     install_summary_compaction_transactionally,
 };
 pub use self::builder::RuntimeBuilder;
-pub use self::config::CompactionConfig;
+pub use self::config::{CompactionConfig, HistoryRetention, SegmentedArchiveConfig};
 use self::diagnostics::{
     APPLY_PATCH_TOOL_NAME, DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
     DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, DIAGNOSTIC_TOOL_NOT_REGISTERED,

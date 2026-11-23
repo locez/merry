@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from . import _merry
 from ._config import (
     GenerationConfig,
+    HistoryRetention,
     PathInput,
     PromptProfile,
     Provider,
@@ -42,6 +43,7 @@ class Agent:
         generation: GenerationConfig | None = None,
         workspace: WorkspaceConfig | None = None,
         session_store: PathInput | None = None,
+        history_retention: HistoryRetention | None = None,
         tools: Sequence[ToolRegistration] = (),
         max_model_turns: int | None = None,
         event_buffer_size: int | None = None,
@@ -53,6 +55,7 @@ class Agent:
             generation=generation,
             workspace=workspace,
             session_store=session_store,
+            history_retention=history_retention,
             tools=tools,
             max_model_turns=max_model_turns,
             event_buffer_size=event_buffer_size,
@@ -69,6 +72,7 @@ class Agent:
         *,
         provider: Provider,
         session_store: PathInput,
+        history_retention: HistoryRetention | None = None,
         system_prompt: str | PromptProfile | None = None,
         generation: GenerationConfig | None = None,
         workspace: WorkspaceConfig | None = None,
@@ -85,6 +89,7 @@ class Agent:
             generation=generation,
             workspace=workspace,
             session_store=session_store,
+            history_retention=history_retention,
             tools=tools,
             max_model_turns=max_model_turns,
             event_buffer_size=event_buffer_size,
@@ -192,6 +197,7 @@ def _configure_builder(
     generation: GenerationConfig | None,
     workspace: WorkspaceConfig | None,
     session_store: PathInput | None,
+    history_retention: HistoryRetention | None,
     tools: Sequence[ToolRegistration],
     max_model_turns: int | None,
     event_buffer_size: int | None,
@@ -207,6 +213,8 @@ def _configure_builder(
         builder.workspace(workspace)
     if session_store is not None:
         builder.session_store(session_store)
+    if history_retention is not None:
+        builder.history_retention(history_retention)
     if max_model_turns is not None:
         builder.max_model_turns(max_model_turns)
     if event_buffer_size is not None:

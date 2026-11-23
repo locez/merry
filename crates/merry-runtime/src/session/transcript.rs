@@ -180,6 +180,8 @@ pub(crate) struct PersistedTranscript {
     pub(crate) model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
     pub(crate) model_turn_sequences: BTreeMap<ModelTurnId, u64>,
     pub(crate) next_model_turn_id: u64,
+    pub(crate) pruned_through: Option<ModelTurnId>,
+    pub(crate) pruned_external_turns: u32,
 }
 
 #[cfg(test)]
@@ -273,6 +275,8 @@ pub(crate) struct Transcript {
     pub(super) model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
     pub(super) model_turn_sequences: BTreeMap<ModelTurnId, u64>,
     pub(super) next_model_turn_id: ModelTurnId,
+    pub(super) pruned_through: Option<ModelTurnId>,
+    pub(super) pruned_external_turns: u32,
 }
 
 impl Transcript {
@@ -285,6 +289,8 @@ impl Transcript {
             model_turns: BTreeMap::new(),
             model_turn_sequences: BTreeMap::new(),
             next_model_turn_id: ModelTurnId::new(1),
+            pruned_through: None,
+            pruned_external_turns: 0,
         }
     }
 
@@ -304,6 +310,16 @@ impl Transcript {
     }
 
     #[must_use]
+    pub(crate) const fn pruned_through(&self) -> Option<ModelTurnId> {
+        self.pruned_through
+    }
+
+    #[must_use]
+    pub(crate) const fn pruned_external_turns(&self) -> u32 {
+        self.pruned_external_turns
+    }
+
+    #[must_use]
     pub(crate) fn model_turn_statuses(&self) -> &BTreeMap<ModelTurnId, ModelTurnStatus> {
         &self.model_turns
     }
@@ -314,6 +330,8 @@ impl Transcript {
         model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
         model_turn_sequences: BTreeMap<ModelTurnId, u64>,
         next_model_turn_id: u64,
+        pruned_through: Option<ModelTurnId>,
+        pruned_external_turns: u32,
     ) -> Result<Self, RuntimeError> {
         let mut tool_result_index = BTreeMap::new();
         for (index, item) in items.iter().enumerate() {
@@ -332,6 +350,8 @@ impl Transcript {
             model_turns,
             model_turn_sequences,
             next_model_turn_id: ModelTurnId::new(next_model_turn_id),
+            pruned_through,
+            pruned_external_turns,
         };
         transcript.validate_persisted_turns()?;
         Ok(transcript)
@@ -518,13 +538,47 @@ impl Transcript {
         Ok(())
     }
 
+    /// Removes all transcript items and turn records through `boundary` (inclusive)
+    /// and returns the pruned items in original chronological order.
+    pub(crate) fn prune_through(&mut self, boundary: ModelTurnId) -> Vec<TranscriptItem> {
+        let mut pruned = Vec::new();
+        let mut retained = Vec::with_capacity(self.items.len());
+        let mut pruned_external = 0_u32;
+        for item in self.items.drain(..) {
+            if item.model_turn_id() <= boundary {
+                if matches!(
+                    item,
+                    TranscriptItem::UserMessage {
+                        origin: UserInputOrigin::ExternalUser,
+                        ..
+                    }
+                ) {
+                    pruned_external = pruned_external.saturating_add(1);
+                }
+                pruned.push(item);
+            } else {
+                retained.push(item);
+            }
+        }
+        self.items = retained;
+        self.model_turns.retain(|turn_id, _| *turn_id > boundary);
+        self.model_turn_sequences
+            .retain(|turn_id, _| *turn_id > boundary);
+        self.pruned_through = Some(
+            self.pruned_through
+                .map_or(boundary, |previous| previous.max(boundary)),
+        );
+        self.pruned_external_turns = self.pruned_external_turns.saturating_add(pruned_external);
+        self.rebuild_tool_result_index();
+        pruned
+    }
+
     #[cfg(test)]
     pub(crate) fn retain_ids(&mut self, retained: BTreeSet<TranscriptItemId>) {
         self.items.retain(|item| retained.contains(&item.id()));
         self.rebuild_tool_result_index();
     }
 
-    #[cfg(test)]
     fn rebuild_tool_result_index(&mut self) {
         self.tool_result_index.clear();
         for (index, item) in self.items.iter().enumerate() {
@@ -552,6 +606,8 @@ impl Transcript {
             model_turns: self.model_turns.clone(),
             model_turn_sequences: self.model_turn_sequences.clone(),
             next_model_turn_id: self.next_model_turn_id.as_u64(),
+            pruned_through: self.pruned_through,
+            pruned_external_turns: self.pruned_external_turns,
         }
     }
 
@@ -568,6 +624,8 @@ impl Transcript {
             persisted.model_turns,
             persisted.model_turn_sequences,
             persisted.next_model_turn_id,
+            persisted.pruned_through,
+            persisted.pruned_external_turns,
         )
     }
 }

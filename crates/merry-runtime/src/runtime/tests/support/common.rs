@@ -129,6 +129,7 @@ pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
         model_configs: RuntimeModelConfigs::default(),
         role_model_overrides: tokio::sync::RwLock::new(std::collections::BTreeMap::new()),
         automatic_compaction: tokio::sync::RwLock::new(CompactionConfig::default()),
+        history_retention: crate::HistoryRetention::default(),
         context_window_tokens: tokio::sync::RwLock::new(None),
         capabilities: crate::RuntimeCapabilities::default(),
         prompt_profile: crate::PromptProfile::default(),

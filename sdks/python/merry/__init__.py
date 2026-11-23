@@ -10,6 +10,8 @@ from ._builder import AgentBuilder
 from ._config import (
     Anthropic,
     GenerationConfig,
+    HistoryRetention,
+    HistoryRetentionMode,
     OpenAICompatible,
     ParallelToolCalls,
     PatchConfig,
@@ -69,6 +71,8 @@ __all__ = [
     "EventType",
     "FinalOutputRecord",
     "GenerationConfig",
+    "HistoryRetention",
+    "HistoryRetentionMode",
     "InputQueue",
     "InteractiveInputItem",
     "InteractiveSession",

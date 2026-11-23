@@ -103,6 +103,7 @@ pub(crate) struct StagedSessionBundle {
     commit_bytes: Vec<u8>,
     write_lock: Arc<Mutex<()>>,
     search: Option<search::SessionSearchUpdate>,
+    rotation: Option<crate::session::PreparedJournalRotation>,
     #[cfg(test)]
     commit_pause: Option<SessionStoreCommitPause>,
     #[cfg(test)]
@@ -139,7 +140,19 @@ impl StagedSessionBundle {
 
         let created = {
             let _guard = self.write_lock.lock().await;
-            append_journal_bytes(&self.final_path, &self.header_bytes, &self.commit_bytes).await?
+            if let Some(rotation) = self.rotation {
+                crate::session::commit_journal_rotation(
+                    &self.final_path,
+                    &self.header_bytes,
+                    &self.commit_bytes,
+                    rotation,
+                )
+                .await?;
+                true
+            } else {
+                append_journal_bytes(&self.final_path, &self.header_bytes, &self.commit_bytes)
+                    .await?
+            }
         };
 
         #[cfg(test)]
@@ -439,12 +452,17 @@ impl FileSessionStore {
         commit_bytes: Vec<u8>,
         images: &[crate::session::JournalImageFile],
         search_user_text: Option<String>,
+        rotation: Option<crate::session::PreparedJournalRotation>,
     ) -> Result<StagedSessionBundle, SessionStoreError> {
         let session_dir = self.session_dir(session_id);
         tokio::fs::create_dir_all(&session_dir)
             .await
             .map_err(|source| io_error(session_dir.clone(), source))?;
         self.write_journal_images(session_id, images).await?;
+        if let Some(rot) = rotation.as_ref() {
+            self.write_journal_images(session_id, &rot.archive_images)
+                .await?;
+        }
 
         #[cfg(test)]
         if let Some(pause) = &self.stage_pause {
@@ -461,6 +479,7 @@ impl FileSessionStore {
                 session_id: session_id.clone(),
                 user_text,
             }),
+            rotation,
             #[cfg(test)]
             commit_pause: self.commit_pause.clone(),
             #[cfg(test)]

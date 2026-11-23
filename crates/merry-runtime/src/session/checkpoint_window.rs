@@ -84,6 +84,7 @@ struct PreparedCompactionState {
     compacted_checkpoint: Option<CompactedCheckpoint>,
     archived_ref_manifest: ArchivedRefManifest,
     original_fingerprint: CompactionWindowFingerprint,
+    pruned_segment: Option<super::PrunedCompactionSegment>,
 }
 
 impl PreparedCompactionInstall {
@@ -118,6 +119,10 @@ impl PreparedCompactionInstall {
 
     pub(crate) fn original_fingerprint(&self) -> CompactionWindowFingerprint {
         self.state().original_fingerprint
+    }
+
+    pub(crate) fn pruned_segment(&self) -> Option<&super::PrunedCompactionSegment> {
+        self.state().pruned_segment.as_ref()
     }
 
     #[cfg(test)]
@@ -317,18 +322,29 @@ impl SessionState {
             .expect("prepared checkpoint replacement must carry an outcome"))
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_summary_compaction_install(
         &self,
         input: CitationCompactionInput,
         summary: &str,
     ) -> Result<PreparedCompactionInstall, RuntimeError> {
-        self.prepare_compaction_install(input, summary)
+        self.prepare_compaction_install(input, summary, &crate::HistoryRetention::Full)
+    }
+
+    pub(crate) fn prepare_summary_compaction_install_with_retention(
+        &self,
+        input: CitationCompactionInput,
+        summary: &str,
+        retention: &crate::HistoryRetention,
+    ) -> Result<PreparedCompactionInstall, RuntimeError> {
+        self.prepare_compaction_install(input, summary, retention)
     }
 
     fn prepare_compaction_install(
         &self,
         input: CitationCompactionInput,
         summary: &str,
+        retention: &crate::HistoryRetention,
     ) -> Result<PreparedCompactionInstall, RuntimeError> {
         if !self.pending_tool_calls.is_empty() {
             return Err(CompactionError::PendingToolCalls.into());
@@ -347,6 +363,16 @@ impl SessionState {
             .prompt_history_projection
             .advanced_through(&transcript, compacted_through)?;
         let compacted_checkpoint = Some(compacted);
+        let pruned_segment = if retention.prunes_compacted_history() {
+            let pruned_items = transcript.prune_through(compacted_through);
+            Some(super::PrunedCompactionSegment {
+                pruned_items,
+                compacted_through,
+                summary: summary.to_owned(),
+            })
+        } else {
+            None
+        };
         prompt_history_projection.validate(&transcript, compacted_checkpoint.as_ref())?;
         self.validate_archived_ref_manifest_for(
             &transcript,
@@ -368,6 +394,7 @@ impl SessionState {
                 compacted_checkpoint,
                 archived_ref_manifest: next_archive_manifest,
                 original_fingerprint,
+                pruned_segment,
             },
             outcome,
         })
@@ -429,6 +456,7 @@ impl SessionState {
                 compacted_checkpoint,
                 archived_ref_manifest: next_archive_manifest,
                 original_fingerprint,
+                pruned_segment: None,
             },
         })
     }
@@ -450,10 +478,22 @@ impl SessionState {
         prepared: PreparedCompactionInstall,
     ) -> Option<CompactionOutcome> {
         let (state, outcome) = prepared.into_parts();
+        let pruned = state.pruned_segment.is_some();
         self.transcript = state.transcript;
         self.prompt_history_projection = state.prompt_history_projection;
         self.compacted_checkpoint = state.compacted_checkpoint;
         self.archived_ref_manifest = state.archived_ref_manifest;
+        if pruned {
+            self.resolved_tool_calls = self
+                .transcript
+                .items()
+                .iter()
+                .filter_map(|item| match item {
+                    TranscriptItem::ToolResult { call_id, .. } => Some(call_id.clone()),
+                    _ => None,
+                })
+                .collect();
+        }
         outcome
     }
 

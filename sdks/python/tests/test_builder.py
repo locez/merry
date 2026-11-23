@@ -145,6 +145,52 @@ def test_prompt_profile_and_generation_config_validate_inputs() -> None:
         merry.GenerationConfig(max_output_tokens=True)
 
 
+def test_history_retention_validation_and_builder_wiring(tmp_path: Path) -> None:
+    full = merry.HistoryRetention.full()
+    assert full.mode is merry.HistoryRetentionMode.FULL
+
+    context_only = merry.HistoryRetention.context_only()
+    assert context_only.mode is merry.HistoryRetentionMode.CONTEXT_ONLY
+
+    segmented = merry.HistoryRetention.segmented_archive(
+        max_segments=4,
+        max_bytes=1024 * 1024,
+        export_markdown=True,
+    )
+    assert segmented.mode is merry.HistoryRetentionMode.SEGMENTED_ARCHIVE
+    assert segmented.max_segments == 4
+    assert segmented.max_bytes == 1024 * 1024
+    assert segmented.export_markdown is True
+
+    with pytest.raises(ValueError, match="max_segments"):
+        merry.HistoryRetention.segmented_archive(max_segments=0)
+    with pytest.raises(ValueError, match="max_bytes"):
+        merry.HistoryRetention.segmented_archive(max_bytes=0)
+    with pytest.raises(ValueError, match="only valid for segmented_archive"):
+        merry.HistoryRetention(
+            mode=merry.HistoryRetentionMode.CONTEXT_ONLY,
+            max_segments=2,
+        )
+
+    # In-memory agent (default session_store=None) with context_only retention builds cleanly.
+    in_memory_agent = merry.Agent(
+        session_id="in-memory-context-only",
+        provider=openai_provider(),
+        history_retention=context_only,
+    )
+    assert in_memory_agent.session_id == "in-memory-context-only"
+
+    # Persisted agent with segmented_archive retention builds cleanly via fluent builder.
+    archived_agent = (
+        merry.Agent.builder("persisted-segmented")
+        .provider(openai_provider())
+        .session_store(tmp_path)
+        .history_retention(segmented)
+        .build()
+    )
+    assert archived_agent.session_id == "persisted-segmented"
+
+
 def test_builder_requires_a_primary_provider() -> None:
     with pytest.raises(merry.MerryConfigError) as raised:
         merry.AgentBuilder("missing-provider").build()
