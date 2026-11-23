@@ -2,6 +2,7 @@ use crate::tui::{
     copy_controls::CopyTextError,
     links::HoveredLink,
     overlay::Overlay,
+    render::timeline_layout::materialize_snapshot_rows,
     state::TuiState,
     text_interaction::{CapturedText, SelectionViewport, TextSelection},
 };
@@ -50,9 +51,24 @@ impl TuiState {
         &mut self,
         position: Position,
     ) -> Result<Option<CapturedText>, CopyTextError> {
-        self.text_selection
-            .take()
-            .map_or(Ok(None), |selection| selection.release(position))
+        let Some(mut selection) = self.text_selection.take() else {
+            return Ok(None);
+        };
+        let (start_row, end_row) = selection.selected_row_range(position);
+        let width = selection.area().width;
+        let mut adjustments = Vec::new();
+        materialize_snapshot_rows(
+            self,
+            selection.snapshot_mut(),
+            width,
+            start_row,
+            end_row,
+            |old_end, delta| adjustments.push((old_end, delta)),
+        );
+        for (old_end, delta) in adjustments {
+            selection.adjust_rows_after_materialization(old_end, delta);
+        }
+        selection.release(position)
     }
 
     pub(crate) fn text_selection_is_autoscrolling(&self) -> bool {
@@ -62,11 +78,44 @@ impl TuiState {
     }
 
     pub(crate) fn autoscroll_text_selection(&mut self) {
-        if let Some(SelectionViewport { anchor, offset }) = self
-            .text_selection
-            .as_mut()
-            .and_then(TextSelection::autoscroll)
-        {
+        let Some(mut selection) = self.text_selection.take() else {
+            return;
+        };
+        let viewport = selection.autoscroll();
+        if viewport.is_some() {
+            let (start_row, end_row) = selection.visible_row_range();
+            let width = selection.area().width;
+            let mut adjustments = Vec::new();
+            materialize_snapshot_rows(
+                self,
+                selection.snapshot_mut(),
+                width,
+                start_row,
+                end_row,
+                |old_end, delta| adjustments.push((old_end, delta)),
+            );
+            for (old_end, delta) in adjustments {
+                selection.adjust_rows_after_materialization(old_end, delta);
+            }
+        }
+        let updated_viewport = if viewport.is_some() {
+            let (scroll, _) = selection.visible_row_range();
+            let max_scroll = selection
+                .snapshot_mut()
+                .total_rows()
+                .saturating_sub(usize::from(selection.area().height));
+            selection
+                .snapshot_mut()
+                .anchor_at(scroll)
+                .map(|anchor| SelectionViewport {
+                    anchor,
+                    offset: max_scroll.saturating_sub(scroll),
+                })
+        } else {
+            None
+        };
+        self.text_selection = Some(selection);
+        if let Some(SelectionViewport { anchor, offset }) = updated_viewport {
             self.timeline_review_user_index = None;
             self.pending_empty_input_quit = false;
             self.record_timeline_viewport(anchor, offset);

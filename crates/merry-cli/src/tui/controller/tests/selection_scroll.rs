@@ -420,7 +420,10 @@ fn large_context_drag_selection_hits_layout_cache_with_zero_rebuilds() {
 
     let buffer = draw(&mut state, size);
     let misses_after_initial_draw = state.layout_cache_misses();
-    assert_eq!(misses_after_initial_draw, 200);
+    assert!(
+        misses_after_initial_draw > 0 && misses_after_initial_draw < 50,
+        "lazy viewport layout should only materialize the visible tail and warm pages, got {misses_after_initial_draw} misses for 200 items"
+    );
 
     let start = point(&buffer, "Paragraph 199");
     assert_eq!(
@@ -454,5 +457,90 @@ fn large_context_drag_selection_hits_layout_cache_with_zero_rebuilds() {
         state.layout_cache_misses(),
         misses_after_initial_draw + 1,
         "streaming a delta into the last item should only recompute that single item"
+    );
+}
+
+#[test]
+fn lazy_layout_resize_reuses_width_profiles_and_computes_only_viewport() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "test".into(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    for index in 0..400 {
+        state.push_timeline_item(TimelineItem::Assistant {
+            text: format!(
+                "Paragraph {index} with details.\n```rust\nfn item_{index}() -> usize {{ {index} }}\n```"
+            ),
+        });
+    }
+
+    let _ = draw(&mut state, Size::new(80, 24));
+    let misses_initial = state.layout_cache_misses();
+    assert!(
+        misses_initial > 0 && misses_initial < 60,
+        "expected O(viewport) initial layout misses for 400 items, got {misses_initial}"
+    );
+    assert_eq!(state.cached_width_profile_count(), 400);
+
+    // Resizing should preserve all 400 width profiles and only re-measure the visible tail + warm pages.
+    let resized = draw(&mut state, Size::new(100, 24));
+    let misses_on_resize = state.layout_cache_misses() - misses_initial;
+    assert_eq!(state.cached_width_profile_count(), 400);
+    assert!(
+        misses_on_resize > 0 && misses_on_resize < 60,
+        "expected O(viewport) layout misses on resize for 400 items, got {misses_on_resize}"
+    );
+    assert!(
+        visible_text(&resized, area(&state, Size::new(100, 24))).contains("Paragraph 399"),
+        "resized viewport should still show the latest assistant item"
+    );
+}
+
+#[test]
+fn offscreen_render_cache_eviction_bounds_materialized_items_across_long_scrollback() {
+    let size = Size::new(80, 24);
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "test".into(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    for index in 0..500 {
+        if index % 10 == 0 {
+            state.push_timeline_item(TimelineItem::User {
+                text: format!("Question turn {index}"),
+            });
+        } else {
+            state.push_timeline_item(TimelineItem::Assistant {
+                text: format!("Answer block {index}\nline two of {index}"),
+            });
+        }
+    }
+
+    // Walk across the entire 500-item history so >400 distinct items get visited.
+    let _ = draw(&mut state, size);
+    for step in 0..25 {
+        state.scroll_timeline_up_by(60);
+        let _ = draw(&mut state, size);
+        let materialized = state.materialized_layout_count();
+        assert!(
+            materialized <= 320,
+            "step {step}: materialized render cache should remain bounded by eviction window, got {materialized}"
+        );
+    }
+
+    // Follow back to bottom and confirm the latest turn and sticky user header still render accurately.
+    state.follow_latest();
+    let bottom = draw(&mut state, size);
+    let text = visible_text(&bottom, Rect::new(0, 0, size.width, size.height));
+    assert!(
+        text.contains("Answer block 499"),
+        "expected latest answer after returning to bottom, got:\n{text}"
+    );
+    assert!(
+        text.contains("Question turn 490"),
+        "expected sticky user turn 490 after returning to bottom, got:\n{text}"
     );
 }

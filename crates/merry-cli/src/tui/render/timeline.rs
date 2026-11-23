@@ -14,7 +14,10 @@ use crate::tui::{
     links::{LinkTarget, push_text_with_bare_urls, render_link_tooltip},
     markdown::{RenderedMarkdown, markdown_lines},
     motion::{self, MotionClock},
-    state::{PatchChangeView, PatchLineKind, PatchLineView, PatchOperationView, TuiState},
+    state::{
+        MAX_EXPANDED_PATCH_LINES, PatchChangeView, PatchLineKind, PatchLineView,
+        PatchOperationView, TuiState,
+    },
     text_wrap::{
         StyledTextPart, WrappedLine, inline_code_and_url_parts, inline_code_spans, semantic_style,
         truncate_chars, wrap_styled_parts_with_links,
@@ -154,8 +157,6 @@ pub(super) fn muted_lines(state: &TuiState, title: &str, detail: &str) -> Vec<Li
     vec![Line::from(spans)]
 }
 
-const MAX_EXPANDED_PATCH_LINES: usize = 60;
-
 pub(super) fn patch_lines(
     state: &TuiState,
     changes: &[PatchChangeView],
@@ -174,7 +175,12 @@ pub(super) fn patch_lines(
             patch_change_detail(change),
             semantic_style(state, SemanticColor::Muted),
         )));
-        lines.extend(patch_diff_lines(state, &change.lines, region_width));
+        lines.extend(patch_diff_lines(
+            state,
+            &change.lines,
+            change.omitted_lines,
+            region_width,
+        ));
     }
     lines
 }
@@ -216,9 +222,10 @@ fn patch_change_title_line(state: &TuiState, change: &PatchChangeView) -> Line<'
 fn patch_diff_lines(
     state: &TuiState,
     diff_lines: &[PatchLineView],
+    omitted_lines: usize,
     region_width: u16,
 ) -> Vec<Line<'static>> {
-    if diff_lines.is_empty() {
+    if diff_lines.is_empty() && omitted_lines == 0 {
         return Vec::new();
     }
     let max_line_no = diff_lines
@@ -271,8 +278,11 @@ fn patch_diff_lines(
         }
         out.push(Line::from(spans));
     }
-    if diff_lines.len() > shown_count {
-        let omitted = diff_lines.len() - shown_count;
+    let omitted = diff_lines
+        .len()
+        .saturating_sub(shown_count)
+        .saturating_add(omitted_lines);
+    if omitted > 0 {
         out.push(Line::from(vec![
             Span::raw("  "),
             Span::styled("│ ", rail_style),

@@ -1,6 +1,6 @@
 use crate::tui::{
     copy_controls::{CopyTextBuilder, CopyTextError},
-    render::timeline_cache::TimelineLayoutSnapshot,
+    render::timeline_cache::{TimelineLayoutSnapshot, shift_usize},
     state::TimelineAnchor,
     transcript::SelectionPolicy,
 };
@@ -135,6 +135,44 @@ impl TextSelection {
 
     pub(crate) fn area(&self) -> Rect {
         self.area
+    }
+
+    pub(crate) fn snapshot_mut(&mut self) -> &mut TimelineLayoutSnapshot {
+        &mut self.snapshot.0
+    }
+
+    pub(crate) fn visible_row_range(&self) -> (usize, usize) {
+        (
+            self.scroll,
+            self.scroll.saturating_add(usize::from(self.area.height)),
+        )
+    }
+
+    pub(crate) fn selected_row_range(&self, release_position: Position) -> (usize, usize) {
+        let release_cursor = self.document_position(release_position);
+        let (start, end) = if self.anchor <= release_cursor {
+            (self.anchor, release_cursor)
+        } else {
+            (release_cursor, self.anchor)
+        };
+        (start.row, end.row.saturating_add(1))
+    }
+
+    /// Shifts selection coordinates strictly below a newly materialized cold item
+    /// whose exact height differed from its estimate, keeping the pinned text fixed.
+    pub(crate) fn adjust_rows_after_materialization(&mut self, old_item_end: usize, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+        if self.scroll >= old_item_end {
+            self.scroll = shift_usize(self.scroll, delta);
+        }
+        if self.anchor.row >= old_item_end {
+            self.anchor.row = shift_usize(self.anchor.row, delta);
+        }
+        if self.cursor.row >= old_item_end {
+            self.cursor.row = shift_usize(self.cursor.row, delta);
+        }
     }
 
     pub(crate) fn terminal_size(&self) -> Size {

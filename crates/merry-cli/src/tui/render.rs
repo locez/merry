@@ -53,7 +53,7 @@ mod composer;
 
 mod timeline;
 pub(crate) mod timeline_cache;
-mod timeline_layout;
+pub(crate) mod timeline_layout;
 mod timeline_pointer;
 
 pub(crate) const STATUS_HEIGHT: u16 = 1;

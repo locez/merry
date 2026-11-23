@@ -209,7 +209,7 @@ fn item_stream(
     if width == 0 {
         return None;
     }
-    let item = timeline.items.get(item_index)?;
+    let item = timeline.item_layout(item_index)?;
     let visual_start = *timeline.item_visual_starts.get(item_index)?;
     let height = item.visual_height();
     if height == 0 {

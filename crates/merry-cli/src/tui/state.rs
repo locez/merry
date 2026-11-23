@@ -20,8 +20,9 @@ use std::{
 };
 pub(crate) use timeline::TimelineAnchor;
 pub(crate) use views::{
-    CommandFailure, CommandView, LiveCommandOutput, PatchChangeView, PatchLineKind, PatchLineView,
-    PatchOperationView, PendingQueueEditor, QueuePreviewState, TimelineItem, ToolOutputPreview,
+    CommandFailure, CommandView, LiveCommandOutput, MAX_EXPANDED_PATCH_LINES, PatchChangeView,
+    PatchLineKind, PatchLineView, PatchOperationView, PendingQueueEditor, QueuePreviewState,
+    TimelineItem, ToolOutputPreview,
 };
 
 mod comments;
@@ -298,6 +299,16 @@ impl TuiState {
     #[cfg(test)]
     pub(crate) fn layout_cache_misses(&self) -> u64 {
         self.timeline_cache.misses()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn materialized_layout_count(&self) -> usize {
+        self.timeline_cache.materialized_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_width_profile_count(&self) -> usize {
+        self.timeline_cache.width_profile_count()
     }
 
     fn alloc_timeline_version(&mut self) -> u64 {

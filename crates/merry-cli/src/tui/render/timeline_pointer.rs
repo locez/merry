@@ -152,7 +152,7 @@ fn copy_target_text(
     let Some(item_index) = timeline.item_at_visual(clicked_row) else {
         return Ok(None);
     };
-    let Some(item) = timeline.items.get(item_index) else {
+    let Some(item) = timeline.item_layout(item_index) else {
         return Ok(None);
     };
     let item_start = timeline.item_visual_starts[item_index];
@@ -228,7 +228,7 @@ pub(super) fn hovered_link_screen_y(
     if hovered.document_row < body_scroll || hovered.document_row >= visible_end {
         return None;
     }
-    let item = timeline.items.get(hovered.item_index)?;
+    let item = timeline.item_layout(hovered.item_index)?;
     let item_start = *timeline.item_visual_starts.get(hovered.item_index)?;
     let still_present = item.link_targets.iter().any(|target| {
         item.local_row_starts
@@ -256,7 +256,7 @@ fn link_target_at(
     let document_row = scroll.saturating_add(usize::from(position.y - body.y));
     let column = position.x - body.x;
     let item_index = timeline.item_at_visual(document_row)?;
-    let item = timeline.items.get(item_index)?;
+    let item = timeline.item_layout(item_index)?;
     let item_start = timeline.item_visual_starts[item_index];
     for target in &item.link_targets {
         let Some(&local_row) = item.local_row_starts.get(target.line_index) else {

@@ -6,6 +6,8 @@ use tokio::time::Instant;
 const TOOL_PREVIEW_MAX_LINES: usize = 5;
 const LIVE_OUTPUT_MAX_LINES: usize = 8;
 const TOOL_PREVIEW_MAX_LINE_CHARS: usize = 180;
+/// Maximum diff lines stored and rendered per file in a timeline patch preview.
+pub(crate) const MAX_EXPANDED_PATCH_LINES: usize = 60;
 
 /// A bounded display preview; complete tool output remains in the runtime transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +238,8 @@ pub(crate) struct PatchChangeView {
     pub(crate) bytes_before: usize,
     pub(crate) bytes_after: usize,
     pub(crate) lines: Vec<PatchLineView>,
+    /// Diff lines omitted beyond [`MAX_EXPANDED_PATCH_LINES`] when projecting into the timeline.
+    pub(crate) omitted_lines: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -326,6 +326,7 @@ fn renderer_shows_apply_patch_as_edited_block() {
                 PatchLineView::remove("    lines.push(old);", Some(21)),
                 PatchLineView::add("    lines.push(new);", Some(21)),
             ],
+            omitted_lines: 0,
         }],
         expanded: false,
     });
@@ -441,6 +442,7 @@ fn renderer_shows_patch_summary_and_colored_diff_when_expanded() {
                 PatchLineView::remove("print('old')", Some(7)),
                 PatchLineView::add("print('new')", Some(7)),
             ],
+            omitted_lines: 0,
         }],
         expanded: false,
     });
@@ -486,6 +488,7 @@ fn renderer_names_created_and_deleted_files_instead_of_edits() {
                 bytes_before: 0,
                 bytes_after: 24,
                 lines: vec![PatchLineView::add("new", Some(1))],
+                omitted_lines: 0,
             },
             PatchChangeView {
                 path: "notes/old.md".to_owned(),
@@ -498,6 +501,7 @@ fn renderer_names_created_and_deleted_files_instead_of_edits() {
                 bytes_before: 30,
                 bytes_after: 0,
                 lines: vec![],
+                omitted_lines: 0,
             },
         ],
         expanded: true,
@@ -534,6 +538,7 @@ fn renderer_keeps_byte_only_envelopes_readable() {
             bytes_before: 12,
             bytes_after: 33,
             lines: vec![PatchLineView::add("hello", Some(3))],
+            omitted_lines: 0,
         }],
         expanded: true,
     });
@@ -541,4 +546,62 @@ fn renderer_keeps_byte_only_envelopes_readable() {
 
     assert!(text.contains("Edited hello.txt (+2 -0)"));
     assert!(text.contains("1 hunk(s), - -> - lines, 12 -> 33 bytes"));
+}
+
+#[test]
+fn projector_truncates_large_patch_lines_while_preserving_counts_and_omitted_footer() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+    let total_added = 120;
+    let patch_body = (1..=total_added)
+        .map(|n| format!("+line_{n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let patch = format!("*** Begin Patch\n*** Add File: big.txt\n{patch_body}\n*** End Patch");
+    projector.apply(
+        RuntimeEvent::ToolCallStarted {
+            call: pending_call_with_args(
+                "call-big-patch",
+                APPLY_PATCH_TOOL,
+                json!({ "patch": patch }),
+            ),
+            source: source(),
+        },
+        &mut state,
+    );
+    projector.apply(
+        RuntimeEvent::ToolCallFinished {
+            result: ToolCallResult::succeeded(
+                ToolCallId::new("call-big-patch").expect("valid tool call id"),
+            ),
+            output: Some(ToolOutput::Json {
+                json: r#"{"ok":true,"tool":"apply_patch","changes":[{"path":"big.txt","op":"add","hunks":1,"lines_before":0,"lines_after":120,"bytes_before":0,"bytes_after":960}]}"#.to_owned(),
+            }),
+            source: source(),
+        },
+        &mut state,
+    );
+
+    let TimelineItem::Patch { changes, .. } = &state.timeline()[0] else {
+        panic!("expected patch item");
+    };
+    assert_eq!(changes[0].added, total_added);
+    assert_eq!(
+        changes[0].lines.len(),
+        crate::tui::state::MAX_EXPANDED_PATCH_LINES
+    );
+    assert_eq!(
+        changes[0].omitted_lines,
+        total_added - crate::tui::state::MAX_EXPANDED_PATCH_LINES
+    );
+
+    state.toggle_command_expanded(0);
+    let rendered = render_to_text(&state, 120, 80);
+    assert!(rendered.contains("Created big.txt (+120)"));
+    assert!(rendered.contains("… (+60 more lines)"));
 }

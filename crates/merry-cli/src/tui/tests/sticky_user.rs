@@ -128,3 +128,65 @@ fn sending_a_new_user_message_immediately_anchors_it_at_the_top_above_the_task_d
     let scrolled = render_to_text(&state, 90, 24);
     assert!(scrolled.contains("old-line-29"), "{scrolled}");
 }
+
+#[test]
+fn scrolling_a_long_lazy_timeline_to_the_top_never_duplicates_the_earliest_user_message() {
+    let mut state = state();
+    let earliest = "开一个子agent，让他用浏览器，访问 locez.com，报告主页是什么？";
+    state.push_timeline_item(user(earliest));
+    state.push_timeline_item(TimelineItem::Muted {
+        title: "Tool read_text".to_owned(),
+        detail: "path=/tmp/example".to_owned(),
+    });
+    state.push_timeline_item(TimelineItem::Muted {
+        title: "Delegated spawn_subagents".to_owned(),
+        detail: "foreground_budget_secs=240".to_owned(),
+    });
+    state.push_timeline_item(TimelineItem::Assistant {
+        text: format!(
+            "子 agent 已用浏览器完成访问并关闭会话，报告如下：\n{}",
+            reply("first-turn", 24)
+        ),
+    });
+    for turn in 1..100 {
+        state.push_timeline_item(user(&format!("follow-up-turn-{turn}")));
+        state.push_timeline_item(TimelineItem::Assistant {
+            text: reply(&format!("turn-{turn}-line"), 18),
+        });
+    }
+
+    let size = ratatui::layout::Size::new(100, 24);
+    crate::tui::render::prepare_viewport(&mut state, size);
+    let _ = render_to_text(&state, size.width, size.height);
+
+    // Scroll all the way up in wheel-sized steps (plus extra presses at the top)
+    // across >EVICT_KEEP_MARGIN_ITEMS cold items and verify the earliest user
+    // message is never duplicated on any frame.
+    // Match the ASCII marker because TestBackend inserts a trailing space cell
+    // after each 2-column CJK glyph.
+    let marker = "locez.com";
+    for step in 0..950 {
+        state.scroll_timeline_up_by(3);
+        crate::tui::render::prepare_viewport(&mut state, size);
+        let text = render_to_text(&state, size.width, size.height);
+        assert!(
+            text.matches(marker).count() <= 1,
+            "earliest user prompt duplicated at scroll step {step}:\n{text}"
+        );
+    }
+
+    let top = render_to_text(&state, size.width, size.height);
+    assert_eq!(top.matches(marker).count(), 1, "{top}");
+    assert!(top.contains("read_text"), "{top}");
+
+    // Stepping down 1 row at a time from the very top must also never duplicate it.
+    for step in 0..10 {
+        state.scroll_timeline_down_by(1);
+        crate::tui::render::prepare_viewport(&mut state, size);
+        let text = render_to_text(&state, size.width, size.height);
+        assert!(
+            text.matches(marker).count() <= 1,
+            "earliest user prompt duplicated when stepping down {step} from top:\n{text}"
+        );
+    }
+}

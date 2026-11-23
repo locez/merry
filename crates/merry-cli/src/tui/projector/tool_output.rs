@@ -7,8 +7,8 @@ use crate::{
         process_output::process_output_preview,
         projector::{StartedToolView, mcp_output::parse_mcp_tool_name},
         state::{
-            CommandFailure, CommandView, PatchChangeView, PatchLineKind, PatchLineView,
-            PatchOperationView, TimelineItem, ToolOutputPreview,
+            CommandFailure, CommandView, MAX_EXPANDED_PATCH_LINES, PatchChangeView, PatchLineKind,
+            PatchLineView, PatchOperationView, TimelineItem, ToolOutputPreview,
         },
         tool_error::compact_failed_tool_body,
     },
@@ -419,7 +419,7 @@ pub(super) fn parse_apply_patch_view(
                 .collect::<Vec<_>>();
             // Envelopes recorded before the tool echoed hunk lines fall back to
             // the lines of the pending call's own patch argument.
-            let patch_lines = if patch_lines.is_empty() {
+            let mut patch_lines = if patch_lines.is_empty() {
                 parsed_patch
                     .as_ref()
                     .and_then(|parsed| parsed.change_lines(&change.path))
@@ -443,6 +443,8 @@ pub(super) fn parse_apply_patch_view(
             } else {
                 (hunk_added, hunk_removed)
             };
+            let omitted_lines = patch_lines.len().saturating_sub(MAX_EXPANDED_PATCH_LINES);
+            patch_lines.truncate(MAX_EXPANDED_PATCH_LINES);
             PatchChangeView {
                 path: change.path,
                 operation,
@@ -454,6 +456,7 @@ pub(super) fn parse_apply_patch_view(
                 bytes_before: change.bytes_before,
                 bytes_after: change.bytes_after,
                 lines: patch_lines,
+                omitted_lines,
             }
         })
         .collect::<Vec<_>>();

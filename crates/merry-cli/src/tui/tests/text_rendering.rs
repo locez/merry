@@ -98,6 +98,7 @@ fn renderer_applies_configured_semantic_theme_colors() {
                 PatchLineView::remove("removed", Some(1)),
                 PatchLineView::add("added", Some(1)),
             ],
+            omitted_lines: 0,
         }],
         expanded: false,
     });
