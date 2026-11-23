@@ -378,6 +378,79 @@ async fn successful_refresh_replaces_cache_and_cancelled_refresh_does_not() {
     );
 }
 
+#[tokio::test]
+async fn update_provider_preserves_service_tier_optional_fields_and_copies_retained_key() {
+    let (_temp, paths) = test_paths();
+    let mut service = ProviderManagementService::new(paths.clone()).expect("service");
+    let alias = ProviderAlias::new("gateway").expect("alias");
+
+    let initial = ProviderDraft::new(
+        "Gateway",
+        alias.clone(),
+        ManagedProviderKind::OpenAiCompatible,
+        Some(OpenAiProtocol::Responses),
+        "https://gateway.example.test/v1",
+        "sk-super-secret-value",
+        ModelName::new("gpt-5").expect("model"),
+    )
+    .expect("valid draft")
+    .with_service_tier(Some(merry_llm::ServiceTier::Ultrafast))
+    .expect("valid service tier");
+    service
+        .save_provider(initial)
+        .await
+        .expect("save should succeed");
+
+    assert_eq!(
+        service
+            .copy_retained_api_key(&alias)
+            .expect("retained api key should resolve"),
+        "sk-super-secret-value"
+    );
+
+    // Inject optional Anthropic fields into providers.toml to verify update preserves them.
+    let providers_path = paths.managed_providers_file();
+    let mut toml_text = tokio::fs::read_to_string(&providers_path)
+        .await
+        .expect("providers.toml");
+    toml_text.push_str("api_version = \"2023-06-01\"\ndefault_max_output_tokens = 8192\n");
+    tokio::fs::write(&providers_path, toml_text)
+        .await
+        .expect("write providers.toml");
+
+    let updated = ProviderDraft::for_update(
+        "Gateway Updated",
+        alias.clone(),
+        ManagedProviderKind::OpenAiCompatible,
+        Some(OpenAiProtocol::Responses),
+        "https://gateway.example.test/v1",
+        None,
+        ModelName::new("gpt-5-mini").expect("model"),
+    )
+    .expect("valid update draft")
+    .with_service_tier(Some(merry_llm::ServiceTier::Fast))
+    .expect("valid service tier");
+    service
+        .update_provider(&alias, updated)
+        .await
+        .expect("update should succeed");
+
+    let editable = service.editable_provider(&alias).expect("editable");
+    assert_eq!(editable.display_name, "Gateway Updated");
+    assert_eq!(editable.service_tier, Some(merry_llm::ServiceTier::Fast));
+    assert_eq!(
+        service
+            .copy_retained_api_key(&alias)
+            .expect("retained key survives update"),
+        "sk-super-secret-value"
+    );
+    let saved_toml = tokio::fs::read_to_string(&providers_path)
+        .await
+        .expect("updated providers.toml");
+    assert!(saved_toml.contains("api_version = \"2023-06-01\""));
+    assert!(saved_toml.contains("default_max_output_tokens = 8192"));
+}
+
 enum ScriptedCatalog {
     Success(ModelCatalog),
     Failure,

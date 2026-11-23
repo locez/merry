@@ -909,15 +909,61 @@ impl Runtime {
         model: ModelName,
         retry_policy: ModelRetryPolicy,
     ) {
-        if let Some(manager) = self.inner.subagent_manager.as_ref() {
-            manager.update_parent_primary_model(crate::ParentPrimaryModel {
-                provider: Arc::clone(&provider),
-                model: model.clone(),
+        self.update_interactive_role_model(
+            crate::RuntimeModelRole::Primary,
+            Some(crate::InteractivePrimaryModel::new(
+                provider,
+                model,
                 retry_policy,
+            )),
+        )
+        .await;
+    }
+
+    pub(crate) async fn update_interactive_role_model(
+        &self,
+        role: crate::RuntimeModelRole,
+        model: Option<crate::InteractivePrimaryModel>,
+    ) {
+        let entry = model.map(|selected| {
+            ModelProviderConfig::new(selected.provider, selected.model, selected.retry_policy)
+                .with_reasoning_effort(selected.reasoning_effort)
+        });
+        if role == crate::RuntimeModelRole::Primary
+            && let Some(ref cfg) = entry
+            && let Some(manager) = self.inner.subagent_manager.as_ref()
+        {
+            manager.update_parent_primary_model(crate::ParentPrimaryModel {
+                provider: cfg.provider(),
+                model: cfg.model().clone(),
+                retry_policy: cfg.retry_policy(),
             });
         }
-        *self.inner.primary_model_override.write().await =
-            Some(ModelProviderConfig::new(provider, model, retry_policy));
+        self.inner
+            .role_model_overrides
+            .write()
+            .await
+            .insert(role, entry);
+    }
+
+    pub(crate) fn update_interactive_max_parallel_tool_calls(&self, limit: std::num::NonZeroUsize) {
+        self.inner
+            .max_parallel_tool_calls
+            .store(limit.get(), std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) async fn update_interactive_permission_review_mode(
+        &self,
+        mode: crate::PermissionReviewMode,
+    ) {
+        *self.inner.permission_review_mode.write().await = mode;
+    }
+
+    pub(crate) async fn update_interactive_permission_admission_source(
+        &self,
+        source: Arc<dyn crate::PermissionAdmissionSource>,
+    ) {
+        *self.inner.permission_admission_source.write().await = Some(source);
     }
 
     pub(crate) fn update_interactive_generation_config(

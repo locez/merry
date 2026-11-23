@@ -82,6 +82,17 @@ pub(crate) fn run_palette_command(
             state.open_settings();
             ControllerEffect::None
         }
+        PaletteCommand::SwitchModel => {
+            state.close_overlay();
+            if let Some(alias) = state.active_or_first_provider_alias() {
+                ControllerEffect::OpenTargetedModelPicker {
+                    alias,
+                    target: crate::tui::provider_selection::ModelPickerTarget::QuickSwitch,
+                }
+            } else {
+                ControllerEffect::OpenProviderManager
+            }
+        }
         PaletteCommand::OpenSkills => {
             state.close_overlay();
             if !state.open_skills_picker() {
@@ -95,7 +106,8 @@ pub(crate) fn run_palette_command(
         }
         PaletteCommand::OpenProviders => ControllerEffect::OpenProviderManager,
         PaletteCommand::ShowShortcuts => {
-            state.open_shortcuts();
+            state.close_overlay();
+            state.open_settings_category(crate::tui::settings_overlay::SettingsCategory::Shortcuts);
             ControllerEffect::None
         }
         PaletteCommand::ShowHelp => {

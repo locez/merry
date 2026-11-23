@@ -965,7 +965,7 @@ fn review_workflow_slash_commands_submit_structured_prompts_with_compact_history
 
 #[test]
 fn quick_ui_and_quit_slash_commands_route_to_existing_overlays_and_effects() {
-    for input in ["/model", "/provider", "/providers"] {
+    for input in ["/provider", "/providers"] {
         let mut s = state();
         s.insert_input_str(input);
         assert_eq!(
@@ -973,6 +973,32 @@ fn quick_ui_and_quit_slash_commands_route_to_existing_overlays_and_effects() {
             ControllerEffect::OpenProviderManager
         );
     }
+
+    // /model falls back to ProviderManager when no provider is configured yet,
+    // and opens the QuickSwitch model picker when a provider is configured.
+    let mut no_provider = state();
+    no_provider.insert_input_str("/model");
+    assert_eq!(
+        handle_key_action(KeyAction::Submit, &mut no_provider),
+        ControllerEffect::OpenProviderManager
+    );
+    let mut with_provider = state();
+    with_provider.configure_preferences(
+        crate::tui::preferences::TuiPreferences::default(),
+        crate::tui::preferences::TuiSettingsDefaults {
+            provider_aliases: vec!["compat".to_owned()],
+            provider: Some("compat".to_owned()),
+            ..crate::tui::preferences::TuiSettingsDefaults::default()
+        },
+    );
+    with_provider.insert_input_str("/model");
+    assert_eq!(
+        handle_key_action(KeyAction::Submit, &mut with_provider),
+        ControllerEffect::OpenTargetedModelPicker {
+            alias: "compat".to_owned(),
+            target: crate::tui::provider_selection::ModelPickerTarget::QuickSwitch,
+        }
+    );
 
     for input in ["/settings", "/config"] {
         let mut s = state();
@@ -991,7 +1017,11 @@ fn quick_ui_and_quit_slash_commands_route_to_existing_overlays_and_effects() {
             handle_key_action(KeyAction::Submit, &mut s),
             ControllerEffect::None
         );
-        assert!(matches!(s.overlay(), Some(Overlay::Shortcuts(_))));
+        assert!(matches!(
+            s.overlay(),
+            Some(Overlay::Settings(settings))
+                if settings.category() == crate::tui::settings_overlay::SettingsCategory::Shortcuts
+        ));
     }
 
     for input in ["/exit", "/quit"] {
@@ -1126,7 +1156,7 @@ fn slash_completion_aligns_description_column_across_commands() {
     let compact_col = col_of("Compact conversation history");
     let quit_col = col_of("Quit Merry");
     let help_col = col_of("List slash commands");
-    let model_col = col_of("Switch provider or model");
+    let model_col = col_of("Switch model for the active provider");
     let new_col = col_of("Start a fresh session");
 
     assert_eq!(compact_col, review_col);

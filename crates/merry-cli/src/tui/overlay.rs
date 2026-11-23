@@ -35,7 +35,6 @@ pub(crate) enum Overlay {
     PlanView(super::plan_view::PlanViewOverlay),
     PermissionReview(PermissionReviewOverlay),
     Dialog(MessageDialogOverlay),
-    Shortcuts(ShortcutsBack),
     CommandDetails(super::command_details::CommandDetails),
     SubagentInspect(super::subagent_view::SubagentTakeoverOverlay),
     BackgroundTaskInspect(super::task_dock::BackgroundTaskOverlay),
@@ -119,59 +118,7 @@ impl MessageDialogOverlay {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ShortcutsBack {
-    CommandPalette,
-    Settings(Box<SettingsOverlay>),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SettingItem {
-    CodeTheme,
-    UiTheme,
-    TransparentBackground,
-    DefaultProvider,
-    DefaultModel,
-    ReasoningEffort,
-    ContextWindow,
-    AutoCompaction,
-    ContextStrategy,
-    Subagents,
-    MaxThreads,
-    KeyboardShortcuts,
-}
-
-impl SettingItem {
-    pub(crate) const ALL: [Self; 12] = [
-        Self::CodeTheme,
-        Self::UiTheme,
-        Self::TransparentBackground,
-        Self::DefaultProvider,
-        Self::DefaultModel,
-        Self::ReasoningEffort,
-        Self::ContextWindow,
-        Self::AutoCompaction,
-        Self::ContextStrategy,
-        Self::Subagents,
-        Self::MaxThreads,
-        Self::KeyboardShortcuts,
-    ];
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SettingDirection {
-    Previous,
-    Next,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SettingsOverlay {
-    selected: usize,
-    model_editor: Option<TextInput>,
-    reasoning_editor: Option<TextInput>,
-    context_window_editor: Option<TextInput>,
-    notice: Option<String>,
-}
+pub(crate) use super::settings_overlay::{SettingDirection, SettingItem, SettingsOverlay};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct CommandPalette {
@@ -191,13 +138,22 @@ pub(crate) enum OverlayKeyResult {
     Run(PaletteCommand),
     AdjustSetting(SettingItem, SettingDirection),
     ResetSetting(SettingItem),
-    BeginModelEdit,
-    CommitModel(String),
-    BeginReasoningEdit,
-    CommitReasoning(String),
-    BeginContextWindowEdit,
-    CommitContextWindow(String),
-    OpenShortcuts,
+    BeginSettingEdit(SettingItem),
+    CommitSettingEdit {
+        item: SettingItem,
+        value: String,
+    },
+    PickSettingModel(SettingItem),
+    PickSettingReasoning(SettingItem),
+    OpenSettingChoices(SettingItem),
+    SelectSettingChoice {
+        item: SettingItem,
+        index: usize,
+    },
+    CaptureShortcut {
+        action: super::keymap::KeyAction,
+        key: KeyEvent,
+    },
     ApprovePermission(String),
     DenyPermission(String),
     InsertSkill(String),
@@ -206,7 +162,10 @@ pub(crate) enum OverlayKeyResult {
     SubagentNext,
     SubagentRefresh,
     SubagentStop(String),
-    SubagentSendMessage { agent_id: String, message: String },
+    SubagentSendMessage {
+        agent_id: String,
+        message: String,
+    },
     RefreshBackgroundTask(String),
     StopBackgroundTask(String),
 }
@@ -236,6 +195,7 @@ impl CommandPalette {
         let slash_query = query.strip_prefix('/').unwrap_or(&query);
         all_commands()
             .iter()
+            .filter(|command| command.show_in_palette())
             .filter(|command| plan_command_is_available(command.command, self.plan))
             .filter(|command| {
                 query.is_empty()
@@ -283,174 +243,6 @@ impl CommandPalette {
     }
 }
 
-impl SettingsOverlay {
-    pub(crate) fn selected_item(&self) -> SettingItem {
-        SettingItem::ALL[self.selected.min(SettingItem::ALL.len() - 1)]
-    }
-
-    pub(crate) fn select_item(&mut self, item: SettingItem) {
-        if let Some(index) = SettingItem::ALL
-            .iter()
-            .position(|candidate| *candidate == item)
-        {
-            self.selected = index;
-            self.notice = None;
-        }
-    }
-
-    pub(crate) fn model_editor(&self) -> Option<&TextInput> {
-        self.model_editor.as_ref()
-    }
-
-    pub(crate) fn context_window_editor(&self) -> Option<&TextInput> {
-        self.context_window_editor.as_ref()
-    }
-
-    pub(crate) fn reasoning_editor(&self) -> Option<&TextInput> {
-        self.reasoning_editor.as_ref()
-    }
-
-    pub(crate) fn notice(&self) -> Option<&str> {
-        self.notice.as_deref()
-    }
-
-    pub(crate) fn begin_model_edit(&mut self, value: String) {
-        let mut input = TextInput::default();
-        input.replace_text(value);
-        self.model_editor = Some(input);
-        self.notice = None;
-    }
-
-    pub(crate) fn begin_context_window_edit(&mut self, value: String) {
-        let mut input = TextInput::default();
-        input.replace_text(value);
-        self.context_window_editor = Some(input);
-        self.notice = None;
-    }
-
-    pub(crate) fn begin_reasoning_edit(&mut self, value: String) {
-        let mut input = TextInput::default();
-        input.replace_text(value);
-        self.reasoning_editor = Some(input);
-        self.notice = None;
-    }
-
-    pub(crate) fn set_notice(&mut self, notice: Option<String>) {
-        self.notice = notice;
-    }
-
-    fn insert_paste(&mut self, text: &str) {
-        if let Some(editor) = self.model_editor.as_mut() {
-            editor.insert_str(text);
-        } else if let Some(editor) = self.reasoning_editor.as_mut() {
-            editor.insert_str(text);
-        } else if let Some(editor) = self.context_window_editor.as_mut() {
-            editor.insert_str(text);
-        }
-    }
-
-    fn handle_key(&mut self, key: KeyEvent) -> OverlayKeyResult {
-        if let Some(editor) = self.model_editor.as_mut() {
-            return match key.code {
-                KeyCode::Esc => {
-                    self.model_editor = None;
-                    OverlayKeyResult::Consumed
-                }
-                KeyCode::Enter => {
-                    let value = editor.text().to_owned();
-                    self.model_editor = None;
-                    OverlayKeyResult::CommitModel(value)
-                }
-                _ => {
-                    editor.handle_key(key);
-                    OverlayKeyResult::Consumed
-                }
-            };
-        }
-
-        if let Some(editor) = self.context_window_editor.as_mut() {
-            return match key.code {
-                KeyCode::Esc => {
-                    self.context_window_editor = None;
-                    OverlayKeyResult::Consumed
-                }
-                KeyCode::Enter => {
-                    let value = editor.text().to_owned();
-                    self.context_window_editor = None;
-                    OverlayKeyResult::CommitContextWindow(value)
-                }
-                _ => {
-                    editor.handle_key(key);
-                    OverlayKeyResult::Consumed
-                }
-            };
-        }
-
-        if let Some(editor) = self.reasoning_editor.as_mut() {
-            return match key.code {
-                KeyCode::Esc => {
-                    self.reasoning_editor = None;
-                    OverlayKeyResult::Consumed
-                }
-                KeyCode::Enter => {
-                    let value = editor.text().to_owned();
-                    self.reasoning_editor = None;
-                    OverlayKeyResult::CommitReasoning(value)
-                }
-                _ => {
-                    editor.handle_key(key);
-                    OverlayKeyResult::Consumed
-                }
-            };
-        }
-
-        match key.code {
-            KeyCode::Esc => OverlayKeyResult::Back,
-            KeyCode::Down => {
-                self.selected = (self.selected + 1).min(SettingItem::ALL.len() - 1);
-                self.notice = None;
-                OverlayKeyResult::Consumed
-            }
-            KeyCode::Up => {
-                self.selected = self.selected.saturating_sub(1);
-                self.notice = None;
-                OverlayKeyResult::Consumed
-            }
-            KeyCode::Left => {
-                if self.selected_item() == SettingItem::DefaultProvider {
-                    OverlayKeyResult::Provider(ProviderOverlayAction::OpenProviderManager)
-                } else {
-                    OverlayKeyResult::AdjustSetting(
-                        self.selected_item(),
-                        SettingDirection::Previous,
-                    )
-                }
-            }
-            KeyCode::Right => {
-                if self.selected_item() == SettingItem::DefaultProvider {
-                    OverlayKeyResult::Provider(ProviderOverlayAction::OpenProviderManager)
-                } else {
-                    OverlayKeyResult::AdjustSetting(self.selected_item(), SettingDirection::Next)
-                }
-            }
-            KeyCode::Backspace | KeyCode::Delete => {
-                OverlayKeyResult::ResetSetting(self.selected_item())
-            }
-            KeyCode::Enter => match self.selected_item() {
-                SettingItem::DefaultModel => OverlayKeyResult::BeginModelEdit,
-                SettingItem::ReasoningEffort => OverlayKeyResult::BeginReasoningEdit,
-                SettingItem::ContextWindow => OverlayKeyResult::BeginContextWindowEdit,
-                SettingItem::DefaultProvider => {
-                    OverlayKeyResult::Provider(ProviderOverlayAction::OpenProviderManager)
-                }
-                SettingItem::KeyboardShortcuts => OverlayKeyResult::OpenShortcuts,
-                item => OverlayKeyResult::AdjustSetting(item, SettingDirection::Next),
-            },
-            _ => OverlayKeyResult::Consumed,
-        }
-    }
-}
-
 impl Overlay {
     pub(crate) fn command_palette_for_plan(plan: PlanPaletteContext) -> Self {
         Self::CommandPalette(CommandPalette {
@@ -459,8 +251,8 @@ impl Overlay {
         })
     }
 
-    pub(crate) fn settings() -> Self {
-        Self::Settings(SettingsOverlay::default())
+    pub(crate) fn settings_for_viewport(compact: bool) -> Self {
+        Self::Settings(SettingsOverlay::for_viewport(compact))
     }
 
     #[cfg(test)]
@@ -478,6 +270,7 @@ impl Overlay {
         if key.code == KeyCode::Char('x')
             && key.modifiers.contains(KeyModifiers::ALT)
             && !matches!(self, Self::PermissionReview(_))
+            && !matches!(self, Self::Settings(settings) if settings.is_capturing_shortcut())
         {
             return OverlayKeyResult::Close;
         }
@@ -505,10 +298,29 @@ impl Overlay {
             },
             Self::ModelPicker(picker) => match picker.handle_key(key) {
                 ProviderOverlayAction::Back
-                    if picker.target()
-                        == super::provider_overlay::ModelPickerTarget::ProviderForm =>
+                    if matches!(
+                        picker.target(),
+                        super::provider_overlay::ModelPickerTarget::ProviderForm
+                    ) =>
                 {
                     OverlayKeyResult::Provider(ProviderOverlayAction::BackToProviderForm)
+                }
+                ProviderOverlayAction::Back
+                    if matches!(
+                        picker.target(),
+                        super::provider_overlay::ModelPickerTarget::QuickSwitch
+                    ) =>
+                {
+                    OverlayKeyResult::Close
+                }
+                ProviderOverlayAction::Back
+                    if matches!(
+                        picker.target(),
+                        super::provider_overlay::ModelPickerTarget::SettingsActiveModel
+                            | super::provider_overlay::ModelPickerTarget::RoleBinding(_)
+                    ) =>
+                {
+                    OverlayKeyResult::Back
                 }
                 ProviderOverlayAction::Back => {
                     OverlayKeyResult::Provider(ProviderOverlayAction::OpenProviderManager)
@@ -558,10 +370,6 @@ impl Overlay {
             },
             Self::Dialog(_) => match key.code {
                 KeyCode::Esc | KeyCode::Enter => OverlayKeyResult::Back,
-                _ => OverlayKeyResult::Consumed,
-            },
-            Self::Shortcuts(_) => match key.code {
-                KeyCode::Esc => OverlayKeyResult::Back,
                 _ => OverlayKeyResult::Consumed,
             },
             Self::SubagentInspect(takeover) => match takeover.handle_key(key) {
@@ -618,7 +426,6 @@ impl Overlay {
             | Self::PermissionReview(_)
             | Self::Dialog(_) => {}
             Self::ReasoningPicker(picker) => picker.insert_paste(text),
-            Self::Shortcuts(_) => {}
         }
     }
 }

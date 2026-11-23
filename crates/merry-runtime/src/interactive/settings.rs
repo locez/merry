@@ -1,13 +1,20 @@
-use crate::{CompactionConfig, SubagentConfig};
-use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy};
-use std::{num::NonZeroU64, sync::Arc};
+use crate::{
+    CompactionConfig, PermissionAdmissionSource, PermissionReviewMode, RuntimeModelRole,
+    SubagentConfig,
+};
+use merry_llm::{GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy, ReasoningEffort};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
+};
 
-/// Provider-neutral primary model selection for subsequent interactive requests.
+/// Provider-neutral model selection for subsequent interactive requests.
 #[derive(Clone)]
 pub struct InteractivePrimaryModel {
-    pub(super) provider: Arc<dyn ModelProvider>,
-    pub(super) model: ModelName,
-    pub(super) retry_policy: ModelRetryPolicy,
+    pub(crate) provider: Arc<dyn ModelProvider>,
+    pub(crate) model: ModelName,
+    pub(crate) retry_policy: ModelRetryPolicy,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// Subagent admission and concurrency settings for subsequent delegated work.
@@ -35,7 +42,15 @@ impl InteractivePrimaryModel {
             provider,
             model,
             retry_policy,
+            reasoning_effort: None,
         }
+    }
+
+    /// Attaches an optional role-specific reasoning effort override.
+    #[must_use]
+    pub fn with_reasoning_effort(mut self, reasoning_effort: Option<ReasoningEffort>) -> Self {
+        self.reasoning_effort = reasoning_effort;
+        self
     }
 }
 
@@ -44,9 +59,13 @@ impl InteractivePrimaryModel {
 pub struct InteractiveSettingsUpdate {
     pub(super) generation_config: Option<GenerationConfig>,
     pub(super) primary_model: Option<InteractivePrimaryModel>,
+    pub(super) role_models: Vec<(RuntimeModelRole, Option<InteractivePrimaryModel>)>,
     pub(super) subagents: Option<InteractiveSubagentSettings>,
     pub(super) automatic_compaction: Option<CompactionConfig>,
     pub(super) context_window_tokens: Option<Option<NonZeroU64>>,
+    pub(super) max_parallel_tool_calls: Option<NonZeroUsize>,
+    pub(super) permission_review_mode: Option<PermissionReviewMode>,
+    pub(super) permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
 }
 
 impl InteractiveSettingsUpdate {
@@ -61,6 +80,18 @@ impl InteractiveSettingsUpdate {
     #[must_use]
     pub fn with_primary_model(mut self, primary_model: InteractivePrimaryModel) -> Self {
         self.primary_model = Some(primary_model);
+        self
+    }
+
+    /// Replaces or clears a role-specific provider/model/effort override (such as
+    /// `ContextCompaction` or `ApprovalReview`). Passing `None` falls back to primary.
+    #[must_use]
+    pub fn with_role_model(
+        mut self,
+        role: RuntimeModelRole,
+        model: Option<InteractivePrimaryModel>,
+    ) -> Self {
+        self.role_models.push((role, model));
         self
     }
 
@@ -82,6 +113,30 @@ impl InteractiveSettingsUpdate {
     #[must_use]
     pub fn with_context_window_tokens(mut self, context_window_tokens: Option<NonZeroU64>) -> Self {
         self.context_window_tokens = Some(context_window_tokens);
+        self
+    }
+
+    /// Replaces the maximum concurrent parallel tool calls per tool batch.
+    #[must_use]
+    pub fn with_max_parallel_tool_calls(mut self, limit: NonZeroUsize) -> Self {
+        self.max_parallel_tool_calls = Some(limit);
+        self
+    }
+
+    /// Replaces the live permission review mode for subsequent tool executions.
+    #[must_use]
+    pub fn with_permission_review_mode(mut self, mode: PermissionReviewMode) -> Self {
+        self.permission_review_mode = Some(mode);
+        self
+    }
+
+    /// Supplies or replaces the host permission admission source used by host-reviewed modes.
+    #[must_use]
+    pub fn with_permission_admission_source(
+        mut self,
+        source: Arc<dyn PermissionAdmissionSource>,
+    ) -> Self {
+        self.permission_admission_source = Some(source);
         self
     }
 }

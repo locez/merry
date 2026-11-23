@@ -1,16 +1,36 @@
-use crate::tui::{
-    controller::{ControllerEffect, handle_key_event, handle_paste_event},
-    keymap::Keymap,
-    overlay::SettingItem,
-    preferences::{CodeTheme, TuiPreferences, TuiSettingsDefaults},
-    render::{render_to_buffer, render_to_buffer_and_cursor, render_to_text},
-    state::{TimelineItem, TuiState},
-    tests::{find_cell_style, find_text_position},
-    theme::{SemanticColor, ThemePreset, TuiTheme},
+use crate::{
+    config::HeaderItemKind,
+    tui::{
+        controller::{ControllerEffect, handle_key_event, handle_paste_event},
+        keymap::Keymap,
+        overlay::{Overlay, SettingItem},
+        preferences::{CodeTheme, TuiPreferences, TuiSettingsDefaults},
+        render::{render_to_buffer, render_to_buffer_and_cursor, render_to_text},
+        state::{TimelineItem, TuiState},
+        tests::{find_cell_style, find_text_position},
+        theme::{SemanticColor, ThemePreset, TuiTheme},
+    },
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Color;
 use std::collections::BTreeMap;
+
+fn open_settings_via_palette(state: &mut TuiState) {
+    handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT), state);
+    for character in "settings".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            state,
+        );
+    }
+    handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), state);
+}
+
+fn select_setting(state: &mut TuiState, item: SettingItem) {
+    if let Some(Overlay::Settings(settings)) = state.overlay_mut() {
+        settings.select_item(item);
+    }
+}
 
 #[test]
 fn settings_cycles_code_theme_without_leaking_keys_to_chat_input() {
@@ -20,16 +40,7 @@ fn settings_cycles_code_theme_without_leaking_keys_to_chat_input() {
         Keymap::default(),
         TuiTheme::default(),
     );
-    handle_key_event(
-        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
-        &mut state,
-    );
-    for character in "settings".chars() {
-        handle_key_event(
-            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
-            &mut state,
-        );
-    }
+    open_settings_via_palette(&mut state);
     handle_key_event(
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
@@ -41,6 +52,7 @@ fn settings_cycles_code_theme_without_leaking_keys_to_chat_input() {
     );
 
     let settings = render_to_text(&state, 100, 30);
+    assert!(settings.contains("CATEGORIES"));
     assert!(settings.contains("Catppuccin Mocha"));
     assert_eq!(state.input_text(), "");
     assert!(matches!(
@@ -65,23 +77,8 @@ fn settings_reasoning_change_applies_to_the_current_runtime() {
             ..TuiSettingsDefaults::default()
         },
     );
-    handle_key_event(
-        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
-        &mut state,
-    );
-    for character in "settings".chars() {
-        handle_key_event(
-            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
-            &mut state,
-        );
-    }
-    handle_key_event(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &mut state,
-    );
-    for _ in 0..5 {
-        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
-    }
+    open_settings_via_palette(&mut state);
+    select_setting(&mut state, SettingItem::ReasoningEffort);
 
     let effect = handle_key_event(
         KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
@@ -115,7 +112,9 @@ fn settings_reasoning_change_applies_to_the_current_runtime() {
 }
 
 #[test]
-fn settings_reasoning_editor_accepts_custom_provider_value() {
+fn settings_reasoning_picker_accepts_custom_provider_value_and_filters_presets() {
+    use crate::tui::provider_selection::{ModelPickerTarget, ReasoningBindingTarget};
+
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -126,13 +125,12 @@ fn settings_reasoning_editor_accepts_custom_provider_value() {
         TuiPreferences::default(),
         TuiSettingsDefaults {
             provider: Some("compat".to_owned()),
+            model: Some("gpt-5".to_owned()),
             ..TuiSettingsDefaults::default()
         },
     );
     state.open_settings();
-    for _ in 0..5 {
-        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
-    }
+    select_setting(&mut state, SettingItem::ReasoningEffort);
 
     assert_eq!(
         handle_key_event(
@@ -141,7 +139,7 @@ fn settings_reasoning_editor_accepts_custom_provider_value() {
         ),
         ControllerEffect::None
     );
-    assert!(state.settings_reasoning_editor().is_some());
+    assert!(matches!(state.overlay(), Some(Overlay::ReasoningPicker(_))));
     handle_paste_event("model-specific", &mut state);
 
     let effect = handle_key_event(
@@ -149,19 +147,34 @@ fn settings_reasoning_editor_accepts_custom_provider_value() {
         &mut state,
     );
 
-    assert!(matches!(
+    assert_eq!(
         effect,
-        ControllerEffect::ApplyRuntimePreferences(preferences)
-            if preferences
-                .reasoning_effort_for_provider("compat")
-                .map(|effort| effort.as_str())
-                == Some("model-specific")
-    ));
+        ControllerEffect::ApplyProviderModel {
+            alias: "compat".to_owned(),
+            model: "gpt-5".to_owned(),
+            reasoning_effort: merry_llm::ReasoningEffort::new("model-specific")
+                .expect("custom effort should validate"),
+            target: ModelPickerTarget::SettingsReasoning(ReasoningBindingTarget::ActiveProvider),
+        }
+    );
+    assert!(state.restore_settings_after_reasoning_picker());
+    state.apply_reasoning_binding(
+        &ReasoningBindingTarget::ActiveProvider,
+        "compat",
+        merry_llm::ReasoningEffort::new("model-specific").expect("custom effort should validate"),
+    );
+    assert_eq!(
+        state
+            .preferences()
+            .reasoning_effort_for_provider("compat")
+            .map(|effort| effort.as_str()),
+        Some("model-specific")
+    );
     assert_eq!(state.settings_notice(), Some("Applied"));
 }
 
 #[test]
-fn settings_reasoning_display_and_editor_follow_the_selected_provider() {
+fn settings_reasoning_display_and_picker_follow_the_selected_provider() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -183,17 +196,21 @@ fn settings_reasoning_display_and_editor_follow_the_selected_provider() {
 
     assert_eq!(
         state.setting_value(SettingItem::ReasoningEffort),
-        "Inherit (max ultra)"
+        "Inherit (max ultra) ▸"
     );
     state.open_settings();
-    state.begin_settings_reasoning_edit();
-    assert_eq!(
-        state
-            .settings_reasoning_editor()
-            .expect("reasoning editor should open")
-            .text(),
-        "max ultra"
+    select_setting(&mut state, SettingItem::ReasoningEffort);
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
     );
+    match state.overlay() {
+        Some(Overlay::ReasoningPicker(picker)) => assert_eq!(picker.query(), "max ultra"),
+        other => panic!("expected ReasoningPicker overlay, got {other:?}"),
+    }
+    // Esc returns cleanly to Settings.
+    handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+    assert!(matches!(state.overlay(), Some(Overlay::Settings(_))));
 }
 
 #[test]
@@ -205,9 +222,7 @@ fn settings_context_window_editor_applies_to_the_current_runtime() {
         TuiTheme::default(),
     );
     state.open_settings();
-    for _ in 0..6 {
-        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
-    }
+    select_setting(&mut state, SettingItem::ContextWindow);
 
     handle_key_event(
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -237,9 +252,7 @@ fn settings_context_window_editor_rejects_zero() {
         TuiTheme::default(),
     );
     state.open_settings();
-    for _ in 0..6 {
-        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
-    }
+    select_setting(&mut state, SettingItem::ContextWindow);
     handle_key_event(
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
@@ -268,23 +281,8 @@ fn settings_compaction_change_applies_to_the_current_runtime() {
         Keymap::default(),
         TuiTheme::default(),
     );
-    handle_key_event(
-        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
-        &mut state,
-    );
-    for character in "settings".chars() {
-        handle_key_event(
-            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
-            &mut state,
-        );
-    }
-    handle_key_event(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &mut state,
-    );
-    for _ in 0..7 {
-        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
-    }
+    open_settings_via_palette(&mut state);
+    select_setting(&mut state, SettingItem::AutoCompaction);
 
     let effect = handle_key_event(
         KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
@@ -297,34 +295,7 @@ fn settings_compaction_change_applies_to_the_current_runtime() {
             if preferences.auto_compaction_enabled == Some(true)
     ));
     assert_eq!(state.settings_notice(), Some("Applied"));
-}
-
-#[test]
-fn settings_do_not_describe_runtime_changes_as_next_session() {
-    let mut state = TuiState::new(
-        "/repo".into(),
-        "gpt-test".to_owned(),
-        Keymap::default(),
-        TuiTheme::default(),
-    );
-    handle_key_event(
-        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
-        &mut state,
-    );
-    for character in "settings".chars() {
-        handle_key_event(
-            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
-            &mut state,
-        );
-    }
-    handle_key_event(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &mut state,
-    );
-
-    let settings = render_to_text(&state, 100, 30);
-
-    assert!(!settings.contains("next session"));
+    assert!(!render_to_text(&state, 100, 30).contains("next session"));
 }
 
 #[test]
@@ -338,16 +309,7 @@ fn code_theme_setting_applies_to_existing_code_blocks_immediately() {
     state.push_timeline_item(TimelineItem::Assistant {
         text: "```python\ndef greet():\n    return 'hello'\n```".to_owned(),
     });
-    handle_key_event(
-        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
-        &mut state,
-    );
-    for character in "settings".chars() {
-        handle_key_event(
-            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
-            &mut state,
-        );
-    }
+    open_settings_via_palette(&mut state);
     handle_key_event(
         KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
@@ -368,83 +330,95 @@ fn code_theme_setting_applies_to_existing_code_blocks_immediately() {
 }
 
 #[test]
-fn shortcuts_opened_from_settings_return_to_settings() {
+fn settings_active_model_opens_searchable_editable_picker_and_context_window_owns_cursor() {
+    use crate::tui::{provider_overlay::ModelListItem, provider_selection::ModelPickerTarget};
+
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
         Keymap::default(),
         TuiTheme::default(),
     );
-    handle_key_event(
-        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
-        &mut state,
+    state.configure_preferences(
+        TuiPreferences::default(),
+        TuiSettingsDefaults {
+            provider_aliases: vec!["compat".to_owned()],
+            provider: Some("compat".to_owned()),
+            model: Some("gpt-5".to_owned()),
+            ..TuiSettingsDefaults::default()
+        },
     );
-    for character in "settings".chars() {
+    open_settings_via_palette(&mut state);
+    select_setting(&mut state, SettingItem::ActiveModel);
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+        ),
+        ControllerEffect::OpenTargetedModelPicker {
+            alias: "compat".to_owned(),
+            target: ModelPickerTarget::SettingsActiveModel,
+        }
+    );
+
+    // Searchable dropdown with API models + custom typed model even when partial match exists.
+    state.open_targeted_model_picker(
+        "compat".to_owned(),
+        "Compat".to_owned(),
+        vec![
+            ModelListItem::new("gpt-5", None),
+            ModelListItem::new("gpt-5-mini", None),
+        ],
+        ModelPickerTarget::SettingsActiveModel,
+    );
+    for character in "gpt-5".chars() {
         handle_key_event(
             KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
             &mut state,
         );
     }
-    handle_key_event(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &mut state,
-    );
-    for _ in 0..11 {
-        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
-    }
-    handle_key_event(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &mut state,
-    );
-    assert!(render_to_text(&state, 100, 30).contains("Command palette"));
+    let (buffer, cursor) = render_to_buffer_and_cursor(&state, 100, 30);
+    let (_, search_row) =
+        find_text_position(&buffer, "gpt-5").expect("model picker search input should render");
+    assert_eq!(cursor.y, search_row);
 
+    // Typing a custom suffix still lets the user select "Use custom: gpt-5-custom".
+    for character in "-custom".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+        ),
+        ControllerEffect::OpenReasoningPicker {
+            alias: "compat".to_owned(),
+            model: "gpt-5-custom".to_owned(),
+            target: ModelPickerTarget::SettingsActiveModel,
+        }
+    );
+    // Esc returns cleanly to Settings.
     handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+    assert!(matches!(state.overlay(), Some(Overlay::Settings(_))));
 
-    let settings = render_to_text(&state, 100, 30);
-    assert!(settings.contains("Code theme"));
-    assert!(settings.contains("Default provider"));
-}
-
-#[test]
-fn settings_model_editor_owns_the_visible_cursor() {
-    let mut state = TuiState::new(
-        "/repo".into(),
-        "gpt-test".to_owned(),
-        Keymap::default(),
-        TuiTheme::default(),
-    );
+    // Inline editor (Context window) also owns the visible cursor.
+    select_setting(&mut state, SettingItem::ContextWindow);
     handle_key_event(
-        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
     );
-    for character in "settings".chars() {
+    for character in "128k".chars() {
         handle_key_event(
             KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
             &mut state,
         );
     }
-    handle_key_event(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &mut state,
-    );
-    for _ in 0..4 {
-        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
-    }
-    handle_key_event(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &mut state,
-    );
-    for character in "custom-model".chars() {
-        handle_key_event(
-            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
-            &mut state,
-        );
-    }
-
     let (buffer, cursor) = render_to_buffer_and_cursor(&state, 100, 30);
     let (_, editor_row) =
-        find_text_position(&buffer, "custom-model").expect("model editor should render");
-
+        find_text_position(&buffer, "128k").expect("context window editor should render");
     assert_eq!(cursor.y, editor_row);
     assert!(cursor.x > 30);
 }
@@ -457,27 +431,12 @@ fn settings_keep_the_selected_row_visible_in_a_short_terminal() {
         Keymap::default(),
         TuiTheme::default(),
     );
-    handle_key_event(
-        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
-        &mut state,
-    );
-    for character in "settings".chars() {
-        handle_key_event(
-            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
-            &mut state,
-        );
-    }
-    handle_key_event(
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-        &mut state,
-    );
-    for _ in 0..11 {
-        handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
-    }
+    open_settings_via_palette(&mut state);
+    select_setting(&mut state, SettingItem::HeaderItem(HeaderItemKind::Tokens));
 
-    let settings = render_to_text(&state, 40, 12);
+    let settings = render_to_text(&state, 50, 12);
 
-    assert!(settings.contains("Keyboard shortcuts"));
+    assert!(settings.contains("Header: tokens"));
 }
 
 #[test]
@@ -494,6 +453,10 @@ fn ui_theme_and_transparent_bg_update_active_theme_live_and_reset() {
         custom_configured.clone(),
     );
     state.open_settings();
+    handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
     handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut state);
     assert_eq!(state.selected_setting(), Some(SettingItem::UiTheme));
 

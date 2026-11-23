@@ -114,6 +114,11 @@ impl InteractiveProducer {
                             )
                             .await;
                     }
+                    for (role, model) in update.role_models {
+                        self.runtime
+                            .update_interactive_role_model(role, model)
+                            .await;
+                    }
                     if let Some(automatic_compaction) = update.automatic_compaction {
                         self.runtime
                             .update_interactive_automatic_compaction(automatic_compaction)
@@ -122,6 +127,20 @@ impl InteractiveProducer {
                     if let Some(context_window_tokens) = update.context_window_tokens {
                         self.runtime
                             .update_interactive_context_window_tokens(context_window_tokens)
+                            .await;
+                    }
+                    if let Some(limit) = update.max_parallel_tool_calls {
+                        self.runtime
+                            .update_interactive_max_parallel_tool_calls(limit);
+                    }
+                    if let Some(source) = update.permission_admission_source {
+                        self.runtime
+                            .update_interactive_permission_admission_source(source)
+                            .await;
+                    }
+                    if let Some(mode) = update.permission_review_mode {
+                        self.runtime
+                            .update_interactive_permission_review_mode(mode)
                             .await;
                     }
                 }

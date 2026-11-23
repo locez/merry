@@ -9,7 +9,7 @@ use crate::{
 };
 use merry_llm::{
     ModelCatalog, ModelCatalogEntry, ModelCatalogError, ModelCatalogProvider, ModelName,
-    ReasoningEffort,
+    ReasoningEffort, ServiceTier,
 };
 use merry_provider_anthropic::{AnthropicProvider, AnthropicProviderConfig};
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
@@ -39,6 +39,7 @@ pub(crate) struct ProviderDraft {
     base_url: String,
     api_key: Option<SecretString>,
     reasoning_effort: Option<ReasoningEffort>,
+    service_tier: Option<ServiceTier>,
     default_model: ModelName,
 }
 
@@ -175,6 +176,7 @@ impl ProviderDraft {
             base_url: base_url.to_owned(),
             api_key: api_key.map(SecretString::new).transpose()?,
             reasoning_effort: None,
+            service_tier: None,
             default_model,
         })
     }
@@ -186,6 +188,24 @@ impl ProviderDraft {
     ) -> Self {
         self.reasoning_effort = reasoning_effort;
         self
+    }
+
+    pub(crate) fn with_service_tier(
+        mut self,
+        service_tier: Option<ServiceTier>,
+    ) -> Result<Self, ProviderManagementError> {
+        let _ = ManagedProviderDefinition::with_reasoning_effort(
+            self.alias.clone(),
+            &self.display_name,
+            self.default_model.clone(),
+            self.kind,
+            self.protocol,
+            &self.base_url,
+            self.reasoning_effort.clone(),
+        )?
+        .with_service_tier(service_tier)?;
+        self.service_tier = service_tier;
+        Ok(self)
     }
 
     pub(crate) fn with_reasoning_effort_text(
@@ -233,6 +253,7 @@ impl fmt::Debug for ProviderDraft {
             )
             .field("default_model", &self.default_model)
             .field("reasoning_effort", &self.reasoning_effort)
+            .field("service_tier", &self.service_tier)
             .finish()
     }
 }
@@ -269,6 +290,7 @@ pub(crate) struct EditableProviderProfile {
     pub(crate) protocol: Option<merry_provider_openai::OpenAiProtocol>,
     pub(crate) base_url: String,
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) service_tier: Option<ServiceTier>,
     pub(crate) default_model: ModelName,
 }
 
@@ -344,6 +366,7 @@ impl ProviderManagementService {
             protocol,
             base_url,
             reasoning_effort: profile.reasoning_effort().cloned(),
+            service_tier: profile.service_tier(),
             default_model,
         })
     }
@@ -368,6 +391,7 @@ impl ProviderManagementService {
             base_url,
             api_key,
             reasoning_effort,
+            service_tier,
             default_model,
         } = draft;
         let api_key = api_key.ok_or_else(|| {
@@ -381,7 +405,8 @@ impl ProviderManagementService {
             protocol,
             &base_url,
             reasoning_effort,
-        )?;
+        )?
+        .with_service_tier(service_tier)?;
         self.managed_store
             .upsert(definition, api_key.expose())
             .await?;
@@ -414,6 +439,7 @@ impl ProviderManagementService {
             base_url,
             api_key,
             reasoning_effort,
+            service_tier,
             default_model,
         } = draft;
         let definition = ManagedProviderDefinition::with_reasoning_effort(
@@ -424,7 +450,8 @@ impl ProviderManagementService {
             protocol,
             &base_url,
             reasoning_effort,
-        )?;
+        )?
+        .with_service_tier(service_tier)?;
         self.managed_store
             .update(
                 original_alias,
@@ -524,6 +551,13 @@ impl ProviderManagementService {
             .list_models(cancellation_token)
             .await
             .map_err(Into::into)
+    }
+
+    pub(crate) fn copy_retained_api_key(
+        &self,
+        original_alias: &ProviderAlias,
+    ) -> Result<String, ProviderManagementError> {
+        self.resolve_retained_api_key(original_alias)
     }
 
     fn resolve_retained_api_key(

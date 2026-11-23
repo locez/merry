@@ -165,10 +165,11 @@ async fn execute_permissioned_process_request(
             crate::process::requires_process_action_review(intent)
         }
     };
+    let review_mode = *inner.permission_review_mode.read().await;
     let may_reuse_existing_grant = capabilities_are_satisfied
         && !action_requires_independent_review
         && !matches!(
-            inner.permission_review_mode,
+            review_mode,
             crate::PermissionReviewMode::Required
                 | crate::PermissionReviewMode::HostDecisionOnly
                 | crate::PermissionReviewMode::FullyTrusted
@@ -365,7 +366,7 @@ pub(super) async fn review_permission_request(
     request: crate::PermissionRequest,
     context: &ToolExecutionContext,
 ) -> PermissionAdmissionResult {
-    let mode = inner.permission_review_mode;
+    let mode = *inner.permission_review_mode.read().await;
     if mode.is_fully_trusted() {
         return Ok(crate::PermissionAdmissionDecision::approved(
             "explicit fully trusted mode admitted this configured action",
@@ -452,7 +453,7 @@ pub(super) async fn review_permission_request(
             .await
         }
     } else {
-        let Some(source) = inner.permission_admission_source.as_ref() else {
+        let Some(source) = inner.permission_admission_source.read().await.clone() else {
             return Err(crate::PermissionAdmissionError::ReviewModelUnavailable);
         };
         source
@@ -480,7 +481,7 @@ async fn host_fallback_or_error(
     if !matches!(mode, crate::PermissionReviewMode::ModelThenHostFallback) {
         return Err(crate::PermissionAdmissionError::ReviewModelUnavailable);
     }
-    let Some(source) = inner.permission_admission_source.as_ref() else {
+    let Some(source) = inner.permission_admission_source.read().await.clone() else {
         return Err(crate::PermissionAdmissionError::ReviewModelUnavailable);
     };
     let review_context = PermissionAdmissionContext::new(context.cancellation_token().clone())

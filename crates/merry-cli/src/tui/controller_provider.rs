@@ -38,6 +38,7 @@ pub(super) fn provider_overlay_effect(action: ProviderOverlayAction) -> Controll
             original_alias,
             values,
         },
+        ProviderOverlayAction::CopyApiKey => ControllerEffect::CopyProviderApiKey,
         ProviderOverlayAction::SaveProvider(values) => ControllerEffect::SaveProvider(values),
         ProviderOverlayAction::UpdateProvider {
             original_alias,
@@ -54,10 +55,20 @@ pub(super) fn provider_overlay_effect(action: ProviderOverlayAction) -> Controll
             alias,
             model,
             target,
-        } => ControllerEffect::OpenReasoningPicker {
-            alias,
-            model,
-            target,
+        } => match target {
+            ModelPickerTarget::RoleBinding(
+                target @ (crate::tui::provider_selection::ModelBindingTarget::ContextCompaction
+                | crate::tui::provider_selection::ModelBindingTarget::ApprovalReview),
+            ) => ControllerEffect::ApplyRoleModel {
+                alias,
+                model,
+                target,
+            },
+            target => ControllerEffect::OpenReasoningPicker {
+                alias,
+                model,
+                target,
+            },
         },
         ProviderOverlayAction::SelectReasoning {
             alias,
@@ -80,6 +91,7 @@ pub(super) fn is_provider_effect(effect: &ControllerEffect) -> bool {
             | ControllerEffect::OpenProviderForm
             | ControllerEffect::OpenProviderEditor(_)
             | ControllerEffect::OpenModelPicker(_)
+            | ControllerEffect::OpenTargetedModelPicker { .. }
             | ControllerEffect::BackToProviderForm
             | ControllerEffect::DiscoverFormModels { .. }
             | ControllerEffect::RefreshModels(_)
@@ -90,6 +102,7 @@ pub(super) fn is_provider_effect(effect: &ControllerEffect) -> bool {
             | ControllerEffect::SelectProvider { .. }
             | ControllerEffect::OpenReasoningPicker { .. }
             | ControllerEffect::ApplyProviderModel { .. }
+            | ControllerEffect::ApplyRoleModel { .. }
     )
 }
 
@@ -151,22 +164,18 @@ pub(super) async fn dispatch_provider_effect(
                     base_url: editable.base_url,
                     model: editable.default_model.as_str().to_owned(),
                     reasoning_effort: editable.reasoning_effort,
+                    service_tier: editable.service_tier,
                 },
                 used,
             );
             Ok(false)
         }
         ControllerEffect::OpenModelPicker(alias) => {
-            open_model_picker(
-                &alias,
-                providers.management,
-                state,
-                providers.discovery_tx,
-                providers.discovery_generation,
-                providers.discovery_token,
-                background_tasks,
-            )
-            .await?;
+            open_model_picker(&alias, None, providers, state, background_tasks).await?;
+            Ok(false)
+        }
+        ControllerEffect::OpenTargetedModelPicker { alias, target } => {
+            open_model_picker(&alias, Some(target), providers, state, background_tasks).await?;
             Ok(false)
         }
         ControllerEffect::BackToProviderForm => {
@@ -409,7 +418,11 @@ pub(super) async fn dispatch_provider_effect(
             reasoning_effort,
             target,
         } => match target {
-            ModelPickerTarget::ActiveProvider => {
+            ModelPickerTarget::ActiveProvider
+            | ModelPickerTarget::QuickSwitch
+            | ModelPickerTarget::SettingsActiveModel => {
+                let quick_switch = matches!(target, ModelPickerTarget::QuickSwitch);
+                let from_settings = matches!(target, ModelPickerTarget::SettingsActiveModel);
                 let alias = ProviderAlias::new(&alias).map_err(unexpected)?;
                 let mut preferences = state.preferences().clone();
                 preferences.provider = Some(alias.as_str().to_owned());
@@ -427,7 +440,12 @@ pub(super) async fn dispatch_provider_effect(
                 state.replace_preferences(preferences);
                 state.set_model_label(session.model_label.clone());
                 state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
-                if !state.restore_settings_after_reasoning_picker() {
+                if quick_switch {
+                    cancel_model_discovery(providers.discovery_token);
+                    state.close_overlay();
+                } else if from_settings && state.restore_settings_after_role_picker() {
+                    state.set_settings_notice(Some("Applied".to_owned()));
+                } else if !state.restore_settings_after_reasoning_picker() {
                     cancel_model_discovery(providers.discovery_token);
                     let items = provider_list_items(providers.management, state)?;
                     state.open_provider_manager(items);
@@ -445,7 +463,76 @@ pub(super) async fn dispatch_provider_effect(
                 }
                 Ok(false)
             }
+            ModelPickerTarget::RoleBinding(role_target) => {
+                cancel_model_discovery(providers.discovery_token);
+                let _ = state.restore_settings_after_role_picker();
+                state.apply_role_model_binding(
+                    &role_target,
+                    &alias,
+                    &model,
+                    Some(reasoning_effort),
+                );
+                preferences_store
+                    .save(state.preferences())
+                    .await
+                    .map_err(unexpected)?;
+                Ok(false)
+            }
+            ModelPickerTarget::SettingsReasoning(reasoning_target) => {
+                use crate::tui::provider_selection::ReasoningBindingTarget;
+                let applies_live = matches!(
+                    reasoning_target,
+                    ReasoningBindingTarget::ActiveProvider
+                        | ReasoningBindingTarget::Compaction
+                        | ReasoningBindingTarget::ApprovalReview
+                );
+                let _ = state.restore_settings_after_reasoning_picker();
+                let previous = state.preferences().clone();
+                state.apply_reasoning_binding(&reasoning_target, &alias, reasoning_effort);
+                if applies_live {
+                    let updated = state.preferences().clone();
+                    if let Err(error) = session.apply_preferences(&updated).await {
+                        state.replace_preferences(previous);
+                        state.set_settings_notice(Some(format!("apply failed: {error:?}")));
+                        return Ok(false);
+                    }
+                    state.set_model_label(session.model_label.clone());
+                    state.set_reasoning_effort_label(session.reasoning_effort_label.clone());
+                }
+                preferences_store
+                    .save(state.preferences())
+                    .await
+                    .map_err(unexpected)?;
+                Ok(false)
+            }
         },
+        ControllerEffect::ApplyRoleModel {
+            alias,
+            model,
+            target,
+        } => {
+            use crate::tui::provider_selection::ModelBindingTarget;
+            cancel_model_discovery(providers.discovery_token);
+            let _ = state.restore_settings_after_role_picker();
+            let previous = state.preferences().clone();
+            state.apply_role_model_binding(&target, &alias, &model, None);
+            if matches!(
+                target,
+                ModelBindingTarget::ContextCompaction | ModelBindingTarget::ApprovalReview
+            ) {
+                let updated = state.preferences().clone();
+                if let Err(error) = session.apply_preferences(&updated).await {
+                    state.replace_preferences(previous);
+                    state.set_settings_notice(Some(format!("apply failed: {error:?}")));
+                    return Ok(false);
+                }
+            }
+            preferences_store
+                .save(state.preferences())
+                .await
+                .map_err(unexpected)?;
+            Ok(false)
+        }
         _ => unreachable!("non-provider effect passed to provider dispatcher"),
     }
 }
@@ -484,6 +571,10 @@ fn provider_list_items(
                 .and_then(|entry| entry.reasoning_effort.as_ref())
                 .or_else(|| profile.reasoning_effort())
                 .map(|effort| effort.as_str().to_owned());
+            let service_tier = editable
+                .as_ref()
+                .and_then(|entry| entry.service_tier)
+                .or_else(|| profile.service_tier());
             Ok(ProviderListItem::new(
                 alias,
                 profile.display_name(),
@@ -491,43 +582,53 @@ fn provider_list_items(
                 profile.protocol(),
                 model,
             )
-            .with_details(base_url, reasoning_effort))
+            .with_details(base_url, reasoning_effort)
+            .with_service_tier(service_tier))
         })
         .collect()
 }
 
 async fn open_model_picker(
     alias: &str,
-    provider_management: &ProviderManagementService,
+    settings_target: Option<ModelPickerTarget>,
+    providers: ProviderController<'_>,
     state: &mut TuiState,
-    model_discovery_tx: &mpsc::Sender<ModelDiscoveryCompletion>,
-    model_discovery_generation: &mut u64,
-    model_discovery_token: &mut Option<CancellationToken>,
     background_tasks: &mut JoinSet<()>,
 ) -> Result<(), CliError> {
     let alias = ProviderAlias::new(alias).map_err(unexpected)?;
-    let profile = provider_management
+    let profile = providers
+        .management
         .config()
         .ok_or_else(|| unexpected("no provider config is loaded"))?
         .provider_profile(alias.as_str())
         .map_err(unexpected)?;
-    let cached = provider_management
+    let cached = providers
+        .management
         .load_model_cache(&alias)
         .await
         .map_err(unexpected)?
         .map(model_list_items)
         .unwrap_or_default();
-    state.open_model_picker(
-        alias.as_str().to_owned(),
-        profile.display_name().to_owned(),
-        cached,
-    );
+    if let Some(target) = settings_target {
+        state.open_targeted_model_picker(
+            alias.as_str().to_owned(),
+            profile.display_name().to_owned(),
+            cached,
+            target,
+        );
+    } else {
+        state.open_model_picker(
+            alias.as_str().to_owned(),
+            profile.display_name().to_owned(),
+            cached,
+        );
+    }
     start_model_discovery(
         alias,
-        provider_management.clone(),
-        model_discovery_tx.clone(),
-        model_discovery_generation,
-        model_discovery_token,
+        providers.management.clone(),
+        providers.discovery_tx.clone(),
+        providers.discovery_generation,
+        providers.discovery_token,
         background_tasks,
     );
     Ok(())

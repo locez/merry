@@ -1,11 +1,9 @@
 use super::{
     click_target::{OverlayPointer, chip_hit, chip_line},
-    keymap::KeyAction,
     modal_frame::{
         ModalRects, modal_rects, modal_selection_style, modal_surface_style, render_divider,
         render_modal_frame,
     },
-    overlay::SettingItem,
     overlay::{CommandPalette, CommandSpec, MessageDialogKind, MessageDialogOverlay, Overlay},
     state::TuiState,
     theme::SemanticColor,
@@ -118,7 +116,9 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
                 .min(rows[0].right().saturating_sub(1));
             frame.set_cursor_position(Position::new(cursor_x, rows[0].y));
         }
-        Overlay::Settings(_) => render_settings(frame, state),
+        Overlay::Settings(settings) => {
+            super::settings_render::render_settings(frame, state, settings)
+        }
         Overlay::Skills(picker) => {
             super::skills_overlay::render_skills_overlay(frame, state, picker)
         }
@@ -139,7 +139,6 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
             super::permission_render::render_permission_review(frame, state, review)
         }
         Overlay::Dialog(dialog) => render_message_dialog(frame, state, dialog),
-        Overlay::Shortcuts(_) => render_shortcuts(frame, state),
         Overlay::SubagentInspect(takeover) => {
             super::subagent_view::render_subagent_takeover(frame, state, takeover)
         }
@@ -147,233 +146,6 @@ pub(crate) fn render_overlay(frame: &mut Frame<'_>, state: &TuiState) {
             super::render::task_dock::render_background_task_overlay(frame, state, inspector)
         }
     }
-}
-
-fn render_settings(frame: &mut Frame<'_>, state: &TuiState) {
-    let modal = modal_rects(frame.area(), MAX_OVERLAY_WIDTH, 22);
-    render_modal_frame(
-        frame,
-        state,
-        modal,
-        "Settings",
-        SemanticColor::BorderFocus,
-        true,
-    );
-    let inner = modal.inner;
-    let selected = state.selected_setting();
-    let model_editor_viewport = state
-        .settings_model_editor()
-        .map(|input| input.viewport(inner.width.saturating_sub(36).max(1).into()));
-    let model_value = model_editor_viewport
-        .as_ref()
-        .map(|viewport| format!("{}  editing", viewport.text))
-        .unwrap_or_else(|| state.setting_value(SettingItem::DefaultModel));
-    let reasoning_editor_viewport = state
-        .settings_reasoning_editor()
-        .map(|input| input.viewport(inner.width.saturating_sub(36).max(1).into()));
-    let reasoning_value = reasoning_editor_viewport
-        .as_ref()
-        .map(|viewport| format!("{}  editing", viewport.text))
-        .unwrap_or_else(|| state.setting_value(SettingItem::ReasoningEffort));
-    let context_window_editor_viewport = state
-        .settings_context_window_editor()
-        .map(|input| input.viewport(inner.width.saturating_sub(36).max(1).into()));
-    let context_window_value = context_window_editor_viewport
-        .as_ref()
-        .map(|viewport| format!("{}  editing", viewport.text))
-        .unwrap_or_else(|| state.setting_value(SettingItem::ContextWindow));
-    let lines = vec![
-        section_line(state, "Appearance"),
-        setting_line(
-            state,
-            "Code theme",
-            &state.setting_value(SettingItem::CodeTheme),
-            selected == Some(SettingItem::CodeTheme),
-        ),
-        setting_line(
-            state,
-            "UI theme",
-            &state.setting_value(SettingItem::UiTheme),
-            selected == Some(SettingItem::UiTheme),
-        ),
-        setting_line(
-            state,
-            "Transparent bg",
-            &state.setting_value(SettingItem::TransparentBackground),
-            selected == Some(SettingItem::TransparentBackground),
-        ),
-        Line::default(),
-        section_line(state, "Model defaults"),
-        setting_line(
-            state,
-            "Default provider",
-            &state.setting_value(SettingItem::DefaultProvider),
-            selected == Some(SettingItem::DefaultProvider),
-        ),
-        setting_line(
-            state,
-            "Default model",
-            &model_value,
-            selected == Some(SettingItem::DefaultModel),
-        ),
-        setting_line(
-            state,
-            "Reasoning effort",
-            &reasoning_value,
-            selected == Some(SettingItem::ReasoningEffort),
-        ),
-        Line::default(),
-        section_line(state, "Context"),
-        setting_line(
-            state,
-            "Context window",
-            &context_window_value,
-            selected == Some(SettingItem::ContextWindow),
-        ),
-        setting_line(
-            state,
-            "Auto compaction",
-            &state.setting_value(SettingItem::AutoCompaction),
-            selected == Some(SettingItem::AutoCompaction),
-        ),
-        setting_line(
-            state,
-            "Context strategy",
-            &state.setting_value(SettingItem::ContextStrategy),
-            selected == Some(SettingItem::ContextStrategy),
-        ),
-        Line::default(),
-        section_line(state, "Runtime"),
-        setting_line(
-            state,
-            "Subagents",
-            &state.setting_value(SettingItem::Subagents),
-            selected == Some(SettingItem::Subagents),
-        ),
-        setting_line(
-            state,
-            "Max threads",
-            &state.setting_value(SettingItem::MaxThreads),
-            selected == Some(SettingItem::MaxThreads),
-        ),
-        Line::default(),
-        setting_line(
-            state,
-            "Keyboard shortcuts",
-            &state.setting_value(SettingItem::KeyboardShortcuts),
-            selected == Some(SettingItem::KeyboardShortcuts),
-        ),
-        Line::from(Span::styled(
-            state.settings_notice().unwrap_or(""),
-            semantic_style(state, SemanticColor::Muted),
-        )),
-    ];
-    debug_assert_eq!(lines.len(), SETTINGS_LINE_COUNT);
-    let selected_line = selected.map(setting_line_index).unwrap_or(0);
-    let visible_height = usize::from(inner.height).max(1);
-    let scroll_offset = settings_scroll(selected_line, visible_height);
-    frame.render_widget(
-        Paragraph::new(lines).scroll((scroll_offset as u16, 0)),
-        inner,
-    );
-    if let Some(viewport) = model_editor_viewport {
-        let value_x = inner.x.saturating_add(26);
-        let model_row = setting_line_index(SettingItem::DefaultModel);
-        if let Some(visible_row) = model_row.checked_sub(scroll_offset)
-            && visible_row < visible_height
-        {
-            frame.set_cursor_position(Position::new(
-                value_x
-                    .saturating_add(viewport.cursor_column as u16)
-                    .min(inner.right().saturating_sub(1)),
-                inner.y.saturating_add(visible_row as u16),
-            ));
-        }
-    }
-    if let Some(viewport) = context_window_editor_viewport {
-        let value_x = inner.x.saturating_add(26);
-        let context_window_row = setting_line_index(SettingItem::ContextWindow);
-        if let Some(visible_row) = context_window_row.checked_sub(scroll_offset)
-            && visible_row < visible_height
-        {
-            frame.set_cursor_position(Position::new(
-                value_x
-                    .saturating_add(viewport.cursor_column as u16)
-                    .min(inner.right().saturating_sub(1)),
-                inner.y.saturating_add(visible_row as u16),
-            ));
-        }
-    }
-    if let Some(viewport) = reasoning_editor_viewport {
-        let value_x = inner.x.saturating_add(26);
-        let reasoning_row = setting_line_index(SettingItem::ReasoningEffort);
-        if let Some(visible_row) = reasoning_row.checked_sub(scroll_offset)
-            && visible_row < visible_height
-        {
-            frame.set_cursor_position(Position::new(
-                value_x
-                    .saturating_add(viewport.cursor_column as u16)
-                    .min(inner.right().saturating_sub(1)),
-                inner.y.saturating_add(visible_row as u16),
-            ));
-        }
-    }
-}
-
-fn setting_line_index(item: SettingItem) -> usize {
-    match item {
-        SettingItem::CodeTheme => 1,
-        SettingItem::UiTheme => 2,
-        SettingItem::TransparentBackground => 3,
-        SettingItem::DefaultProvider => 6,
-        SettingItem::DefaultModel => 7,
-        SettingItem::ReasoningEffort => 8,
-        SettingItem::ContextWindow => 11,
-        SettingItem::AutoCompaction => 12,
-        SettingItem::ContextStrategy => 13,
-        SettingItem::Subagents => 16,
-        SettingItem::MaxThreads => 17,
-        SettingItem::KeyboardShortcuts => 19,
-    }
-}
-
-fn render_shortcuts(frame: &mut Frame<'_>, state: &TuiState) {
-    let lines = vec![
-        shortcut_line_for_action(state, "Submit", KeyAction::Submit),
-        shortcut_line_for_action(state, "Command palette", KeyAction::OpenCommandPanel),
-        shortcut_line_for_action(state, "Toggle plan", KeyAction::TogglePlan),
-        shortcut_line_for_action(state, "Command output", KeyAction::OpenCommandDetails),
-        shortcut_line_for_action(state, "Follow latest", KeyAction::FollowLatest),
-        #[cfg(feature = "web")]
-        shortcut_line_for_action(
-            state,
-            "Open trajectory in browser",
-            KeyAction::OpenSessionInBrowser,
-        ),
-        shortcut_line_for_action(
-            state,
-            "Previous user input",
-            KeyAction::ReviewPreviousUserInput,
-        ),
-        shortcut_line_for_action(state, "Search history", KeyAction::HistorySearch),
-        shortcut_line_for_action(state, "Comment mode", KeyAction::ToggleComment),
-        shortcut_line_for_action(state, "Interrupt", KeyAction::Interrupt),
-        shortcut_line_for_action(state, "Quit", KeyAction::Quit),
-    ];
-    let height = u16::try_from(lines.len()).unwrap_or(14).saturating_add(6);
-    let modal = modal_rects(frame.area(), MAX_OVERLAY_WIDTH, height);
-    render_modal_frame(
-        frame,
-        state,
-        modal,
-        "Keyboard shortcuts",
-        SemanticColor::BorderFocus,
-        true,
-    );
-    frame.render_widget(
-        Paragraph::new(lines).style(code_surface_style(state)),
-        modal.inner,
-    );
 }
 
 fn render_message_dialog(frame: &mut Frame<'_>, state: &TuiState, dialog: &MessageDialogOverlay) {
@@ -470,43 +242,6 @@ fn command_category_line(state: &TuiState, category: &str) -> Line<'static> {
     ])
 }
 
-fn section_line(state: &TuiState, label: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        label.to_owned(),
-        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD),
-    ))
-}
-
-fn setting_line(state: &TuiState, label: &str, value: &str, selected: bool) -> Line<'static> {
-    let base = selection_style(state, selected);
-    Line::from(vec![
-        Span::styled(if selected { "▌ " } else { "  " }, base),
-        Span::styled(format!("{label:<24}"), base),
-        Span::styled(
-            value.to_owned(),
-            semantic_style(state, SemanticColor::ToolKeyword).patch(base),
-        ),
-    ])
-}
-
-fn shortcut_line(state: &TuiState, label: &str, shortcut: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!("  {label:<34}"), code_surface_style(state)),
-        Span::styled(
-            shortcut.to_owned(),
-            semantic_style(state, SemanticColor::ToolKeyword),
-        ),
-    ])
-}
-
-fn shortcut_line_for_action(state: &TuiState, label: &str, action: KeyAction) -> Line<'static> {
-    let shortcut = state
-        .keymap()
-        .binding_label_for(action)
-        .unwrap_or_else(|| "Unbound".to_owned());
-    shortcut_line(state, label, &shortcut)
-}
-
 pub(super) fn centered_rect(area: Rect, max_width: u16, desired_height: u16) -> Rect {
     let width = area.width.saturating_sub(4).min(max_width).max(1);
     let height = area.height.saturating_sub(2).min(desired_height).max(1);
@@ -549,8 +284,6 @@ pub(super) fn semantic_style(state: &TuiState, slot: SemanticColor) -> Style {
         .map_or_else(Style::default, |color| Style::default().fg(color))
 }
 
-const SETTINGS_LINE_COUNT: usize = 21;
-
 struct OverlaySplit {
     modal: ModalRects,
     body: Rect,
@@ -574,12 +307,9 @@ pub(crate) fn overlay_pointer(
             }
             palette_command_at(modal, &command_rows, palette, position).map(OverlayPointer::Palette)
         }
-        Overlay::Settings(_) => {
-            let modal = modal_rects(area, MAX_OVERLAY_WIDTH, 22);
-            if modal.close_hit(position) {
-                return Some(OverlayPointer::CloseModal);
-            }
-            settings_item_at(state, modal.inner, position).map(OverlayPointer::Setting)
+        Overlay::Settings(settings) => {
+            super::settings_render::settings_pointer(state, settings, area, position)
+                .map(OverlayPointer::Settings)
         }
         Overlay::Skills(picker) => {
             match super::skills_overlay::skills_overlay_pointer(area, picker, position) {
@@ -641,13 +371,6 @@ pub(crate) fn overlay_pointer(
         }
         Overlay::CommandDetails(details) => {
             super::command_details::details_pointer(state, area, details, position)
-        }
-        Overlay::Shortcuts(_) => {
-            let height = 20u16;
-            let modal = modal_rects(area, MAX_OVERLAY_WIDTH, height);
-            modal
-                .close_hit(position)
-                .then_some(OverlayPointer::CloseModal)
         }
         Overlay::SubagentInspect(_) => {
             super::subagent_view::subagent_takeover_pointer(state, area, position)
@@ -724,32 +447,4 @@ fn palette_command_at(
         CommandPaletteRow::Command { index, .. } => Some(*index),
         CommandPaletteRow::Category(_) => None,
     }
-}
-
-fn settings_item_at(state: &TuiState, inner: Rect, position: Position) -> Option<SettingItem> {
-    if state.settings_model_editor().is_some()
-        || state.settings_reasoning_editor().is_some()
-        || state.settings_context_window_editor().is_some()
-    {
-        return None;
-    }
-    if !inner.contains(position) {
-        return None;
-    }
-    let selected_line = state
-        .selected_setting()
-        .map(setting_line_index)
-        .unwrap_or(0);
-    let visible_height = usize::from(inner.height).max(1);
-    let scroll = settings_scroll(selected_line, visible_height);
-    let line = scroll + usize::from(position.y.saturating_sub(inner.y));
-    SettingItem::ALL
-        .into_iter()
-        .find(|item| setting_line_index(*item) == line)
-}
-
-fn settings_scroll(selected_line: usize, visible_height: usize) -> usize {
-    selected_line
-        .saturating_sub(visible_height.saturating_sub(1))
-        .min(SETTINGS_LINE_COUNT.saturating_sub(visible_height))
 }

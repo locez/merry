@@ -8,9 +8,12 @@ use crate::{
     },
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_llm::ReasoningEffort;
+use merry_llm::{ReasoningEffort, ServiceTier};
 use merry_provider_openai::OpenAiProtocol;
 use std::{collections::BTreeSet, fmt};
+
+const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderFormField {
@@ -22,11 +25,12 @@ pub(crate) enum ProviderFormField {
     ApiKey,
     Model,
     ReasoningEffort,
+    ServiceTier,
     Save,
 }
 
 impl ProviderFormField {
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::DisplayName,
         Self::Alias,
         Self::Kind,
@@ -35,6 +39,7 @@ impl ProviderFormField {
         Self::ApiKey,
         Self::Model,
         Self::ReasoningEffort,
+        Self::ServiceTier,
         Self::Save,
     ];
 }
@@ -49,6 +54,7 @@ pub(crate) struct ProviderFormValues {
     pub(crate) api_key: String,
     pub(crate) model: String,
     pub(crate) reasoning_effort: String,
+    pub(crate) service_tier: Option<ServiceTier>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +73,7 @@ pub(crate) struct ProviderFormSeed {
     pub(crate) base_url: String,
     pub(crate) model: String,
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) service_tier: Option<ServiceTier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +94,7 @@ impl fmt::Debug for ProviderFormValues {
             .field("api_key", &"<redacted>")
             .field("model", &self.model)
             .field("reasoning_effort", &self.reasoning_effort)
+            .field("service_tier", &self.service_tier)
             .finish()
     }
 }
@@ -120,11 +128,10 @@ impl ProviderFormValues {
                 model.clone(),
             )?,
         };
-        Ok((
-            alias,
-            model,
-            draft.with_reasoning_effort_text(&self.reasoning_effort)?,
-        ))
+        let draft = draft
+            .with_reasoning_effort_text(&self.reasoning_effort)?
+            .with_service_tier(self.service_tier)?;
+        Ok((alias, model, draft))
     }
 }
 
@@ -135,6 +142,7 @@ pub(crate) struct ProviderFormOverlay {
     mode: ProviderFormMode,
     kind: ManagedProviderKind,
     openai_protocol: OpenAiProtocol,
+    openai_service_tier: Option<ServiceTier>,
     selected: usize,
     notice: Option<String>,
     alias_edited: bool,
@@ -147,10 +155,12 @@ impl fmt::Debug for ProviderFormOverlay {
             .field("display_name", &self.field(ProviderFormField::DisplayName))
             .field("alias", &self.field(ProviderFormField::Alias))
             .field("kind", &self.kind)
+            .field("protocol", &self.protocol())
             .field("base_url", &self.field(ProviderFormField::BaseUrl))
             .field("api_key", &"<redacted>")
             .field("model", &self.field(ProviderFormField::Model))
             .field("reasoning_effort", &self.reasoning_effort_text())
+            .field("service_tier", &self.service_tier())
             .field("selected", &self.selected)
             .field("notice", &self.notice)
             .finish()
@@ -161,13 +171,14 @@ impl ProviderFormOverlay {
     pub(crate) fn new(alias: String, used_aliases: BTreeSet<String>) -> Self {
         let mut fields = std::array::from_fn(|_| TextInput::default());
         fields[1].replace_text(alias);
-        fields[2].replace_text("https://api.openai.com/v1".to_owned());
+        fields[2].replace_text(DEFAULT_OPENAI_BASE_URL.to_owned());
         Self {
             fields,
             used_aliases,
             mode: ProviderFormMode::Add,
             kind: ManagedProviderKind::OpenAiCompatible,
             openai_protocol: OpenAiProtocol::Responses,
+            openai_service_tier: None,
             selected: 0,
             notice: None,
             alias_edited: false,
@@ -191,6 +202,7 @@ impl ProviderFormOverlay {
             },
             kind: seed.kind,
             openai_protocol: seed.protocol.unwrap_or(OpenAiProtocol::Responses),
+            openai_service_tier: seed.service_tier,
             selected: 0,
             notice: None,
             alias_edited: true,
@@ -240,6 +252,10 @@ impl ProviderFormOverlay {
                 self.toggle_protocol();
                 ProviderOverlayAction::Consumed
             }
+            ProviderFormField::ServiceTier => {
+                self.cycle_service_tier(1);
+                ProviderOverlayAction::Consumed
+            }
             ProviderFormField::Save => self.save_action(),
             ProviderFormField::Alias if self.is_editing() => {
                 self.notice = Some("Config alias is the stable provider ID".to_owned());
@@ -257,6 +273,25 @@ impl ProviderFormOverlay {
         }
     }
 
+    pub(crate) fn trigger_copy_api_key(&mut self) -> ProviderOverlayAction {
+        self.select_field(ProviderFormField::ApiKey);
+        if !self.has_copyable_api_key() {
+            self.notice = Some("No API key to copy".to_owned());
+            return ProviderOverlayAction::Consumed;
+        }
+        ProviderOverlayAction::CopyApiKey
+    }
+
+    pub(crate) fn has_copyable_api_key(&self) -> bool {
+        self.is_editing() || !self.field(ProviderFormField::ApiKey).trim().is_empty()
+    }
+
+    pub(crate) fn api_key_copy_source(&self) -> (Option<String>, Option<String>) {
+        let draft = self.field(ProviderFormField::ApiKey).trim();
+        let draft_api_key = (!draft.is_empty()).then(|| draft.to_owned());
+        (self.editing_alias().map(str::to_owned), draft_api_key)
+    }
+
     pub(crate) fn kind(&self) -> ManagedProviderKind {
         self.kind
     }
@@ -265,6 +300,26 @@ impl ProviderFormOverlay {
         match self.kind {
             ManagedProviderKind::OpenAiCompatible => Some(self.openai_protocol),
             ManagedProviderKind::Anthropic => None,
+        }
+    }
+
+    pub(crate) fn service_tier(&self) -> Option<ServiceTier> {
+        match self.kind {
+            ManagedProviderKind::OpenAiCompatible => self.openai_service_tier,
+            ManagedProviderKind::Anthropic => None,
+        }
+    }
+
+    pub(crate) fn service_tier_label(&self) -> String {
+        match self.kind {
+            ManagedProviderKind::Anthropic => "N/A (OpenAI-compatible only)".to_owned(),
+            ManagedProviderKind::OpenAiCompatible => match self.openai_service_tier {
+                None => "Unset".to_owned(),
+                Some(tier) if !self.openai_protocol.supports_service_tier(tier) => {
+                    format!("{} (requires Responses)", tier.as_str())
+                }
+                Some(tier) => tier.as_str().to_owned(),
+            },
         }
     }
 
@@ -296,16 +351,22 @@ impl ProviderFormOverlay {
     }
 
     pub(crate) fn masked_api_key(&self) -> String {
-        let masked = "*".repeat(self.field(ProviderFormField::ApiKey).chars().count());
-        if masked.is_empty() && self.is_editing() {
-            "unchanged".to_owned()
+        let len = self.field(ProviderFormField::ApiKey).chars().count();
+        if len > 0 {
+            "*".repeat(len)
+        } else if self.is_editing() {
+            "•••••••••••• (saved)".to_owned()
         } else {
-            masked
+            String::new()
         }
     }
 
     pub(crate) fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
+    }
+
+    pub(crate) fn set_notice(&mut self, notice: Option<String>) {
+        self.notice = notice;
     }
 
     pub(crate) fn set_model_and_reasoning(&mut self, model: &str, reasoning_effort: &str) {
@@ -342,6 +403,12 @@ impl ProviderFormOverlay {
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.save_action()
             }
+            KeyCode::Char('y' | 'Y')
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.selected_field() == ProviderFormField::ApiKey =>
+            {
+                self.trigger_copy_api_key()
+            }
             KeyCode::Tab | KeyCode::Down => {
                 self.selected = (self.selected + 1) % ProviderFormField::ALL.len();
                 ProviderOverlayAction::Consumed
@@ -361,6 +428,24 @@ impl ProviderFormOverlay {
                 if self.selected_field() == ProviderFormField::Protocol =>
             {
                 self.toggle_protocol();
+                ProviderOverlayAction::Consumed
+            }
+            KeyCode::Left if self.selected_field() == ProviderFormField::ServiceTier => {
+                self.cycle_service_tier(-1);
+                ProviderOverlayAction::Consumed
+            }
+            KeyCode::Right | KeyCode::Char(' ')
+                if self.selected_field() == ProviderFormField::ServiceTier =>
+            {
+                self.cycle_service_tier(1);
+                ProviderOverlayAction::Consumed
+            }
+            KeyCode::Backspace | KeyCode::Delete
+                if self.selected_field() == ProviderFormField::ServiceTier =>
+            {
+                if self.kind == ManagedProviderKind::OpenAiCompatible {
+                    self.openai_service_tier = None;
+                }
                 ProviderOverlayAction::Consumed
             }
             KeyCode::Char(' ')
@@ -408,15 +493,15 @@ impl ProviderFormOverlay {
     }
 
     fn toggle_kind(&mut self) {
+        let old_default = default_base_url(self.kind);
         self.kind = match self.kind {
             ManagedProviderKind::OpenAiCompatible => ManagedProviderKind::Anthropic,
             ManagedProviderKind::Anthropic => ManagedProviderKind::OpenAiCompatible,
         };
-        let default = match self.kind {
-            ManagedProviderKind::OpenAiCompatible => "https://api.openai.com/v1",
-            ManagedProviderKind::Anthropic => "https://api.anthropic.com",
-        };
-        self.fields[2].replace_text(default.to_owned());
+        let current_url = self.fields[2].text().trim();
+        if current_url.is_empty() || current_url == old_default {
+            self.fields[2].replace_text(default_base_url(self.kind).to_owned());
+        }
     }
 
     fn toggle_protocol(&mut self) {
@@ -427,6 +512,38 @@ impl ProviderFormOverlay {
             OpenAiProtocol::Responses => OpenAiProtocol::ChatCompletions,
             OpenAiProtocol::ChatCompletions => OpenAiProtocol::Responses,
         };
+        if let Some(tier) = self.openai_service_tier
+            && !self.openai_protocol.supports_service_tier(tier)
+        {
+            self.notice = Some(format!(
+                "Service tier \"{tier}\" requires Responses; change tier or switch back before saving"
+            ));
+        }
+    }
+
+    fn cycle_service_tier(&mut self, delta: isize) {
+        if self.kind != ManagedProviderKind::OpenAiCompatible {
+            self.notice =
+                Some("Service tier is only supported for OpenAI-compatible providers".to_owned());
+            return;
+        }
+        let mut choices: Vec<Option<ServiceTier>> = vec![None];
+        for tier in ServiceTier::ALL {
+            if self.openai_protocol.supports_service_tier(tier) {
+                choices.push(Some(tier));
+            }
+        }
+        let current = choices
+            .iter()
+            .position(|choice| *choice == self.openai_service_tier)
+            .unwrap_or(0);
+        let len = choices.len();
+        let next = if delta < 0 {
+            (current + len - 1) % len
+        } else {
+            (current + 1) % len
+        };
+        self.openai_service_tier = choices[next];
     }
 
     fn cycle_reasoning(&mut self) {
@@ -458,7 +575,15 @@ impl ProviderFormOverlay {
             api_key: self.field(ProviderFormField::ApiKey).to_owned(),
             model: self.field(ProviderFormField::Model).to_owned(),
             reasoning_effort: self.reasoning_effort_text().trim().to_owned(),
+            service_tier: self.service_tier(),
         }
+    }
+}
+
+fn default_base_url(kind: ManagedProviderKind) -> &'static str {
+    match kind {
+        ManagedProviderKind::OpenAiCompatible => DEFAULT_OPENAI_BASE_URL,
+        ManagedProviderKind::Anthropic => DEFAULT_ANTHROPIC_BASE_URL,
     }
 }
 
@@ -472,6 +597,7 @@ fn field_input_index(field: ProviderFormField) -> Option<usize> {
         ProviderFormField::ApiKey => Some(3),
         ProviderFormField::Model => Some(4),
         ProviderFormField::ReasoningEffort => Some(5),
+        ProviderFormField::ServiceTier => None,
         ProviderFormField::Save => None,
     }
 }

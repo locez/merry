@@ -31,14 +31,39 @@ fn overlay_pointer_effect(pointer: OverlayPointer, state: &mut TuiState) -> Cont
             }
             press_overlay(state, KeyCode::Enter)
         }
-        OverlayPointer::Setting(item) => {
+        OverlayPointer::Settings(pointer) => {
+            use crate::tui::settings_render::SettingsPointer;
             if settings_editor_open(state) {
                 return ControllerEffect::None;
             }
-            if let Some(Overlay::Settings(settings)) = state.overlay_mut() {
-                settings.select_item(item);
+            match pointer {
+                SettingsPointer::Close => {
+                    state.close_overlay();
+                    ControllerEffect::None
+                }
+                SettingsPointer::Back => press_overlay(state, KeyCode::Esc),
+                SettingsPointer::Category(category) => {
+                    if let Some(Overlay::Settings(settings)) = state.overlay_mut() {
+                        settings.select_category(category);
+                    }
+                    ControllerEffect::None
+                }
+                SettingsPointer::Item(item) => {
+                    if let Some(Overlay::Settings(settings)) = state.overlay_mut() {
+                        settings.select_item(item);
+                    }
+                    press_overlay(state, KeyCode::Enter)
+                }
+                SettingsPointer::Choice(index) => {
+                    if let Some(Overlay::Settings(settings)) = state.overlay_mut()
+                        && let Some(menu) = settings.choice_menu_mut()
+                    {
+                        menu.select(index);
+                    }
+                    press_overlay(state, KeyCode::Enter)
+                }
+                SettingsPointer::ResetSelected => press_overlay(state, KeyCode::Char('r')),
             }
-            press_overlay(state, KeyCode::Enter)
         }
         OverlayPointer::DialogClose | OverlayPointer::PermissionAllow => {
             press_overlay(state, KeyCode::Enter)
@@ -54,7 +79,13 @@ fn overlay_pointer_effect(pointer: OverlayPointer, state: &mut TuiState) -> Cont
             }
             press_overlay(state, KeyCode::Enter)
         }
-        OverlayPointer::ManualModel => press_overlay(state, KeyCode::Enter),
+        OverlayPointer::ManualModel => {
+            if let Some(Overlay::ModelPicker(picker)) = state.overlay_mut() {
+                let manual_index = picker.visible_models().len();
+                picker.select(manual_index);
+            }
+            press_overlay(state, KeyCode::Enter)
+        }
         OverlayPointer::Reasoning(index) => {
             if let Some(Overlay::ReasoningPicker(picker)) = state.overlay_mut() {
                 picker.select(index);
@@ -185,6 +216,14 @@ fn provider_workbench_pointer_effect(
             };
             crate::tui::controller_provider::provider_overlay_effect(action)
         }
+        ProviderWorkbenchPointer::CopyApiKey => {
+            let action = match state.overlay_mut() {
+                Some(Overlay::ProviderManager(manager)) => manager.trigger_detail_copy_api_key(),
+                Some(Overlay::ProviderForm(form)) => form.trigger_copy_api_key(),
+                _ => return ControllerEffect::None,
+            };
+            crate::tui::controller_provider::provider_overlay_effect(action)
+        }
         ProviderWorkbenchPointer::BrowseModels => {
             let action = match state.overlay_mut() {
                 Some(Overlay::ProviderManager(manager)) => {
@@ -267,9 +306,7 @@ fn scroll_active_overlay(state: &mut TuiState, up: bool, lines: usize) -> bool {
 }
 
 fn settings_editor_open(state: &TuiState) -> bool {
-    state.settings_model_editor().is_some()
-        || state.settings_reasoning_editor().is_some()
-        || state.settings_context_window_editor().is_some()
+    state.settings_editor_open()
 }
 
 fn open_model_from_header(state: &TuiState) -> ControllerEffect {

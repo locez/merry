@@ -65,6 +65,7 @@ fn main() -> CliExit {
     if let Err(error) = validate_loaded_config(_config.as_ref(), &config_paths) {
         return CliExit::Unexpected(error.to_string());
     }
+    let explicit_flags = cli.explicit_flags();
     if let Some(config) = _config.as_ref() {
         let defaults = match config.cli_defaults() {
             Ok(defaults) => defaults,
@@ -111,5 +112,5 @@ fn main() -> CliExit {
         Err(err) => return CliExit::Unexpected(err.to_string()),
     };
 
-    runtime.block_on(cli_route::run(cli, _config))
+    runtime.block_on(cli_route::run(cli, explicit_flags, _config))
 }

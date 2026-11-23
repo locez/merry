@@ -80,7 +80,12 @@ async fn execute_tool_call_batch_inner(
                         (index, result)
                     }
                 })
-                .buffer_unordered(inner.max_parallel_tool_calls.get());
+                .buffer_unordered(
+                    inner
+                        .max_parallel_tool_calls
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        .max(1),
+                );
 
             let mut first_error: Option<(usize, RuntimeError)> = None;
             while let Some((index, result)) = running.next().await {

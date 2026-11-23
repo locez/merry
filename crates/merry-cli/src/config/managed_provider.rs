@@ -1,8 +1,11 @@
 use super::{
     ConfigError, XdgPaths,
-    provider::{NamedProviderToml, validate_api_key_text, validate_provider_display_name},
+    provider::{
+        ConfiguredProviderKind, NamedProviderToml, validate_api_key_text,
+        validate_provider_display_name, validate_service_tier_support,
+    },
 };
-use merry_llm::{ModelName, ReasoningEffort};
+use merry_llm::{ModelName, ReasoningEffort, ServiceTier};
 use merry_provider_anthropic::AnthropicProviderConfig;
 use merry_provider_openai::{OpenAiProtocol, OpenAiProviderConfig};
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -121,6 +124,7 @@ pub(crate) struct ManagedProviderDefinition {
     base_url: String,
     protocol: Option<OpenAiProtocol>,
     reasoning_effort: Option<ReasoningEffort>,
+    service_tier: Option<ServiceTier>,
 }
 
 impl ManagedProviderDefinition {
@@ -189,17 +193,43 @@ impl ManagedProviderDefinition {
             base_url: base_url.to_owned(),
             protocol,
             reasoning_effort,
+            service_tier: None,
         })
     }
 
-    fn into_toml(self, api_key_file: String) -> NamedProviderToml {
+    pub(crate) fn with_service_tier(
+        mut self,
+        service_tier: Option<ServiceTier>,
+    ) -> Result<Self, ConfigError> {
+        if let Some(tier) = service_tier {
+            let configured_kind = match self.kind {
+                ManagedProviderKind::OpenAiCompatible => ConfiguredProviderKind::OpenAiCompatible,
+                ManagedProviderKind::Anthropic => ConfiguredProviderKind::Anthropic,
+            };
+            validate_service_tier_support(
+                &format!("providers.{}.service_tier", self.alias.as_str()),
+                tier,
+                configured_kind,
+                self.protocol,
+            )?;
+        }
+        self.service_tier = service_tier;
+        Ok(self)
+    }
+
+    fn into_toml(
+        self,
+        api_key_file: String,
+        preserved_api_version: Option<String>,
+        preserved_default_max_output_tokens: Option<u64>,
+    ) -> NamedProviderToml {
         NamedProviderToml {
             display_name: Some(self.display_name),
             default_model: Some(self.default_model.as_str().to_owned()),
             reasoning_effort: self
                 .reasoning_effort
                 .map(|effort| effort.as_str().to_owned()),
-            service_tier: None,
+            service_tier: self.service_tier.map(|tier| tier.as_str().to_owned()),
             kind: Some(
                 match self.kind {
                     ManagedProviderKind::OpenAiCompatible => "openai-compatible",
@@ -209,8 +239,8 @@ impl ManagedProviderDefinition {
             ),
             protocol: self.protocol,
             base_url: Some(self.base_url),
-            api_version: None,
-            default_max_output_tokens: None,
+            api_version: preserved_api_version,
+            default_max_output_tokens: preserved_default_max_output_tokens,
             api_key_file: Some(api_key_file),
         }
     }
@@ -262,7 +292,7 @@ impl ManagedProviderStore {
         write_new_private_file(&secret_path, api_key.as_bytes()).await?;
         registry.providers.insert(
             alias,
-            definition.into_toml(format!("secrets/{secret_name}")),
+            definition.into_toml(format!("secrets/{secret_name}"), None, None),
         );
         #[cfg(test)]
         if self.fail_registry_replace {
@@ -326,7 +356,11 @@ impl ManagedProviderStore {
         };
         registry.providers.insert(
             original_alias.as_str().to_owned(),
-            definition.into_toml(api_key_file),
+            definition.into_toml(
+                api_key_file,
+                existing.api_version,
+                existing.default_max_output_tokens,
+            ),
         );
         #[cfg(test)]
         if self.fail_registry_replace {

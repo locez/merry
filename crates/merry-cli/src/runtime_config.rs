@@ -420,7 +420,44 @@ pub(crate) async fn prepared_action_process_backend_options(
     config: Option<&MerryConfig>,
     mode: crate::coding::SandboxMode,
 ) -> Result<ActionProcessBackendOptions, CliError> {
-    let options = action_process_backend_options(config).map_err(unexpected)?;
+    prepared_action_process_backend_options_with_overrides(
+        config,
+        mode,
+        &crate::tui::preferences::TuiPermissionPreferences::default(),
+    )
+    .await
+}
+
+pub(crate) async fn prepared_action_process_backend_options_with_overrides(
+    config: Option<&MerryConfig>,
+    mode: crate::coding::SandboxMode,
+    overrides: &crate::tui::preferences::TuiPermissionPreferences,
+) -> Result<ActionProcessBackendOptions, CliError> {
+    let mut options = action_process_backend_options(config).map_err(unexpected)?;
+    if let Some(network) = overrides.network {
+        options = options.with_network_requests_allowed(network);
+    }
+    if overrides.ssh_agent.is_some() || overrides.gpg_agent.is_some() || overrides.dbus.is_some() {
+        let mut integrations = config
+            .map(MerryConfig::host_integrations)
+            .unwrap_or_default();
+        set_host_integration(
+            &mut integrations,
+            merry_runtime::HostIntegration::SshAgent,
+            overrides.ssh_agent,
+        );
+        set_host_integration(
+            &mut integrations,
+            merry_runtime::HostIntegration::GpgAgent,
+            overrides.gpg_agent,
+        );
+        set_host_integration(
+            &mut integrations,
+            merry_runtime::HostIntegration::SessionBus,
+            overrides.dbus,
+        );
+        options = options.with_host_integrations(integrations);
+    }
     if !mode.uses_action_sandbox() {
         return Ok(options);
     }
@@ -428,10 +465,12 @@ pub(crate) async fn prepared_action_process_backend_options(
     let home = config
         .map(MerryConfig::home)
         .unwrap_or_else(|| paths.home());
-    let gpg_enabled = config.is_some_and(|config| {
-        config
-            .host_integrations()
-            .contains(&merry_runtime::HostIntegration::GpgAgent)
+    let gpg_enabled = overrides.gpg_agent.unwrap_or_else(|| {
+        config.is_some_and(|config| {
+            config
+                .host_integrations()
+                .contains(&merry_runtime::HostIntegration::GpgAgent)
+        })
     });
     match merry_process::GpgAgentSockets::discover(home, options.environment_overrides())
         .await
@@ -447,6 +486,23 @@ pub(crate) async fn prepared_action_process_backend_options(
             "gpg_agent requires gpgconf in PATH for socket discovery",
         )),
         None => Ok(options),
+    }
+}
+
+fn set_host_integration(
+    integrations: &mut Vec<merry_runtime::HostIntegration>,
+    target: merry_runtime::HostIntegration,
+    override_value: Option<bool>,
+) {
+    let Some(enabled) = override_value else {
+        return;
+    };
+    if enabled {
+        if !integrations.contains(&target) {
+            integrations.push(target);
+        }
+    } else {
+        integrations.retain(|item| *item != target);
     }
 }
 

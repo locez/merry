@@ -126,6 +126,7 @@ pub(super) async fn fit_compaction_plan(
             }
             CompactionPreparation::ReplaceCheckpoint(input) => *input,
         };
+        let effective_reasoning_effort = provider_config.reasoning_effort().or(reasoning_effort);
         let request = match compile_fitted_compaction_request(
             &input,
             provider_config.model(),
@@ -134,7 +135,7 @@ pub(super) async fn fit_compaction_plan(
                 mode,
                 user_context: budget.user_context.as_deref(),
             },
-            reasoning_effort,
+            effective_reasoning_effort,
             limits,
             reserve,
             policy,

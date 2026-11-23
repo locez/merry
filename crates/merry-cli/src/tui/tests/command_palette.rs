@@ -33,6 +33,9 @@ fn controller_alt_x_opens_searchable_command_palette_and_settings() {
     let palette = render_to_text(&state, 100, 30);
     assert!(palette.contains("Commands"));
     assert!(palette.contains("Settings"));
+    assert!(palette.contains("Switch model"));
+    assert!(!palette.contains("Providers & models"));
+    assert!(!palette.contains("Keyboard shortcuts"));
     #[cfg(feature = "web")]
     assert!(palette.contains("Open trajectory in browser"));
     #[cfg(not(feature = "web"))]
@@ -52,7 +55,7 @@ fn controller_alt_x_opens_searchable_command_palette_and_settings() {
     let settings = render_to_text(&state, 100, 30);
     assert!(settings.contains("Settings"));
     assert!(settings.contains("Code theme"));
-    assert!(settings.contains("Default provider"));
+    assert!(settings.contains("Models"));
 }
 
 #[test]
@@ -351,4 +354,56 @@ fn command_palette_blocks_mouse_scroll_from_mutating_the_hidden_timeline() {
     handle_mouse_scroll_up(Position::new(1, 1), Size::new(80, 24), &mut state);
 
     assert_eq!(state.timeline_scroll_offset(), 0);
+}
+
+#[test]
+fn command_palette_switch_model_opens_quick_model_picker_and_escape_closes() {
+    use crate::tui::{
+        preferences::{TuiPreferences, TuiSettingsDefaults},
+        provider_overlay::ModelListItem,
+        provider_selection::ModelPickerTarget,
+    };
+
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.configure_preferences(
+        TuiPreferences::default(),
+        TuiSettingsDefaults {
+            provider_aliases: vec!["compat".to_owned()],
+            provider: Some("compat".to_owned()),
+            ..TuiSettingsDefaults::default()
+        },
+    );
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
+        &mut state,
+    );
+    for character in "switch model".chars() {
+        handle_key_event(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &mut state,
+        );
+    }
+    assert_eq!(
+        handle_key_event(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut state,
+        ),
+        ControllerEffect::OpenTargetedModelPicker {
+            alias: "compat".to_owned(),
+            target: ModelPickerTarget::QuickSwitch,
+        }
+    );
+    state.open_targeted_model_picker(
+        "compat".to_owned(),
+        "Compat".to_owned(),
+        vec![ModelListItem::new("gpt-5", None)],
+        ModelPickerTarget::QuickSwitch,
+    );
+    handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut state);
+    assert!(state.overlay().is_none());
 }

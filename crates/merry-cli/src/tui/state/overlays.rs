@@ -1,13 +1,13 @@
 use crate::tui::{
     overlay::{
         MessageDialogKind, MessageDialogOverlay, Overlay, PlanPaletteContext, SettingsOverlay,
-        ShortcutsBack,
     },
     provider_overlay::{
         ModelListItem, ModelPickerOverlay, ProviderFormOverlay, ProviderFormSeed,
         ProviderFormValues, ProviderListItem, ProviderManagerOverlay,
     },
     reasoning_picker::ReasoningPickerOverlay,
+    settings_overlay::SettingsCategory,
     state::TuiState,
 };
 use std::collections::BTreeSet;
@@ -21,6 +21,7 @@ pub(super) struct OverlayState {
     provider_form_back: Option<ProviderFormBack>,
     provider_workbench_items: Vec<ProviderListItem>,
     reasoning_picker_back: Option<Box<Overlay>>,
+    settings_role_picker_back: Option<Box<SettingsOverlay>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,10 +60,34 @@ impl TuiState {
         self.overlays.overlay = Some(self.command_palette_overlay());
     }
 
+    pub(crate) fn sync_viewport_size(&mut self, size: ratatui::layout::Size) {
+        self.viewport_size = size;
+        let compact = crate::tui::settings_render::settings_uses_compact_layout(
+            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+        );
+        if let Some(Overlay::Settings(settings)) = self.overlays.overlay.as_mut() {
+            settings.set_compact(compact);
+        }
+    }
+
     pub(crate) fn open_settings(&mut self) {
         self.overlays.dialog_back = None;
         self.overlays.provider_overlay_back = None;
-        self.overlays.overlay = Some(Overlay::settings());
+        let compact = crate::tui::settings_render::settings_uses_compact_layout(
+            ratatui::layout::Rect::new(0, 0, self.viewport_size.width, self.viewport_size.height),
+        );
+        self.overlays.overlay = Some(Overlay::settings_for_viewport(compact));
+    }
+
+    pub(crate) fn open_settings_category(&mut self, category: SettingsCategory) {
+        self.overlays.dialog_back = None;
+        self.overlays.provider_overlay_back = None;
+        let compact = crate::tui::settings_render::settings_uses_compact_layout(
+            ratatui::layout::Rect::new(0, 0, self.viewport_size.width, self.viewport_size.height),
+        );
+        let mut settings = SettingsOverlay::for_viewport(compact);
+        settings.select_category(category);
+        self.overlays.overlay = Some(Overlay::Settings(settings));
     }
 
     pub(crate) fn open_skills_picker(&mut self) -> bool {
@@ -239,14 +264,9 @@ impl TuiState {
                 | Overlay::CommandDetails(_)
                 | Overlay::SubagentInspect(_)
                 | Overlay::BackgroundTaskInspect(_)
-                | Overlay::Skills(_)
-                | Overlay::Shortcuts(_),
+                | Overlay::Skills(_),
             )
-            | None => {
-                self.overlays
-                    .provider_overlay_back
-                    .get_or_insert(ProviderOverlayBack::CommandPalette);
-            }
+            | None => {}
         }
         let current = self.current_provider_alias().map(str::to_owned);
         self.overlays.provider_workbench_items = items.clone();
@@ -288,12 +308,43 @@ impl TuiState {
     ) {
         self.overlays.provider_form_back = None;
         self.overlays.reasoning_picker_back = None;
+        self.overlays.settings_role_picker_back = None;
         self.overlays.overlay = Some(Overlay::ModelPicker(ModelPickerOverlay::new(
             alias,
             display_name,
             models,
             true,
         )));
+    }
+
+    pub(crate) fn open_targeted_model_picker(
+        &mut self,
+        alias: String,
+        display_name: String,
+        models: Vec<ModelListItem>,
+        target: crate::tui::provider_overlay::ModelPickerTarget,
+    ) {
+        self.overlays.provider_form_back = None;
+        self.overlays.reasoning_picker_back = None;
+        if let Some(Overlay::Settings(settings)) = self.overlays.overlay.take() {
+            self.overlays.settings_role_picker_back = Some(Box::new(settings));
+        }
+        self.overlays.overlay = Some(Overlay::ModelPicker(ModelPickerOverlay::for_target(
+            alias,
+            display_name,
+            models,
+            target,
+        )));
+    }
+
+    pub(crate) fn restore_settings_after_role_picker(&mut self) -> bool {
+        self.overlays.reasoning_picker_back = None;
+        if let Some(settings) = self.overlays.settings_role_picker_back.take() {
+            self.overlays.overlay = Some(Overlay::Settings(*settings));
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) fn open_provider_form_model_picker(
@@ -326,13 +377,23 @@ impl TuiState {
         model: String,
         target: crate::tui::provider_overlay::ModelPickerTarget,
     ) -> bool {
+        self.open_reasoning_picker_with_initial(alias, model, None, target)
+    }
+
+    pub(crate) fn open_reasoning_picker_with_initial(
+        &mut self,
+        alias: String,
+        model: String,
+        initial: Option<&str>,
+        target: crate::tui::provider_overlay::ModelPickerTarget,
+    ) -> bool {
         let Some(previous) = self.overlays.overlay.take() else {
             return false;
         };
         self.overlays.reasoning_picker_back = Some(Box::new(previous));
-        self.overlays.overlay = Some(Overlay::ReasoningPicker(ReasoningPickerOverlay::new(
-            alias, model, target,
-        )));
+        self.overlays.overlay = Some(Overlay::ReasoningPicker(
+            ReasoningPickerOverlay::new(alias, model, target).with_initial_value(initial),
+        ));
         true
     }
 
@@ -344,6 +405,30 @@ impl TuiState {
             ProviderFormBack::Workbench(manager) => manager
                 .detail_form()
                 .map(ProviderFormOverlay::discovery_request),
+        }
+    }
+
+    pub(crate) fn provider_form_api_key_for_copy(
+        &self,
+    ) -> Option<(Option<String>, Option<String>)> {
+        match self.overlays.overlay.as_ref()? {
+            Overlay::ProviderForm(form) => Some(form.api_key_copy_source()),
+            Overlay::ProviderManager(manager) => manager
+                .detail_form()
+                .map(ProviderFormOverlay::api_key_copy_source),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set_provider_form_notice(&mut self, notice: Option<String>) {
+        match self.overlays.overlay.as_mut() {
+            Some(Overlay::ProviderForm(form)) => form.set_notice(notice),
+            Some(Overlay::ProviderManager(manager)) => {
+                if let Some(form) = manager.detail_form_mut() {
+                    form.set_notice(notice);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -529,45 +614,41 @@ impl TuiState {
         )));
     }
 
-    pub(crate) fn open_shortcuts(&mut self) {
-        let back = match self.overlays.overlay.take() {
-            Some(Overlay::Settings(settings)) => ShortcutsBack::Settings(Box::new(settings)),
-            _ => ShortcutsBack::CommandPalette,
-        };
-        self.overlays.overlay = Some(Overlay::Shortcuts(back));
-    }
-
     pub(crate) fn close_overlay(&mut self) {
         self.overlays.overlay = None;
         self.overlays.dialog_back = None;
         self.overlays.provider_overlay_back = None;
         self.overlays.provider_form_back = None;
         self.overlays.reasoning_picker_back = None;
+        self.overlays.settings_role_picker_back = None;
     }
 
     pub(crate) fn back_overlay(&mut self) {
         let command_palette = self.command_palette_overlay();
         self.overlays.overlay = match self.overlays.overlay.take() {
-            Some(Overlay::Shortcuts(ShortcutsBack::Settings(settings))) => {
-                Some(Overlay::Settings(*settings))
-            }
-            Some(Overlay::Shortcuts(ShortcutsBack::CommandPalette))
-            | Some(Overlay::Settings(_)) => Some(command_palette.clone()),
+            Some(Overlay::Settings(_)) => None,
             Some(Overlay::ProviderManager(_)) => match self.overlays.provider_overlay_back.take() {
                 Some(ProviderOverlayBack::Settings(settings)) => Some(Overlay::Settings(*settings)),
-                Some(ProviderOverlayBack::CommandPalette) | None => Some(command_palette),
+                Some(ProviderOverlayBack::CommandPalette) => Some(command_palette),
+                None => None,
             },
             Some(Overlay::PermissionReview(_) | Overlay::Dialog(_)) => {
                 self.overlays.dialog_back.take().map(|overlay| *overlay)
             }
             Some(Overlay::ModelPicker(_)) => {
-                self.overlays
-                    .provider_form_back
-                    .take()
-                    .map(|back| match back {
-                        ProviderFormBack::Standalone(form) => Overlay::ProviderForm(form),
-                        ProviderFormBack::Workbench(manager) => Overlay::ProviderManager(manager),
-                    })
+                if let Some(settings) = self.overlays.settings_role_picker_back.take() {
+                    Some(Overlay::Settings(*settings))
+                } else {
+                    self.overlays
+                        .provider_form_back
+                        .take()
+                        .map(|back| match back {
+                            ProviderFormBack::Standalone(form) => Overlay::ProviderForm(form),
+                            ProviderFormBack::Workbench(manager) => {
+                                Overlay::ProviderManager(manager)
+                            }
+                        })
+                }
             }
             Some(Overlay::ReasoningPicker(_)) => self
                 .overlays

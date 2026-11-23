@@ -65,7 +65,7 @@ pub(in crate::tui) fn render_model_picker(
             ),
             Span::styled(
                 if picker.query().is_empty() {
-                    "Search models".to_owned()
+                    "Search models or type custom ID".to_owned()
                 } else {
                     query.text.clone()
                 },
@@ -80,16 +80,15 @@ pub(in crate::tui) fn render_model_picker(
         rows[1],
     );
     let visible = picker.visible_models();
+    let manual = picker.manual_model();
     let list_height = usize::from(rows[2].height).max(1);
     let offset = picker
         .selected()
         .saturating_sub(list_height.saturating_sub(1));
     let id_col = usize::from(rows[2].width).saturating_sub(18).clamp(16, 44);
-    let mut lines = visible
+    let mut all_lines = visible
         .iter()
         .enumerate()
-        .skip(offset)
-        .take(list_height)
         .map(|(index, model)| {
             let selected = index == picker.selected();
             let base = modal_selection_style(state, selected);
@@ -110,18 +109,28 @@ pub(in crate::tui) fn render_model_picker(
             ])
         })
         .collect::<Vec<_>>();
-    if lines.is_empty()
-        && let Some(manual) = picker.manual_model()
-    {
-        let base = modal_selection_style(state, true);
-        lines.push(Line::from(vec![
-            Span::styled("▌ ", base),
-            Span::styled(manual.to_owned(), base.add_modifier(Modifier::BOLD)),
+    if let Some(manual) = manual {
+        let manual_index = visible.len();
+        let selected = picker.selected() == manual_index;
+        let base = modal_selection_style(state, selected);
+        all_lines.push(Line::from(vec![
+            Span::styled(if selected { "▌ " } else { "  " }, base),
+            Span::styled(
+                format!("Use custom: {manual}"),
+                semantic_style(state, SemanticColor::Focus)
+                    .add_modifier(Modifier::BOLD)
+                    .patch(base),
+            ),
         ]));
     }
+    let lines = all_lines
+        .into_iter()
+        .skip(offset)
+        .take(list_height)
+        .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines).style(surface), rows[2]);
     let status = if picker.is_loading() {
-        "Refreshing"
+        "Refreshing models from provider API..."
     } else {
         picker.error().unwrap_or("")
     };
@@ -173,96 +182,113 @@ pub(in crate::tui) fn render_reasoning_picker(
     }
     let surface = modal_surface_style(state);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(
-                    picker.model().to_owned(),
-                    semantic_style(state, SemanticColor::Focus)
-                        .add_modifier(Modifier::BOLD)
-                        .patch(surface),
-                ),
-                Span::styled(
-                    format!("  {}", picker.alias()),
-                    semantic_style(state, SemanticColor::Muted).patch(surface),
-                ),
-            ]),
-            Line::from(Span::styled(
-                "Choose a thinking mode for this model",
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                picker.model().to_owned(),
+                semantic_style(state, SemanticColor::Focus)
+                    .add_modifier(Modifier::BOLD)
+                    .patch(surface),
+            ),
+            Span::styled(
+                format!("  {}", picker.alias()),
                 semantic_style(state, SemanticColor::Muted).patch(surface),
-            )),
-        ])
+            ),
+        ]))
         .style(surface),
         rows[0],
     );
 
-    if let Some(editor) = picker.custom_editor() {
-        let viewport = editor.viewport(rows[1].width.saturating_sub(10) as usize);
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    "Custom ",
-                    semantic_style(state, SemanticColor::Focus).patch(surface),
-                ),
-                Span::styled(
-                    viewport.text.clone(),
-                    semantic_style(state, SemanticColor::Assistant).patch(surface),
-                ),
-            ]))
-            .style(surface),
-            rows[1],
-        );
-        let status = picker
-            .error()
-            .unwrap_or("Enter a provider-supported reasoning identifier");
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(
-                    status,
-                    if picker.error().is_some() {
-                        semantic_style(state, SemanticColor::Error).patch(surface)
-                    } else {
-                        semantic_style(state, SemanticColor::Muted).patch(surface)
-                    },
-                )),
-                action_hint_line(state, &[("Enter", "Use"), ("Esc", "Back")], surface),
-            ])
-            .style(surface),
-            rows[2],
-        );
-        frame.set_cursor_position(Position::new(
-            rows[1]
-                .x
-                .saturating_add(7)
-                .saturating_add(viewport.cursor_column as u16)
-                .min(rows[1].right().saturating_sub(1)),
-            rows[1].y,
-        ));
-        return;
-    }
+    let query = picker.query_viewport(rows[1].width.saturating_sub(2) as usize);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "❯ ",
+                semantic_style(state, SemanticColor::Focus)
+                    .add_modifier(Modifier::BOLD)
+                    .patch(surface),
+            ),
+            Span::styled(
+                if picker.query().is_empty() {
+                    "Filter presets or type custom value".to_owned()
+                } else {
+                    query.text.clone()
+                },
+                if picker.query().is_empty() {
+                    semantic_style(state, SemanticColor::Muted).patch(surface)
+                } else {
+                    semantic_style(state, SemanticColor::Assistant).patch(surface)
+                },
+            ),
+        ]))
+        .style(surface),
+        rows[1],
+    );
 
-    let lines = (0..picker.option_count())
-        .map(|index| {
+    let presets = picker.visible_presets();
+    let custom = picker.custom_candidate();
+    let list_height = usize::from(rows[2].height).max(1);
+    let offset = picker
+        .selected()
+        .saturating_sub(list_height.saturating_sub(1));
+    let mut all_lines = presets
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
             let selected = index == picker.selected();
             let base = modal_selection_style(state, selected);
             Line::from(vec![
                 Span::styled(if selected { "▌ " } else { "  " }, base),
-                Span::styled(
-                    picker.option_label(index),
-                    base.add_modifier(Modifier::BOLD),
-                ),
+                Span::styled((*label).to_owned(), base.add_modifier(Modifier::BOLD)),
             ])
         })
         .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines).style(surface), rows[1]);
+    if let Some(custom) = custom {
+        let custom_index = presets.len();
+        let selected = picker.selected() == custom_index;
+        let base = modal_selection_style(state, selected);
+        all_lines.push(Line::from(vec![
+            Span::styled(if selected { "▌ " } else { "  " }, base),
+            Span::styled(
+                format!("Use custom: {custom}"),
+                semantic_style(state, SemanticColor::Focus)
+                    .add_modifier(Modifier::BOLD)
+                    .patch(base),
+            ),
+        ]));
+    }
+    let lines = all_lines
+        .into_iter()
+        .skip(offset)
+        .take(list_height)
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).style(surface), rows[2]);
+
+    let status = picker
+        .error()
+        .unwrap_or("Pick a preset or type any provider-supported reasoning effort");
     frame.render_widget(
-        Paragraph::new(action_hint_line(
-            state,
-            &[("Enter", "Use"), ("Esc", "Back")],
-            surface,
-        ))
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                status,
+                if picker.error().is_some() {
+                    semantic_style(state, SemanticColor::Error).patch(surface)
+                } else {
+                    semantic_style(state, SemanticColor::Muted).patch(surface)
+                },
+            )),
+            action_hint_line(state, &[("Enter", "Use"), ("Esc", "Back")], surface),
+        ])
         .style(surface),
-        rows[2],
+        rows[3],
     );
+    frame.set_cursor_position(Position::new(
+        rows[1]
+            .x
+            .saturating_add(2)
+            .saturating_add(query.cursor_column as u16)
+            .min(rows[1].right().saturating_sub(1)),
+        rows[1].y,
+    ));
 }
 
 pub(crate) fn model_picker_pointer(
@@ -286,14 +312,14 @@ pub(crate) fn model_picker_pointer(
     if local >= list_height {
         return None;
     }
-    if visible.is_empty() {
-        return picker
-            .manual_model()
-            .filter(|_| local == 0)
-            .map(|_| ModelPointer::Manual);
-    }
     let index = offset + local;
-    (index < visible.len()).then_some(ModelPointer::Row(index))
+    if index < visible.len() {
+        return Some(ModelPointer::Row(index));
+    }
+    if index == visible.len() && picker.manual_model().is_some() {
+        return Some(ModelPointer::Manual);
+    }
+    None
 }
 
 pub(crate) fn reasoning_pointer(
@@ -305,13 +331,18 @@ pub(crate) fn reasoning_pointer(
     if modal.close_hit(position) {
         return Some(Err(()));
     }
-    if picker.custom_editor().is_some() {
+    if !rows[2].contains(position) {
         return None;
     }
-    if !rows[1].contains(position) {
+    let list_height = usize::from(rows[2].height).max(1);
+    let offset = picker
+        .selected()
+        .saturating_sub(list_height.saturating_sub(1));
+    let local = usize::from(position.y.saturating_sub(rows[2].y));
+    if local >= list_height {
         return None;
     }
-    let index = usize::from(position.y.saturating_sub(rows[1].y));
+    let index = offset + local;
     (index < picker.option_count()).then_some(Ok(index))
 }
 
@@ -334,9 +365,10 @@ fn reasoning_layout(area: Rect) -> (ModalRects, std::rc::Rc<[Rect]>) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Length(2),
             Constraint::Min(1),
-            Constraint::Length(3),
+            Constraint::Length(2),
         ])
         .split(modal.inner);
     (modal, rows)

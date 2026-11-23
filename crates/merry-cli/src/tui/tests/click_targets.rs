@@ -81,10 +81,17 @@ fn status_commands_chip_opens_the_palette_and_a_row_click_opens_settings() {
 
     let buffer = draw(&mut state, size);
     assert_eq!(
-        click(&mut state, size, point(&buffer, "Keyboard shortcuts")),
+        click(&mut state, size, point(&buffer, "Shortcuts")),
         ControllerEffect::None
     );
-    assert!(matches!(state.overlay(), Some(Overlay::Shortcuts(_))));
+    assert!(matches!(
+        state.overlay(),
+        Some(Overlay::Settings(settings))
+            if settings.category() == crate::tui::settings_overlay::SettingsCategory::Shortcuts
+    ));
+    let buffer = draw(&mut state, size);
+    let rendered = crate::tui::tests::rendered_buffer_text(&buffer);
+    assert!(rendered.contains("Command palette"));
 }
 
 #[test]

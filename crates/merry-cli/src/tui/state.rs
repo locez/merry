@@ -47,10 +47,12 @@ pub(crate) struct TuiState {
     workspace_root: PathBuf,
     model_label: String,
     reasoning_effort_label: Option<String>,
+    configured_keymap: Keymap,
     keymap: Keymap,
     configured_theme: TuiTheme,
     theme: TuiTheme,
     input: TextInput,
+    viewport_size: ratatui::layout::Size,
     /// Inner composer width from the last layout. Zero means keys use logical lines.
     composer_columns: usize,
     composer_mouse_selecting: bool,
@@ -122,10 +124,12 @@ impl TuiState {
             workspace_root: workspace_root.clone(),
             model_label,
             reasoning_effort_label: None,
+            configured_keymap: keymap.clone(),
             keymap,
             configured_theme: theme.clone(),
             theme,
             input: TextInput::default(),
+            viewport_size: ratatui::layout::Size::new(100, 30),
             composer_columns: 0,
             composer_mouse_selecting: false,
             completion_sources: CompletionSources::new(workspace_root.clone(), Vec::new()),
@@ -330,7 +334,7 @@ impl TuiState {
         &self.theme
     }
 
-    pub(super) fn sync_active_theme(&mut self) {
+    pub(super) fn sync_active_ui_preferences(&mut self) {
         let base = match self.preferences.theme_preset {
             Some(preset) => TuiTheme::from_preset(preset),
             None => self.configured_theme.clone(),
@@ -340,10 +344,45 @@ impl TuiState {
             .transparent_background
             .unwrap_or(self.settings_defaults.transparent_background);
         self.theme = base.with_transparent_background(transparent);
+        self.keymap = self
+            .configured_keymap
+            .with_overrides(&self.preferences.keymap);
+        self.animations = self
+            .preferences
+            .animations
+            .unwrap_or(self.settings_defaults.animations);
+        self.brand_mark = self
+            .preferences
+            .brand_mark
+            .unwrap_or(self.settings_defaults.brand_mark);
+        self.max_reading_width = self
+            .preferences
+            .max_reading_width
+            .unwrap_or(self.settings_defaults.max_reading_width);
+        let text_sizing = self
+            .preferences
+            .text_sizing
+            .unwrap_or(self.settings_defaults.text_sizing);
+        self.text_sizing_active = crate::tui::text_sizing::is_text_sizing_active(text_sizing);
+        self.header_items = self
+            .preferences
+            .header_items
+            .clone()
+            .unwrap_or_else(|| self.settings_defaults.header_items.clone());
+        self.mouse_scroll_lines = self
+            .preferences
+            .mouse_scroll_lines
+            .unwrap_or(self.settings_defaults.mouse_scroll_lines)
+            .max(1);
+        self.show_successful_command_output = self
+            .preferences
+            .show_successful_command_output
+            .unwrap_or(self.settings_defaults.show_successful_command_output);
     }
 
     pub(crate) fn replace_settings_defaults(&mut self, defaults: TuiSettingsDefaults) {
         self.settings_defaults = defaults;
+        self.sync_active_ui_preferences();
     }
 
     pub(crate) fn current_provider_alias(&self) -> Option<&str> {
@@ -355,7 +394,7 @@ impl TuiState {
 
     pub(crate) fn replace_preferences(&mut self, preferences: TuiPreferences) {
         self.preferences = preferences;
-        self.sync_active_theme();
+        self.sync_active_ui_preferences();
     }
 
     pub(crate) fn timeline(&self) -> &[TimelineItem] {

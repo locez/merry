@@ -23,6 +23,7 @@ pub(crate) enum ProviderOverlayAction {
         original_alias: Option<String>,
         values: ProviderFormValues,
     },
+    CopyApiKey,
     SaveProvider(ProviderFormValues),
     UpdateProvider {
         original_alias: String,

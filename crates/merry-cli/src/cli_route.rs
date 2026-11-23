@@ -1,4 +1,4 @@
-use crate::cli::{self, Cli, CliCommand};
+use crate::cli::{self, Cli, CliCommand, ExplicitCliFlags};
 use crate::cli_error::CliError;
 use crate::cli_exit::CliExit;
 use crate::cmd;
@@ -9,7 +9,11 @@ use crate::debug::{
 use crate::run as run_command;
 use crate::tui;
 
-pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit {
+pub(crate) async fn run(
+    cli: Cli,
+    explicit_flags: ExplicitCliFlags,
+    merry_config: Option<MerryConfig>,
+) -> CliExit {
     let sandbox_mode = cli.sandbox_mode();
     let permission_mode = cli.permission_mode();
     let auto_fallback = cli.auto_fallback();
@@ -28,6 +32,7 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
                 sandbox_mode,
                 permission_mode,
                 auto_fallback,
+                explicit_flags,
                 trust_workspace,
             )
             .await,
@@ -41,6 +46,7 @@ pub(crate) async fn run(cli: Cli, merry_config: Option<MerryConfig>) -> CliExit 
                 sandbox_mode,
                 permission_mode,
                 auto_fallback,
+                explicit_flags,
                 trust_workspace,
             )
             .await,

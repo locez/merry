@@ -63,6 +63,7 @@ const HEADER_HEIGHT: u16 = 1;
 /// Captures the visible timeline anchor before drawing or processing subsequent updates.
 pub(crate) fn prepare_viewport(state: &mut TuiState, size: ratatui::layout::Size) {
     state.set_composer_columns(composer_inner_columns(size.width));
+    state.sync_viewport_size(size);
     let area = Rect::new(0, 0, size.width, size.height);
     super::command_details::prepare_viewport(state, area);
     super::plan_view::prepare_viewport(state, area);

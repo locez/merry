@@ -67,6 +67,15 @@ impl ModelPickerOverlay {
         )
     }
 
+    pub(crate) fn for_target(
+        alias: String,
+        display_name: String,
+        models: Vec<ModelListItem>,
+        target: ModelPickerTarget,
+    ) -> Self {
+        Self::with_target(alias, display_name, models, true, target)
+    }
+
     fn with_target(
         alias: String,
         display_name: String,
@@ -94,8 +103,8 @@ impl ModelPickerOverlay {
         &self.display_name
     }
 
-    pub(crate) fn target(&self) -> ModelPickerTarget {
-        self.target
+    pub(crate) fn target(&self) -> &ModelPickerTarget {
+        &self.target
     }
 
     pub(crate) fn query(&self) -> &str {
@@ -111,7 +120,7 @@ impl ModelPickerOverlay {
     }
 
     pub(crate) fn select(&mut self, index: usize) {
-        let count = self.visible_models().len();
+        let count = self.row_count();
         if count > 0 {
             self.selected = index.min(count - 1);
         }
@@ -148,13 +157,15 @@ impl ModelPickerOverlay {
         .then_some(query)
     }
 
+    pub(crate) fn row_count(&self) -> usize {
+        self.visible_models().len() + usize::from(self.manual_model().is_some())
+    }
+
     pub(crate) fn set_models(&mut self, models: Vec<ModelListItem>) {
         self.models = models;
         self.loading = false;
         self.error = None;
-        self.selected = self
-            .selected
-            .min(self.visible_models().len().saturating_sub(1));
+        self.selected = self.selected.min(self.row_count().saturating_sub(1));
     }
 
     pub(crate) fn set_loading(&mut self) {
@@ -166,32 +177,36 @@ impl ModelPickerOverlay {
         match key.code {
             KeyCode::Esc => ProviderOverlayAction::Back,
             KeyCode::Down => {
-                self.selected =
-                    (self.selected + 1).min(self.visible_models().len().saturating_sub(1));
+                self.selected = (self.selected + 1).min(self.row_count().saturating_sub(1));
                 ProviderOverlayAction::Consumed
             }
             KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
                 ProviderOverlayAction::Consumed
             }
-            KeyCode::F(5) => match self.target {
-                ModelPickerTarget::ActiveProvider => {
+            KeyCode::F(5) => match &self.target {
+                ModelPickerTarget::ProviderForm => ProviderOverlayAction::RefreshFormModels,
+                ModelPickerTarget::ActiveProvider
+                | ModelPickerTarget::QuickSwitch
+                | ModelPickerTarget::SettingsActiveModel
+                | ModelPickerTarget::RoleBinding(_)
+                | ModelPickerTarget::SettingsReasoning(_) => {
                     ProviderOverlayAction::RefreshModels(self.alias.clone())
                 }
-                ModelPickerTarget::ProviderForm => ProviderOverlayAction::RefreshFormModels,
             },
             KeyCode::Enter => {
-                if let Some(model) = self.visible_models().get(self.selected) {
+                let visible = self.visible_models();
+                if let Some(model) = visible.get(self.selected) {
                     ProviderOverlayAction::SelectModel {
                         alias: self.alias.clone(),
                         model: model.id.clone(),
-                        target: self.target,
+                        target: self.target.clone(),
                     }
                 } else if let Some(model) = self.manual_model() {
                     ProviderOverlayAction::SelectModel {
                         alias: self.alias.clone(),
                         model: model.to_owned(),
-                        target: self.target,
+                        target: self.target.clone(),
                     }
                 } else {
                     ProviderOverlayAction::Consumed

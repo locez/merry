@@ -36,7 +36,7 @@ pub(crate) enum OverlayPointer {
     CloseModal,
     Palette(usize),
     Skill(usize),
-    Setting(crate::tui::overlay::SettingItem),
+    Settings(crate::tui::settings_render::SettingsPointer),
     PlanView(crate::tui::plan_view::PlanViewPointer),
     PermissionAllow,
     PermissionReject,

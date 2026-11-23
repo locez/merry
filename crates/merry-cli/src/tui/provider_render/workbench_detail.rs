@@ -164,8 +164,22 @@ pub(super) fn render_form_detail_pane(
                 }
             },
             ProviderFormField::ApiKey => {
+                let copy_label = " [Copy]";
+                let show_copy = form.has_copyable_api_key()
+                    && value_width >= UnicodeWidthStr::width(copy_label) + 4;
+                let key_budget = if show_copy {
+                    value_width
+                        .saturating_sub(UnicodeWidthStr::width(copy_label))
+                        .max(1)
+                } else {
+                    value_width
+                };
                 let masked = form.masked_api_key();
-                let val_style = if masked == "unchanged" {
+                let visible_masked =
+                    crate::tui::click_target::truncate_columns(&masked, key_budget);
+                let is_saved_placeholder =
+                    form.field(ProviderFormField::ApiKey).is_empty() && form.is_editing();
+                let val_style = if is_saved_placeholder {
                     semantic_style(state, SemanticColor::Muted).patch(if selected {
                         base
                     } else {
@@ -178,7 +192,33 @@ pub(super) fn render_form_detail_pane(
                         input_bg
                     })
                 };
-                spans.push(Span::styled(masked, val_style));
+                spans.push(Span::styled(visible_masked, val_style));
+                if show_copy {
+                    spans.push(Span::styled(" ", base));
+                    let mut chip_style =
+                        semantic_style(state, SemanticColor::Focus).add_modifier(Modifier::BOLD);
+                    if let Some(bg) = state.theme().bg_color(SemanticColor::ChipBackground) {
+                        chip_style = chip_style.bg(bg);
+                    }
+                    spans.push(Span::styled("[Copy]", chip_style));
+                }
+            }
+            ProviderFormField::ServiceTier => {
+                let label = form.service_tier_label();
+                let is_muted = form.kind() != ManagedProviderKind::OpenAiCompatible
+                    || form.service_tier().is_none();
+                let is_warning = form.service_tier().is_some_and(|tier| {
+                    form.protocol()
+                        .is_some_and(|protocol| !protocol.supports_service_tier(tier))
+                });
+                let slot = if is_warning {
+                    SemanticColor::Warning
+                } else if is_muted {
+                    SemanticColor::Muted
+                } else {
+                    SemanticColor::ToolKeyword
+                };
+                spans.push(Span::styled(label, semantic_style(state, slot).patch(base)));
             }
             ProviderFormField::Model => {
                 let browse_label = " [Browse ▸]";
@@ -229,6 +269,7 @@ pub(super) fn render_form_detail_pane(
         if selected != ProviderFormField::Kind
             && selected != ProviderFormField::Protocol
             && selected != ProviderFormField::ApiKey
+            && selected != ProviderFormField::ServiceTier
             && selected != ProviderFormField::Save
             && !(selected == ProviderFormField::Alias && form.is_editing())
         {

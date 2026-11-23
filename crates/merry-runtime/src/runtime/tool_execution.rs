@@ -142,7 +142,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
         return execute_permission_request_tool_call(inner, &pending, context, false).await;
     }
 
-    let fully_trusted = inner.permission_review_mode.is_fully_trusted();
+    let fully_trusted = inner.permission_review_mode.read().await.is_fully_trusted();
     let mut policy_decision = DefaultActionPolicy.decide(registered_tool.action_kind());
     if fully_trusted {
         policy_decision =

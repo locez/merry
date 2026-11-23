@@ -17,12 +17,12 @@ use crate::{
 };
 use merry_core::SessionId;
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 use tokio::sync::{Mutex, RwLock};
@@ -34,9 +34,10 @@ pub(super) struct RuntimeInner {
     pub(super) active_step: Arc<AtomicBool>,
     pub(super) memory_projection_epoch: AtomicU64,
     pub(super) event_buffer_size: NonZeroUsize,
-    pub(super) max_parallel_tool_calls: NonZeroUsize,
+    pub(super) max_parallel_tool_calls: AtomicUsize,
     pub(super) model_configs: RuntimeModelConfigs,
-    pub(super) primary_model_override: RwLock<Option<ModelProviderConfig>>,
+    pub(super) role_model_overrides:
+        RwLock<BTreeMap<RuntimeModelRole, Option<ModelProviderConfig>>>,
     pub(super) automatic_compaction: RwLock<CompactionConfig>,
     pub(super) context_window_tokens: RwLock<Option<NonZeroU64>>,
     pub(super) capabilities: RuntimeCapabilities,
@@ -50,12 +51,12 @@ pub(super) struct RuntimeInner {
     pub(super) read_only_shell_process_runner: Option<Arc<dyn ProcessRunner>>,
     pub(super) accepted_local_workspace_process_runner: Option<AcceptedLocalWorkspaceProcessRunner>,
     pub(super) runtime_trust_level: RuntimeTrustLevel,
-    pub(super) permission_review_mode: PermissionReviewMode,
+    pub(super) permission_review_mode: RwLock<PermissionReviewMode>,
     pub(super) permission_review_rules: PermissionReviewRules,
     pub(super) permission_review_workspace_root: Option<PathBuf>,
     pub(super) permission_actor: PermissionActor,
     pub(super) recorded_permission_decisions: RwLock<VecDeque<RecordedPermissionDecision>>,
-    pub(super) permission_admission_source: Option<Arc<dyn PermissionAdmissionSource>>,
+    pub(super) permission_admission_source: RwLock<Option<Arc<dyn PermissionAdmissionSource>>>,
     pub(super) permissioned_process_runner_factory:
         Option<Arc<dyn PermissionedProcessRunnerFactory>>,
     pub(super) background_process_control: Option<Arc<dyn BackgroundProcessControl>>,
@@ -78,10 +79,8 @@ impl RuntimeInner {
     }
 
     pub(super) async fn model_config(&self, role: RuntimeModelRole) -> Option<ModelProviderConfig> {
-        if role == RuntimeModelRole::Primary
-            && let Some(config) = self.primary_model_override.read().await.as_ref()
-        {
-            return Some(config.clone());
+        if let Some(override_entry) = self.role_model_overrides.read().await.get(&role) {
+            return override_entry.clone();
         }
         self.model_configs.get(role)
     }
@@ -91,7 +90,7 @@ impl RuntimeInner {
         role: RuntimeModelRole,
     ) -> Option<ModelProviderConfig> {
         if role != RuntimeModelRole::Primary
-            && let Some(config) = self.model_configs.get(role)
+            && let Some(config) = self.model_config(role).await
         {
             return Some(config);
         }

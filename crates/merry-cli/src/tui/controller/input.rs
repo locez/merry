@@ -7,7 +7,6 @@ use crate::tui::{
     keymap::KeyAction,
     overlay::{Overlay, OverlayKeyResult},
     preferences::TuiPreferences,
-    provider_overlay::ModelPickerTarget,
     state::{PendingEditCommit, TuiState},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -365,14 +364,12 @@ pub(super) fn preferences_effect(
     item: crate::tui::overlay::SettingItem,
     preferences: TuiPreferences,
 ) -> ControllerEffect {
-    match item {
-        crate::tui::overlay::SettingItem::CodeTheme
-        | crate::tui::overlay::SettingItem::UiTheme
-        | crate::tui::overlay::SettingItem::TransparentBackground => {
-            ControllerEffect::PersistPreferences(preferences)
-        }
-        crate::tui::overlay::SettingItem::KeyboardShortcuts => ControllerEffect::None,
-        _ => ControllerEffect::ApplyRuntimePreferences(preferences),
+    if item.is_action_only() {
+        ControllerEffect::None
+    } else if item.is_ui_only() {
+        ControllerEffect::PersistPreferences(preferences)
+    } else {
+        ControllerEffect::ApplyRuntimePreferences(preferences)
     }
 }
 
@@ -467,49 +464,57 @@ fn overlay_key_effect(result: OverlayKeyResult, state: &mut TuiState) -> Control
                 ControllerEffect::None
             }
         }
-        OverlayKeyResult::BeginModelEdit => {
-            state.begin_settings_model_edit();
+        OverlayKeyResult::BeginSettingEdit(item) => {
+            state.begin_settings_inline_edit(item);
             ControllerEffect::None
         }
-        OverlayKeyResult::CommitModel(value) => {
-            let clears_model = value.trim().is_empty();
-            match state.commit_settings_model(value) {
-                Some((alias, model)) => ControllerEffect::OpenReasoningPicker {
-                    alias,
-                    model,
-                    target: ModelPickerTarget::ActiveProvider,
-                },
-                None if clears_model => {
-                    ControllerEffect::ApplyRuntimePreferences(state.preferences().clone())
-                }
-                None => ControllerEffect::None,
-            }
-        }
-        OverlayKeyResult::BeginReasoningEdit => {
-            state.begin_settings_reasoning_edit();
-            ControllerEffect::None
-        }
-        OverlayKeyResult::CommitReasoning(value) => {
-            if state.commit_settings_reasoning(value) {
-                ControllerEffect::ApplyRuntimePreferences(state.preferences().clone())
+        OverlayKeyResult::CommitSettingEdit { item, value } => {
+            if state.commit_settings_inline_edit(item, value) {
+                preferences_effect(item, state.preferences().clone())
             } else {
                 ControllerEffect::None
             }
         }
-        OverlayKeyResult::BeginContextWindowEdit => {
-            state.begin_settings_context_window_edit();
+        OverlayKeyResult::PickSettingModel(item) => match state.settings_model_picker_request(item)
+        {
+            Some((alias, target)) => ControllerEffect::OpenTargetedModelPicker { alias, target },
+            None => {
+                state.set_settings_notice(Some(
+                    "Add or select a provider first before picking a model".to_owned(),
+                ));
+                ControllerEffect::None
+            }
+        },
+        OverlayKeyResult::PickSettingReasoning(item) => {
+            if !state.open_settings_reasoning_picker(item) {
+                state.set_settings_notice(Some(
+                    "Add or select a provider first before picking a thinking mode".to_owned(),
+                ));
+            }
             ControllerEffect::None
         }
-        OverlayKeyResult::CommitContextWindow(value) => {
-            if state.commit_settings_context_window(value) {
-                ControllerEffect::ApplyRuntimePreferences(state.preferences().clone())
+        OverlayKeyResult::OpenSettingChoices(item) => {
+            if !state.open_settings_choice_menu(item)
+                && state.adjust_setting(item, crate::tui::overlay::SettingDirection::Next)
+            {
+                preferences_effect(item, state.preferences().clone())
             } else {
                 ControllerEffect::None
             }
         }
-        OverlayKeyResult::OpenShortcuts => {
-            state.open_shortcuts();
-            ControllerEffect::None
+        OverlayKeyResult::SelectSettingChoice { item, index } => {
+            if state.apply_setting_choice(item, index) {
+                preferences_effect(item, state.preferences().clone())
+            } else {
+                ControllerEffect::None
+            }
+        }
+        OverlayKeyResult::CaptureShortcut { action, key } => {
+            if state.apply_shortcut_capture(action, key) {
+                ControllerEffect::PersistPreferences(state.preferences().clone())
+            } else {
+                ControllerEffect::None
+            }
         }
         OverlayKeyResult::ApprovePermission(approval_id) => {
             state.close_overlay();

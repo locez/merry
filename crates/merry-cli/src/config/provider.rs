@@ -365,7 +365,7 @@ fn parse_provider_service_tier(
 /// `location` names the setting in the user's config so the message points at
 /// the key that has to change, which differs between `[providers.default]` and
 /// `[providers.<alias>]`.
-fn validate_service_tier_support(
+pub(super) fn validate_service_tier_support(
     location: &str,
     service_tier: ServiceTier,
     kind: ConfiguredProviderKind,

@@ -80,8 +80,11 @@ impl ModelBackedPermissionAdmissionSource {
         recorded_decisions: Vec<RecordedPermissionDecision>,
         environment: Option<PermissionReviewEnvironmentMetadata>,
     ) -> Result<Self, PermissionAdmissionError> {
-        let reasoning_effort = ReasoningEffort::new(PERMISSION_REVIEW_REASONING_EFFORT)
-            .map_err(map_permission_model_request_error)?;
+        let reasoning_effort = match config.reasoning_effort() {
+            Some(effort) => effort.clone(),
+            None => ReasoningEffort::new(PERMISSION_REVIEW_REASONING_EFFORT)
+                .map_err(map_permission_model_request_error)?,
+        };
         let generation_config =
             GenerationConfig::new(Some(PERMISSION_REVIEW_MAX_OUTPUT_TOKENS), false)
                 .map_err(map_permission_model_request_error)?

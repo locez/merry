@@ -44,6 +44,7 @@ pub(crate) enum ProviderWorkbenchPointer {
     SelectProvider(usize),
     AddProvider,
     Field(ProviderFormField),
+    CopyApiKey,
     BrowseModels,
     SetActive,
     DeleteSelected,
@@ -155,6 +156,7 @@ pub(super) fn form_field_label(field: ProviderFormField) -> &'static str {
         ProviderFormField::ApiKey => "API key",
         ProviderFormField::Model => "Initial model",
         ProviderFormField::ReasoningEffort => "Thinking mode",
+        ProviderFormField::ServiceTier => "Service tier",
         ProviderFormField::Save => "Save provider",
     }
 }

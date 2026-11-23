@@ -22,6 +22,7 @@ use crate::{
 };
 #[cfg(test)]
 pub(super) use effects::persist_submitted_input_history;
+pub(super) use effects::write_system_clipboard;
 pub(super) use input::project_local_effect;
 pub(crate) use input::{
     apply_clipboard_image_completion, handle_key_action, handle_key_event, handle_paste_event,
@@ -143,6 +144,7 @@ fn needs_pre_dispatch_render(effect: &ControllerEffect) -> bool {
             | ControllerEffect::LoadCommandOutput(_)
             | ControllerEffect::PasteImage
             | ControllerEffect::OpenModelPicker(_)
+            | ControllerEffect::OpenTargetedModelPicker { .. }
             | ControllerEffect::RefreshModels(_)
             | ControllerEffect::RefreshFormModels
             | ControllerEffect::DiscoverFormModels { .. }
@@ -280,11 +282,16 @@ pub(crate) enum ControllerEffect {
     OpenProviderForm,
     OpenProviderEditor(String),
     OpenModelPicker(String),
+    OpenTargetedModelPicker {
+        alias: String,
+        target: ModelPickerTarget,
+    },
     BackToProviderForm,
     DiscoverFormModels {
         original_alias: Option<String>,
         values: ProviderFormValues,
     },
+    CopyProviderApiKey,
     SaveProvider(ProviderFormValues),
     UpdateProvider {
         original_alias: String,
@@ -306,6 +313,11 @@ pub(crate) enum ControllerEffect {
         model: String,
         reasoning_effort: merry_llm::ReasoningEffort,
         target: ModelPickerTarget,
+    },
+    ApplyRoleModel {
+        alias: String,
+        model: String,
+        target: crate::tui::provider_selection::ModelBindingTarget,
     },
     SetPlanMode {
         enabled: bool,

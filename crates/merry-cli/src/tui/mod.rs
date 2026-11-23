@@ -51,7 +51,7 @@ mod overlay_render;
 mod permission_render;
 mod plan_controller;
 mod plan_view;
-mod preferences;
+pub(crate) mod preferences;
 mod process_output;
 mod projector;
 mod provider_overlay;
@@ -62,6 +62,8 @@ mod render;
 mod runtime;
 pub(crate) mod session_list;
 mod session_picker;
+mod settings_overlay;
+mod settings_render;
 mod skills_overlay;
 mod state;
 mod status;
@@ -115,6 +117,7 @@ pub(crate) async fn run(
     sandbox_mode: SandboxMode,
     permission_mode: PermissionMode,
     auto_fallback: AutoFallback,
+    explicit_flags: crate::cli::ExplicitCliFlags,
     trust_workspace: Option<TrustWorkspace>,
 ) -> Result<(), CliError> {
     let tui_config = merry_config
@@ -134,11 +137,21 @@ pub(crate) async fn run(
         .cloned()
         .or_else(|| merry_config.cloned());
     let mut settings_defaults = TuiSettingsDefaults::from_config(active_config.as_ref())
-        .map_err(crate::cli_error::unexpected)?;
+        .map_err(crate::cli_error::unexpected)?
+        .with_explicit_cli_flags(explicit_flags);
     let mut preferences = preferences_store
         .load_with_default_provider(settings_defaults.provider.as_deref())
         .await
         .map_err(crate::cli_error::unexpected)?;
+    let startup_sandbox = resolve_effective_sandbox(explicit_flags, &preferences, sandbox_mode);
+    if startup_sandbox == SandboxMode::Workspace
+        && sandbox_mode != SandboxMode::Workspace
+        && let Err(error) = merry_process::probe_workspace_sandbox()
+    {
+        return Err(crate::cli_error::unexpected(format!(
+            "{error}\nSee SANDBOX.md (https://github.com/locez/merry/blob/main/SANDBOX.md)."
+        )));
+    }
     let startup_transparent = preferences
         .transparent_background
         .unwrap_or(settings_defaults.transparent_background);
@@ -147,7 +160,8 @@ pub(crate) async fn run(
         .map(TuiTheme::from_preset)
         .unwrap_or_else(|| configured_theme.clone())
         .with_transparent_background(startup_transparent);
-    let launch = workspace_trust::prepare_product_workspace(sandbox_mode, trust_workspace, &paths)?;
+    let launch =
+        workspace_trust::prepare_product_workspace(startup_sandbox, trust_workspace, &paths)?;
     let mut terminal = match TerminalSession::enter() {
         Ok(terminal) => terminal,
         Err(error) => {
@@ -189,7 +203,8 @@ pub(crate) async fn run(
         preferences = configured;
         active_config = provider_management.config().cloned();
         settings_defaults = TuiSettingsDefaults::from_config(active_config.as_ref())
-            .map_err(crate::cli_error::unexpected)?;
+            .map_err(crate::cli_error::unexpected)?
+            .with_explicit_cli_flags(explicit_flags);
     }
     let input_history_store = InputHistoryStore::for_workspace(paths.state_dir(), &workspace_root);
     let mut selection = match launch_mode {
@@ -209,15 +224,24 @@ pub(crate) async fn run(
         if matches!(selection, SessionPickerSelection::Quit) {
             return Ok(());
         }
+        let effective_sandbox =
+            resolve_effective_sandbox(explicit_flags, &preferences, sandbox_mode);
+        let effective_permission_mode =
+            resolve_effective_permission_mode(explicit_flags, &preferences, permission_mode);
+        let effective_auto_fallback =
+            resolve_effective_auto_fallback(explicit_flags, &preferences, auto_fallback);
         let session = runtime::start_tui_runtime_session(
             active_config.as_ref(),
             session_store.clone(),
             selection,
             &preferences,
             runtime::TuiSessionLaunch {
-                sandbox_mode,
-                permission_mode,
-                auto_fallback,
+                sandbox_mode: effective_sandbox,
+                permission_mode: effective_permission_mode,
+                auto_fallback: effective_auto_fallback,
+                configured_permission_mode: permission_mode,
+                configured_auto_fallback: auto_fallback,
+                explicit_cli_flags: explicit_flags,
                 workspace_root: workspace_root.clone(),
                 workspace_writable: workspace.writable,
             },
@@ -286,7 +310,8 @@ pub(crate) async fn run(
             .cloned()
             .or_else(|| merry_config.cloned());
         settings_defaults = TuiSettingsDefaults::from_config(active_config.as_ref())
-            .map_err(crate::cli_error::unexpected)?;
+            .map_err(crate::cli_error::unexpected)?
+            .with_explicit_cli_flags(explicit_flags);
         preferences = preferences_store
             .load_with_default_provider(settings_defaults.provider.as_deref())
             .await
@@ -318,6 +343,39 @@ pub(crate) async fn run(
             }
         }
     }
+}
+
+pub(crate) fn resolve_effective_sandbox(
+    explicit_flags: crate::cli::ExplicitCliFlags,
+    preferences: &TuiPreferences,
+    config_or_default: SandboxMode,
+) -> SandboxMode {
+    explicit_flags
+        .sandbox
+        .or(preferences.permissions.sandbox)
+        .unwrap_or(config_or_default)
+}
+
+pub(crate) fn resolve_effective_permission_mode(
+    explicit_flags: crate::cli::ExplicitCliFlags,
+    preferences: &TuiPreferences,
+    config_or_default: PermissionMode,
+) -> PermissionMode {
+    explicit_flags
+        .permission_mode
+        .or(preferences.permissions.permission_mode)
+        .unwrap_or(config_or_default)
+}
+
+pub(crate) fn resolve_effective_auto_fallback(
+    explicit_flags: crate::cli::ExplicitCliFlags,
+    preferences: &TuiPreferences,
+    config_or_default: AutoFallback,
+) -> AutoFallback {
+    explicit_flags
+        .auto_fallback
+        .or(preferences.permissions.auto_fallback)
+        .unwrap_or(config_or_default)
 }
 
 fn project_mcp_startup_warnings(state: &mut TuiState, warnings: &[merry_mcp::McpServerDiagnostic]) {
@@ -407,7 +465,7 @@ async fn run_provider_setup(
                                 if matches!(
                                     state.overlay(),
                                     Some(overlay::Overlay::ModelPicker(picker))
-                                        if picker.target() == ModelPickerTarget::ProviderForm
+                                        if *picker.target() == ModelPickerTarget::ProviderForm
                                 ) =>
                             {
                                 state.back_overlay();
@@ -471,6 +529,7 @@ async fn run_provider_setup(
                                         base_url: editable.base_url,
                                         model: editable.default_model.as_str().to_owned(),
                                         reasoning_effort: editable.reasoning_effort,
+                                        service_tier: editable.service_tier,
                                     },
                                     used,
                                 );
@@ -490,6 +549,43 @@ async fn run_provider_setup(
                             ProviderOverlayAction::BackToProviderForm => {
                                 cancel_setup_discovery(&mut discovery_token);
                                 state.back_overlay();
+                            }
+                            ProviderOverlayAction::CopyApiKey => {
+                                if let Some((original_alias, draft_api_key)) =
+                                    state.provider_form_api_key_for_copy()
+                                {
+                                    let secret = if let Some(draft) = draft_api_key {
+                                        Ok(draft)
+                                    } else if let Some(alias) = original_alias {
+                                        ProviderAlias::new(&alias)
+                                            .map_err(|error| error.to_string())
+                                            .and_then(|alias| {
+                                                provider_management
+                                                    .copy_retained_api_key(&alias)
+                                                    .map_err(|error| error.to_string())
+                                            })
+                                    } else {
+                                        Err("No API key to copy".to_owned())
+                                    };
+                                    match secret {
+                                        Ok(key) => {
+                                            let system =
+                                                controller::write_system_clipboard(&key).await;
+                                            let terminal_result = terminal.copy_text(&key);
+                                            let notice = if system.is_ok()
+                                                || terminal_result.is_ok()
+                                            {
+                                                "API key copied to clipboard".to_owned()
+                                            } else {
+                                                "Copy failed: clipboard is unavailable".to_owned()
+                                            };
+                                            state.set_provider_form_notice(Some(notice));
+                                        }
+                                        Err(message) => {
+                                            state.set_provider_form_notice(Some(message));
+                                        }
+                                    }
+                                }
                             }
                             ProviderOverlayAction::DiscoverFormModels {
                                 original_alias,
@@ -694,6 +790,14 @@ async fn run_provider_setup(
                                     );
                                 }
                             }
+                            ProviderOverlayAction::SelectReasoning {
+                                target:
+                                    ModelPickerTarget::QuickSwitch
+                                    | ModelPickerTarget::RoleBinding(_)
+                                    | ModelPickerTarget::SettingsActiveModel
+                                    | ModelPickerTarget::SettingsReasoning(_),
+                                ..
+                            } => {}
                         }
                     }
                     terminal::TerminalEvent::Paste(text) => {
@@ -729,6 +833,17 @@ fn open_setup_provider_manager(
             let model = preferences
                 .model_for_provider(profile.alias().as_str())
                 .or_else(|| profile.default_model().map(merry_llm::ModelName::as_str));
+            let editable = provider_management.editable_provider(profile.alias()).ok();
+            let base_url = editable.as_ref().map(|entry| entry.base_url.clone());
+            let reasoning_effort = editable
+                .as_ref()
+                .and_then(|entry| entry.reasoning_effort.as_ref())
+                .or_else(|| profile.reasoning_effort())
+                .map(|effort| effort.as_str().to_owned());
+            let service_tier = editable
+                .as_ref()
+                .and_then(|entry| entry.service_tier)
+                .or_else(|| profile.service_tier());
             ProviderListItem::new(
                 profile.alias().as_str(),
                 profile.display_name(),
@@ -736,6 +851,8 @@ fn open_setup_provider_manager(
                 profile.protocol(),
                 model,
             )
+            .with_details(base_url, reasoning_effort)
+            .with_service_tier(service_tier)
         })
         .collect::<Vec<_>>();
     if items.is_empty() {

@@ -138,6 +138,24 @@ fn form_detail_pointer(
     let non_save_count = ProviderFormField::ALL.len() - 1;
     if local_y >= first_field_row && local_y < first_field_row + non_save_count {
         let field = ProviderFormField::ALL[local_y - first_field_row];
+        if field == ProviderFormField::ApiKey && form.has_copyable_api_key() {
+            let copy_label = " [Copy]";
+            if value_width >= UnicodeWidthStr::width(copy_label) + 4 {
+                let key_budget = value_width
+                    .saturating_sub(UnicodeWidthStr::width(copy_label))
+                    .max(1);
+                let masked = form.masked_api_key();
+                let visible_masked =
+                    crate::tui::click_target::truncate_columns(&masked, key_budget);
+                let text_width = UnicodeWidthStr::width(visible_masked.as_str());
+                let copy_x = pane.x.saturating_add(
+                    u16::try_from(2 + label_col_width + text_width + 1).unwrap_or(0),
+                );
+                if position.x >= copy_x && position.x < copy_x.saturating_add(6) {
+                    return Some(ProviderWorkbenchPointer::CopyApiKey);
+                }
+            }
+        }
         if field == ProviderFormField::Model {
             let browse_label = " [Browse ▸]";
             if value_width >= UnicodeWidthStr::width(browse_label) + 4 {

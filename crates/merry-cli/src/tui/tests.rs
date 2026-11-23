@@ -119,6 +119,8 @@ mod read_output;
 mod provider_interactions;
 
 mod settings;
+mod settings_permissions;
+mod settings_workbench;
 
 mod status_usage;
 mod sticky_user;

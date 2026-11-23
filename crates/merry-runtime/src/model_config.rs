@@ -4,7 +4,7 @@
 //! provider step uses only the primary role; review roles are stored for later
 //! gates without affecting provider-visible request shapes.
 
-use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
+use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy, ReasoningEffort};
 use std::{collections::BTreeMap, sync::Arc};
 
 /// Runtime model role for a configured provider/model pair.
@@ -36,6 +36,7 @@ pub(crate) struct ModelProviderConfig {
     provider: Arc<dyn ModelProvider>,
     model: ModelName,
     retry_policy: ModelRetryPolicy,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl ModelProviderConfig {
@@ -48,7 +49,16 @@ impl ModelProviderConfig {
             provider,
             model,
             retry_policy,
+            reasoning_effort: None,
         }
+    }
+
+    pub(crate) fn with_reasoning_effort(
+        mut self,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) -> Self {
+        self.reasoning_effort = reasoning_effort;
+        self
     }
 
     pub(crate) fn provider(&self) -> Arc<dyn ModelProvider> {
@@ -61,6 +71,10 @@ impl ModelProviderConfig {
 
     pub(crate) fn retry_policy(&self) -> ModelRetryPolicy {
         self.retry_policy
+    }
+
+    pub(crate) fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
+        self.reasoning_effort.as_ref()
     }
 
     pub(crate) fn set_retry_policy(&mut self, retry_policy: ModelRetryPolicy) {

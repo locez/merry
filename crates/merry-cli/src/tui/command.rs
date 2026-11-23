@@ -4,6 +4,7 @@ use merry::profiles::CodingWorkflowCommand;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaletteCommand {
     OpenSettings,
+    SwitchModel,
     OpenProviders,
     ShowShortcuts,
     ShowHelp,
@@ -33,6 +34,7 @@ pub(crate) struct CommandSpec {
     pub(crate) category: &'static str,
     pub(crate) label: &'static str,
     pub(crate) key_action: Option<KeyAction>,
+    show_in_palette: bool,
     slash_name: Option<&'static str>,
     slash_aliases: &'static [&'static str],
     slash_description: Option<&'static str>,
@@ -51,11 +53,17 @@ impl CommandSpec {
             category,
             label,
             key_action,
+            show_in_palette: true,
             slash_name: None,
             slash_aliases: &[],
             slash_description: None,
             arg_hint: None,
         }
+    }
+
+    const fn hidden_from_palette(mut self) -> Self {
+        self.show_in_palette = false;
+        self
     }
 
     const fn with_slash(mut self, name: &'static str, description: &'static str) -> Self {
@@ -79,6 +87,10 @@ impl CommandSpec {
         self.slash_description = Some(description);
         self.arg_hint = Some(arg_hint);
         self
+    }
+
+    pub(crate) const fn show_in_palette(&self) -> bool {
+        self.show_in_palette
     }
 
     pub(crate) const fn slash_name(&self) -> Option<&'static str> {
@@ -112,21 +124,20 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec::new(PaletteCommand::OpenSettings, "Merry", "Settings", None)
         .with_slash("settings", "Open settings")
         .with_slash_aliases(&["config"]),
-    CommandSpec::new(
-        PaletteCommand::OpenProviders,
-        "Merry",
-        "Providers & models",
-        None,
-    )
-    .with_slash("model", "Switch provider or model")
-    .with_slash_aliases(&["provider", "providers"]),
+    CommandSpec::new(PaletteCommand::SwitchModel, "Merry", "Switch model", None)
+        .with_slash("model", "Switch model for the active provider"),
+    CommandSpec::new(PaletteCommand::OpenProviders, "Merry", "Providers", None)
+        .hidden_from_palette()
+        .with_slash("providers", "Manage providers")
+        .with_slash_aliases(&["provider"]),
     CommandSpec::new(
         PaletteCommand::ShowShortcuts,
         "Merry",
         "Keyboard shortcuts",
         None,
     )
-    .with_slash("shortcuts", "Show keyboard shortcuts")
+    .hidden_from_palette()
+    .with_slash("shortcuts", "Open keyboard shortcuts in Settings")
     .with_slash_aliases(&["keys"]),
     CommandSpec::new(PaletteCommand::ShowHelp, "Merry", "Command help", None)
         .with_slash("help", "List slash commands and keys"),
@@ -342,11 +353,13 @@ pub(crate) fn slash_help_body(keymap: &Keymap) -> String {
     ];
     #[cfg(feature = "web")]
     lines.push(
-        "Config    /model (/provider) · /settings (/config) · /shortcuts · /web · /help".to_owned(),
+        "Config    /model · /providers · /settings (/config) · /shortcuts · /web · /help"
+            .to_owned(),
     );
     #[cfg(not(feature = "web"))]
-    lines
-        .push("Config    /model (/provider) · /settings (/config) · /shortcuts · /help".to_owned());
+    lines.push(
+        "Config    /model · /providers · /settings (/config) · /shortcuts · /help".to_owned(),
+    );
     lines.push("Type / to search commands with descriptions.".to_owned());
     lines.push(format!(
         "Submit {}  Commands {}  Stop {}",
@@ -413,11 +426,23 @@ mod tests {
         );
         assert_eq!(
             find_slash_exact("model").map(|command| command.command),
-            Some(PaletteCommand::OpenProviders)
+            Some(PaletteCommand::SwitchModel)
         );
         assert_eq!(
             find_slash_exact("provider").map(|command| command.command),
             Some(PaletteCommand::OpenProviders)
+        );
+        assert_eq!(
+            find_slash_exact("providers").map(|command| command.command),
+            Some(PaletteCommand::OpenProviders)
+        );
+        assert!(
+            find_slash_exact("settings").is_some_and(CommandSpec::show_in_palette)
+                && find_slash_exact("model").is_some_and(CommandSpec::show_in_palette)
+        );
+        assert!(
+            find_slash_exact("providers").is_some_and(|spec| !spec.show_in_palette())
+                && find_slash_exact("shortcuts").is_some_and(|spec| !spec.show_in_palette())
         );
         assert_eq!(
             find_slash_exact("resume").map(|command| command.command),

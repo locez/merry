@@ -1,7 +1,7 @@
 use super::{ProviderFormField, ProviderFormOverlay, ProviderFormSeed, ProviderOverlayAction};
 use crate::config::{ConfiguredProviderKind, ManagedProviderKind, derive_provider_alias};
 use crossterm::event::{KeyCode, KeyEvent};
-use merry_llm::ReasoningEffort;
+use merry_llm::{ReasoningEffort, ServiceTier};
 use merry_provider_openai::OpenAiProtocol;
 use std::collections::BTreeSet;
 
@@ -22,6 +22,7 @@ pub(crate) struct ProviderListItem {
     model: Option<String>,
     base_url: Option<String>,
     reasoning_effort: Option<String>,
+    service_tier: Option<ServiceTier>,
 }
 
 impl ProviderListItem {
@@ -40,6 +41,7 @@ impl ProviderListItem {
             model: model.map(str::to_owned),
             base_url: None,
             reasoning_effort: None,
+            service_tier: None,
         }
     }
 
@@ -50,6 +52,11 @@ impl ProviderListItem {
     ) -> Self {
         self.base_url = base_url;
         self.reasoning_effort = reasoning_effort;
+        self
+    }
+
+    pub(crate) fn with_service_tier(mut self, service_tier: Option<ServiceTier>) -> Self {
+        self.service_tier = service_tier;
         self
     }
 
@@ -98,6 +105,7 @@ impl ProviderListItem {
                 .unwrap_or_else(|| default_url.to_owned()),
             model: self.model.clone().unwrap_or_default(),
             reasoning_effort,
+            service_tier: self.service_tier,
         }
     }
 }
@@ -221,6 +229,14 @@ impl ProviderManagerOverlay {
         self.focus = ProviderWorkbenchFocus::Detail;
         form.select_field(ProviderFormField::Model);
         form.trigger_model_discovery()
+    }
+
+    pub(crate) fn trigger_detail_copy_api_key(&mut self) -> ProviderOverlayAction {
+        let Some(form) = self.detail_form.as_mut() else {
+            return ProviderOverlayAction::Consumed;
+        };
+        self.focus = ProviderWorkbenchFocus::Detail;
+        form.trigger_copy_api_key()
     }
 
     pub(crate) fn insert_paste(&mut self, text: &str) {

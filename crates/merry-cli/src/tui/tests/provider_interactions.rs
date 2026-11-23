@@ -322,13 +322,15 @@ fn provider_surfaces_fit_supported_terminal_sizes_without_secret_exposure() {
             base_url: "https://gateway.example.test/v1".to_owned(),
             model: "deepseek-v4-pro".to_owned(),
             reasoning_effort: None,
+            service_tier: None,
         },
         Default::default(),
     );
     let edit = render_to_text(&state, 100, 30);
     assert!(edit.contains("Edit provider"));
     assert!(edit.contains("Chat Completions"));
-    assert!(edit.contains("unchanged"));
+    assert!(edit.contains("saved"));
+    assert!(edit.contains("[Copy]"));
 
     state.open_model_picker(
         "opencode".to_owned(),
@@ -366,6 +368,7 @@ fn provider_form_model_picker_returns_selection_to_the_form() {
             base_url: "https://opencode.example.test/v1".to_owned(),
             model: "model-a".to_owned(),
             reasoning_effort: None,
+            service_tier: None,
         },
         Default::default(),
     );

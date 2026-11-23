@@ -199,6 +199,7 @@ impl SubagentsConfig {
         mut self,
         enabled: Option<bool>,
         max_threads: Option<usize>,
+        limit_behavior: Option<SubagentLimitBehavior>,
     ) -> Result<Self, ConfigError> {
         let mut limits = merry_runtime::SubagentConfig::new(
             max_threads.unwrap_or_else(|| self.limits.max_threads()),
@@ -213,10 +214,66 @@ impl SubagentsConfig {
         .map_err(|error| ConfigError::Invalid(error.to_string()))?
         .with_max_total_tokens(self.limits.max_total_tokens())
         .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-        limits = limits.with_limit_behavior(self.limits.limit_behavior());
+        limits = limits
+            .with_limit_behavior(limit_behavior.unwrap_or_else(|| self.limits.limit_behavior()));
         self.enabled = enabled.unwrap_or(self.enabled);
         self.limits = limits;
         Ok(self)
+    }
+
+    pub(crate) fn apply_tui_overrides(
+        &mut self,
+        default_provider: Option<&str>,
+        default_model: Option<&str>,
+        default_reasoning: Option<ReasoningEffort>,
+        roles: &BTreeMap<String, crate::tui::preferences::SubagentRolePreferenceOverride>,
+    ) -> Result<(), ConfigError> {
+        if let Some(provider) = default_provider {
+            self.default.provider = Some(provider.to_owned());
+        }
+        if let Some(model) = default_model {
+            self.default.model = Some(model.to_owned());
+        }
+        if let Some(reasoning) = default_reasoning {
+            self.default.reasoning_effort = Some(reasoning);
+        }
+        let mut highest_turns = self.limits.max_model_turns();
+        for (name, role_override) in roles {
+            if let Some(enabled) = role_override.enabled {
+                self.toggle.insert(name.clone(), enabled);
+            }
+            if role_override.provider.is_some()
+                || role_override.model.is_some()
+                || role_override.reasoning_effort.is_some()
+                || role_override.max_model_turns.is_some()
+                || role_override.timeout_secs.is_some()
+            {
+                let entry = self.roles.entry(name.clone()).or_default();
+                if let Some(provider) = role_override.provider.as_ref() {
+                    entry.provider = Some(provider.clone());
+                }
+                if let Some(model) = role_override.model.as_ref() {
+                    entry.model = Some(model.clone());
+                }
+                if let Some(reasoning) = role_override.reasoning_effort.as_ref() {
+                    entry.reasoning_effort = Some(reasoning.clone());
+                }
+                if let Some(turns) = role_override.max_model_turns {
+                    entry.max_model_turns = Some(turns);
+                    highest_turns = highest_turns.max(turns);
+                }
+                if let Some(timeout) = role_override.timeout_secs {
+                    entry.timeout_secs = Some(timeout);
+                }
+            }
+        }
+        if highest_turns > self.limits.max_model_turns() {
+            self.limits = self
+                .limits
+                .with_model_turn_bounds(self.limits.min_model_turns(), highest_turns)
+                .map_err(|error| ConfigError::Invalid(error.to_string()))?;
+        }
+        Ok(())
     }
 }
 

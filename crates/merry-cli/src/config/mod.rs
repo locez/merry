@@ -1,7 +1,7 @@
 use merry_runtime::{
     HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource, PermissionReviewRules,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs, io,
@@ -558,7 +558,7 @@ fn parse_config_text(text: &str, path: &Path) -> Result<MerryConfigToml, ConfigE
     })
 }
 
-fn validate_environment_name(name: &str) -> Result<(), ConfigError> {
+pub(crate) fn validate_environment_name(name: &str) -> Result<(), ConfigError> {
     if name.is_empty()
         || name.contains('=')
         || name.contains('\0')
@@ -726,12 +726,12 @@ struct RuntimeModelToml {
 }
 
 pub(crate) const DEFAULT_MOUSE_SCROLL_LINES: usize = 3;
-const MAX_MOUSE_SCROLL_LINES: usize = 10;
+pub(crate) const MAX_MOUSE_SCROLL_LINES: usize = 10;
 pub(crate) const DEFAULT_MAX_READING_WIDTH: u16 = 104;
-const MIN_MAX_READING_WIDTH: u16 = 40;
-const MAX_MAX_READING_WIDTH: u16 = 240;
+pub(crate) const MIN_MAX_READING_WIDTH: u16 = 40;
+pub(crate) const MAX_MAX_READING_WIDTH: u16 = 240;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum HeaderItemKind {
     Workspace,
@@ -743,6 +743,15 @@ pub(crate) enum HeaderItemKind {
 }
 
 impl HeaderItemKind {
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Workspace,
+        Self::Model,
+        Self::Context,
+        Self::Cache,
+        Self::Rate,
+        Self::Tokens,
+    ];
+
     pub(crate) const DEFAULT_ITEMS: [Self; 5] = [
         Self::Workspace,
         Self::Model,
@@ -752,7 +761,7 @@ impl HeaderItemKind {
     ];
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TextSizingMode {
     #[default]
@@ -761,7 +770,7 @@ pub(crate) enum TextSizingMode {
     On,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BrandMarkMode {
     #[default]

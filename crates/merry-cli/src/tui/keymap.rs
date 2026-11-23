@@ -24,6 +24,56 @@ pub(crate) enum KeyAction {
     SendComments,
 }
 
+impl KeyAction {
+    pub(crate) fn config_key(self) -> Option<&'static str> {
+        match self {
+            Self::Submit => Some("submit"),
+            Self::InsertNewline => Some("insert_newline"),
+            Self::PasteImage => Some("paste_image"),
+            Self::TogglePlan => Some("toggle_plan"),
+            Self::OpenCommandDetails => Some("open_command_details"),
+            Self::FollowLatest => Some("follow_latest"),
+            #[cfg(feature = "web")]
+            Self::OpenSessionInBrowser => Some("open_session_in_browser"),
+            Self::ReviewPreviousUserInput => Some("review_previous_user_input"),
+            Self::Interrupt => Some("interrupt"),
+            Self::CancelInputOrQuit => Some("cancel_input_or_quit"),
+            Self::Quit => Some("quit"),
+            Self::ScrollUp => Some("scroll_up"),
+            Self::ScrollDown => Some("scroll_down"),
+            Self::HistoryPrevious => Some("history_previous"),
+            Self::HistoryNext => Some("history_next"),
+            Self::HistorySearch => Some("history_search"),
+            Self::ToggleComment => Some("toggle_comment"),
+            Self::OpenCommandPanel | Self::SendComments => None,
+        }
+    }
+
+    pub(crate) fn from_config_key(key: &str) -> Option<Self> {
+        match key {
+            "submit" => Some(Self::Submit),
+            "insert_newline" => Some(Self::InsertNewline),
+            "paste_image" => Some(Self::PasteImage),
+            "toggle_plan" => Some(Self::TogglePlan),
+            "open_command_details" => Some(Self::OpenCommandDetails),
+            "follow_latest" => Some(Self::FollowLatest),
+            #[cfg(feature = "web")]
+            "open_session_in_browser" => Some(Self::OpenSessionInBrowser),
+            "review_previous_user_input" => Some(Self::ReviewPreviousUserInput),
+            "interrupt" => Some(Self::Interrupt),
+            "cancel_input_or_quit" => Some(Self::CancelInputOrQuit),
+            "quit" => Some(Self::Quit),
+            "scroll_up" => Some(Self::ScrollUp),
+            "scroll_down" => Some(Self::ScrollDown),
+            "history_previous" => Some(Self::HistoryPrevious),
+            "history_next" => Some(Self::HistoryNext),
+            "history_search" => Some(Self::HistorySearch),
+            "toggle_comment" => Some(Self::ToggleComment),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct KeyBinding {
     code: KeyCode,
@@ -212,9 +262,35 @@ impl Keymap {
         Ok(keymap)
     }
 
+    pub(crate) fn with_overrides(
+        &self,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        if overrides.is_empty() {
+            return self.clone();
+        }
+        let mut keymap = self.clone();
+        for (key, value) in overrides {
+            if let (Some(action), Ok(binding)) =
+                (KeyAction::from_config_key(key), parse_binding(value))
+            {
+                keymap.set_binding(binding, action);
+            }
+        }
+        keymap.bind_if_free(
+            KeyBinding::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            KeyAction::HistoryPrevious,
+        );
+        keymap.bind_if_free(
+            KeyBinding::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            KeyAction::HistoryNext,
+        );
+        keymap
+    }
+
     fn bind_if_free(&mut self, binding: KeyBinding, action: KeyAction) {
         if self.action_for(binding).is_none() {
-            self.bindings.push((binding, action));
+            self.bindings.insert(0, (binding, action));
         }
     }
 
@@ -295,7 +371,30 @@ pub(crate) fn normalize_command_key(key: KeyEvent) -> KeyEvent {
 }
 
 impl KeyBinding {
-    fn label(self) -> String {
+    pub(crate) fn canonical_from_key_event(key: KeyEvent) -> Option<String> {
+        let key = normalize_command_key(key);
+        match (key.code, key.modifiers) {
+            (KeyCode::Enter, KeyModifiers::NONE) => Some("enter".to_owned()),
+            (KeyCode::Enter, KeyModifiers::ALT) => Some("alt+enter".to_owned()),
+            (KeyCode::End, KeyModifiers::CONTROL) => Some("ctrl+end".to_owned()),
+            (KeyCode::Up, KeyModifiers::NONE) => Some("up".to_owned()),
+            (KeyCode::Down, KeyModifiers::NONE) => Some("down".to_owned()),
+            (KeyCode::PageUp, KeyModifiers::NONE) => Some("pageup".to_owned()),
+            (KeyCode::PageDown, KeyModifiers::NONE) => Some("pagedown".to_owned()),
+            (KeyCode::Char(ch), mods) if ch.is_ascii_alphabetic() => {
+                let mods = mods - KeyModifiers::SHIFT;
+                let lower = ch.to_ascii_lowercase();
+                match mods {
+                    KeyModifiers::CONTROL => Some(format!("ctrl+{lower}")),
+                    KeyModifiers::ALT if lower != 'x' => Some(format!("alt+{lower}")),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn label(self) -> String {
         let mut parts = Vec::new();
         if self.modifiers.contains(KeyModifiers::CONTROL) {
             parts.push("Ctrl".to_owned());
@@ -319,6 +418,10 @@ impl KeyBinding {
         });
         parts.join("+")
     }
+}
+
+pub(crate) fn parse_binding_str(value: &str) -> Result<KeyBinding, crate::config::ConfigError> {
+    parse_binding(value)
 }
 
 fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> {

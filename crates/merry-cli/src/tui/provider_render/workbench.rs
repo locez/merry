@@ -90,12 +90,29 @@ pub(in crate::tui) fn render_provider_manager(
     render_divider(frame, state, layout.footer_divider);
     let notice = manager.notice().unwrap_or("");
     let actions: &[(&str, &str)] = if manager.focus() == ProviderWorkbenchFocus::Detail {
-        &[
-            ("Tab", "Next"),
-            ("Left/Right", "Change"),
-            ("Ctrl+S", "Save"),
-            ("Esc", "List"),
-        ]
+        match manager
+            .detail_form()
+            .map(ProviderFormOverlay::selected_field)
+        {
+            Some(ProviderFormField::ApiKey) => &[
+                ("Ctrl+Y", "Copy key"),
+                ("Tab", "Next"),
+                ("Ctrl+S", "Save"),
+                ("Esc", "List"),
+            ],
+            Some(ProviderFormField::ServiceTier) => &[
+                ("Left/Right", "Change"),
+                ("Backspace", "Clear"),
+                ("Ctrl+S", "Save"),
+                ("Esc", "List"),
+            ],
+            _ => &[
+                ("Tab", "Next"),
+                ("Left/Right", "Change"),
+                ("Ctrl+S", "Save"),
+                ("Esc", "List"),
+            ],
+        }
     } else if manager.selected_item().is_some() {
         &[
             ("N", "Add"),
@@ -153,9 +170,21 @@ pub(in crate::tui) fn render_provider_form(
 
     render_divider(frame, state, layout.footer_divider);
     let actions: &[(&str, &str)] = match form.selected_field() {
+        ProviderFormField::ApiKey => &[
+            ("Ctrl+Y", "Copy key"),
+            ("Tab", "Next"),
+            ("Ctrl+S", "Save"),
+            ("Esc", "Back"),
+        ],
         ProviderFormField::Model => &[("Enter", "Models"), ("Ctrl+S", "Save"), ("Esc", "Back")],
         ProviderFormField::ReasoningEffort => &[
             ("Ctrl+Space", "Presets"),
+            ("Ctrl+S", "Save"),
+            ("Esc", "Back"),
+        ],
+        ProviderFormField::ServiceTier => &[
+            ("Left/Right", "Change"),
+            ("Backspace", "Clear"),
             ("Ctrl+S", "Save"),
             ("Esc", "Back"),
         ],

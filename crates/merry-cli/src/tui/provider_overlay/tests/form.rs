@@ -3,7 +3,7 @@ use crate::tui::provider_overlay::{
     ProviderFormField, ProviderFormOverlay, ProviderFormSeed, ProviderOverlayAction,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_llm::ReasoningEffort;
+use merry_llm::{ReasoningEffort, ServiceTier};
 use merry_provider_openai::OpenAiProtocol;
 use std::collections::BTreeSet;
 
@@ -120,11 +120,12 @@ fn provider_edit_form_prefills_values_retains_secret_and_emits_update() {
             base_url: "https://api.openai.com/v1".to_owned(),
             model: "model-a".to_owned(),
             reasoning_effort: None,
+            service_tier: None,
         },
         BTreeSet::from(["opencode".to_owned()]),
     );
     assert_eq!(form.field(ProviderFormField::DisplayName), "OpenCode");
-    assert_eq!(form.masked_api_key(), "unchanged");
+    assert_eq!(form.masked_api_key(), "•••••••••••• (saved)");
 
     let _ = form.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     form.insert_paste("-pasted");
@@ -137,7 +138,7 @@ fn provider_edit_form_prefills_values_retains_secret_and_emits_update() {
     let _ = form.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     let _ = form.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     let _ = form.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    for _ in 0..5 {
+    for _ in 0..6 {
         let _ = form.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
 
@@ -164,6 +165,7 @@ fn provider_form_model_enter_discovers_before_explicit_save() {
             base_url: "https://opencode.example.test/v1".to_owned(),
             model: "model-a".to_owned(),
             reasoning_effort: None,
+            service_tier: None,
         },
         BTreeSet::from(["opencode".to_owned()]),
     );
@@ -181,7 +183,7 @@ fn provider_form_model_enter_discovers_before_explicit_save() {
         } if original_alias == "opencode" && values.model == "model-a"
     ));
 
-    for _ in 0..2 {
+    for _ in 0..3 {
         let _ = form.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     assert_eq!(form.selected_field(), ProviderFormField::Save);
@@ -199,4 +201,123 @@ fn provider_form_ctrl_s_saves_from_any_field() {
     let action = form.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
 
     assert!(matches!(action, ProviderOverlayAction::SaveProvider(_)));
+}
+
+#[test]
+fn provider_form_kind_and_protocol_toggle_preserves_custom_url_key_model_and_tier() {
+    let mut form = ProviderFormOverlay::edit(
+        ProviderFormSeed {
+            original_alias: "gateway".to_owned(),
+            display_name: "Custom Gateway".to_owned(),
+            alias: "gateway".to_owned(),
+            kind: ManagedProviderKind::OpenAiCompatible,
+            protocol: Some(OpenAiProtocol::Responses),
+            base_url: "https://gateway.internal.test/v1".to_owned(),
+            model: "gpt-custom".to_owned(),
+            reasoning_effort: Some(ReasoningEffort::new("high").expect("valid effort")),
+            service_tier: Some(ServiceTier::Ultrafast),
+        },
+        BTreeSet::from(["gateway".to_owned()]),
+    );
+    form.select_field(ProviderFormField::ApiKey);
+    form.insert_paste("sk-draft-secret");
+
+    // Toggle API type OpenAI-compatible -> Anthropic -> OpenAI-compatible.
+    form.select_field(ProviderFormField::Kind);
+    let _ = form.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(form.kind(), ManagedProviderKind::Anthropic);
+    assert_eq!(
+        form.field(ProviderFormField::BaseUrl),
+        "https://gateway.internal.test/v1"
+    );
+    assert_eq!(form.field(ProviderFormField::ApiKey), "sk-draft-secret");
+    assert_eq!(form.field(ProviderFormField::Model), "gpt-custom");
+    assert_eq!(form.service_tier(), None);
+
+    let _ = form.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(form.kind(), ManagedProviderKind::OpenAiCompatible);
+    assert_eq!(
+        form.field(ProviderFormField::BaseUrl),
+        "https://gateway.internal.test/v1"
+    );
+    assert_eq!(form.field(ProviderFormField::ApiKey), "sk-draft-secret");
+    assert_eq!(form.service_tier(), Some(ServiceTier::Ultrafast));
+
+    // Toggling protocol to ChatCompletions warns about ultrafast without dropping it.
+    form.select_field(ProviderFormField::Protocol);
+    let _ = form.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(form.protocol(), Some(OpenAiProtocol::ChatCompletions));
+    assert!(
+        form.notice()
+            .is_some_and(|notice| notice.contains("requires Responses"))
+    );
+    assert_eq!(form.service_tier(), Some(ServiceTier::Ultrafast));
+    assert_eq!(form.field(ProviderFormField::ApiKey), "sk-draft-secret");
+}
+
+#[test]
+fn provider_form_kind_toggle_updates_builtin_default_base_url_only() {
+    let mut form = ProviderFormOverlay::new("provider".to_owned(), BTreeSet::new());
+    assert_eq!(
+        form.field(ProviderFormField::BaseUrl),
+        "https://api.openai.com/v1"
+    );
+
+    form.select_field(ProviderFormField::Kind);
+    let _ = form.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(
+        form.field(ProviderFormField::BaseUrl),
+        "https://api.anthropic.com"
+    );
+
+    let _ = form.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(
+        form.field(ProviderFormField::BaseUrl),
+        "https://api.openai.com/v1"
+    );
+}
+
+#[test]
+fn provider_form_ctrl_y_requests_copy_for_saved_and_draft_api_keys() {
+    let mut add_form = ProviderFormOverlay::new("provider".to_owned(), BTreeSet::new());
+    add_form.select_field(ProviderFormField::ApiKey);
+    assert_eq!(
+        add_form.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)),
+        ProviderOverlayAction::Consumed
+    );
+    assert_eq!(add_form.notice(), Some("No API key to copy"));
+
+    add_form.insert_paste("sk-new-key");
+    assert_eq!(
+        add_form.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)),
+        ProviderOverlayAction::CopyApiKey
+    );
+    assert_eq!(
+        add_form.api_key_copy_source(),
+        (None, Some("sk-new-key".to_owned()))
+    );
+
+    let mut edit_form = ProviderFormOverlay::edit(
+        ProviderFormSeed {
+            original_alias: "saved".to_owned(),
+            display_name: "Saved".to_owned(),
+            alias: "saved".to_owned(),
+            kind: ManagedProviderKind::OpenAiCompatible,
+            protocol: Some(OpenAiProtocol::Responses),
+            base_url: "https://api.openai.com/v1".to_owned(),
+            model: "gpt-5".to_owned(),
+            reasoning_effort: None,
+            service_tier: None,
+        },
+        BTreeSet::from(["saved".to_owned()]),
+    );
+    edit_form.select_field(ProviderFormField::ApiKey);
+    assert_eq!(
+        edit_form.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)),
+        ProviderOverlayAction::CopyApiKey
+    );
+    assert_eq!(
+        edit_form.api_key_copy_source(),
+        (Some("saved".to_owned()), None)
+    );
 }

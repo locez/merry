@@ -1,9 +1,9 @@
 use super::{CodingAutoFallback, CodingPermissionMode};
 use clap::ValueEnum;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Who reviews permission requests.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[value(rename_all = "kebab-case")]
 pub(crate) enum PermissionMode {
@@ -19,7 +19,7 @@ pub(crate) enum PermissionMode {
 }
 
 /// What happens after `auto` denies an action or cannot decide.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[value(rename_all = "kebab-case")]
 pub(crate) enum AutoFallback {

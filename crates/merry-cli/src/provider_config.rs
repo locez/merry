@@ -16,28 +16,37 @@ use std::{collections::BTreeMap, env, num::NonZeroU64, path::Path, sync::Arc};
 
 pub(crate) const MERRY_OPENAI_DEBUG_ENV: &str = "MERRY_OPENAI_DEBUG";
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RuntimeRoleOverrides<'a> {
+    pub(crate) context_compaction: Option<(&'a str, &'a str)>,
+    pub(crate) approval_review: Option<(&'a str, &'a str)>,
+}
+
 pub(crate) fn runtime_provider_bundle_from_config(
     merry_config: Option<&MerryConfig>,
     map_usage_error: fn(String) -> CliError,
 ) -> Result<RuntimeProviderBundle, CliError> {
-    runtime_provider_bundle_from_config_with_primary_override(
+    runtime_provider_bundle_from_config_with_overrides(
         merry_config,
         None,
         None,
+        RuntimeRoleOverrides::default(),
         map_usage_error,
     )
 }
 
-pub(crate) fn runtime_provider_bundle_from_config_with_primary_override(
+pub(crate) fn runtime_provider_bundle_from_config_with_overrides(
     merry_config: Option<&MerryConfig>,
     provider_override: Option<&str>,
     model_override: Option<&str>,
+    role_overrides: RuntimeRoleOverrides<'_>,
     map_usage_error: fn(String) -> CliError,
 ) -> Result<RuntimeProviderBundle, CliError> {
     runtime_provider_bundle_from_config_inner(
         merry_config,
         provider_override,
         model_override,
+        role_overrides,
         map_usage_error,
     )
 }
@@ -46,6 +55,7 @@ fn runtime_provider_bundle_from_config_inner(
     merry_config: Option<&MerryConfig>,
     provider_override: Option<&str>,
     model_override: Option<&str>,
+    role_overrides: RuntimeRoleOverrides<'_>,
     map_usage_error: fn(String) -> CliError,
 ) -> Result<RuntimeProviderBundle, CliError> {
     let merry_config = merry_config.ok_or_else(|| {
@@ -60,30 +70,44 @@ fn runtime_provider_bundle_from_config_inner(
     let runtime_models = merry_config
         .runtime_models()
         .map_err(|error| map_usage_error(error.to_string()))?;
-    let context_compaction = runtime_models
+    let context_compaction_binding = role_overrides
         .context_compaction
-        .map(|model| {
+        .map(|(provider, model)| (provider.to_owned(), model.to_owned()))
+        .or_else(|| {
+            runtime_models
+                .context_compaction
+                .map(|model| (model.provider, model.model))
+        });
+    let context_compaction = context_compaction_binding
+        .map(|(provider_alias, model)| {
             let provider = merry_config
-                .provider_by_alias(&model.provider)
+                .provider_by_alias(&provider_alias)
                 .map_err(|error| map_usage_error(error.to_string()))?;
             runtime_role_provider(
                 RuntimeModelRole::ContextCompaction,
                 provider,
-                model.model,
+                model,
                 map_usage_error,
             )
         })
         .transpose()?;
-    let approval_review = runtime_models
+    let approval_review_binding = role_overrides
         .approval_review
-        .map(|model| {
+        .map(|(provider, model)| (provider.to_owned(), model.to_owned()))
+        .or_else(|| {
+            runtime_models
+                .approval_review
+                .map(|model| (model.provider, model.model))
+        });
+    let approval_review = approval_review_binding
+        .map(|(provider_alias, model)| {
             let provider = merry_config
-                .provider_by_alias(&model.provider)
+                .provider_by_alias(&provider_alias)
                 .map_err(|error| map_usage_error(error.to_string()))?;
             runtime_role_provider(
                 RuntimeModelRole::ApprovalReview,
                 provider,
-                model.model,
+                model,
                 map_usage_error,
             )
         })
@@ -934,10 +958,11 @@ api_key_file = "secrets/claude.key"
             ],
         );
 
-        let bundle = super::runtime_provider_bundle_from_config_with_primary_override(
+        let bundle = super::runtime_provider_bundle_from_config_with_overrides(
             Some(&config),
             Some("claude"),
             Some("claude-next"),
+            super::RuntimeRoleOverrides::default(),
             crate::cli_error::debug_openai_usage_error,
         )
         .expect("runtime provider bundle should build");

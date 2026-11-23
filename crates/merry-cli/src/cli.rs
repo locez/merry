@@ -68,7 +68,30 @@ pub(crate) struct Cli {
     pub(crate) command: Option<CliCommand>,
 }
 
+/// Permission and sandbox flags explicitly provided on the command line.
+///
+/// Captured before applying `[cli]` config defaults so the TUI can preserve
+/// strict precedence: `defaults < config.toml < tui-preferences.toml < CLI flags`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ExplicitCliFlags {
+    pub(crate) sandbox: Option<SandboxMode>,
+    pub(crate) permission_mode: Option<PermissionMode>,
+    pub(crate) auto_fallback: Option<AutoFallback>,
+}
+
 impl Cli {
+    pub(crate) fn explicit_flags(&self) -> ExplicitCliFlags {
+        ExplicitCliFlags {
+            sandbox: self.sandbox,
+            permission_mode: if self.always_approve {
+                Some(PermissionMode::AlwaysApprove)
+            } else {
+                self.permission_mode
+            },
+            auto_fallback: self.auto_fallback,
+        }
+    }
+
     pub(crate) fn is_product_surface(&self) -> bool {
         matches!(
             &self.command,

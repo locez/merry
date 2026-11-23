@@ -102,6 +102,42 @@ pub(super) async fn dispatch_effect(
             show_copy_feedback(state, feedback, failed);
             Ok(None)
         }
+        ControllerEffect::CopyProviderApiKey => {
+            let Some((original_alias, draft_api_key)) = state.provider_form_api_key_for_copy()
+            else {
+                return Ok(None);
+            };
+            let secret = if let Some(draft) = draft_api_key {
+                Ok(draft)
+            } else if let Some(alias) = original_alias {
+                crate::config::ProviderAlias::new(&alias)
+                    .map_err(|error| error.to_string())
+                    .and_then(|alias| {
+                        providers
+                            .management
+                            .copy_retained_api_key(&alias)
+                            .map_err(|error| error.to_string())
+                    })
+            } else {
+                Err("No API key to copy".to_owned())
+            };
+            match secret {
+                Ok(key) => {
+                    let system = write_system_clipboard(&key).await;
+                    let terminal_result = terminal.copy_text(&key);
+                    let notice = if system.is_ok() || terminal_result.is_ok() {
+                        "API key copied to clipboard".to_owned()
+                    } else {
+                        "Copy failed: clipboard is unavailable".to_owned()
+                    };
+                    state.set_provider_form_notice(Some(notice));
+                }
+                Err(message) => {
+                    state.set_provider_form_notice(Some(message));
+                }
+            }
+            Ok(None)
+        }
         ControllerEffect::CopyTextTooLarge => {
             show_copy_feedback(
                 state,
@@ -425,7 +461,7 @@ async fn close_session(
     Ok(())
 }
 
-async fn write_system_clipboard(text: &str) -> Result<(), String> {
+pub(in crate::tui) async fn write_system_clipboard(text: &str) -> Result<(), String> {
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = text;

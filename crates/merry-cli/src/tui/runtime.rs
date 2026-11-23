@@ -7,13 +7,12 @@ use crate::coding::{
 use crate::config::MerryConfig;
 use crate::mcp_tools::discover_configured_mcp_tools;
 use crate::provider_config::{
-    RuntimePrimaryProviderConfig, RuntimeProviderBundle, build_coding_subagents_config,
-    runtime_primary_provider_from_config_with_override,
-    runtime_provider_bundle_from_config_with_primary_override,
+    RuntimePrimaryProviderConfig, RuntimeProviderBundle, RuntimeRoleOverrides,
+    build_coding_subagents_config, runtime_provider_bundle_from_config_with_overrides,
 };
 use crate::runtime_config::{
-    automatic_compaction_config, main_reasoning_effort, prepared_action_process_backend_options,
-    private_tool_paths, subagents_config,
+    automatic_compaction_config, main_reasoning_effort,
+    prepared_action_process_backend_options_with_overrides, private_tool_paths, subagents_config,
 };
 use crate::tui::preferences::{CompactionStrategy, TuiPreferences};
 use crate::tui::session_list::{TuiSessionMetadata, TuiSessionStore, now_unix_ms};
@@ -46,6 +45,10 @@ pub(crate) struct TuiRuntimeSession {
     pub(crate) control: AgentLoopControl,
     pub(crate) skills: Vec<SkillMetadata>,
     merry_config: MerryConfig,
+    explicit_cli_flags: crate::cli::ExplicitCliFlags,
+    configured_permission_mode: PermissionMode,
+    configured_auto_fallback: AutoFallback,
+    permission_source: Arc<ChannelPermissionAdmissionSource>,
     pub(crate) permission_requests: mpsc::Receiver<PermissionReviewRequest>,
     pending_permission_reviews: VecDeque<PermissionReviewRequest>,
     _session_reservation: SessionReservation,
@@ -55,6 +58,9 @@ pub(crate) struct TuiSessionLaunch {
     pub(crate) sandbox_mode: SandboxMode,
     pub(crate) permission_mode: PermissionMode,
     pub(crate) auto_fallback: AutoFallback,
+    pub(crate) configured_permission_mode: PermissionMode,
+    pub(crate) configured_auto_fallback: AutoFallback,
+    pub(crate) explicit_cli_flags: crate::cli::ExplicitCliFlags,
     pub(crate) workspace_root: PathBuf,
     pub(crate) workspace_writable: bool,
 }
@@ -70,6 +76,9 @@ pub(crate) async fn start_tui_runtime_session(
         sandbox_mode,
         permission_mode,
         auto_fallback,
+        configured_permission_mode,
+        configured_auto_fallback,
+        explicit_cli_flags,
         workspace_root,
         workspace_writable,
     } = launch;
@@ -78,15 +87,17 @@ pub(crate) async fn start_tui_runtime_session(
         debug_openai_usage_error("Merry XDG provider config is required for runtime".to_owned())
     })?;
 
+    let role_overrides = runtime_role_overrides(merry_config, preferences);
     let RuntimeProviderBundle {
         primary,
         context_compaction,
         approval_review,
         retry_policy,
-    } = runtime_provider_bundle_from_config_with_primary_override(
+    } = runtime_provider_bundle_from_config_with_overrides(
         merry_config,
         preferences.provider.as_deref(),
         preference_model_override(&owned_config, preferences)?,
+        role_overrides,
         debug_openai_usage_error,
     )?;
     let RuntimePrimaryProviderConfig { provider, model } = primary;
@@ -104,8 +115,12 @@ pub(crate) async fn start_tui_runtime_session(
         .map_err(unexpected)?;
     metadata.model = Some(model_label.clone());
     metadata.reasoning_effort = reasoning_effort_label.clone();
-    let mut backend_options =
-        prepared_action_process_backend_options(merry_config, sandbox_mode).await?;
+    let mut backend_options = prepared_action_process_backend_options_with_overrides(
+        merry_config,
+        sandbox_mode,
+        &preferences.permissions,
+    )
+    .await?;
     if !workspace_writable {
         backend_options = backend_options.read_only_workspace();
     }
@@ -125,11 +140,29 @@ pub(crate) async fn start_tui_runtime_session(
         None
     };
     let mcp = discover_configured_mcp_tools(merry_config).await?;
-    let subagents = subagents_config(merry_config)
+    let mut subagents = subagents_config(merry_config)
         .map_err(unexpected)?
         .with_overrides(
             preferences.subagents_enabled,
             preferences.subagent_max_threads,
+            preferences.subagent_limit_behavior.map(Into::into),
+        )
+        .map_err(unexpected)?;
+    subagents
+        .apply_tui_overrides(
+            preferences
+                .subagent_default_model
+                .as_ref()
+                .and_then(|binding| binding.provider.as_deref()),
+            preferences
+                .subagent_default_model
+                .as_ref()
+                .and_then(|binding| binding.model.as_deref()),
+            preferences
+                .subagent_default_model
+                .as_ref()
+                .and_then(|binding| binding.reasoning_effort.clone()),
+            &preferences.subagent_roles,
         )
         .map_err(unexpected)?;
     let coding_subagents = build_coding_subagents_config(
@@ -166,7 +199,7 @@ pub(crate) async fn start_tui_runtime_session(
     let permission_policy = CodingPermissionPolicy::for_permission_mode(
         permission_mode.coding_mode(),
         auto_fallback.coding_fallback(),
-        Some(permission_source),
+        Some(Arc::clone(&permission_source) as Arc<dyn merry_runtime::PermissionAdmissionSource>),
     )
     .map_err(unexpected)?;
     let permission_review_rules = merry_config
@@ -174,11 +207,14 @@ pub(crate) async fn start_tui_runtime_session(
         .transpose()
         .map_err(unexpected)?
         .unwrap_or_default();
-    let max_parallel_tool_calls = merry_config
-        .map(MerryConfig::max_parallel_tool_calls)
-        .transpose()
-        .map_err(unexpected)?
-        .flatten();
+    let max_parallel_tool_calls = preferences
+        .max_parallel_tool_calls
+        .and_then(std::num::NonZeroUsize::new)
+        .or(merry_config
+            .map(MerryConfig::max_parallel_tool_calls)
+            .transpose()
+            .map_err(unexpected)?
+            .flatten());
     let coding_runtime = match loaded_session {
         Some(loaded) => resume_headless_coding_composition_with_loaded_session(
             runtime_input,
@@ -207,13 +243,36 @@ pub(crate) async fn start_tui_runtime_session(
         .map_err(unexpected)?;
     let subagent_activity = runtime.subscribe_subagent_activity();
     let (stream, input, control) = interactive.split();
+    let mut startup_update = InteractiveSettingsUpdate::default();
+    let mut needs_startup_update = false;
     if preferences.context_window_tokens.is_some() {
+        startup_update = startup_update
+            .with_context_window_tokens(context_window_tokens_with_preferences(preferences)?);
+        needs_startup_update = true;
+    }
+    if preferences
+        .context_compaction_model
+        .as_ref()
+        .is_some_and(|b| b.reasoning_effort.is_some())
+        || preferences
+            .approval_review_model
+            .as_ref()
+            .is_some_and(|b| b.reasoning_effort.is_some())
+    {
+        let role_overrides = runtime_role_overrides(Some(&owned_config), preferences);
+        let bundle = runtime_provider_bundle_from_config_with_overrides(
+            Some(&owned_config),
+            preferences.provider.as_deref(),
+            preference_model_override(&owned_config, preferences)?,
+            role_overrides,
+            debug_openai_usage_error,
+        )?;
+        startup_update = attach_live_role_models(startup_update, &bundle, preferences);
+        needs_startup_update = true;
+    }
+    if needs_startup_update {
         control
-            .update_settings(
-                InteractiveSettingsUpdate::default().with_context_window_tokens(
-                    context_window_tokens_with_preferences(preferences)?,
-                ),
-            )
+            .update_settings(startup_update)
             .await
             .map_err(unexpected)?;
     }
@@ -233,6 +292,10 @@ pub(crate) async fn start_tui_runtime_session(
         control,
         skills,
         merry_config: owned_config,
+        explicit_cli_flags,
+        configured_permission_mode,
+        configured_auto_fallback,
+        permission_source,
         permission_requests,
         pending_permission_reviews: VecDeque::new(),
         _session_reservation: session_reservation,
@@ -322,18 +385,17 @@ impl TuiRuntimeSession {
         &mut self,
         preferences: &TuiPreferences,
     ) -> Result<(), CliError> {
-        let RuntimePrimaryProviderConfig { provider, model } =
-            runtime_primary_provider_from_config_with_override(
-                Some(&self.merry_config),
-                preferences.provider.as_deref(),
-                preference_model_override(&self.merry_config, preferences)?,
-                debug_openai_usage_error,
-            )?;
-        let retry_policy = self
-            .merry_config
-            .provider_retry_policy()
-            .map_err(unexpected)?
-            .unwrap_or_default();
+        let role_overrides = runtime_role_overrides(Some(&self.merry_config), preferences);
+        let bundle = runtime_provider_bundle_from_config_with_overrides(
+            Some(&self.merry_config),
+            preferences.provider.as_deref(),
+            preference_model_override(&self.merry_config, preferences)?,
+            role_overrides,
+            debug_openai_usage_error,
+        )?;
+        let provider = Arc::clone(&bundle.primary.provider);
+        let model = bundle.primary.model.clone();
+        let retry_policy = bundle.retry_policy.unwrap_or_default();
         let generation = generation_config_with_preferences(Some(&self.merry_config), preferences)
             .map_err(unexpected)?;
         let subagents = self
@@ -343,11 +405,33 @@ impl TuiRuntimeSession {
             .with_overrides(
                 preferences.subagents_enabled,
                 preferences.subagent_max_threads,
+                preferences.subagent_limit_behavior.map(Into::into),
             )
             .map_err(unexpected)?;
         let automatic_compaction =
             automatic_compaction_config_with_preferences(Some(&self.merry_config), preferences)?;
-        let update = InteractiveSettingsUpdate::default()
+        let max_parallel_tool_calls = preferences
+            .max_parallel_tool_calls
+            .and_then(std::num::NonZeroUsize::new)
+            .or(self
+                .merry_config
+                .max_parallel_tool_calls()
+                .map_err(unexpected)?)
+            .unwrap_or(std::num::NonZeroUsize::new(8).expect("default parallel limit is non-zero"));
+        let effective_permission_mode = crate::tui::resolve_effective_permission_mode(
+            self.explicit_cli_flags,
+            preferences,
+            self.configured_permission_mode,
+        );
+        let effective_auto_fallback = crate::tui::resolve_effective_auto_fallback(
+            self.explicit_cli_flags,
+            preferences,
+            self.configured_auto_fallback,
+        );
+        let review_mode =
+            permission_review_mode_for(effective_permission_mode, effective_auto_fallback);
+
+        let mut update = InteractiveSettingsUpdate::default()
             .with_primary_model(InteractivePrimaryModel::new(
                 provider,
                 model.clone(),
@@ -359,7 +443,12 @@ impl TuiRuntimeSession {
                 subagents.limits(),
             ))
             .with_automatic_compaction(automatic_compaction)
-            .with_context_window_tokens(context_window_tokens_with_preferences(preferences)?);
+            .with_context_window_tokens(context_window_tokens_with_preferences(preferences)?)
+            .with_max_parallel_tool_calls(max_parallel_tool_calls)
+            .with_permission_admission_source(Arc::clone(&self.permission_source)
+                as Arc<dyn merry_runtime::PermissionAdmissionSource>)
+            .with_permission_review_mode(review_mode);
+        update = attach_live_role_models(update, &bundle, preferences);
         self.control
             .update_settings(update)
             .await
@@ -526,11 +615,30 @@ fn generation_config_with_preferences(
     // The service tier is provider-specific, so the selected provider owns it.
     // It is never inherited from [providers.default] when that default names a
     // different provider, which may not accept the tier at all.
-    let service_tier = merry_config
+    let preference_service_tier = selected_provider
+        .as_deref()
+        .and_then(|provider| preferences.service_tier_for_provider(provider))
+        .filter(|tier| {
+            let Some((config, provider)) = merry_config.zip(selected_provider.as_deref()) else {
+                return true;
+            };
+            config
+                .provider_profile(provider)
+                .ok()
+                .is_some_and(|profile| {
+                    profile.kind() == crate::config::ConfiguredProviderKind::OpenAiCompatible
+                        && profile
+                            .protocol()
+                            .unwrap_or_default()
+                            .supports_service_tier(*tier)
+                })
+        });
+    let provider_service_tier = merry_config
         .zip(selected_provider.as_deref())
         .map(|(config, provider)| config.effective_provider_service_tier(provider))
         .transpose()?
         .flatten();
+    let service_tier = preference_service_tier.or(provider_service_tier);
     Ok(GenerationConfig::default()
         .with_reasoning_effort(reasoning_effort)
         .with_service_tier(service_tier))
@@ -541,7 +649,7 @@ fn automatic_compaction_config_with_preferences(
     preferences: &TuiPreferences,
 ) -> Result<CompactionConfig, CliError> {
     let inherited = automatic_compaction_config(merry_config).map_err(unexpected)?;
-    let policy = match preferences.compaction_strategy {
+    let mut policy = match preferences.compaction_strategy {
         None | Some(CompactionStrategy::Balanced) => inherited.policy(),
         Some(CompactionStrategy::Compact) => inherited
             .policy()
@@ -552,6 +660,11 @@ fn automatic_compaction_config_with_preferences(
             .with_retained_model_turns(7)
             .map_err(unexpected)?,
     };
+    if let Some(turns) = preferences.retained_model_turns {
+        policy = policy
+            .with_retained_model_turns(turns)
+            .map_err(unexpected)?;
+    }
     let enabled = preferences
         .auto_compaction_enabled
         .unwrap_or_else(|| inherited.is_enabled());
@@ -572,6 +685,86 @@ fn context_window_tokens_with_preferences(
                 .ok_or_else(|| unexpected("context window preference must be greater than zero"))
         })
         .transpose()
+}
+
+fn permission_review_mode_for(
+    mode: PermissionMode,
+    fallback: AutoFallback,
+) -> merry_runtime::PermissionReviewMode {
+    match mode {
+        PermissionMode::AlwaysApprove => merry_runtime::PermissionReviewMode::FullyTrusted,
+        PermissionMode::Deny => merry_runtime::PermissionReviewMode::DenyAll,
+        PermissionMode::Ask => merry_runtime::PermissionReviewMode::HostDecisionOnly,
+        PermissionMode::Auto => match fallback {
+            AutoFallback::Ask => merry_runtime::PermissionReviewMode::ModelThenHostFallback,
+            AutoFallback::Deny => merry_runtime::PermissionReviewMode::Required,
+        },
+    }
+}
+
+fn attach_live_role_models(
+    mut update: InteractiveSettingsUpdate,
+    bundle: &RuntimeProviderBundle,
+    preferences: &TuiPreferences,
+) -> InteractiveSettingsUpdate {
+    let retry_policy = bundle.retry_policy.unwrap_or_default();
+    let build_role = |role_cfg: Option<&merry::profiles::CodingModelRoleConfig>,
+                      effort: Option<merry_llm::ReasoningEffort>|
+     -> Option<InteractivePrimaryModel> {
+        if let Some(cfg) = role_cfg {
+            Some(
+                InteractivePrimaryModel::new(cfg.provider(), cfg.model().clone(), retry_policy)
+                    .with_reasoning_effort(effort),
+            )
+        } else if effort.is_some() {
+            Some(
+                InteractivePrimaryModel::new(
+                    Arc::clone(&bundle.primary.provider),
+                    bundle.primary.model.clone(),
+                    retry_policy,
+                )
+                .with_reasoning_effort(effort),
+            )
+        } else {
+            None
+        }
+    };
+    let compaction_effort = preferences
+        .context_compaction_model
+        .as_ref()
+        .and_then(|binding| binding.reasoning_effort.clone());
+    let approval_effort = preferences
+        .approval_review_model
+        .as_ref()
+        .and_then(|binding| binding.reasoning_effort.clone());
+    update = update.with_role_model(
+        merry_runtime::RuntimeModelRole::ContextCompaction,
+        build_role(bundle.context_compaction.as_ref(), compaction_effort),
+    );
+    update = update.with_role_model(
+        merry_runtime::RuntimeModelRole::ApprovalReview,
+        build_role(bundle.approval_review.as_ref(), approval_effort),
+    );
+    update
+}
+
+fn runtime_role_overrides<'a>(
+    merry_config: Option<&MerryConfig>,
+    preferences: &'a TuiPreferences,
+) -> RuntimeRoleOverrides<'a> {
+    let valid_role = |binding: Option<&'a crate::tui::preferences::RoleModelOverride>| {
+        let binding = binding?;
+        let provider = binding.provider.as_deref()?;
+        let model = binding.model.as_deref()?;
+        if merry_config.is_some_and(|config| config.provider_profile(provider).is_err()) {
+            return None;
+        }
+        Some((provider, model))
+    };
+    RuntimeRoleOverrides {
+        context_compaction: valid_role(preferences.context_compaction_model.as_ref()),
+        approval_review: valid_role(preferences.approval_review_model.as_ref()),
+    }
 }
 
 #[cfg(test)]
