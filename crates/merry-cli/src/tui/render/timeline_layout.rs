@@ -75,7 +75,11 @@ fn compute_item_layout(state: &TuiState, index: usize, width: u16) -> CachedItem
     let mut item_targets = Vec::new();
     let mut item_link_targets = Vec::new();
     let item_rows = match item {
-        TimelineItem::User { text } => user_lines(state, text, width),
+        TimelineItem::User { text } => {
+            let (rows, links) = user_lines(state, text, width);
+            item_link_targets = links;
+            rows
+        }
         TimelineItem::Assistant { text } => {
             let rendered = assistant_lines(state, text, index, width);
             item_targets = rendered.copy_targets;
@@ -191,14 +195,29 @@ fn compute_item_layout(state: &TuiState, index: usize, width: u16) -> CachedItem
 
     let mut local_row_starts: Vec<usize> = Vec::with_capacity(rows.len().saturating_add(1));
     local_row_starts.push(0);
-    for row in &rows {
+    let mut added_post_links = false;
+    for (row_index, row) in rows.iter_mut().enumerate() {
         let count = wrapped_line_count(std::slice::from_ref(&row.display), width).max(1);
+        if count == 1 {
+            let extra = crate::tui::links::linkify_rendered_line(
+                &mut row.display,
+                row_index,
+                &link_targets,
+            );
+            if !extra.is_empty() {
+                link_targets.extend(extra);
+                added_post_links = true;
+            }
+        }
         let next = local_row_starts
             .last()
             .copied()
             .unwrap_or(0)
             .saturating_add(count);
         local_row_starts.push(next);
+    }
+    if added_post_links {
+        link_targets.sort_by_key(|target| (target.line_index, target.column));
     }
 
     CachedItemLayout::new(rows, local_row_starts, copy_targets, link_targets)

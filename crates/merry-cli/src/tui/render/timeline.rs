@@ -16,8 +16,8 @@ use crate::tui::{
     motion::{self, MotionClock},
     state::{PatchChangeView, PatchLineKind, PatchLineView, PatchOperationView, TuiState},
     text_wrap::{
-        StyledTextPart, inline_code_spans, semantic_style, truncate_chars,
-        wrap_styled_parts_with_links,
+        StyledTextPart, WrappedLine, inline_code_and_url_parts, inline_code_spans, semantic_style,
+        truncate_chars, wrap_styled_parts_with_links,
     },
     theme::SemanticColor,
     transcript::{SelectionPolicy, TranscriptRow},
@@ -496,7 +496,11 @@ const USER_PROMPT_INDENT: &str = "  ";
 /// User-turn anchor band framed with two subtle gray hairlines (matching the
 /// composer without the `🎀` badge), soft `UserBackground`, and clean `❯`
 /// prompt mark.
-pub(super) fn user_lines(state: &TuiState, text: &str, width: u16) -> Vec<TranscriptRow> {
+pub(super) fn user_lines(
+    state: &TuiState,
+    text: &str,
+    width: u16,
+) -> (Vec<TranscriptRow>, Vec<LinkTarget>) {
     let border_style = semantic_style(state, SemanticColor::Border);
     let hairline = Line::from(Span::styled("─".repeat(usize::from(width)), border_style));
     let band = state.theme().bg_color(SemanticColor::UserBackground);
@@ -514,35 +518,53 @@ pub(super) fn user_lines(state: &TuiState, text: &str, width: u16) -> Vec<Transc
         text.split('\n').collect()
     };
 
+    let content_width = width.saturating_sub(3).max(1);
     let mut rows = Vec::with_capacity(segments.len() + 2);
+    let mut link_targets = Vec::new();
     if width > 0 {
         rows.push(TranscriptRow::new(hairline.clone(), SelectionPolicy::Skip));
     }
-    for (index, segment) in segments.into_iter().enumerate() {
-        let mut spans = vec![
-            Span::styled(USER_LEFT_PAD.to_owned(), bg_style),
-            Span::styled(
-                if index == 0 {
-                    USER_PROMPT_MARK
-                } else {
-                    USER_PROMPT_INDENT
-                }
-                .to_owned(),
-                mark_style,
-            ),
-        ];
-        spans.extend(inline_code_spans(state, segment, body_style));
-        let mut line = Line::from(spans);
-        if let Some(color) = band {
-            line.style.bg = Some(color);
+    let mut is_first_visual_row = true;
+    for segment in segments {
+        let wrapped = if segment.is_empty() {
+            vec![WrappedLine::plain(Line::default())]
+        } else {
+            let parts = inline_code_and_url_parts(state, segment, body_style);
+            wrap_styled_parts_with_links(parts, content_width)
+        };
+        for mut wrapped_line in wrapped {
+            let prompt = if is_first_visual_row {
+                is_first_visual_row = false;
+                USER_PROMPT_MARK
+            } else {
+                USER_PROMPT_INDENT
+            };
+            wrapped_line.shift_links(3);
+            let mut spans = Vec::with_capacity(wrapped_line.line.spans.len() + 2);
+            spans.push(Span::styled(USER_LEFT_PAD.to_owned(), bg_style));
+            spans.push(Span::styled(prompt.to_owned(), mark_style));
+            spans.extend(wrapped_line.line.spans);
+            let line_index = rows.len();
+            for link in wrapped_line.links {
+                link_targets.push(LinkTarget::new(
+                    line_index,
+                    link.column,
+                    link.width,
+                    link.url,
+                ));
+            }
+            let mut line = Line::from(spans);
+            if let Some(color) = band {
+                line.style.bg = Some(color);
+            }
+            pad_user_line(&mut line, width, bg_style);
+            rows.push(TranscriptRow::new(line, SelectionPolicy::StripPrefix(3)));
         }
-        pad_user_line(&mut line, width, bg_style);
-        rows.push(TranscriptRow::new(line, SelectionPolicy::StripPrefix(3)));
     }
     if width > 0 {
         rows.push(TranscriptRow::new(hairline, SelectionPolicy::Skip));
     }
-    rows
+    (rows, link_targets)
 }
 
 fn pad_user_line(line: &mut Line<'static>, width: u16, bg_style: Style) {

@@ -1,5 +1,9 @@
 //! Hyperlink metadata, bare-URL detection, security validation, browser launching,
-//! and floating hover-tooltip rendering for timeline views.
+//! and floating hover-tooltip re-exports for timeline views.
+
+mod tooltip;
+
+pub(crate) use tooltip::render_link_tooltip;
 
 use super::{
     state::TuiState,
@@ -7,15 +11,12 @@ use super::{
     theme::SemanticColor,
 };
 use ratatui::{
-    Frame,
-    layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 use std::{process::Stdio, sync::Arc, time::Duration};
 use thiserror::Error;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 /// Maximum accepted URL length when launching an external browser.
 const MAX_EXTERNAL_URL_BYTES: usize = 8192;
@@ -23,12 +24,6 @@ const MAX_EXTERNAL_URL_BYTES: usize = 8192;
 /// Maximum time to wait for a platform browser launcher to report immediate
 /// failure before detaching it cleanly.
 const BROWSER_LAUNCH_WAIT: Duration = Duration::from_secs(2);
-
-/// Maximum inner text lines displayed inside a floating link hover tooltip.
-const MAX_TOOLTIP_LINES: usize = 3;
-
-/// Maximum inner text width of a floating link hover tooltip.
-const MAX_TOOLTIP_INNER_WIDTH: u16 = 84;
 
 /// Hyperlink hit span on a single wrapped line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,19 +88,28 @@ impl HoveredLink {
     }
 }
 
-/// Shared inline hyperlink style across Markdown, tables, and diagnostics.
+/// Shared inline hyperlink style across Markdown, tables, user messages, and diagnostics.
 pub(crate) fn link_style(state: &TuiState) -> Style {
     semantic_style(state, SemanticColor::Link).add_modifier(Modifier::UNDERLINED)
 }
 
+/// Returns a validated link target when inline code contains a standalone `http(s)` URL.
+pub(crate) fn inline_code_link(code: &str) -> Option<Arc<str>> {
+    validate_external_url(code.trim()).ok().map(Arc::from)
+}
+
 /// Appends plain text into `parts`, promoting bare `http://`/`https://` URLs
-/// into styled, clickable hyperlink parts.
+/// into styled, clickable hyperlink parts while preserving `base_style.bg`.
 pub(crate) fn push_text_with_bare_urls(
     parts: &mut Vec<StyledTextPart>,
     state: &TuiState,
     text: &str,
     base_style: Style,
 ) {
+    let url_style = match base_style.bg {
+        Some(bg) => link_style(state).bg(bg),
+        None => link_style(state),
+    };
     for segment in split_bare_urls(text) {
         match segment {
             TextOrUrl::Text(chunk) => {
@@ -114,13 +118,124 @@ pub(crate) fn push_text_with_bare_urls(
             TextOrUrl::Url(url) => {
                 parts.push(StyledTextPart::with_link(
                     url.to_owned(),
-                    link_style(state),
+                    url_style,
                     false,
                     Some(Arc::from(url)),
                 ));
             }
         }
     }
+}
+
+/// Scans a single pre-wrapped display line for bare `http://`/`https://` URLs
+/// not already covered by `existing_targets`, underlines those URL spans in
+/// place, and returns newly discovered [`LinkTarget`]s for `line_index`.
+pub(crate) fn linkify_rendered_line(
+    line: &mut Line<'static>,
+    line_index: usize,
+    existing_targets: &[LinkTarget],
+) -> Vec<LinkTarget> {
+    let has_colon = line.spans.iter().any(|span| span.content.contains(':'));
+    let has_slashes = line.spans.iter().any(|span| span.content.contains("//"));
+    if !has_colon || !has_slashes {
+        return Vec::new();
+    }
+
+    let full_text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    if !full_text.contains("://") {
+        return Vec::new();
+    }
+
+    let mut byte_offset = 0usize;
+    let mut col_offset = 0usize;
+    let mut url_ranges: Vec<(usize, usize)> = Vec::new();
+    let mut discovered: Vec<LinkTarget> = Vec::new();
+
+    for segment in split_bare_urls(&full_text) {
+        match segment {
+            TextOrUrl::Text(chunk) => {
+                byte_offset += chunk.len();
+                col_offset += UnicodeWidthStr::width(chunk);
+            }
+            TextOrUrl::Url(url) => {
+                let start_byte = byte_offset;
+                let end_byte = byte_offset + url.len();
+                let start_col = u16::try_from(col_offset).unwrap_or(u16::MAX);
+                let width = u16::try_from(UnicodeWidthStr::width(url)).unwrap_or(u16::MAX);
+                let end_col = start_col.saturating_add(width);
+
+                let overlaps_existing = existing_targets.iter().any(|target| {
+                    target.line_index == line_index
+                        && target.column < end_col
+                        && target.column.saturating_add(target.width) > start_col
+                });
+                if !overlaps_existing && width > 0 {
+                    url_ranges.push((start_byte, end_byte));
+                    discovered.push(LinkTarget::new(
+                        line_index,
+                        start_col,
+                        width,
+                        url.to_owned(),
+                    ));
+                }
+
+                byte_offset = end_byte;
+                col_offset += UnicodeWidthStr::width(url);
+            }
+        }
+    }
+
+    if !url_ranges.is_empty() {
+        underline_byte_ranges(line, &url_ranges);
+    }
+    discovered
+}
+
+fn underline_byte_ranges(line: &mut Line<'static>, ranges: &[(usize, usize)]) {
+    let old_spans = std::mem::take(&mut line.spans);
+    let mut new_spans = Vec::with_capacity(old_spans.len() + ranges.len() * 2);
+    let mut cursor = 0usize;
+
+    for span in old_spans {
+        let span_start = cursor;
+        let span_end = span_start + span.content.len();
+        cursor = span_end;
+
+        let content = span.content.as_ref();
+        let mut local_pos = 0usize;
+        for &(range_start, range_end) in ranges {
+            if range_end <= span_start {
+                continue;
+            }
+            if range_start >= span_end {
+                break;
+            }
+            let overlap_start = range_start.max(span_start) - span_start;
+            let overlap_end = range_end.min(span_end) - span_start;
+            if overlap_start > local_pos {
+                new_spans.push(Span::styled(
+                    content[local_pos..overlap_start].to_owned(),
+                    span.style,
+                ));
+            }
+            if overlap_end > overlap_start {
+                new_spans.push(Span::styled(
+                    content[overlap_start..overlap_end].to_owned(),
+                    span.style.add_modifier(Modifier::UNDERLINED),
+                ));
+            }
+            local_pos = overlap_end;
+        }
+        if local_pos < content.len() {
+            new_spans.push(Span::styled(content[local_pos..].to_owned(), span.style));
+        }
+    }
+
+    line.spans = new_spans;
 }
 
 /// Failure reason when validating a hyperlink before opening it externally.
@@ -186,7 +301,7 @@ pub(crate) fn validate_external_url(url: &str) -> Result<&str, UrlValidationErro
     Ok(url)
 }
 
-fn strip_http_scheme(url: &str) -> Option<&str> {
+pub(super) fn strip_http_scheme(url: &str) -> Option<&str> {
     if url.len() >= 8 && url[..8].eq_ignore_ascii_case("https://") {
         Some(&url[8..])
     } else if url.len() >= 7 && url[..7].eq_ignore_ascii_case("http://") {
@@ -376,264 +491,16 @@ pub(crate) fn open_url_feedback(url: &str, result: Result<(), String>) -> (Strin
     }
 }
 
-/// Highlights the hovered hyperlink segment and draws a floating anti-phishing
-/// URL preview tooltip anchored above (or below) the link within `bounds`.
-pub(crate) fn render_link_tooltip(
-    frame: &mut Frame<'_>,
-    state: &TuiState,
-    bounds: Rect,
-    body: Rect,
-    hovered: &HoveredLink,
-    screen_y: u16,
-) {
-    if bounds.is_empty() || body.is_empty() {
-        return;
-    }
-
-    let anchor_x = body.x.saturating_add(hovered.column);
-
-    // Highlight the hovered link segment so the user sees the exact active span.
-    if screen_y >= body.y && screen_y < body.bottom() {
-        let start_x = anchor_x.max(body.x);
-        let end_x = anchor_x.saturating_add(hovered.width).min(body.right());
-        let buf = frame.buffer_mut();
-        for x in start_x..end_x {
-            let cell = &mut buf[(x, screen_y)];
-            cell.set_style(
-                cell.style()
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            );
-        }
-    }
-
-    let clean_url = crate::text::without_control_chars(&hovered.url);
-    let openable = validate_external_url(&hovered.url).is_ok();
-    let surface = tooltip_surface_style(state);
-
-    let max_inner_width = bounds
-        .width
-        .saturating_sub(4)
-        .clamp(1, MAX_TOOLTIP_INNER_WIDTH);
-    let wrapped_lines = build_tooltip_lines(state, &clean_url, openable, surface, max_inner_width);
-    if wrapped_lines.is_empty() {
-        return;
-    }
-
-    let content_width = wrapped_lines.iter().map(Line::width).max().unwrap_or(1);
-    let content_lines = u16::try_from(wrapped_lines.len()).unwrap_or(1);
-
-    let can_draw_boxed = bounds.width >= 6 && bounds.height >= content_lines.saturating_add(3);
-
-    if can_draw_boxed {
-        // Box: `│ ` + content + ` │` => content_width + 4.
-        let box_width = u16::try_from(content_width)
-            .unwrap_or(bounds.width)
-            .saturating_add(4)
-            .min(bounds.width);
-        let box_height = content_lines.saturating_add(2);
-        let tooltip_rect = place_tooltip_rect(bounds, anchor_x, screen_y, box_width, box_height);
-
-        let border_slot = if openable {
-            SemanticColor::BorderFocus
-        } else {
-            SemanticColor::Warning
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(semantic_style(state, border_slot).patch(surface))
-            .style(surface);
-
-        frame.render_widget(Clear, tooltip_rect);
-        let inner = block.inner(tooltip_rect);
-        frame.render_widget(block, tooltip_rect);
-        if !inner.is_empty() {
-            let padded_lines: Vec<Line<'static>> = wrapped_lines
-                .into_iter()
-                .map(|mut line| {
-                    line.spans.insert(0, Span::styled(" ", surface));
-                    line
-                })
-                .collect();
-            frame.render_widget(Paragraph::new(padded_lines).style(surface), inner);
-        }
-        return;
-    }
-
-    // Compact 1-row fallback when the pane is too short for a bordered card.
-    if bounds.height < 2 {
-        return;
-    }
-    let bar_width = u16::try_from(content_width)
-        .unwrap_or(bounds.width)
-        .saturating_add(2)
-        .min(bounds.width);
-    let tooltip_rect = place_tooltip_rect(bounds, anchor_x, screen_y, bar_width, 1);
-    frame.render_widget(Clear, tooltip_rect);
-    let mut line = wrapped_lines.into_iter().next().unwrap_or_default();
-    line.spans.insert(0, Span::styled(" ", surface));
-    frame.render_widget(Paragraph::new(line).style(surface), tooltip_rect);
-}
-
-fn place_tooltip_rect(bounds: Rect, anchor_x: u16, anchor_y: u16, width: u16, height: u16) -> Rect {
-    let width = width.min(bounds.width).max(1);
-    let height = height.min(bounds.height).max(1);
-
-    let max_x = bounds.right().saturating_sub(width);
-    let x = anchor_x.max(bounds.x).min(max_x);
-
-    let above_space = anchor_y.saturating_sub(bounds.y);
-    let below_start = anchor_y.saturating_add(1);
-    let below_space = bounds.bottom().saturating_sub(below_start);
-
-    let y = if above_space >= height {
-        anchor_y.saturating_sub(height)
-    } else if below_space >= height {
-        below_start
-    } else if above_space >= below_space {
-        bounds.y
-    } else {
-        bounds.bottom().saturating_sub(height)
-    };
-
-    Rect::new(x, y, width, height)
-}
-
-fn tooltip_surface_style(state: &TuiState) -> Style {
-    state
-        .theme()
-        .bg_color(SemanticColor::Surface)
-        .or_else(|| state.theme().bg_color(SemanticColor::SurfaceSubtle))
-        .or_else(|| state.theme().bg_color(SemanticColor::HeaderBackground))
-        .map_or_else(Style::default, |bg| Style::default().bg(bg))
-}
-
-fn build_tooltip_lines(
-    state: &TuiState,
-    clean_url: &str,
-    openable: bool,
-    surface: Style,
-    max_width: u16,
-) -> Vec<Line<'static>> {
-    let max_width = usize::from(max_width).max(1);
-    let mut styled_chars: Vec<(char, Style)> = Vec::new();
-
-    if openable {
-        let icon_style = semantic_style(state, SemanticColor::Status)
-            .add_modifier(Modifier::BOLD)
-            .patch(surface);
-        let host_style = semantic_style(state, SemanticColor::Link)
-            .add_modifier(Modifier::BOLD)
-            .patch(surface);
-        let rest_style = semantic_style(state, SemanticColor::TextSecondary).patch(surface);
-
-        let split_at = split_scheme_and_authority(clean_url);
-        styled_chars.extend("↗ ".chars().map(|ch| (ch, icon_style)));
-        styled_chars.extend(clean_url[..split_at].chars().map(|ch| (ch, host_style)));
-        styled_chars.extend(clean_url[split_at..].chars().map(|ch| (ch, rest_style)));
-    } else {
-        let warn_style = semantic_style(state, SemanticColor::Warning)
-            .add_modifier(Modifier::BOLD)
-            .patch(surface);
-        let muted_style = semantic_style(state, SemanticColor::Muted).patch(surface);
-        styled_chars.extend("⊘ ".chars().map(|ch| (ch, warn_style)));
-        styled_chars.extend(clean_url.chars().map(|ch| (ch, warn_style)));
-        styled_chars.extend(" (not http/https)".chars().map(|ch| (ch, muted_style)));
-    }
-
-    wrap_styled_chars(styled_chars, max_width, MAX_TOOLTIP_LINES, surface)
-}
-
-fn split_scheme_and_authority(url: &str) -> usize {
-    let Some(after_scheme) = strip_http_scheme(url) else {
-        return url.len();
-    };
-    let scheme_len = url.len() - after_scheme.len();
-    let authority_end = after_scheme
-        .find(['/', '?', '#'])
-        .unwrap_or(after_scheme.len());
-    scheme_len + authority_end
-}
-
-fn wrap_styled_chars(
-    chars: Vec<(char, Style)>,
-    max_width: usize,
-    max_lines: usize,
-    fallback_style: Style,
-) -> Vec<Line<'static>> {
-    if chars.is_empty() || max_lines == 0 {
-        return Vec::new();
-    }
-
-    let mut lines: Vec<Vec<(char, Style)>> = vec![Vec::new()];
-    let mut current_width = 0usize;
-    let mut truncated = false;
-
-    for (ch, style) in chars {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if current_width > 0 && current_width + ch_width > max_width {
-            if lines.len() >= max_lines {
-                truncated = true;
-                break;
-            }
-            lines.push(Vec::new());
-            current_width = 0;
-        }
-        if let Some(last) = lines.last_mut() {
-            last.push((ch, style));
-        }
-        current_width += ch_width;
-    }
-
-    if truncated && let Some(last) = lines.last_mut() {
-        let mut width: usize = last
-            .iter()
-            .map(|(ch, _)| UnicodeWidthChar::width(*ch).unwrap_or(0))
-            .sum();
-        while !last.is_empty() && width + 1 > max_width {
-            if let Some((removed, _)) = last.pop() {
-                width = width.saturating_sub(UnicodeWidthChar::width(removed).unwrap_or(0));
-            }
-        }
-        let ellipsis_style = last.last().map_or(fallback_style, |(_, s)| *s);
-        last.push(('…', ellipsis_style));
-    }
-
-    lines
-        .into_iter()
-        .map(|row| {
-            let mut spans: Vec<Span<'static>> = Vec::new();
-            let mut buf = String::new();
-            let mut active_style: Option<Style> = None;
-            for (ch, style) in row {
-                if active_style == Some(style) {
-                    buf.push(ch);
-                } else {
-                    if let Some(prev_style) = active_style.take()
-                        && !buf.is_empty()
-                    {
-                        spans.push(Span::styled(std::mem::take(&mut buf), prev_style));
-                    }
-                    buf.push(ch);
-                    active_style = Some(style);
-                }
-            }
-            if let Some(prev_style) = active_style
-                && !buf.is_empty()
-            {
-                spans.push(Span::styled(buf, prev_style));
-            }
-            Line::from(spans)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        TextOrUrl, UrlValidationError, place_tooltip_rect, split_bare_urls, validate_external_url,
+        LinkTarget, TextOrUrl, UrlValidationError, linkify_rendered_line, split_bare_urls,
+        validate_external_url,
     };
-    use ratatui::layout::Rect;
+    use ratatui::{
+        style::{Modifier, Style},
+        text::{Line, Span},
+    };
 
     #[test]
     fn validate_external_url_accepts_safe_http_and_https_urls() {
@@ -740,17 +607,36 @@ mod tests {
     }
 
     #[test]
-    fn place_tooltip_rect_prefers_above_and_flips_below_when_near_top() {
-        let bounds = Rect::new(2, 1, 80, 20);
-        // Plenty of room above y=10 -> places above without covering y=10.
-        let above = place_tooltip_rect(bounds, 70, 10, 30, 3);
-        assert_eq!(above.y, 7);
-        assert_eq!(above.bottom(), 10);
-        assert_eq!(above.right(), bounds.right());
+    fn linkify_rendered_line_handles_split_spans_and_preserves_existing_links() {
+        // Syntax-highlighted spans may split scheme and host across separate spans.
+        let mut line = Line::from(vec![
+            Span::styled("▎ curl ".to_owned(), Style::default()),
+            Span::styled("Https".to_owned(), Style::default()),
+            Span::styled(":".to_owned(), Style::default()),
+            Span::styled("//example.com/a_b?x=1&y=2".to_owned(), Style::default()),
+        ]);
+        let found = linkify_rendered_line(&mut line, 3, &[]);
+        assert_eq!(
+            found,
+            vec![LinkTarget::new(
+                3,
+                7,
+                31,
+                "Https://example.com/a_b?x=1&y=2".to_owned()
+            )]
+        );
+        assert!(line.spans.iter().any(|span| {
+            span.content == "Https" && span.style.add_modifier.contains(Modifier::UNDERLINED)
+        }));
 
-        // Near top y=2 -> only 1 row above, flips directly below to y=3.
-        let below = place_tooltip_rect(bounds, 5, 2, 30, 3);
-        assert_eq!(below.y, 3);
-        assert_eq!(below.x, 5);
+        // Existing Markdown link target (e.g. anti-phishing masked link) is never overwritten.
+        let mut masked = Line::from(Span::raw("https://trusted.example".to_owned()));
+        let existing = vec![LinkTarget::new(
+            0,
+            0,
+            23,
+            "https://evil.example/phish".to_owned(),
+        )];
+        assert!(linkify_rendered_line(&mut masked, 0, &existing).is_empty());
     }
 }

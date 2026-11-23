@@ -4,7 +4,7 @@ use self::table::{TableState, spans_width, table_lines};
 use super::{
     copy_controls::{CopyContent, CopyTarget, code_block_header},
     highlight::highlight_code_to_lines,
-    links::{LinkTarget, link_style, push_text_with_bare_urls},
+    links::{LinkTarget, inline_code_link, link_style, push_text_with_bare_urls},
     state::TuiState,
     text_wrap::{
         StyledTextPart, WrappedLine, inline_code_style, inline_code_text, semantic_style,
@@ -13,7 +13,9 @@ use super::{
     theme::SemanticColor,
     transcript::{SelectionPolicy, TranscriptRow},
 };
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{
+    CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd, TextMergeStream,
+};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -52,7 +54,7 @@ pub(crate) fn markdown_lines(
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS,
     );
     let mut renderer = MarkdownRenderer::new(state, region_width);
-    for event in parser {
+    for event in TextMergeStream::new(parser) {
         renderer.push_event(event);
     }
     renderer.finish()
@@ -149,10 +151,7 @@ impl<'state> MarkdownRenderer<'state> {
             Event::Start(tag) => self.start_tag(tag),
             Event::End(tag) => self.end_tag(tag),
             Event::Text(text) => self.push_text(text.as_ref()),
-            Event::Code(code) => self.push_atomic_text(
-                inline_code_text(self.state, code.as_ref()),
-                inline_code_style(self.state, self.current_style()),
-            ),
+            Event::Code(code) => self.push_inline_code(code.as_ref()),
             Event::SoftBreak | Event::HardBreak => self.flush_parts(),
             Event::Rule => {
                 self.flush_parts();
@@ -396,10 +395,10 @@ impl<'state> MarkdownRenderer<'state> {
                 self.push_table_text(text.as_ref());
             }
             Event::Code(code) => {
-                let link = self.current_link_url();
+                let (style, link) = self.inline_code_style_and_link(code.as_ref());
                 self.push_table_part(StyledTextPart::with_link(
                     inline_code_text(self.state, code.as_ref()),
-                    inline_code_style(self.state, self.current_style()),
+                    style,
                     true,
                     link,
                 ));
@@ -482,15 +481,25 @@ impl<'state> MarkdownRenderer<'state> {
         push_text_with_bare_urls(&mut self.parts, self.state, text, base_style);
     }
 
-    fn push_atomic_text(&mut self, text: String, style: Style) {
+    fn push_inline_code(&mut self, code: &str) {
+        let text = inline_code_text(self.state, code);
         if text.is_empty() {
             return;
         }
         self.push_pending_list_marker();
         self.record_link_label(&text);
-        let link = self.current_link_url();
+        let (style, link) = self.inline_code_style_and_link(code);
         self.parts
             .push(StyledTextPart::with_link(text, style, true, link));
+    }
+
+    fn inline_code_style_and_link(&self, code: &str) -> (Style, Option<Arc<str>>) {
+        let mut style = inline_code_style(self.state, self.current_style());
+        let link = self.current_link_url().or_else(|| inline_code_link(code));
+        if link.is_some() {
+            style = style.add_modifier(Modifier::UNDERLINED);
+        }
+        (style, link)
     }
 
     fn push_pending_list_marker(&mut self) {

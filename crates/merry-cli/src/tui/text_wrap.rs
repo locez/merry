@@ -1,6 +1,10 @@
 //! Width-aware styled text helpers shared by the TUI renderers.
 
-use super::{links::LineLink, state::TuiState, theme::SemanticColor};
+use super::{
+    links::{LineLink, inline_code_link, push_text_with_bare_urls},
+    state::TuiState,
+    theme::SemanticColor,
+};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
@@ -89,37 +93,79 @@ pub(super) fn inline_code_spans(
         .collect()
 }
 
-fn inline_code_parts(state: &TuiState, text: &str, base_style: Style) -> Vec<StyledTextPart> {
-    let mut spans = Vec::new();
+enum InlineCodeSegment<'a> {
+    Text(&'a str),
+    Code(&'a str),
+}
+
+fn split_inline_code(text: &str) -> Vec<InlineCodeSegment<'_>> {
+    let mut segments = Vec::new();
     let mut remainder = text;
     loop {
         let Some(start) = remainder.find('`') else {
             if !remainder.is_empty() {
-                spans.push(StyledTextPart::new(remainder.to_owned(), base_style, false));
+                segments.push(InlineCodeSegment::Text(remainder));
             }
-            return spans;
+            return segments;
         };
         let before = &remainder[..start];
         if !before.is_empty() {
-            spans.push(StyledTextPart::new(before.to_owned(), base_style, false));
+            segments.push(InlineCodeSegment::Text(before));
         }
         let after_start = &remainder[start + 1..];
         let Some(end) = after_start.find('`') else {
-            spans.push(StyledTextPart::new(
-                remainder[start..].to_owned(),
-                base_style,
-                false,
-            ));
-            return spans;
+            segments.push(InlineCodeSegment::Text(&remainder[start..]));
+            return segments;
         };
-        let code = &after_start[..end];
-        spans.push(StyledTextPart::new(
-            inline_code_text(state, code),
-            inline_code_style(state, base_style),
-            true,
-        ));
+        segments.push(InlineCodeSegment::Code(&after_start[..end]));
         remainder = &after_start[end + 1..];
     }
+}
+
+fn inline_code_parts(state: &TuiState, text: &str, base_style: Style) -> Vec<StyledTextPart> {
+    split_inline_code(text)
+        .into_iter()
+        .map(|segment| match segment {
+            InlineCodeSegment::Text(chunk) => {
+                StyledTextPart::new(chunk.to_owned(), base_style, false)
+            }
+            InlineCodeSegment::Code(code) => StyledTextPart::new(
+                inline_code_text(state, code),
+                inline_code_style(state, base_style),
+                true,
+            ),
+        })
+        .collect()
+}
+
+/// Splits backticked inline code and bare `http(s)` URLs into wrappable styled parts.
+pub(crate) fn inline_code_and_url_parts(
+    state: &TuiState,
+    text: &str,
+    base_style: Style,
+) -> Vec<StyledTextPart> {
+    let mut parts = Vec::new();
+    for segment in split_inline_code(text) {
+        match segment {
+            InlineCodeSegment::Text(chunk) => {
+                push_text_with_bare_urls(&mut parts, state, chunk, base_style);
+            }
+            InlineCodeSegment::Code(code) => {
+                let link = inline_code_link(code);
+                let mut style = inline_code_style(state, base_style);
+                if link.is_some() {
+                    style = style.add_modifier(Modifier::UNDERLINED);
+                }
+                parts.push(StyledTextPart::with_link(
+                    inline_code_text(state, code),
+                    style,
+                    true,
+                    link,
+                ));
+            }
+        }
+    }
+    parts
 }
 
 pub(crate) fn wrap_styled_parts(

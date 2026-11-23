@@ -105,6 +105,7 @@ mod event_projection;
 mod input_controls;
 
 mod layout;
+mod link_and_table_rendering;
 
 mod output_preview;
 mod output_rate;
