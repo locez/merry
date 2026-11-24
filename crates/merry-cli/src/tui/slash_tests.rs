@@ -476,7 +476,7 @@ fn local_slash_input_bypasses_timeline_review_confirmation() {
         handle_key_action(KeyAction::Submit, &mut timeline_review),
         ControllerEffect::None
     );
-    assert!(!timeline_review.is_timeline_reviewing());
+    assert!(!timeline_review.is_timeline_detached());
     assert_eq!(timeline_review.input_text(), "");
     assert!(matches!(
         timeline_review.timeline().last(),

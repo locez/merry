@@ -401,11 +401,16 @@ fn status_click(action: StatusAction, state: &mut TuiState) -> ControllerEffect 
             initial_prompt: None,
         };
     }
+    if action == StatusAction::Follow {
+        state.follow_latest();
+        return ControllerEffect::None;
+    }
     let key_action = match action {
         StatusAction::Commands => KeyAction::OpenCommandPanel,
-        StatusAction::Agents | StatusAction::PlanMode => unreachable!("handled above"),
+        StatusAction::Agents | StatusAction::PlanMode | StatusAction::Follow => {
+            unreachable!("handled above")
+        }
         StatusAction::Plan => KeyAction::TogglePlan,
-        StatusAction::Follow => KeyAction::FollowLatest,
         StatusAction::Stop => KeyAction::Interrupt,
         StatusAction::Comment => KeyAction::ToggleComment,
         StatusAction::SendComments => KeyAction::SendComments,
@@ -457,7 +462,10 @@ fn apply_pending_queue_pointer(
             ControllerEffect::RemovePendingInput { id, resume }
         }
         PendingQueuePointer::SaveEdit => commit_pending_edit_effect(state, true),
-        PendingQueuePointer::SendAll => ControllerEffect::FlushPendingInputs,
+        PendingQueuePointer::SendAll => {
+            state.follow_latest_if_detached();
+            ControllerEffect::FlushPendingInputs
+        }
     }
 }
 
@@ -535,6 +543,16 @@ fn handle_mouse_move(position: Position, terminal_size: Size, state: &mut TuiSta
 }
 
 pub(crate) fn handle_mouse_input(
+    mouse: MouseInput,
+    terminal_size: Size,
+    state: &mut TuiState,
+) -> ControllerEffect {
+    let effect = handle_mouse_input_inner(mouse, terminal_size, state);
+    state.note_timeline_review_activity();
+    effect
+}
+
+fn handle_mouse_input_inner(
     mouse: MouseInput,
     terminal_size: Size,
     state: &mut TuiState,
@@ -812,36 +830,7 @@ pub(crate) fn handle_mouse_scroll_up_by(
     lines: usize,
     state: &mut TuiState,
 ) -> ControllerEffect {
-    let lines = lines.max(1);
-    state.clear_text_selection();
-    state.clear_all_hovered_links();
-    if matches!(state.overlay(), Some(Overlay::CommandDetails(_))) {
-        let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
-        return crate::tui::command_details::handle_mouse_scroll(state, area, position, true);
-    }
-    if matches!(state.overlay(), Some(Overlay::PlanView(_))) {
-        let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
-        return crate::tui::plan_view::handle_mouse_scroll(state, area, position, true, lines);
-    }
-    if scroll_active_overlay(state, true, lines) {
-        return ControllerEffect::None;
-    }
-    if state.overlay().is_some() {
-        return ControllerEffect::None;
-    }
-    if state.history_search_active() {
-        state.newer_history_search();
-        return ControllerEffect::None;
-    }
-    if scroll_task_dock_at(position, terminal_size, state, -1)
-        || scroll_todo_dock_at(position, terminal_size, state, -1)
-    {
-        return ControllerEffect::None;
-    }
-    match state.scroll_timeline_up_and_maybe_load_archive(lines) {
-        Some(segment) => ControllerEffect::LoadArchiveSegment(segment),
-        None => ControllerEffect::None,
-    }
+    handle_mouse_scroll_by(position, terminal_size, lines, true, state)
 }
 
 pub(crate) fn handle_mouse_scroll_down_by(
@@ -850,34 +839,65 @@ pub(crate) fn handle_mouse_scroll_down_by(
     lines: usize,
     state: &mut TuiState,
 ) -> ControllerEffect {
+    handle_mouse_scroll_by(position, terminal_size, lines, false, state)
+}
+
+fn handle_mouse_scroll_by(
+    position: Position,
+    terminal_size: Size,
+    lines: usize,
+    up: bool,
+    state: &mut TuiState,
+) -> ControllerEffect {
+    let effect = handle_mouse_scroll_by_inner(position, terminal_size, lines, up, state);
+    state.note_timeline_review_activity();
+    effect
+}
+
+fn handle_mouse_scroll_by_inner(
+    position: Position,
+    terminal_size: Size,
+    lines: usize,
+    up: bool,
+    state: &mut TuiState,
+) -> ControllerEffect {
     let lines = lines.max(1);
     state.clear_text_selection();
     state.clear_all_hovered_links();
     if matches!(state.overlay(), Some(Overlay::CommandDetails(_))) {
         let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
-        return crate::tui::command_details::handle_mouse_scroll(state, area, position, false);
+        return crate::tui::command_details::handle_mouse_scroll(state, area, position, up);
     }
     if matches!(state.overlay(), Some(Overlay::PlanView(_))) {
         let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
-        return crate::tui::plan_view::handle_mouse_scroll(state, area, position, false, lines);
+        return crate::tui::plan_view::handle_mouse_scroll(state, area, position, up, lines);
     }
-    if scroll_active_overlay(state, false, lines) {
-        return ControllerEffect::None;
-    }
-    if state.overlay().is_some() {
+    if scroll_active_overlay(state, up, lines) || state.overlay().is_some() {
         return ControllerEffect::None;
     }
     if state.history_search_active() {
-        state.begin_or_older_history_search();
+        if up {
+            state.newer_history_search();
+        } else {
+            state.begin_or_older_history_search();
+        }
         return ControllerEffect::None;
     }
-    if scroll_task_dock_at(position, terminal_size, state, 1)
-        || scroll_todo_dock_at(position, terminal_size, state, 1)
+    let dock_delta = if up { -1 } else { 1 };
+    if scroll_task_dock_at(position, terminal_size, state, dock_delta)
+        || scroll_todo_dock_at(position, terminal_size, state, dock_delta)
     {
         return ControllerEffect::None;
     }
-    state.scroll_timeline_down_by(lines);
-    ControllerEffect::None
+    if up {
+        match state.scroll_timeline_up_and_maybe_load_archive(lines) {
+            Some(segment) => ControllerEffect::LoadArchiveSegment(segment),
+            None => ControllerEffect::None,
+        }
+    } else {
+        state.scroll_timeline_down_by(lines);
+        ControllerEffect::None
+    }
 }
 
 fn scroll_task_dock_at(

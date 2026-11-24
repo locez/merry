@@ -408,7 +408,7 @@ fn renderer_review_user_input_starts_viewport_at_selected_user_turn() {
     assert!(first.contains("❯ first request"));
     assert!(first.contains("first answer"));
 
-    state.exit_timeline_review();
+    state.follow_latest();
     let bottom = render_to_text(&state, 80, 18);
     assert!(bottom.contains("second answer"));
 }

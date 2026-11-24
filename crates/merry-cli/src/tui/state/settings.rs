@@ -503,7 +503,7 @@ impl TuiState {
         }
         let Some(canonical) = KeyBinding::canonical_from_key_event(normalized) else {
             self.set_settings_notice(Some(
-                "Unsupported key (use Ctrl+<key>, Alt+<key>, Enter, Alt+Enter, Up/Down, PageUp/PageDown, or Ctrl+End)"
+                "Unsupported key (use Ctrl+<key>, Alt+<key>, Enter, Alt+Enter, Up/Down, or PageUp/PageDown)"
                     .to_owned(),
             ));
             return false;

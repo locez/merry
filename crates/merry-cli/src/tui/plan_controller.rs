@@ -57,9 +57,12 @@ pub(crate) async fn dispatch_effect(
             {
                 if let Err(error) = session.submit_message(message, prompt).await {
                     state.show_error_dialog("Plan prompt failed", error.to_string());
-                } else if !state.is_active_run() && !state.queue_preview().paused {
-                    state.push_local_user_echo(prompt.clone());
-                    state.project_local_run_start();
+                } else {
+                    state.follow_latest_if_detached();
+                    if !state.is_active_run() && !state.queue_preview().paused {
+                        state.push_local_user_echo(prompt.clone());
+                        state.project_local_run_start();
+                    }
                 }
             }
         }

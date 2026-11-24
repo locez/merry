@@ -166,7 +166,7 @@ fn controller_empty_submit_does_nothing() {
 }
 
 #[test]
-fn controller_submit_exits_review_mode_before_submitting_input() {
+fn controller_submit_immediately_exits_review_mode_and_submits_input() {
     let mut state = TuiState::new(
         "/repo".into(),
         "gpt-test".to_owned(),
@@ -184,14 +184,144 @@ fn controller_submit_exits_review_mode_before_submitting_input() {
 
     assert_eq!(
         handle_key_action(KeyAction::Submit, &mut state),
-        ControllerEffect::None
+        ControllerEffect::Submit(text_submission("draft"))
     );
     assert_eq!(state.timeline_review_user_index(), None);
     assert_eq!(state.timeline_scroll_offset(), 0);
-    assert_eq!(state.input_text(), "draft");
+    assert!(!state.is_timeline_detached());
+    assert_eq!(state.input_text(), "");
+}
 
+#[test]
+fn controller_submit_exits_scrolled_review_and_jumps_to_bottom_when_idle_or_running() {
+    use crate::tui::{
+        controller::project_local_effect,
+        render::{prepare_viewport, render_to_text},
+    };
+    use merry_core::InteractiveRunState;
+    use ratatui::layout::Size;
+
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    for index in 0..40 {
+        state.push_timeline_item(TimelineItem::Muted {
+            title: format!("entry-{index:02}"),
+            detail: "scroll history".to_owned(),
+        });
+    }
+    let size = Size::new(80, 24);
+    handle_key_action(KeyAction::ScrollUp, &mut state);
+    prepare_viewport(&mut state, size);
+    assert!(state.is_timeline_detached());
+    assert!(state.timeline_anchor().is_some());
+
+    state.insert_input_str("fresh prompt");
+    let effect = handle_key_action(KeyAction::Submit, &mut state);
+    assert_eq!(
+        effect,
+        ControllerEffect::Submit(text_submission("fresh prompt"))
+    );
+    assert!(!state.is_timeline_detached());
+    assert_eq!(state.timeline_anchor(), None);
+    assert_eq!(state.timeline_scroll_offset(), 0);
+
+    project_local_effect(&effect, &mut state);
+    prepare_viewport(&mut state, size);
+    let rendered = render_to_text(&state, size.width, size.height);
+    assert!(rendered.contains("fresh prompt"));
+    assert!(!rendered.contains("Reviewing"));
+    assert!(!rendered.contains("New content"));
+
+    // Submitting a follow-up while the model is actively running also exits review immediately.
+    state.set_run_state(InteractiveRunState::RunningModel);
+    handle_key_action(KeyAction::ScrollUp, &mut state);
+    prepare_viewport(&mut state, size);
+    assert!(state.is_timeline_detached());
+
+    state.insert_input_str("queued follow-up");
+    let effect = handle_key_action(KeyAction::Submit, &mut state);
+    assert_eq!(
+        effect,
+        ControllerEffect::Submit(text_submission("queued follow-up"))
+    );
+    assert!(!state.is_timeline_detached());
+    assert_eq!(state.timeline_anchor(), None);
+    assert_eq!(state.timeline_scroll_offset(), 0);
+}
+
+#[test]
+fn controller_submit_while_following_latest_keeps_turn_scroll_animation() {
+    use crate::tui::{controller::project_local_effect, render::prepare_viewport};
+    use ratatui::layout::Size;
+
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    for index in 0..30 {
+        state.push_timeline_item(TimelineItem::Muted {
+            title: format!("entry-{index:02}"),
+            detail: "history".to_owned(),
+        });
+    }
+    let size = Size::new(80, 24);
+    prepare_viewport(&mut state, size);
+    assert!(!state.is_timeline_detached());
+
+    state.insert_input_str("next turn");
+    let effect = handle_key_action(KeyAction::Submit, &mut state);
+    assert_eq!(
+        effect,
+        ControllerEffect::Submit(text_submission("next turn"))
+    );
+    project_local_effect(&effect, &mut state);
+    assert!(state.has_active_timeline_scroll_animation());
+}
+
+#[test]
+fn controller_empty_enter_and_idle_esc_exit_scrolled_review_to_latest() {
+    use crate::tui::render::prepare_viewport;
+    use ratatui::layout::Size;
+
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "gpt-test".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    for index in 0..40 {
+        state.push_timeline_item(TimelineItem::Muted {
+            title: format!("entry-{index:02}"),
+            detail: "scroll history".to_owned(),
+        });
+    }
+    let size = Size::new(80, 24);
+    handle_key_action(KeyAction::ScrollUp, &mut state);
+    prepare_viewport(&mut state, size);
+    assert!(state.is_timeline_detached());
+
+    // Empty Enter exits scrolled review and jumps back to latest.
     assert_eq!(
         handle_key_action(KeyAction::Submit, &mut state),
-        ControllerEffect::Submit(text_submission("draft"))
+        ControllerEffect::None
     );
+    assert!(!state.is_timeline_detached());
+    assert_eq!(state.timeline_scroll_offset(), 0);
+    assert_eq!(state.timeline_anchor(), None);
+
+    // Idle Esc also exits scrolled review (outside comment mode).
+    handle_key_action(KeyAction::ScrollUp, &mut state);
+    prepare_viewport(&mut state, size);
+    assert!(state.is_timeline_detached());
+    assert_eq!(
+        handle_key_action(KeyAction::Interrupt, &mut state),
+        ControllerEffect::None
+    );
+    assert!(!state.is_timeline_detached());
 }

@@ -121,7 +121,6 @@ impl SettingsCategory {
                 SettingItem::Shortcut(KeyAction::PasteImage),
                 SettingItem::Shortcut(KeyAction::TogglePlan),
                 SettingItem::Shortcut(KeyAction::OpenCommandDetails),
-                SettingItem::Shortcut(KeyAction::FollowLatest),
                 #[cfg(feature = "web")]
                 SettingItem::Shortcut(KeyAction::OpenSessionInBrowser),
                 SettingItem::Shortcut(KeyAction::ReviewPreviousUserInput),
@@ -316,7 +315,6 @@ impl SettingItem {
             Self::Shortcut(KeyAction::PasteImage) => "Paste image",
             Self::Shortcut(KeyAction::TogglePlan) => "Toggle plan",
             Self::Shortcut(KeyAction::OpenCommandDetails) => "Command output",
-            Self::Shortcut(KeyAction::FollowLatest) => "Follow latest",
             #[cfg(feature = "web")]
             Self::Shortcut(KeyAction::OpenSessionInBrowser) => "Open in browser",
             Self::Shortcut(KeyAction::ReviewPreviousUserInput) => "Previous user input",

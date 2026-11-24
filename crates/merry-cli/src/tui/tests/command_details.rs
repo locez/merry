@@ -159,11 +159,11 @@ fn command_output_hint_does_not_overwrite_new_content_navigation() {
 
     let wide = draw(&mut state, 80, 24);
     assert!(wide.contains("New content"));
-    assert!(wide.contains("Ctrl+End latest"));
+    assert!(wide.contains("Enter latest"));
     assert!(wide.contains(&output_hint()));
     let narrow = draw(&mut state, 40, 24);
     assert!(narrow.contains("New content"));
-    assert!(narrow.contains("Ctrl+End latest"));
+    assert!(narrow.contains("Enter latest"));
     assert!(!narrow.contains(&output_hint()));
 }
 
@@ -403,9 +403,9 @@ fn opening_before_any_command_completes_preserves_the_draft() {
 }
 
 #[test]
-fn inspection_toggle_and_follow_shortcuts_respect_configured_bindings() {
+fn inspection_toggle_and_submit_shortcuts_respect_configured_bindings() {
     let config: crate::config::TuiKeymapToml =
-        toml::from_str("open_command_details = 'ctrl+f'\nfollow_latest = 'ctrl+b'").unwrap();
+        toml::from_str("open_command_details = 'ctrl+f'\nsubmit = 'ctrl+b'").unwrap();
     let keymap = Keymap::from_config(&config).unwrap();
     let mut state = TuiState::new("/repo".into(), "test".into(), keymap, TuiTheme::default());
     let call_id = completed_command(&mut state, "configured", "pwd", 0, "");
@@ -436,6 +436,7 @@ fn inspection_toggle_and_follow_shortcuts_respect_configured_bindings() {
     assert!(state.overlay().is_none());
     assert_eq!(draw(&mut state, 80, 24), collapsed);
     state.scroll_timeline_up_by(10);
+    assert!(draw(&mut state, 80, 24).contains("Ctrl+B latest"));
     handle_key_event(
         KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
         &mut state,

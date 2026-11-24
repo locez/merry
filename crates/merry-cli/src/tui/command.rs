@@ -165,7 +165,7 @@ const COMMANDS: &[CommandSpec] = &[
         PaletteCommand::FollowLatest,
         "Navigation",
         "Follow latest output",
-        Some(KeyAction::FollowLatest),
+        None,
     ),
     CommandSpec::new(
         PaletteCommand::Interrupt,

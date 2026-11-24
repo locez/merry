@@ -269,7 +269,7 @@ fn render_top_hairline(frame: &mut Frame<'_>, state: &TuiState, area: Rect, bord
     let hint_style = semantic_style(state, SemanticColor::Muted);
 
     let review_hint = if state.is_timeline_detached() {
-        let key = state.keymap().binding_label_for(KeyAction::FollowLatest);
+        let key = state.keymap().binding_label_for(KeyAction::Submit);
         let label = if state.timeline_has_updates() {
             "New content"
         } else {

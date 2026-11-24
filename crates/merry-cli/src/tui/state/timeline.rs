@@ -2,6 +2,9 @@ use super::TuiState;
 use std::time::{Duration, Instant};
 
 const TURN_SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(220);
+/// Idle duration while a run is active before detached timeline review
+/// automatically returns to following the latest output.
+pub(crate) const TIMELINE_REVIEW_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Identifies the displayed item and wrapped row, independently of later timeline growth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,7 +71,52 @@ impl TuiState {
     pub(crate) fn is_timeline_detached(&self) -> bool {
         self.timeline_anchor.is_some()
             || self.timeline_scroll_offset > 0
-            || self.is_timeline_reviewing()
+            || self.timeline_review_user_index.is_some()
+    }
+
+    /// Exits detached timeline review when active.
+    /// Preserves `timeline_last_scroll` (and turn-scroll animations) when already following.
+    pub(crate) fn follow_latest_if_detached(&mut self) {
+        if self.is_timeline_detached() {
+            self.follow_latest();
+        }
+    }
+
+    /// Records recent user interaction to extend detached timeline review while a run is active.
+    pub(crate) fn note_timeline_review_activity(&mut self) {
+        if self.is_timeline_detached() {
+            self.timeline_review_last_activity = Some(tokio::time::Instant::now());
+        }
+    }
+
+    /// Returns to following the latest output once detached timeline review has
+    /// remained idle for [`TIMELINE_REVIEW_IDLE_TIMEOUT`] during an active run.
+    pub(crate) fn expire_idle_timeline_review(&mut self) -> bool {
+        if !self.is_timeline_detached() {
+            self.timeline_review_last_activity = None;
+            return false;
+        }
+        if !self.is_active_run() {
+            return false;
+        }
+        let now = tokio::time::Instant::now();
+        if self.is_timeline_review_auto_follow_paused() {
+            // Keep the deadline fresh while a modal, comment session, or text
+            // selection holds focus so closing it never snaps the viewport away
+            // immediately.
+            self.timeline_review_last_activity = Some(now);
+            return false;
+        }
+        let last_activity = *self.timeline_review_last_activity.get_or_insert(now);
+        if now.saturating_duration_since(last_activity) >= TIMELINE_REVIEW_IDLE_TIMEOUT {
+            self.follow_latest();
+            return true;
+        }
+        false
+    }
+
+    fn is_timeline_review_auto_follow_paused(&self) -> bool {
+        self.overlay().is_some() || self.text_selection().is_some() || self.is_commenting()
     }
 
     /// Records the actual viewport after layout, keeping subsequent updates anchored.
@@ -167,5 +215,81 @@ mod tests {
         assert_eq!(r4, 40);
         // Ease-out covers more than half the distance in the first half of the duration.
         assert!(r2 > 25, "expected ease-out midpoint > 25, got {r2}");
+    }
+
+    fn detached_state() -> TuiState {
+        let mut state = TuiState::new(
+            "/repo".into(),
+            "gpt-test".into(),
+            crate::tui::keymap::Keymap::default(),
+            crate::tui::theme::TuiTheme::default(),
+        );
+        state.push_timeline_item(crate::tui::state::TimelineItem::User {
+            text: "question".into(),
+        });
+        state.push_timeline_item(crate::tui::state::TimelineItem::Assistant {
+            text: "answer".into(),
+        });
+        state.scroll_timeline_up_by(10);
+        state
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_review_auto_follows_after_timeout_only_while_run_is_active() {
+        let mut state = detached_state();
+
+        // Idle sessions remain detached indefinitely.
+        tokio::time::advance(Duration::from_secs(600)).await;
+        assert!(!state.expire_idle_timeline_review());
+        assert!(state.is_timeline_detached());
+
+        // Starting an active run grants a fresh timeout window from run start.
+        state.set_run_state(merry_core::InteractiveRunState::RunningModel);
+        tokio::time::advance(TIMELINE_REVIEW_IDLE_TIMEOUT - Duration::from_millis(1)).await;
+        assert!(!state.expire_idle_timeline_review());
+        assert!(state.is_timeline_detached());
+
+        // User activity extends the timeout window.
+        state.note_timeline_review_activity();
+        tokio::time::advance(TIMELINE_REVIEW_IDLE_TIMEOUT - Duration::from_millis(1)).await;
+        assert!(!state.expire_idle_timeline_review());
+        assert!(state.is_timeline_detached());
+
+        // Reaching the timeout without activity exits detached review and follows latest.
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(state.expire_idle_timeline_review());
+        assert!(!state.is_timeline_detached());
+        assert_eq!(state.timeline_scroll_offset(), 0);
+        assert_eq!(state.timeline_review_user_index(), None);
+        assert_eq!(state.timeline_anchor(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_review_auto_follow_pauses_during_overlays_and_comment_mode() {
+        let mut state = detached_state();
+        state.set_run_state(merry_core::InteractiveRunState::RunningTool);
+
+        // Opening an overlay pauses auto-follow and refreshes the deadline.
+        state.open_command_palette();
+        tokio::time::advance(TIMELINE_REVIEW_IDLE_TIMEOUT + Duration::from_secs(15)).await;
+        assert!(!state.expire_idle_timeline_review());
+        assert!(state.is_timeline_detached());
+
+        // Closing the overlay grants a fresh window before expiring.
+        state.close_overlay();
+        tokio::time::advance(TIMELINE_REVIEW_IDLE_TIMEOUT - Duration::from_millis(1)).await;
+        assert!(!state.expire_idle_timeline_review());
+        assert!(state.is_timeline_detached());
+
+        // Entering comment mode also pauses auto-follow until exited.
+        state.toggle_comment_mode();
+        tokio::time::advance(TIMELINE_REVIEW_IDLE_TIMEOUT + Duration::from_secs(10)).await;
+        assert!(!state.expire_idle_timeline_review());
+        assert!(state.is_timeline_detached());
+
+        state.toggle_comment_mode();
+        tokio::time::advance(TIMELINE_REVIEW_IDLE_TIMEOUT).await;
+        assert!(state.expire_idle_timeline_review());
+        assert!(!state.is_timeline_detached());
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::tui::{
     command_details::CommandNavigation,
-    controller::{ControllerEffect, exit_review_if_active},
+    controller::ControllerEffect,
     input::{DraftImage, TuiSubmission},
     keymap::KeyAction,
     overlay::{Overlay, OverlayKeyResult},
@@ -65,11 +65,10 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
                 state.follow_latest();
                 state.repeat_stop_feedback();
                 ControllerEffect::None
-            } else if state.is_timeline_reviewing() {
-                state.exit_timeline_review();
-                ControllerEffect::None
             } else {
-                state.escape_comment_mode();
+                if !state.escape_comment_mode() {
+                    state.follow_latest_if_detached();
+                }
                 ControllerEffect::None
             }
         }
@@ -82,10 +81,6 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
         }
         KeyAction::ScrollDown => {
             state.scroll_timeline_down_by(TIMELINE_SCROLL_STEP);
-            ControllerEffect::None
-        }
-        KeyAction::FollowLatest => {
-            state.follow_latest();
             ControllerEffect::None
         }
         KeyAction::ReviewPreviousUserInput => {
@@ -120,11 +115,7 @@ fn dispatch_submit(
         return submit_input(state, submit);
     }
     if let Some(effect) = crate::tui::command_controller::slash_input_effect(state) {
-        exit_review_if_active(state);
         return effect;
-    }
-    if exit_review_if_active(state) {
-        return ControllerEffect::None;
     }
     if state.pending_comment_quote().is_some() {
         state.pin_pending_comment();
@@ -140,9 +131,11 @@ fn send_comments(
     state: &mut TuiState,
     submit: impl FnOnce(TuiSubmission) -> ControllerEffect,
 ) -> ControllerEffect {
-    state
-        .take_comment_submission()
-        .map_or(ControllerEffect::None, submit)
+    let Some(submission) = state.take_comment_submission() else {
+        return ControllerEffect::None;
+    };
+    state.follow_latest_if_detached();
+    submit(submission)
 }
 
 pub(super) fn submit_input(
@@ -150,12 +143,9 @@ pub(super) fn submit_input(
     submit: impl FnOnce(TuiSubmission) -> ControllerEffect,
 ) -> ControllerEffect {
     if let Some(effect) = crate::tui::command_controller::slash_input_effect(state) {
-        exit_review_if_active(state);
         return effect;
     }
-    if exit_review_if_active(state) {
-        return ControllerEffect::None;
-    }
+    state.follow_latest_if_detached();
     if let Some(submission) = state.take_input_for_submit() {
         return submit(submission);
     }
@@ -226,6 +216,12 @@ fn history_search_key(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
 }
 
 pub(crate) fn handle_key_event(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
+    let effect = handle_key_event_inner(key, state);
+    state.note_timeline_review_activity();
+    effect
+}
+
+fn handle_key_event_inner(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
     state.clear_all_hovered_links();
     if state.overlay().is_none() && state.clear_text_selection() && key.code == KeyCode::Esc {
         return ControllerEffect::None;
@@ -564,15 +560,12 @@ pub(super) fn press_overlay(state: &mut TuiState, code: KeyCode) -> ControllerEf
 
 pub(crate) fn handle_paste_event(text: &str, state: &mut TuiState) {
     state.clear_text_selection();
-    if state.overlay().is_none() && state.history_search_paste(text) {
-        return;
-    }
-    if state.overlay().is_none() && state.paste_into_pending_edit(text) {
-        return;
-    }
-    if !state.insert_overlay_paste(text) {
+    let handled = state.overlay().is_none()
+        && (state.history_search_paste(text) || state.paste_into_pending_edit(text));
+    if !handled && !state.insert_overlay_paste(text) {
         state.insert_input_paste(text);
     }
+    state.note_timeline_review_activity();
 }
 
 pub(super) fn commit_pending_edit_effect(state: &mut TuiState, resume: bool) -> ControllerEffect {
@@ -634,6 +627,7 @@ fn pending_edit_key(key: KeyEvent, state: &mut TuiState) -> ControllerEffect {
 pub(in crate::tui) fn project_local_effect(effect: &ControllerEffect, state: &mut TuiState) {
     match effect {
         ControllerEffect::Submit(submission) => {
+            state.follow_latest_if_detached();
             if !state.is_active_run() && !state.queue_preview().paused {
                 state.push_local_user_echo(submission.text.clone());
                 state.project_local_run_start();

@@ -142,7 +142,16 @@ fn stop_and_follow_chips_use_the_same_actions_as_the_keyboard() {
         click(&mut state, size, point(&buffer, "[follow]")),
         ControllerEffect::None
     );
-    assert!(!state.is_timeline_reviewing());
+    assert!(!state.is_timeline_detached());
+
+    // Scrolled-up detached review also exposes and responds to [follow].
+    state.scroll_timeline_up_by(5);
+    let buffer = draw(&mut state, size);
+    assert_eq!(
+        click(&mut state, size, point(&buffer, "[follow]")),
+        ControllerEffect::None
+    );
+    assert!(!state.is_timeline_detached());
 }
 
 #[test]

@@ -18,6 +18,7 @@ pub(crate) fn slash_input_effect(state: &mut TuiState) -> Option<ControllerEffec
             match command.command {
                 PaletteCommand::TogglePlanMode if owned_args.is_some() => {
                     state.close_overlay();
+                    state.follow_latest_if_detached();
                     Some(ControllerEffect::SetPlanMode {
                         enabled: true,
                         initial_prompt: owned_args,
@@ -146,7 +147,8 @@ pub(crate) fn run_palette_command(
         }
         PaletteCommand::FollowLatest => {
             state.close_overlay();
-            handle_key_action(KeyAction::FollowLatest, state)
+            state.follow_latest();
+            ControllerEffect::None
         }
         PaletteCommand::Interrupt => {
             prepare_timeline_feedback(state);

@@ -329,8 +329,7 @@ interrupt = "esc"
 quit = "ctrl+q"
 scroll_up = "pageup"
 scroll_down = "pagedown"
-# Manual scrolling pauses following; return explicitly when ready for new output.
-follow_latest = "ctrl+end"
+# Manual scrolling pauses following; press Enter (or Esc when idle) to return to latest output.
 # Toggle command output details; pressing the same shortcut again or Esc closes them.
 open_command_details = "alt+t"
 review_previous_user_input = "alt+u"

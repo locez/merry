@@ -55,7 +55,7 @@ fn incoming_text_and_item_replacement_preserve_the_reading_position() {
     assert_eq!(visible_entries(&before), visible_entries(&after));
     assert!(after.contains("New content"));
     handle_key_event(
-        KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         &mut state,
     );
     let latest = draw(&mut state, size);
@@ -94,4 +94,76 @@ fn review_anchor_survives_narrow_resize_and_repeated_scrolls() {
     handle_key_action(KeyAction::ScrollDown, &mut state);
     let restored = draw(&mut state, wide);
     assert_eq!(visible_entries(&restored)[0].trim(), first);
+}
+
+#[tokio::test(start_paused = true)]
+async fn mouse_move_scroll_and_keys_extend_running_review_timeout_before_auto_follow() {
+    use crate::tui::{
+        controller::{
+            handle_mouse_input, handle_mouse_scroll_down_by, handle_mouse_scroll_up_by,
+            handle_paste_event,
+        },
+        state::TIMELINE_REVIEW_IDLE_TIMEOUT,
+        text_interaction::MouseInput,
+    };
+    use merry_core::InteractiveRunState;
+    use ratatui::layout::Position;
+    use std::time::Duration;
+
+    let mut state = populated_state();
+    let size = Size::new(80, 24);
+    state.set_run_state(InteractiveRunState::RunningModel);
+    handle_key_action(KeyAction::ScrollUp, &mut state);
+    draw(&mut state, size);
+    state.append_assistant_delta(None, "latest streamed response");
+    let detached = draw(&mut state, size);
+    assert!(detached.contains("New content"));
+    assert!(detached.contains("Enter latest"));
+    assert!(state.is_timeline_detached());
+
+    let almost_expired = TIMELINE_REVIEW_IDLE_TIMEOUT - Duration::from_secs(5);
+
+    // Moving the mouse pointer extends the review timeout.
+    tokio::time::advance(almost_expired).await;
+    handle_mouse_input(MouseInput::Move(Position::new(12, 6)), size, &mut state);
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert!(!state.expire_idle_timeline_review());
+    assert!(state.is_timeline_detached());
+
+    // Scrolling up or down extends the review timeout.
+    tokio::time::advance(almost_expired - Duration::from_secs(10)).await;
+    handle_mouse_scroll_up_by(Position::new(12, 6), size, 2, &mut state);
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert!(!state.expire_idle_timeline_review());
+    assert!(state.is_timeline_detached());
+
+    tokio::time::advance(almost_expired - Duration::from_secs(10)).await;
+    handle_mouse_scroll_down_by(Position::new(12, 6), size, 1, &mut state);
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert!(!state.expire_idle_timeline_review());
+    assert!(state.is_timeline_detached());
+
+    // Keyboard and paste input extend the review timeout.
+    tokio::time::advance(almost_expired - Duration::from_secs(10)).await;
+    handle_key_event(
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        &mut state,
+    );
+    tokio::time::advance(Duration::from_secs(10)).await;
+    assert!(!state.expire_idle_timeline_review());
+    assert!(state.is_timeline_detached());
+
+    tokio::time::advance(almost_expired - Duration::from_secs(10)).await;
+    handle_paste_event("bc", &mut state);
+    tokio::time::advance(almost_expired).await;
+    assert!(!state.expire_idle_timeline_review());
+    assert!(state.is_timeline_detached());
+
+    // Once idle past the timeout with no activity, review exits silently to latest.
+    tokio::time::advance(Duration::from_secs(5)).await;
+    assert!(state.expire_idle_timeline_review());
+    assert!(!state.is_timeline_detached());
+    let latest = draw(&mut state, size);
+    assert!(latest.contains("latest streamed response"));
+    assert!(!latest.contains("New content"));
 }

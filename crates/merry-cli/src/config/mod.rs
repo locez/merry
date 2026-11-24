@@ -849,7 +849,6 @@ pub(crate) struct TuiKeymapToml {
     pub(crate) quit: Option<String>,
     pub(crate) scroll_up: Option<String>,
     pub(crate) scroll_down: Option<String>,
-    pub(crate) follow_latest: Option<String>,
     pub(crate) open_command_details: Option<String>,
     pub(crate) review_previous_user_input: Option<String>,
     pub(crate) history_previous: Option<String>,

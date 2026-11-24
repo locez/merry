@@ -15,7 +15,6 @@ pub(crate) enum KeyAction {
     Quit,
     ScrollUp,
     ScrollDown,
-    FollowLatest,
     ReviewPreviousUserInput,
     HistoryPrevious,
     HistoryNext,
@@ -32,7 +31,6 @@ impl KeyAction {
             Self::PasteImage => Some("paste_image"),
             Self::TogglePlan => Some("toggle_plan"),
             Self::OpenCommandDetails => Some("open_command_details"),
-            Self::FollowLatest => Some("follow_latest"),
             #[cfg(feature = "web")]
             Self::OpenSessionInBrowser => Some("open_session_in_browser"),
             Self::ReviewPreviousUserInput => Some("review_previous_user_input"),
@@ -56,7 +54,6 @@ impl KeyAction {
             "paste_image" => Some(Self::PasteImage),
             "toggle_plan" => Some(Self::TogglePlan),
             "open_command_details" => Some(Self::OpenCommandDetails),
-            "follow_latest" => Some(Self::FollowLatest),
             #[cfg(feature = "web")]
             "open_session_in_browser" => Some(Self::OpenSessionInBrowser),
             "review_previous_user_input" => Some(Self::ReviewPreviousUserInput),
@@ -149,10 +146,6 @@ impl Default for Keymap {
                     KeyAction::ScrollDown,
                 ),
                 (
-                    KeyBinding::new(KeyCode::End, KeyModifiers::CONTROL),
-                    KeyAction::FollowLatest,
-                ),
-                (
                     KeyBinding::new(KeyCode::Char('u'), KeyModifiers::ALT),
                     KeyAction::ReviewPreviousUserInput,
                 ),
@@ -228,9 +221,6 @@ impl Keymap {
         }
         if let Some(binding) = config.scroll_down.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::ScrollDown);
-        }
-        if let Some(binding) = config.follow_latest.as_deref() {
-            keymap.set_binding(parse_binding(binding)?, KeyAction::FollowLatest);
         }
         if let Some(binding) = config.open_command_details.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::OpenCommandDetails);
@@ -376,7 +366,6 @@ impl KeyBinding {
         match (key.code, key.modifiers) {
             (KeyCode::Enter, KeyModifiers::NONE) => Some("enter".to_owned()),
             (KeyCode::Enter, KeyModifiers::ALT) => Some("alt+enter".to_owned()),
-            (KeyCode::End, KeyModifiers::CONTROL) => Some("ctrl+end".to_owned()),
             (KeyCode::Up, KeyModifiers::NONE) => Some("up".to_owned()),
             (KeyCode::Down, KeyModifiers::NONE) => Some("down".to_owned()),
             (KeyCode::PageUp, KeyModifiers::NONE) => Some("pageup".to_owned()),
@@ -429,7 +418,6 @@ fn parse_binding(value: &str) -> Result<KeyBinding, crate::config::ConfigError> 
     match normalized.as_str() {
         "enter" => Ok(KeyBinding::new(KeyCode::Enter, KeyModifiers::NONE)),
         "esc" => Ok(KeyBinding::new(KeyCode::Esc, KeyModifiers::NONE)),
-        "ctrl+end" => Ok(KeyBinding::new(KeyCode::End, KeyModifiers::CONTROL)),
         "alt+enter" | "option+enter" => Ok(KeyBinding::new(KeyCode::Enter, KeyModifiers::ALT)),
         "up" => Ok(KeyBinding::new(KeyCode::Up, KeyModifiers::NONE)),
         "down" => Ok(KeyBinding::new(KeyCode::Down, KeyModifiers::NONE)),

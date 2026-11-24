@@ -127,7 +127,7 @@ pub(crate) fn status_actions(state: &TuiState) -> Vec<StatusAction> {
     if state.plan().has_plans() {
         actions.push(StatusAction::Plan);
     }
-    if state.is_timeline_reviewing() {
+    if state.is_timeline_detached() {
         actions.push(StatusAction::Follow);
     }
     if state.can_interrupt_run() {

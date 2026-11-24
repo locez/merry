@@ -386,14 +386,6 @@ pub(crate) enum ControllerEffect {
     Quit,
 }
 
-fn exit_review_if_active(state: &mut TuiState) -> bool {
-    let was_reviewing = state.is_timeline_reviewing();
-    if state.is_timeline_reviewing() {
-        state.exit_timeline_review();
-    }
-    was_reviewing
-}
-
 fn cockpit_rects(terminal_size: Size, state: &TuiState) -> super::layout::TimelineRects {
     let area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
     let pane_heights = render::pane_heights_for_area(state, area);
@@ -485,6 +477,7 @@ pub(crate) async fn run_controller(
                         .drain_queued_events(MAX_DRAINED_TERMINAL_EVENTS.saturating_sub(1))
                         .map_err(unexpected)?;
                     raw_batch.extend(extra);
+                    let had_user_activity = raw_batch.iter().any(is_user_activity_event);
 
                     let coalesced = coalesce_terminal_events(raw_batch, state.mouse_scroll_lines());
                     let mut pending_exit: Option<ControllerExit> = None;
@@ -575,6 +568,9 @@ pub(crate) async fn run_controller(
                                 break;
                             }
                         }
+                    }
+                    if had_user_activity {
+                        state.note_timeline_review_activity();
                     }
                     if state.inspected_subagent_id().is_none() {
                         subagent_live_stream = None;
@@ -813,11 +809,23 @@ async fn recv_subagent_live_event(
     }
 }
 
+fn is_user_activity_event(event: &TerminalEvent) -> bool {
+    matches!(
+        event,
+        TerminalEvent::Key(_)
+            | TerminalEvent::Mouse(_)
+            | TerminalEvent::MouseScrollUp(_)
+            | TerminalEvent::MouseScrollDown(_)
+            | TerminalEvent::Paste(_)
+    )
+}
+
 fn refresh_interactions(state: &mut TuiState, size: Size) {
     state.expire_clipboard_feedback();
     let rects = cockpit_rects(size, state);
     state.validate_text_selection_area(render::timeline_text_area(state, rects.timeline));
     state.autoscroll_text_selection();
+    state.expire_idle_timeline_review();
 }
 
 fn new_refresh_interval() -> time::Interval {

@@ -18,6 +18,8 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
+#[cfg(test)]
+pub(crate) use timeline::TIMELINE_REVIEW_IDLE_TIMEOUT;
 pub(crate) use timeline::TimelineAnchor;
 pub(crate) use views::{
     CommandFailure, CommandView, LiveCommandOutput, MAX_EXPANDED_PATCH_LINES, PatchChangeView,
@@ -83,6 +85,7 @@ pub(crate) struct TuiState {
     timeline_review_user_index: Option<usize>,
     timeline_anchor: Option<TimelineAnchor>,
     timeline_has_updates: bool,
+    timeline_review_last_activity: Option<tokio::time::Instant>,
     timeline_last_scroll: Option<usize>,
     timeline_scroll_anim: Option<timeline::TimelineScrollAnimation>,
     pending_turn_scroll_animation: bool,
@@ -161,6 +164,7 @@ impl TuiState {
             timeline_review_user_index: None,
             timeline_anchor: None,
             timeline_has_updates: false,
+            timeline_review_last_activity: None,
             timeline_last_scroll: None,
             timeline_scroll_anim: None,
             pending_turn_scroll_animation: false,
@@ -513,6 +517,9 @@ impl TuiState {
                 *review_index -= 1;
             }
         }
+        if !self.is_timeline_detached() {
+            self.timeline_review_last_activity = None;
+        }
     }
 
     /// Appends reasoning text to the open thinking block, or starts one.
@@ -690,19 +697,12 @@ impl TuiState {
         self.timeline_review_user_index
     }
 
-    pub(crate) fn is_timeline_reviewing(&self) -> bool {
-        self.timeline_review_user_index.is_some()
-    }
-
-    pub(crate) fn exit_timeline_review(&mut self) {
-        self.follow_latest();
-    }
-
     pub(crate) fn follow_latest(&mut self) {
         self.timeline_scroll_offset = 0;
         self.timeline_review_user_index = None;
         self.timeline_anchor = None;
         self.timeline_has_updates = false;
+        self.timeline_review_last_activity = None;
         self.timeline_last_scroll = None;
         self.clear_timeline_scroll_animation();
         self.pending_empty_input_quit = false;
@@ -719,6 +719,7 @@ impl TuiState {
         self.timeline_anchor = None;
         self.clear_timeline_scroll_animation();
         self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_add(lines);
+        self.note_timeline_review_activity();
     }
 
     pub(crate) fn scroll_timeline_down_by(&mut self, lines: usize) {
@@ -729,6 +730,8 @@ impl TuiState {
         self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_sub(lines);
         if self.timeline_scroll_offset == 0 {
             self.follow_latest();
+        } else {
+            self.note_timeline_review_activity();
         }
     }
 
@@ -744,6 +747,7 @@ impl TuiState {
             self.timeline_review_user_index = Some(index);
             self.timeline_anchor = None;
             self.clear_timeline_scroll_animation();
+            self.note_timeline_review_activity();
         }
     }
 
@@ -780,6 +784,9 @@ impl TuiState {
         if is_active && !was_active {
             self.stop_feedback = StopFeedbackState::Idle;
             self.active_run_started_at = Some(now);
+            if self.is_timeline_detached() {
+                self.timeline_review_last_activity = Some(tokio::time::Instant::now());
+            }
         } else if !is_active {
             self.finish_reasoning();
             if was_active && let Some(started_at) = self.active_run_started_at.take() {
