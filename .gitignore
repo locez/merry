@@ -21,6 +21,7 @@ target/
 web/node_modules/
 web/dist/
 crates/merry-web/assets/
+crates/merry-web/dist/
 
 # Python packaging/build outputs.
 .venv/

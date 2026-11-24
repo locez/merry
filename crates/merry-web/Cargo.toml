@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["web-programming", "development-tools"]
+description = "Local HTTP trajectory viewer backend and embedded web UI assets for Merry."
+include = ["Cargo.toml", "build.rs", "src/**", "dist/**"]
 
 [dependencies]
 axum.workspace = true

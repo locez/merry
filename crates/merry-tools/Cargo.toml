@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["development-tools", "asynchronous"]
+description = "Workspace file, search, patch, web fetch, and document tools for the Merry agent runtime."
 
 [dependencies]
 base64.workspace = true

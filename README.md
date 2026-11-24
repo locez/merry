@@ -2,7 +2,7 @@
 
 # Merry
 
-**A sandboxed terminal coding agent powered by a unified Rust runtime.**
+**A lightweight terminal coding agent powered by a unified Rust runtime.**
 
 CLI · Interactive TUI · Rust SDK · Python SDK
 

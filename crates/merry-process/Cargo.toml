@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["os", "development-tools"]
+description = "Sandboxed host-process execution (Landlock/seccomp, Seatbelt, Windows Job Objects) for Merry."
 
 [dependencies]
 merry-core = { path = "../merry-core", version = "0.1.0" }

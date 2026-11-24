@@ -3,7 +3,7 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "merry"
+name = "merry-agent"
 dynamic = ["version"]
 readme = "README.md"
 description = "Python bindings for the Merry agent runtime"
@@ -16,6 +16,10 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Rust",
 ]
+
+[project.urls]
+Homepage = "https://github.com/locez/merry"
+Repository = "https://github.com/locez/merry"
 
 [dependency-groups]
 dev = [

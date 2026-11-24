@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories = ["asynchronous", "development-tools"]
+description = "Structured session, task ledger, context compaction, memory, permission, and tool runtime for Merry."
 
 [dependencies]
 base64.workspace = true

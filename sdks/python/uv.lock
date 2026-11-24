@@ -30,7 +30,7 @@ wheels = [
 ]
 
 [[package]]
-name = "merry"
+name = "merry-agent"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },

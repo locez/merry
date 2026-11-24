@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords.workspace = true
+categories = ["development-tools", "asynchronous"]
+description = "Rust SDK facade for the Merry coding agent runtime (CLI available as `merry-cli`)."
 
 [features]
 default = ["openai-compatible"]
