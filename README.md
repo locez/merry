@@ -6,7 +6,7 @@
 
 CLI · Interactive TUI · Rust SDK · Python SDK
 
-[Quick Start](#quick-start) · [Shortcuts](#tui-shortcuts) · [Sandbox](SANDBOX.md) · [SDKs](#sdks) · [Config](examples/config.toml)
+[Features](#features) · [Memory](#memory-footprint) · [Quick Start](#quick-start) · [Shortcuts](#tui-shortcuts) · [Sandbox](SANDBOX.md) · [SDKs](#sdks) · [Config](examples/config.toml)
 
 </div>
 
@@ -14,15 +14,40 @@ https://github.com/user-attachments/assets/f7272d03-d4b8-4ae4-9ba7-547e3bc726f2
 
 ---
 
-## Why Merry
+## Why
+
+Honestly, there isn't much of a *why*. I just wanted an agent of my own — it sounded fun, so I built one.
+
+---
+
+## Features
 
 One Rust runtime owns sessions, tool admission, context compilation, permissions, and lifecycle — serving the terminal UI, headless CLI, Rust crate, and Python SDK from the same core.
 
+- **Lightweight Footprint** — Single native Rust binary with no JS runtime or background daemon, idling at ~27 MiB RSS in the full interactive TUI ([comparison](#memory-footprint)).
 - **Streaming TUI** — Markdown & syntax-highlighted diffs, Plan Mode (`Alt+P`), inline review comments (`Alt+C`), image paste, and built-in themes (`Sakura`, `Tokyo Night`, `Catppuccin Mocha`, `Nord`, `Paper Light`, `ANSI`) with optional transparency.
 - **Parallel Subagents** — Built-in `explore`, `coder`, and `review` roles plus custom roles, Git worktree isolation, and live monitoring in the `Tasks` dock.
 - **Sandboxed by Default** — Confines every process action via Linux Landlock + seccomp or macOS Seatbelt with workspace trust and AI/human permission review (Windows defaults to host mode with permission review and Job Object process cleanup).
 - **Structured Runtime** — Automatic turn-preserving context compaction, on-demand `SKILL.md` skills, durable memory, HTTP MCP servers, and resumable sessions.
 - **Multi-Provider** — OpenAI Responses & Chat Completions, Anthropic Messages, and per-role model overrides.
+
+---
+
+## Memory Footprint
+
+Cold-start idle memory compared across coding agents on the same machine:
+
+| Agent | Version | Idle RSS | Peak RSS (`VmHWM`) | vs. Merry |
+| --- | --- | ---: | ---: | ---: |
+| **Merry** | `0.1.0` | **26.5 MiB** | **26.5 MiB** | **1.0×** |
+| Grok CLI | `1.0.89` | 114.1 MiB | 114.1 MiB | 4.3× |
+| Codex CLI | `0.171.0` | 125.9 MiB | 125.9 MiB | 4.8× |
+| Claude Code | `2.1.330` | 126.5 MiB | 137.2 MiB | 4.8× |
+| OpenCode CLI | `2.3.0` | 514.6 MiB | 703.7 MiB | 19.4× |
+| DeepSeek Harness (server only) | `0.2.2-rc.5` | 416.5 MiB | 416.5 MiB | 15.7× |
+| DeepSeek Harness (server + Chrome) | `0.2.2-rc.5` | 789.9 MiB* | — | 29.8× |
+
+<sub>Measured on Linux `x86_64` by cold-starting each agent in a 120×40 PTY inside the same repository directory with zero prompts sent, reading total process-tree `VmRSS` / `VmHWM` from `/proc` after settling (8s). Numbers vary with OS, version, plugins, and active sessions. Claude Code was measured at its initial workspace trust screen. DeepSeek Harness (`dsh web`) excludes the `npx` wrapper; `*` adds headless Chrome's deduplicated `PSS` (334.0 MiB across all browser processes; renderer processes alone: 178.3 MiB `PSS`) to the connected `dsh` server (455.9 MiB `VmRSS`) to avoid double-counting shared browser pages.</sub>
 
 ---
 
