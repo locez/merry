@@ -43,6 +43,7 @@ Cold-start idle memory compared across coding agents on the same machine:
 | Grok CLI | `1.0.89` | 114.1 MiB | 114.1 MiB | 4.3× |
 | Codex CLI | `0.171.0` | 125.9 MiB | 125.9 MiB | 4.8× |
 | Claude Code | `2.1.330` | 126.5 MiB | 137.2 MiB | 4.8× |
+| Antigravity CLI (`agy`) | `1.5.13` | 224.9 MiB | 224.9 MiB | 8.5× |
 | OpenCode CLI | `2.3.0` | 514.6 MiB | 703.7 MiB | 19.4× |
 | DeepSeek Harness (server only) | `0.2.2-rc.5` | 416.5 MiB | 416.5 MiB | 15.7× |
 | DeepSeek Harness (server + Chrome) | `0.2.2-rc.5` | 789.9 MiB* | — | 29.8× |
