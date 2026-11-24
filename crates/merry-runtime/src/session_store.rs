@@ -389,6 +389,38 @@ impl FileSessionStore {
         })
     }
 
+    /// Releases a session reservation and removes its directory when it contains
+    /// no persisted files other than `.session.lock` (for example, when a newly
+    /// opened interactive session exits without recording any activity).
+    pub async fn release_empty_reservation(
+        &self,
+        session_id: &SessionId,
+        reservation: SessionReservation,
+    ) {
+        let session_dir = self.session_dir(session_id);
+        let mut has_other_entries = false;
+        match tokio::fs::read_dir(&session_dir).await {
+            Ok(mut entries) => {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    if entry.file_name() != OsStr::new(SESSION_LOCK_FILE_NAME) {
+                        has_other_entries = true;
+                        break;
+                    }
+                }
+            }
+            Err(_) => {
+                drop(reservation);
+                return;
+            }
+        }
+        drop(reservation);
+        if has_other_entries {
+            return;
+        }
+        let _ = tokio::fs::remove_file(session_dir.join(SESSION_LOCK_FILE_NAME)).await;
+        let _ = tokio::fs::remove_dir(&session_dir).await;
+    }
+
     /// Reports whether this store already holds committed state for a session id.
     ///
     /// Saving appends `journal.jsonl`, so a new run that reuses an id would
@@ -411,7 +443,9 @@ impl FileSessionStore {
         Ok(false)
     }
 
-    pub(crate) fn session_dir(&self, session_id: &SessionId) -> PathBuf {
+    /// Returns the directory containing durable state and archive files for `session_id`.
+    #[must_use]
+    pub fn session_dir(&self, session_id: &SessionId) -> PathBuf {
         self.sessions_dir.join(session_id.as_str())
     }
 

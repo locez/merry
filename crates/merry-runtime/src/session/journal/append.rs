@@ -24,6 +24,13 @@ use crate::{
 use merry_core::{SessionId, SessionUsage, TodoItem, ToolCallId, ToolOutput};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FlushedModelTurn {
+    status: ModelTurnStatus,
+    sequence: Option<u64>,
+    started_at_epoch_secs: Option<u64>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct JournalCursor {
     committed_any: bool,
@@ -40,7 +47,7 @@ pub(crate) struct JournalCursor {
     flushed_todos: Vec<TodoItem>,
     flushed_context_entries: Vec<JournalContextEntry>,
     flushed_next_item_id: Option<u64>,
-    flushed_model_turns: BTreeMap<ModelTurnId, (ModelTurnStatus, Option<u64>)>,
+    flushed_model_turns: BTreeMap<ModelTurnId, FlushedModelTurn>,
     flushed_next_model_turn_id: Option<u64>,
     flushed_topic: Option<String>,
     flushed_subagents: Vec<crate::subagent::PersistedSubagentRecord>,
@@ -326,10 +333,11 @@ fn build_state_delta(
     let model_turns = current_model_turns
         .iter()
         .filter(|(id, state)| cursor.flushed_model_turns.get(id) != Some(*state))
-        .map(|(id, (status, sequence))| JournalModelTurn {
+        .map(|(id, turn)| JournalModelTurn {
             id: *id,
-            status: *status,
-            sequence: *sequence,
+            status: turn.status,
+            sequence: turn.sequence,
+            started_at_epoch_secs: turn.started_at_epoch_secs,
         })
         .collect::<Vec<_>>();
 
@@ -422,14 +430,22 @@ fn optional_patch<T: Clone + PartialEq>(
     }
 }
 
-fn snapshot_model_turns(
-    transcript: &Transcript,
-) -> BTreeMap<ModelTurnId, (ModelTurnStatus, Option<u64>)> {
+fn snapshot_model_turns(transcript: &Transcript) -> BTreeMap<ModelTurnId, FlushedModelTurn> {
     let sequences = transcript.model_turn_sequences();
+    let timestamps = transcript.model_turn_timestamps();
     transcript
         .model_turn_statuses()
         .iter()
-        .map(|(id, status)| (*id, (*status, sequences.get(id).copied())))
+        .map(|(id, status)| {
+            (
+                *id,
+                FlushedModelTurn {
+                    status: *status,
+                    sequence: sequences.get(id).copied(),
+                    started_at_epoch_secs: timestamps.get(id).copied(),
+                },
+            )
+        })
         .collect()
 }
 

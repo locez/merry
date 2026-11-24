@@ -6,8 +6,9 @@ use crate::{
     cli_error::{CliError, unexpected},
     tui::{
         controller::{
-            ClipboardImageCompletion, CommandOutputCompletion, CompactionCompletion,
-            ControllerEffect, ControllerExit, OpenUrlCompletion, ProviderController,
+            ArchiveSegmentCompletion, ClipboardImageCompletion, CommandOutputCompletion,
+            CompactionCompletion, ControllerEffect, ControllerExit, OpenUrlCompletion,
+            ProviderController,
         },
         input_history_store::InputHistoryStore,
         links::{open_external_url, validate_external_url},
@@ -30,6 +31,7 @@ pub(super) struct ControllerServices<'a> {
     pub(super) providers: ProviderController<'a>,
     pub(super) clipboard_image_tx: &'a mpsc::Sender<ClipboardImageCompletion>,
     pub(super) command_output_tx: &'a mpsc::Sender<CommandOutputCompletion>,
+    pub(super) archive_segment_tx: &'a mpsc::Sender<ArchiveSegmentCompletion>,
     pub(super) compaction_tx: &'a mpsc::Sender<CompactionCompletion>,
     pub(super) open_url_tx: &'a mpsc::Sender<OpenUrlCompletion>,
     pub(super) terminal: &'a mut crate::tui::terminal::TerminalSession,
@@ -54,6 +56,7 @@ pub(super) async fn dispatch_effect(
         providers,
         clipboard_image_tx,
         command_output_tx,
+        archive_segment_tx,
         compaction_tx,
         open_url_tx,
         terminal,
@@ -87,6 +90,20 @@ pub(super) async fn dispatch_effect(
                 let result = crate::tui::command_details::load_output(&runtime, &call_id).await;
                 let _ = sender
                     .send(CommandOutputCompletion::new(call_id, generation, result))
+                    .await;
+            });
+            Ok(None)
+        }
+        ControllerEffect::LoadArchiveSegment(segment) => {
+            let runtime = session.runtime().clone();
+            let sender = archive_segment_tx.clone();
+            background_tasks.spawn(async move {
+                let result = runtime
+                    .read_archived_segment_transcript(segment)
+                    .await
+                    .map_err(|error| error.to_string());
+                let _ = sender
+                    .send(ArchiveSegmentCompletion::new(segment, result))
                     .await;
             });
             Ok(None)
@@ -163,8 +180,7 @@ pub(super) async fn dispatch_effect(
                 .into_user_message_and_history()
                 .map_err(unexpected)?;
             session
-                .input
-                .submit_message(message)
+                .submit_message(message, &history_text)
                 .await
                 .map_err(unexpected)?;
             persist_submitted_input_history(
@@ -426,37 +442,37 @@ pub(super) async fn dispatch_effect(
         | ControllerEffect::RequestPlanChanges { .. }
         | ControllerEffect::AbandonPlan(_) => unreachable!("plan effect handled above"),
         ControllerEffect::NewSession => {
-            let should_save = session.resumed || state.first_user_input_topic().is_some();
-            close_session(session, state, should_save).await?;
+            close_session(session, state).await?;
             Ok(Some(ControllerExit::NewSession))
         }
         ControllerEffect::ResumeSession => {
-            let should_save = session.resumed || state.first_user_input_topic().is_some();
-            close_session(session, state, should_save).await?;
+            close_session(session, state).await?;
             Ok(Some(ControllerExit::ResumeSession))
         }
         ControllerEffect::Quit => {
-            close_session(session, state, true).await?;
+            close_session(session, state).await?;
             Ok(Some(ControllerExit::Quit))
         }
         _ => unreachable!("provider effect handled by the provider dispatcher"),
     }
 }
 
-async fn close_session(
-    session: &mut TuiRuntimeSession,
-    state: &TuiState,
-    save_session: bool,
-) -> Result<(), CliError> {
-    session.set_topic_if_empty(state.first_user_input_topic());
+async fn close_session(session: &mut TuiRuntimeSession, state: &TuiState) -> Result<(), CliError> {
+    let should_save =
+        state.first_user_input_topic().is_some() || session.has_persistable_activity().await;
+    if should_save {
+        session.set_topic_if_empty(state.first_user_input_topic());
+    }
     session.control.close().await.map_err(unexpected)?;
     session
         .stream
         .wait_until_closed()
         .await
         .map_err(unexpected)?;
-    if save_session {
+    if should_save {
         session.save_on_exit().await?;
+    } else {
+        session.discard_if_empty().await;
     }
     Ok(())
 }

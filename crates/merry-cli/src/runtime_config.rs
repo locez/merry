@@ -4,8 +4,8 @@ use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
 use merry_core::SessionId;
 use merry_llm::{GenerationConfig, ReasoningEffort, ServiceTier};
 use merry_runtime::{
-    CompactionConfig, MemoryLayout, PathAccess, PathAccessRule, PathAccessRuleSource, Runtime,
-    RuntimeBuilder,
+    CompactionConfig, HistoryRetention, MemoryLayout, PathAccess, PathAccessRule,
+    PathAccessRuleSource, Runtime, RuntimeBuilder,
 };
 use std::{
     env,
@@ -23,6 +23,7 @@ pub(crate) fn validate_loaded_config(
     };
     let _ = effective_log_settings(Some(config), paths)?;
     let _ = automatic_compaction_config(Some(config))?;
+    let _ = history_retention_config(Some(config))?;
     let _ = subagents_config(Some(config))?;
     let _ = config.trusted_global_path_rules()?;
     let _ = config.permission_review_rules()?;
@@ -52,6 +53,15 @@ pub(crate) fn automatic_compaction_config(
 ) -> Result<CompactionConfig, config::ConfigError> {
     config
         .map(MerryConfig::automatic_compaction_config)
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+pub(crate) fn history_retention_config(
+    config: Option<&MerryConfig>,
+) -> Result<HistoryRetention, config::ConfigError> {
+    config
+        .map(MerryConfig::history_retention)
         .transpose()
         .map(Option::unwrap_or_default)
 }
@@ -413,6 +423,7 @@ pub(crate) fn configured_runtime_builder(
         .unwrap_or_default();
     Ok(Runtime::builder(session_id)
         .automatic_compaction(automatic_compaction_config(config).map_err(unexpected)?)
+        .history_retention(history_retention_config(config).map_err(unexpected)?)
         .permission_review_rules(review_rules))
 }
 

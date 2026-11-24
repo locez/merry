@@ -206,6 +206,7 @@ fn user_message_transcript_id_exhaustion_leaves_state_unchanged() {
             .into_iter()
             .collect(),
         model_turn_sequences: std::collections::BTreeMap::new(),
+        model_turn_timestamps: std::collections::BTreeMap::new(),
         next_model_turn_id: 2,
         pruned_through: None,
         pruned_external_turns: 0,

@@ -1,6 +1,6 @@
 use crate::{
-    CitationCompactionPolicy, FileSessionStore, HistoryRetention, RuntimeModelRole,
-    SegmentedArchiveConfig, StepContext, UserImageInput, UserMessageInput,
+    ArchiveConfig, CitationCompactionPolicy, FileSessionStore, HistoryRetention, RuntimeModelRole,
+    SessionTranscriptItem, StepContext, UserImageInput, UserMessageInput,
     durable_memory::condense::{condense_turn_range_with_offset, count_external_turns},
     runtime::{
         Runtime,
@@ -177,6 +177,10 @@ async fn context_only_persisted_rotates_journal_deletes_orphan_images_and_resume
         !store.session_dir(&id).join("archive").exists(),
         "context_only must not create an archive directory"
     );
+    assert!(
+        !store.session_dir(&id).join("compaction").exists(),
+        "context_only must not create a legacy compaction directory"
+    );
 
     let journal_text = String::from_utf8(
         store
@@ -202,12 +206,12 @@ async fn context_only_persisted_rotates_journal_deletes_orphan_images_and_resume
 }
 
 #[tokio::test]
-async fn segmented_archive_rotates_exports_markdown_reads_tool_output_and_enforces_limits() {
+async fn archive_rotates_exports_markdown_with_time_range_pages_transcript_and_enforces_limits() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store = FileSessionStore::new(temp.path());
-    let id = session_id("retention-segmented-archive");
-    let retention = HistoryRetention::segmented_archive(
-        SegmentedArchiveConfig::new()
+    let id = session_id("retention-archive");
+    let retention = HistoryRetention::archive_with(
+        ArchiveConfig::new()
             .with_max_segments(NonZeroUsize::new(1))
             .with_export_markdown(true),
     );
@@ -283,11 +287,16 @@ async fn segmented_archive_rotates_exports_markdown_reads_tool_output_and_enforc
     assert!(seg1_jsonl.exists(), "seg_0001.jsonl must be written");
     assert!(seg1_md.exists(), "seg_0001.md must be written");
     assert!(index_md.exists(), "INDEX.md must be written");
+    assert!(
+        !store.session_dir(&id).join("compaction").exists(),
+        "archive mode must write a single unified Markdown archive instead of duplicate compaction/ files"
+    );
 
     let seg1_md_text = tokio::fs::read_to_string(&seg1_md)
         .await
         .expect("seg_0001.md reads");
     assert!(seg1_md_text.contains("# Session Archive — seg_0001"));
+    assert!(seg1_md_text.contains("- **Time (UTC)**:"));
     assert!(seg1_md_text.contains("Investigated Cargo workspace layout"));
     assert!(seg1_md_text.contains("read_diagnostics"));
     assert!(seg1_md_text.contains("Output truncated"));
@@ -295,7 +304,37 @@ async fn segmented_archive_rotates_exports_markdown_reads_tool_output_and_enforc
     let index_text = tokio::fs::read_to_string(&index_md)
         .await
         .expect("INDEX.md reads");
+    assert!(
+        index_text.contains("| Segment | Time (UTC) | Model Turns | Summary | Keywords | Files |")
+    );
     assert!(index_text.contains("`seg_0001`"));
+
+    let snapshot = runtime.context_snapshot().await;
+    let checkpoint = snapshot
+        .compacted_checkpoint_for_tests()
+        .expect("checkpoint exists");
+    assert!(
+        checkpoint.text().contains("archive/INDEX.md"),
+        "checkpoint summary should point agents to unified archive/INDEX.md: {}",
+        checkpoint.text()
+    );
+
+    assert_eq!(
+        runtime
+            .archived_segment_numbers()
+            .await
+            .expect("archived segment numbers"),
+        vec![1]
+    );
+    let paged_items = runtime
+        .read_archived_segment_transcript(1)
+        .await
+        .expect("archived segment transcript reads");
+    assert!(paged_items.iter().any(|item| matches!(
+        item,
+        SessionTranscriptItem::UserMessage { text, .. }
+            if text.contains("Check the Cargo workspace diagnostics")
+    )));
 
     // Image from turn 1 is still referenced by seg_0001.jsonl, so GC keeps it.
     let images_dir = store.session_dir(&id).join("images");

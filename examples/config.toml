@@ -129,8 +129,8 @@ enabled = true
 retained_model_turns = 5
 # The compactor uses grok-build's full-replace summary prompt. Missing
 # sections, extra prose, and unbalanced tags are cleaned and installed.
-# Only an empty summary is retried. Covered history is also written to the
-# session compaction/ directory when a session store is configured.
+# Only an empty summary is retried. Under mode = "archive", covered history is
+# rotated into the session archive/ directory when a session store is configured.
 # Summary soft target: 5% of the primary window, clamped to 512-8192 tokens.
 # Written into the prompt as guidance. It does not reject a usable summary.
 # After compaction, the installed summary replaces covered turns and the retained
@@ -150,6 +150,20 @@ retained_model_turns = 5
 # necessary; roll over text only as a last resort. Exact artifacts remain on disk.
 # one_shot_retained_tool_exchanges = 5
 # one_shot_window_percent was removed: actual request fit replaces ratio thresholds.
+
+[runtime.history_retention]
+# Policy for compacted session history:
+#   "archive"      (default) rotate compacted turns out of live journal.jsonl into
+#                  <session_dir>/archive/seg_NNNN.jsonl (plus seg_NNNN.md + INDEX.md
+#                  with UTC time ranges when export_markdown = true). Unbounded by default;
+#                  TUI lazily loads archived segments as you scroll to the top.
+#   "context_only" retain only the active post-compaction tail and checkpoint summary
+#                  with no archive files on disk.
+mode = "archive"
+# Optional rolling retention caps (valid only when mode = "archive"):
+# max_segments = 30
+# max_bytes = 52428800
+export_markdown = true
 
 [subagents]
 # Enabled by default when omitted (or when `enabled` is omitted); set `enabled = false` to disable.

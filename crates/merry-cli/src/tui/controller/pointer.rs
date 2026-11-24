@@ -838,8 +838,10 @@ pub(crate) fn handle_mouse_scroll_up_by(
     {
         return ControllerEffect::None;
     }
-    state.scroll_timeline_up_by(lines);
-    ControllerEffect::None
+    match state.scroll_timeline_up_and_maybe_load_archive(lines) {
+        Some(segment) => ControllerEffect::LoadArchiveSegment(segment),
+        None => ControllerEffect::None,
+    }
 }
 
 pub(crate) fn handle_mouse_scroll_down_by(

@@ -137,9 +137,7 @@ pub use profile::{
     RuntimeCapabilities, RuntimeProfile, RuntimeProfileBuilder, RuntimeProfileError,
 };
 pub use prompt::{PromptBlock, PromptError, PromptProfile, subagent_base_instructions};
-pub use runtime::{
-    CompactionConfig, HistoryRetention, Runtime, RuntimeBuilder, SegmentedArchiveConfig,
-};
+pub use runtime::{ArchiveConfig, CompactionConfig, HistoryRetention, Runtime, RuntimeBuilder};
 pub use session_projection::SessionTranscriptItem;
 pub use session_store::{FileSessionStore, SessionReservation, SessionStoreError};
 pub use skill::{

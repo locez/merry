@@ -55,7 +55,7 @@ pub(crate) async fn dispatch_effect(
             if let Some(prompt) = initial_prompt
                 && let Ok(message) = merry_runtime::UserMessageInput::text_only(prompt)
             {
-                if let Err(error) = session.input.submit_message(message).await {
+                if let Err(error) = session.submit_message(message, prompt).await {
                     state.show_error_dialog("Plan prompt failed", error.to_string());
                 } else if !state.is_active_run() && !state.queue_preview().paused {
                     state.push_local_user_echo(prompt.clone());

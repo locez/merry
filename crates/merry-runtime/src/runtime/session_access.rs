@@ -317,4 +317,30 @@ impl Runtime {
             .map(SessionTranscriptItem::from)
             .collect())
     }
+
+    /// Lists surviving archived compaction segment numbers in ascending order
+    /// (`1, 2, ...`) when a session store is attached.
+    pub async fn archived_segment_numbers(&self) -> Result<Vec<u32>, RuntimeError> {
+        let Some(store) = self.inner.session_store.as_ref() else {
+            return Ok(Vec::new());
+        };
+        Ok(crate::session::list_archived_segment_numbers(store, &self.inner.session_id).await?)
+    }
+
+    /// Reads one archived compaction segment as UI/SDK transcript items for
+    /// on-demand upward scrollback loading.
+    pub async fn read_archived_segment_transcript(
+        &self,
+        segment_number: u32,
+    ) -> Result<Vec<SessionTranscriptItem>, RuntimeError> {
+        let Some(store) = self.inner.session_store.as_ref() else {
+            return Ok(Vec::new());
+        };
+        Ok(crate::session::read_archived_segment_transcript(
+            store,
+            &self.inner.session_id,
+            segment_number,
+        )
+        .await?)
+    }
 }

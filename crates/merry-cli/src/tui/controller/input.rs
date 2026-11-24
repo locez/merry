@@ -75,8 +75,10 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
         }
         KeyAction::Quit => ControllerEffect::Quit,
         KeyAction::ScrollUp => {
-            state.scroll_timeline_up_by(TIMELINE_SCROLL_STEP);
-            ControllerEffect::None
+            match state.scroll_timeline_up_and_maybe_load_archive(TIMELINE_SCROLL_STEP) {
+                Some(segment) => ControllerEffect::LoadArchiveSegment(segment),
+                None => ControllerEffect::None,
+            }
         }
         KeyAction::ScrollDown => {
             state.scroll_timeline_down_by(TIMELINE_SCROLL_STEP);

@@ -3,12 +3,13 @@
 
 use super::{
     append::encode_pruned_segment_journal,
-    images::JournalImageFile,
+    images::{JournalImageFile, images_dir},
     markdown_archive::{PreparedSegmentMarkdown, parse_index_markdown, render_index_markdown},
+    replay::transcript_items_from_segment_journal,
     wire::{collect_journal_image_ids, find_tool_output_in_journal_bytes},
 };
 use crate::{
-    FileSessionStore, HistoryRetention, SegmentedArchiveConfig, SessionStoreError,
+    ArchiveConfig, FileSessionStore, HistoryRetention, SessionStoreError, SessionTranscriptItem,
     session::{ModelTurnId, transcript::TranscriptItem},
 };
 use merry_core::{SessionId, ToolCallId, ToolOutput};
@@ -23,19 +24,20 @@ const INDEX_FILE_NAME: &str = "INDEX.md";
 const IMAGES_DIR_NAME: &str = "images";
 
 /// Pruned transcript slice produced when a checkpoint compaction evicts turns
-/// `<= compacted_through` under `ContextOnly` or `SegmentedArchive`.
+/// `<= compacted_through` under `Archive` or `ContextOnly`.
 #[derive(Debug)]
 pub(crate) struct PrunedCompactionSegment {
     pub(crate) pruned_items: Vec<TranscriptItem>,
     pub(crate) compacted_through: ModelTurnId,
     pub(crate) summary: String,
+    pub(crate) time_range: Option<(u64, u64)>,
 }
 
 /// Prepared on-disk rotation payload executed atomically under the store write lock.
 #[derive(Debug)]
 pub(crate) struct PreparedJournalRotation {
     pub(crate) session_id: SessionId,
-    pub(crate) archive_config: Option<SegmentedArchiveConfig>,
+    pub(crate) archive_config: Option<ArchiveConfig>,
     pub(crate) archive_jsonl_bytes: Option<Vec<u8>>,
     pub(crate) archive_images: Vec<JournalImageFile>,
     pub(crate) markdown: Option<PreparedSegmentMarkdown>,
@@ -48,7 +50,7 @@ pub(crate) fn prepare_journal_rotation(
     pruned: &PrunedCompactionSegment,
     retention: &HistoryRetention,
 ) -> Result<PreparedJournalRotation, SessionStoreError> {
-    let Some(archive_config) = retention.segmented_archive_config().copied() else {
+    let Some(archive_config) = retention.archive_config() else {
         return Ok(PreparedJournalRotation {
             session_id: session_id.clone(),
             archive_config: None,
@@ -70,6 +72,7 @@ pub(crate) fn prepare_journal_rotation(
             &pruned.pruned_items,
             pruned.compacted_through.as_u64(),
             &pruned.summary,
+            pruned.time_range,
         )
     });
 
@@ -165,6 +168,61 @@ pub(crate) async fn commit_journal_rotation(
     Ok(())
 }
 
+/// Lists surviving archived segment numbers under `<session_dir>/archive/` in
+/// ascending chronological order (`1, 2, ...`) without stat'ing segment sizes.
+pub(crate) async fn list_archived_segment_numbers(
+    store: &FileSessionStore,
+    session_id: &SessionId,
+) -> Result<Vec<u32>, SessionStoreError> {
+    let archive_dir = store.session_dir(session_id).join(ARCHIVE_DIR_NAME);
+    let mut entries = match tokio::fs::read_dir(&archive_dir).await {
+        Ok(entries) => entries,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(io_error(archive_dir, source)),
+    };
+    let mut numbers = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|source| io_error(archive_dir.clone(), source))?
+    {
+        if let Some(number) = entry
+            .file_name()
+            .to_str()
+            .and_then(parse_segment_jsonl_name)
+        {
+            numbers.push(number);
+        }
+    }
+    numbers.sort_unstable();
+    Ok(numbers)
+}
+
+/// Loads one archived `seg_NNNN.jsonl` segment as UI/SDK transcript items for
+/// on-demand upward scrollback paging.
+pub(crate) async fn read_archived_segment_transcript(
+    store: &FileSessionStore,
+    session_id: &SessionId,
+    segment_number: u32,
+) -> Result<Vec<SessionTranscriptItem>, SessionStoreError> {
+    let session_dir = store.session_dir(session_id);
+    let seg_path = session_dir
+        .join(ARCHIVE_DIR_NAME)
+        .join(format!("seg_{segment_number:04}.jsonl"));
+    let bytes = match tokio::fs::read(&seg_path).await {
+        Ok(bytes) => bytes,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(io_error(seg_path, source)),
+    };
+    let items =
+        transcript_items_from_segment_journal(&bytes, &images_dir(store, session_id)).await?;
+    Ok(items
+        .into_iter()
+        .filter(|item| !item.is_hidden())
+        .map(|item| SessionTranscriptItem::from(item.to_full_snapshot()))
+        .collect())
+}
+
 /// Scans archived `seg_NNNN.jsonl` files from newest to oldest to retrieve the
 /// full output of a pruned tool call on demand.
 pub(crate) async fn read_archived_tool_output(
@@ -241,7 +299,7 @@ async fn list_archive_segments(
 
 async fn enforce_archive_retention(
     archive_dir: &Path,
-    config: &SegmentedArchiveConfig,
+    config: &ArchiveConfig,
 ) -> Result<BTreeSet<u32>, SessionStoreError> {
     let segments = list_archive_segments(archive_dir).await?;
     let mut total_bytes: u64 = segments.iter().map(|seg| seg.total_bytes).sum();

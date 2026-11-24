@@ -146,30 +146,40 @@ def test_prompt_profile_and_generation_config_validate_inputs() -> None:
 
 
 def test_history_retention_validation_and_builder_wiring(tmp_path: Path) -> None:
-    full = merry.HistoryRetention.full()
-    assert full.mode is merry.HistoryRetentionMode.FULL
+    unbounded = merry.HistoryRetention.archive()
+    assert unbounded.mode is merry.HistoryRetentionMode.ARCHIVE
+    assert unbounded.max_segments is None
+    assert unbounded.max_bytes is None
+    assert unbounded.export_markdown is True
 
     context_only = merry.HistoryRetention.context_only()
     assert context_only.mode is merry.HistoryRetentionMode.CONTEXT_ONLY
+    assert context_only.export_markdown is False
 
-    segmented = merry.HistoryRetention.segmented_archive(
+    bounded = merry.HistoryRetention.archive(
         max_segments=4,
         max_bytes=1024 * 1024,
         export_markdown=True,
     )
-    assert segmented.mode is merry.HistoryRetentionMode.SEGMENTED_ARCHIVE
-    assert segmented.max_segments == 4
-    assert segmented.max_bytes == 1024 * 1024
-    assert segmented.export_markdown is True
+    assert bounded.mode is merry.HistoryRetentionMode.ARCHIVE
+    assert bounded.max_segments == 4
+    assert bounded.max_bytes == 1024 * 1024
+    assert bounded.export_markdown is True
 
     with pytest.raises(ValueError, match="max_segments"):
-        merry.HistoryRetention.segmented_archive(max_segments=0)
+        merry.HistoryRetention.archive(max_segments=0)
     with pytest.raises(ValueError, match="max_bytes"):
-        merry.HistoryRetention.segmented_archive(max_bytes=0)
-    with pytest.raises(ValueError, match="only valid for segmented_archive"):
+        merry.HistoryRetention.archive(max_bytes=0)
+    with pytest.raises(ValueError, match="only valid for archive"):
         merry.HistoryRetention(
             mode=merry.HistoryRetentionMode.CONTEXT_ONLY,
             max_segments=2,
+            export_markdown=False,
+        )
+    with pytest.raises(ValueError, match="only valid for archive"):
+        merry.HistoryRetention(
+            mode=merry.HistoryRetentionMode.CONTEXT_ONLY,
+            export_markdown=True,
         )
 
     # In-memory agent (default session_store=None) with context_only retention builds cleanly.
@@ -180,15 +190,15 @@ def test_history_retention_validation_and_builder_wiring(tmp_path: Path) -> None
     )
     assert in_memory_agent.session_id == "in-memory-context-only"
 
-    # Persisted agent with segmented_archive retention builds cleanly via fluent builder.
+    # Persisted agent with archive retention builds cleanly via fluent builder.
     archived_agent = (
-        merry.Agent.builder("persisted-segmented")
+        merry.Agent.builder("persisted-archive")
         .provider(openai_provider())
         .session_store(tmp_path)
-        .history_retention(segmented)
+        .history_retention(bounded)
         .build()
     )
-    assert archived_agent.session_id == "persisted-segmented"
+    assert archived_agent.session_id == "persisted-archive"
 
 
 def test_builder_requires_a_primary_provider() -> None:

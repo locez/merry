@@ -9,7 +9,8 @@ use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 #[cfg(test)]
 use merry_runtime::Runtime;
 use merry_runtime::{
-    CompactionConfig, FileSessionStore, LoadedSession, PermissionReviewRules, RegisteredTool,
+    CompactionConfig, FileSessionStore, HistoryRetention, LoadedSession, PermissionReviewRules,
+    RegisteredTool,
 };
 use std::{
     path::{Path, PathBuf},
@@ -37,6 +38,7 @@ pub(crate) struct HeadlessCodingRuntimeInput<'a> {
     pub(crate) process_backend: ActionProcessBackend,
     pub(crate) extra_tools: Vec<RegisteredTool>,
     pub(crate) automatic_compaction: CompactionConfig,
+    pub(crate) history_retention: HistoryRetention,
     pub(crate) retry_policy: Option<ModelRetryPolicy>,
     pub(crate) context_compaction: Option<RuntimeRoleProviderConfig>,
     pub(crate) approval_review: Option<RuntimeRoleProviderConfig>,
@@ -161,6 +163,7 @@ pub(crate) fn build_coding_runtime(
         process_backend: options.process_backend,
         extra_tools: options.extra_tools,
         automatic_compaction: options.automatic_compaction,
+        history_retention: HistoryRetention::default(),
         retry_policy: options.retry_policy,
         context_compaction: options.context_compaction,
         approval_review: options.approval_review,
@@ -192,6 +195,7 @@ fn build_coding_runtime_from_headless_input(
     )
     .with_extra_tools(input.extra_tools)
     .with_automatic_compaction(input.automatic_compaction)
+    .with_history_retention(input.history_retention)
     .with_skill_roots(input.skill_roots)
     .with_denied_absolute_paths(input.denied_absolute_paths)
     .with_subagents(input.subagents)

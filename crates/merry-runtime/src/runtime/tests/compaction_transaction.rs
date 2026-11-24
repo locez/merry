@@ -181,7 +181,13 @@ async fn directory_sync_failure_keeps_renamed_disk_and_memory_in_step() {
         "cursor must advance after append even when directory sync fails"
     );
     assert_ne!(after_disk, before_disk);
-    assert!(after_disk.starts_with(&before_disk));
+    assert_eq!(
+        runtime
+            .archived_segment_numbers()
+            .await
+            .expect("archived segment list reads"),
+        vec![1]
+    );
     assert!(runtime.compacted_checkpoint_summary().await.is_some());
     let resumed = Runtime::builder(id)
         .resume_from_store(durable_store)
@@ -378,7 +384,6 @@ async fn successful_compaction_commit_resumes_exact_transactional_state() {
         .await
         .expect("committed state reads");
     assert_ne!(after_disk, before_disk);
-    assert!(after_disk.starts_with(&before_disk));
     assert!(
         after_memory.is_empty(),
         "a durable compaction adopts the journal cursor"
@@ -393,8 +398,23 @@ async fn successful_compaction_commit_resumes_exact_transactional_state() {
         .await
         .expect("checkpoint resumes");
     assert!(!outcome.checkpoint_id().as_str().is_empty());
+    assert_eq!(
+        resumed
+            .archived_segment_numbers()
+            .await
+            .expect("archived segments list"),
+        vec![1]
+    );
+    assert_eq!(
+        resumed
+            .read_archived_segment_transcript(1)
+            .await
+            .expect("archived segment 1 reads")
+            .len(),
+        1
+    );
     let session = resumed.inner.session.lock().await;
-    assert_eq!(session.full_transcript_snapshot().len(), 2);
+    assert_eq!(session.full_transcript_snapshot().len(), 1);
     assert_eq!(
         session.prompt_history_projection().compacted_through(),
         Some(ModelTurnId::new(1))
@@ -555,8 +575,14 @@ async fn aborting_compaction_after_rename_still_installs_memory_state() {
         .await
         .expect("committed disk state reads");
 
-    assert!(after_disk.len() > before_disk.len());
-    assert!(after_disk.starts_with(&before_disk));
+    assert_ne!(after_disk, before_disk);
+    assert_eq!(
+        runtime
+            .archived_segment_numbers()
+            .await
+            .expect("archived segment list reads"),
+        vec![1]
+    );
     assert!(runtime.compacted_checkpoint_summary().await.is_some());
     assert!(runtime.acquire_active_step_permit().is_ok());
 }

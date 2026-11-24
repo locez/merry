@@ -19,7 +19,8 @@ pub(crate) use self::append::{
 };
 pub(crate) use self::archive::{
     PreparedJournalRotation, PrunedCompactionSegment, commit_journal_rotation,
-    prepare_journal_rotation, read_archived_tool_output,
+    list_archived_segment_numbers, prepare_journal_rotation, read_archived_segment_transcript,
+    read_archived_tool_output,
 };
 pub(crate) use self::images::{JournalImageFile, images_dir, is_image_id};
 pub(crate) use self::replay::{

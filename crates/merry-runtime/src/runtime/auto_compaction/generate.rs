@@ -11,7 +11,6 @@ use crate::{
     CompactionOutcome, RuntimeError, RuntimeModelRole,
     compaction::{
         CompactionCoverageBudget, format_continuation, generate_validated_compaction_candidate,
-        persist_covered_segment,
     },
     events::ActiveStepPermit,
 };
@@ -54,16 +53,21 @@ pub(in crate::runtime) async fn generate_and_install_compaction(
         .await
         {
             Ok(cleaned_summary) => {
-                let segment_hint = match &inner.session_store {
-                    Some(store) => {
-                        persist_covered_segment(
-                            store,
-                            &inner.session_id,
-                            &plan.input.render_covered_segment(),
-                        )
-                        .await
+                let segment_hint = match (
+                    &inner.session_store,
+                    inner.history_retention.archive_config(),
+                ) {
+                    (Some(store), Some(cfg)) if cfg.export_markdown() => {
+                        let archive_dir = store.session_dir(&inner.session_id).join("archive");
+                        Some(format!(
+                            "Archived rollouts of compacted history are in {}/seg_*.md. \
+                             See {}/INDEX.md for time ranges, summaries, and keywords. \
+                             Use read_file to recover exact code, paths, or tool output when this summary is not enough. Do not modify these files.",
+                            archive_dir.display(),
+                            archive_dir.display(),
+                        ))
                     }
-                    None => None,
+                    _ => None,
                 };
                 let continuation = format_continuation(&cleaned_summary, segment_hint.as_deref());
                 return install_summary_compaction_transactionally(

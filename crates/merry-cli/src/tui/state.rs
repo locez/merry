@@ -25,6 +25,7 @@ pub(crate) use views::{
     TimelineItem, ToolOutputPreview,
 };
 
+mod archive_paging;
 mod comments;
 pub(crate) use comments::CommentHighlight;
 mod history_search;
@@ -85,6 +86,8 @@ pub(crate) struct TuiState {
     timeline_last_scroll: Option<usize>,
     timeline_scroll_anim: Option<timeline::TimelineScrollAnimation>,
     pending_turn_scroll_animation: bool,
+    unloaded_archive_segments: Vec<u32>,
+    loading_archive_segment: Option<u32>,
     text_selection: Option<TextSelection>,
     hovered_link: Option<HoveredLink>,
     clipboard_feedback: Option<ClipboardFeedback>,
@@ -161,6 +164,8 @@ impl TuiState {
             timeline_last_scroll: None,
             timeline_scroll_anim: None,
             pending_turn_scroll_animation: false,
+            unloaded_archive_segments: Vec::new(),
+            loading_archive_segment: None,
             text_selection: None,
             hovered_link: None,
             clipboard_feedback: None,
@@ -410,6 +415,10 @@ impl TuiState {
 
     pub(crate) fn timeline(&self) -> &[TimelineItem] {
         &self.timeline
+    }
+
+    pub(crate) fn into_timeline(self) -> Vec<TimelineItem> {
+        self.timeline
     }
 
     pub(crate) fn first_user_input_topic(&self) -> Option<String> {

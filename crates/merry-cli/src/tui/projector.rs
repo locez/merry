@@ -47,6 +47,42 @@ struct StartedToolView {
 
 #[allow(dead_code)]
 impl TuiProjector {
+    /// Shifts live timeline indices when older archived segments are prepended.
+    pub(crate) fn shift_timeline_indices(&mut self, shift: usize) {
+        if shift == 0 {
+            return;
+        }
+        for tool in self.started_tools.values_mut() {
+            tool.timeline_index = tool.timeline_index.saturating_add(shift);
+        }
+        if let Some(index) = &mut self.streaming_assistant_index {
+            *index = index.saturating_add(shift);
+        }
+        if let Some(index) = &mut self.compaction_timeline_index {
+            *index = index.saturating_add(shift);
+        }
+    }
+
+    /// Projects archived transcript items into standalone `TimelineItem`s using
+    /// the same formatting and tool-preview rules as live session resume.
+    pub(crate) fn project_archived_transcript_items(
+        items: Vec<SessionTranscriptItem>,
+        template: &TuiState,
+    ) -> Vec<TimelineItem> {
+        let mut scratch = TuiState::new(
+            template.workspace_root().to_path_buf(),
+            String::new(),
+            template.keymap().clone(),
+            template.theme().clone(),
+        )
+        .with_successful_command_output(template.show_successful_command_output());
+        let mut projector = Self::default();
+        for item in items {
+            projector.apply_transcript_item(item, &mut scratch);
+        }
+        scratch.into_timeline()
+    }
+
     pub(crate) fn apply_transcript_item(
         &mut self,
         item: SessionTranscriptItem,

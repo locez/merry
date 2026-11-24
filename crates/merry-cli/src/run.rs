@@ -245,6 +245,8 @@ pub(crate) async fn run(
         false,
         debug_openai_usage_error,
     )?;
+    let history_retention =
+        crate::runtime_config::history_retention_config(merry_config).map_err(unexpected)?;
     let runtime_input = HeadlessCodingRuntimeInput {
         session_id: session.id().as_str(),
         root: &root,
@@ -253,6 +255,7 @@ pub(crate) async fn run(
         process_backend: backend,
         extra_tools: mcp.tools,
         automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
+        history_retention,
         retry_policy,
         context_compaction,
         approval_review,

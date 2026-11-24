@@ -277,6 +277,46 @@ async fn concurrent_session_reservations_have_one_winner() {
 }
 
 #[tokio::test]
+async fn release_empty_reservation_removes_untouched_dir_and_keeps_populated_dir() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+
+    let empty_id = SessionId::new("empty-reserved-session").expect("valid session id");
+    let empty_reservation = store
+        .reserve_session(&empty_id)
+        .await
+        .expect("empty session reserves");
+    let empty_dir = store.session_dir(&empty_id);
+    assert!(empty_dir.join(super::SESSION_LOCK_FILE_NAME).exists());
+
+    store
+        .release_empty_reservation(&empty_id, empty_reservation)
+        .await;
+    assert!(
+        !empty_dir.exists(),
+        "untouched empty session directory should be removed"
+    );
+
+    let populated_id = SessionId::new("populated-reserved-session").expect("valid session id");
+    let populated_reservation = store
+        .reserve_session(&populated_id)
+        .await
+        .expect("populated session reserves");
+    let populated_dir = store.session_dir(&populated_id);
+    tokio::fs::write(populated_dir.join("meta.json"), b"{}\n")
+        .await
+        .expect("meta placeholder writes");
+
+    store
+        .release_empty_reservation(&populated_id, populated_reservation)
+        .await;
+    assert!(
+        populated_dir.join("meta.json").exists(),
+        "session directory with persisted files must be preserved"
+    );
+}
+
+#[tokio::test]
 async fn journal_appends_write_header_once_and_serialize_concurrent_commits() {
     let temp = tempfile::tempdir().expect("tempdir");
     let store_a = FileSessionStore::new(temp.path());

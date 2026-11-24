@@ -201,6 +201,10 @@ impl Transcript {
         if let Some(sequence) = start_sequence {
             self.model_turn_sequences.insert(turn_id, sequence);
         }
+        if let Ok(duration) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            self.model_turn_timestamps
+                .insert(turn_id, duration.as_secs());
+        }
         self.next_model_turn_id = next_model_turn_id;
         Ok(turn_id)
     }
@@ -208,6 +212,11 @@ impl Transcript {
     #[must_use]
     pub(crate) fn model_turn_sequences(&self) -> &BTreeMap<ModelTurnId, u64> {
         &self.model_turn_sequences
+    }
+
+    #[must_use]
+    pub(crate) fn model_turn_timestamps(&self) -> &BTreeMap<ModelTurnId, u64> {
+        &self.model_turn_timestamps
     }
 
     pub(crate) fn close_model_response(
@@ -537,6 +546,7 @@ mod tests {
             next_id: super::super::transcript::TranscriptItemId::new(0),
             model_turns: BTreeMap::new(),
             model_turn_sequences: BTreeMap::new(),
+            model_turn_timestamps: BTreeMap::new(),
             next_model_turn_id: ModelTurnId::new(u64::MAX),
             pruned_through: None,
             pruned_external_turns: 0,

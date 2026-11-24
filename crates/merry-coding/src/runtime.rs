@@ -16,9 +16,9 @@ use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_process::ProcessBackend;
 use merry_runtime::{
     AgentLoopConfig, AgentLoopConfigError, ChildRuntimeFactory, CompactionConfig, DurableMemory,
-    FileSessionStore, LoadedSession, PermissionReviewRules, RegisteredTool, Runtime,
-    RuntimeBuilder, RuntimeError, RuntimeModelRole, SkillCatalog, SkillError, SubagentConfig,
-    SubagentError, SubagentManager, subagent_registered_tools_with_roles,
+    FileSessionStore, HistoryRetention, LoadedSession, PermissionReviewRules, RegisteredTool,
+    Runtime, RuntimeBuilder, RuntimeError, RuntimeModelRole, SkillCatalog, SkillError,
+    SubagentConfig, SubagentError, SubagentManager, subagent_registered_tools_with_roles,
 };
 use merry_tools::WorkspaceToolLimits;
 pub use permission_policy::{
@@ -225,6 +225,7 @@ pub struct CodingRuntimeInput {
     process_backend: Option<Arc<dyn ProcessBackend>>,
     extra_tools: Vec<RegisteredTool>,
     automatic_compaction: CompactionConfig,
+    history_retention: HistoryRetention,
     retry_policy: Option<ModelRetryPolicy>,
     model_roles: Vec<CodingModelRoleConfig>,
     skill_roots: Vec<PathBuf>,
@@ -257,6 +258,7 @@ impl CodingRuntimeInput {
             process_backend: Some(process_backend),
             extra_tools: Vec::new(),
             automatic_compaction: CompactionConfig::default(),
+            history_retention: HistoryRetention::default(),
             retry_policy: None,
             model_roles: Vec::new(),
             skill_roots: Vec::new(),
@@ -296,6 +298,7 @@ impl CodingRuntimeInput {
             process_backend: None,
             extra_tools: Vec::new(),
             automatic_compaction: CompactionConfig::default(),
+            history_retention: HistoryRetention::default(),
             retry_policy: None,
             model_roles: Vec::new(),
             skill_roots: Vec::new(),
@@ -333,6 +336,13 @@ impl CodingRuntimeInput {
     #[must_use]
     pub fn with_automatic_compaction(mut self, config: CompactionConfig) -> Self {
         self.automatic_compaction = config;
+        self
+    }
+
+    /// Sets how compacted history is retained in memory and on disk.
+    #[must_use]
+    pub fn with_history_retention(mut self, retention: HistoryRetention) -> Self {
+        self.history_retention = retention;
         self
     }
 
@@ -534,6 +544,7 @@ impl CodingRuntimeBuilder {
             process_backend,
             extra_tools,
             automatic_compaction,
+            history_retention,
             retry_policy,
             model_roles,
             skill_roots,
@@ -581,6 +592,7 @@ impl CodingRuntimeBuilder {
         }
         let mut runtime_builder = Runtime::builder(session_id.clone())
             .automatic_compaction(automatic_compaction.clone())
+            .history_retention(history_retention)
             .model_provider(Arc::clone(&provider), model.clone());
         if let Some(limit) = max_parallel_tool_calls {
             runtime_builder = runtime_builder.max_parallel_tool_calls(limit);

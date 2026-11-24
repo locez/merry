@@ -179,6 +179,7 @@ pub(crate) struct PersistedTranscript {
     pub(crate) next_id: u64,
     pub(crate) model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
     pub(crate) model_turn_sequences: BTreeMap<ModelTurnId, u64>,
+    pub(crate) model_turn_timestamps: BTreeMap<ModelTurnId, u64>,
     pub(crate) next_model_turn_id: u64,
     pub(crate) pruned_through: Option<ModelTurnId>,
     pub(crate) pruned_external_turns: u32,
@@ -274,9 +275,55 @@ pub(crate) struct Transcript {
     pub(super) next_id: TranscriptItemId,
     pub(super) model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
     pub(super) model_turn_sequences: BTreeMap<ModelTurnId, u64>,
+    pub(super) model_turn_timestamps: BTreeMap<ModelTurnId, u64>,
     pub(super) next_model_turn_id: ModelTurnId,
     pub(super) pruned_through: Option<ModelTurnId>,
     pub(super) pruned_external_turns: u32,
+}
+
+impl TranscriptItem {
+    pub(crate) fn is_hidden(&self) -> bool {
+        matches!(
+            self,
+            Self::ToolCall {
+                prompt_projection: ToolCallPromptProjection::Hidden,
+                ..
+            } | Self::ToolResult {
+                prompt_projection: ToolResultPromptProjection::Hidden,
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn to_full_snapshot(&self) -> TranscriptItemSnapshot {
+        match self {
+            Self::UserMessage {
+                text,
+                images,
+                origin,
+                ..
+            } => TranscriptItemSnapshot::UserMessage {
+                text: text.to_string(),
+                images: images.clone(),
+                origin: *origin,
+            },
+            Self::AssistantText { text, .. } => TranscriptItemSnapshot::AssistantText {
+                text: text.to_string(),
+            },
+            Self::ToolCall { call, .. } => TranscriptItemSnapshot::ToolCall { call: call.clone() },
+            Self::ToolResult {
+                call_id,
+                result,
+                payload,
+                ..
+            } => TranscriptItemSnapshot::ToolResult {
+                call_id: call_id.clone(),
+                result: result.clone(),
+                output: payload.full().clone(),
+                images: payload.images().to_vec(),
+            },
+        }
+    }
 }
 
 impl Transcript {
@@ -288,6 +335,7 @@ impl Transcript {
             next_id: TranscriptItemId::new(0),
             model_turns: BTreeMap::new(),
             model_turn_sequences: BTreeMap::new(),
+            model_turn_timestamps: BTreeMap::new(),
             next_model_turn_id: ModelTurnId::new(1),
             pruned_through: None,
             pruned_external_turns: 0,
@@ -324,17 +372,9 @@ impl Transcript {
         &self.model_turns
     }
 
-    pub(crate) fn from_journal_parts(
-        items: Vec<TranscriptItem>,
-        next_id: u64,
-        model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
-        model_turn_sequences: BTreeMap<ModelTurnId, u64>,
-        next_model_turn_id: u64,
-        pruned_through: Option<ModelTurnId>,
-        pruned_external_turns: u32,
-    ) -> Result<Self, RuntimeError> {
+    pub(crate) fn from_journal_parts(parts: JournalTranscriptParts) -> Result<Self, RuntimeError> {
         let mut tool_result_index = BTreeMap::new();
-        for (index, item) in items.iter().enumerate() {
+        for (index, item) in parts.items.iter().enumerate() {
             if let TranscriptItem::ToolResult { call_id, .. } = item
                 && tool_result_index.insert(call_id.clone(), index).is_some()
             {
@@ -344,14 +384,15 @@ impl Transcript {
             }
         }
         let transcript = Self {
-            items,
+            items: parts.items,
             tool_result_index,
-            next_id: TranscriptItemId::new(next_id),
-            model_turns,
-            model_turn_sequences,
-            next_model_turn_id: ModelTurnId::new(next_model_turn_id),
-            pruned_through,
-            pruned_external_turns,
+            next_id: TranscriptItemId::new(parts.next_id),
+            model_turns: parts.model_turns,
+            model_turn_sequences: parts.model_turn_sequences,
+            model_turn_timestamps: parts.model_turn_timestamps,
+            next_model_turn_id: ModelTurnId::new(parts.next_model_turn_id),
+            pruned_through: parts.pruned_through,
+            pruned_external_turns: parts.pruned_external_turns,
         };
         transcript.validate_persisted_turns()?;
         Ok(transcript)
@@ -539,8 +580,11 @@ impl Transcript {
     }
 
     /// Removes all transcript items and turn records through `boundary` (inclusive)
-    /// and returns the pruned items in original chronological order.
-    pub(crate) fn prune_through(&mut self, boundary: ModelTurnId) -> Vec<TranscriptItem> {
+    /// and returns `(pruned_items, pruned_time_range_epoch_secs)` in chronological order.
+    pub(crate) fn prune_through(
+        &mut self,
+        boundary: ModelTurnId,
+    ) -> (Vec<TranscriptItem>, Option<(u64, u64)>) {
         let mut pruned = Vec::new();
         let mut retained = Vec::with_capacity(self.items.len());
         let mut pruned_external = 0_u32;
@@ -560,9 +604,20 @@ impl Transcript {
                 retained.push(item);
             }
         }
+        let mut min_ts: Option<u64> = None;
+        let mut max_ts: Option<u64> = None;
+        for (&turn_id, &ts) in &self.model_turn_timestamps {
+            if turn_id <= boundary {
+                min_ts = Some(min_ts.map_or(ts, |cur| cur.min(ts)));
+                max_ts = Some(max_ts.map_or(ts, |cur| cur.max(ts)));
+            }
+        }
+        let time_range = min_ts.zip(max_ts);
         self.items = retained;
         self.model_turns.retain(|turn_id, _| *turn_id > boundary);
         self.model_turn_sequences
+            .retain(|turn_id, _| *turn_id > boundary);
+        self.model_turn_timestamps
             .retain(|turn_id, _| *turn_id > boundary);
         self.pruned_through = Some(
             self.pruned_through
@@ -570,7 +625,7 @@ impl Transcript {
         );
         self.pruned_external_turns = self.pruned_external_turns.saturating_add(pruned_external);
         self.rebuild_tool_result_index();
-        pruned
+        (pruned, time_range)
     }
 
     #[cfg(test)]
@@ -605,6 +660,7 @@ impl Transcript {
             next_id: self.next_id.as_u64(),
             model_turns: self.model_turns.clone(),
             model_turn_sequences: self.model_turn_sequences.clone(),
+            model_turn_timestamps: self.model_turn_timestamps.clone(),
             next_model_turn_id: self.next_model_turn_id.as_u64(),
             pruned_through: self.pruned_through,
             pruned_external_turns: self.pruned_external_turns,
@@ -618,16 +674,29 @@ impl Transcript {
             .into_iter()
             .map(TranscriptItem::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        Self::from_journal_parts(
+        Self::from_journal_parts(JournalTranscriptParts {
             items,
-            persisted.next_id,
-            persisted.model_turns,
-            persisted.model_turn_sequences,
-            persisted.next_model_turn_id,
-            persisted.pruned_through,
-            persisted.pruned_external_turns,
-        )
+            next_id: persisted.next_id,
+            model_turns: persisted.model_turns,
+            model_turn_sequences: persisted.model_turn_sequences,
+            model_turn_timestamps: persisted.model_turn_timestamps,
+            next_model_turn_id: persisted.next_model_turn_id,
+            pruned_through: persisted.pruned_through,
+            pruned_external_turns: persisted.pruned_external_turns,
+        })
     }
+}
+
+/// Replayed transcript components used to reconstruct a [`Transcript`] from journal records.
+pub(crate) struct JournalTranscriptParts {
+    pub(crate) items: Vec<TranscriptItem>,
+    pub(crate) next_id: u64,
+    pub(crate) model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
+    pub(crate) model_turn_sequences: BTreeMap<ModelTurnId, u64>,
+    pub(crate) model_turn_timestamps: BTreeMap<ModelTurnId, u64>,
+    pub(crate) next_model_turn_id: u64,
+    pub(crate) pruned_through: Option<ModelTurnId>,
+    pub(crate) pruned_external_turns: u32,
 }
 
 impl Default for Transcript {
@@ -841,25 +910,11 @@ impl SessionState {
     ) -> Vec<TranscriptItemSnapshot> {
         let mut snapshot = Vec::new();
         for item in self.transcript_items_for_projection(apply_prompt_projection) {
+            if !apply_prompt_projection {
+                snapshot.push(item.to_full_snapshot());
+                continue;
+            }
             let item = match item {
-                TranscriptItem::UserMessage {
-                    text,
-                    images,
-                    origin,
-                    ..
-                } => TranscriptItemSnapshot::UserMessage {
-                    text: text.to_string(),
-                    images: images.clone(),
-                    origin: *origin,
-                },
-                TranscriptItem::AssistantText { text, .. } => {
-                    TranscriptItemSnapshot::AssistantText {
-                        text: text.to_string(),
-                    }
-                }
-                TranscriptItem::ToolCall { call, .. } => {
-                    TranscriptItemSnapshot::ToolCall { call: call.clone() }
-                }
                 TranscriptItem::ToolResult {
                     call_id,
                     result,
@@ -867,19 +922,16 @@ impl SessionState {
                     prompt_projection,
                     ..
                 } => {
-                    let output = match (apply_prompt_projection, prompt_projection) {
-                        (false, _) => payload.full().clone(),
-                        (true, ToolResultPromptProjection::Full) => payload.model_or_full().clone(),
-                        (true, ToolResultPromptProjection::Collapsed) => ToolOutput::json(
+                    let output = match prompt_projection {
+                        ToolResultPromptProjection::Full => payload.model_or_full().clone(),
+                        ToolResultPromptProjection::Collapsed => ToolOutput::json(
                             collapsed_tool_result_notice_json(result.status(), call_id),
                         ),
-                        (true, ToolResultPromptProjection::Hidden) => unreachable!(
+                        ToolResultPromptProjection::Hidden => unreachable!(
                             "hidden tool results are filtered before snapshot construction"
                         ),
                     };
-                    let include_images = !apply_prompt_projection
-                        || *prompt_projection == ToolResultPromptProjection::Full;
-                    let images = if include_images {
+                    let images = if *prompt_projection == ToolResultPromptProjection::Full {
                         payload.images().to_vec()
                     } else {
                         Vec::new()
@@ -891,6 +943,7 @@ impl SessionState {
                         images,
                     }
                 }
+                other => other.to_full_snapshot(),
             };
             snapshot.push(item);
         }

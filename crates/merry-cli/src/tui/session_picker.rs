@@ -1,4 +1,5 @@
 use super::{
+    runtime::ResumeFailureKind,
     session_list::{TuiSessionMetadata, TuiSessionStore},
     terminal::{TerminalEvent, TerminalSession},
     theme::{SemanticColor, TuiTheme},
@@ -7,17 +8,29 @@ use crate::cli_error::{CliError, unexpected};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     Frame,
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SessionPickerSelection {
     New,
     Resume(TuiSessionMetadata),
     Quit,
+}
+
+/// Modal notice shown over the session picker when a selected session cannot be
+/// resumed directly (for example, an incompatible legacy format or active lock).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionPickerNotice {
+    pub(crate) kind: ResumeFailureKind,
+    pub(crate) session_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +40,7 @@ pub(crate) struct SessionPickerState {
     selected: usize,
     query: String,
     filtering: bool,
+    notice: Option<SessionPickerNotice>,
 }
 
 impl SessionPickerState {
@@ -37,7 +51,17 @@ impl SessionPickerState {
             selected: 0,
             query: String::new(),
             filtering: false,
+            notice: None,
         }
+    }
+
+    pub(crate) fn with_notice(mut self, notice: Option<SessionPickerNotice>) -> Self {
+        self.notice = notice;
+        self
+    }
+
+    pub(crate) fn has_notice(&self) -> bool {
+        self.notice.is_some()
     }
 
     pub(crate) fn select_next(&mut self) {
@@ -64,6 +88,20 @@ pub(crate) fn handle_picker_key(
     key: KeyEvent,
     state: &mut SessionPickerState,
 ) -> Option<SessionPickerSelection> {
+    if state.notice.is_some() {
+        return match key.code {
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                state.notice = None;
+                Some(SessionPickerSelection::New)
+            }
+            KeyCode::Char('q') => Some(SessionPickerSelection::Quit),
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Char(' ') => {
+                state.notice = None;
+                None
+            }
+            _ => None,
+        };
+    }
     match key.code {
         KeyCode::Enter => Some(state.accept()),
         KeyCode::Char('/') if !state.filtering => {
@@ -132,10 +170,20 @@ pub(crate) async fn pick_session(
     workspace_root: &Path,
     theme: &TuiTheme,
 ) -> Result<SessionPickerSelection, CliError> {
+    pick_session_with_notice(terminal, store, workspace_root, theme, None).await
+}
+
+pub(crate) async fn pick_session_with_notice(
+    terminal: &mut TerminalSession,
+    store: &TuiSessionStore,
+    workspace_root: &Path,
+    theme: &TuiTheme,
+    notice: Option<SessionPickerNotice>,
+) -> Result<SessionPickerSelection, CliError> {
     let sessions = store
         .sessions_for_workspace(workspace_root)
         .map_err(unexpected)?;
-    let mut state = SessionPickerState::new(sessions);
+    let mut state = SessionPickerState::new(sessions).with_notice(notice);
 
     terminal
         .draw(|frame| render_session_picker(frame, &state, workspace_root, theme))
@@ -162,19 +210,22 @@ pub(crate) async fn pick_session(
                     .draw(|frame| render_session_picker(frame, &state, workspace_root, theme))
                     .map_err(unexpected)?;
             }
-            TerminalEvent::MouseScrollDown(_) => {
+            TerminalEvent::MouseScrollDown(_) if !state.has_notice() => {
                 state.select_next();
                 terminal
                     .draw(|frame| render_session_picker(frame, &state, workspace_root, theme))
                     .map_err(unexpected)?;
             }
-            TerminalEvent::MouseScrollUp(_) => {
+            TerminalEvent::MouseScrollUp(_) if !state.has_notice() => {
                 state.select_previous();
                 terminal
                     .draw(|frame| render_session_picker(frame, &state, workspace_root, theme))
                     .map_err(unexpected)?;
             }
-            TerminalEvent::Paste(_) | TerminalEvent::Mouse(_) => {}
+            TerminalEvent::MouseScrollDown(_)
+            | TerminalEvent::MouseScrollUp(_)
+            | TerminalEvent::Paste(_)
+            | TerminalEvent::Mouse(_) => {}
         }
     }
 }
@@ -273,6 +324,152 @@ fn render_session_picker(
             .style(Style::default().fg(muted).bg(surface)),
         footer,
     );
+
+    if let Some(notice) = &state.notice {
+        render_notice_modal(frame, area, notice, theme);
+    }
+}
+
+fn render_notice_modal(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    notice: &SessionPickerNotice,
+    theme: &TuiTheme,
+) {
+    let surface = theme
+        .color(SemanticColor::Surface)
+        .unwrap_or(Color::Rgb(36, 32, 41));
+    let warning = theme
+        .color(SemanticColor::Warning)
+        .unwrap_or(Color::LightYellow);
+    let border = theme
+        .color(SemanticColor::Border)
+        .unwrap_or(Color::DarkGray);
+    let text = theme
+        .color(SemanticColor::Assistant)
+        .unwrap_or(Color::White);
+    let accent = theme
+        .color(SemanticColor::ToolKeyword)
+        .unwrap_or(Color::LightCyan);
+    let muted = theme.color(SemanticColor::Muted).unwrap_or(Color::DarkGray);
+
+    let (title, headline, guidance) = match notice.kind {
+        ResumeFailureKind::IncompatibleFormat => (
+            " Incompatible Session ",
+            "This session uses a different format and cannot be resumed directly.",
+            "Start a new session and ask Merry to read key context from:",
+        ),
+        ResumeFailureKind::AlreadyOpen => (
+            " Session In Use ",
+            "This session is currently open in another Merry window.",
+            "Close it there to resume, or start a new session to read from:",
+        ),
+    };
+
+    let popup = centered_rect(area, 72, 13);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .title(title)
+        .title_style(Style::default().fg(warning).add_modifier(Modifier::BOLD))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(warning))
+        .style(Style::default().bg(surface));
+    let inner = inset_rect(block.inner(popup), 2, 1);
+    frame.render_widget(block, popup);
+
+    let [body_area, rule_area, actions_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+
+    let path_display = notice.session_dir.display().to_string();
+    let lines = vec![
+        Line::from(Span::styled(
+            headline,
+            Style::default().fg(text).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(guidance, Style::default().fg(muted))),
+        Line::from(Span::styled(
+            format!("  {path_display}"),
+            Style::default().fg(accent),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(text).bg(surface))
+            .wrap(Wrap { trim: false }),
+        body_area,
+    );
+
+    let divider = "─".repeat(usize::from(rule_area.width));
+    frame.render_widget(
+        Paragraph::new(divider).style(Style::default().fg(border).bg(surface)),
+        rule_area,
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "n",
+                Style::default().fg(warning).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" New session", Style::default().fg(text)),
+            Span::styled("   ·   ", Style::default().fg(muted)),
+            Span::styled(
+                "Enter / Esc",
+                Style::default().fg(warning).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Back", Style::default().fg(text)),
+            Span::styled("   ·   ", Style::default().fg(muted)),
+            Span::styled(
+                "q",
+                Style::default().fg(warning).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Quit", Style::default().fg(text)),
+        ]))
+        .style(Style::default().bg(surface)),
+        actions_area,
+    );
+}
+
+fn inset_rect(area: Rect, horizontal: u16, vertical: u16) -> Rect {
+    let x = area.x.saturating_add(horizontal.min(area.width / 2));
+    let y = area.y.saturating_add(vertical.min(area.height / 2));
+    let width = area
+        .width
+        .saturating_sub(horizontal.saturating_mul(2))
+        .max(1)
+        .min(area.width);
+    let height = area
+        .height
+        .saturating_sub(vertical.saturating_mul(2))
+        .max(1)
+        .min(area.height);
+    Rect::new(x, y, width, height)
+}
+
+fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
+    let width = area
+        .width
+        .saturating_sub(4)
+        .clamp(1, max_width)
+        .min(area.width);
+    let height = area
+        .height
+        .saturating_sub(2)
+        .clamp(1, max_height)
+        .min(area.height);
+    let x = area.x.saturating_add(area.width.saturating_sub(width) / 2);
+    let y = area
+        .y
+        .saturating_add(area.height.saturating_sub(height) / 2);
+    Rect::new(x, y, width, height)
 }
 
 fn session_line(session: &TuiSessionMetadata, theme: &TuiTheme) -> Line<'static> {
@@ -398,5 +595,90 @@ mod tests {
         );
 
         assert!(text.contains("headless"));
+    }
+
+    #[test]
+    fn incompatible_session_notice_modal_renders_clean_guidance_and_handles_keys() {
+        let notice = SessionPickerNotice {
+            kind: ResumeFailureKind::IncompatibleFormat,
+            session_dir: PathBuf::from("/state/sessions/legacy-session-01"),
+        };
+        let mut state = SessionPickerState::new(vec![
+            metadata("legacy-session-01", 10),
+            metadata("session-b", 20),
+        ])
+        .with_notice(Some(notice));
+
+        let rendered = render_picker_to_text(&state, Path::new("/repo"), 90, 22);
+        assert!(rendered.contains("Incompatible Session"));
+        assert!(rendered.contains("different format"));
+        assert!(rendered.contains("/state/sessions/legacy-session-01"));
+        assert!(rendered.contains("New session"));
+        assert!(!rendered.contains("Reason:"));
+
+        // Navigation keys are absorbed while the modal is open.
+        assert_eq!(
+            handle_picker_key(
+                KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::NONE),
+                &mut state,
+            ),
+            None
+        );
+        assert!(state.has_notice());
+        assert_eq!(
+            state.accept(),
+            SessionPickerSelection::Resume(metadata("legacy-session-01", 10))
+        );
+
+        // Enter dismisses the notice and returns to the picker list.
+        assert_eq!(
+            handle_picker_key(
+                KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE),
+                &mut state,
+            ),
+            None
+        );
+        assert!(!state.has_notice());
+
+        // Pressing 'n' while the notice is open immediately starts a new session.
+        let mut state_for_new = SessionPickerState::new(vec![metadata("legacy-session-01", 10)])
+            .with_notice(Some(SessionPickerNotice {
+                kind: ResumeFailureKind::IncompatibleFormat,
+                session_dir: PathBuf::from("/state/sessions/legacy-session-01"),
+            }));
+        assert_eq!(
+            handle_picker_key(
+                KeyEvent::new(KeyCode::Char('n'), crossterm::event::KeyModifiers::NONE),
+                &mut state_for_new,
+            ),
+            Some(SessionPickerSelection::New)
+        );
+    }
+
+    #[test]
+    fn incompatible_resume_error_classifier_matches_legacy_locked_and_corrupt_store_errors() {
+        use merry_runtime::{RuntimeError, SessionStoreError};
+        assert_eq!(
+            super::super::runtime::classify_resume_error(&RuntimeError::SessionStore {
+                source: SessionStoreError::UnsupportedFormatVersion { actual: 6 },
+            }),
+            Some(ResumeFailureKind::IncompatibleFormat)
+        );
+        assert_eq!(
+            super::super::runtime::classify_resume_error(&RuntimeError::SessionStore {
+                source: SessionStoreError::InvalidDocument {
+                    reason: "legacy journal",
+                },
+            }),
+            Some(ResumeFailureKind::IncompatibleFormat)
+        );
+        assert_eq!(
+            super::super::runtime::classify_resume_error(&RuntimeError::SessionStore {
+                source: SessionStoreError::SessionAlreadyReserved {
+                    session_id: SessionId::new("busy").expect("valid id"),
+                },
+            }),
+            Some(ResumeFailureKind::AlreadyOpen)
+        );
     }
 }

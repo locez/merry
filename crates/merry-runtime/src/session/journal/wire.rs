@@ -168,6 +168,8 @@ pub(super) struct JournalModelTurn {
     pub(super) status: ModelTurnStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) started_at_epoch_secs: Option<u64>,
 }
 
 /// Incremental delta for session side-state that cannot be derived from

@@ -544,3 +544,96 @@ fn offscreen_render_cache_eviction_bounds_materialized_items_across_long_scrollb
         "expected sticky user turn 490 after returning to bottom, got:\n{text}"
     );
 }
+
+#[test]
+fn scrolling_to_top_triggers_archive_segment_load_and_prepends_without_jumping_or_rebuilding() {
+    let size = Size::new(80, 24);
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "test".into(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    state.push_timeline_item(TimelineItem::User {
+        text: "Hot question 00".into(),
+    });
+    for index in 1..40 {
+        state.push_timeline_item(TimelineItem::Assistant {
+            text: format!("Hot item {index:02}\nsecond line {index:02}"),
+        });
+    }
+    state.set_unloaded_archive_segments(vec![1, 2]);
+
+    let _ = draw(&mut state, size);
+    let timeline_area = area(&state, size);
+    let cursor = Position::new(timeline_area.x + 1, timeline_area.y + 1);
+
+    // Scrolling up while still near the bottom must not trigger an archive fetch.
+    assert_eq!(
+        handle_mouse_scroll_up(cursor, size, &mut state),
+        ControllerEffect::None
+    );
+
+    // Jump to the top of the hot timeline and settle the viewport anchor.
+    state.scroll_timeline_up_by(usize::MAX);
+    let top_buffer = draw(&mut state, size);
+    let top_before = visible_text(&top_buffer, timeline_area);
+    assert!(
+        top_before.contains("Hot question 00") && top_before.contains("Hot item 01"),
+        "expected top of hot timeline, got:\n{top_before}"
+    );
+    let misses_at_top = state.layout_cache_misses();
+
+    // Scrolling up at the top requests the newest unloaded segment (2) and deduplicates repeats.
+    assert_eq!(
+        handle_mouse_scroll_up(cursor, size, &mut state),
+        ControllerEffect::LoadArchiveSegment(2)
+    );
+    assert_eq!(
+        handle_mouse_scroll_up(cursor, size, &mut state),
+        ControllerEffect::None
+    );
+    // Simulate a frame render while segment 2 is loading asynchronously.
+    let _ = draw(&mut state, size);
+
+    // Apply the loaded archived segment via ArchiveSegmentCompletion and verify anchor stability.
+    let mut projector = crate::tui::projector::TuiProjector::default();
+    super::super::ArchiveSegmentCompletion::new(
+        2,
+        Ok(vec![
+            merry_runtime::SessionTranscriptItem::UserMessage {
+                text: "Archived segment two question".into(),
+                images: Vec::new(),
+            },
+            merry_runtime::SessionTranscriptItem::AssistantText {
+                text: "Archived segment two answer".into(),
+            },
+        ]),
+    )
+    .apply(&mut state, &mut projector);
+
+    let after_prepend = draw(&mut state, size);
+    let top_after = visible_text(&after_prepend, timeline_area);
+    assert_eq!(
+        top_after, top_before,
+        "prepending archived segment must keep the visible viewport pixel-identical"
+    );
+    assert!(
+        state.layout_cache_misses() <= misses_at_top + 1,
+        "prepending archived items above the viewport must not rebuild already-cached visible items (before={misses_at_top}, after={})",
+        state.layout_cache_misses()
+    );
+
+    // Scrolling further upward reveals the newly prepended archived items and then requests segment 1.
+    state.scroll_timeline_up_by(usize::MAX);
+    let archived_view = visible_text(&draw(&mut state, size), timeline_area);
+    assert!(
+        archived_view.contains("Archived segment two question")
+            && archived_view.contains("Archived segment two answer"),
+        "expected archived segment 2 content at the new top, got:\n{archived_view}"
+    );
+    assert_eq!(
+        handle_mouse_scroll_up(cursor, size, &mut state),
+        ControllerEffect::LoadArchiveSegment(1)
+    );
+}

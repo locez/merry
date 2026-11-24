@@ -328,7 +328,12 @@ impl SessionState {
         input: CitationCompactionInput,
         summary: &str,
     ) -> Result<PreparedCompactionInstall, RuntimeError> {
-        self.prepare_compaction_install(input, summary, &crate::HistoryRetention::Full)
+        self.prepare_summary_compaction_install_with_retention(
+            input,
+            summary,
+            &crate::HistoryRetention::archive(),
+            false,
+        )
     }
 
     pub(crate) fn prepare_summary_compaction_install_with_retention(
@@ -336,15 +341,7 @@ impl SessionState {
         input: CitationCompactionInput,
         summary: &str,
         retention: &crate::HistoryRetention,
-    ) -> Result<PreparedCompactionInstall, RuntimeError> {
-        self.prepare_compaction_install(input, summary, retention)
-    }
-
-    fn prepare_compaction_install(
-        &self,
-        input: CitationCompactionInput,
-        summary: &str,
-        retention: &crate::HistoryRetention,
+        has_session_store: bool,
     ) -> Result<PreparedCompactionInstall, RuntimeError> {
         if !self.pending_tool_calls.is_empty() {
             return Err(CompactionError::PendingToolCalls.into());
@@ -363,12 +360,13 @@ impl SessionState {
             .prompt_history_projection
             .advanced_through(&transcript, compacted_through)?;
         let compacted_checkpoint = Some(compacted);
-        let pruned_segment = if retention.prunes_compacted_history() {
-            let pruned_items = transcript.prune_through(compacted_through);
+        let pruned_segment = if retention.prunes_compacted_history(has_session_store) {
+            let (pruned_items, time_range) = transcript.prune_through(compacted_through);
             Some(super::PrunedCompactionSegment {
                 pruned_items,
                 compacted_through,
                 summary: summary.to_owned(),
+                time_range,
             })
         } else {
             None

@@ -83,6 +83,19 @@ impl CommentSession {
         self.active = true;
         Some(comment)
     }
+
+    /// Shifts all stored timeline item indices when older archived items are prepended.
+    pub(crate) fn shift_item_indices(&mut self, delta: usize) {
+        if delta == 0 {
+            return;
+        }
+        if let Some(pending) = &mut self.pending {
+            pending.item_index = pending.item_index.saturating_add(delta);
+        }
+        for comment in &mut self.comments {
+            comment.item_index = comment.item_index.saturating_add(delta);
+        }
+    }
 }
 
 /// One highlighted quote. `comment_index` is absent for a quote that is not saved yet.

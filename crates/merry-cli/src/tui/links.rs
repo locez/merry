@@ -302,13 +302,17 @@ pub(crate) fn validate_external_url(url: &str) -> Result<&str, UrlValidationErro
 }
 
 pub(super) fn strip_http_scheme(url: &str) -> Option<&str> {
-    if url.len() >= 8 && url[..8].eq_ignore_ascii_case("https://") {
-        Some(&url[8..])
-    } else if url.len() >= 7 && url[..7].eq_ignore_ascii_case("http://") {
-        Some(&url[7..])
-    } else {
-        None
+    if let Some(prefix) = url.get(..8)
+        && prefix.eq_ignore_ascii_case("https://")
+    {
+        return url.get(8..);
     }
+    if let Some(prefix) = url.get(..7)
+        && prefix.eq_ignore_ascii_case("http://")
+    {
+        return url.get(7..);
+    }
+    None
 }
 
 /// Splits plain text into literal text slices and validated bare `http://`/`https://` URLs.
@@ -638,5 +642,25 @@ mod tests {
             "https://evil.example/phish".to_owned(),
         )];
         assert!(linkify_rendered_line(&mut masked, 0, &existing).is_empty());
+    }
+
+    #[test]
+    fn strip_http_scheme_and_inline_code_link_never_panic_on_multibyte_utf8() {
+        for sample in ["【完】", "表格测试", "🙂🙂", "a【完】", "ab【完】"] {
+            assert_eq!(super::strip_http_scheme(sample), None);
+            assert_eq!(super::inline_code_link(sample), None);
+            assert!(matches!(
+                validate_external_url(sample),
+                Err(UrlValidationError::UnsupportedScheme)
+            ));
+        }
+        assert_eq!(
+            super::strip_http_scheme("HTTPS://example.com/路径"),
+            Some("example.com/路径")
+        );
+        assert_eq!(
+            super::strip_http_scheme("Http://example.com/路径"),
+            Some("example.com/路径")
+        );
     }
 }

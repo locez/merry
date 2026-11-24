@@ -496,6 +496,48 @@ impl TimelineRenderCache {
         layout
     }
 
+    /// Shifts cached slots and width profiles right when older archived items
+    /// are prepended to the start of the timeline, keeping already-measured
+    /// items warm at their new indices without rebuilding them.
+    pub(crate) fn prepend_unmeasured(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !guard.slots.is_empty() {
+            for slot in guard.slots.iter_mut().flatten() {
+                if let Some(layout) = slot.layout.as_mut()
+                    && layout.copy_targets.iter().any(|target| {
+                        matches!(
+                            target.content,
+                            crate::tui::copy_controls::CopyContent::AssistantMessage(_)
+                        )
+                    })
+                {
+                    let layout_mut = Arc::make_mut(layout);
+                    for target in &mut layout_mut.copy_targets {
+                        if let crate::tui::copy_controls::CopyContent::AssistantMessage(index) =
+                            &mut target.content
+                        {
+                            *index = index.saturating_add(count);
+                        }
+                    }
+                }
+            }
+            let mut next = vec![None; count];
+            next.append(&mut guard.slots);
+            guard.slots = next;
+        }
+        if !guard.width_profiles.is_empty() {
+            let mut next = vec![None; count];
+            next.append(&mut guard.width_profiles);
+            guard.width_profiles = next;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn misses(&self) -> u64 {
         self.inner

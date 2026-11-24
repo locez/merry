@@ -5,34 +5,44 @@ use std::num::{NonZeroU64, NonZeroUsize};
 /// Policy governing how compacted session history is retained in memory and on disk.
 ///
 /// Orthogonal to persistence (`session_store`):
-/// - When no `session_store` is attached, nothing is written to disk. [`Self::ContextOnly`]
-///   still prunes compacted turns (`<= compacted_through`) from hot in-memory session state
-///   so long-lived in-memory agents keep bounded RAM.
-/// - When a `session_store` is attached:
-///   - [`Self::Full`] preserves every historical turn in hot memory and append-only `journal.jsonl`.
-///   - [`Self::ContextOnly`] rewrites `journal.jsonl` on compaction to hold only the active tail
-///     and compacted checkpoint summary, and deletes unreferenced sidecar images.
-///   - [`Self::SegmentedArchive`] moves compacted history out of hot memory and live `journal.jsonl`
-///     into `<session_dir>/archive/seg_NNNN.jsonl` (plus deterministic Markdown files when enabled),
-///     enforces segment/byte retention caps, garbage-collects unreferenced sidecar images, and
-///     supports on-demand `read_tool_output` lookup across archived segments.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// - [`Self::Archive`] (the default) retains compacted history cleanly:
+///   - When a `session_store` is attached, compaction always rotates turns `<= compacted_through`
+///     out of hot memory and live `journal.jsonl` into `<session_dir>/archive/seg_NNNN.jsonl`
+///     (plus a unified deterministic Markdown archive `seg_NNNN.md` + `INDEX.md` when enabled),
+///     keeping startup and hot RAM bounded. By default there is no segment or byte cap, so full
+///     history is preserved; optional `max_segments` / `max_bytes` caps enable rolling eviction
+///     and orphan image GC for long-lived bots.
+///   - When no `session_store` is attached, nothing is written to disk and turns stay in memory
+///     so history is not silently discarded.
+/// - [`Self::ContextOnly`] retains only the active post-compaction tail and checkpoint summary:
+///   prunes compacted turns from hot memory, rewrites `journal.jsonl` when persisted, deletes
+///   unreferenced sidecar images, and writes no `archive/` files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryRetention {
-    /// Keep all historical turns in hot memory and append-only `journal.jsonl`.
-    #[default]
-    Full,
+    /// Rotate compacted segments into `<session_dir>/archive/` when persisted
+    /// (unbounded by default; optionally capped via [`ArchiveConfig`]).
+    Archive(ArchiveConfig),
     /// Retain only the active post-compaction tail and compacted checkpoint summary.
     ContextOnly,
-    /// Bound hot memory and live `journal.jsonl` to the active tail while rotating compacted
-    /// segments into `<session_dir>/archive/`.
-    SegmentedArchive(SegmentedArchiveConfig),
+}
+
+impl Default for HistoryRetention {
+    fn default() -> Self {
+        Self::Archive(ArchiveConfig::new())
+    }
 }
 
 impl HistoryRetention {
-    /// Retains all history in hot memory and append-only `journal.jsonl`.
+    /// Retains all compacted history in `<session_dir>/archive/` with no retention cap.
     #[must_use]
-    pub const fn full() -> Self {
-        Self::Full
+    pub const fn archive() -> Self {
+        Self::Archive(ArchiveConfig::new())
+    }
+
+    /// Retains compacted history in `<session_dir>/archive/` using custom [`ArchiveConfig`].
+    #[must_use]
+    pub const fn archive_with(config: ArchiveConfig) -> Self {
+        Self::Archive(config)
     }
 
     /// Retains only the active context tail and compaction summary.
@@ -41,37 +51,34 @@ impl HistoryRetention {
         Self::ContextOnly
     }
 
-    /// Rotates compacted segments into `<session_dir>/archive/`.
+    /// Whether compacted turns should be pruned from hot memory (and rotated on disk when stored).
     #[must_use]
-    pub const fn segmented_archive(config: SegmentedArchiveConfig) -> Self {
-        Self::SegmentedArchive(config)
-    }
-
-    /// Whether compacted turns should be pruned from hot memory and live `journal.jsonl`.
-    #[must_use]
-    pub(crate) const fn prunes_compacted_history(&self) -> bool {
-        matches!(self, Self::ContextOnly | Self::SegmentedArchive(_))
-    }
-
-    /// Returns archive settings when [`Self::SegmentedArchive`] is active.
-    #[must_use]
-    pub const fn segmented_archive_config(&self) -> Option<&SegmentedArchiveConfig> {
+    pub(crate) const fn prunes_compacted_history(&self, has_session_store: bool) -> bool {
         match self {
-            Self::SegmentedArchive(config) => Some(config),
-            Self::Full | Self::ContextOnly => None,
+            Self::ContextOnly => true,
+            Self::Archive(_) => has_session_store,
+        }
+    }
+
+    /// Returns archive settings when [`Self::Archive`] is active.
+    #[must_use]
+    pub const fn archive_config(&self) -> Option<ArchiveConfig> {
+        match self {
+            Self::Archive(config) => Some(*config),
+            Self::ContextOnly => None,
         }
     }
 }
 
-/// Configuration for [`HistoryRetention::SegmentedArchive`].
+/// Configuration for [`HistoryRetention::Archive`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SegmentedArchiveConfig {
+pub struct ArchiveConfig {
     max_segments: Option<NonZeroUsize>,
     max_bytes: Option<NonZeroU64>,
     export_markdown: bool,
 }
 
-impl SegmentedArchiveConfig {
+impl ArchiveConfig {
     /// Creates archive settings with deterministic Markdown export enabled and no size cap.
     #[must_use]
     pub const fn new() -> Self {
@@ -122,7 +129,7 @@ impl SegmentedArchiveConfig {
     }
 }
 
-impl Default for SegmentedArchiveConfig {
+impl Default for ArchiveConfig {
     fn default() -> Self {
         Self::new()
     }

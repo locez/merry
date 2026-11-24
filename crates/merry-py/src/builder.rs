@@ -4,9 +4,8 @@ use crate::{agent::PyAgent, error, protocol};
 use merry::profiles::WorkspaceToolLimits;
 use merry::providers::OpenAiProtocol;
 use merry::{
-    AgentBuilder, AgentLoopConfig, FileSessionStore, GenerationConfig, HistoryRetention,
-    ParallelToolCalls, PromptBlock, PromptProfile, ReasoningEffort, SegmentedArchiveConfig,
-    ServiceTier,
+    AgentBuilder, AgentLoopConfig, ArchiveConfig, FileSessionStore, GenerationConfig,
+    HistoryRetention, ParallelToolCalls, PromptBlock, PromptProfile, ReasoningEffort, ServiceTier,
 };
 use merry_core::ToolName;
 use pyo3::prelude::*;
@@ -340,23 +339,7 @@ fn parse_history_retention(
     export_markdown: Option<bool>,
 ) -> PyResult<HistoryRetention> {
     match mode {
-        "full" => {
-            if max_segments.is_some() || max_bytes.is_some() || export_markdown == Some(true) {
-                return Err(error::config_message_to_py(
-                    "max_segments, max_bytes, and export_markdown are only valid for segmented_archive retention",
-                ));
-            }
-            Ok(HistoryRetention::Full)
-        }
-        "context_only" => {
-            if max_segments.is_some() || max_bytes.is_some() || export_markdown == Some(true) {
-                return Err(error::config_message_to_py(
-                    "max_segments, max_bytes, and export_markdown are only valid for segmented_archive retention",
-                ));
-            }
-            Ok(HistoryRetention::ContextOnly)
-        }
-        "segmented_archive" => {
+        "archive" => {
             let max_segments = max_segments
                 .map(|value| {
                     NonZeroUsize::new(value).ok_or_else(|| {
@@ -371,11 +354,19 @@ fn parse_history_retention(
                     })
                 })
                 .transpose()?;
-            let config = SegmentedArchiveConfig::new()
+            let config = ArchiveConfig::new()
                 .with_max_segments(max_segments)
                 .with_max_bytes(max_bytes)
                 .with_export_markdown(export_markdown.unwrap_or(true));
-            Ok(HistoryRetention::SegmentedArchive(config))
+            Ok(HistoryRetention::Archive(config))
+        }
+        "context_only" => {
+            if max_segments.is_some() || max_bytes.is_some() || export_markdown == Some(true) {
+                return Err(error::config_message_to_py(
+                    "max_segments, max_bytes, and export_markdown are only valid for archive retention",
+                ));
+            }
+            Ok(HistoryRetention::ContextOnly)
         }
         other => Err(error::config_message_to_py(format!(
             "unsupported history_retention mode: {other}"

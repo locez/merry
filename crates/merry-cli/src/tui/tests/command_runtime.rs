@@ -98,6 +98,7 @@ async fn runtime_process_stays_running_and_animates_until_the_backend_completes(
             )),
             extra_tools: Vec::new(),
             automatic_compaction: CompactionConfig::disabled(),
+            history_retention: merry_runtime::HistoryRetention::default(),
             retry_policy: None,
             context_compaction: None,
             approval_review: None,

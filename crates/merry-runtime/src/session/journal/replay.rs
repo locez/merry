@@ -58,6 +58,7 @@ struct ReplayedSideState {
     next_item_id: Option<u64>,
     model_turns: BTreeMap<ModelTurnId, ModelTurnStatus>,
     model_turn_sequences: BTreeMap<ModelTurnId, u64>,
+    model_turn_timestamps: BTreeMap<ModelTurnId, u64>,
     next_model_turn_id: Option<u64>,
     topic: Option<String>,
     subagents: Vec<crate::subagent::PersistedSubagentRecord>,
@@ -102,6 +103,9 @@ impl ReplayedSideState {
             self.model_turns.insert(turn.id, turn.status);
             if let Some(sequence) = turn.sequence {
                 self.model_turn_sequences.insert(turn.id, sequence);
+            }
+            if let Some(ts) = turn.started_at_epoch_secs {
+                self.model_turn_timestamps.insert(turn.id, ts);
             }
         }
         if let Some(next_model_turn_id) = delta.next_model_turn_id {
@@ -186,28 +190,7 @@ pub(crate) async fn session_from_journal(
         return Err(invalid_document("session journal has no commit"));
     }
 
-    let mut hidden_calls = BTreeSet::new();
-    for item in &transcript_items {
-        if let TranscriptItem::ToolResult {
-            call_id,
-            prompt_projection: ToolResultPromptProjection::Hidden,
-            ..
-        } = item
-        {
-            hidden_calls.insert(call_id.clone());
-        }
-    }
-    for item in &mut transcript_items {
-        if let TranscriptItem::ToolCall {
-            call,
-            prompt_projection,
-            ..
-        } = item
-            && hidden_calls.contains(call.id())
-        {
-            *prompt_projection = ToolCallPromptProjection::Hidden;
-        }
-    }
+    mark_hidden_tool_calls(&mut transcript_items);
 
     let derived_next_item_id = transcript_items
         .iter()
@@ -228,16 +211,18 @@ pub(crate) async fn session_from_journal(
         .session_started
         .unwrap_or(state.next_sequence > 0 || !transcript_items.is_empty());
 
-    let mut transcript = Transcript::from_journal_parts(
-        transcript_items,
-        next_item_id,
-        state.model_turns,
-        state.model_turn_sequences,
-        next_model_turn_id,
-        state.pruned_through,
-        state.pruned_external_turns,
-    )
-    .map_err(runtime_error_to_invalid_document)?;
+    let mut transcript =
+        Transcript::from_journal_parts(crate::session::transcript::JournalTranscriptParts {
+            items: transcript_items,
+            next_id: next_item_id,
+            model_turns: state.model_turns,
+            model_turn_sequences: state.model_turn_sequences,
+            model_turn_timestamps: state.model_turn_timestamps,
+            next_model_turn_id,
+            pruned_through: state.pruned_through,
+            pruned_external_turns: state.pruned_external_turns,
+        })
+        .map_err(runtime_error_to_invalid_document)?;
 
     let mut prompt_history_projection = PromptHistoryProjection::new();
     let mut compacted_checkpoint = None;
@@ -420,6 +405,56 @@ pub(crate) fn extract_search_snapshot(
         topic,
         user_text: texts.join("\n"),
     })
+}
+
+/// Replays the transcript items from a single archived `seg_NNNN.jsonl` file
+/// for on-demand scrollback paging in UI or SDK callers.
+pub(super) async fn transcript_items_from_segment_journal(
+    bytes: &[u8],
+    images_dir: &Path,
+) -> Result<Vec<TranscriptItem>, SessionStoreError> {
+    let (complete_bytes, _) = complete_journal_prefix(bytes);
+    let records = parse_journal_records(complete_bytes)?;
+    let mut seen_item_ids = BTreeSet::new();
+    let mut transcript_items = Vec::new();
+    for record in records {
+        let JournalRecord::Commit { items, .. } = record else {
+            continue;
+        };
+        for item in items {
+            if !seen_item_ids.insert(item.id()) {
+                continue;
+            }
+            transcript_items.push(transcript_item_from_journal(item, images_dir).await?);
+        }
+    }
+    mark_hidden_tool_calls(&mut transcript_items);
+    Ok(transcript_items)
+}
+
+fn mark_hidden_tool_calls(transcript_items: &mut [TranscriptItem]) {
+    let mut hidden_calls = BTreeSet::new();
+    for item in transcript_items.iter() {
+        if let TranscriptItem::ToolResult {
+            call_id,
+            prompt_projection: ToolResultPromptProjection::Hidden,
+            ..
+        } = item
+        {
+            hidden_calls.insert(call_id.clone());
+        }
+    }
+    for item in transcript_items.iter_mut() {
+        if let TranscriptItem::ToolCall {
+            call,
+            prompt_projection,
+            ..
+        } = item
+            && hidden_calls.contains(call.id())
+        {
+            *prompt_projection = ToolCallPromptProjection::Hidden;
+        }
+    }
 }
 
 fn parse_journal_records(complete_bytes: &[u8]) -> Result<Vec<JournalRecord>, SessionStoreError> {

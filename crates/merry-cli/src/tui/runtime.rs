@@ -35,6 +35,7 @@ pub(crate) struct TuiRuntimeSession {
     pub(crate) model_label: String,
     pub(crate) reasoning_effort_label: Option<String>,
     pub(crate) metadata: TuiSessionMetadata,
+    metadata_written: bool,
     pub(crate) resumed: bool,
     pub(crate) startup_warnings: Vec<McpServerDiagnostic>,
     runtime: Runtime,
@@ -51,7 +52,7 @@ pub(crate) struct TuiRuntimeSession {
     permission_source: Arc<ChannelPermissionAdmissionSource>,
     pub(crate) permission_requests: mpsc::Receiver<PermissionReviewRequest>,
     pending_permission_reviews: VecDeque<PermissionReviewRequest>,
-    _session_reservation: SessionReservation,
+    session_reservation: Option<SessionReservation>,
 }
 
 pub(crate) struct TuiSessionLaunch {
@@ -65,13 +66,59 @@ pub(crate) struct TuiSessionLaunch {
     pub(crate) workspace_writable: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResumeFailureKind {
+    IncompatibleFormat,
+    AlreadyOpen,
+}
+
+pub(crate) enum TuiSessionStartError {
+    ResumeUnavailable {
+        kind: ResumeFailureKind,
+        session_id: SessionId,
+        session_dir: PathBuf,
+    },
+    Fatal(CliError),
+}
+
+impl From<CliError> for TuiSessionStartError {
+    fn from(error: CliError) -> Self {
+        Self::Fatal(error)
+    }
+}
+
+impl From<crate::coding::CodingRuntimeError> for TuiSessionStartError {
+    fn from(error: crate::coding::CodingRuntimeError) -> Self {
+        Self::Fatal(CliError::from(error))
+    }
+}
+
+pub(super) fn classify_resume_error(
+    error: &merry_runtime::RuntimeError,
+) -> Option<ResumeFailureKind> {
+    match error {
+        merry_runtime::RuntimeError::SessionStore {
+            source: merry_runtime::SessionStoreError::SessionAlreadyReserved { .. },
+        } => Some(ResumeFailureKind::AlreadyOpen),
+        merry_runtime::RuntimeError::SessionStore {
+            source:
+                merry_runtime::SessionStoreError::UnsupportedFormatVersion { .. }
+                | merry_runtime::SessionStoreError::InvalidDocument { .. }
+                | merry_runtime::SessionStoreError::Json { .. }
+                | merry_runtime::SessionStoreError::SessionIdMismatch { .. }
+                | merry_runtime::SessionStoreError::Io { .. },
+        } => Some(ResumeFailureKind::IncompatibleFormat),
+        _ => None,
+    }
+}
+
 pub(crate) async fn start_tui_runtime_session(
     merry_config: Option<&MerryConfig>,
     session_store: TuiSessionStore,
     selection: SessionPickerSelection,
     preferences: &TuiPreferences,
     launch: TuiSessionLaunch,
-) -> Result<TuiRuntimeSession, CliError> {
+) -> Result<TuiRuntimeSession, TuiSessionStartError> {
     let TuiSessionLaunch {
         sandbox_mode,
         permission_mode,
@@ -108,11 +155,22 @@ pub(crate) async fn start_tui_runtime_session(
         .reasoning_effort()
         .map(|effort| effort.as_str().to_owned());
     let (session_id, mut metadata, should_resume) = session_start(selection, &workspace_root);
-    let session_reservation = session_store
-        .session_state_store()
-        .reserve_session(&session_id)
-        .await
-        .map_err(unexpected)?;
+    let state_store = session_store.session_state_store();
+    let session_reservation = match state_store.reserve_session(&session_id).await {
+        Ok(reservation) => reservation,
+        Err(merry_runtime::SessionStoreError::SessionAlreadyReserved { .. }) if should_resume => {
+            tracing::warn!(
+                session_id = %session_id,
+                "cannot resume session because it is already reserved by another run"
+            );
+            return Err(TuiSessionStartError::ResumeUnavailable {
+                kind: ResumeFailureKind::AlreadyOpen,
+                session_dir: state_store.session_dir(&session_id),
+                session_id,
+            });
+        }
+        Err(error) => return Err(TuiSessionStartError::Fatal(unexpected(error))),
+    };
     metadata.model = Some(model_label.clone());
     metadata.reasoning_effort = reasoning_effort_label.clone();
     let mut backend_options = prepared_action_process_backend_options_with_overrides(
@@ -127,15 +185,27 @@ pub(crate) async fn start_tui_runtime_session(
     let backend = action_process_runner_for_mode(&workspace_root, backend_options, sandbox_mode)?;
     let (permission_source, permission_requests) = ChannelPermissionAdmissionSource::channel(8);
     let permission_source = Arc::new(permission_source);
-    let state_store = session_store.session_state_store();
     let loaded_session = if should_resume {
-        Some(
-            LoadedSession::load(&state_store, &session_id)
-                .await
-                .map_err(|error| {
-                    unexpected(format!("could not resume session {session_id}: {error}"))
-                })?,
-        )
+        match LoadedSession::load(&state_store, &session_id).await {
+            Ok(loaded) => Some(loaded),
+            Err(error) => {
+                if let Some(kind) = classify_resume_error(&error) {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %error,
+                        "cannot resume historical session directly"
+                    );
+                    return Err(TuiSessionStartError::ResumeUnavailable {
+                        kind,
+                        session_dir: state_store.session_dir(&session_id),
+                        session_id,
+                    });
+                }
+                return Err(TuiSessionStartError::Fatal(unexpected(format!(
+                    "could not resume session {session_id}: {error}"
+                ))));
+            }
+        }
     } else {
         None
     };
@@ -172,6 +242,8 @@ pub(crate) async fn start_tui_runtime_session(
         true,
         debug_openai_usage_error,
     )?;
+    let history_retention =
+        crate::runtime_config::history_retention_config(merry_config).map_err(unexpected)?;
     let runtime_input = HeadlessCodingRuntimeInput {
         session_id: session_id.as_str(),
         root: &workspace_root,
@@ -183,6 +255,7 @@ pub(crate) async fn start_tui_runtime_session(
             merry_config,
             preferences,
         )?,
+        history_retention,
         retry_policy,
         context_compaction,
         approval_review,
@@ -223,14 +296,16 @@ pub(crate) async fn start_tui_runtime_session(
             permission_review_rules,
             Some(state_store),
             max_parallel_tool_calls,
-        )?,
+        )
+        .map_err(CliError::from)?,
         None => build_headless_coding_with_policy_composition(
             runtime_input,
             permission_policy,
             permission_review_rules,
             Some(state_store),
             max_parallel_tool_calls,
-        )?,
+        )
+        .map_err(CliError::from)?,
     };
     let loop_config = coding_runtime.loop_config();
     let runtime = coding_runtime.into_runtime();
@@ -282,6 +357,7 @@ pub(crate) async fn start_tui_runtime_session(
         model_label,
         reasoning_effort_label,
         metadata,
+        metadata_written: should_resume,
         resumed: should_resume,
         startup_warnings: mcp.warnings,
         runtime,
@@ -298,7 +374,7 @@ pub(crate) async fn start_tui_runtime_session(
         permission_source,
         permission_requests,
         pending_permission_reviews: VecDeque::new(),
-        _session_reservation: session_reservation,
+        session_reservation: Some(session_reservation),
     })
 }
 
@@ -467,6 +543,53 @@ impl TuiRuntimeSession {
         self.metadata.set_topic_if_empty(topic);
     }
 
+    pub(crate) fn is_metadata_written(&self) -> bool {
+        self.metadata_written
+    }
+
+    /// Submits a user message to the interactive runtime and writes initial
+    /// picker metadata (`meta.json`) on first activity so a mid-turn crash
+    /// after runtime journal savepoints land remains resumable.
+    pub(crate) async fn submit_message(
+        &mut self,
+        message: merry_runtime::UserMessageInput,
+        fallback_text: &str,
+    ) -> Result<(), merry_runtime::InteractiveError> {
+        self.input.submit_message(message).await?;
+        let fallback_topic = if self.metadata.topic.is_none() {
+            let topic = crate::tui::session_list::compact_session_text(fallback_text);
+            (!topic.is_empty()).then_some(topic)
+        } else {
+            None
+        };
+        self.ensure_metadata_written(fallback_topic).await;
+        Ok(())
+    }
+
+    /// Writes `meta.json` on first user submission (or once a fallback topic
+    /// becomes available) without creating metadata for untouched empty sessions.
+    pub(crate) async fn ensure_metadata_written(&mut self, fallback_topic: Option<String>) {
+        let had_topic = self.metadata.topic.is_some();
+        self.metadata.set_topic_if_empty(fallback_topic);
+        let topic_populated = !had_topic && self.metadata.topic.is_some();
+        if self.metadata_written && !topic_populated {
+            return;
+        }
+        self.metadata.mark_active(now_unix_ms());
+        match write_session_metadata(&self.session_store, &self.metadata).await {
+            Ok(()) => {
+                self.metadata_written = true;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %self.metadata.session_id,
+                    error = ?error,
+                    "could not write initial TUI session metadata"
+                );
+            }
+        }
+    }
+
     /// Refreshes picker metadata after an automatic runtime turn savepoint
     /// without blocking the TUI loop on background topic generation.
     pub(crate) async fn sync_metadata_on_turn_settled(&mut self, fallback_topic: Option<String>) {
@@ -476,12 +599,17 @@ impl TuiRuntimeSession {
             self.metadata.set_topic_if_empty(fallback_topic);
         }
         self.metadata.mark_active(now_unix_ms());
-        if let Err(error) = write_session_metadata(&self.session_store, &self.metadata).await {
-            tracing::warn!(
-                session_id = %self.metadata.session_id,
-                error = ?error,
-                "could not refresh TUI session metadata after turn"
-            );
+        match write_session_metadata(&self.session_store, &self.metadata).await {
+            Ok(()) => {
+                self.metadata_written = true;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %self.metadata.session_id,
+                    error = ?error,
+                    "could not refresh TUI session metadata after turn"
+                );
+            }
         }
     }
 
@@ -493,7 +621,40 @@ impl TuiRuntimeSession {
             .await
             .map_err(unexpected)?;
         write_session_metadata(&self.session_store, &self.metadata).await?;
+        self.metadata_written = true;
         Ok(())
+    }
+
+    /// Returns true when this session has resumed history, already persisted a
+    /// journal (for example via `/save`), or recorded at least one transcript item.
+    pub(crate) async fn has_persistable_activity(&self) -> bool {
+        if self.resumed {
+            return true;
+        }
+        if self
+            .session_store
+            .session_state_store()
+            .contains_session(&self.metadata.session_id)
+            .await
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        self.runtime
+            .session_transcript()
+            .await
+            .is_ok_and(|items| !items.is_empty())
+    }
+
+    /// Releases the reservation and removes the session directory when an
+    /// untouched new session exits without writing any persisted files.
+    pub(crate) async fn discard_if_empty(&mut self) {
+        if let Some(reservation) = self.session_reservation.take() {
+            self.session_store
+                .session_state_store()
+                .release_empty_reservation(&self.metadata.session_id, reservation)
+                .await;
+        }
     }
 
     pub(crate) async fn save_now(&mut self) -> Result<(), CliError> {
@@ -504,6 +665,7 @@ impl TuiRuntimeSession {
             .await
             .map_err(unexpected)?;
         write_session_metadata(&self.session_store, &self.metadata).await?;
+        self.metadata_written = true;
         Ok(())
     }
 
@@ -768,186 +930,5 @@ fn runtime_role_overrides<'a>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::XdgPaths;
-
-    #[test]
-    fn default_tui_session_id_is_filesystem_safe() {
-        let session_id = default_tui_session_id();
-
-        assert!(!session_id.as_str().is_empty());
-        assert!(
-            session_id
-                .as_str()
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        );
-    }
-
-    #[test]
-    fn tui_reasoning_preference_overrides_provider_default() {
-        let paths = XdgPaths::from_parts(std::path::PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_with_managed_from_text(
-            Some(
-                r#"
-[providers.default]
-provider = "compat"
-model = "gpt-test"
-reasoning_effort = "low"
-"#,
-            ),
-            Some(
-                r#"
-version = 1
-
-[providers.compat]
-type = "openai-compatible"
-api_key_file = "managed/secrets/compat.key"
-"#,
-            ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should exist");
-        let mut preferences = TuiPreferences::default();
-        preferences
-            .set_reasoning_effort_for_provider(
-                "compat",
-                Some(merry_llm::ReasoningEffort::new("high").unwrap()),
-            )
-            .expect("reasoning preference should be valid");
-
-        let generation = generation_config_with_preferences(Some(&config), &preferences)
-            .expect("generation config should build");
-
-        assert_eq!(
-            generation.reasoning_effort().map(|effort| effort.as_str()),
-            Some("high")
-        );
-    }
-
-    #[test]
-    fn selected_provider_reasoning_effort_is_used_when_preference_is_inherited() {
-        let paths = XdgPaths::from_parts(std::path::PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_with_managed_from_text(
-            Some(
-                r#"
-[providers.default]
-provider = "compat"
-model = "gpt-test"
-"#,
-            ),
-            Some(
-                r#"
-version = 1
-
-[providers.compat]
-type = "openai-compatible"
-api_key_file = "managed/secrets/compat.key"
-
-[providers.alt]
-type = "openai-compatible"
-default_model = "alt-model"
-reasoning_effort = "high"
-api_key_file = "managed/secrets/alt.key"
-"#,
-            ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should exist");
-        let mut preferences = TuiPreferences::default();
-        preferences.provider = Some("alt".to_owned());
-
-        let generation = generation_config_with_preferences(Some(&config), &preferences)
-            .expect("generation config should build");
-
-        assert_eq!(
-            generation.reasoning_effort().map(|effort| effort.as_str()),
-            Some("high")
-        );
-    }
-
-    #[test]
-    fn selected_provider_does_not_inherit_the_default_provider_service_tier() {
-        let paths = XdgPaths::from_parts(std::path::PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_with_managed_from_text(
-            Some(
-                r#"
-[providers.default]
-provider = "compat"
-model = "gpt-test"
-service_tier = "priority"
-"#,
-            ),
-            Some(
-                r#"
-version = 1
-
-[providers.compat]
-type = "openai-compatible"
-api_key_file = "managed/secrets/compat.key"
-
-[providers.alt]
-type = "openai-compatible"
-default_model = "alt-model"
-api_key_file = "managed/secrets/alt.key"
-"#,
-            ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should exist");
-        let mut preferences = TuiPreferences::default();
-        preferences.provider = Some("alt".to_owned());
-
-        let generation = generation_config_with_preferences(Some(&config), &preferences)
-            .expect("generation config should build");
-
-        assert_eq!(generation.service_tier(), None);
-
-        preferences.provider = Some("compat".to_owned());
-        let generation = generation_config_with_preferences(Some(&config), &preferences)
-            .expect("generation config should build");
-
-        assert_eq!(
-            generation.service_tier(),
-            Some(merry_llm::ServiceTier::Priority)
-        );
-    }
-
-    #[test]
-    fn tui_compaction_strategies_only_change_retained_model_turns() {
-        let paths = XdgPaths::from_parts(std::path::PathBuf::from("/home/alice"), None, None);
-        let config = MerryConfig::load_optional_from_text(
-            Some(
-                r#"
-[runtime.auto_compaction]
-target_output_tokens = 9000
-max_accepted_output_bytes = 72000
-retained_model_turns = 5
-"#,
-            ),
-            &paths,
-        )
-        .expect("config should parse")
-        .expect("config should exist");
-
-        for (strategy, expected_turns) in [
-            (CompactionStrategy::Compact, 3),
-            (CompactionStrategy::Balanced, 5),
-            (CompactionStrategy::PreserveDetail, 7),
-        ] {
-            let mut preferences = TuiPreferences::default();
-            preferences.compaction_strategy = Some(strategy);
-            let policy = automatic_compaction_config_with_preferences(Some(&config), &preferences)
-                .expect("TUI compaction config should build")
-                .policy();
-
-            assert_eq!(policy.retained_model_turns(), expected_turns);
-            assert_eq!(policy.target_output_tokens(), Some(9_000));
-            assert_eq!(policy.max_accepted_output_bytes(), Some(72_000));
-        }
-    }
-}
+#[path = "runtime_tests.rs"]
+mod tests;

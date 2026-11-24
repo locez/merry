@@ -65,8 +65,6 @@ pub enum CompactionError {
     InvalidModelResponseShape { reason: &'static str },
 }
 
-#[path = "compaction/segments.rs"]
-mod segments;
 #[path = "compaction/summary.rs"]
 mod summary;
 #[path = "compaction/window.rs"]
@@ -93,7 +91,6 @@ pub(crate) use request::{
     CompactionRequestMode, CompactionRequestProjection, CompactionRequestSource,
     compile_citation_compaction_model_request,
 };
-pub(crate) use segments::persist_covered_segment;
 pub(crate) use summary::{format_compact_summary, format_continuation, is_degenerate_summary};
 
 pub(crate) use window::{
@@ -244,7 +241,7 @@ impl CitationCompactionInput {
         &self.window
     }
 
-    /// Markdown of the covered turns, written beside the session when a store exists.
+    /// Markdown of the covered turns used for payload-mode compaction requests and token estimation.
     #[must_use]
     pub fn render_covered_segment(&self) -> String {
         self.window

@@ -32,6 +32,7 @@ fn headless_input<'a>(
         )),
         extra_tools: Vec::new(),
         automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+        history_retention: merry_runtime::HistoryRetention::default(),
         retry_policy: None,
         context_compaction: None,
         approval_review: None,

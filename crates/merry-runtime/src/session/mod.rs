@@ -29,7 +29,8 @@ mod usage;
 pub(crate) use self::checkpoint_window::PreparedCompactionInstall;
 pub(crate) use self::journal::{
     JournalCursor, JournalImageFile, PreparedJournalRotation, PrunedCompactionSegment,
-    commit_journal_rotation, extract_search_snapshot, is_image_id, read_archived_tool_output,
+    commit_journal_rotation, extract_search_snapshot, is_image_id, list_archived_segment_numbers,
+    read_archived_segment_transcript, read_archived_tool_output,
 };
 pub(crate) use self::{
     model_turns::{ModelTurn, ModelTurnId, ModelTurnStatus, PromptHistoryProjection},

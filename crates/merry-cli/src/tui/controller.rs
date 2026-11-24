@@ -246,6 +246,39 @@ impl CommandOutputCompletion {
     }
 }
 
+pub(super) struct ArchiveSegmentCompletion {
+    segment: u32,
+    result: Result<Vec<merry_runtime::SessionTranscriptItem>, String>,
+}
+
+impl ArchiveSegmentCompletion {
+    pub(super) fn new(
+        segment: u32,
+        result: Result<Vec<merry_runtime::SessionTranscriptItem>, String>,
+    ) -> Self {
+        Self { segment, result }
+    }
+
+    pub(super) fn apply(self, state: &mut TuiState, projector: &mut TuiProjector) {
+        match self.result {
+            Ok(transcript_items) => {
+                let items =
+                    TuiProjector::project_archived_transcript_items(transcript_items, state);
+                let shift = state.prepend_archived_segment_items(self.segment, items);
+                projector.shift_timeline_indices(shift);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    segment = self.segment,
+                    error = %error,
+                    "failed to load archived session segment for TUI timeline"
+                );
+                state.fail_archive_segment_load(self.segment);
+            }
+        }
+    }
+}
+
 pub(super) struct ProviderController<'a> {
     pub(super) management: &'a mut ProviderManagementService,
     pub(super) discovery_tx: &'a mpsc::Sender<ModelDiscoveryCompletion>,
@@ -270,6 +303,7 @@ pub(crate) enum ControllerEffect {
     FlushPendingInputs,
     PasteImage,
     LoadCommandOutput(merry_core::ToolCallId),
+    LoadArchiveSegment(u32),
     CopyText(String),
     CopyTextTooLarge,
     OpenUrl(String),
@@ -387,6 +421,7 @@ pub(crate) async fn run_controller(
     let (model_discovery_tx, mut model_discovery_rx) = mpsc::channel(4);
     let (clipboard_image_tx, mut clipboard_image_rx) = mpsc::channel(4);
     let (command_output_tx, mut command_output_rx) = mpsc::channel(4);
+    let (archive_segment_tx, mut archive_segment_rx) = mpsc::channel(4);
     let (compaction_tx, mut compaction_rx) = mpsc::channel(2);
     let (open_url_tx, mut open_url_rx) = mpsc::channel(4);
     let mut model_discovery_generation = 0_u64;
@@ -524,6 +559,7 @@ pub(crate) async fn run_controller(
                                 providers,
                                 clipboard_image_tx: &clipboard_image_tx,
                                 command_output_tx: &command_output_tx,
+                                archive_segment_tx: &archive_segment_tx,
                                 compaction_tx: &compaction_tx,
                                 open_url_tx: &open_url_tx,
                                 terminal,
@@ -592,6 +628,11 @@ pub(crate) async fn run_controller(
                                 state.sync_background_processes(
                                     session.runtime().background_processes(),
                                 );
+                                if !session.is_metadata_written() {
+                                    session
+                                        .ensure_metadata_written(state.first_user_input_topic())
+                                        .await;
+                                }
                             }
                             if was_active && !state.is_active_run() {
                                 session
@@ -661,6 +702,10 @@ pub(crate) async fn run_controller(
                     completion.apply(&mut state);
                     render_once(terminal, &mut state)?;
                 }
+                Some(completion) = archive_segment_rx.recv() => {
+                    completion.apply(&mut state, &mut projector);
+                    render_once(terminal, &mut state)?;
+                }
                 Some(completion) = compaction_rx.recv() => {
                     completion.apply(&mut state);
                     render_once(terminal, &mut state)?;
@@ -682,9 +727,11 @@ pub(crate) async fn run_controller(
     model_discovery_rx.close();
     clipboard_image_rx.close();
     command_output_rx.close();
+    archive_segment_rx.close();
     compaction_rx.close();
     open_url_rx.close();
     let session_result = session.stream.wait_until_closed().await.map_err(unexpected);
+    session.discard_if_empty().await;
     let tasks_result = drain_background_tasks(&mut background_tasks).await;
     #[cfg(feature = "web")]
     let web_result = web_service.shutdown().await.map_err(unexpected);

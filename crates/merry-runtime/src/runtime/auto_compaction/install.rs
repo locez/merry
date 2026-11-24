@@ -19,8 +19,14 @@ pub(in crate::runtime) async fn install_summary_compaction_transactionally(
 ) -> Result<CompactionOutcome, RuntimeError> {
     let summary = summary.to_owned();
     let retention = inner.history_retention;
+    let has_session_store = inner.session_store.is_some();
     let outcome = install_compaction_transaction(inner, &token, active_permit, move |session| {
-        session.prepare_summary_compaction_install_with_retention(input, &summary, &retention)
+        session.prepare_summary_compaction_install_with_retention(
+            input,
+            &summary,
+            &retention,
+            has_session_store,
+        )
     })
     .await?;
     Ok(outcome.expect("prepared summary replacement must carry an outcome"))

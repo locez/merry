@@ -2,7 +2,7 @@ use super::{
     ConfigError, MerryConfig, RuntimeModelToml, default_true, provider::parse_reasoning_effort,
     validate_model_text,
 };
-use merry_runtime::{CitationCompactionPolicy, CompactionConfig};
+use merry_runtime::{ArchiveConfig, CitationCompactionPolicy, CompactionConfig, HistoryRetention};
 use serde::Deserialize;
 
 impl MerryConfig {
@@ -17,6 +17,19 @@ impl MerryConfig {
         };
 
         auto_compaction.to_config()
+    }
+
+    pub fn history_retention(&self) -> Result<HistoryRetention, ConfigError> {
+        let Some(retention) = self
+            .raw
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.history_retention.as_ref())
+        else {
+            return Ok(HistoryRetention::default());
+        };
+
+        retention.to_config()
     }
 
     pub fn max_parallel_tool_calls(&self) -> Result<Option<std::num::NonZeroUsize>, ConfigError> {
@@ -116,6 +129,73 @@ pub struct EffectiveRuntimeModelsConfig {
 pub(super) struct RuntimeToml {
     max_parallel_tool_calls: Option<usize>,
     auto_compaction: Option<AutoCompactionToml>,
+    history_retention: Option<HistoryRetentionToml>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum HistoryRetentionModeToml {
+    #[default]
+    Archive,
+    ContextOnly,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct HistoryRetentionToml {
+    #[serde(default)]
+    mode: HistoryRetentionModeToml,
+    max_segments: Option<usize>,
+    max_bytes: Option<u64>,
+    export_markdown: Option<bool>,
+}
+
+impl HistoryRetentionToml {
+    fn to_config(&self) -> Result<HistoryRetention, ConfigError> {
+        match self.mode {
+            HistoryRetentionModeToml::Archive => {
+                let max_segments = self
+                    .max_segments
+                    .map(|value| {
+                        std::num::NonZeroUsize::new(value).ok_or_else(|| {
+                            ConfigError::Invalid(
+                                "runtime.history_retention.max_segments must be greater than zero"
+                                    .to_owned(),
+                            )
+                        })
+                    })
+                    .transpose()?;
+                let max_bytes = self
+                    .max_bytes
+                    .map(|value| {
+                        std::num::NonZeroU64::new(value).ok_or_else(|| {
+                            ConfigError::Invalid(
+                                "runtime.history_retention.max_bytes must be greater than zero"
+                                    .to_owned(),
+                            )
+                        })
+                    })
+                    .transpose()?;
+                let config = ArchiveConfig::new()
+                    .with_max_segments(max_segments)
+                    .with_max_bytes(max_bytes)
+                    .with_export_markdown(self.export_markdown.unwrap_or(true));
+                Ok(HistoryRetention::archive_with(config))
+            }
+            HistoryRetentionModeToml::ContextOnly => {
+                if self.max_segments.is_some()
+                    || self.max_bytes.is_some()
+                    || self.export_markdown == Some(true)
+                {
+                    return Err(ConfigError::Invalid(
+                        "runtime.history_retention max_segments, max_bytes, and export_markdown are only valid when mode = \"archive\""
+                            .to_owned(),
+                    ));
+                }
+                Ok(HistoryRetention::context_only())
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -453,6 +533,75 @@ api_key_file = "managed/secrets/openai.key"
 
         assert!(models.context_compaction.is_none());
         assert!(models.approval_review.is_none());
+    }
+
+    #[test]
+    fn parses_runtime_history_retention_config_and_rejects_invalid_combinations() {
+        let paths = XdgPaths::from_parts(home(), None, None);
+
+        let default_retention = MerryConfig::load_optional_from_text(Some(""), &paths)
+            .expect("empty config parses")
+            .expect("config present")
+            .history_retention()
+            .expect("default history_retention validates");
+        assert_eq!(default_retention, HistoryRetention::archive());
+
+        let bounded = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[runtime.history_retention]
+mode = "archive"
+max_segments = 12
+max_bytes = 10485760
+export_markdown = false
+"#,
+            ),
+            &paths,
+        )
+        .expect("bounded archive config parses")
+        .expect("config present")
+        .history_retention()
+        .expect("bounded archive validates");
+        assert_eq!(
+            bounded,
+            HistoryRetention::archive_with(
+                ArchiveConfig::new()
+                    .with_max_segments(std::num::NonZeroUsize::new(12))
+                    .with_max_bytes(std::num::NonZeroU64::new(10_485_760))
+                    .with_export_markdown(false),
+            )
+        );
+
+        let context_only = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[runtime.history_retention]
+mode = "context_only"
+"#,
+            ),
+            &paths,
+        )
+        .expect("context_only config parses")
+        .expect("config present")
+        .history_retention()
+        .expect("context_only validates");
+        assert_eq!(context_only, HistoryRetention::context_only());
+
+        let invalid = MerryConfig::load_optional_from_text(
+            Some(
+                r#"
+[runtime.history_retention]
+mode = "context_only"
+max_segments = 5
+"#,
+            ),
+            &paths,
+        )
+        .expect("config syntax parses")
+        .expect("config present")
+        .history_retention()
+        .expect_err("context_only with max_segments must fail");
+        assert!(invalid.to_string().contains("mode = \"archive\""));
     }
 
     #[test]
