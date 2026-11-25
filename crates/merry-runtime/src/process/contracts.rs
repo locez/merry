@@ -10,7 +10,10 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 /// Maximum accepted byte length for one argv item in a process intent.
-pub const MAX_PROCESS_ARG_BYTES: usize = 4096;
+///
+/// Sized for inline shell/Python scripts (`64 KiB`), staying safely below
+/// Linux's `128 KiB` `MAX_ARG_STRLEN` while matching [`MAX_PROCESS_STDIN_TEXT_BYTES`].
+pub const MAX_PROCESS_ARG_BYTES: usize = 64 * 1024;
 /// Maximum accepted number of argv items in a process intent.
 pub const MAX_PROCESS_ARGV_ITEMS: usize = 256;
 /// Maximum accepted byte length for a workspace-relative process cwd.

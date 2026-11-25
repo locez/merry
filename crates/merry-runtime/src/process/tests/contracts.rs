@@ -1,8 +1,8 @@
 use super::intent;
 use crate::process::{
     AcceptedLocalWorkspaceProcessAdmission, LocalWorkspaceProcessSandboxProfile,
-    MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionError, ProcessActionIntent, ProcessEnvPolicy,
-    ProcessExecutionEvidence, ProcessExitStatus, ProcessPermissionProfileId,
+    MAX_PROCESS_ARG_BYTES, MAX_PROCESS_OUTPUT_LIMIT_BYTES, ProcessActionError, ProcessActionIntent,
+    ProcessEnvPolicy, ProcessExecutionEvidence, ProcessExitStatus, ProcessPermissionProfileId,
     required_process_permission_profile_id,
 };
 
@@ -59,6 +59,35 @@ fn process_action_intent_validates_argv_cwd_and_limits() {
         multiline_shell.argv()[2],
         "cargo check -p merry-runtime\ncargo test -p merry-runtime"
     );
+
+    let max_len_script = "a".repeat(MAX_PROCESS_ARG_BYTES);
+    ProcessActionIntent::new(
+        vec!["bash".to_owned(), "-lc".to_owned(), max_len_script],
+        Some(".".to_owned()),
+        ProcessEnvPolicy::empty(),
+        None,
+        1024,
+        1024,
+    )
+    .expect("argv up to MAX_PROCESS_ARG_BYTES is accepted");
+
+    let oversized = ProcessActionIntent::new(
+        vec![
+            "bash".to_owned(),
+            "-lc".to_owned(),
+            "x".repeat(MAX_PROCESS_ARG_BYTES + 1),
+        ],
+        Some(".".to_owned()),
+        ProcessEnvPolicy::empty(),
+        None,
+        1024,
+        1024,
+    )
+    .expect_err("argv exceeding MAX_PROCESS_ARG_BYTES is rejected");
+    assert!(matches!(
+        oversized,
+        ProcessActionError::InvalidArgument { index: 2, .. }
+    ));
 
     for bad_arg in ["bad\u{0}arg", "bad\rarg", "bad\u{7f}arg"] {
         let error = ProcessActionIntent::new(
