@@ -1,5 +1,5 @@
 use crate::{
-    config::CopyButtonPosition,
+    config::{BrandMarkMode, CopyButtonPosition},
     tui::{
         controller::{ControllerEffect, handle_key_event, handle_mouse_input},
         keymap::Keymap,
@@ -439,13 +439,27 @@ fn copy_buttons_respect_all_four_configurable_corners_and_invalidate_cache_live(
 
         let title_pos = point(&buffer, "Title");
         let code_pos = point(&buffer, "fn main()");
-        let (reply_btn, code_btn) = if position.is_top() {
+        let anchor_pos = point(&buffer, "Merry");
+        assert!(
+            anchor_pos.y < title_pos.y,
+            "reply anchor header should sit above content for {position:?}"
+        );
+        let rendered = rendered_buffer_text(&buffer);
+        assert!(
+            rendered.contains("🎀") && rendered.contains("Merry") && rendered.contains('┄'),
+            "reply anchor header should include brand mark and dashed rule for {position:?}:\n{rendered}"
+        );
+        let is_top = matches!(
+            position,
+            CopyButtonPosition::TopLeft | CopyButtonPosition::TopRight
+        );
+        let (reply_btn, code_btn) = if is_top {
             (targets[0], targets[1])
         } else {
             (targets[1], targets[0])
         };
 
-        if position.is_top() {
+        if is_top {
             assert!(
                 reply_btn.y < title_pos.y,
                 "reply button should sit above content for {position:?}"
@@ -488,10 +502,10 @@ fn copy_buttons_respect_all_four_configurable_corners_and_invalidate_cache_live(
             "code copy button should copy exact code for {position:?}"
         );
 
-        // Dragging across the message must skip copy bars in every corner configuration.
+        // Dragging across the message must skip copy and anchor bars in every corner configuration.
         let mut drag_state = state.clone();
         let _ = draw(&mut drag_state, size);
-        let start = Position::new(0, reply_btn.y.min(title_pos.y));
+        let start = Position::new(0, anchor_pos.y.min(reply_btn.y));
         let end = Position::new(size.width.saturating_sub(1), reply_btn.y.max(code_pos.y));
         let copied = match drag_copy(&mut drag_state, size, start, end) {
             ControllerEffect::CopyText(text) => text,
@@ -502,11 +516,24 @@ fn copy_buttons_respect_all_four_configurable_corners_and_invalidate_cache_live(
             "leaked copy label for {position:?}: {copied:?}"
         );
         assert!(
+            !copied.contains("Merry") && !copied.contains('┄'),
+            "leaked reply anchor header for {position:?}: {copied:?}"
+        );
+        assert!(
             !copied.contains('▎'),
             "leaked code rail for {position:?}: {copied:?}"
         );
         assert!(copied.contains("Title") && copied.contains("fn main() {}"));
     }
+
+    // Switching brand_mark to Snowflake updates the reply anchor glyph live.
+    let mut snowflake = state(markdown).with_brand_mark(BrandMarkMode::Snowflake);
+    let snowflake_text = rendered_buffer_text(&draw(&mut snowflake, size));
+    assert!(
+        snowflake_text.contains("❆ Merry"),
+        "snowflake mode should render ❆ Merry anchor:\n{snowflake_text}"
+    );
+    assert!(!snowflake_text.contains("🎀"));
 
     // Live Settings change must invalidate timeline cache and move copy buttons immediately.
     let mut live = state(markdown);

@@ -16,6 +16,7 @@ pub(crate) enum KeyAction {
     ScrollUp,
     ScrollDown,
     ReviewPreviousUserInput,
+    JumpToLatestResponse,
     HistoryPrevious,
     HistoryNext,
     HistorySearch,
@@ -34,6 +35,7 @@ impl KeyAction {
             #[cfg(feature = "web")]
             Self::OpenSessionInBrowser => Some("open_session_in_browser"),
             Self::ReviewPreviousUserInput => Some("review_previous_user_input"),
+            Self::JumpToLatestResponse => Some("jump_to_latest_response"),
             Self::Interrupt => Some("interrupt"),
             Self::CancelInputOrQuit => Some("cancel_input_or_quit"),
             Self::Quit => Some("quit"),
@@ -57,6 +59,7 @@ impl KeyAction {
             #[cfg(feature = "web")]
             "open_session_in_browser" => Some(Self::OpenSessionInBrowser),
             "review_previous_user_input" => Some(Self::ReviewPreviousUserInput),
+            "jump_to_latest_response" => Some(Self::JumpToLatestResponse),
             "interrupt" => Some(Self::Interrupt),
             "cancel_input_or_quit" => Some(Self::CancelInputOrQuit),
             "quit" => Some(Self::Quit),
@@ -150,6 +153,10 @@ impl Default for Keymap {
                     KeyAction::ReviewPreviousUserInput,
                 ),
                 (
+                    KeyBinding::new(KeyCode::Char('r'), KeyModifiers::ALT),
+                    KeyAction::JumpToLatestResponse,
+                ),
+                (
                     KeyBinding::new(KeyCode::Char('c'), KeyModifiers::ALT),
                     KeyAction::ToggleComment,
                 ),
@@ -227,6 +234,9 @@ impl Keymap {
         }
         if let Some(binding) = config.review_previous_user_input.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::ReviewPreviousUserInput);
+        }
+        if let Some(binding) = config.jump_to_latest_response.as_deref() {
+            keymap.set_binding(parse_binding(binding)?, KeyAction::JumpToLatestResponse);
         }
         if let Some(binding) = config.history_previous.as_deref() {
             keymap.set_binding(parse_binding(binding)?, KeyAction::HistoryPrevious);

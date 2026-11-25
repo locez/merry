@@ -87,6 +87,10 @@ pub(crate) fn handle_key_action(action: KeyAction, state: &mut TuiState) -> Cont
             state.jump_to_previous_user_input();
             ControllerEffect::None
         }
+        KeyAction::JumpToLatestResponse => {
+            state.jump_to_latest_response();
+            ControllerEffect::None
+        }
         KeyAction::HistoryPrevious => {
             state.previous_input_history();
             ControllerEffect::None

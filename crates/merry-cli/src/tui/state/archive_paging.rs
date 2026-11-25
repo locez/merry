@@ -70,8 +70,8 @@ impl TuiState {
         if let Some(anchor) = &mut self.timeline_anchor {
             anchor.item_index = anchor.item_index.saturating_add(shift);
         }
-        if let Some(review_index) = &mut self.timeline_review_user_index {
-            *review_index = review_index.saturating_add(shift);
+        if let Some(target) = self.timeline_review_target {
+            self.timeline_review_target = Some(target.shift_up(shift));
         }
         self.comments.shift_item_indices(shift);
         if let StopFeedbackState::Pending(index) = &mut self.stop_feedback {

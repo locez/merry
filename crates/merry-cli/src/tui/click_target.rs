@@ -25,6 +25,7 @@ pub(crate) enum StatusAction {
     Agents,
     PlanMode,
     Plan,
+    ReplyTop,
     Follow,
     Stop,
     Comment,
@@ -127,6 +128,9 @@ pub(crate) fn status_actions(state: &TuiState) -> Vec<StatusAction> {
     if state.plan().has_plans() {
         actions.push(StatusAction::Plan);
     }
+    if state.can_jump_to_latest_response_start() {
+        actions.push(StatusAction::ReplyTop);
+    }
     if state.is_timeline_detached() {
         actions.push(StatusAction::Follow);
     }
@@ -168,10 +172,21 @@ pub(crate) fn status_action_label(state: &TuiState, action: &StatusAction) -> St
                 }
             }
         }
+        StatusAction::ReplyTop => reply_top_chip_label(state),
         StatusAction::Follow => "follow".to_owned(),
         StatusAction::Stop => "stop".to_owned(),
         StatusAction::Comment => comment_chip_label(state),
         StatusAction::SendComments => "send".to_owned(),
+    }
+}
+
+fn reply_top_chip_label(state: &TuiState) -> String {
+    match state
+        .keymap()
+        .binding_label_for(KeyAction::JumpToLatestResponse)
+    {
+        Some(key) => format!("{key} ↑ reply"),
+        None => "↑ reply".to_owned(),
     }
 }
 

@@ -125,6 +125,7 @@ impl SettingsCategory {
                 #[cfg(feature = "web")]
                 SettingItem::Shortcut(KeyAction::OpenSessionInBrowser),
                 SettingItem::Shortcut(KeyAction::ReviewPreviousUserInput),
+                SettingItem::Shortcut(KeyAction::JumpToLatestResponse),
                 SettingItem::Shortcut(KeyAction::Interrupt),
                 SettingItem::Shortcut(KeyAction::CancelInputOrQuit),
                 SettingItem::Shortcut(KeyAction::Quit),
@@ -321,6 +322,7 @@ impl SettingItem {
             #[cfg(feature = "web")]
             Self::Shortcut(KeyAction::OpenSessionInBrowser) => "Open in browser",
             Self::Shortcut(KeyAction::ReviewPreviousUserInput) => "Previous user input",
+            Self::Shortcut(KeyAction::JumpToLatestResponse) => "Latest response",
             Self::Shortcut(KeyAction::Interrupt) => "Interrupt run",
             Self::Shortcut(KeyAction::CancelInputOrQuit) => "Clear / quit",
             Self::Shortcut(KeyAction::Quit) => "Quit",

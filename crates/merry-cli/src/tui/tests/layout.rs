@@ -629,7 +629,7 @@ fn renderer_keeps_timeline_visible_when_bottom_panes_are_taller_than_short_windo
         .expect("assistant output should render");
     let input_row = text
         .lines()
-        .position(|line| line.contains("M"))
+        .position(|line| line.contains("❯"))
         .expect("input panel should render");
     assert!(input_row > assistant_row, "{text}");
 }

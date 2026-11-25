@@ -793,10 +793,6 @@ pub(crate) enum CopyButtonPosition {
 }
 
 impl CopyButtonPosition {
-    pub(crate) const fn is_top(self) -> bool {
-        matches!(self, Self::TopLeft | Self::TopRight)
-    }
-
     pub(crate) const fn is_left(self) -> bool {
         matches!(self, Self::TopLeft | Self::BottomLeft)
     }
@@ -885,6 +881,7 @@ pub(crate) struct TuiKeymapToml {
     pub(crate) scroll_down: Option<String>,
     pub(crate) open_command_details: Option<String>,
     pub(crate) review_previous_user_input: Option<String>,
+    pub(crate) jump_to_latest_response: Option<String>,
     pub(crate) history_previous: Option<String>,
     pub(crate) history_next: Option<String>,
     pub(crate) history_search: Option<String>,

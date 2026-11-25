@@ -10,7 +10,7 @@ use super::mcp_style::mcp_title_line;
 use super::sticky::{paint_sticky_header, split_timeline_content, timeline_scroll_split};
 use super::task_dock::{adjust_body_scroll, render_task_dock, split_dock_region};
 use crate::tui::{
-    copy_controls::{CopyContent, CopyTarget, copy_bar},
+    copy_controls::{ChromeCopyEdge, CopyContent, CopyTarget, reply_chrome},
     links::{LinkTarget, push_text_with_bare_urls, render_link_tooltip},
     markdown::{RenderedMarkdown, markdown_lines},
     motion::{self, MotionClock},
@@ -98,38 +98,51 @@ pub(super) fn assistant_lines(
     region_width: u16,
 ) -> RenderedMarkdown {
     let mut rendered = markdown_lines(state, text, region_width);
-    let position = state.copy_button_position();
-    if let Some(bar) = copy_bar(state, region_width, position) {
-        if position.is_top() {
-            rendered
-                .rows
-                .insert(0, TranscriptRow::new(bar.line, SelectionPolicy::Skip));
-            for target in &mut rendered.copy_targets {
-                target.line_index += 1;
+    let chrome = reply_chrome(state, region_width);
+    let top_line_index = chrome.top_bar.map(|top_bar| {
+        rendered
+            .rows
+            .insert(0, TranscriptRow::new(top_bar, SelectionPolicy::Skip));
+        for target in &mut rendered.copy_targets {
+            target.line_index += 1;
+        }
+        for target in &mut rendered.link_targets {
+            target.line_index += 1;
+        }
+        0
+    });
+    let bottom_line_index = chrome.bottom_bar.map(|bar| {
+        let line_index = rendered.rows.len();
+        rendered
+            .rows
+            .push(TranscriptRow::new(bar, SelectionPolicy::Skip));
+        line_index
+    });
+    if let Some(hit) = chrome.copy_hit {
+        match hit.edge {
+            ChromeCopyEdge::Top => {
+                if let Some(line_index) = top_line_index {
+                    rendered.copy_targets.insert(
+                        0,
+                        CopyTarget::new(
+                            line_index,
+                            hit.column,
+                            hit.width,
+                            CopyContent::AssistantMessage(item_index),
+                        ),
+                    );
+                }
             }
-            for target in &mut rendered.link_targets {
-                target.line_index += 1;
+            ChromeCopyEdge::Bottom => {
+                if let Some(line_index) = bottom_line_index {
+                    rendered.copy_targets.push(CopyTarget::new(
+                        line_index,
+                        hit.column,
+                        hit.width,
+                        CopyContent::AssistantMessage(item_index),
+                    ));
+                }
             }
-            rendered.copy_targets.insert(
-                0,
-                CopyTarget::new(
-                    0,
-                    bar.column,
-                    bar.width,
-                    CopyContent::AssistantMessage(item_index),
-                ),
-            );
-        } else {
-            let line_index = rendered.rows.len();
-            rendered
-                .rows
-                .push(TranscriptRow::new(bar.line, SelectionPolicy::Skip));
-            rendered.copy_targets.push(CopyTarget::new(
-                line_index,
-                bar.column,
-                bar.width,
-                CopyContent::AssistantMessage(item_index),
-            ));
         }
     }
     rendered

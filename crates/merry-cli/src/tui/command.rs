@@ -13,6 +13,7 @@ pub(crate) enum PaletteCommand {
     #[cfg(feature = "web")]
     OpenSessionInBrowser,
     ReviewPreviousUserInput,
+    JumpToLatestResponse,
     OpenCommandDetails,
     FollowLatest,
     Interrupt,
@@ -155,6 +156,12 @@ const COMMANDS: &[CommandSpec] = &[
         "Navigation",
         "Previous user input",
         Some(KeyAction::ReviewPreviousUserInput),
+    ),
+    CommandSpec::new(
+        PaletteCommand::JumpToLatestResponse,
+        "Navigation",
+        "Latest response",
+        Some(KeyAction::JumpToLatestResponse),
     ),
     CommandSpec::new(
         PaletteCommand::OpenCommandDetails,

@@ -83,8 +83,9 @@ pub(crate) struct TuiState {
     todo_dock: TodoDockState,
     command_details_generation: u64,
     timeline_scroll_offset: usize,
-    timeline_review_user_index: Option<usize>,
+    timeline_review_target: Option<TimelineReviewTarget>,
     timeline_anchor: Option<TimelineAnchor>,
+    latest_response_above_viewport: bool,
     timeline_has_updates: bool,
     timeline_review_last_activity: Option<tokio::time::Instant>,
     timeline_last_scroll: Option<usize>,
@@ -109,6 +110,38 @@ pub(crate) struct TuiState {
     settings_defaults: TuiSettingsDefaults,
     plan: PlanUiState,
     comments: comments::CommentSession,
+}
+
+/// Explicit timeline jump target owned by detached review mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TimelineReviewTarget {
+    User(usize),
+    Response(usize),
+}
+
+impl TimelineReviewTarget {
+    pub(super) fn shift_up(self, delta: usize) -> Self {
+        match self {
+            Self::User(index) => Self::User(index.saturating_add(delta)),
+            Self::Response(index) => Self::Response(index.saturating_add(delta)),
+        }
+    }
+
+    fn adjust_after_remove(self, removed: usize) -> Option<Self> {
+        let adjust = |index: usize| {
+            if index == removed {
+                None
+            } else if index > removed {
+                Some(index - 1)
+            } else {
+                Some(index)
+            }
+        };
+        match self {
+            Self::User(index) => adjust(index).map(Self::User),
+            Self::Response(index) => adjust(index).map(Self::Response),
+        }
+    }
 }
 
 /// A stop request moves from idle to pending, then completes at a cancellation boundary.
@@ -163,8 +196,9 @@ impl TuiState {
             todo_dock: TodoDockState::default(),
             command_details_generation: 0,
             timeline_scroll_offset: 0,
-            timeline_review_user_index: None,
+            timeline_review_target: None,
             timeline_anchor: None,
+            latest_response_above_viewport: false,
             timeline_has_updates: false,
             timeline_review_last_activity: None,
             timeline_last_scroll: None,
@@ -276,8 +310,16 @@ impl TuiState {
         self
     }
 
+    pub(crate) fn brand_mark(&self) -> crate::config::BrandMarkMode {
+        self.brand_mark
+    }
+
     pub(crate) fn primary_brand_badge(&self) -> &'static str {
         crate::tui::glyphs::primary_badge(self.brand_mark)
+    }
+
+    pub(crate) fn primary_brand_glyph(&self) -> &'static str {
+        crate::tui::glyphs::primary_glyph(self.brand_mark)
     }
 
     #[allow(dead_code)]
@@ -440,12 +482,21 @@ impl TuiState {
         &self.timeline
     }
 
+    /// Returns the timeline index of the latest non-empty assistant response.
+    pub(crate) fn latest_assistant_response_index(&self) -> Option<usize> {
+        self.timeline.iter().rposition(|item| match item {
+            TimelineItem::Assistant { text } => !text.trim().is_empty(),
+            _ => false,
+        })
+    }
+
     /// Returns the raw text of the latest non-empty assistant response in the timeline.
     pub(crate) fn latest_assistant_response(&self) -> Option<&str> {
-        self.timeline.iter().rev().find_map(|item| match item {
-            TimelineItem::Assistant { text } if !text.trim().is_empty() => Some(text.as_str()),
+        let index = self.latest_assistant_response_index()?;
+        match self.timeline.get(index) {
+            Some(TimelineItem::Assistant { text }) => Some(text.as_str()),
             _ => None,
-        })
+        }
     }
 
     pub(crate) fn into_timeline(self) -> Vec<TimelineItem> {
@@ -537,13 +588,9 @@ impl TuiState {
                 anchor.item_index -= 1;
             }
         }
-        if let Some(review_index) = &mut self.timeline_review_user_index {
-            if *review_index == index {
-                self.timeline_review_user_index = None;
-            } else if *review_index > index {
-                *review_index -= 1;
-            }
-        }
+        self.timeline_review_target = self
+            .timeline_review_target
+            .and_then(|target| target.adjust_after_remove(index));
         if !self.is_timeline_detached() {
             self.timeline_review_last_activity = None;
         }
@@ -720,13 +767,31 @@ impl TuiState {
         self.timeline_scroll_offset
     }
 
+    pub(crate) fn timeline_review_target(&self) -> Option<TimelineReviewTarget> {
+        self.timeline_review_target
+    }
+
+    #[cfg(test)]
     pub(crate) fn timeline_review_user_index(&self) -> Option<usize> {
-        self.timeline_review_user_index
+        match self.timeline_review_target {
+            Some(TimelineReviewTarget::User(index)) => Some(index),
+            _ => None,
+        }
+    }
+
+    /// Whether the opening row of the latest assistant response currently sits
+    /// above the visible timeline body.
+    pub(crate) fn can_jump_to_latest_response_start(&self) -> bool {
+        self.latest_response_above_viewport
+    }
+
+    pub(crate) fn set_latest_response_above_viewport(&mut self, above: bool) {
+        self.latest_response_above_viewport = above;
     }
 
     pub(crate) fn follow_latest(&mut self) {
         self.timeline_scroll_offset = 0;
-        self.timeline_review_user_index = None;
+        self.timeline_review_target = None;
         self.timeline_anchor = None;
         self.timeline_has_updates = false;
         self.timeline_review_last_activity = None;
@@ -742,7 +807,7 @@ impl TuiState {
 
     pub(crate) fn scroll_timeline_up_by(&mut self, lines: usize) {
         self.pending_empty_input_quit = false;
-        self.timeline_review_user_index = None;
+        self.timeline_review_target = None;
         self.timeline_anchor = None;
         self.clear_timeline_scroll_animation();
         self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_add(lines);
@@ -751,7 +816,7 @@ impl TuiState {
 
     pub(crate) fn scroll_timeline_down_by(&mut self, lines: usize) {
         self.pending_empty_input_quit = false;
-        self.timeline_review_user_index = None;
+        self.timeline_review_target = None;
         self.timeline_anchor = None;
         self.clear_timeline_scroll_animation();
         self.timeline_scroll_offset = self.timeline_scroll_offset.saturating_sub(lines);
@@ -763,15 +828,28 @@ impl TuiState {
     }
 
     pub(crate) fn jump_to_previous_user_input(&mut self) {
-        let before = self
-            .timeline_review_user_index
-            .unwrap_or(self.timeline.len());
+        let before = match self.timeline_review_target {
+            Some(TimelineReviewTarget::User(index)) => index,
+            _ => self.timeline.len(),
+        };
         if let Some(index) = self.timeline[..before]
             .iter()
             .rposition(|item| matches!(item, TimelineItem::User { .. }))
         {
             self.pending_empty_input_quit = false;
-            self.timeline_review_user_index = Some(index);
+            self.timeline_review_target = Some(TimelineReviewTarget::User(index));
+            self.timeline_anchor = None;
+            self.clear_timeline_scroll_animation();
+            self.note_timeline_review_activity();
+        }
+    }
+
+    /// Jumps the timeline viewport directly to the opening anchor of the latest
+    /// non-empty assistant response.
+    pub(crate) fn jump_to_latest_response(&mut self) {
+        if let Some(index) = self.latest_assistant_response_index() {
+            self.pending_empty_input_quit = false;
+            self.timeline_review_target = Some(TimelineReviewTarget::Response(index));
             self.timeline_anchor = None;
             self.clear_timeline_scroll_animation();
             self.note_timeline_review_activity();

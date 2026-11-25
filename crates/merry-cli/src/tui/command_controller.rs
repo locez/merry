@@ -142,6 +142,10 @@ pub(crate) fn run_palette_command(
             state.close_overlay();
             handle_key_action(KeyAction::ReviewPreviousUserInput, state)
         }
+        PaletteCommand::JumpToLatestResponse => {
+            state.close_overlay();
+            handle_key_action(KeyAction::JumpToLatestResponse, state)
+        }
         PaletteCommand::OpenCommandDetails => {
             handle_key_action(KeyAction::OpenCommandDetails, state)
         }

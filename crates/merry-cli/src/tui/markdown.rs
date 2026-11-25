@@ -2,7 +2,7 @@ mod table;
 
 use self::table::{TableState, spans_width, table_lines};
 use super::{
-    copy_controls::{CodeBlockCopyEdge, CopyContent, CopyTarget, code_block_chrome},
+    copy_controls::{ChromeCopyEdge, CopyContent, CopyTarget, code_block_chrome},
     highlight::highlight_code_to_lines,
     links::{LinkTarget, inline_code_link, link_style, push_text_with_bare_urls},
     state::TuiState,
@@ -625,8 +625,8 @@ impl<'state> MarkdownRenderer<'state> {
         });
         if let Some(hit) = copy_hit {
             let line_index = match hit.edge {
-                CodeBlockCopyEdge::Top => top_line_index,
-                CodeBlockCopyEdge::Bottom => bottom_line_index,
+                ChromeCopyEdge::Top => top_line_index,
+                ChromeCopyEdge::Bottom => bottom_line_index,
             };
             if let Some(line_index) = line_index {
                 self.copy_targets.push(CopyTarget::new(

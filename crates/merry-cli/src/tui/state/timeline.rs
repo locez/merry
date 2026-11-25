@@ -71,7 +71,7 @@ impl TuiState {
     pub(crate) fn is_timeline_detached(&self) -> bool {
         self.timeline_anchor.is_some()
             || self.timeline_scroll_offset > 0
-            || self.timeline_review_user_index.is_some()
+            || self.timeline_review_target.is_some()
     }
 
     /// Exits detached timeline review when active.

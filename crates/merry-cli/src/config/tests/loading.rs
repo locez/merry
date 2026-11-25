@@ -337,6 +337,7 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
         tui.keymap.review_previous_user_input.as_deref(),
         Some("alt+u")
     );
+    assert_eq!(tui.keymap.jump_to_latest_response.as_deref(), Some("alt+r"));
     assert_eq!(tui.keymap.history_previous.as_deref(), Some("up"));
 
     let snowflake =

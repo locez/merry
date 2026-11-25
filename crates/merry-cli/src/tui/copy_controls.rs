@@ -83,35 +83,35 @@ impl CopyTarget {
 }
 
 /// Rendered copy-control line together with its clickable column range.
-pub(crate) struct CopyBar {
-    pub(crate) line: Line<'static>,
-    pub(crate) column: u16,
-    pub(crate) width: u16,
+struct CopyBar {
+    line: Line<'static>,
+    column: u16,
+    width: u16,
 }
 
-/// Which edge of a fenced code block carries its clickable copy button.
+/// Which edge of a reply or fenced code block carries its clickable copy button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CodeBlockCopyEdge {
+pub(crate) enum ChromeCopyEdge {
     Top,
     Bottom,
 }
 
-/// Clickable copy hit range relative to a code block's top or bottom chrome row.
+/// Clickable copy hit range relative to a block's top or bottom chrome row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CodeBlockCopyHit {
-    pub(crate) edge: CodeBlockCopyEdge,
+pub(crate) struct ChromeCopyHit {
+    pub(crate) edge: ChromeCopyEdge,
     pub(crate) column: u16,
     pub(crate) width: u16,
 }
 
-/// Optional top and bottom chrome rows for a fenced code block plus its copy hit target.
-pub(crate) struct CodeBlockChrome {
+/// Optional top and bottom chrome rows for a reply or fenced code block plus its copy hit target.
+pub(crate) struct BlockChrome {
     pub(crate) top_bar: Option<Line<'static>>,
     pub(crate) bottom_bar: Option<Line<'static>>,
-    pub(crate) copy_hit: Option<CodeBlockCopyHit>,
+    pub(crate) copy_hit: Option<ChromeCopyHit>,
 }
 
-impl CodeBlockChrome {
+impl BlockChrome {
     const fn empty() -> Self {
         Self {
             top_bar: None,
@@ -121,26 +121,32 @@ impl CodeBlockChrome {
     }
 }
 
-/// Renders a quiet copy chip for an assistant reply aligned to the configured
-/// side (`TopLeft`/`BottomLeft` on the left, `TopRight`/`BottomRight` on the
-/// right), or omits it when `⧉ Copy` cannot fit.
-pub(crate) fn copy_bar(
-    state: &TuiState,
-    width: u16,
-    position: CopyButtonPosition,
-) -> Option<CopyBar> {
-    let columns = UnicodeWidthStr::width(COPY_LABEL);
-    let total = usize::from(width);
-    if total < columns {
-        return None;
-    }
-    let (icon, rest) = COPY_LABEL.split_at(COPY_ICON.len());
+fn reply_copy_chip_styles(state: &TuiState) -> (Style, Style) {
     let band = state.theme().bg_color(SemanticColor::ChipBackground);
     let mut icon_style = semantic_style(state, SemanticColor::Focus);
     let mut word_style = semantic_style(state, SemanticColor::Muted);
     if let Some(color) = band {
         icon_style = icon_style.bg(color);
         word_style = word_style.bg(color);
+    }
+    (icon_style, word_style)
+}
+
+fn push_reply_copy_chip(state: &TuiState, spans: &mut Vec<Span<'static>>) {
+    let (icon, rest) = COPY_LABEL.split_at(COPY_ICON.len());
+    let (icon_style, word_style) = reply_copy_chip_styles(state);
+    spans.push(Span::styled(icon.to_owned(), icon_style));
+    spans.push(Span::styled(rest.to_owned(), word_style));
+}
+
+/// Renders a quiet copy chip for an assistant reply aligned to the configured
+/// side (`TopLeft`/`BottomLeft` on the left, `TopRight`/`BottomRight` on the
+/// right), or omits it when `⧉ Copy` cannot fit.
+fn copy_bar(state: &TuiState, width: u16, position: CopyButtonPosition) -> Option<CopyBar> {
+    let columns = UnicodeWidthStr::width(COPY_LABEL);
+    let total = usize::from(width);
+    if total < columns {
+        return None;
     }
     let col = if position.is_left() {
         0
@@ -151,13 +157,136 @@ pub(crate) fn copy_bar(
     if col > 0 {
         spans.push(Span::raw(" ".repeat(col)));
     }
-    spans.push(Span::styled(icon.to_owned(), icon_style));
-    spans.push(Span::styled(rest.to_owned(), word_style));
+    push_reply_copy_chip(state, &mut spans);
     Some(CopyBar {
         line: Line::from(spans),
         column: u16::try_from(col).unwrap_or(0),
         width: u16::try_from(columns).unwrap_or(u16::MAX),
     })
+}
+
+const REPLY_BRAND_NAME: &str = " Merry";
+const REPLY_ANCHOR_RULE: &str = "┄";
+
+fn push_reply_brand(
+    spans: &mut Vec<Span<'static>>,
+    glyph: &str,
+    glyph_style: Style,
+    name_style: Style,
+) {
+    spans.push(Span::styled(glyph.to_owned(), glyph_style));
+    spans.push(Span::styled(REPLY_BRAND_NAME.to_owned(), name_style));
+}
+
+fn push_trailing_rule(
+    spans: &mut Vec<Span<'static>>,
+    total: usize,
+    used: usize,
+    rule_style: Style,
+) {
+    if total > used + 1 {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            REPLY_ANCHOR_RULE.repeat(total - used - 1),
+            rule_style,
+        ));
+    }
+}
+
+/// Renders the brand anchor header (`🎀 Merry ┄┄┄`) and clickable copy button
+/// for an assistant reply according to the active [`CopyButtonPosition`].
+pub(crate) fn reply_chrome(state: &TuiState, width: u16) -> BlockChrome {
+    let position = state.copy_button_position();
+    let total = usize::from(width);
+    let copy_columns = UnicodeWidthStr::width(COPY_LABEL);
+    let copy_width = u16::try_from(copy_columns).unwrap_or(u16::MAX);
+    let glyph = state.primary_brand_glyph();
+    let badge_width = UnicodeWidthStr::width(glyph) + UnicodeWidthStr::width(REPLY_BRAND_NAME);
+    let glyph_style = semantic_style(state, SemanticColor::Status).add_modifier(Modifier::BOLD);
+    let name_style = semantic_style(state, SemanticColor::Heading).add_modifier(Modifier::BOLD);
+    let rule_style = semantic_style(state, SemanticColor::Border);
+
+    match position {
+        CopyButtonPosition::TopRight => {
+            if total < copy_columns {
+                return BlockChrome::empty();
+            }
+            if total < badge_width + 1 + copy_columns {
+                return fallback_top_copy_chrome(state, width, position);
+            }
+            let gap = total.saturating_sub(badge_width + copy_columns);
+            let mut spans = Vec::with_capacity(7);
+            push_reply_brand(&mut spans, glyph, glyph_style, name_style);
+            if gap >= 3 {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(REPLY_ANCHOR_RULE.repeat(gap - 2), rule_style));
+                spans.push(Span::raw(" "));
+            } else if gap > 0 {
+                spans.push(Span::raw(" ".repeat(gap)));
+            }
+            push_reply_copy_chip(state, &mut spans);
+            BlockChrome {
+                top_bar: Some(Line::from(spans)),
+                bottom_bar: None,
+                copy_hit: Some(ChromeCopyHit {
+                    edge: ChromeCopyEdge::Top,
+                    column: u16::try_from(total.saturating_sub(copy_columns)).unwrap_or(0),
+                    width: copy_width,
+                }),
+            }
+        }
+        CopyButtonPosition::TopLeft => {
+            if total < copy_columns {
+                return BlockChrome::empty();
+            }
+            if total < copy_columns + 2 + badge_width {
+                return fallback_top_copy_chrome(state, width, position);
+            }
+            let mut spans = Vec::with_capacity(6);
+            push_reply_copy_chip(state, &mut spans);
+            spans.push(Span::raw("  "));
+            push_reply_brand(&mut spans, glyph, glyph_style, name_style);
+            push_trailing_rule(
+                &mut spans,
+                total,
+                copy_columns + 2 + badge_width,
+                rule_style,
+            );
+            BlockChrome {
+                top_bar: Some(Line::from(spans)),
+                bottom_bar: None,
+                copy_hit: Some(ChromeCopyHit {
+                    edge: ChromeCopyEdge::Top,
+                    column: 0,
+                    width: copy_width,
+                }),
+            }
+        }
+        CopyButtonPosition::BottomLeft | CopyButtonPosition::BottomRight => {
+            let top_bar = (total >= badge_width).then(|| {
+                let mut spans = Vec::with_capacity(4);
+                push_reply_brand(&mut spans, glyph, glyph_style, name_style);
+                push_trailing_rule(&mut spans, total, badge_width, rule_style);
+                Line::from(spans)
+            });
+            let (bottom_bar, copy_hit) = match copy_bar(state, width, position) {
+                Some(bar) => (
+                    Some(bar.line),
+                    Some(ChromeCopyHit {
+                        edge: ChromeCopyEdge::Bottom,
+                        column: bar.column,
+                        width: bar.width,
+                    }),
+                ),
+                None => (None, None),
+            };
+            BlockChrome {
+                top_bar,
+                bottom_bar,
+                copy_hit,
+            }
+        }
+    }
 }
 
 const CODE_BLOCK_RAIL: &str = "▎ ";
@@ -210,11 +339,7 @@ impl CodeBlockBarTheme {
 
 /// Renders the top and optional bottom chrome bars for a fenced code block
 /// according to the active [`CopyButtonPosition`].
-pub(crate) fn code_block_chrome(
-    state: &TuiState,
-    lang: Option<&str>,
-    width: u16,
-) -> CodeBlockChrome {
+pub(crate) fn code_block_chrome(state: &TuiState, lang: Option<&str>, width: u16) -> BlockChrome {
     let position = state.copy_button_position();
     let copy_columns = UnicodeWidthStr::width(COPY_LABEL);
     let copy_width = u16::try_from(copy_columns).unwrap_or(u16::MAX);
@@ -237,7 +362,7 @@ pub(crate) fn code_block_chrome(
     match position {
         CopyButtonPosition::TopRight => {
             if total < copy_columns {
-                return CodeBlockChrome::empty();
+                return BlockChrome::empty();
             }
             let right_pad = usize::from(total >= left_width + copy_columns + 3);
             if total < left_width + copy_columns + 1 {
@@ -253,11 +378,11 @@ pub(crate) fn code_block_chrome(
             if right_pad > 0 {
                 spans.push(Span::styled(" ".repeat(right_pad), theme.code_bg_style));
             }
-            CodeBlockChrome {
+            BlockChrome {
                 top_bar: Some(Line::from(spans)),
                 bottom_bar: None,
-                copy_hit: Some(CodeBlockCopyHit {
-                    edge: CodeBlockCopyEdge::Top,
+                copy_hit: Some(ChromeCopyHit {
+                    edge: ChromeCopyEdge::Top,
                     column: u16::try_from(left_width + gap).unwrap_or(u16::MAX),
                     width: copy_width,
                 }),
@@ -265,7 +390,7 @@ pub(crate) fn code_block_chrome(
         }
         CopyButtonPosition::TopLeft => {
             if total < copy_columns {
-                return CodeBlockChrome::empty();
+                return BlockChrome::empty();
             }
             if total < rail_width + copy_columns {
                 return fallback_top_copy_chrome(state, width, position);
@@ -279,11 +404,11 @@ pub(crate) fn code_block_chrome(
                 used += 2 + label_width;
             }
             theme.push_trailing_bg(&mut spans, total, used);
-            CodeBlockChrome {
+            BlockChrome {
                 top_bar: Some(Line::from(spans)),
                 bottom_bar: None,
-                copy_hit: Some(CodeBlockCopyHit {
-                    edge: CodeBlockCopyEdge::Top,
+                copy_hit: Some(ChromeCopyHit {
+                    edge: ChromeCopyEdge::Top,
                     column: u16::try_from(rail_width).unwrap_or(u16::MAX),
                     width: copy_width,
                 }),
@@ -309,15 +434,15 @@ pub(crate) fn code_block_chrome(
             ) {
                 Some(bar) => (
                     Some(bar.line),
-                    Some(CodeBlockCopyHit {
-                        edge: CodeBlockCopyEdge::Bottom,
+                    Some(ChromeCopyHit {
+                        edge: ChromeCopyEdge::Bottom,
                         column: bar.column,
                         width: bar.width,
                     }),
                 ),
                 None => (None, None),
             };
-            CodeBlockChrome {
+            BlockChrome {
                 top_bar,
                 bottom_bar,
                 copy_hit,
@@ -330,15 +455,15 @@ fn fallback_top_copy_chrome(
     state: &TuiState,
     width: u16,
     position: CopyButtonPosition,
-) -> CodeBlockChrome {
+) -> BlockChrome {
     let Some(bar) = copy_bar(state, width, position) else {
-        return CodeBlockChrome::empty();
+        return BlockChrome::empty();
     };
-    CodeBlockChrome {
+    BlockChrome {
         top_bar: Some(bar.line),
         bottom_bar: None,
-        copy_hit: Some(CodeBlockCopyHit {
-            edge: CodeBlockCopyEdge::Top,
+        copy_hit: Some(ChromeCopyHit {
+            edge: ChromeCopyEdge::Top,
             column: bar.column,
             width: bar.width,
         }),

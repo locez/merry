@@ -12,14 +12,12 @@
 use crate::config::BrandMarkMode;
 
 /// Merry ribbon mark (`🎀`) used when `brand_mark = "emoji"`.
-#[cfg(test)]
 pub(crate) const BRAND_RIBBON: &str = "🎀";
 
 /// Padded Merry ribbon badge for title hairlines and rounded modal headers.
 pub(crate) const BRAND_RIBBON_BADGE: &str = " 🎀 ";
 
 /// Monochrome snowflake mark (`❆`, `U+2746`, `Emoji=No`) used when `brand_mark = "snowflake"`.
-#[cfg(test)]
 pub(crate) const BRAND_SNOWFLAKE: &str = "❆";
 
 /// Padded monochrome snowflake badge for title hairlines and rounded modal headers.
@@ -30,6 +28,14 @@ pub(crate) const BRAND_PAW: &str = "🐾";
 
 /// Padded Merry paw badge for subagent modal headers.
 pub(crate) const BRAND_PAW_BADGE: &str = " 🐾 ";
+
+/// Returns the unpadded primary brand glyph (`"🎀"` or `"❆"`) for the active mode.
+pub(crate) const fn primary_glyph(mode: BrandMarkMode) -> &'static str {
+    match mode {
+        BrandMarkMode::Emoji => BRAND_RIBBON,
+        BrandMarkMode::Snowflake => BRAND_SNOWFLAKE,
+    }
+}
 
 /// Returns the padded primary brand badge (`" 🎀 "` or `" ❆ "`) for the active mode.
 pub(crate) const fn primary_badge(mode: BrandMarkMode) -> &'static str {

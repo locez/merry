@@ -116,7 +116,7 @@ impl TuiState {
         };
         self.text_selection = Some(selection);
         if let Some(SelectionViewport { anchor, offset }) = updated_viewport {
-            self.timeline_review_user_index = None;
+            self.timeline_review_target = None;
             self.pending_empty_input_quit = false;
             self.record_timeline_viewport(anchor, offset);
         }

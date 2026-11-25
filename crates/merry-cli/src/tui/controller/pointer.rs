@@ -411,6 +411,7 @@ fn status_click(action: StatusAction, state: &mut TuiState) -> ControllerEffect 
             unreachable!("handled above")
         }
         StatusAction::Plan => KeyAction::TogglePlan,
+        StatusAction::ReplyTop => KeyAction::JumpToLatestResponse,
         StatusAction::Stop => KeyAction::Interrupt,
         StatusAction::Comment => KeyAction::ToggleComment,
         StatusAction::SendComments => KeyAction::SendComments,

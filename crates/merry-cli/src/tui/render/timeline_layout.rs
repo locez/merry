@@ -2,7 +2,8 @@
 
 use super::{
     activity::thinking_lines,
-    sticky::pinned_user_index_for_scroll,
+    sticky::{pinned_user_index_for_scroll, split_timeline_content, timeline_scroll_split},
+    task_dock::{adjust_body_scroll, split_dock_region},
     timeline::{
         assistant_lines, command_lines, diagnostic_lines, expanded_tool_lines, local_command_lines,
         muted_lines, patch_lines, read_tool_lines, subagent_lines, tool_running_lines, user_lines,
@@ -14,7 +15,7 @@ use super::{
     },
 };
 use crate::tui::{
-    state::{CommandView, TimelineItem, TuiState},
+    state::{CommandView, TimelineItem, TimelineReviewTarget, TuiState},
     transcript::{SelectionPolicy, TranscriptRow},
 };
 use ratatui::{
@@ -34,6 +35,7 @@ fn timeline_cache_context(state: &TuiState, width: u16) -> TimelineCacheContext 
         animations: state.animations_enabled(),
         code_theme: state.code_theme(),
         show_successful_command_output: state.show_successful_command_output(),
+        brand_mark: state.brand_mark(),
         copy_button_position: state.copy_button_position(),
         theme: state.theme().clone(),
     }
@@ -450,10 +452,25 @@ fn timeline_scroll_start_from_geometry(
         && let Some(&item_rows) = heights.get(anchor.item_index)
     {
         start.saturating_add(anchor.row.min(item_rows.saturating_sub(1)))
-    } else if let Some(review_index) = state.timeline_review_user_index()
-        && let Some(&start) = starts.get(review_index)
-    {
-        start
+    } else if let Some(target) = state.timeline_review_target() {
+        match target {
+            TimelineReviewTarget::User(index) => starts.get(index).copied().unwrap_or(0),
+            TimelineReviewTarget::Response(index) => {
+                // Reserve sticky-header headroom so the lazy cache materializes the
+                // preceding user header alongside the target response opening.
+                let max_scroll = max_timeline_scroll_from_starts(
+                    starts,
+                    latest_user_index,
+                    usize::from(region.height),
+                );
+                starts
+                    .get(index)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(usize::from(region.height).min(6))
+                    .min(max_scroll)
+            }
+        }
     } else {
         let max_scroll =
             max_timeline_scroll_from_starts(starts, latest_user_index, usize::from(region.height));
@@ -477,10 +494,22 @@ pub(super) fn timeline_scroll_start(
     {
         let item_rows = timeline.item_height(anchor.item_index);
         start.saturating_add(anchor.row.min(item_rows.saturating_sub(1)))
-    } else if let Some(review_index) = state.timeline_review_user_index()
-        && let Some(&start) = timeline.item_visual_starts.get(review_index)
-    {
-        start
+    } else if let Some(target) = state.timeline_review_target() {
+        match target {
+            TimelineReviewTarget::User(index) => {
+                timeline.item_visual_starts.get(index).copied().unwrap_or(0)
+            }
+            TimelineReviewTarget::Response(index) => {
+                let max_scroll = max_timeline_scroll(state, timeline, usize::from(region.height));
+                timeline
+                    .item_visual_starts
+                    .get(index)
+                    .copied()
+                    .map_or(0, |start| {
+                        scroll_start_to_reveal_row(state, timeline, region, start).min(max_scroll)
+                    })
+            }
+        }
     } else {
         let max_scroll = max_timeline_scroll(state, timeline, usize::from(region.height));
         if state.timeline_scroll_offset() == 0
@@ -492,22 +521,78 @@ pub(super) fn timeline_scroll_start(
     }
 }
 
+fn body_scroll_for(
+    state: &TuiState,
+    timeline: &TimelineLayoutSnapshot,
+    content: Rect,
+    scroll: usize,
+) -> usize {
+    let split = timeline_scroll_split(state, timeline, content.height, scroll);
+    let (_, after_header) = split_timeline_content(content, split.header_rows);
+    let (_, after_task_dock) = split_dock_region(state, after_header);
+    let (_, body) = crate::tui::todo_dock::split_todo_dock_region(state, after_task_dock);
+    adjust_body_scroll(
+        split.body_scroll,
+        after_header.height,
+        body.height,
+        timeline.total_rows(),
+    )
+}
+
+fn scroll_start_to_reveal_row(
+    state: &TuiState,
+    timeline: &TimelineLayoutSnapshot,
+    content: Rect,
+    target_row: usize,
+) -> usize {
+    let mut candidate = target_row;
+    for _ in 0..2 {
+        let actual_body = body_scroll_for(state, timeline, content, candidate);
+        let overshoot = actual_body.saturating_sub(target_row);
+        if overshoot == 0 {
+            break;
+        }
+        candidate = candidate.saturating_sub(overshoot);
+    }
+    candidate
+}
+
 pub(crate) fn prepare_timeline_viewport(state: &mut TuiState, region: Rect) {
     let content = timeline_content_region(region);
     if content.is_empty() {
+        state.set_latest_response_above_viewport(false);
         return;
     }
     let timeline = timeline_layout(state, content);
     let max_scroll = max_timeline_scroll(state, &timeline, usize::from(content.height));
-    if !state.is_timeline_detached() {
+    let scroll = if !state.is_timeline_detached() {
         state.sync_followed_timeline_scroll(max_scroll);
-        return;
-    }
-    let scroll = timeline_scroll_start(state, &timeline, content);
-    state.record_timeline_last_scroll(scroll);
-    if let Some(anchor) = timeline.anchor_at(scroll) {
-        state.record_timeline_viewport(anchor, max_scroll.saturating_sub(scroll));
-    }
+        timeline_scroll_start(state, &timeline, content)
+    } else {
+        let scroll = timeline_scroll_start(state, &timeline, content);
+        let jumping_to_response_at_bottom = matches!(
+            state.timeline_review_target(),
+            Some(TimelineReviewTarget::Response(_))
+        ) && state.timeline_anchor().is_none()
+            && scroll >= max_scroll;
+        if jumping_to_response_at_bottom {
+            state.follow_latest();
+            state.sync_followed_timeline_scroll(max_scroll);
+            max_scroll
+        } else {
+            state.record_timeline_last_scroll(scroll);
+            if let Some(anchor) = timeline.anchor_at(scroll) {
+                state.record_timeline_viewport(anchor, max_scroll.saturating_sub(scroll));
+            }
+            scroll
+        }
+    };
+    let body_scroll = body_scroll_for(state, &timeline, content, scroll);
+    let latest_above = state
+        .latest_assistant_response_index()
+        .and_then(|index| timeline.item_visual_starts.get(index).copied())
+        .is_some_and(|start| start < body_scroll);
+    state.set_latest_response_above_viewport(latest_above);
 }
 
 pub(super) fn timeline_padding(region: Rect) -> Padding {
