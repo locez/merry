@@ -258,25 +258,80 @@ fn is_baseline_write(path: &Path) -> bool {
 }
 
 #[test]
-fn cargo_debug_helper_resolves_legacy_deps_and_build_dir_layouts() {
+fn helper_resolution_handles_cargo_test_layouts_and_fails_closed_without_recursion() {
     let temp = tempfile::tempdir().expect("tempdir");
     let profile = temp.path().join("target/debug");
-    let helper = profile.join("merry-sandbox-helper");
-    let deps_bin = profile.join("deps/merry-123456");
-    let build_bin = profile.join("build/merry-cli/abcdef01/out/merry-abcdef01");
+    let deps_bin = profile.join("deps/merry_process-123456");
+    let build_bin = profile.join("build/merry-process/abcdef01/out/merry_process-abcdef01");
     fs::create_dir_all(deps_bin.parent().expect("deps dir")).expect("create deps dir");
     fs::create_dir_all(build_bin.parent().expect("out dir")).expect("create out dir");
-    fs::write(&helper, b"").expect("create helper stub");
 
+    assert_eq!(cargo_test_profile_dir(&deps_bin), Some(profile.as_path()));
+    assert_eq!(cargo_test_profile_dir(&build_bin), Some(profile.as_path()));
+    assert_eq!(cargo_test_profile_dir(&profile.join("merry")), None);
+
+    // Missing helper in both Cargo test layouts must fail closed rather than
+    // falling back to `/proc/self/exe` (which would recursively re-run libtest).
+    for test_bin in [&deps_bin, &build_bin] {
+        let error = resolve_helper_program(None, Some(test_bin), true, true)
+            .expect_err("missing test helper must fail closed");
+        let message = error.to_string();
+        assert!(message.contains("merry-sandbox-helper"), "{message}");
+        assert!(
+            message.contains("refusing to re-exec test binary"),
+            "{message}"
+        );
+    }
+
+    // An explicit helper path still overrides Cargo test layout discovery.
+    let explicit = temp.path().join("custom-helper");
     assert_eq!(
-        cargo_debug_helper(&deps_bin).as_deref(),
-        Some(helper.as_path())
+        resolve_helper_program(Some(explicit.clone()), Some(&deps_bin), false, true)
+            .expect("explicit helper succeeds"),
+        explicit
+    );
+
+    // Once merry-sandbox-helper exists, both Cargo test layouts resolve to it.
+    let helper = profile.join("merry-sandbox-helper");
+    fs::write(&helper, b"").expect("create helper stub");
+    assert_eq!(
+        resolve_helper_program(None, Some(&deps_bin), false, true)
+            .expect("deps test resolves helper"),
+        helper
     );
     assert_eq!(
-        cargo_debug_helper(&build_bin).as_deref(),
-        Some(helper.as_path())
+        resolve_helper_program(None, Some(&build_bin), false, true)
+            .expect("build out test resolves helper"),
+        helper
     );
-    assert_eq!(cargo_debug_helper(&profile.join("merry")), None);
+
+    // Non-test executables that never called `sandbox_helper_requested()` in
+    // `main()` (e.g. Python/Rust SDK hosts) must also fail closed.
+    let host_bin = temp.path().join("python3");
+    let unregistered = resolve_helper_program(None, Some(&host_bin), false, true)
+        .expect_err("unregistered host executable must fail closed");
+    assert!(
+        unregistered
+            .to_string()
+            .contains("sandbox_helper_requested"),
+        "{unregistered}"
+    );
+
+    // A registered `merry` binary resolves to `/proc/self/exe` on Linux (when
+    // available) or `current_exe` otherwise.
+    let merry_bin = profile.join("merry");
+    let resolved =
+        resolve_helper_program(None, Some(&merry_bin), true, true).expect("registered binary");
+    if cfg!(target_os = "linux") {
+        assert_eq!(resolved, PathBuf::from("/proc/self/exe"));
+    } else {
+        assert_eq!(resolved, merry_bin);
+    }
+    assert_eq!(
+        resolve_helper_program(None, Some(&merry_bin), true, false)
+            .expect("registered binary without /proc/self/exe"),
+        merry_bin
+    );
 }
 
 #[test]

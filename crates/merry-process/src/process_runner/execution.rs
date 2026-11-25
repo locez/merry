@@ -67,8 +67,8 @@ async fn run_sandbox_launch(
         )
         .await;
     }
+    let helper = confinement::helper_program()?;
     let policy = confinement::write_policy(&launch)?;
-    let helper = confinement::helper_program();
     let mut command = tokio::process::Command::new(&helper);
     command
         .env(confinement::helper_env_name(), "1")

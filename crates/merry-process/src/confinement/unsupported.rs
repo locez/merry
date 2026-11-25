@@ -8,12 +8,13 @@
 use std::env;
 
 const HELPER_ENV: &str = "MERRY_SANDBOX_HELPER";
+const POLICY_ENV: &str = "MERRY_SANDBOX_POLICY";
 const SETUP_EXIT_CODE: i32 = 126;
 
 /// Reports whether this process was spawned as the sandbox helper.
 #[must_use]
 pub fn sandbox_helper_requested() -> bool {
-    env::var_os(HELPER_ENV).is_some()
+    env::var_os(HELPER_ENV).is_some() && env::var_os(POLICY_ENV).is_some()
 }
 
 /// Reports that the workspace sandbox helper is unavailable on this target and

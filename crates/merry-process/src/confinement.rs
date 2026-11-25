@@ -20,7 +20,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use crate::process_runner::{WorkspaceProcessEnvironment, process_current_dir};
@@ -31,6 +31,8 @@ mod seatbelt;
 const HELPER_ENV: &str = "MERRY_SANDBOX_HELPER";
 const POLICY_ENV: &str = "MERRY_SANDBOX_POLICY";
 const SETUP_EXIT_CODE: i32 = 126;
+
+static SELF_EXEC_HELPER_REGISTERED: AtomicBool = AtomicBool::new(false);
 
 const READ_ONLY_DIRECTORIES: &[&str] = &[
     "/usr",
@@ -123,9 +125,15 @@ impl SandboxLaunch {
 }
 
 /// Reports whether this process was spawned as the sandbox helper.
+///
+/// Calling this at startup in `main` also marks the current executable as
+/// supporting self-exec sandbox helper fallback. Executables that never call
+/// this entrypoint (such as Cargo `libtest` binaries or host SDK runtimes)
+/// fail closed instead of recursively re-executing themselves.
 #[must_use]
 pub fn sandbox_helper_requested() -> bool {
-    env::var_os(HELPER_ENV).is_some()
+    SELF_EXEC_HELPER_REGISTERED.store(true, Ordering::Release);
+    env::var_os(HELPER_ENV).is_some() && env::var_os(POLICY_ENV).is_some()
 }
 
 /// Applies the policy named by [`POLICY_ENV`](Self) and executes the command.
@@ -227,14 +235,49 @@ pub(crate) fn prepare_launch(
     })
 }
 
-pub(crate) fn helper_program() -> PathBuf {
-    if let Some(path) = explicit_helper_program() {
-        return path;
+pub(crate) fn helper_program() -> Result<PathBuf, ProcessRunnerError> {
+    let explicit = explicit_helper_program();
+    let current = env::current_exe().ok();
+    let self_exec_registered = SELF_EXEC_HELPER_REGISTERED.load(Ordering::Acquire);
+    #[cfg(target_os = "linux")]
+    let proc_self_exe_exists = Path::new("/proc/self/exe").exists();
+    #[cfg(not(target_os = "linux"))]
+    let proc_self_exe_exists = false;
+
+    resolve_helper_program(
+        explicit,
+        current.as_deref(),
+        self_exec_registered,
+        proc_self_exe_exists,
+    )
+}
+
+fn resolve_helper_program(
+    explicit: Option<PathBuf>,
+    current_exe: Option<&Path>,
+    self_exec_registered: bool,
+    proc_self_exe_exists: bool,
+) -> Result<PathBuf, ProcessRunnerError> {
+    if let Some(path) = explicit {
+        return Ok(path);
     }
-    if let Ok(current) = env::current_exe()
-        && let Some(helper) = cargo_debug_helper(&current)
+    if let Some(current) = current_exe
+        && let Some(profile_dir) = cargo_test_profile_dir(current)
     {
-        return helper;
+        let helper = profile_dir.join("merry-sandbox-helper");
+        if helper.is_file() {
+            return Ok(helper);
+        }
+        return Err(ProcessRunnerError::infrastructure(format!(
+            "sandbox helper binary `{}` was not found; build it first with `cargo build -p merry-process --bin merry-sandbox-helper` or set {HELPER_ENV} (refusing to re-exec test binary `{}`)",
+            helper.display(),
+            current.display()
+        )));
+    }
+    if !self_exec_registered {
+        return Err(ProcessRunnerError::infrastructure(format!(
+            "workspace sandbox helper is unavailable: current executable did not register `merry_process::sandbox_helper_requested()` at startup; build `merry-sandbox-helper` or set {HELPER_ENV} to a helper binary path"
+        )));
     }
     // On Linux, `env::current_exe()` reads `/proc/self/exe` into a path string
     // that becomes `... (deleted)` once the running binary is replaced or
@@ -242,17 +285,15 @@ pub(crate) fn helper_program() -> PathBuf {
     // `/proc/self/exe` directly executes the kernel's live open inode for this
     // process, avoiding both `ENOENT` and policy-schema skew against a newer
     // binary installed at the old path.
-    #[cfg(target_os = "linux")]
-    {
-        let proc_self_exe = Path::new("/proc/self/exe");
-        if proc_self_exe.exists() {
-            return proc_self_exe.to_path_buf();
-        }
+    if cfg!(target_os = "linux") && proc_self_exe_exists {
+        return Ok(PathBuf::from("/proc/self/exe"));
     }
-    if let Ok(current) = env::current_exe() {
-        return current;
+    if let Some(current) = current_exe {
+        return Ok(current.to_path_buf());
     }
-    PathBuf::from("merry")
+    Err(ProcessRunnerError::infrastructure(
+        "could not resolve current executable for workspace sandbox helper",
+    ))
 }
 
 pub(crate) fn explicit_helper_program() -> Option<PathBuf> {
@@ -832,22 +873,20 @@ fn os_to_string(value: &std::ffi::OsStr, label: &str) -> Result<String, ProcessR
         .ok_or_else(|| ProcessRunnerError::infrastructure(format!("{label} must be valid UTF-8")))
 }
 
-fn cargo_debug_helper(current: &Path) -> Option<PathBuf> {
+fn cargo_test_profile_dir(current: &Path) -> Option<&Path> {
     let parent = current.parent()?;
-    let profile_dir = if parent.file_name()? == "deps" {
-        parent.parent()?
+    if parent.file_name()? == "deps" {
+        parent.parent()
     } else if parent.file_name()? == "out" {
         // Cargo 1.100+ places test binaries at `<profile>/build/<pkg>/<hash>/out/<bin>`.
         let build_dir = parent.parent()?.parent()?.parent()?;
         if build_dir.file_name()? != "build" {
             return None;
         }
-        build_dir.parent()?
+        build_dir.parent()
     } else {
-        return None;
-    };
-    let helper = profile_dir.join("merry-sandbox-helper");
-    helper.is_file().then_some(helper)
+        None
+    }
 }
 
 trait CommandExec {
@@ -869,103 +908,7 @@ impl CommandExec for Command {
 }
 
 #[cfg(target_os = "linux")]
-mod linux {
-    use super::SandboxLaunch;
-    use landlock::{
-        ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr,
-        RulesetStatus,
-    };
-    use seccompiler::{
-        SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter, SeccompRule,
-    };
-    use std::collections::BTreeMap;
-
-    pub(super) fn probe() -> Result<(), String> {
-        let ruleset = Ruleset::default()
-            .handle_access(AccessFs::from_all(ABI::V1))
-            .map_err(|error| error.to_string())?
-            .create()
-            .map_err(|error| error.to_string())?;
-        drop(ruleset);
-        Ok(())
-    }
-
-    pub(super) fn apply(launch: &SandboxLaunch) -> Result<(), String> {
-        apply_landlock(launch)?;
-        if !launch.network() {
-            apply_network_seccomp()?;
-        }
-        Ok(())
-    }
-
-    fn apply_landlock(launch: &SandboxLaunch) -> Result<(), String> {
-        let abi = ABI::V5;
-        let ruleset = Ruleset::default()
-            .handle_access(AccessFs::from_all(abi))
-            .map_err(|error| error.to_string())?
-            .create()
-            .map_err(|error| error.to_string())?
-            .set_compatibility(CompatLevel::BestEffort);
-        let ruleset = add_paths(ruleset, &launch.read_only, AccessFs::from_read(abi))?;
-        let ruleset = add_paths(ruleset, &launch.read_write, AccessFs::from_all(abi))?;
-        let ruleset = add_paths(
-            ruleset,
-            &launch.traverse,
-            landlock::BitFlags::from(AccessFs::Execute),
-        )?;
-        let status = ruleset
-            .restrict_self()
-            .map_err(|error| format!("Landlock restriction failed: {error}"))?;
-        if status.ruleset == RulesetStatus::NotEnforced {
-            return Err(
-                "Landlock could not enforce the workspace sandbox. Pass --sandbox off to run without it."
-                    .to_owned(),
-            );
-        }
-        Ok(())
-    }
-
-    fn add_paths(
-        ruleset: landlock::RulesetCreated,
-        paths: &[String],
-        access: landlock::BitFlags<AccessFs>,
-    ) -> Result<landlock::RulesetCreated, String> {
-        ruleset
-            .add_rules(landlock::path_beneath_rules(paths, access))
-            .map_err(|error| format!("failed to add Landlock rules: {error}"))
-    }
-
-    fn apply_network_seccomp() -> Result<(), String> {
-        let deny = |domain| -> Result<SeccompRule, String> {
-            SeccompRule::new(vec![
-                SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, domain)
-                    .map_err(|error| error.to_string())?,
-            ])
-            .map_err(|error| error.to_string())
-        };
-        let mut rules = BTreeMap::new();
-        rules.insert(
-            libc::SYS_socket,
-            vec![
-                deny(libc::AF_INET as u64)?,
-                deny(libc::AF_INET6 as u64)?,
-                deny(libc::AF_PACKET as u64)?,
-            ],
-        );
-        let arch = seccompiler::TargetArch::try_from(std::env::consts::ARCH)
-            .map_err(|error| error.to_string())?;
-        let filter = SeccompFilter::new(
-            rules,
-            SeccompAction::Allow,
-            SeccompAction::Errno(libc::EPERM as u32),
-            arch,
-        )
-        .map_err(|error| error.to_string())?;
-        let program = seccompiler::BpfProgram::try_from(filter)
-            .map_err(|error: seccompiler::BackendError| error.to_string())?;
-        seccompiler::apply_filter(&program).map_err(|error| error.to_string())
-    }
-}
+mod linux;
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests;
