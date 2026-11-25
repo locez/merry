@@ -68,5 +68,13 @@ rustix = { workspace = true, features = ["pty"] }
 name = "merry"
 path = "src/main.rs"
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/merry-v{ version }-{ target }.{ archive-format }"
+bin-dir = "merry-v{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+
 [lints]
 workspace = true

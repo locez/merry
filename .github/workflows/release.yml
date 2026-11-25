@@ -1,0 +1,215 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag used in archive names (e.g. v0.1.0); does not publish a GitHub Release when dispatched manually"
+        required: false
+        default: "v0.1.0"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  web:
+    name: Build Web trajectory assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build and test Web assets
+        working-directory: web
+        run: npm ci && npm test
+
+      - name: Upload tested Web assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: merry-web-dist
+          path: web/dist
+          if-no-files-found: error
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: web
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use_zigbuild: true
+            archive: tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use_zigbuild: true
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            use_zigbuild: false
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            use_zigbuild: false
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_zigbuild: false
+            archive: zip
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download tested Web assets
+        uses: actions/download-artifact@v8
+        with:
+          name: merry-web-dist
+          path: web/dist
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "release-${{ matrix.target }}"
+
+      - name: Install cargo-zigbuild and Zig (musl targets)
+        if: matrix.use_zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild,zig
+
+      - name: Determine release tag
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary (musl via cargo-zigbuild)
+        if: matrix.use_zigbuild
+        shell: bash
+        run: |
+          cargo zigbuild --locked --release -p merry-cli --features web --target "${{ matrix.target }}"
+          file "target/${{ matrix.target }}/release/merry"
+
+      - name: Build release binary (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "12.0"
+        run: |
+          if [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]]; then
+            export CMAKE_OSX_ARCHITECTURES=x86_64
+          else
+            export CMAKE_OSX_ARCHITECTURES=arm64
+          fi
+          cargo build --locked --release -p merry-cli --features web --target "${{ matrix.target }}"
+          file "target/${{ matrix.target }}/release/merry"
+
+      - name: Build release binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p merry-cli --features web --target "${{ matrix.target }}"
+
+      - name: Package Unix archive
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="merry-${{ steps.meta.outputs.tag }}-${{ matrix.target }}"
+          mkdir -p "dist/${stage}"
+          cp "target/${{ matrix.target }}/release/merry" "dist/${stage}/merry"
+          chmod 755 "dist/${stage}/merry"
+          cp README.md LICENSE-MIT LICENSE-APACHE "dist/${stage}/"
+          tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+          ls -lh "dist/${stage}.tar.gz"
+
+      - name: Package Windows archive
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $stage = "merry-${{ steps.meta.outputs.tag }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist\$stage" | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\merry.exe" "dist\$stage\merry.exe"
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE "dist\$stage\"
+          Compress-Archive -Path "dist\$stage" -DestinationPath "dist\$stage.zip" -Force
+          Get-Item "dist\$stage.zip"
+
+      - name: Upload release archive artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: "release-archive-${{ matrix.target }}"
+          path: "dist/merry-*.${{ matrix.archive }}"
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Download all release archives
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          pattern: release-archive-*
+          merge-multiple: true
+
+      - name: Generate checksums and attach installers
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp scripts/install.sh scripts/install.ps1 release-assets/
+          chmod 755 release-assets/install.sh
+          (
+            cd release-assets
+            sha256sum merry-*.tar.gz merry-*.zip > SHA256SUMS.txt
+            cat SHA256SUMS.txt
+          )
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF#refs/tags/}"
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" release-assets/* --clobber
+          else
+            gh release create "${tag}" release-assets/* \
+              --title "Merry ${tag}" \
+              --generate-notes
+          fi

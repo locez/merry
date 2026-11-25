@@ -105,3 +105,8 @@ windows-sys = { version = "0.61", features = [
 # `AsyncFd::with_interest` wrapper; the replacement is unsafe, and
 # `ReviewTerminal::open` is the only allowed site.
 unsafe_code = "deny"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+codegen-units = 1

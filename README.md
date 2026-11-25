@@ -54,10 +54,28 @@ Cold-start idle memory compared across coding agents on the same machine:
 
 ## Quick Start
 
-Requires **Rust 1.95+**. Supported on Linux (5.13+ for Landlock), macOS (Seatbelt), and Windows (host mode with PowerShell 7 / Windows PowerShell).
+Supported on Linux (5.13+ for Landlock), macOS (Seatbelt), and Windows (host mode with PowerShell 7 / Windows PowerShell).
+
+### Prebuilt binaries (no Rust or Node.js required; includes `Alt+G` Web viewer)
 
 ```bash
-cargo install --locked --git https://github.com/locez/merry merry-cli
+# Linux (static musl, x86_64 / arm64) & macOS (Apple Silicon / Intel)
+curl -fsSL https://github.com/locez/merry/releases/latest/download/install.sh | sh
+```
+
+```powershell
+# Windows (x86_64)
+irm https://github.com/locez/merry/releases/latest/download/install.ps1 | iex
+```
+
+Or download directly from [GitHub Releases](https://github.com/locez/merry/releases), or use `cargo binstall merry-cli`.
+
+### From crates.io (requires Rust 1.95+)
+
+```bash
+cargo install --locked merry-cli
+# or with the local Web trajectory viewer (Alt+G), no Node.js required:
+cargo install --locked merry-cli --features web
 ```
 
 Launch Merry in any project directory — on first launch, the TUI guides you through provider setup, and settings can be adjusted anytime via `Alt+X → Settings`:
@@ -73,9 +91,13 @@ merry completions fish                  # print shell completions (bash, zsh, fi
 For file-based configuration (custom providers, subagent roles, MCP servers, skills, themes, and keymaps), copy [`examples/config.toml`](examples/config.toml) to `~/.config/merry/config.toml` (Linux/macOS) or `%APPDATA%\merry\config.toml` (Windows).
 
 <details>
-<summary>Optional: install with the local Web trajectory viewer (<code>Alt+G</code>)</summary>
+<summary>Optional: install from git <code>main</code></summary>
 
-Requires Node.js/npm to build the frontend assets under `web/dist/` first:
+```bash
+cargo install --locked --git https://github.com/locez/merry merry-cli
+```
+
+To build the local Web trajectory viewer from source, build `web/dist/` first (requires Node.js/npm):
 
 ```bash
 git clone https://github.com/locez/merry.git && cd merry
@@ -113,7 +135,11 @@ See [SANDBOX.md](SANDBOX.md) for Landlock/seccomp, Seatbelt, Windows host mode, 
 
 ## SDKs
 
-### Rust (`merry`)
+### Rust ([`merry`](https://crates.io/crates/merry))
+
+```bash
+cargo add merry --features anthropic
+```
 
 ```rust
 use merry::{AgentBuilder, SessionId, providers::anthropic};
@@ -132,7 +158,11 @@ let result = agent.run("Inspect the repository and summarize key modules.").awai
 
 Declare typed async tools with `#[merry::tool]` and register them explicitly via `AgentBuilder::tool(...)`.
 
-### Python (`sdks/python`)
+### Python ([`merry-agent`](https://pypi.org/project/merry-agent/))
+
+```bash
+pip install merry-agent   # imports as `merry` (currently sdist; requires Rust 1.95+)
+```
 
 ```python
 from typing import Annotated

@@ -7,7 +7,15 @@ tool admission, and run lifecycle.
 
 ## Install
 
-From the repository root:
+From PyPI (currently published as a source distribution; requires **Rust 1.95+**):
+
+```bash
+pip install merry-agent
+# or
+uv add merry-agent
+```
+
+Or build from the repository root:
 
 ```bash
 cd sdks/python
