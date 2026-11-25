@@ -136,6 +136,11 @@ impl InteractiveEventStream {
                     crate::binding::OwnedAgentRunMessage::ToolInvocations { batch },
                 ))
             }
+            Some(RuntimeInteractiveMessage::HookInvocation { invocation }) => {
+                Ok(Some(crate::binding::OwnedAgentRunMessage::HookInvocation {
+                    invocation: Box::new(invocation),
+                }))
+            }
             None => Ok(None),
             _ => Err(AgentError::InteractiveProtocol {
                 message: "runtime emitted an unsupported interactive message",
@@ -162,6 +167,28 @@ impl InteractiveEventStream {
             }) => Ok(ToolInvocationSubmission::RejectedAndRecorded),
             Err(error) => Err(error),
         }
+    }
+
+    pub(crate) async fn submit_owned_hook_decision(
+        &mut self,
+        invocation_id: &merry_runtime::HookInvocationId,
+        decision: merry_runtime::HookDecision,
+    ) -> Result<(), AgentError> {
+        self.inner
+            .submit_hook_decision(invocation_id, decision)
+            .await
+            .map_err(AgentError::from)
+    }
+
+    pub(crate) async fn fail_owned_hook_invocation(
+        &mut self,
+        invocation_id: &merry_runtime::HookInvocationId,
+        message: String,
+    ) -> Result<(), AgentError> {
+        self.inner
+            .fail_hook_invocation(invocation_id, message)
+            .await
+            .map_err(AgentError::from)
     }
 }
 

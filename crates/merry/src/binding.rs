@@ -10,8 +10,9 @@ pub use crate::agent::{
     ToolInvocationSubmission,
 };
 use crate::{
-    AgentError, InteractiveControl, InteractiveEventStream, InteractiveInput, InteractiveRun,
-    RunResult, RuntimeEvent, agent::AgentRun,
+    AgentError, HookDecision, HookInvocation, HookInvocationId, InteractiveControl,
+    InteractiveEventStream, InteractiveInput, InteractiveRun, RunResult, RuntimeEvent,
+    agent::AgentRun,
 };
 use merry_core::{PendingToolCall, ToolCallBatchId};
 
@@ -26,6 +27,11 @@ pub enum OwnedAgentRunMessage {
         /// The batch must be submitted or cancelled before the run advances.
         batch: OwnedToolInvocationBatch,
     },
+    /// A subscribed host-bridged lifecycle hook awaiting a decision.
+    HookInvocation {
+        /// The hook invocation must be resolved or failed before the run advances.
+        invocation: Box<HookInvocation>,
+    },
 }
 
 impl OwnedAgentRunMessage {
@@ -34,7 +40,7 @@ impl OwnedAgentRunMessage {
     pub fn as_event(&self) -> Option<&RuntimeEvent> {
         match self {
             Self::Event(event) => Some(event.as_ref()),
-            Self::ToolInvocations { .. } => None,
+            Self::ToolInvocations { .. } | Self::HookInvocation { .. } => None,
         }
     }
 
@@ -42,8 +48,17 @@ impl OwnedAgentRunMessage {
     #[must_use]
     pub fn as_tool_invocations(&self) -> Option<&OwnedToolInvocationBatch> {
         match self {
-            Self::Event(_) => None,
+            Self::Event(_) | Self::HookInvocation { .. } => None,
             Self::ToolInvocations { batch } => Some(batch),
+        }
+    }
+
+    /// Borrows the hook invocation when this is a bridged hook message.
+    #[must_use]
+    pub fn as_hook_invocation(&self) -> Option<&HookInvocation> {
+        match self {
+            Self::HookInvocation { invocation } => Some(invocation.as_ref()),
+            Self::Event(_) | Self::ToolInvocations { .. } => None,
         }
     }
 }
@@ -100,6 +115,7 @@ impl OwnedToolInvocationBatch {
 pub struct OwnedAgentRun {
     inner: AgentRun,
     pending_batch: Option<OwnedToolInvocationBatch>,
+    pending_hook: Option<HookInvocation>,
     terminal_result: Option<RunResult>,
 }
 
@@ -108,19 +124,29 @@ impl OwnedAgentRun {
         Self {
             inner,
             pending_batch: None,
+            pending_hook: None,
             terminal_result: None,
         }
     }
 
-    /// Returns the next event or host-tool invocation batch.
+    /// Returns the next event, host-tool invocation batch, or subscribed hook invocation.
     pub async fn next_message(&mut self) -> Result<Option<OwnedAgentRunMessage>, AgentError> {
         if self.pending_batch.is_some() {
             return Err(AgentError::ToolInvocationBatchPending);
         }
+        if self.pending_hook.is_some() {
+            return Err(AgentError::HookInvocationPending);
+        }
 
         let message = self.inner.next_owned_message().await?;
-        if let Some(OwnedAgentRunMessage::ToolInvocations { batch }) = &message {
-            self.pending_batch = Some(batch.clone());
+        match &message {
+            Some(OwnedAgentRunMessage::ToolInvocations { batch }) => {
+                self.pending_batch = Some(batch.clone());
+            }
+            Some(OwnedAgentRunMessage::HookInvocation { invocation }) => {
+                self.pending_hook = Some((**invocation).clone());
+            }
+            Some(OwnedAgentRunMessage::Event(_)) | None => {}
         }
         Ok(message)
     }
@@ -153,6 +179,44 @@ impl OwnedAgentRun {
         result
     }
 
+    /// Submits a typed decision for the active bridged hook invocation.
+    pub async fn submit_hook_decision(
+        &mut self,
+        invocation_id: &HookInvocationId,
+        decision: HookDecision,
+    ) -> Result<(), AgentError> {
+        if self.pending_hook.is_none() {
+            return Err(AgentError::HookInvocationNotPending);
+        }
+        let result = self
+            .inner
+            .submit_hook_decision(invocation_id, decision)
+            .await;
+        if result.is_ok() {
+            self.pending_hook = None;
+        }
+        result
+    }
+
+    /// Reports a fail-closed host hook error for the active bridged hook invocation.
+    pub async fn fail_hook_invocation(
+        &mut self,
+        invocation_id: &HookInvocationId,
+        message: String,
+    ) -> Result<(), AgentError> {
+        if self.pending_hook.is_none() {
+            return Err(AgentError::HookInvocationNotPending);
+        }
+        let result = self
+            .inner
+            .fail_hook_invocation(invocation_id, message)
+            .await;
+        if result.is_ok() {
+            self.pending_hook = None;
+        }
+        result
+    }
+
     /// Returns the terminal result after the run reaches EOF.
     ///
     /// A successful result is retained and returned again on repeated calls so
@@ -174,6 +238,7 @@ impl OwnedAgentRun {
             return Ok(result.clone());
         }
         self.pending_batch = None;
+        self.pending_hook = None;
         let result = self.inner.cancel().await?;
         self.terminal_result = Some(result.clone());
         Ok(result)
@@ -190,6 +255,7 @@ impl From<AgentRun> for OwnedAgentRun {
 pub struct OwnedInteractiveStream {
     inner: InteractiveEventStream,
     pending_batch: Option<OwnedToolInvocationBatch>,
+    pending_hook: Option<HookInvocation>,
 }
 
 impl OwnedInteractiveStream {
@@ -197,18 +263,25 @@ impl OwnedInteractiveStream {
         Self {
             inner,
             pending_batch: None,
+            pending_hook: None,
         }
     }
 
-    /// Returns the next runtime event or host tool invocation batch.
+    /// Returns the next runtime event, host tool invocation batch, or subscribed hook invocation.
     pub async fn next_message(&mut self) -> Result<Option<OwnedAgentRunMessage>, AgentError> {
         let message = self.inner.next_owned_message().await?;
         match &message {
             Some(OwnedAgentRunMessage::ToolInvocations { batch }) => {
                 self.pending_batch = Some(batch.clone());
+                self.pending_hook = None;
+            }
+            Some(OwnedAgentRunMessage::HookInvocation { invocation }) => {
+                self.pending_hook = Some((**invocation).clone());
+                self.pending_batch = None;
             }
             Some(OwnedAgentRunMessage::Event(_)) | None => {
                 self.pending_batch = None;
+                self.pending_hook = None;
             }
         }
         Ok(message)
@@ -244,6 +317,56 @@ impl OwnedInteractiveStream {
         result
     }
 
+    /// Submits a typed decision for the active interactive bridged hook invocation.
+    pub async fn submit_hook_decision(
+        &mut self,
+        invocation_id: &HookInvocationId,
+        decision: HookDecision,
+    ) -> Result<(), AgentError> {
+        if self.pending_hook.is_none() {
+            return Err(AgentError::HookInvocationNotPending);
+        }
+        let result = self
+            .inner
+            .submit_owned_hook_decision(invocation_id, decision)
+            .await;
+        match &result {
+            Ok(()) => self.pending_hook = None,
+            Err(AgentError::Interactive {
+                source:
+                    merry_runtime::InteractiveError::NoPendingHookInvocation { .. }
+                    | merry_runtime::InteractiveError::RunClosed { .. },
+            }) => self.pending_hook = None,
+            Err(_) => {}
+        }
+        result
+    }
+
+    /// Reports a fail-closed host hook error for the active interactive bridged hook invocation.
+    pub async fn fail_hook_invocation(
+        &mut self,
+        invocation_id: &HookInvocationId,
+        message: String,
+    ) -> Result<(), AgentError> {
+        if self.pending_hook.is_none() {
+            return Err(AgentError::HookInvocationNotPending);
+        }
+        let result = self
+            .inner
+            .fail_owned_hook_invocation(invocation_id, message)
+            .await;
+        match &result {
+            Ok(()) => self.pending_hook = None,
+            Err(AgentError::Interactive {
+                source:
+                    merry_runtime::InteractiveError::NoPendingHookInvocation { .. }
+                    | merry_runtime::InteractiveError::RunClosed { .. },
+            }) => self.pending_hook = None,
+            Err(_) => {}
+        }
+        result
+    }
+
     /// Requests cancellation of the interactive producer without awaiting shutdown.
     pub fn request_cancel(&self) {
         self.inner.request_cancel();
@@ -253,6 +376,7 @@ impl OwnedInteractiveStream {
     /// for durable shutdown (releasing the session's active step permit).
     pub async fn cancel_and_wait_until_closed(&mut self) -> Result<(), AgentError> {
         self.pending_batch = None;
+        self.pending_hook = None;
         self.inner.cancel_and_wait_until_closed().await
     }
 }

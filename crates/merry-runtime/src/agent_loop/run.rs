@@ -2,8 +2,9 @@
 
 use super::{AgentLoopError, AgentLoopResult, agent_loop_stream_error};
 use crate::{
-    RuntimeError, ToolExecutionOutcome,
+    HookDecision, HookInvocation, HookInvocationId, RuntimeError, ToolExecutionOutcome,
     bridge::{BridgeToolResultCommand, BridgeToolResultPayload},
+    hooks::bridge::HookDecisionCommand,
 };
 use futures_util::StreamExt;
 use merry_core::{PendingToolCallBatch, RuntimeEvent, SessionId, ToolCallBatchId, ToolCallId};
@@ -17,9 +18,8 @@ use tokio_stream::wrappers::ReceiverStream;
 /// Runtime-owned single-consumer protocol for one agent run.
 ///
 /// [`Self::next_message`] is the only output path. It yields durable runtime
-/// events and explicit host-owned tool batches from the same ordered channel,
-/// so a consumer cannot accidentally skip a tool handoff by using an
-/// event-only stream. Runtime state owns the active batch and its lifecycle.
+/// events, explicit host-owned tool batches, and subscribed host-bridged hook
+/// invocations from the same ordered channel.
 pub struct AgentRun {
     session_id: SessionId,
     events: ReceiverStream<AgentRunMessage>,
@@ -30,9 +30,14 @@ pub struct AgentRun {
     pending_tool_invocations: Option<PendingToolCallBatch>,
     bridge_resolution_epoch: Arc<AtomicU64>,
     observed_bridge_resolution_epoch: u64,
+    hook_sender: mpsc::Sender<HookDecisionCommand>,
+    pending_hook_invocation: Option<HookInvocation>,
+    hook_resolution_epoch: Arc<AtomicU64>,
+    observed_hook_resolution_epoch: u64,
 }
 
 impl AgentRun {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         session_id: SessionId,
         events: ReceiverStream<AgentRunMessage>,
@@ -41,8 +46,11 @@ impl AgentRun {
         result_receiver: oneshot::Receiver<Result<AgentLoopResult, AgentLoopError>>,
         bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
         bridge_resolution_epoch: Arc<AtomicU64>,
+        hook_sender: mpsc::Sender<HookDecisionCommand>,
+        hook_resolution_epoch: Arc<AtomicU64>,
     ) -> Self {
         let observed_bridge_resolution_epoch = bridge_resolution_epoch.load(Ordering::Acquire);
+        let observed_hook_resolution_epoch = hook_resolution_epoch.load(Ordering::Acquire);
         Self {
             session_id,
             events,
@@ -53,6 +61,10 @@ impl AgentRun {
             pending_tool_invocations: None,
             bridge_resolution_epoch,
             observed_bridge_resolution_epoch,
+            hook_sender,
+            pending_hook_invocation: None,
+            hook_resolution_epoch,
+            observed_hook_resolution_epoch,
         }
     }
 
@@ -61,6 +73,11 @@ impl AgentRun {
         if epoch != self.observed_bridge_resolution_epoch {
             self.pending_tool_invocations = None;
             self.observed_bridge_resolution_epoch = epoch;
+        }
+        let hook_epoch = self.hook_resolution_epoch.load(Ordering::Acquire);
+        if hook_epoch != self.observed_hook_resolution_epoch {
+            self.pending_hook_invocation = None;
+            self.observed_hook_resolution_epoch = hook_epoch;
         }
     }
 
@@ -132,11 +149,70 @@ impl AgentRun {
             })?
     }
 
+    /// Submits a typed decision for the active host-bridged hook invocation.
+    pub async fn submit_hook_decision(
+        &mut self,
+        invocation_id: &HookInvocationId,
+        decision: HookDecision,
+    ) -> Result<(), RuntimeError> {
+        self.submit_hook_outcome(invocation_id, Ok(decision)).await
+    }
+
+    /// Reports a fail-closed host hook error for the active hook invocation.
+    pub async fn fail_hook_invocation(
+        &mut self,
+        invocation_id: &HookInvocationId,
+        message: String,
+    ) -> Result<(), RuntimeError> {
+        self.submit_hook_outcome(invocation_id, Err(message)).await
+    }
+
+    async fn submit_hook_outcome(
+        &mut self,
+        invocation_id: &HookInvocationId,
+        outcome: Result<HookDecision, String>,
+    ) -> Result<(), RuntimeError> {
+        self.synchronize_bridge_resolution();
+        let Some(expected) = self.pending_hook_invocation.as_ref() else {
+            return Err(RuntimeError::NoPendingAgentRunHookInvocation {
+                session_id: self.session_id.clone(),
+            });
+        };
+        if expected.id() != invocation_id {
+            return Err(RuntimeError::HookInvocationIdMismatch {
+                session_id: self.session_id.clone(),
+                expected_invocation_id: expected.id().clone(),
+                received_invocation_id: invocation_id.clone(),
+            });
+        }
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.hook_sender
+            .send(HookDecisionCommand {
+                invocation_id: invocation_id.clone(),
+                outcome,
+                ack_sender,
+            })
+            .await
+            .map_err(|_| RuntimeError::AgentRunClosed {
+                session_id: self.session_id.clone(),
+                message: "agent run closed before accepting the hook decision",
+            })?;
+        let result = ack_receiver
+            .await
+            .map_err(|_| RuntimeError::AgentRunClosed {
+                session_id: self.session_id.clone(),
+                message: "agent run closed before acknowledging the hook decision",
+            })?;
+        if result.is_ok() {
+            self.pending_hook_invocation = None;
+        }
+        result
+    }
+
     /// Returns the collected loop result once the run has completed.
     ///
-    /// Unconsumed events are drained. An unresolved host-tool batch is reported
-    /// as an error and cancellation is requested so the producer cannot remain
-    /// blocked waiting for a result that the caller has abandoned.
+    /// Unconsumed events are drained. An unresolved host-tool batch or hook
+    /// invocation is reported as an error and cancellation is requested.
     pub async fn result(&mut self) -> Result<AgentLoopResult, AgentLoopError> {
         loop {
             match self.next_message().await {
@@ -150,10 +226,20 @@ impl AgentRun {
                         "agent run result requested before the host tool batch was resolved",
                     ));
                 }
+                Ok(Some(AgentRunMessage::HookInvocation { .. })) => {
+                    self.request_cancel();
+                    self.pending_hook_invocation = None;
+                    return Err(agent_loop_stream_error(
+                        &self.session_id,
+                        Vec::new(),
+                        "agent run result requested before the hook invocation was resolved",
+                    ));
+                }
                 Ok(None) => break,
                 Err(source) => {
                     self.request_cancel();
                     self.pending_tool_invocations = None;
+                    self.pending_hook_invocation = None;
                     return Err(AgentLoopError::new(Vec::new(), source));
                 }
             }
@@ -184,6 +270,7 @@ impl AgentRun {
     pub async fn cancel_and_wait(&mut self) {
         self.loop_token.cancel();
         self.pending_tool_invocations = None;
+        self.pending_hook_invocation = None;
         // A producer may be waiting for capacity while publishing a durable
         // event. Drain the bounded channel so cancellation can reach the
         // runtime checkpoint instead of relying on task abortion.
@@ -195,8 +282,8 @@ impl AgentRun {
 
     /// Returns the next runtime-owned run message.
     ///
-    /// SDK host adapters use this to execute bridge tool calls without
-    /// exposing bridge handoff as a public [`RuntimeEvent`].
+    /// SDK host adapters use this to execute bridge tool calls and subscribed
+    /// host hooks without exposing bridge handoff as a public [`RuntimeEvent`].
     pub async fn next_message(&mut self) -> Result<Option<AgentRunMessage>, RuntimeError> {
         self.synchronize_bridge_resolution();
         if let Some(batch) = self.pending_tool_invocations.as_ref() {
@@ -205,16 +292,28 @@ impl AgentRun {
                 batch_id: batch.id().clone(),
             });
         }
+        if let Some(invocation) = self.pending_hook_invocation.as_ref() {
+            return Err(RuntimeError::AgentRunHookInvocationPending {
+                session_id: self.session_id.clone(),
+                invocation_id: invocation.id().clone(),
+            });
+        }
         let Some(message) = self.events.next().await else {
             return Ok(None);
         };
-        if let AgentRunMessage::ToolInvocations { batch } = &message {
-            if batch.calls().is_empty() {
-                return Err(RuntimeError::BridgeToolResultBatchEmpty {
-                    session_id: self.session_id.clone(),
-                });
+        match &message {
+            AgentRunMessage::ToolInvocations { batch } => {
+                if batch.calls().is_empty() {
+                    return Err(RuntimeError::BridgeToolResultBatchEmpty {
+                        session_id: self.session_id.clone(),
+                    });
+                }
+                self.pending_tool_invocations = Some(batch.clone());
             }
-            self.pending_tool_invocations = Some(batch.clone());
+            AgentRunMessage::HookInvocation { invocation } => {
+                self.pending_hook_invocation = Some(invocation.clone());
+            }
+            AgentRunMessage::Event(_) => {}
         }
         Ok(Some(message))
     }
@@ -236,6 +335,7 @@ impl AgentRun {
     pub fn request_cancel(&mut self) {
         self.loop_token.cancel();
         self.pending_tool_invocations = None;
+        self.pending_hook_invocation = None;
     }
 }
 
@@ -268,6 +368,14 @@ pub enum AgentRunMessage {
         /// runtime execution wave or model response.
         batch: PendingToolCallBatch,
     },
+    /// Subscribed host-bridged lifecycle hook awaiting a typed decision.
+    ///
+    /// Emitted only when the host explicitly subscribed to this hook point
+    /// (and matching tool name, for tool hooks).
+    HookInvocation {
+        /// Pending hook invocation payload and identifier.
+        invocation: HookInvocation,
+    },
 }
 
 impl AgentRunMessage {
@@ -275,7 +383,7 @@ impl AgentRunMessage {
     pub fn as_event(&self) -> Option<&RuntimeEvent> {
         match self {
             Self::Event(event) => Some(event),
-            Self::ToolInvocations { .. } => None,
+            Self::ToolInvocations { .. } | Self::HookInvocation { .. } => None,
         }
     }
 
@@ -285,7 +393,16 @@ impl AgentRunMessage {
     pub fn as_tool_invocations(&self) -> Option<&PendingToolCallBatch> {
         match self {
             Self::ToolInvocations { batch } => Some(batch),
-            Self::Event(_) => None,
+            Self::Event(_) | Self::HookInvocation { .. } => None,
+        }
+    }
+
+    /// Borrows the hook invocation when this message carries a bridged hook request.
+    #[must_use]
+    pub fn as_hook_invocation(&self) -> Option<&HookInvocation> {
+        match self {
+            Self::HookInvocation { invocation } => Some(invocation),
+            Self::Event(_) | Self::ToolInvocations { .. } => None,
         }
     }
 }

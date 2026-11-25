@@ -4,14 +4,19 @@ from . import _merry as _merry
 from . import config as config
 from . import errors as errors
 from . import events as events
+from . import hooks as hooks
 from . import tools as tools
 from ._agent import Agent
 from ._builder import AgentBuilder
 from ._config import (
+    UNSET,
     Anthropic,
+    CompactionConfig,
+    CompactionOutcome,
     GenerationConfig,
     HistoryRetention,
     HistoryRetentionMode,
+    InteractiveSettingsUpdate,
     OpenAICompatible,
     ParallelToolCalls,
     PatchConfig,
@@ -19,6 +24,7 @@ from ._config import (
     PromptProfile,
     Provider,
     ServiceTier,
+    StructuredOutputRetryPolicy,
     WorkspaceConfig,
     WorkspaceLimits,
 )
@@ -37,11 +43,35 @@ from ._errors import (
     ToolDomainError,
 )
 from ._events import Event, EventType
-from ._interactive import InputQueue, InteractiveInputItem, InteractiveSession
+from ._hook_strategies import (
+    deny_tools_hook,
+    max_token_budget_hook,
+    require_condition_before_stop_hook,
+)
+from ._hooks import (
+    AfterModelDecision,
+    AfterModelStepContext,
+    AfterToolCallContext,
+    AfterToolDecision,
+    BeforeModelDecision,
+    BeforeModelStepContext,
+    BeforeToolCallContext,
+    BeforeToolDecision,
+    HookInvocation,
+    HookPoint,
+    Hooks,
+)
+from ._interactive import (
+    InputQueue,
+    InteractiveInputItem,
+    InteractiveSession,
+    ManualHookInteractiveSession,
+)
 from ._models import (
     BlockedReason,
     CompactionUsageWindow,
     FinalOutputRecord,
+    HookStopInfo,
     JsonContent,
     ModelUsage,
     RunResult,
@@ -55,17 +85,28 @@ from ._models import (
     ToolSubmission,
     UsageContextWindow,
 )
-from ._run import AgentRun
+from ._run import AgentRun, ManualHookAgentRun
 from ._tools import Tool, ToolHandler, ToolRegistry, tool
 
 __version__ = _merry.version()
 
 __all__ = [
+    "UNSET",
+    "AfterModelDecision",
+    "AfterModelStepContext",
+    "AfterToolCallContext",
+    "AfterToolDecision",
     "Agent",
     "AgentBuilder",
     "AgentRun",
     "Anthropic",
+    "BeforeModelDecision",
+    "BeforeModelStepContext",
+    "BeforeToolCallContext",
+    "BeforeToolDecision",
     "BlockedReason",
+    "CompactionConfig",
+    "CompactionOutcome",
     "CompactionUsageWindow",
     "Event",
     "EventType",
@@ -73,10 +114,17 @@ __all__ = [
     "GenerationConfig",
     "HistoryRetention",
     "HistoryRetentionMode",
+    "HookInvocation",
+    "HookPoint",
+    "HookStopInfo",
+    "Hooks",
     "InputQueue",
     "InteractiveInputItem",
     "InteractiveSession",
+    "InteractiveSettingsUpdate",
     "JsonContent",
+    "ManualHookAgentRun",
+    "ManualHookInteractiveSession",
     "MerryCompactionError",
     "MerryConfigError",
     "MerryContextError",
@@ -99,6 +147,7 @@ __all__ = [
     "RunStatus",
     "ServiceTier",
     "SessionUsage",
+    "StructuredOutputRetryPolicy",
     "TextContent",
     "Tool",
     "ToolCall",
@@ -114,8 +163,12 @@ __all__ = [
     "WorkspaceLimits",
     "__version__",
     "config",
+    "deny_tools_hook",
     "errors",
     "events",
+    "hooks",
+    "max_token_budget_hook",
+    "require_condition_before_stop_hook",
     "tool",
     "tools",
 ]

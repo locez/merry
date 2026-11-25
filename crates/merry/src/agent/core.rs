@@ -15,13 +15,16 @@ use crate::{
 use merry_core::{SessionId, ToolInputSchema, ToolName, ToolSpec};
 use merry_llm::{GenerationConfig, ModelName, ModelProvider};
 use merry_runtime::{
-    AgentLoopConfig, FileSessionStore, FinalOutputContract, HistoryRetention, Runtime,
-    RuntimeBuilder, RuntimeModelRole, RuntimeProfile, StepContext, StepInput,
+    AgentLoopConfig, CompactionConfig, FileSessionStore, FinalOutputContract, HistoryRetention,
+    Runtime, RuntimeBuilder, RuntimeModelRole, RuntimeProfile, StepContext, StepInput,
     StructuredOutputRetryPolicy,
 };
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
+};
 
 /// Builder for a high-level semantic Merry agent.
 ///
@@ -110,6 +113,54 @@ impl AgentBuilder {
     #[must_use]
     pub fn generation_config(mut self, config: GenerationConfig) -> Self {
         self.generation_config = config;
+        self
+    }
+
+    /// Sets an explicit context-window size in tokens for this session.
+    ///
+    /// This takes precedence over provider-reported capabilities and fallback
+    /// defaults when computing context budgets and automatic compaction triggers.
+    #[must_use]
+    pub fn context_window_tokens(mut self, tokens: NonZeroU64) -> Self {
+        self.runtime_builder = self.runtime_builder.context_window_tokens(tokens);
+        self
+    }
+
+    /// Configures automatic checkpoint compaction policy for this session.
+    #[must_use]
+    pub fn compaction(mut self, config: CompactionConfig) -> Self {
+        self.runtime_builder = self.runtime_builder.automatic_compaction(config);
+        self
+    }
+
+    /// Installs an in-process Rust hook registry for lifecycle interception.
+    #[must_use]
+    pub fn hooks(mut self, hooks: merry_runtime::HookRegistry) -> Self {
+        if !hooks.is_empty() {
+            self.runtime_builder = self.runtime_builder.hooks(Arc::new(hooks));
+        }
+        self
+    }
+
+    /// Installs a custom object-safe in-process Rust hook handler.
+    #[must_use]
+    pub fn hook_handler(mut self, handler: Arc<dyn merry_runtime::RuntimeHookHandler>) -> Self {
+        self.runtime_builder = self.runtime_builder.hooks(handler);
+        self
+    }
+
+    /// Declares host-bridged lifecycle hook subscriptions (used by foreign-language SDKs).
+    ///
+    /// Hook points not present in `subscriptions` are never emitted on the run stream.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn bridge_hook_subscriptions(
+        mut self,
+        subscriptions: merry_runtime::HookSubscriptions,
+    ) -> Self {
+        self.runtime_builder = self
+            .runtime_builder
+            .bridge_hook_subscriptions(subscriptions);
         self
     }
 

@@ -46,6 +46,8 @@ impl Runtime {
         let (command_sender, command_receiver) = mpsc::channel(16);
         let (bridge_sender, bridge_receiver) = mpsc::channel(4);
         let bridge_resolution_epoch = Arc::new(AtomicU64::new(0));
+        let (hook_sender, hook_receiver) = mpsc::channel(4);
+        let hook_resolution_epoch = Arc::new(AtomicU64::new(0));
         let subagent_event_receiver = self.subscribe_subagent_events();
         let producer = InteractiveProducer::new(InteractiveProducerInput {
             runtime: self.clone(),
@@ -56,6 +58,8 @@ impl Runtime {
             rate_sender,
             bridge_receiver,
             bridge_resolution_epoch: Arc::clone(&bridge_resolution_epoch),
+            hook_receiver,
+            hook_resolution_epoch: Arc::clone(&hook_resolution_epoch),
             loop_token: producer_token,
             generation_config,
             config,
@@ -72,6 +76,8 @@ impl Runtime {
                 producer_handle,
                 bridge_sender,
                 bridge_resolution_epoch,
+                hook_sender,
+                hook_resolution_epoch,
             ),
             AgentLoopInput::new(run_id, command_sender.clone()),
             AgentLoopControl::new(run_id, command_sender),

@@ -213,7 +213,20 @@ class RunStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     BLOCKED = "blocked"
+    STOPPED_BY_HOOK = "stopped_by_hook"
     UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class HookStopInfo:
+    """Metadata describing why a lifecycle hook stopped a run cleanly."""
+
+    hook_point: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        _validate_identifier("hook point", self.hook_point, 64)
+        _validate_text("hook stop reason", self.reason, 4096)
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,6 +351,7 @@ class RunResult(Generic[OutputT]):
     diagnostic: EventDiagnostic | None = None
     blocked_reason: BlockedReason | None = None
     final_output_record: FinalOutputRecord | None = None
+    hook_stop: HookStopInfo | None = None
 
     def __post_init__(self) -> None:
         from ._events import Event
@@ -382,6 +396,8 @@ class RunResult(Generic[OutputT]):
             self.final_output_record, FinalOutputRecord
         ):
             raise TypeError("run final output record must be FinalOutputRecord or None")
+        if self.hook_stop is not None and not isinstance(self.hook_stop, HookStopInfo):
+            raise TypeError("run hook_stop must be HookStopInfo or None")
         if (
             self.final_output_record is not None
             and self.final_output_json != self.final_output_record.value
@@ -390,20 +406,45 @@ class RunResult(Generic[OutputT]):
 
         match self.status:
             case RunStatus.COMPLETED:
-                if self.diagnostic is not None or self.blocked_reason is not None:
+                if (
+                    self.diagnostic is not None
+                    or self.blocked_reason is not None
+                    or self.hook_stop is not None
+                ):
                     raise ValueError("completed runs must not have failure metadata")
             case RunStatus.FAILED | RunStatus.CANCELLED:
-                if self.diagnostic is None or self.blocked_reason is not None:
+                if (
+                    self.diagnostic is None
+                    or self.blocked_reason is not None
+                    or self.hook_stop is not None
+                ):
                     raise ValueError(
                         "failed or cancelled runs require a diagnostic and no blocked reason"
                     )
             case RunStatus.BLOCKED:
-                if self.blocked_reason is None or self.diagnostic is not None:
+                if (
+                    self.blocked_reason is None
+                    or self.diagnostic is not None
+                    or self.hook_stop is not None
+                ):
                     raise ValueError(
                         "blocked runs require a blocked reason and no diagnostic"
                     )
+            case RunStatus.STOPPED_BY_HOOK:
+                if (
+                    self.hook_stop is None
+                    or self.diagnostic is not None
+                    or self.blocked_reason is not None
+                ):
+                    raise ValueError(
+                        "stopped_by_hook runs require hook_stop and no failure metadata"
+                    )
             case RunStatus.UNKNOWN:
-                if self.diagnostic is not None or self.blocked_reason is not None:
+                if (
+                    self.diagnostic is not None
+                    or self.blocked_reason is not None
+                    or self.hook_stop is not None
+                ):
                     raise ValueError("unknown runs must not have terminal metadata")
 
 

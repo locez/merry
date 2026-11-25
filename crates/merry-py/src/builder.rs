@@ -4,8 +4,9 @@ use crate::{agent::PyAgent, error, protocol};
 use merry::profiles::WorkspaceToolLimits;
 use merry::providers::OpenAiProtocol;
 use merry::{
-    AgentBuilder, AgentLoopConfig, ArchiveConfig, FileSessionStore, GenerationConfig,
-    HistoryRetention, ParallelToolCalls, PromptBlock, PromptProfile, ReasoningEffort, ServiceTier,
+    AgentBuilder, AgentLoopConfig, ArchiveConfig, CompactionConfig, FileSessionStore,
+    GenerationConfig, HistoryRetention, ParallelToolCalls, PromptBlock, PromptProfile,
+    ReasoningEffort, ServiceTier, StructuredOutputRetryPolicy,
 };
 use merry_core::ToolName;
 use pyo3::prelude::*;
@@ -22,6 +23,7 @@ pub(crate) struct PyAgentBuilder {
     session_store_path: Option<String>,
     prompt_profile: Option<PromptProfile>,
     progress_commentary: Option<bool>,
+    structured_output_retry_policy: Option<StructuredOutputRetryPolicy>,
 }
 
 #[pymethods]
@@ -35,15 +37,18 @@ impl PyAgentBuilder {
             session_store_path: None,
             prompt_profile: None,
             progress_commentary: None,
+            structured_output_retry_policy: None,
         })
     }
 
+    #[pyo3(signature = (api_key, model, base_url=None, protocol=None, context_window_tokens=None))]
     fn with_openai_compatible(
         &mut self,
         api_key: String,
         model: String,
         base_url: Option<String>,
         protocol: Option<String>,
+        context_window_tokens: Option<u64>,
     ) -> PyResult<()> {
         let mut provider_config = merry::providers::OpenAiProviderConfig::new(&api_key)
             .map_err(|error| error::provider_message_to_py(error.to_string()))?;
@@ -54,6 +59,12 @@ impl PyAgentBuilder {
         }
         if let Some(protocol) = protocol.as_deref() {
             provider_config = provider_config.with_protocol(parse_openai_protocol(protocol)?);
+        }
+        if let Some(tokens) = context_window_tokens {
+            let tokens = NonZeroU64::new(tokens).ok_or_else(|| {
+                error::config_message_to_py("context_window_tokens must be greater than zero")
+            })?;
+            provider_config = provider_config.with_context_window_tokens(tokens);
         }
         let provider = merry::providers::openai_compatible()
             .provider_config(provider_config)
@@ -66,11 +77,13 @@ impl PyAgentBuilder {
         Ok(())
     }
 
+    #[pyo3(signature = (api_key, model, base_url=None, context_window_tokens=None))]
     fn with_anthropic(
         &mut self,
         api_key: String,
         model: String,
         base_url: Option<String>,
+        context_window_tokens: Option<u64>,
     ) -> PyResult<()> {
         let mut provider_config = merry::providers::AnthropicProviderConfig::new(&api_key)
             .map_err(|error| error::provider_message_to_py(error.to_string()))?;
@@ -78,6 +91,12 @@ impl PyAgentBuilder {
             provider_config = provider_config
                 .with_base_url(base_url)
                 .map_err(|error| error::provider_message_to_py(error.to_string()))?;
+        }
+        if let Some(tokens) = context_window_tokens {
+            let tokens = NonZeroU64::new(tokens).ok_or_else(|| {
+                error::config_message_to_py("context_window_tokens must be greater than zero")
+            })?;
+            provider_config = provider_config.with_context_window_tokens(tokens);
         }
         let provider = merry::providers::anthropic()
             .provider_config(provider_config)
@@ -257,12 +276,58 @@ impl PyAgentBuilder {
         Ok(())
     }
 
+    fn with_structured_output_retry_policy(&mut self, max_retries: usize) -> PyResult<()> {
+        if self.inner.is_none() {
+            return Err(error::builder_consumed_to_py());
+        }
+        self.structured_output_retry_policy = Some(StructuredOutputRetryPolicy::new(max_retries));
+        Ok(())
+    }
+
+    fn with_context_window_tokens(&mut self, tokens: u64) -> PyResult<()> {
+        let tokens = NonZeroU64::new(tokens).ok_or_else(|| {
+            error::config_message_to_py("context_window_tokens must be greater than zero")
+        })?;
+        let builder = self.take_builder()?;
+        self.inner = Some(builder.context_window_tokens(tokens));
+        Ok(())
+    }
+
+    fn with_compaction(&mut self, enabled: bool, reasoning_effort: Option<String>) -> PyResult<()> {
+        let reasoning = reasoning_effort
+            .as_deref()
+            .map(ReasoningEffort::new)
+            .transpose()
+            .map_err(|error| error::config_message_to_py(error.to_string()))?;
+        let config = if enabled {
+            CompactionConfig::default()
+        } else {
+            CompactionConfig::disabled()
+        }
+        .with_reasoning_effort(reasoning);
+        let builder = self.take_builder()?;
+        self.inner = Some(builder.compaction(config));
+        Ok(())
+    }
+
     fn with_event_buffer_size(&mut self, size: usize) -> PyResult<()> {
         let size = NonZeroUsize::new(size).ok_or_else(|| {
             error::config_message_to_py("event buffer size must be greater than zero")
         })?;
         let builder = self.take_builder()?;
         self.inner = Some(builder.event_buffer_size(size));
+        Ok(())
+    }
+
+    fn with_hook_subscriptions(&mut self, subscriptions_json: String) -> PyResult<()> {
+        let subscriptions = protocol::parse_hook_subscriptions(&subscriptions_json)
+            .map_err(error::config_message_to_py)?;
+        let builder = self.take_builder()?;
+        self.inner = Some(if subscriptions.is_empty() {
+            builder
+        } else {
+            builder.bridge_hook_subscriptions(subscriptions)
+        });
         Ok(())
     }
 
@@ -317,6 +382,9 @@ impl PyAgentBuilder {
         }
         if let Some(enabled) = self.progress_commentary.take() {
             builder = builder.progress_commentary(enabled);
+        }
+        if let Some(policy) = self.structured_output_retry_policy.take() {
+            builder = builder.structured_output_retry_policy(policy);
         }
         Ok(builder)
     }

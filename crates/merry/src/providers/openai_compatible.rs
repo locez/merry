@@ -1,7 +1,7 @@
 use super::ConfiguredModelProvider;
 use merry_llm::{ModelError, ModelName, ModelRetryPolicy};
 use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig, OpenAiProviderError};
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 use thiserror::Error;
 
 /// Creates an OpenAI-compatible provider component builder.
@@ -16,6 +16,7 @@ pub struct OpenAiCompatibleProviderBuilder {
     config: Option<OpenAiProviderConfig>,
     model: Option<ModelName>,
     retry_policy: Option<ModelRetryPolicy>,
+    context_window_tokens: Option<NonZeroU64>,
 }
 
 impl OpenAiCompatibleProviderBuilder {
@@ -70,11 +71,21 @@ impl OpenAiCompatibleProviderBuilder {
         self
     }
 
+    /// Sets the model context window size reported by this provider component.
+    #[must_use]
+    pub fn context_window_tokens(mut self, tokens: NonZeroU64) -> Self {
+        self.context_window_tokens = Some(tokens);
+        self
+    }
+
     /// Builds a provider-neutral configured provider component.
     pub fn build(self) -> Result<ConfiguredModelProvider, OpenAiCompatibleProviderBuildError> {
-        let config = self
+        let mut config = self
             .config
             .ok_or(OpenAiCompatibleProviderBuildError::MissingProviderConfig)?;
+        if let Some(tokens) = self.context_window_tokens {
+            config = config.with_context_window_tokens(tokens);
+        }
         let model = self
             .model
             .ok_or(OpenAiCompatibleProviderBuildError::MissingModel)?;

@@ -2,8 +2,47 @@
 //!
 //! This crate is the interface layer for applications embedding Merry. It
 //! exposes the high-level semantic agent API plus small components for runtime
-//! construction: providers, profiles, tools, events, and stable errors.
-//! Lower-level crates still own their domains.
+//! construction: providers, profiles, tools, lifecycle hooks, events, and
+//! stable errors. Lower-level crates still own their domains.
+//!
+//! # Context Windows And Lifecycle Hooks
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use merry::{
+//!     AfterModelDecision, AgentBuilder, BeforeModelDecision, BeforeToolDecision,
+//!     CompactionConfig, HookRegistry, SessionId, ToolName, providers::openai_compatible,
+//! };
+//! use std::num::NonZeroU64;
+//!
+//! let provider = openai_compatible()
+//!     .api_key("sk-...")?
+//!     .model_name("gpt-4.1-mini")?
+//!     .context_window_tokens(NonZeroU64::new(128_000).expect("non-zero"))
+//!     .build()?;
+//!
+//! let hooks = HookRegistry::new()
+//!     .before_model_step(|ctx| async move {
+//!         if ctx.session_usage.is_some_and(|u| u.total.total_tokens >= 100_000) {
+//!             return BeforeModelDecision::stop_turn("token budget exceeded", None);
+//!         }
+//!         BeforeModelDecision::continue_normally()
+//!     })
+//!     .before_tool_call_for([ToolName::new("run_shell")?], |_ctx| async move {
+//!         BeforeToolDecision::deny("shell execution disabled")
+//!     })
+//!     .after_model_step(|_ctx| async move { AfterModelDecision::accept() });
+//!
+//! let agent = AgentBuilder::new(SessionId::new("demo")?)
+//!     .provider(provider)
+//!     .compaction(CompactionConfig::default())
+//!     .hooks(hooks)
+//!     .build()?;
+//!
+//! let _result = agent.run("Summarize the workspace.").await?;
+//! # Ok(())
+//! # }
+//! ```
 
 mod agent;
 mod agent_loop;
@@ -49,17 +88,22 @@ pub use interactive::{
     InteractiveControl, InteractiveEventStream, InteractiveInput, InteractiveInputItem,
     InteractiveInputSnapshot, InteractiveRun,
 };
-pub use merry_core::RuntimeEvent;
-pub use merry_core::SessionId;
+pub use merry_core::{
+    ContextWindowSource, RuntimeEvent, SessionId, ToolCallArguments, ToolName, ToolOutput,
+};
 pub use merry_llm::{
     GenerationConfig, ModelName, ModelProvider, ModelRetryPolicy, ParallelToolCalls,
     ReasoningEffort, ServiceTier,
 };
 pub use merry_runtime::{
+    AfterModelDecision, AfterModelStepContext, AfterToolCallContext, AfterToolDecision,
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopConfigError, AgentLoopStatus, ArchiveConfig,
-    CompactionConfig, FINAL_OUTPUT_TOOL_NAME, FileSessionStore, FinalOutput, HistoryRetention,
-    InteractivePrimaryModel, InterruptReason, PromptBlock, PromptError, PromptProfile,
-    QueuedInputId, StructuredOutputRetryPolicy,
+    BeforeModelDecision, BeforeModelStepContext, BeforeToolCallContext, BeforeToolDecision,
+    CompactionConfig, CompactionOutcome, FINAL_OUTPUT_TOOL_NAME, FileSessionStore, FinalOutput,
+    HistoryRetention, HookDecision, HookError, HookFuture, HookInvocation, HookInvocationId,
+    HookPoint, HookRegistry, HookRequest, HookSubscriptions, InteractivePrimaryModel,
+    InteractiveSettingsUpdate, InterruptReason, PromptBlock, PromptError, PromptProfile,
+    QueuedInputId, RuntimeHookHandler, StructuredOutputRetryPolicy, ToolHookFilter,
 };
 pub use profile::{AgentProfile, AgentProfileContext};
 pub use stream::{AgentEventStream, StructuredAgentEventStream, StructuredRunResult};

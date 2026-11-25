@@ -8,7 +8,17 @@ use crate::agent_loop::{
     PendingLoopToolCall, can_retry_structured_output, record_final_output_tool_call,
     validate_final_output,
 };
-use crate::{RuntimeError, ToolExecutionContext, bridge::resolve_bridge_tool_result_command};
+use crate::{
+    RuntimeError, ToolExecutionContext,
+    bridge::validate_bridge_tool_result_command,
+    hooks::{
+        bridge::{StreamHookBridge, has_after_tool_hook},
+        wave::{
+            HookWaveContext, PostBridgeWaveOutcome, PostRuntimeToolOutcome, PreToolWaveOutcome,
+            run_post_bridge_tool_hooks, run_post_runtime_tool_hooks, run_pre_tool_wave_hooks,
+        },
+    },
+};
 use merry_core::{
     InteractiveRunState, PendingToolCall, PendingToolCallBatch, RuntimeJournalEvent,
     ToolCallBatchId,
@@ -247,16 +257,159 @@ impl InteractiveProducer {
         Some(false)
     }
 
+    async fn settle_stopped_turn_pending_calls(&mut self, reason: &str) -> Option<bool> {
+        let settled = match self
+            .runtime
+            .settle_pending_tool_calls_stopped_by_hook_with_active_permit(reason, &self.loop_permit)
+            .await
+        {
+            Ok(events) => events,
+            Err(source) => {
+                self.remember_terminal_error(InteractiveError::Runtime { source });
+                return None;
+            }
+        };
+        if !settled.is_empty() && !self.send_runtime_events(settled).await {
+            return None;
+        }
+        Some(false)
+    }
+
+    async fn run_pre_tool_hooks(
+        &mut self,
+        calls: Vec<PendingToolCall>,
+        is_bridge_tool: bool,
+    ) -> Result<Vec<PendingToolCall>, Option<bool>> {
+        let pre_token = self.loop_token.child_token();
+        self.phase_token = Some(pre_token.clone());
+        let outcome = {
+            let wave = HookWaveContext {
+                runtime: &self.runtime,
+                model_turn: self.model_turns_run,
+                token: &pre_token,
+                loop_permit: &self.loop_permit,
+            };
+            let mut hook_bridge = StreamHookBridge {
+                sender: &self.message_sender,
+                receiver: &mut self.hook_receiver,
+                resolution_epoch: &self.hook_resolution_epoch,
+                sequence: &mut self.hook_sequence,
+            };
+            run_pre_tool_wave_hooks(&wave, calls, is_bridge_tool, Some(&mut hook_bridge)).await
+        };
+        match outcome {
+            Ok(PreToolWaveOutcome::Proceed {
+                pre_events,
+                allowed_calls,
+            }) => {
+                if !pre_events.is_empty() && !self.send_runtime_events(pre_events).await {
+                    self.phase_token = None;
+                    return Err(None);
+                }
+                Ok(allowed_calls)
+            }
+            Ok(PreToolWaveOutcome::StoppedByHook {
+                pre_events, reason, ..
+            }) => {
+                self.phase_token = None;
+                if !pre_events.is_empty() && !self.send_runtime_events(pre_events).await {
+                    return Err(None);
+                }
+                Err(self.settle_stopped_turn_pending_calls(&reason).await)
+            }
+            Err(RuntimeError::HookCancelled { .. }) => {
+                self.phase_token = None;
+                self.interrupted = true;
+                Err(self
+                    .settle_stopped_turn_pending_calls("cancelled during before_tool_call hook")
+                    .await)
+            }
+            Err(source) => {
+                self.phase_token = None;
+                let _ = self
+                    .runtime
+                    .settle_pending_tool_calls_stopped_by_hook_with_active_permit(
+                        "failed during before_tool_call hook",
+                        &self.loop_permit,
+                    )
+                    .await;
+                self.remember_terminal_error(InteractiveError::Runtime { source });
+                Err(None)
+            }
+        }
+    }
+
+    async fn run_post_runtime_hooks_and_publish(
+        &mut self,
+        calls: &[PendingToolCall],
+        events: Vec<RuntimeJournalEvent>,
+    ) -> Result<(), Option<bool>> {
+        let post_token = self.loop_token.child_token();
+        self.phase_token = Some(post_token.clone());
+        let post_outcome = {
+            let wave = HookWaveContext {
+                runtime: &self.runtime,
+                model_turn: self.model_turns_run,
+                token: &post_token,
+                loop_permit: &self.loop_permit,
+            };
+            let mut hook_bridge = StreamHookBridge {
+                sender: &self.message_sender,
+                receiver: &mut self.hook_receiver,
+                resolution_epoch: &self.hook_resolution_epoch,
+                sequence: &mut self.hook_sequence,
+            };
+            run_post_runtime_tool_hooks(&wave, calls, &events, Some(&mut hook_bridge)).await
+        };
+        self.phase_token = None;
+        if !self.send_runtime_events(events).await {
+            return Err(None);
+        }
+        match post_outcome {
+            Ok(PostRuntimeToolOutcome::Continue) => Ok(()),
+            Ok(PostRuntimeToolOutcome::StoppedByHook { reason, .. }) => {
+                Err(self.settle_stopped_turn_pending_calls(&reason).await)
+            }
+            Err(RuntimeError::HookCancelled { .. }) => {
+                self.interrupted = true;
+                Err(self
+                    .settle_stopped_turn_pending_calls("cancelled during after_tool_call hook")
+                    .await)
+            }
+            Err(source) => {
+                let _ = self
+                    .runtime
+                    .settle_pending_tool_calls_stopped_by_hook_with_active_permit(
+                        "failed during after_tool_call hook",
+                        &self.loop_permit,
+                    )
+                    .await;
+                self.remember_terminal_error(InteractiveError::Runtime { source });
+                Err(None)
+            }
+        }
+    }
+
     pub(super) async fn run_runtime_tool(
         &mut self,
         call: merry_core::PendingToolCall,
     ) -> Option<bool> {
+        let allowed_calls = match self.run_pre_tool_hooks(vec![call], false).await {
+            Ok(calls) => calls,
+            Err(early) => return early,
+        };
+        let Some(call) = allowed_calls.into_iter().next() else {
+            self.phase_token = None;
+            return self.runtime_tool_continuation().await;
+        };
+        let phase_token = self.loop_token.child_token();
+        self.phase_token = Some(phase_token.clone());
+
         if !self.send_state(InteractiveRunState::RunningTool).await {
+            self.phase_token = None;
             return None;
         }
 
-        let phase_token = self.loop_token.child_token();
-        self.phase_token = Some(phase_token.clone());
         let runtime = self.runtime.clone();
         let loop_permit = self.loop_permit.clone();
         let call_id = call.id().clone();
@@ -314,12 +467,13 @@ impl InteractiveProducer {
         self.phase_token = None;
 
         match result {
-            Ok(events) => {
-                if !self.send_runtime_events(events).await {
-                    return None;
-                }
-                self.runtime_tool_continuation().await
-            }
+            Ok(events) => match self
+                .run_post_runtime_hooks_and_publish(std::slice::from_ref(&call), events)
+                .await
+            {
+                Ok(()) => self.runtime_tool_continuation().await,
+                Err(early) => early,
+            },
             Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
                 let runtime = self.runtime.clone();
                 let events = match runtime
@@ -369,12 +523,26 @@ impl InteractiveProducer {
         &mut self,
         calls: Vec<PendingToolCall>,
     ) -> Option<bool> {
+        let calls = match self.run_pre_tool_hooks(calls, false).await {
+            Ok(calls) => calls,
+            Err(early) => return early,
+        };
+        if calls.is_empty() {
+            self.phase_token = None;
+            return self.runtime_tool_continuation().await;
+        }
+
         if !self.send_state(InteractiveRunState::RunningTool).await {
+            self.phase_token = None;
             return None;
         }
 
         let phase_token = self.loop_token.child_token();
         self.phase_token = Some(phase_token.clone());
+        let needs_post_hooks = calls
+            .iter()
+            .any(|call| has_after_tool_hook(&self.runtime, call.name(), true));
+        let calls_for_post = calls.clone();
         let runtime = self.runtime.clone();
         let loop_permit = self.loop_permit.clone();
         let call_ids = calls
@@ -398,6 +566,7 @@ impl InteractiveProducer {
         let mut commands_open = true;
         let mut output_open = true;
         let mut batch_events_open = true;
+        let mut buffered_events = Vec::new();
 
         let error = loop {
             tokio::select! {
@@ -407,7 +576,9 @@ impl InteractiveProducer {
                         batch_events_open = false;
                         continue;
                     };
-                    if !self.send_runtime_events(call_events).await {
+                    if needs_post_hooks {
+                        buffered_events.extend(call_events);
+                    } else if !self.send_runtime_events(call_events).await {
                         return None;
                     }
                 }
@@ -446,9 +617,20 @@ impl InteractiveProducer {
         self.phase_token = None;
 
         while let Ok(call_events) = batch_events_rx.try_recv() {
-            if !self.send_runtime_events(call_events).await {
+            if needs_post_hooks {
+                buffered_events.extend(call_events);
+            } else if !self.send_runtime_events(call_events).await {
                 return None;
             }
+        }
+
+        if needs_post_hooks
+            && !buffered_events.is_empty()
+            && let Err(early) = self
+                .run_post_runtime_hooks_and_publish(&calls_for_post, buffered_events)
+                .await
+        {
+            return early;
         }
 
         match error {
@@ -526,10 +708,16 @@ impl InteractiveProducer {
         &mut self,
         calls: Vec<PendingToolCall>,
     ) -> Option<bool> {
+        let calls = match self.run_pre_tool_hooks(calls, true).await {
+            Ok(calls) => calls,
+            Err(early) => return early,
+        };
         let Some(first_call) = calls.first() else {
-            return Some(false);
+            self.phase_token = None;
+            return self.runtime_tool_continuation().await;
         };
         if !self.send_state(InteractiveRunState::RunningTool).await {
+            self.phase_token = None;
             return None;
         }
 
@@ -583,7 +771,7 @@ impl InteractiveProducer {
                             message: "interactive bridge result channel closed before invocations were resolved",
                         });
                     };
-                    let (ack_sender, result) = resolve_bridge_tool_result_command(
+                    let (ack_sender, result) = validate_bridge_tool_result_command(
                         &self.runtime,
                         &batch,
                         command,
@@ -591,11 +779,11 @@ impl InteractiveProducer {
                     )
                     .await;
                     match result {
-                        Ok(events) => {
+                        Ok(outcomes) => {
                             self.bridge_pending = false;
                             self.bridge_resolution_epoch.fetch_add(1, Ordering::AcqRel);
                             let _ = ack_sender.send(Ok(()));
-                            break Ok(events);
+                            break Ok(outcomes);
                         }
                         Err(error) if error.is_retryable_bridge_tool_result() => {
                             let _ = ack_sender.send(Err(error));
@@ -636,11 +824,95 @@ impl InteractiveProducer {
         self.phase_token = None;
 
         match result {
-            Ok(events) => {
-                if !self.send_runtime_events(events).await {
-                    return None;
+            Ok(validated_outcomes) => {
+                let post_token = self.loop_token.child_token();
+                self.phase_token = Some(post_token.clone());
+                let post_outcome = {
+                    let mut hook_bridge = StreamHookBridge {
+                        sender: &self.message_sender,
+                        receiver: &mut self.hook_receiver,
+                        resolution_epoch: &self.hook_resolution_epoch,
+                        sequence: &mut self.hook_sequence,
+                    };
+                    run_post_bridge_tool_hooks(
+                        &self.runtime,
+                        batch.calls(),
+                        validated_outcomes,
+                        self.model_turns_run,
+                        &post_token,
+                        Some(&mut hook_bridge),
+                    )
+                    .await
+                };
+                self.phase_token = None;
+                match post_outcome {
+                    Ok(PostBridgeWaveOutcome::Continue(final_outcomes)) => {
+                        let events = match self
+                            .runtime
+                            .submit_tool_execution_outcomes_with_active_permit(
+                                final_outcomes,
+                                &self.loop_permit,
+                            )
+                            .await
+                        {
+                            Ok(events) => events,
+                            Err(source) => {
+                                self.remember_terminal_error(InteractiveError::Runtime { source });
+                                return None;
+                            }
+                        };
+                        if !self.send_runtime_events(events).await {
+                            return None;
+                        }
+                        self.runtime_tool_continuation().await
+                    }
+                    Ok(PostBridgeWaveOutcome::StoppedByHook {
+                        outcomes_to_commit,
+                        reason,
+                        ..
+                    }) => {
+                        if !outcomes_to_commit.is_empty() {
+                            let events = match self
+                                .runtime
+                                .submit_tool_execution_outcomes_with_active_permit(
+                                    outcomes_to_commit,
+                                    &self.loop_permit,
+                                )
+                                .await
+                            {
+                                Ok(events) => events,
+                                Err(source) => {
+                                    self.remember_terminal_error(InteractiveError::Runtime {
+                                        source,
+                                    });
+                                    return None;
+                                }
+                            };
+                            if !self.send_runtime_events(events).await {
+                                return None;
+                            }
+                        }
+                        self.settle_stopped_turn_pending_calls(&reason).await
+                    }
+                    Err(RuntimeError::HookCancelled { .. }) => {
+                        self.interrupted = true;
+                        self.settle_stopped_turn_pending_calls(
+                            "cancelled during after_tool_call hook",
+                        )
+                        .await
+                    }
+                    Err(source) => {
+                        let _ = self
+                            .runtime
+                            .settle_pending_tool_calls_stopped_by_hook_with_active_permit(
+                                "failed during after_tool_call hook",
+                                &self.loop_permit,
+                            )
+                            .await;
+                        self.remember_terminal_error(InteractiveError::Runtime { source });
+                        None
+                    }
                 }
-                self.runtime_tool_continuation().await
             }
             Err(RuntimeError::ToolExecutionCancelled { .. }) => {
                 self.settle_bridge_tool_batch(&calls, true, "bridge tool was interrupted")

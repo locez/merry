@@ -14,8 +14,8 @@ mod input;
 mod projection;
 
 pub use budget::{
-    CheckpointDecision, ContextBudget, ResolvedContextWindow, decide_checkpoint,
-    resolve_context_window,
+    CheckpointDecision, ContextBudget, ResolvedContextWindow, bundled_model_context_window,
+    decide_checkpoint, resolve_context_window,
 };
 pub use input::{
     CompactedCheckpoint, CompactedCheckpointSummary, ContextEntry, ContextSummary, ProjectRules,

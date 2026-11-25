@@ -142,6 +142,11 @@ impl AgentRun {
                     crate::binding::OwnedAgentRunMessage::ToolInvocations { batch },
                 ))
             }
+            merry_runtime::AgentRunMessage::HookInvocation { invocation } => {
+                Ok(Some(crate::binding::OwnedAgentRunMessage::HookInvocation {
+                    invocation: Box::new(invocation),
+                }))
+            }
             _ => Err(AgentError::AgentRunProtocol {
                 message: "runtime emitted an unsupported agent run message",
             }),
@@ -204,6 +209,28 @@ impl AgentRun {
             }
             Err(error) => Err(AgentError::from(error)),
         }
+    }
+
+    pub(crate) async fn submit_hook_decision(
+        &mut self,
+        invocation_id: &merry_runtime::HookInvocationId,
+        decision: merry_runtime::HookDecision,
+    ) -> Result<(), AgentError> {
+        self.inner
+            .submit_hook_decision(invocation_id, decision)
+            .await
+            .map_err(AgentError::from)
+    }
+
+    pub(crate) async fn fail_hook_invocation(
+        &mut self,
+        invocation_id: &merry_runtime::HookInvocationId,
+        message: String,
+    ) -> Result<(), AgentError> {
+        self.inner
+            .fail_hook_invocation(invocation_id, message)
+            .await
+            .map_err(AgentError::from)
     }
 
     /// Returns the terminal result after [`Self::next_message`] returned `Ok(None)`.

@@ -108,6 +108,13 @@ pub enum AgentLoopStatus {
     Cancelled { diagnostic: ErrorInfo },
     /// The loop stopped because MVP loop policy cannot safely continue.
     Blocked { reason: AgentLoopBlockedReason },
+    /// A lifecycle hook intentionally stopped the turn cleanly.
+    StoppedByHook {
+        /// Hook point that requested stopping the turn.
+        hook_point: crate::HookPoint,
+        /// Actionable human-readable reason returned by the hook.
+        reason: String,
+    },
 }
 
 /// Reasons a loop can stop without final model completion.

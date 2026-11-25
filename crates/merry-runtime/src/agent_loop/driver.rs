@@ -1,5 +1,9 @@
 //! Synchronous and streaming entry points for the runtime agent loop.
 
+use super::hook_step::{
+    AfterStepHookAction, BeforeStepHookAction, StepHookContext, finish_hook_result,
+    run_after_model_step_hook, run_before_model_step_hook,
+};
 use super::producer::{
     AgentLoopStreamProducer, AgentLoopStreamProducerInput, run_agent_loop_stream_producer,
 };
@@ -13,7 +17,13 @@ use super::{
     tool_resolution_is_policy_denied, tool_resolution_status, trace_loop_error, trace_loop_finish,
     validate_final_output,
 };
-use crate::{Runtime, RuntimeError, StepContext, StepInput, ToolExecutionContext};
+use crate::{
+    HookPoint, Runtime, RuntimeError, StepContext, StepInput, ToolExecutionContext,
+    hooks::wave::{
+        HookWaveContext, PostRuntimeToolOutcome, PreToolWaveOutcome, run_post_runtime_tool_hooks,
+        run_pre_tool_wave_hooks,
+    },
+};
 use std::sync::{Arc, atomic::AtomicU64};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -78,18 +88,60 @@ impl Runtime {
                 }
                 next_input = Some(notification_input);
             }
-            let input = next_input
+            let mut input = next_input
                 .take()
                 .expect("agent loop always installs the next step input before continuing");
             let step_index = model_turns_run + 1;
+            let before_ctx = StepHookContext {
+                runtime: self,
+                model_turn: step_index,
+                max_model_turns: config.max_model_turns(),
+                loop_token: &loop_token,
+                loop_permit: &loop_permit,
+            };
+            let step_generation_config = match run_before_model_step_hook(
+                &before_ctx,
+                &mut input,
+                generation_config.clone(),
+                None,
+            )
+            .await
+            {
+                Ok(BeforeStepHookAction::Proceed(gen_cfg)) => gen_cfg,
+                Ok(BeforeStepHookAction::Finish {
+                    status,
+                    final_output,
+                }) => {
+                    if matches!(status, AgentLoopStatus::StoppedByHook { .. }) {
+                        trace_loop_finish(
+                            self.session_id().as_str(),
+                            "stopped_by_hook",
+                            model_turns_run,
+                            Some("before_model_step"),
+                        );
+                    }
+                    return Ok(finish_hook_result(
+                        self,
+                        status,
+                        events,
+                        model_turns_run,
+                        final_output,
+                    )
+                    .await);
+                }
+                Err(source) => {
+                    trace_loop_error(self.session_id().as_str(), model_turns_run, &source);
+                    return Err(AgentLoopError::new(events, source));
+                }
+            };
             tracing::info!(
                 event = "runtime.step.start",
                 session_id = self.session_id().as_str(),
                 step_index,
                 "runtime loop step start"
             );
-            let mut step_context = StepContext::new(loop_token.clone())
-                .with_generation_config(generation_config.clone());
+            let mut step_context =
+                StepContext::new(loop_token.clone()).with_generation_config(step_generation_config);
             if let Some(contract) = config.final_output_contract().cloned() {
                 step_context = step_context.with_final_output_contract(contract);
             }
@@ -108,6 +160,44 @@ impl Runtime {
             let outcome = classify_step_events(&step_events, config.final_output_contract());
             events.append(&mut step_events);
             drain_subagent_events(&mut subagent_event_receiver, &mut events);
+
+            let after_ctx = StepHookContext {
+                runtime: self,
+                model_turn: model_turns_run,
+                max_model_turns: config.max_model_turns(),
+                loop_token: &loop_token,
+                loop_permit: &loop_permit,
+            };
+            match run_after_model_step_hook(&after_ctx, &outcome, &step_final_output, None).await {
+                Ok(AfterStepHookAction::Accept) => {}
+                Ok(AfterStepHookAction::ContinueWithInput {
+                    settled_events,
+                    input,
+                }) => {
+                    events.extend(settled_events);
+                    next_input = Some(input);
+                    continue;
+                }
+                Ok(AfterStepHookAction::Finish {
+                    settled_events,
+                    status,
+                    final_output,
+                }) => {
+                    events.extend(settled_events);
+                    return Ok(finish_hook_result(
+                        self,
+                        status,
+                        events,
+                        model_turns_run,
+                        final_output,
+                    )
+                    .await);
+                }
+                Err(source) => {
+                    trace_loop_error(self.session_id().as_str(), model_turns_run, &source);
+                    return Err(AgentLoopError::new(events, source));
+                }
+            }
 
             match outcome {
                 StepOutcome::Completed => {
@@ -506,31 +596,58 @@ impl Runtime {
                             }
                         })
                         .collect();
-                    let execution = self
-                        .execute_tool_call_batch_with_active_permit(
-                            runtime_calls,
-                            ToolExecutionContext::new(loop_token.clone()),
-                            &loop_permit,
+                    let wave = HookWaveContext {
+                        runtime: self,
+                        model_turn: model_turns_run,
+                        token: &loop_token,
+                        loop_permit: &loop_permit,
+                    };
+                    let allowed_calls =
+                        match run_driver_pre_tool_hooks(&wave, runtime_calls, &mut events).await {
+                            DriverPreHookOutcome::Proceed(calls) => calls,
+                            DriverPreHookOutcome::Finish(res) => return *res,
+                        };
+
+                    if !allowed_calls.is_empty() {
+                        let execution = self
+                            .execute_tool_call_batch_with_active_permit(
+                                allowed_calls.clone(),
+                                ToolExecutionContext::new(loop_token.clone()),
+                                &loop_permit,
+                            )
+                            .await;
+                        let (mut execution_events, error) = execution.into_parts();
+                        let post_outcome = run_post_runtime_tool_hooks(
+                            &wave,
+                            &allowed_calls,
+                            &execution_events,
+                            None,
                         )
                         .await;
-                    let (mut execution_events, error) = execution.into_parts();
-                    events.append(&mut execution_events);
+                        events.append(&mut execution_events);
 
-                    if let Some(error) = error {
-                        if let RuntimeError::ToolExecutionCancelled { call_id, .. } = error {
-                            let session_usage = self.usage().await;
-                            return Ok(AgentLoopResult::new(
-                                AgentLoopStatus::Cancelled {
-                                    diagnostic: tool_execution_cancelled_diagnostic(&call_id),
-                                },
-                                events,
-                                model_turns_run,
-                                None,
-                                session_usage,
-                            ));
+                        if let Some(early) =
+                            handle_driver_post_tool_outcome(&wave, post_outcome, &mut events).await
+                        {
+                            return early;
                         }
-                        trace_loop_error(self.session_id().as_str(), model_turns_run, &error);
-                        return Err(AgentLoopError::new(events, error));
+
+                        if let Some(error) = error {
+                            if let RuntimeError::ToolExecutionCancelled { call_id, .. } = error {
+                                return Ok(finish_hook_result(
+                                    self,
+                                    AgentLoopStatus::Cancelled {
+                                        diagnostic: tool_execution_cancelled_diagnostic(&call_id),
+                                    },
+                                    events,
+                                    model_turns_run,
+                                    None,
+                                )
+                                .await);
+                            }
+                            trace_loop_error(self.session_id().as_str(), model_turns_run, &error);
+                            return Err(AgentLoopError::new(events, error));
+                        }
                     }
 
                     next_input = Some(continuation_step_input());
@@ -543,8 +660,8 @@ impl Runtime {
                             model_turns_run,
                             Some("max_model_turns_reached"),
                         );
-                        let session_usage = self.usage().await;
-                        return Ok(AgentLoopResult::new(
+                        return Ok(finish_hook_result(
+                            self,
                             AgentLoopStatus::Blocked {
                                 reason: AgentLoopBlockedReason::MaxModelTurnsReached {
                                     max_model_turns: config.max_model_turns(),
@@ -553,72 +670,106 @@ impl Runtime {
                             events,
                             model_turns_run,
                             None,
-                            session_usage,
-                        ));
+                        )
+                        .await);
                     }
 
-                    tracing::info!(
-                        event = "runtime.tool.pending",
-                        session_id = self.session_id().as_str(),
-                        step_index = model_turns_run,
-                        tool_call_id = call.id().as_str(),
-                        tool_name = call.name().as_str(),
-                        "runtime loop saw pending tool"
-                    );
-                    tracing::info!(
-                        event = "runtime.tool.execute.start",
-                        session_id = self.session_id().as_str(),
-                        step_index = model_turns_run,
-                        tool_call_id = call.id().as_str(),
-                        tool_name = call.name().as_str(),
-                        "runtime loop tool execution start"
-                    );
-                    match self
-                        .execute_tool_call_with_active_permit(
-                            call.id(),
-                            ToolExecutionContext::new(loop_token.clone()),
-                            &loop_permit,
-                        )
-                        .await
-                    {
-                        Ok(execution_events) => {
-                            if !tool_resolution_is_policy_denied(&execution_events) {
-                                tracing::info!(
-                                    event = "runtime.tool.execute.finish",
-                                    session_id = self.session_id().as_str(),
-                                    step_index = model_turns_run,
-                                    tool_call_id = call.id().as_str(),
-                                    tool_name = call.name().as_str(),
-                                    status = tool_resolution_status(&execution_events),
-                                    diagnostic_code =
-                                        tool_resolution_diagnostic_code(&execution_events)
-                                            .unwrap_or(""),
-                                    "runtime loop tool execution finish"
-                                );
+                    let wave = HookWaveContext {
+                        runtime: self,
+                        model_turn: model_turns_run,
+                        token: &loop_token,
+                        loop_permit: &loop_permit,
+                    };
+                    let allowed_calls =
+                        match run_driver_pre_tool_hooks(&wave, vec![call], &mut events).await {
+                            DriverPreHookOutcome::Proceed(calls) => calls,
+                            DriverPreHookOutcome::Finish(res) => return *res,
+                        };
+
+                    if let Some(allowed_call) = allowed_calls.into_iter().next() {
+                        tracing::info!(
+                            event = "runtime.tool.pending",
+                            session_id = self.session_id().as_str(),
+                            step_index = model_turns_run,
+                            tool_call_id = allowed_call.id().as_str(),
+                            tool_name = allowed_call.name().as_str(),
+                            "runtime loop saw pending tool"
+                        );
+                        tracing::info!(
+                            event = "runtime.tool.execute.start",
+                            session_id = self.session_id().as_str(),
+                            step_index = model_turns_run,
+                            tool_call_id = allowed_call.id().as_str(),
+                            tool_name = allowed_call.name().as_str(),
+                            "runtime loop tool execution start"
+                        );
+                        match self
+                            .execute_tool_call_with_active_permit(
+                                allowed_call.id(),
+                                ToolExecutionContext::new(loop_token.clone()),
+                                &loop_permit,
+                            )
+                            .await
+                        {
+                            Ok(execution_events) => {
+                                let post_outcome = run_post_runtime_tool_hooks(
+                                    &wave,
+                                    std::slice::from_ref(&allowed_call),
+                                    &execution_events,
+                                    None,
+                                )
+                                .await;
+                                if !tool_resolution_is_policy_denied(&execution_events) {
+                                    tracing::info!(
+                                        event = "runtime.tool.execute.finish",
+                                        session_id = self.session_id().as_str(),
+                                        step_index = model_turns_run,
+                                        tool_call_id = allowed_call.id().as_str(),
+                                        tool_name = allowed_call.name().as_str(),
+                                        status = tool_resolution_status(&execution_events),
+                                        diagnostic_code =
+                                            tool_resolution_diagnostic_code(&execution_events)
+                                                .unwrap_or(""),
+                                        "runtime loop tool execution finish"
+                                    );
+                                }
+                                events.extend(execution_events);
+                                if let Some(early) = handle_driver_post_tool_outcome(
+                                    &wave,
+                                    post_outcome,
+                                    &mut events,
+                                )
+                                .await
+                                {
+                                    return early;
+                                }
                             }
-                            events.extend(execution_events);
-                        }
-                        Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
-                            trace_loop_finish(
-                                self.session_id().as_str(),
-                                "cancelled",
-                                model_turns_run,
-                                Some("tool_execution_cancelled"),
-                            );
-                            let session_usage = self.usage().await;
-                            return Ok(AgentLoopResult::new(
-                                AgentLoopStatus::Cancelled {
-                                    diagnostic: tool_execution_cancelled_diagnostic(&call_id),
-                                },
-                                events,
-                                model_turns_run,
-                                None,
-                                session_usage,
-                            ));
-                        }
-                        Err(source) => {
-                            trace_loop_error(self.session_id().as_str(), model_turns_run, &source);
-                            return Err(AgentLoopError::new(events, source));
+                            Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
+                                trace_loop_finish(
+                                    self.session_id().as_str(),
+                                    "cancelled",
+                                    model_turns_run,
+                                    Some("tool_execution_cancelled"),
+                                );
+                                return Ok(finish_hook_result(
+                                    self,
+                                    AgentLoopStatus::Cancelled {
+                                        diagnostic: tool_execution_cancelled_diagnostic(&call_id),
+                                    },
+                                    events,
+                                    model_turns_run,
+                                    None,
+                                )
+                                .await);
+                            }
+                            Err(source) => {
+                                trace_loop_error(
+                                    self.session_id().as_str(),
+                                    model_turns_run,
+                                    &source,
+                                );
+                                return Err(AgentLoopError::new(events, source));
+                            }
                         }
                     }
 
@@ -653,6 +804,9 @@ impl Runtime {
         let (bridge_sender, bridge_receiver) = mpsc::channel(1);
         let bridge_resolution_epoch = Arc::new(AtomicU64::new(0));
         let producer_bridge_resolution_epoch = Arc::clone(&bridge_resolution_epoch);
+        let (hook_sender, hook_receiver) = mpsc::channel(1);
+        let hook_resolution_epoch = Arc::new(AtomicU64::new(0));
+        let producer_hook_resolution_epoch = Arc::clone(&hook_resolution_epoch);
         let runtime = self.clone();
         let session_id = self.session_id().clone();
         let producer_handle = tokio::spawn(async move {
@@ -667,6 +821,8 @@ impl Runtime {
                     sender,
                     bridge_receiver,
                     bridge_resolution_epoch: producer_bridge_resolution_epoch,
+                    hook_receiver,
+                    hook_resolution_epoch: producer_hook_resolution_epoch,
                 },
             ))
             .await;
@@ -681,6 +837,8 @@ impl Runtime {
             result_receiver,
             bridge_sender,
             bridge_resolution_epoch,
+            hook_sender,
+            hook_resolution_epoch,
         ))
     }
 }
@@ -697,6 +855,149 @@ fn drain_subagent_events(
                 tokio::sync::broadcast::error::TryRecvError::Empty
                 | tokio::sync::broadcast::error::TryRecvError::Closed,
             ) => return,
+        }
+    }
+}
+
+enum DriverPreHookOutcome {
+    Proceed(Vec<merry_core::PendingToolCall>),
+    Finish(Box<Result<AgentLoopResult, AgentLoopError>>),
+}
+
+async fn run_driver_pre_tool_hooks(
+    wave: &HookWaveContext<'_>,
+    calls: Vec<merry_core::PendingToolCall>,
+    events: &mut Vec<merry_core::RuntimeJournalEvent>,
+) -> DriverPreHookOutcome {
+    match run_pre_tool_wave_hooks(wave, calls, false, None).await {
+        Ok(PreToolWaveOutcome::Proceed {
+            pre_events,
+            allowed_calls,
+        }) => {
+            events.extend(pre_events);
+            DriverPreHookOutcome::Proceed(allowed_calls)
+        }
+        Ok(PreToolWaveOutcome::StoppedByHook {
+            pre_events,
+            reason,
+            final_output,
+        }) => {
+            events.extend(pre_events);
+            let settled = match wave
+                .runtime
+                .settle_pending_tool_calls_stopped_by_hook_with_active_permit(
+                    &reason,
+                    wave.loop_permit,
+                )
+                .await
+            {
+                Ok(settled) => settled,
+                Err(source) => {
+                    return DriverPreHookOutcome::Finish(Box::new(Err(AgentLoopError::new(
+                        std::mem::take(events),
+                        source,
+                    ))));
+                }
+            };
+            events.extend(settled);
+            DriverPreHookOutcome::Finish(Box::new(Ok(finish_hook_result(
+                wave.runtime,
+                AgentLoopStatus::StoppedByHook {
+                    hook_point: HookPoint::BeforeToolCall,
+                    reason,
+                },
+                std::mem::take(events),
+                wave.model_turn,
+                final_output,
+            )
+            .await)))
+        }
+        Err(RuntimeError::HookCancelled { .. }) => {
+            let _ = wave
+                .runtime
+                .settle_pending_tool_calls_stopped_by_hook_with_active_permit(
+                    "cancelled during before_tool_call hook",
+                    wave.loop_permit,
+                )
+                .await;
+            DriverPreHookOutcome::Finish(Box::new(Ok(finish_hook_result(
+                wave.runtime,
+                AgentLoopStatus::Cancelled {
+                    diagnostic: crate::agent_loop::agent_loop_cancelled_diagnostic(),
+                },
+                std::mem::take(events),
+                wave.model_turn,
+                None,
+            )
+            .await)))
+        }
+        Err(source) => {
+            let _ = wave
+                .runtime
+                .settle_pending_tool_calls_stopped_by_hook_with_active_permit(
+                    "failed during before_tool_call hook",
+                    wave.loop_permit,
+                )
+                .await;
+            trace_loop_error(wave.runtime.session_id().as_str(), wave.model_turn, &source);
+            DriverPreHookOutcome::Finish(Box::new(Err(AgentLoopError::new(
+                std::mem::take(events),
+                source,
+            ))))
+        }
+    }
+}
+
+async fn handle_driver_post_tool_outcome(
+    wave: &HookWaveContext<'_>,
+    post_outcome: Result<PostRuntimeToolOutcome, RuntimeError>,
+    events: &mut Vec<merry_core::RuntimeJournalEvent>,
+) -> Option<Result<AgentLoopResult, AgentLoopError>> {
+    match post_outcome {
+        Ok(PostRuntimeToolOutcome::Continue) => None,
+        Ok(PostRuntimeToolOutcome::StoppedByHook {
+            reason,
+            final_output,
+        }) => {
+            let settled = match wave
+                .runtime
+                .settle_pending_tool_calls_stopped_by_hook_with_active_permit(
+                    &reason,
+                    wave.loop_permit,
+                )
+                .await
+            {
+                Ok(settled) => settled,
+                Err(source) => {
+                    return Some(Err(AgentLoopError::new(std::mem::take(events), source)));
+                }
+            };
+            events.extend(settled);
+            Some(Ok(finish_hook_result(
+                wave.runtime,
+                AgentLoopStatus::StoppedByHook {
+                    hook_point: HookPoint::AfterToolCall,
+                    reason,
+                },
+                std::mem::take(events),
+                wave.model_turn,
+                final_output,
+            )
+            .await))
+        }
+        Err(RuntimeError::HookCancelled { .. }) => Some(Ok(finish_hook_result(
+            wave.runtime,
+            AgentLoopStatus::Cancelled {
+                diagnostic: crate::agent_loop::agent_loop_cancelled_diagnostic(),
+            },
+            std::mem::take(events),
+            wave.model_turn,
+            None,
+        )
+        .await)),
+        Err(source) => {
+            trace_loop_error(wave.runtime.session_id().as_str(), wave.model_turn, &source);
+            Some(Err(AgentLoopError::new(std::mem::take(events), source)))
         }
     }
 }

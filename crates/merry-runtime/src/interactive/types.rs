@@ -76,6 +76,14 @@ pub enum InteractiveError {
     ToolInvocationsPending { run_id: InteractiveRunId },
     #[error("interactive run {run_id:?} has no pending tool invocations")]
     NoPendingToolInvocations { run_id: InteractiveRunId },
+    #[error("interactive run {run_id:?} has an unresolved hook invocation")]
+    HookInvocationPending { run_id: InteractiveRunId },
+    #[error("interactive run {run_id:?} has no pending hook invocation")]
+    NoPendingHookInvocation { run_id: InteractiveRunId },
+    #[error(
+        "interactive run {run_id:?} emitted a hook invocation; consume it with the message protocol"
+    )]
+    HookInvocationRequiresMessageProtocol { run_id: InteractiveRunId },
     #[error(
         "interactive run {run_id:?} emitted {count} tool invocations; consume them with the message protocol"
     )]

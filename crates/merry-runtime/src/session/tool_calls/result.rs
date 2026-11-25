@@ -126,6 +126,16 @@ impl SessionState {
         Ok(events)
     }
 
+    pub(crate) fn replace_tool_result_output(
+        &mut self,
+        call_id: &ToolCallId,
+        output: ToolOutput,
+    ) -> Result<(), RuntimeError> {
+        let payload = self.prepare_tool_result_payload(call_id, output.into())?;
+        self.transcript
+            .replace_tool_result_payload(call_id, payload)
+    }
+
     pub(crate) fn submit_tool_execution_outcome(
         &mut self,
         call_id: &ToolCallId,
@@ -176,7 +186,7 @@ impl SessionState {
         Ok(events)
     }
 
-    fn validate_tool_execution_outcomes(
+    pub(crate) fn validate_tool_execution_outcomes(
         &self,
         outcomes: &[(ToolCallId, ToolExecutionOutcome)],
     ) -> Result<(), RuntimeError> {

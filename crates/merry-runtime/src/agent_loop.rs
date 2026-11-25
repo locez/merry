@@ -8,6 +8,7 @@
 mod config;
 mod driver;
 mod helpers;
+mod hook_step;
 mod producer;
 mod run;
 mod tool_flow;
@@ -32,5 +33,4 @@ pub(crate) use helpers::{
 pub(crate) use tool_flow::{
     PendingLoopToolCall, PendingLoopToolWave, StepOutcome, classify_step_events,
     execute_stream_runtime_batch, next_agent_run_batch_id, receive_and_publish_bridge_tool_results,
-    settle_cancelled_bridge_tool_calls, settle_failed_bridge_tool_calls,
 };

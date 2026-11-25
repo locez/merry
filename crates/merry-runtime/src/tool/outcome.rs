@@ -105,6 +105,10 @@ impl ToolExecutionOutcome {
         self.status
     }
 
+    pub(crate) fn replace_output(&mut self, output: ToolOutput) {
+        self.content = ToolResultContent::from(output);
+    }
+
     /// Borrows the exact full execution output.
     ///
     /// Runtime records this output before emitting the resolution event.

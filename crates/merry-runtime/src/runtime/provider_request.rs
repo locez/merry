@@ -1,7 +1,8 @@
 use crate::{
     CheckpointDecision, ContextBudget, ContextCompiler, DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
     ProjectRules, PromptProfile, ResolvedContextWindow, RuntimeError, SessionContextSnapshot,
-    SkillCatalog, TaskAnchor, decide_checkpoint, resolve_context_window,
+    SkillCatalog, TaskAnchor, bundled_model_context_window, decide_checkpoint,
+    resolve_context_window,
     session::{SessionState, TranscriptItemSnapshot},
     step::{StepInput, StepModelRequestParts, compile_step_model_request},
     token_estimate::{TokenEstimateScale, estimate_model_input_tokens},
@@ -286,7 +287,8 @@ pub(super) fn request_context_budget(
     context_window_override: Option<u64>,
     token_estimate_scale: TokenEstimateScale,
 ) -> Result<RequestContextBudget, crate::ContextError> {
-    let window = resolve_request_context_window(capabilities, context_window_override)?;
+    let window =
+        resolve_request_context_window(capabilities, request.model(), context_window_override)?;
     let output_reserve_tokens = request
         .generation()
         .max_output_tokens()
@@ -317,12 +319,13 @@ pub(super) fn request_context_budget(
 
 pub(super) fn resolve_request_context_window(
     capabilities: &merry_llm::ModelCapabilities,
+    model: &ModelName,
     context_window_override: Option<u64>,
 ) -> Result<ResolvedContextWindow, crate::ContextError> {
     resolve_context_window(
         context_window_override,
         capabilities.max_input_tokens(),
-        None,
+        bundled_model_context_window(model.as_str()),
         DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
     )
 }

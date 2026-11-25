@@ -511,6 +511,25 @@ impl Transcript {
         Ok(id)
     }
 
+    pub(crate) fn replace_tool_result_payload(
+        &mut self,
+        call_id: &ToolCallId,
+        new_payload: ToolResultPayload,
+    ) -> Result<(), RuntimeError> {
+        let Some(&index) = self.tool_result_index.get(call_id) else {
+            return Err(RuntimeError::TranscriptToolCallMissing {
+                call_id: call_id.clone(),
+            });
+        };
+        let Some(TranscriptItem::ToolResult { payload, .. }) = self.items.get_mut(index) else {
+            return Err(RuntimeError::TranscriptToolCallMissing {
+                call_id: call_id.clone(),
+            });
+        };
+        *payload = new_payload;
+        Ok(())
+    }
+
     pub(crate) fn hide_tool_call(&mut self, call_id: &ToolCallId) -> Result<(), RuntimeError> {
         let Some(prompt_projection) = self.items.iter_mut().find_map(|item| match item {
             TranscriptItem::ToolCall {

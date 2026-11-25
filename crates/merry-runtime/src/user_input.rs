@@ -218,7 +218,7 @@ impl UserMessageInput {
 pub struct StepInput {
     user_messages: Vec<UserMessageInput>,
     user_texts: Vec<String>,
-    history: StepInputHistory,
+    history_message_count: usize,
 }
 
 impl StepInput {
@@ -255,21 +255,21 @@ impl StepInput {
             .iter()
             .map(|message| message.text().to_owned())
             .collect();
+        let history_message_count = user_messages.len();
 
         Ok(Self {
             user_messages,
             user_texts,
-            history: StepInputHistory::RecordUser,
+            history_message_count,
         })
     }
 
-    #[allow(dead_code)]
     pub(crate) fn loop_control_text(text: &str) -> Result<Self, RuntimeError> {
         let message = UserMessageInput::text_only(text)?;
         Ok(Self {
             user_texts: vec![message.text().to_owned()],
             user_messages: vec![message],
-            history: StepInputHistory::ControlOnly,
+            history_message_count: 0,
         })
     }
 
@@ -277,8 +277,16 @@ impl StepInput {
         Self {
             user_messages: Vec::new(),
             user_texts: Vec::new(),
-            history: StepInputHistory::ControlOnly,
+            history_message_count: 0,
         }
+    }
+
+    /// Appends a dynamic control steering note sent to the model without recording it as user history.
+    pub(crate) fn append_control_note(&mut self, text: &str) -> Result<(), RuntimeError> {
+        let message = UserMessageInput::text_only(text)?;
+        self.user_texts.push(message.text().to_owned());
+        self.user_messages.push(message);
+        Ok(())
     }
 
     /// Borrows the first user text for this step.
@@ -307,22 +315,12 @@ impl StepInput {
     }
 
     pub(crate) fn user_messages_for_history(&self) -> &[UserMessageInput] {
-        if self.history == StepInputHistory::RecordUser {
-            &self.user_messages
-        } else {
-            &[]
-        }
+        &self.user_messages[..self.history_message_count]
     }
 
     pub(crate) fn memory_activation_query(&self) -> Option<String> {
         (!self.user_texts.is_empty()).then(|| self.user_texts.join("\n\n"))
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StepInputHistory {
-    RecordUser,
-    ControlOnly,
 }
 
 /// Normalizes CRLF (`\r\n`) and bare CR (`\r`) line breaks into `\n`.

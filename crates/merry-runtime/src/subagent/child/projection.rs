@@ -23,7 +23,7 @@ pub(in crate::subagent) struct ChildLoopProjection {
 impl ChildLoopProjection {
     pub(super) async fn from_result(runtime: &Runtime, result: &AgentLoopResult) -> Self {
         let explicit_result = match result.status() {
-            AgentLoopStatus::Completed => result
+            AgentLoopStatus::Completed | AgentLoopStatus::StoppedByHook { .. } => result
                 .final_output()
                 .and_then(SubagentResultView::from_conclusion),
             AgentLoopStatus::Failed { .. }
@@ -77,6 +77,11 @@ pub(in crate::subagent) fn apply_loop_result(
         AgentLoopStatus::Completed => {
             agent.status = SubagentStatusLabel::Completed;
             agent.summary = "child completed".to_owned();
+            agent.output_paths.clear();
+        }
+        AgentLoopStatus::StoppedByHook { hook_point, reason } => {
+            agent.status = SubagentStatusLabel::Completed;
+            agent.summary = format!("child stopped by {hook_point} hook: {reason}");
             agent.output_paths.clear();
         }
         AgentLoopStatus::Failed { diagnostic } => {

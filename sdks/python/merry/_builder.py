@@ -11,12 +11,14 @@ from pydantic import BaseModel
 from . import _merry
 from ._config import (
     Anthropic,
+    CompactionConfig,
     GenerationConfig,
     HistoryRetention,
     OpenAICompatible,
     PathInput,
     PromptProfile,
     Provider,
+    StructuredOutputRetryPolicy,
     WorkspaceConfig,
     require_positive_int,
 )
@@ -27,6 +29,7 @@ from ._errors import (
     _decode_native_error,
     builder_consumed_error,
 )
+from ._hooks import Hooks
 from ._json import dump_json
 from ._tools import Tool, ToolOutputValue, ToolRegistration
 
@@ -47,6 +50,7 @@ class AgentBuilder:
             raise _decode_native_error(error) from error
         self._session_id = resolved_session_id
         self._tools: dict[str, ToolRegistration] = {}
+        self._hooks: Hooks | None = None
         self._provider_configured = False
         self._consumed = False
 
@@ -61,12 +65,14 @@ class AgentBuilder:
                     provider.model,
                     provider.base_url,
                     provider.protocol,
+                    provider.context_window_tokens,
                 )
             elif isinstance(provider, Anthropic):
                 self._native.with_anthropic(
                     provider.api_key,
                     provider.model,
                     provider.base_url,
+                    provider.context_window_tokens,
                 )
             else:
                 raise TypeError("provider must be OpenAICompatible or Anthropic")
@@ -180,6 +186,45 @@ class AgentBuilder:
             self._handle_native_error(error)
         return self
 
+    def structured_output_retry_policy(
+        self, policy: StructuredOutputRetryPolicy
+    ) -> Self:
+        """Set retries allowed when structured final-output decoding fails."""
+
+        self._ensure_open()
+        if not isinstance(policy, StructuredOutputRetryPolicy):
+            raise TypeError(
+                "structured_output_retry_policy must be a StructuredOutputRetryPolicy"
+            )
+        try:
+            self._native.with_structured_output_retry_policy(policy.max_retries)
+        except NativeMerryError as error:
+            self._handle_native_error(error)
+        return self
+
+    def context_window_tokens(self, tokens: int) -> Self:
+        """Set an explicit context-window size in tokens for this session."""
+
+        self._ensure_open()
+        require_positive_int("context_window_tokens", tokens)
+        try:
+            self._native.with_context_window_tokens(tokens)
+        except NativeMerryError as error:
+            self._handle_native_error(error)
+        return self
+
+    def compaction(self, config: CompactionConfig) -> Self:
+        """Configure automatic checkpoint compaction policy for this session."""
+
+        self._ensure_open()
+        if not isinstance(config, CompactionConfig):
+            raise TypeError("compaction must be a CompactionConfig")
+        try:
+            self._native.with_compaction(config.enabled, config.reasoning_effort)
+        except NativeMerryError as error:
+            self._handle_native_error(error)
+        return self
+
     def event_buffer_size(self, value: int) -> Self:
         """Set the bounded runtime event buffer size."""
 
@@ -187,6 +232,26 @@ class AgentBuilder:
         require_positive_int("event_buffer_size", value)
         try:
             self._native.with_event_buffer_size(value)
+        except NativeMerryError as error:
+            self._handle_native_error(error)
+        return self
+
+    def hooks(self, hooks: Hooks) -> Self:
+        """Install lifecycle hooks on this agent.
+
+        Only the subscribed hook points (and tool filters) are registered with
+        Rust; unregistered points emit no bridge messages.
+        """
+
+        self._ensure_open()
+        if not isinstance(hooks, Hooks):
+            raise TypeError("hooks must be a Hooks instance")
+        snapshot = hooks.copy()
+        self._hooks = None if snapshot.is_empty() else snapshot
+        try:
+            self._native.with_hook_subscriptions(
+                dump_json(snapshot.subscriptions_wire(), "hook subscriptions")
+            )
         except NativeMerryError as error:
             self._handle_native_error(error)
         return self
@@ -275,7 +340,11 @@ class AgentBuilder:
         except NativeMerryError as error:
             self._handle_native_error(error)
         self._consumed = True
-        return Agent._from_native(native_agent, tools=tuple(self._tools.values()))
+        return Agent._from_native(
+            native_agent,
+            tools=tuple(self._tools.values()),
+            hooks=self._hooks,
+        )
 
     async def resume(self, path: PathInput | None = None) -> Agent:
         """Consume this builder and resume from its configured or explicit store."""
@@ -300,7 +369,11 @@ class AgentBuilder:
             native_agent = await awaitable
         except NativeMerryError as error:
             self._handle_native_error(error)
-        return Agent._from_native(native_agent, tools=tuple(self._tools.values()))
+        return Agent._from_native(
+            native_agent,
+            tools=tuple(self._tools.values()),
+            hooks=self._hooks,
+        )
 
     def _register_tool(self, tool_obj: ToolRegistration) -> None:
         if tool_obj.name in self._tools:

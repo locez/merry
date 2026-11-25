@@ -59,6 +59,15 @@ impl Runtime {
         Ok(events)
     }
 
+    pub(crate) async fn validate_tool_execution_outcomes_with_active_permit(
+        &self,
+        outcomes: &[(ToolCallId, crate::ToolExecutionOutcome)],
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<(), RuntimeError> {
+        let session = self.inner.session.lock().await;
+        session.validate_tool_execution_outcomes(outcomes)
+    }
+
     pub(crate) async fn submit_tool_execution_outcomes_with_active_permit(
         &self,
         outcomes: Vec<(ToolCallId, crate::ToolExecutionOutcome)>,
@@ -173,6 +182,115 @@ impl Runtime {
         };
         self.inner.commit_journal_events(&events).await;
         Ok(events)
+    }
+
+    pub(crate) async fn replace_pending_tool_call_arguments_with_active_permit(
+        &self,
+        call_id: &ToolCallId,
+        arguments: merry_core::ToolCallArguments,
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<PendingToolCall, RuntimeError> {
+        let mut session = self.inner.session.lock().await;
+        session.replace_pending_tool_call_arguments(call_id, arguments)
+    }
+
+    pub(crate) async fn replace_tool_result_output_with_active_permit(
+        &self,
+        call_id: &ToolCallId,
+        output: ToolOutput,
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<(), RuntimeError> {
+        {
+            let mut session = self.inner.session.lock().await;
+            session.replace_tool_result_output(call_id, output)?;
+        }
+        self.inner.refresh_resume_savepoint().await;
+        Ok(())
+    }
+
+    pub(crate) async fn submit_hook_denied_tool_call_with_active_permit(
+        &self,
+        call: &PendingToolCall,
+        message: &str,
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+        let diagnostic = diagnostic_from_text("hook_tool_denied", message);
+        let content = ToolOutput::json(
+            serde_json::json!({
+                "ok": false,
+                "tool": call.name().as_str(),
+                "error": {
+                    "code": "hook_tool_denied",
+                    "message": message,
+                }
+            })
+            .to_string(),
+        );
+        let events = {
+            let mut session = self.inner.session.lock().await;
+            session.submit_tool_execution_outcome(
+                call.id(),
+                ToolCallResultStatus::Failed,
+                content,
+                Some(diagnostic),
+                None,
+            )?
+        };
+        self.inner.commit_journal_events(&events).await;
+        Ok(events)
+    }
+
+    pub(crate) async fn submit_hook_short_circuit_tool_call_with_active_permit(
+        &self,
+        call_id: &ToolCallId,
+        output: ToolOutput,
+        _active_permit: &ActiveStepPermit,
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+        let events = {
+            let mut session = self.inner.session.lock().await;
+            session.submit_tool_execution_outcome(
+                call_id,
+                ToolCallResultStatus::Succeeded,
+                output,
+                None,
+                None,
+            )?
+        };
+        self.inner.commit_journal_events(&events).await;
+        Ok(events)
+    }
+
+    /// Durably settles all remaining pending tool calls when a hook stops the turn,
+    /// keeping the session transcript valid for subsequent turns and `resume`.
+    pub(crate) async fn settle_pending_tool_calls_stopped_by_hook_with_active_permit(
+        &self,
+        reason: &str,
+        active_permit: &ActiveStepPermit,
+    ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+        let pending = {
+            let session = self.inner.session.lock().await;
+            session.pending_tool_calls()
+        };
+        let mut all_events = Vec::new();
+        for call in pending {
+            let diagnostic = diagnostic_from_text("hook_stopped_turn", reason);
+            let mut events = {
+                let mut session = self.inner.session.lock().await;
+                session.submit_tool_execution_outcome(
+                    call.id(),
+                    ToolCallResultStatus::Failed,
+                    ToolOutput::text(format!(
+                        "Tool execution skipped because hook stopped turn: {reason}"
+                    )),
+                    Some(diagnostic),
+                    None,
+                )?
+            };
+            self.inner.commit_journal_events(&events).await;
+            all_events.append(&mut events);
+        }
+        let _ = active_permit;
+        Ok(all_events)
     }
 
     /// Converts an executor infrastructure failure into a durable failed

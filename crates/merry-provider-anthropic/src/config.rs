@@ -108,6 +108,13 @@ impl AnthropicProviderConfig {
         self.capabilities = capabilities;
         self
     }
+
+    /// Returns a config declaring the provider/model context window size in tokens.
+    #[must_use]
+    pub fn with_context_window_tokens(mut self, tokens: NonZeroU64) -> Self {
+        self.capabilities = self.capabilities.with_max_input_tokens(tokens);
+        self
+    }
 }
 
 impl fmt::Debug for AnthropicProviderConfig {

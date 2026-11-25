@@ -80,6 +80,13 @@ impl ModelCapabilities {
     pub fn max_output_tokens(&self) -> Option<u64> {
         self.max_output_tokens
     }
+
+    /// Returns a copy with an explicit provider-reported input token limit.
+    #[must_use]
+    pub fn with_max_input_tokens(mut self, max_input_tokens: std::num::NonZeroU64) -> Self {
+        self.max_input_tokens = Some(max_input_tokens.get());
+        self
+    }
 }
 
 impl Default for ModelCapabilities {

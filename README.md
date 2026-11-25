@@ -156,7 +156,7 @@ let agent = AgentBuilder::new(SessionId::new("example")?)
 let result = agent.run("Inspect the repository and summarize key modules.").await?;
 ```
 
-Declare typed async tools with `#[merry::tool]` and register them explicitly via `AgentBuilder::tool(...)`.
+Declare typed async tools with `#[merry::tool]`, configure context windows and compaction on providers or `AgentBuilder`, and intercept model or tool turns with `HookRegistry`. See [docs.rs/merry](https://docs.rs/merry) and [`crates/merry/src/lib.rs`](crates/merry/src/lib.rs).
 
 ### Python ([`merry-agent`](https://pypi.org/project/merry-agent/))
 
@@ -195,7 +195,7 @@ async with agent.stream("Check order A123.") as run:
     result = await run.result()
 ```
 
-Supports direct `Agent(...)` / `await Agent.resume(...)` construction, `@merry.tool` decorators (multi-parameter signatures or single `BaseModel` input), concurrent `parallel_safe` tool batches, structured outputs, and long-lived interactive sessions (`async with agent.interactive() as session:`). See [`sdks/python/README.md`](sdks/python/README.md) and [`sdks/python/CAPABILITY_MATRIX.md`](sdks/python/CAPABILITY_MATRIX.md).
+Supports `Agent(...)` / `await Agent.resume(...)`, `@merry.tool` decorators, context window and compaction config, lifecycle hooks (`merry.Hooks`), structured outputs, and interactive sessions (`agent.interactive()`). See [`sdks/python/README.md`](sdks/python/README.md) and [`sdks/python/CAPABILITY_MATRIX.md`](sdks/python/CAPABILITY_MATRIX.md).
 
 ---
 

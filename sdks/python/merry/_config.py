@@ -46,6 +46,7 @@ class OpenAICompatible:
     model: str
     base_url: str | None = None
     protocol: Literal["responses", "chat_completions"] = "responses"
+    context_window_tokens: int | None = None
 
     def __post_init__(self) -> None:
         _require_text("api_key", self.api_key)
@@ -54,13 +55,16 @@ class OpenAICompatible:
             _require_text("base_url", self.base_url)
         if self.protocol not in {"responses", "chat_completions"}:
             raise ValueError("protocol must be 'responses' or 'chat_completions'")
+        if self.context_window_tokens is not None:
+            require_positive_int("context_window_tokens", self.context_window_tokens)
 
     def __repr__(self) -> str:
         base_url = None if self.base_url is None else "<configured>"
         return (
             "OpenAICompatible(api_key='<redacted>', "
             f"model={self.model!r}, base_url={base_url!r}, "
-            f"protocol={self.protocol!r})"
+            f"protocol={self.protocol!r}, "
+            f"context_window_tokens={self.context_window_tokens!r})"
         )
 
 
@@ -71,18 +75,22 @@ class Anthropic:
     api_key: str
     model: str
     base_url: str | None = None
+    context_window_tokens: int | None = None
 
     def __post_init__(self) -> None:
         _require_text("api_key", self.api_key)
         _require_text("model", self.model)
         if self.base_url is not None:
             _require_text("base_url", self.base_url)
+        if self.context_window_tokens is not None:
+            require_positive_int("context_window_tokens", self.context_window_tokens)
 
     def __repr__(self) -> str:
         base_url = None if self.base_url is None else "<configured>"
         return (
             "Anthropic(api_key='<redacted>', "
-            f"model={self.model!r}, base_url={base_url!r})"
+            f"model={self.model!r}, base_url={base_url!r}, "
+            f"context_window_tokens={self.context_window_tokens!r})"
         )
 
 
@@ -339,6 +347,101 @@ class HistoryRetention:
         """Prune compacted history from hot memory and live journal.jsonl."""
 
         return cls(mode=HistoryRetentionMode.CONTEXT_ONLY, export_markdown=False)
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionConfig:
+    """Runtime policy for automatic and manual checkpoint compaction."""
+
+    enabled: bool = True
+    reasoning_effort: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.enabled) is not bool:
+            raise TypeError("CompactionConfig.enabled must be a boolean")
+        if self.reasoning_effort is not None:
+            _require_text("reasoning_effort", self.reasoning_effort)
+
+    @classmethod
+    def disabled(cls) -> CompactionConfig:
+        """Disable automatic checkpoint compaction."""
+
+        return cls(enabled=False)
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredOutputRetryPolicy:
+    """Retry policy for structured final-output decoding failures."""
+
+    max_retries: int = 0
+
+    def __post_init__(self) -> None:
+        if type(self.max_retries) is not int:
+            raise TypeError("max_retries must be an integer")
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
+
+    @classmethod
+    def disabled(cls) -> StructuredOutputRetryPolicy:
+        """Disable structured-output retries after the first attempt."""
+
+        return cls(max_retries=0)
+
+
+class _UnsetSentinel:
+    """Sentinel type distinguishing an omitted optional update from explicit None."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET = _UnsetSentinel()
+
+
+@dataclass(frozen=True, slots=True)
+class InteractiveSettingsUpdate:
+    """Settings applied by an interactive session at the next model-request boundary.
+
+    Fields left as `UNSET` remain unchanged. Setting `context_window_tokens=None`
+    explicitly clears an existing session override so resolution falls back to
+    provider capabilities or defaults.
+    """
+
+    context_window_tokens: int | None | _UnsetSentinel = UNSET
+    generation: GenerationConfig | None = None
+    compaction: CompactionConfig | None = None
+    max_parallel_tool_calls: int | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.context_window_tokens, _UnsetSentinel)
+            and self.context_window_tokens is not None
+        ):
+            require_positive_int("context_window_tokens", self.context_window_tokens)
+        if self.generation is not None and not isinstance(
+            self.generation, GenerationConfig
+        ):
+            raise TypeError("generation must be a GenerationConfig or None")
+        if self.compaction is not None and not isinstance(
+            self.compaction, CompactionConfig
+        ):
+            raise TypeError("compaction must be a CompactionConfig or None")
+        if self.max_parallel_tool_calls is not None:
+            require_positive_int(
+                "max_parallel_tool_calls", self.max_parallel_tool_calls
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionOutcome:
+    """Summary returned by a manual interactive compaction that created a checkpoint."""
+
+    checkpoint_id: str
+    covered_model_turn_count: int
+    covered_history_item_count: int
+    retained_history_item_count: int
 
 
 Provider: TypeAlias = OpenAICompatible | Anthropic

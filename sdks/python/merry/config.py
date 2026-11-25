@@ -1,10 +1,14 @@
 """Public configuration types for the Merry Python SDK."""
 
 from ._config import (
+    UNSET,
     Anthropic,
+    CompactionConfig,
+    CompactionOutcome,
     GenerationConfig,
     HistoryRetention,
     HistoryRetentionMode,
+    InteractiveSettingsUpdate,
     OpenAICompatible,
     ParallelToolCalls,
     PatchConfig,
@@ -13,15 +17,20 @@ from ._config import (
     PromptProfile,
     Provider,
     ServiceTier,
+    StructuredOutputRetryPolicy,
     WorkspaceConfig,
     WorkspaceLimits,
 )
 
 __all__ = [
+    "UNSET",
     "Anthropic",
+    "CompactionConfig",
+    "CompactionOutcome",
     "GenerationConfig",
     "HistoryRetention",
     "HistoryRetentionMode",
+    "InteractiveSettingsUpdate",
     "OpenAICompatible",
     "ParallelToolCalls",
     "PatchConfig",
@@ -30,6 +39,7 @@ __all__ = [
     "PromptProfile",
     "Provider",
     "ServiceTier",
+    "StructuredOutputRetryPolicy",
     "WorkspaceConfig",
     "WorkspaceLimits",
 ]

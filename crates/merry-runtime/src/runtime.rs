@@ -1000,6 +1000,38 @@ impl Runtime {
     ) {
         *self.inner.context_window_tokens.write().await = context_window_tokens;
     }
+
+    pub(crate) fn native_hook_handler(&self) -> Option<&Arc<dyn crate::RuntimeHookHandler>> {
+        self.inner.hook_handler.as_ref()
+    }
+
+    pub(crate) fn bridge_hook_subscriptions(&self) -> &crate::HookSubscriptions {
+        &self.inner.bridge_hook_subscriptions
+    }
+
+    pub(crate) fn validate_registered_tool_input(
+        &self,
+        call: &merry_core::PendingToolCall,
+    ) -> Option<Result<(), crate::tool_input_validation::ToolInputValidationError>> {
+        self.inner.tool_registry.validate_tool_input(call)
+    }
+
+    pub(crate) async fn compact_context_for_hook_with_active_permit(
+        &self,
+        cancellation_token: tokio_util::sync::CancellationToken,
+        active_permit: &ActiveStepPermit,
+    ) -> Result<Option<CompactionOutcome>, RuntimeError> {
+        let policy = self.inner.automatic_compaction.read().await.policy();
+        auto_compaction::compact_context_once_inner(
+            &self.inner,
+            policy,
+            None,
+            cancellation_token,
+            active_permit.clone(),
+            None,
+        )
+        .await
+    }
 }
 #[cfg(test)]
 mod tests;

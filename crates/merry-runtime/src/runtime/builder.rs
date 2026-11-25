@@ -28,7 +28,7 @@ use merry_core::{SessionId, ToolName};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use std::{
     collections::{BTreeMap, VecDeque},
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     path::PathBuf,
     sync::{
         Arc,
@@ -54,6 +54,7 @@ pub struct RuntimeBuilder {
     model_retry_policy: ModelRetryPolicy,
     automatic_compaction: CompactionConfig,
     history_retention: HistoryRetention,
+    context_window_tokens: Option<NonZeroU64>,
     capabilities: RuntimeCapabilities,
     prompt_profile: PromptProfile,
     progress_commentary: bool,
@@ -86,6 +87,8 @@ pub struct RuntimeBuilder {
     loaded_session: Option<SessionState>,
     durable_memory: Option<Arc<crate::DurableMemory>>,
     memory_maintenance: bool,
+    hook_handler: Option<Arc<dyn crate::RuntimeHookHandler>>,
+    bridge_hook_subscriptions: crate::HookSubscriptions,
 }
 
 impl RuntimeBuilder {
@@ -101,6 +104,7 @@ impl RuntimeBuilder {
             model_retry_policy: ModelRetryPolicy::default(),
             automatic_compaction: CompactionConfig::default(),
             history_retention: HistoryRetention::default(),
+            context_window_tokens: None,
             capabilities: RuntimeCapabilities::default(),
             prompt_profile: PromptProfile::default(),
             progress_commentary: false,
@@ -133,6 +137,8 @@ impl RuntimeBuilder {
             loaded_session: None,
             durable_memory: None,
             memory_maintenance: false,
+            hook_handler: None,
+            bridge_hook_subscriptions: crate::HookSubscriptions::none(),
         }
     }
 
@@ -244,6 +250,29 @@ impl RuntimeBuilder {
     #[must_use]
     pub fn automatic_compaction(mut self, config: CompactionConfig) -> Self {
         self.automatic_compaction = config;
+        self
+    }
+
+    /// Sets an explicit context-window override in tokens for budget and compaction calculations.
+    #[must_use]
+    pub fn context_window_tokens(mut self, tokens: NonZeroU64) -> Self {
+        self.context_window_tokens = Some(tokens);
+        self
+    }
+
+    /// Installs an in-process Rust lifecycle hook handler.
+    #[must_use]
+    pub fn hooks(mut self, handler: Arc<dyn crate::RuntimeHookHandler>) -> Self {
+        self.hook_handler = Some(handler);
+        self
+    }
+
+    /// Declares which lifecycle hook points should be bridged to the embedding host.
+    ///
+    /// Hook points not present in `subscriptions` are never sent over the stream.
+    #[must_use]
+    pub fn bridge_hook_subscriptions(mut self, subscriptions: crate::HookSubscriptions) -> Self {
+        self.bridge_hook_subscriptions = subscriptions;
         self
     }
 
@@ -809,7 +838,7 @@ impl RuntimeBuilder {
                 role_model_overrides: RwLock::new(std::collections::BTreeMap::new()),
                 automatic_compaction: RwLock::new(self.automatic_compaction),
                 history_retention: self.history_retention,
-                context_window_tokens: RwLock::new(None),
+                context_window_tokens: RwLock::new(self.context_window_tokens),
                 capabilities: self.capabilities,
                 prompt_profile: self.prompt_profile,
                 progress_commentary: self.progress_commentary,
@@ -840,6 +869,8 @@ impl RuntimeBuilder {
                 durable_memory: self.durable_memory,
                 memory_maintenance: self.memory_maintenance,
                 memory_context,
+                hook_handler: self.hook_handler,
+                bridge_hook_subscriptions: self.bridge_hook_subscriptions,
             }),
         })
     }

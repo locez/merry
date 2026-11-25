@@ -36,6 +36,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(test_agent_with_pending_response, module)?)?;
     module.add_function(wrap_pyfunction!(test_agent_with_scripted_turns, module)?)?;
     module.add_function(wrap_pyfunction!(test_agent_echoing_request, module)?)?;
+    module.add_function(wrap_pyfunction!(test_agent_with_context_and_hooks, module)?)?;
     Ok(())
 }
 
@@ -251,6 +252,113 @@ fn test_agent_with_scripted_turns(
     }
     let agent = builder.build().map_err(error::agent_build_error_to_py)?;
     Ok(PyAgent::new(agent, session_store_path))
+}
+
+// Keep test-only PyO3 factory scalar-only to mirror PyAgentBuilder's ABI.
+#[allow(clippy::too_many_arguments)]
+#[pyfunction]
+#[pyo3(signature = (
+    session_id,
+    turns_json,
+    tool_names,
+    provider_context_window_tokens=None,
+    explicit_context_window_tokens=None,
+    hook_subscriptions_json=None,
+    max_model_turns=None,
+))]
+fn test_agent_with_context_and_hooks(
+    session_id: String,
+    turns_json: String,
+    tool_names: Vec<String>,
+    provider_context_window_tokens: Option<u64>,
+    explicit_context_window_tokens: Option<u64>,
+    hook_subscriptions_json: Option<String>,
+    max_model_turns: Option<usize>,
+) -> PyResult<PyAgent> {
+    let session_id = SessionId::new(&session_id)
+        .map_err(|error| error::config_message_to_py(error.to_string()))?;
+    let model_name = ModelName::new("fake-model")
+        .map_err(|error| error::config_message_to_py(error.to_string()))?;
+    let turn_specs = serde_json::from_str::<Vec<ScriptedTurnSpec>>(&turns_json)
+        .map_err(|error| error::protocol_message_to_py(error.to_string()))?;
+
+    let mut turns = Vec::with_capacity(turn_specs.len());
+    for spec in turn_specs {
+        let usage = Some(merry_core::ModelUsage::new(100, 25));
+        let turn = match spec {
+            ScriptedTurnSpec::Text { text } => vec![Ok(ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text(&text)],
+                    FinishReason::Stop,
+                    usage,
+                ),
+            })],
+            ScriptedTurnSpec::ToolCalls { calls } => {
+                let mut outputs = Vec::with_capacity(calls.len());
+                for item in calls {
+                    let tool_name = ToolName::new(&item.name)
+                        .map_err(|error| error::config_message_to_py(error.to_string()))?;
+                    let call_id = ModelToolCallId::new(&item.id)
+                        .map_err(|error| error::protocol_message_to_py(error.to_string()))?;
+                    let arguments = ToolArguments::try_from(item.arguments)
+                        .map_err(|error| error::protocol_message_to_py(error.to_string()))?;
+                    outputs.push(ModelOutput::tool_call(ModelToolCall::new(
+                        call_id, tool_name, arguments,
+                    )));
+                }
+                vec![Ok(ModelEvent::Completed {
+                    response: ModelResponse::new(outputs, FinishReason::ToolCalls, usage),
+                })]
+            }
+        };
+        turns.push(turn);
+    }
+
+    let mut capabilities = ModelCapabilities::new(true, true, true, true, None, None)
+        .map_err(|error| error::config_message_to_py(error.to_string()))?;
+    if let Some(tokens) = provider_context_window_tokens {
+        let tokens = std::num::NonZeroU64::new(tokens).ok_or_else(|| {
+            error::config_message_to_py("provider_context_window_tokens must be greater than zero")
+        })?;
+        capabilities = capabilities.with_max_input_tokens(tokens);
+    }
+    let provider = Arc::new(FakeModelProvider::with_turns_and_capabilities(
+        turns,
+        capabilities,
+    ));
+    let mut builder = AgentBuilder::new(session_id).model_provider(provider, model_name);
+    if let Some(tokens) = explicit_context_window_tokens {
+        let tokens = std::num::NonZeroU64::new(tokens).ok_or_else(|| {
+            error::config_message_to_py("explicit_context_window_tokens must be greater than zero")
+        })?;
+        builder = builder.context_window_tokens(tokens);
+    }
+    if let Some(turns_limit) = max_model_turns {
+        let loop_cfg = merry::AgentLoopConfig::new(turns_limit)
+            .map_err(|error| error::config_message_to_py(error.to_string()))?;
+        builder = builder.loop_config(loop_cfg);
+    }
+    if let Some(subs_json) = hook_subscriptions_json {
+        let subs = crate::protocol::parse_hook_subscriptions(&subs_json)
+            .map_err(error::config_message_to_py)?;
+        if !subs.is_empty() {
+            builder = builder.bridge_hook_subscriptions(subs);
+        }
+    }
+    for raw_name in tool_names {
+        let tool_name = ToolName::new(&raw_name)
+            .map_err(|error| error::config_message_to_py(error.to_string()))?;
+        let spec = permissive_bridge_tool(tool_name)?;
+        builder = builder
+            .bridge_tool(
+                spec.name().clone(),
+                spec.description(),
+                spec.input_schema().clone(),
+            )
+            .map_err(error::agent_build_error_to_py)?;
+    }
+    let agent = builder.build().map_err(error::agent_build_error_to_py)?;
+    Ok(PyAgent::new(agent, None))
 }
 
 // Keep the test-only PyO3 factory scalar-only to mirror PyAgentBuilder's ABI.

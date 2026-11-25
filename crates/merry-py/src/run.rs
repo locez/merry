@@ -137,6 +137,76 @@ impl PyAgentRun {
         })
     }
 
+    fn submit_hook_decision<'py>(
+        &self,
+        py: Python<'py>,
+        invocation_id: String,
+        decision_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let invocation_id = protocol::parse_hook_invocation_id(&invocation_id)
+            .map_err(error::protocol_message_to_py)?;
+        let decision =
+            protocol::parse_hook_decision(&decision_json).map_err(error::protocol_message_to_py)?;
+        let state = Arc::clone(&self.inner);
+        let cancellation = self.cancellation.clone();
+        let lease = RunLease::take(state).map_err(error::run_state_message_to_py)?;
+        future_into_py(py, async move {
+            let mut lease = lease;
+            let outcome = {
+                let run = lease.run_mut().map_err(error::run_state_message_to_py)?;
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        run.cancel().await.map_err(error::agent_error_to_py)?;
+                        Ok(false)
+                    }
+                    submitted = run.submit_hook_decision(&invocation_id, decision) => {
+                        submitted.map(|()| true).map_err(error::agent_error_to_py)
+                    }
+                }
+            };
+            lease.restore().map_err(error::run_state_message_to_py)?;
+            if !outcome? {
+                return Err(error::cancelled_operation_to_py());
+            }
+            Ok(())
+        })
+    }
+
+    fn fail_hook_invocation<'py>(
+        &self,
+        py: Python<'py>,
+        invocation_id: String,
+        message: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let invocation_id = protocol::parse_hook_invocation_id(&invocation_id)
+            .map_err(error::protocol_message_to_py)?;
+        let state = Arc::clone(&self.inner);
+        let cancellation = self.cancellation.clone();
+        let lease = RunLease::take(state).map_err(error::run_state_message_to_py)?;
+        future_into_py(py, async move {
+            let mut lease = lease;
+            let outcome = {
+                let run = lease.run_mut().map_err(error::run_state_message_to_py)?;
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        run.cancel().await.map_err(error::agent_error_to_py)?;
+                        Ok(false)
+                    }
+                    failed = run.fail_hook_invocation(&invocation_id, message) => {
+                        failed.map(|()| true).map_err(error::agent_error_to_py)
+                    }
+                }
+            };
+            lease.restore().map_err(error::run_state_message_to_py)?;
+            if !outcome? {
+                return Err(error::cancelled_operation_to_py());
+            }
+            Ok(())
+        })
+    }
+
     fn result<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let state = Arc::clone(&self.inner);
         let cancellation = self.cancellation.clone();

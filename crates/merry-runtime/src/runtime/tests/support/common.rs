@@ -160,6 +160,8 @@ pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
         durable_memory: None,
         memory_maintenance: false,
         memory_context: None,
+        hook_handler: None,
+        bridge_hook_subscriptions: crate::HookSubscriptions::none(),
     }
 }
 

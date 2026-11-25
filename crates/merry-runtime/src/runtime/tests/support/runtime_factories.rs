@@ -82,6 +82,8 @@ where
             durable_memory: None,
             memory_maintenance: false,
             memory_context: None,
+            hook_handler: None,
+            bridge_hook_subscriptions: crate::HookSubscriptions::none(),
         }),
     }
 }
@@ -145,6 +147,8 @@ pub(in crate::runtime::tests) fn runtime_with_provider(
             durable_memory: None,
             memory_maintenance: false,
             memory_context: None,
+            hook_handler: None,
+            bridge_hook_subscriptions: crate::HookSubscriptions::none(),
         }),
     }
 }
@@ -211,6 +215,8 @@ where
             durable_memory: None,
             memory_maintenance: false,
             memory_context: None,
+            hook_handler: None,
+            bridge_hook_subscriptions: crate::HookSubscriptions::none(),
         }),
     }
 }

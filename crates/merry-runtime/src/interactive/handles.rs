@@ -4,7 +4,11 @@ use super::{
     types::{InputRecord, InputRecords},
 };
 use crate::bridge::BridgeToolResultCommand;
-use crate::{CompactionOutcome, FileSessionStore, UserMessageInput};
+use crate::hooks::bridge::HookDecisionCommand;
+use crate::{
+    CompactionOutcome, FileSessionStore, HookDecision, HookInvocation, HookInvocationId,
+    UserMessageInput,
+};
 use merry_core::{PendingToolCallBatch, PlanId, RuntimeEvent, ToolCallBatchId, ToolCallId};
 use std::sync::{
     Arc,
@@ -40,10 +44,15 @@ pub struct InteractiveRunEventStream {
     unread_message: Option<InteractiveRunMessage>,
     bridge_resolution_epoch: Arc<AtomicU64>,
     observed_bridge_resolution_epoch: u64,
+    hook_sender: mpsc::Sender<HookDecisionCommand>,
+    pending_hook_invocation: Option<HookInvocation>,
+    hook_resolution_epoch: Arc<AtomicU64>,
+    observed_hook_resolution_epoch: u64,
     closed_event_observed: bool,
 }
 
 impl InteractiveRunEventStream {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         run_id: InteractiveRunId,
         inner: ReceiverStream<InteractiveRunMessage>,
@@ -52,8 +61,11 @@ impl InteractiveRunEventStream {
         producer_handle: JoinHandle<Result<(), InteractiveError>>,
         bridge_sender: mpsc::Sender<BridgeToolResultCommand>,
         bridge_resolution_epoch: Arc<AtomicU64>,
+        hook_sender: mpsc::Sender<HookDecisionCommand>,
+        hook_resolution_epoch: Arc<AtomicU64>,
     ) -> Self {
         let observed_bridge_resolution_epoch = bridge_resolution_epoch.load(Ordering::Acquire);
+        let observed_hook_resolution_epoch = hook_resolution_epoch.load(Ordering::Acquire);
         Self {
             inner: Some(inner),
             inner_closed: false,
@@ -67,6 +79,10 @@ impl InteractiveRunEventStream {
             unread_message: None,
             bridge_resolution_epoch,
             observed_bridge_resolution_epoch,
+            hook_sender,
+            pending_hook_invocation: None,
+            hook_resolution_epoch,
+            observed_hook_resolution_epoch,
             closed_event_observed: false,
         }
     }
@@ -78,19 +94,26 @@ impl InteractiveRunEventStream {
             self.unread_message = None;
             self.observed_bridge_resolution_epoch = epoch;
         }
+        let hook_epoch = self.hook_resolution_epoch.load(Ordering::Acquire);
+        if hook_epoch != self.observed_hook_resolution_epoch {
+            self.pending_hook_invocation = None;
+            self.unread_message = None;
+            self.observed_hook_resolution_epoch = hook_epoch;
+        }
     }
 
-    /// Returns the next ordered event or host tool handoff.
-    ///
-    /// Calling this while a previous tool batch is unresolved returns an
-    /// explicit error. A rejected result submission leaves the same batch
-    /// active so the host can correct and retry it.
+    /// Returns the next ordered event, host tool handoff, or subscribed hook invocation.
     pub async fn next_message(
         &mut self,
     ) -> Result<Option<InteractiveRunMessage>, InteractiveError> {
         self.synchronize_bridge_resolution();
         if self.pending_tool_invocations.is_some() {
             return Err(InteractiveError::ToolInvocationsPending {
+                run_id: self.run_id,
+            });
+        }
+        if self.pending_hook_invocation.is_some() {
+            return Err(InteractiveError::HookInvocationPending {
                 run_id: self.run_id,
             });
         }
@@ -202,28 +225,35 @@ impl InteractiveRunEventStream {
         &mut self,
         message: &InteractiveRunMessage,
     ) -> Result<(), InteractiveError> {
-        let InteractiveRunMessage::ToolInvocations { batch } = message else {
-            return Ok(());
-        };
-        if batch.calls().is_empty() {
-            return Err(InteractiveError::InvalidToolInvocationBatch {
-                run_id: self.run_id,
-            });
+        match message {
+            InteractiveRunMessage::ToolInvocations { batch } => {
+                if batch.calls().is_empty() {
+                    return Err(InteractiveError::InvalidToolInvocationBatch {
+                        run_id: self.run_id,
+                    });
+                }
+                self.pending_tool_invocations = Some(batch.clone());
+            }
+            InteractiveRunMessage::HookInvocation { invocation } => {
+                self.pending_hook_invocation = Some(invocation.clone());
+            }
+            InteractiveRunMessage::Event(_) => {}
         }
-        self.pending_tool_invocations = Some(batch.clone());
         Ok(())
     }
 
     /// Returns the next runtime event when no host handoff is encountered.
     ///
-    /// Hosts that register bridge tools must use [`Self::next_message`] so the
-    /// tool batch and its completion path remain visible. If a bridge batch is
-    /// encountered, it remains unread and the caller can recover by switching
-    /// to `next_message`.
+    /// Hosts that register bridge tools or hooks must use [`Self::next_message`].
     pub async fn next_event(&mut self) -> Result<Option<RuntimeEvent>, InteractiveError> {
         self.synchronize_bridge_resolution();
         if self.pending_tool_invocations.is_some() {
             return Err(InteractiveError::ToolInvocationsPending {
+                run_id: self.run_id,
+            });
+        }
+        if self.pending_hook_invocation.is_some() {
+            return Err(InteractiveError::HookInvocationPending {
                 run_id: self.run_id,
             });
         }
@@ -246,6 +276,66 @@ impl InteractiveRunEventStream {
                     count,
                 })
             }
+            InteractiveRunMessage::HookInvocation { invocation } => {
+                self.unread_message = Some(InteractiveRunMessage::HookInvocation { invocation });
+                Err(InteractiveError::HookInvocationRequiresMessageProtocol {
+                    run_id: self.run_id,
+                })
+            }
+        }
+    }
+
+    /// Submits a typed decision for the active host-bridged hook invocation.
+    pub async fn submit_hook_decision(
+        &mut self,
+        invocation_id: &HookInvocationId,
+        decision: HookDecision,
+    ) -> Result<(), InteractiveError> {
+        self.submit_hook_outcome(invocation_id, Ok(decision)).await
+    }
+
+    /// Reports a fail-closed host hook error for the active hook invocation.
+    pub async fn fail_hook_invocation(
+        &mut self,
+        invocation_id: &HookInvocationId,
+        message: String,
+    ) -> Result<(), InteractiveError> {
+        self.submit_hook_outcome(invocation_id, Err(message)).await
+    }
+
+    async fn submit_hook_outcome(
+        &mut self,
+        invocation_id: &HookInvocationId,
+        outcome: Result<HookDecision, String>,
+    ) -> Result<(), InteractiveError> {
+        self.synchronize_bridge_resolution();
+        if self.pending_hook_invocation.is_none() {
+            return Err(InteractiveError::NoPendingHookInvocation {
+                run_id: self.run_id,
+            });
+        }
+        let (ack_sender, ack_receiver) = oneshot::channel();
+        self.hook_sender
+            .send(HookDecisionCommand {
+                invocation_id: invocation_id.clone(),
+                outcome,
+                ack_sender,
+            })
+            .await
+            .map_err(|_| InteractiveError::RunClosed {
+                run_id: self.run_id,
+            })?;
+        let result = ack_receiver
+            .await
+            .map_err(|_| InteractiveError::RunClosed {
+                run_id: self.run_id,
+            })?;
+        match result {
+            Ok(()) => {
+                self.pending_hook_invocation = None;
+                Ok(())
+            }
+            Err(source) => Err(InteractiveError::Runtime { source }),
         }
     }
 
@@ -328,6 +418,7 @@ impl InteractiveRunEventStream {
     pub async fn cancel_and_wait_until_closed(&mut self) -> Result<(), InteractiveError> {
         self.cancellation_token.cancel();
         self.pending_tool_invocations = None;
+        self.pending_hook_invocation = None;
         self.unread_message = None;
         while let Some(message) = self.receive_message().await {
             self.observe_terminal_message(&message);
@@ -816,6 +907,7 @@ mod tests {
         let (message_tx, message_rx) = mpsc::channel(1);
         let (rate_tx, rate_rx) = watch::channel(None);
         let (bridge_tx, _bridge_rx) = mpsc::channel(1);
+        let (hook_tx, _hook_rx) = mpsc::channel(1);
         let producer = tokio::spawn(async move {
             let _tx = message_tx;
             let _rate = rate_tx;
@@ -829,6 +921,8 @@ mod tests {
             CancellationToken::new(),
             producer,
             bridge_tx,
+            Arc::new(AtomicU64::new(0)),
+            hook_tx,
             Arc::new(AtomicU64::new(0)),
         );
 

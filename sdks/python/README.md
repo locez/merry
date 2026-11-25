@@ -25,8 +25,8 @@ uv build
 
 The package exposes the native extension as `merry._merry`. Application code
 should use the typed `merry` package and its focused submodules (`merry.config`,
-`merry.errors`, `merry.events`, `merry.tools`) instead of constructing native
-objects directly.
+`merry.errors`, `merry.events`, `merry.hooks`, `merry.tools`) instead of
+constructing native objects directly.
 
 ## Examples
 
@@ -37,6 +37,7 @@ The examples use the live OpenAI-compatible provider configured through
 ```bash
 uv run examples/basic_agent.py                # streaming with async with
 uv run examples/tool_decorator.py             # @merry.tool host execution
+uv run examples/lifecycle_hooks.py            # context window + lifecycle hooks
 uv run examples/structured_output.py          # two-field typed JSON output
 uv run examples/interactive_session.py        # long-lived interactive loop
 uv run examples/multi_runtime_orchestration.py  # compose independent runtimes
@@ -90,9 +91,97 @@ Anthropic Messages uses the same constructor:
 ```python
 agent = merry.Agent(
     session_id="anthropic-session",
-    provider=merry.Anthropic(api_key="...", model="claude-sonnet-4-5"),
+    provider=merry.Anthropic(
+        api_key="...",
+        model="claude-sonnet-4-5",
+        context_window_tokens=200_000,
+    ),
 )
 ```
+
+## Context Window And Compaction
+
+The Rust runtime resolves the effective context window in deterministic order:
+
+1. **Session-level explicit override** (`Agent(..., context_window_tokens=...)` or
+   `await session.update_settings(context_window_tokens=...)`) -> `"explicit_config"`
+2. **Provider capability** (`OpenAICompatible(..., context_window_tokens=...)` or
+   `Anthropic(..., context_window_tokens=...)`) -> `"provider_capabilities"`
+3. **Bundled catalog** (conservative built-in windows for common official models) -> `"bundled_catalog"`
+4. **Fallback** (`272_000` tokens when no metadata is supplied) -> `"fallback"`
+
+You can inspect the active window and source on `result.session_usage.context`
+(`resolved_model_window_tokens`, `effective_window_tokens`, `source`), and
+configure automatic compaction or structured-output retries on `Agent` /
+`AgentBuilder`:
+
+```python
+agent = merry.Agent(
+    provider=merry.OpenAICompatible(
+        api_key="...",
+        model="deepseek-chat",
+        context_window_tokens=128_000,
+    ),
+    # Optional session-level override (takes precedence over provider):
+    # context_window_tokens=96_000,
+    compaction=merry.CompactionConfig(),  # or CompactionConfig.disabled()
+    structured_output_retry_policy=merry.StructuredOutputRetryPolicy(max_retries=2),
+)
+```
+
+## Lifecycle Hooks And Turn Control (`merry.hooks`)
+
+Use `merry.Hooks` to intercept model steps and tool executions with typed
+decisions while keeping runtime state and journal settlement in Rust:
+
+- `@hooks.before_model_step` -> `BeforeModelDecision.continue_normally(...)` (with
+  optional `generation_override`, `dynamic_steering_note` injected after the
+  cached prefix, and `force_compact=True`) or `BeforeModelDecision.stop_turn(...)`
+- `@hooks.after_model_step` -> `AfterModelDecision.accept()`,
+  `AfterModelDecision.continue_with(text)` (force another model turn even when
+  the model did not call tools), or `AfterModelDecision.stop_turn(...)`
+- `@hooks.before_tool_call(tools=[...])` -> `BeforeToolDecision.allow()`,
+  `.modify_input(arguments)` (re-validated against the tool schema),
+  `.deny(message)`, `.short_circuit(output)`, or `.stop_turn(...)`
+- `@hooks.after_tool_call(tools=[...])` -> `AfterToolDecision.continue_normally()`,
+  `.modify_output(output)`, or `.stop_turn(...)`
+
+Unregistered hook points and non-matching `tools=[...]` filters emit **zero**
+hook bridge messages from Rust. Built-in strategy helpers are also exported:
+`max_token_budget_hook`, `deny_tools_hook`, and
+`require_condition_before_stop_hook`.
+
+```python
+hooks = merry.Hooks()
+hooks.before_model_step(merry.max_token_budget_hook(100_000))
+
+
+@hooks.before_tool_call(tools=["lookup_order"])
+async def rewrite_order(ctx: merry.BeforeToolCallContext) -> merry.BeforeToolDecision:
+    if ctx.arguments.get("order_id") == "blocked":
+        return merry.BeforeToolDecision.deny("Order lookup blocked by policy.")
+    return merry.BeforeToolDecision.allow()
+
+
+agent = merry.Agent(
+    provider=merry.OpenAICompatible(api_key="...", model="gpt-4.1-mini"),
+    tools=[lookup_order],
+    hooks=hooks,
+)
+result = await agent.run("Check order A123.")
+if result.status is merry.RunStatus.STOPPED_BY_HOOK and result.hook_stop is not None:
+    print(result.hook_stop.hook_point, result.hook_stop.reason)
+```
+
+- `agent.stream(..., auto_hooks=True, auto_tools=False)` (default): runs
+  registered Python hooks automatically on the caller's asyncio loop and yields
+  only `Event | ToolCallBatch`. Pass `auto_tools=True` to also execute host
+  tools automatically while streaming events.
+- `agent.stream(..., auto_hooks=False)`: yields `HookInvocation` messages
+  directly so external workflows or approval UIs can resolve them manually via
+  `await invocation.submit(decision)` or `await invocation.fail(message)`.
+- Hook exceptions are fail-closed: Python reports the failure to Rust so
+  pending tool calls settle cleanly and re-raises the original exception.
 
 ## Tools (`@merry.tool`)
 
@@ -169,20 +258,27 @@ Rust shutdown cleanly.
 
 Use `agent.interactive()` for long-lived multi-turn sessions with `session.send(...)`,
 `session.queue` controls (`pause`, `resume`, `flush`, `snapshot`, `update`, `remove`),
-and mid-turn `session.interrupt()`:
+mid-turn `session.interrupt()`, hot settings updates (`session.update_settings(...)`),
+and manual compaction (`session.compact(...)`):
 
 ```python
 import merry
 from merry import events
 
-async with agent.interactive() as session:
+async with agent.interactive(auto_tools=True) as session:
+    # Apply runtime settings at the next model-request boundary
+    await session.update_settings(context_window_tokens=128_000)
     await session.send("Hello!")
     async for message in session:
-        if isinstance(message, merry.ToolCallBatch):
-            await agent.execute_tool_batch(message)
-        elif isinstance(message.payload, events.AssistantMessagePayload):
+        if isinstance(message, merry.Event) and isinstance(
+            message.payload, events.AssistantMessagePayload
+        ):
             print(message.payload.text)
             break
+
+    # Clear explicit override (returns to provider/catalog window) or compact while idle
+    await session.update_settings(context_window_tokens=None)
+    outcome = await session.compact(focus="Keep key decisions")
 ```
 
 ## Structured Final Output

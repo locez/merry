@@ -1,5 +1,10 @@
 //! Asynchronous event producer for the runtime-owned agent loop.
 
+use super::hook_step::{
+    AfterStepHookAction, BeforeStepHookAction, StepHookContext, finish_hook_result,
+    handle_stream_wave_outcome, publish_stream_events, run_after_model_step_hook,
+    run_before_model_step_hook,
+};
 use super::{
     AgentLoopBlockedReason, AgentLoopConfig, AgentLoopError, AgentLoopResult, AgentLoopStatus,
     AgentRunMessage, PendingLoopToolCall, PendingLoopToolWave, StepOutcome,
@@ -7,23 +12,17 @@ use super::{
     can_retry_structured_output, classify_step_events, continuation_step_input,
     execute_stream_runtime_batch, final_assistant_output_from_step, next_agent_run_batch_id,
     publish_journal_event, receive_and_publish_bridge_tool_results, record_final_output_tool_call,
-    settle_cancelled_bridge_tool_calls, settle_failed_bridge_tool_calls,
     structured_output_failure_result, take_subagent_notification, take_subagent_notification_input,
-    tool_execution_cancelled_diagnostic, validate_final_output,
+    validate_final_output,
 };
 use crate::{
-    Runtime, RuntimeError, StepContext, StepInput, ToolExecutionContext,
-    bridge::{
-        BridgeToolResultCommand, receive_bridge_tool_result, resolve_bridge_tool_result_command,
-    },
+    Runtime, StepContext, StepInput,
+    bridge::BridgeToolResultCommand,
     events::{ActiveStepPermit, RuntimeEventProjector},
+    hooks::bridge::{HookDecisionCommand, StreamHookBridge},
 };
 use futures_util::StreamExt;
-use merry_core::PendingToolCallBatch;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::{Arc, atomic::AtomicU64};
 use tokio::sync::mpsc;
 
 pub(crate) struct AgentLoopStreamProducer {
@@ -36,6 +35,8 @@ pub(crate) struct AgentLoopStreamProducer {
     sender: mpsc::Sender<AgentRunMessage>,
     bridge_receiver: mpsc::Receiver<BridgeToolResultCommand>,
     bridge_resolution_epoch: Arc<AtomicU64>,
+    hook_receiver: mpsc::Receiver<HookDecisionCommand>,
+    hook_resolution_epoch: Arc<AtomicU64>,
 }
 
 pub(crate) struct AgentLoopStreamProducerInput {
@@ -48,6 +49,8 @@ pub(crate) struct AgentLoopStreamProducerInput {
     pub(crate) sender: mpsc::Sender<AgentRunMessage>,
     pub(crate) bridge_receiver: mpsc::Receiver<BridgeToolResultCommand>,
     pub(crate) bridge_resolution_epoch: Arc<AtomicU64>,
+    pub(crate) hook_receiver: mpsc::Receiver<HookDecisionCommand>,
+    pub(crate) hook_resolution_epoch: Arc<AtomicU64>,
 }
 
 impl AgentLoopStreamProducer {
@@ -62,6 +65,8 @@ impl AgentLoopStreamProducer {
             sender,
             bridge_receiver,
             bridge_resolution_epoch,
+            hook_receiver,
+            hook_resolution_epoch,
         } = input;
         Self {
             runtime,
@@ -73,6 +78,8 @@ impl AgentLoopStreamProducer {
             sender,
             bridge_receiver,
             bridge_resolution_epoch,
+            hook_receiver,
+            hook_resolution_epoch,
         }
     }
 }
@@ -90,6 +97,8 @@ pub(crate) async fn run_agent_loop_stream_producer(
         sender,
         mut bridge_receiver,
         bridge_resolution_epoch,
+        mut hook_receiver,
+        hook_resolution_epoch,
     } = producer;
     let mut next_input = Some(input);
     let mut deferred_user_input = None;
@@ -98,6 +107,7 @@ pub(crate) async fn run_agent_loop_stream_producer(
     let mut subagent_event_receiver = runtime.subscribe_subagent_events();
     let mut model_turns_run = 0;
     let mut bridge_batch_sequence = 0_u64;
+    let mut hook_sequence = 0_u64;
     let mut structured_output_retries: usize = 0;
 
     loop {
@@ -121,7 +131,7 @@ pub(crate) async fn run_agent_loop_stream_producer(
             }
             next_input = Some(notification_input);
         }
-        let Some(input) = next_input.take() else {
+        let Some(mut input) = next_input.take() else {
             break;
         };
         if loop_token.is_cancelled() {
@@ -137,8 +147,53 @@ pub(crate) async fn run_agent_loop_stream_producer(
             ));
         }
 
+        let before_ctx = StepHookContext {
+            runtime: &runtime,
+            model_turn: model_turns_run + 1,
+            max_model_turns: config.max_model_turns(),
+            loop_token: &loop_token,
+            loop_permit: &loop_permit,
+        };
+        let mut hook_bridge = StreamHookBridge {
+            sender: &sender,
+            receiver: &mut hook_receiver,
+            resolution_epoch: &hook_resolution_epoch,
+            sequence: &mut hook_sequence,
+        };
+        let step_generation_config = match run_before_model_step_hook(
+            &before_ctx,
+            &mut input,
+            generation_config.clone(),
+            Some(&mut hook_bridge),
+        )
+        .await
+        {
+            Ok(BeforeStepHookAction::Proceed(gen_cfg)) => gen_cfg,
+            Ok(BeforeStepHookAction::Finish {
+                status,
+                final_output,
+            }) => {
+                return Ok(finish_hook_result(
+                    &runtime,
+                    status,
+                    events,
+                    model_turns_run,
+                    final_output,
+                )
+                .await);
+            }
+            Err(source) => {
+                return Err(agent_loop_stream_error_with_source(
+                    &runtime,
+                    model_turns_run,
+                    &events,
+                    source,
+                ));
+            }
+        };
+
         let mut step_context =
-            StepContext::new(loop_token.clone()).with_generation_config(generation_config.clone());
+            StepContext::new(loop_token.clone()).with_generation_config(step_generation_config);
         if let Some(contract) = config.final_output_contract().cloned() {
             step_context = step_context.with_final_output_contract(contract);
         }
@@ -188,7 +243,80 @@ pub(crate) async fn run_agent_loop_stream_producer(
         .await?;
 
         let step_final_output = final_assistant_output_from_step(&runtime, &step_events).await;
-        match classify_step_events(&step_events, config.final_output_contract()) {
+        let outcome = classify_step_events(&step_events, config.final_output_contract());
+
+        let after_ctx = StepHookContext {
+            runtime: &runtime,
+            model_turn: model_turns_run,
+            max_model_turns: config.max_model_turns(),
+            loop_token: &loop_token,
+            loop_permit: &loop_permit,
+        };
+        let mut hook_bridge = StreamHookBridge {
+            sender: &sender,
+            receiver: &mut hook_receiver,
+            resolution_epoch: &hook_resolution_epoch,
+            sequence: &mut hook_sequence,
+        };
+        match run_after_model_step_hook(
+            &after_ctx,
+            &outcome,
+            &step_final_output,
+            Some(&mut hook_bridge),
+        )
+        .await
+        {
+            Ok(AfterStepHookAction::Accept) => {}
+            Ok(AfterStepHookAction::ContinueWithInput {
+                settled_events,
+                input,
+            }) => {
+                publish_stream_events(
+                    &runtime,
+                    &mut projector,
+                    &sender,
+                    &mut events,
+                    settled_events,
+                    model_turns_run,
+                )
+                .await?;
+                next_input = Some(input);
+                continue;
+            }
+            Ok(AfterStepHookAction::Finish {
+                settled_events,
+                status,
+                final_output,
+            }) => {
+                publish_stream_events(
+                    &runtime,
+                    &mut projector,
+                    &sender,
+                    &mut events,
+                    settled_events,
+                    model_turns_run,
+                )
+                .await?;
+                return Ok(finish_hook_result(
+                    &runtime,
+                    status,
+                    events,
+                    model_turns_run,
+                    final_output,
+                )
+                .await);
+            }
+            Err(source) => {
+                return Err(agent_loop_stream_error_with_source(
+                    &runtime,
+                    model_turns_run,
+                    &events,
+                    source,
+                ));
+            }
+        }
+
+        match outcome {
             StepOutcome::Completed => {
                 loop {
                     if let Some(notification_input) =
@@ -368,48 +496,26 @@ pub(crate) async fn run_agent_loop_stream_producer(
                 }
 
                 for wave in waves {
-                    match wave {
+                    let mut hook_bridge = StreamHookBridge {
+                        sender: &sender,
+                        receiver: &mut hook_receiver,
+                        resolution_epoch: &hook_resolution_epoch,
+                        sequence: &mut hook_sequence,
+                    };
+                    let wave_outcome = match wave {
                         PendingLoopToolWave::Runtime(calls) => {
-                            if let Some(error) = execute_stream_runtime_batch(
+                            execute_stream_runtime_batch(
                                 &runtime,
                                 calls,
+                                model_turns_run,
                                 &loop_token,
                                 &loop_permit,
                                 &mut projector,
                                 &sender,
                                 &mut events,
+                                Some(&mut hook_bridge),
                             )
                             .await
-                            .map_err(|source| {
-                                agent_loop_stream_error_with_source(
-                                    &runtime,
-                                    model_turns_run,
-                                    &events,
-                                    source,
-                                )
-                            })? {
-                                if let RuntimeError::ToolExecutionCancelled { call_id, .. } = error
-                                {
-                                    let session_usage = runtime.usage().await;
-                                    return Ok(AgentLoopResult::new(
-                                        AgentLoopStatus::Cancelled {
-                                            diagnostic: tool_execution_cancelled_diagnostic(
-                                                &call_id,
-                                            ),
-                                        },
-                                        events,
-                                        model_turns_run,
-                                        None,
-                                        session_usage,
-                                    ));
-                                }
-                                return Err(agent_loop_stream_error_with_source(
-                                    &runtime,
-                                    model_turns_run,
-                                    &events,
-                                    error,
-                                ));
-                            }
                         }
                         PendingLoopToolWave::Bridge(calls) => {
                             let batch_id = next_agent_run_batch_id(&mut bridge_batch_sequence)
@@ -421,10 +527,11 @@ pub(crate) async fn run_agent_loop_stream_producer(
                                         source,
                                     )
                                 })?;
-                            match receive_and_publish_bridge_tool_results(
+                            receive_and_publish_bridge_tool_results(
                                 &runtime,
                                 calls,
                                 batch_id,
+                                model_turns_run,
                                 &bridge_resolution_epoch,
                                 &loop_token,
                                 &loop_permit,
@@ -432,34 +539,23 @@ pub(crate) async fn run_agent_loop_stream_producer(
                                 &mut projector,
                                 &sender,
                                 &mut events,
+                                Some(&mut hook_bridge),
                             )
                             .await
-                            {
-                                Ok(()) => {}
-                                Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
-                                    let session_usage = runtime.usage().await;
-                                    return Ok(AgentLoopResult::new(
-                                        AgentLoopStatus::Cancelled {
-                                            diagnostic: tool_execution_cancelled_diagnostic(
-                                                &call_id,
-                                            ),
-                                        },
-                                        events,
-                                        model_turns_run,
-                                        None,
-                                        session_usage,
-                                    ));
-                                }
-                                Err(source) => {
-                                    return Err(agent_loop_stream_error_with_source(
-                                        &runtime,
-                                        model_turns_run,
-                                        &events,
-                                        source,
-                                    ));
-                                }
-                            }
                         }
+                    };
+                    if let Some(early) = handle_stream_wave_outcome(
+                        &runtime,
+                        &loop_permit,
+                        &mut projector,
+                        &sender,
+                        &mut events,
+                        model_turns_run,
+                        wave_outcome,
+                    )
+                    .await
+                    {
+                        return early;
                     }
                 }
 
@@ -689,193 +785,70 @@ pub(crate) async fn run_agent_loop_stream_producer(
                         ));
                     }
 
-                    let execution_events = match call {
+                    let mut hook_bridge = StreamHookBridge {
+                        sender: &sender,
+                        receiver: &mut hook_receiver,
+                        resolution_epoch: &hook_resolution_epoch,
+                        sequence: &mut hook_sequence,
+                    };
+                    let wave_outcome = match call {
                         PendingLoopToolCall::Runtime(call) => {
-                            match runtime
-                                .execute_tool_call_with_active_permit(
-                                    call.id(),
-                                    ToolExecutionContext::new(loop_token.clone()),
-                                    &loop_permit,
-                                )
-                                .await
-                            {
-                                Ok(events) => events,
-                                Err(RuntimeError::ToolExecutionCancelled { call_id, .. }) => {
-                                    let session_usage = runtime.usage().await;
-                                    return Ok(AgentLoopResult::new(
-                                        AgentLoopStatus::Cancelled {
-                                            diagnostic: tool_execution_cancelled_diagnostic(
-                                                &call_id,
-                                            ),
-                                        },
-                                        events,
-                                        model_turns_run,
-                                        None,
-                                        session_usage,
-                                    ));
-                                }
-                                Err(error) => {
-                                    return Err(agent_loop_stream_error_with_source(
+                            execute_stream_runtime_batch(
+                                &runtime,
+                                vec![call],
+                                model_turns_run,
+                                &loop_token,
+                                &loop_permit,
+                                &mut projector,
+                                &sender,
+                                &mut events,
+                                Some(&mut hook_bridge),
+                            )
+                            .await
+                        }
+                        PendingLoopToolCall::Bridge(call) => {
+                            let batch_id = next_agent_run_batch_id(&mut bridge_batch_sequence)
+                                .map_err(|source| {
+                                    agent_loop_stream_error_with_source(
                                         &runtime,
                                         model_turns_run,
                                         &events,
-                                        error,
-                                    ));
-                                }
-                            }
-                        }
-                        PendingLoopToolCall::Bridge(call) => {
-                            let batch = PendingToolCallBatch::new(
-                                next_agent_run_batch_id(&mut bridge_batch_sequence).map_err(
-                                    |source| {
-                                        agent_loop_stream_error_with_source(
-                                            &runtime,
-                                            model_turns_run,
-                                            &events,
-                                            source,
-                                        )
-                                    },
-                                )?,
-                                vec![call.clone()],
-                            )
-                            .map_err(|source| {
-                                agent_loop_stream_error_with_source(
-                                    &runtime,
-                                    model_turns_run,
-                                    &events,
-                                    RuntimeError::from(source),
-                                )
-                            })?;
-                            sender
-                                .send(AgentRunMessage::ToolInvocations {
-                                    batch: batch.clone(),
-                                })
-                                .await
-                                .map_err(|_| {
-                                    agent_loop_stream_error(
-                                        runtime.session_id(),
-                                        events.clone(),
-                                        "bridge invocation receiver closed before the request was delivered",
+                                        source,
                                     )
                                 })?;
-                            loop {
-                                let command = match receive_bridge_tool_result(
-                                    &mut bridge_receiver,
-                                    &loop_token,
-                                )
-                                .await
-                                {
-                                    Some(command) => command,
-                                    None if loop_token.is_cancelled() => {
-                                        let settlement = settle_cancelled_bridge_tool_calls(
-                                            &runtime,
-                                            batch.calls(),
-                                            &loop_permit,
-                                            &mut projector,
-                                            &sender,
-                                            &mut events,
-                                        )
-                                        .await;
-                                        bridge_resolution_epoch.fetch_add(1, Ordering::AcqRel);
-                                        settlement.map_err(|source| {
-                                            agent_loop_stream_error_with_source(
-                                                &runtime,
-                                                model_turns_run,
-                                                &events,
-                                                source,
-                                            )
-                                        })?;
-                                        let session_usage = runtime.usage().await;
-                                        return Ok(AgentLoopResult::new(
-                                            AgentLoopStatus::Cancelled {
-                                                diagnostic: agent_loop_cancelled_diagnostic(),
-                                            },
-                                            events,
-                                            model_turns_run,
-                                            None,
-                                            session_usage,
-                                        ));
-                                    }
-                                    None => {
-                                        return Err(agent_loop_stream_error(
-                                            runtime.session_id(),
-                                            events,
-                                            "bridge tool result channel closed before the call was resolved",
-                                        ));
-                                    }
-                                };
-
-                                let (ack_sender, result) = resolve_bridge_tool_result_command(
-                                    &runtime,
-                                    &batch,
-                                    command,
-                                    &loop_permit,
-                                )
-                                .await;
-                                match result {
-                                    Ok(events) => {
-                                        bridge_resolution_epoch.fetch_add(1, Ordering::AcqRel);
-                                        let _ = ack_sender.send(Ok(()));
-                                        break events;
-                                    }
-                                    Err(error) if error.is_retryable_bridge_tool_result() => {
-                                        let _ = ack_sender.send(Err(error));
-                                    }
-                                    Err(error) => {
-                                        let message = error.to_string();
-                                        let _ = ack_sender.send(Err(
-                                            RuntimeError::BridgeToolResultRejected {
-                                                session_id: runtime.session_id().clone(),
-                                                message: message.clone(),
-                                            },
-                                        ));
-                                        settle_failed_bridge_tool_calls(
-                                            &runtime,
-                                            batch.calls(),
-                                            &loop_permit,
-                                            &mut projector,
-                                            &sender,
-                                            &mut events,
-                                            &message,
-                                        )
-                                        .await
-                                        .map_err(
-                                            |source| {
-                                                agent_loop_stream_error_with_source(
-                                                    &runtime,
-                                                    model_turns_run,
-                                                    &events,
-                                                    source,
-                                                )
-                                            },
-                                        )?;
-                                        break Vec::new();
-                                    }
-                                }
-                            }
+                            receive_and_publish_bridge_tool_results(
+                                &runtime,
+                                vec![call],
+                                batch_id,
+                                model_turns_run,
+                                &bridge_resolution_epoch,
+                                &loop_token,
+                                &loop_permit,
+                                &mut bridge_receiver,
+                                &mut projector,
+                                &sender,
+                                &mut events,
+                                Some(&mut hook_bridge),
+                            )
+                            .await
                         }
                         PendingLoopToolCall::FinalOutput(_) => {
                             unreachable!("final-output call is handled before continuation budget")
                         }
                     };
 
-                    for event in execution_events {
-                        publish_journal_event(
-                            &runtime,
-                            &mut projector,
-                            &sender,
-                            &mut events,
-                            event,
-                        )
-                        .await
-                        .map_err(|source| {
-                            agent_loop_stream_error_with_source(
-                                &runtime,
-                                model_turns_run,
-                                &events,
-                                source,
-                            )
-                        })?;
+                    if let Some(early) = handle_stream_wave_outcome(
+                        &runtime,
+                        &loop_permit,
+                        &mut projector,
+                        &sender,
+                        &mut events,
+                        model_turns_run,
+                        wave_outcome,
+                    )
+                    .await
+                    {
+                        return early;
                     }
 
                     next_input = Some(continuation_step_input());

@@ -1,8 +1,10 @@
 //! Strict provider-neutral JSON conversion at the Python boundary.
 
 use merry::{
-    AgentLoopBlockedReason, AgentLoopStatus, InteractiveInputItem, InteractiveInputSnapshot,
-    RunResult,
+    AgentLoopBlockedReason, AgentLoopStatus, CompactionConfig, CompactionOutcome, GenerationConfig,
+    HookDecision, HookInvocation, HookInvocationId, HookPoint, HookSubscriptions,
+    InteractiveInputItem, InteractiveInputSnapshot, InteractiveSettingsUpdate, ParallelToolCalls,
+    ReasoningEffort, RunResult, ServiceTier, ToolHookFilter,
     binding::{
         OwnedAgentRunMessage, OwnedToolInvocationBatch, ToolInvocation, ToolInvocationContent,
         ToolInvocationResult, ToolInvocationSubmission,
@@ -13,7 +15,11 @@ use merry_core::{
     ToolInputSchema, ToolName,
 };
 use schemars::Schema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::{
+    collections::BTreeSet,
+    num::{NonZeroU64, NonZeroUsize},
+};
 
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -24,6 +30,10 @@ enum NativeRunMessage<'a> {
     ToolInvocations {
         #[serde(flatten)]
         batch: NativeToolInvocationBatch<'a>,
+    },
+    HookInvocation {
+        #[serde(flatten)]
+        invocation: &'a HookInvocation,
     },
 }
 
@@ -47,6 +57,9 @@ pub(crate) fn message_to_json(message: &OwnedAgentRunMessage) -> Result<String, 
         },
         OwnedAgentRunMessage::ToolInvocations { batch } => NativeRunMessage::ToolInvocations {
             batch: tool_invocation_batch(batch),
+        },
+        OwnedAgentRunMessage::HookInvocation { invocation } => NativeRunMessage::HookInvocation {
+            invocation: invocation.as_ref(),
         },
         _ => return Err(unsupported_protocol_variant("agent run message")),
     };
@@ -72,9 +85,19 @@ fn tool_invocation(invocation: &ToolInvocation) -> NativeToolInvocation<'_> {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum NativeRunStatus<'a> {
     Completed,
-    Failed { diagnostic: &'a ErrorInfo },
-    Cancelled { diagnostic: &'a ErrorInfo },
-    Blocked { reason: NativeBlockedReason },
+    Failed {
+        diagnostic: &'a ErrorInfo,
+    },
+    Cancelled {
+        diagnostic: &'a ErrorInfo,
+    },
+    Blocked {
+        reason: NativeBlockedReason,
+    },
+    StoppedByHook {
+        hook_point: HookPoint,
+        reason: &'a str,
+    },
 }
 
 #[derive(Serialize)]
@@ -128,6 +151,12 @@ fn status_to_wire(status: &AgentLoopStatus) -> Result<NativeRunStatus<'_>, serde
         AgentLoopStatus::Blocked { reason } => Ok(NativeRunStatus::Blocked {
             reason: blocked_reason_to_wire(reason)?,
         }),
+        AgentLoopStatus::StoppedByHook { hook_point, reason } => {
+            Ok(NativeRunStatus::StoppedByHook {
+                hook_point: *hook_point,
+                reason: reason.as_str(),
+            })
+        }
         _ => Err(unsupported_protocol_variant("agent loop status")),
     }
 }
@@ -300,6 +329,186 @@ pub(crate) fn interactive_input_snapshot_to_json(
         items,
         paused: snapshot.paused,
     })
+}
+
+#[derive(Serialize)]
+struct NativeCompactionOutcome<'a> {
+    checkpoint_id: &'a str,
+    covered_model_turn_count: usize,
+    covered_history_item_count: usize,
+    retained_history_item_count: usize,
+}
+
+pub(crate) fn compaction_outcome_to_json(
+    outcome: &CompactionOutcome,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&NativeCompactionOutcome {
+        checkpoint_id: outcome.checkpoint_id().as_str(),
+        covered_model_turn_count: outcome.covered_model_turn_count(),
+        covered_history_item_count: outcome.covered_history_item_count(),
+        retained_history_item_count: outcome.retained_history_item_count(),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeGenerationConfig {
+    max_output_tokens: Option<u64>,
+    parallel_tool_calls: Option<String>,
+    reasoning_effort: Option<String>,
+    service_tier: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeCompactionConfig {
+    enabled: bool,
+    reasoning_effort: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeInteractiveSettingsUpdate {
+    #[serde(default, deserialize_with = "deserialize_optional_nullable_u64")]
+    context_window_tokens: Option<Option<u64>>,
+    generation: Option<NativeGenerationConfig>,
+    compaction: Option<NativeCompactionConfig>,
+    max_parallel_tool_calls: Option<usize>,
+}
+
+fn deserialize_optional_nullable_u64<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<u64>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<u64>::deserialize(deserializer).map(Some)
+}
+
+pub(crate) fn parse_interactive_settings_update(
+    payload: &str,
+) -> Result<InteractiveSettingsUpdate, String> {
+    let wire = serde_json::from_str::<NativeInteractiveSettingsUpdate>(payload)
+        .map_err(|error| format!("interactive settings payload is invalid: {error}"))?;
+    let mut update = InteractiveSettingsUpdate::default();
+    if let Some(tokens_opt) = wire.context_window_tokens {
+        let parsed = tokens_opt
+            .map(|value| {
+                NonZeroU64::new(value)
+                    .ok_or_else(|| "context_window_tokens must be greater than zero".to_owned())
+            })
+            .transpose()?;
+        update = update.with_context_window_tokens(parsed);
+    }
+    if let Some(generation) = wire.generation {
+        let parallel = match generation.parallel_tool_calls.as_deref() {
+            None | Some("auto") => ParallelToolCalls::Auto,
+            Some("enabled") => ParallelToolCalls::Enabled,
+            Some("disabled") => ParallelToolCalls::Disabled,
+            Some(other) => {
+                return Err(format!("unsupported parallel_tool_calls mode: {other}"));
+            }
+        };
+        let reasoning = generation
+            .reasoning_effort
+            .as_deref()
+            .map(ReasoningEffort::new)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let tier = generation
+            .service_tier
+            .as_deref()
+            .map(ServiceTier::new)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let config = GenerationConfig::new(generation.max_output_tokens, false)
+            .map_err(|error| error.to_string())?
+            .with_parallel_tool_calls(parallel)
+            .with_reasoning_effort(reasoning)
+            .with_service_tier(tier);
+        update = update.with_generation_config(config);
+    }
+    if let Some(compaction) = wire.compaction {
+        let reasoning = compaction
+            .reasoning_effort
+            .as_deref()
+            .map(ReasoningEffort::new)
+            .transpose()
+            .map_err(|error| error.to_string())?;
+        let config = if compaction.enabled {
+            CompactionConfig::default()
+        } else {
+            CompactionConfig::disabled()
+        }
+        .with_reasoning_effort(reasoning);
+        update = update.with_automatic_compaction(config);
+    }
+    if let Some(limit) = wire.max_parallel_tool_calls {
+        let limit = NonZeroUsize::new(limit)
+            .ok_or_else(|| "max_parallel_tool_calls must be greater than zero".to_owned())?;
+        update = update.with_max_parallel_tool_calls(limit);
+    }
+    Ok(update)
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+enum NativeToolHookFilter {
+    None,
+    All,
+    Only { tools: Vec<String> },
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeHookSubscriptions {
+    #[serde(default)]
+    before_model_step: bool,
+    #[serde(default)]
+    after_model_step: bool,
+    before_tool_call: NativeToolHookFilter,
+    after_tool_call: NativeToolHookFilter,
+}
+
+fn parse_tool_hook_filter(filter: NativeToolHookFilter) -> Result<ToolHookFilter, String> {
+    match filter {
+        NativeToolHookFilter::None => Ok(ToolHookFilter::None),
+        NativeToolHookFilter::All => Ok(ToolHookFilter::All),
+        NativeToolHookFilter::Only { tools } => {
+            let mut set = BTreeSet::new();
+            for name in tools {
+                let parsed = ToolName::new(&name)
+                    .map_err(|error| format!("hook tool filter name is invalid: {error}"))?;
+                set.insert(parsed);
+            }
+            Ok(if set.is_empty() {
+                ToolHookFilter::None
+            } else {
+                ToolHookFilter::Only(set)
+            })
+        }
+    }
+}
+
+pub(crate) fn parse_hook_subscriptions(payload: &str) -> Result<HookSubscriptions, String> {
+    let wire = serde_json::from_str::<NativeHookSubscriptions>(payload)
+        .map_err(|error| format!("hook subscriptions payload is invalid: {error}"))?;
+    Ok(HookSubscriptions::none()
+        .with_before_model_step(wire.before_model_step)
+        .with_after_model_step(wire.after_model_step)
+        .with_before_tool_call(parse_tool_hook_filter(wire.before_tool_call)?)
+        .with_after_tool_call(parse_tool_hook_filter(wire.after_tool_call)?))
+}
+
+pub(crate) fn parse_hook_invocation_id(value: &str) -> Result<HookInvocationId, String> {
+    HookInvocationId::new(value).map_err(|error| error.to_string())
+}
+
+pub(crate) fn parse_hook_decision(payload: &str) -> Result<HookDecision, String> {
+    let decision = serde_json::from_str::<HookDecision>(payload)
+        .map_err(|error| format!("hook decision payload is invalid: {error}"))?;
+    decision.validate().map_err(|error| error.to_string())?;
+    Ok(decision)
 }
 
 fn unsupported_protocol_variant(kind: &str) -> serde_json::Error {

@@ -71,6 +71,8 @@ pub(super) struct RuntimeInner {
     pub(super) durable_memory: Option<Arc<crate::DurableMemory>>,
     pub(super) memory_maintenance: bool,
     pub(super) memory_context: Option<Arc<str>>,
+    pub(super) hook_handler: Option<Arc<dyn crate::RuntimeHookHandler>>,
+    pub(super) bridge_hook_subscriptions: crate::HookSubscriptions,
 }
 
 impl RuntimeInner {

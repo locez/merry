@@ -10,7 +10,10 @@ use super::{
     commands::InteractiveCommand, handles::InteractiveRunMessage, queue::InteractiveInputQueue,
     types::InteractiveError,
 };
-use crate::{AgentLoopConfig, Runtime, bridge::BridgeToolResultCommand, events::ActiveStepPermit};
+use crate::{
+    AgentLoopConfig, Runtime, bridge::BridgeToolResultCommand, events::ActiveStepPermit,
+    hooks::bridge::HookDecisionCommand,
+};
 use merry_llm::GenerationConfig;
 use std::sync::{Arc, atomic::AtomicU64};
 use tokio::sync::{Notify, mpsc, watch};
@@ -29,6 +32,11 @@ pub(super) struct InteractiveProducer {
     pub(super) bridge_resolution_epoch: Arc<AtomicU64>,
     pub(super) bridge_pending: bool,
     pub(super) bridge_batch_sequence: u64,
+    pub(super) hook_receiver: mpsc::Receiver<HookDecisionCommand>,
+    pub(super) hook_resolution_epoch: Arc<AtomicU64>,
+    pub(super) hook_sequence: u64,
+    pub(super) hook_stopped_turn: bool,
+    pub(super) hook_continuation_note: Option<String>,
     pub(super) loop_token: CancellationToken,
     pub(super) generation_config: GenerationConfig,
     pub(super) config: AgentLoopConfig,
@@ -52,6 +60,8 @@ pub(super) struct InteractiveProducerInput {
     pub(super) rate_sender: watch::Sender<Option<merry_core::RuntimeEvent>>,
     pub(super) bridge_receiver: mpsc::Receiver<BridgeToolResultCommand>,
     pub(super) bridge_resolution_epoch: Arc<AtomicU64>,
+    pub(super) hook_receiver: mpsc::Receiver<HookDecisionCommand>,
+    pub(super) hook_resolution_epoch: Arc<AtomicU64>,
     pub(super) loop_token: CancellationToken,
     pub(super) generation_config: GenerationConfig,
     pub(super) config: AgentLoopConfig,
@@ -69,6 +79,8 @@ impl InteractiveProducer {
             rate_sender,
             bridge_receiver,
             bridge_resolution_epoch,
+            hook_receiver,
+            hook_resolution_epoch,
             loop_token,
             generation_config,
             config,
@@ -87,6 +99,11 @@ impl InteractiveProducer {
             bridge_resolution_epoch,
             bridge_pending: false,
             bridge_batch_sequence: 0,
+            hook_receiver,
+            hook_resolution_epoch,
+            hook_sequence: 0,
+            hook_stopped_turn: false,
+            hook_continuation_note: None,
             loop_token,
             generation_config,
             config,

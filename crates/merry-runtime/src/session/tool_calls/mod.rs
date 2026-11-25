@@ -25,6 +25,25 @@ impl SessionState {
         !self.pending_tool_calls.is_empty()
     }
 
+    pub(crate) fn replace_pending_tool_call_arguments(
+        &mut self,
+        call_id: &ToolCallId,
+        arguments: merry_core::ToolCallArguments,
+    ) -> Result<PendingToolCall, RuntimeError> {
+        let Some(pending) = self
+            .pending_tool_calls
+            .iter_mut()
+            .find(|call| call.id() == call_id)
+        else {
+            return Err(RuntimeError::UnknownToolCall {
+                session_id: self.session_id.clone(),
+                call_id: call_id.clone(),
+            });
+        };
+        *pending = PendingToolCall::new(pending.id().clone(), pending.name().clone(), arguments);
+        Ok(pending.clone())
+    }
+
     #[cfg(test)]
     pub(crate) fn record_tool_call_pending(
         &mut self,

@@ -192,6 +192,76 @@ impl PyInteractiveRun {
         })
     }
 
+    fn submit_hook_decision<'py>(
+        &self,
+        py: Python<'py>,
+        invocation_id: String,
+        decision_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let invocation_id = protocol::parse_hook_invocation_id(&invocation_id)
+            .map_err(error::protocol_message_to_py)?;
+        let decision =
+            protocol::parse_hook_decision(&decision_json).map_err(error::protocol_message_to_py)?;
+        let state = Arc::clone(&self.stream_state);
+        let cancellation = self.cancellation.clone();
+        let lease = InteractiveStreamLease::take(state).map_err(error::run_state_message_to_py)?;
+        future_into_py(py, async move {
+            let mut lease = lease;
+            let outcome = {
+                let stream = lease.stream_mut().map_err(error::run_state_message_to_py)?;
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        stream.request_cancel();
+                        Ok(false)
+                    }
+                    submitted = stream.submit_hook_decision(&invocation_id, decision) => {
+                        submitted.map(|()| true).map_err(error::agent_error_to_py)
+                    }
+                }
+            };
+            lease.restore().map_err(error::run_state_message_to_py)?;
+            if !outcome? {
+                return Err(error::cancelled_operation_to_py());
+            }
+            Ok(())
+        })
+    }
+
+    fn fail_hook_invocation<'py>(
+        &self,
+        py: Python<'py>,
+        invocation_id: String,
+        message: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let invocation_id = protocol::parse_hook_invocation_id(&invocation_id)
+            .map_err(error::protocol_message_to_py)?;
+        let state = Arc::clone(&self.stream_state);
+        let cancellation = self.cancellation.clone();
+        let lease = InteractiveStreamLease::take(state).map_err(error::run_state_message_to_py)?;
+        future_into_py(py, async move {
+            let mut lease = lease;
+            let outcome = {
+                let stream = lease.stream_mut().map_err(error::run_state_message_to_py)?;
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        stream.request_cancel();
+                        Ok(false)
+                    }
+                    failed = stream.fail_hook_invocation(&invocation_id, message) => {
+                        failed.map(|()| true).map_err(error::agent_error_to_py)
+                    }
+                }
+            };
+            lease.restore().map_err(error::run_state_message_to_py)?;
+            if !outcome? {
+                return Err(error::cancelled_operation_to_py());
+            }
+            Ok(())
+        })
+    }
+
     fn submit<'py>(&self, py: Python<'py>, text: String) -> PyResult<Bound<'py, PyAny>> {
         let input = self.input.clone();
         future_into_py(py, async move {
@@ -292,6 +362,38 @@ impl PyInteractiveRun {
                 .save_session_to(store)
                 .await
                 .map_err(|err| error::agent_error_to_py(AgentError::from(err)))
+        })
+    }
+
+    fn update_settings<'py>(
+        &self,
+        py: Python<'py>,
+        settings_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let update = protocol::parse_interactive_settings_update(&settings_json)
+            .map_err(error::config_message_to_py)?;
+        let control = self.control.clone();
+        future_into_py(py, async move {
+            control
+                .update_settings(update)
+                .await
+                .map_err(|err| error::agent_error_to_py(AgentError::from(err)))
+        })
+    }
+
+    #[pyo3(signature = (focus=None))]
+    fn compact<'py>(&self, py: Python<'py>, focus: Option<String>) -> PyResult<Bound<'py, PyAny>> {
+        let control = self.control.clone();
+        future_into_py(py, async move {
+            let outcome = control
+                .compact_context(focus)
+                .await
+                .map_err(|err| error::agent_error_to_py(AgentError::from(err)))?;
+            outcome
+                .as_ref()
+                .map(protocol::compaction_outcome_to_json)
+                .transpose()
+                .map_err(error::serialization_error_to_py)
         })
     }
 

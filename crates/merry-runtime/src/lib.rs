@@ -31,6 +31,7 @@ mod durable_memory;
 mod error;
 mod events;
 mod final_output;
+mod hooks;
 mod interactive;
 mod memory;
 mod model_completion;
@@ -81,13 +82,20 @@ pub use context::{
     CheckpointDecision, CompactedCheckpoint, CompactedCheckpointSummary, CompiledContext,
     CompiledContextSection, ContextBudget, ContextCompiler, ContextEntry, ContextError,
     ContextSummary, DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS, ProjectRules, ResolvedContextWindow,
-    SessionContextSnapshot, TaskAnchor, decide_checkpoint, resolve_context_window,
+    SessionContextSnapshot, TaskAnchor, bundled_model_context_window, decide_checkpoint,
+    resolve_context_window,
 };
 pub use durable_memory::{DurableMemory, DurableMemoryError, MemoryLayout, MemoryWriteKind};
 pub use error::RuntimeError;
 pub use events::{RuntimeEventStream, RuntimeJournalEventStream};
 pub use final_output::{
     FINAL_OUTPUT_TOOL_NAME, FinalOutput, FinalOutputContract, FinalOutputContractError,
+};
+pub use hooks::{
+    AfterModelDecision, AfterModelStepContext, AfterToolCallContext, AfterToolDecision,
+    BeforeModelDecision, BeforeModelStepContext, BeforeToolCallContext, BeforeToolDecision,
+    HookDecision, HookError, HookFuture, HookInvocation, HookInvocationId, HookPoint, HookRegistry,
+    HookRequest, HookSubscriptions, RuntimeHookHandler, ToolHookFilter,
 };
 pub use interactive::{
     AgentLoopControl, AgentLoopInput, InteractiveAgentRun, InteractiveError, InteractiveInputItem,

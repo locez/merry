@@ -367,6 +367,55 @@ pub enum RuntimeError {
         /// Actionable model stream error.
         message: String,
     },
+
+    /// A host-bridged hook invocation is still pending and must be resolved before reading further messages.
+    #[error("agent run for session {session_id} has pending hook invocation {invocation_id}")]
+    AgentRunHookInvocationPending {
+        /// Session whose run has a pending hook invocation.
+        session_id: SessionId,
+        /// Pending hook invocation identifier.
+        invocation_id: crate::HookInvocationId,
+    },
+
+    /// A caller attempted to submit a hook decision when no hook invocation is pending.
+    #[error("agent run for session {session_id} has no pending hook invocation")]
+    NoPendingAgentRunHookInvocation {
+        /// Session whose run has no pending hook invocation.
+        session_id: SessionId,
+    },
+
+    /// A submitted hook decision referenced the wrong invocation identifier.
+    #[error(
+        "hook invocation id mismatch for session {session_id}: expected {expected_invocation_id}, received {received_invocation_id}"
+    )]
+    HookInvocationIdMismatch {
+        /// Session whose run rejected the hook decision.
+        session_id: SessionId,
+        /// Active hook invocation identifier.
+        expected_invocation_id: crate::HookInvocationId,
+        /// Identifier submitted by the caller.
+        received_invocation_id: crate::HookInvocationId,
+    },
+
+    /// A lifecycle hook failed (fail-closed).
+    #[error("hook {hook_point} failed for session {session_id}: {message}")]
+    HookFailed {
+        /// Session whose hook failed.
+        session_id: SessionId,
+        /// Hook point that failed.
+        hook_point: crate::HookPoint,
+        /// Actionable failure detail.
+        message: String,
+    },
+
+    /// A lifecycle hook was cancelled cooperatively.
+    #[error("hook {hook_point} cancelled for session {session_id}")]
+    HookCancelled {
+        /// Session whose hook was cancelled.
+        session_id: SessionId,
+        /// Hook point that was cancelled.
+        hook_point: crate::HookPoint,
+    },
 }
 
 impl RuntimeError {
@@ -420,6 +469,11 @@ impl RuntimeError {
             Self::CompactionModelTruncated { .. } => "compaction_model_truncated",
             Self::CompactionModelSetup { .. } => "compaction_model_setup",
             Self::CompactionModelStream { .. } => "compaction_model_stream",
+            Self::AgentRunHookInvocationPending { .. } => "agent_run_hook_invocation_pending",
+            Self::NoPendingAgentRunHookInvocation { .. } => "no_pending_agent_run_hook_invocation",
+            Self::HookInvocationIdMismatch { .. } => "hook_invocation_id_mismatch",
+            Self::HookFailed { .. } => "hook_failed",
+            Self::HookCancelled { .. } => "hook_cancelled",
         }
     }
 

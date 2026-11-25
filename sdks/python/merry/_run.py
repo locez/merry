@@ -18,9 +18,11 @@ from ._errors import (
     _decode_native_error,
 )
 from ._events import Event
+from ._hooks import HookDecision, HookInvocation, Hooks
 from ._json import dump_json
 from ._models import RunResult, ToolCallBatch, ToolResult, ToolSubmission
 from ._protocol import parse_message, parse_run_result, parse_submission
+from ._tools import ToolRegistry
 
 _LOGGER = logging.getLogger(__name__)
 OutputT = TypeVar("OutputT", bound=BaseModel)
@@ -33,6 +35,14 @@ class _NativeRun(Protocol):
         self, batch_id: str, results_json: str
     ) -> Awaitable[str]: ...
 
+    def submit_hook_decision(
+        self, invocation_id: str, decision_json: str
+    ) -> Awaitable[None]: ...
+
+    def fail_hook_invocation(
+        self, invocation_id: str, message: str
+    ) -> Awaitable[None]: ...
+
     def result(self) -> Awaitable[str]: ...
 
     def cancel(self) -> Awaitable[str]: ...
@@ -41,6 +51,8 @@ class _NativeRun(Protocol):
 _NON_TERMINAL_ERROR_CODES = frozenset(
     {
         "agent_run_not_finished",
+        "hook_invocation_not_pending",
+        "hook_invocation_pending",
         "runtime.run_state",
         "tool_batch_mismatch",
         "tool_batch_not_pending",
@@ -51,12 +63,25 @@ _NON_TERMINAL_ERROR_CODES = frozenset(
 )
 
 
-class AgentRun(Generic[OutputT]):
-    """Single-consumer async run with explicit tool batch handoff and async context management."""
+class _AgentRunCore(Generic[OutputT]):
+    """Shared implementation for auto-hook and manual-hook async agent runs."""
 
-    def __init__(self, native: _NativeRun, output_model: type[OutputT] | None) -> None:
+    def __init__(
+        self,
+        native: _NativeRun,
+        output_model: type[OutputT] | None,
+        *,
+        hooks: Hooks | None = None,
+        tools: ToolRegistry | None = None,
+        auto_hooks: bool = True,
+        auto_tools: bool = False,
+    ) -> None:
         self._native = native
         self._output_model = output_model
+        self._hooks = hooks
+        self._tools = tools
+        self._auto_hooks = auto_hooks
+        self._auto_tools = auto_tools
         self._eof = False
         self._result: RunResult[OutputT] | None = None
         self._terminal_error: MerryError | None = None
@@ -73,47 +98,75 @@ class AgentRun(Generic[OutputT]):
         if exc_type is asyncio.CancelledError:
             await self._cancel_after_task_cancellation()
             return
+        if exc_type is not None:
+            try:
+                await self.close()
+            except MerryError:
+                pass
+            return
         await self.close()
 
     def __aiter__(self) -> Self:
         return self
 
-    async def __anext__(self) -> Event | ToolCallBatch:
-        message = await self.next()
-        if message is None:
-            raise StopAsyncIteration
-        return message
-
-    async def next(self) -> Event | ToolCallBatch | None:
-        """Return the next event or tool batch, or `None` at message EOF."""
-
+    async def _next_raw(self) -> Event | ToolCallBatch | HookInvocation | None:
         self._raise_terminal_error()
-        if self._eof:
-            return None
-        try:
-            payload = await self._native.next()
-            if payload is None:
-                self._eof = True
+        while True:
+            if self._eof:
                 return None
-            if not isinstance(payload, str):
-                raise TypeError("native AgentRun.next() must return str or None")
             try:
-                return parse_message(payload, self)
-            except (TypeError, KeyError, ValueError):
-                error = self._protocol_error(
-                    "protocol.native_message_invalid",
-                    "The native run message did not match the SDK protocol.",
-                )
-                self._cache_terminal_error(error)
-                raise error from None
-        except NativeMerryError as error:
-            decoded = _decode_native_error(error)
-            if self._is_terminal_native_error(decoded):
-                self._cache_terminal_error(decoded)
-            raise decoded from error
-        except asyncio.CancelledError:
-            await self._cancel_after_task_cancellation()
-            raise
+                payload = await self._native.next()
+                if payload is None:
+                    self._eof = True
+                    return None
+                if not isinstance(payload, str):
+                    raise TypeError("native AgentRun.next() must return str or None")
+                try:
+                    message = parse_message(payload, self, self)
+                except (TypeError, KeyError, ValueError):
+                    error = self._protocol_error(
+                        "protocol.native_message_invalid",
+                        "The native run message did not match the SDK protocol.",
+                    )
+                    self._cache_terminal_error(error)
+                    raise error from None
+            except NativeMerryError as error:
+                decoded = _decode_native_error(error)
+                if self._is_terminal_native_error(decoded):
+                    self._cache_terminal_error(decoded)
+                raise decoded from error
+            except asyncio.CancelledError:
+                await self._cancel_after_task_cancellation()
+                raise
+
+            if (
+                isinstance(message, HookInvocation)
+                and self._auto_hooks
+                and self._hooks is not None
+            ):
+                try:
+                    decision = await self._hooks.evaluate(message)
+                except asyncio.CancelledError:
+                    await self._cancel_after_task_cancellation()
+                    raise
+                except Exception as hook_error:
+                    try:
+                        await message.fail(f"{type(hook_error).__name__}: {hook_error}")
+                    except MerryError:
+                        pass
+                    raise
+                await message.submit(decision)
+                continue
+
+            if (
+                isinstance(message, ToolCallBatch)
+                and self._auto_tools
+                and self._tools is not None
+            ):
+                await self._tools.execute(message)
+                continue
+
+            return message
 
     async def result(self) -> RunResult[OutputT]:
         """Return terminal evidence after EOF, excluding live text deltas and rates."""
@@ -224,6 +277,41 @@ class AgentRun(Generic[OutputT]):
             await self._cancel_after_task_cancellation()
             raise
 
+    async def _submit_hook_decision(
+        self,
+        invocation_id: str,
+        decision: HookDecision,
+    ) -> None:
+        self._raise_terminal_error()
+        payload = dump_json(decision.to_wire(), "hook decision")
+        try:
+            await self._native.submit_hook_decision(invocation_id, payload)
+        except NativeMerryError as error:
+            decoded = _decode_native_error(error)
+            if self._is_terminal_native_error(decoded):
+                self._cache_terminal_error(decoded)
+            raise decoded from error
+        except asyncio.CancelledError:
+            await self._cancel_after_task_cancellation()
+            raise
+
+    async def _fail_hook_invocation(
+        self,
+        invocation_id: str,
+        message: str,
+    ) -> None:
+        self._raise_terminal_error()
+        try:
+            await self._native.fail_hook_invocation(invocation_id, message)
+        except NativeMerryError as error:
+            decoded = _decode_native_error(error)
+            if self._is_terminal_native_error(decoded):
+                self._cache_terminal_error(decoded)
+            raise decoded from error
+        except asyncio.CancelledError:
+            await self._cancel_after_task_cancellation()
+            raise
+
     async def _cancel_after_task_cancellation(self) -> None:
         try:
             cancellation = self.cancel()
@@ -277,3 +365,77 @@ class AgentRun(Generic[OutputT]):
     @staticmethod
     def _is_terminal_native_error(error: MerryError) -> bool:
         return error.code not in _NON_TERMINAL_ERROR_CODES
+
+
+class AgentRun(_AgentRunCore[OutputT]):
+    """Single-consumer async run with automatic hook dispatch and typed event/tool streaming."""
+
+    def __init__(
+        self,
+        native: _NativeRun,
+        output_model: type[OutputT] | None,
+        *,
+        hooks: Hooks | None = None,
+        tools: ToolRegistry | None = None,
+        auto_tools: bool = False,
+    ) -> None:
+        super().__init__(
+            native,
+            output_model,
+            hooks=hooks,
+            tools=tools,
+            auto_hooks=True,
+            auto_tools=auto_tools,
+        )
+
+    async def __anext__(self) -> Event | ToolCallBatch:
+        message = await self.next()
+        if message is None:
+            raise StopAsyncIteration
+        return message
+
+    async def next(self) -> Event | ToolCallBatch | None:
+        """Return the next event or tool call batch, or `None` at EOF."""
+
+        message = await self._next_raw()
+        if isinstance(message, HookInvocation):
+            error = self._protocol_error(
+                "protocol.unexpected_hook_invocation",
+                "Received a native hook invocation without registered Python hooks.",
+            )
+            self._cache_terminal_error(error)
+            raise error
+        return message
+
+
+class ManualHookAgentRun(_AgentRunCore[OutputT]):
+    """Single-consumer async run that yields `HookInvocation` messages for manual resolution."""
+
+    def __init__(
+        self,
+        native: _NativeRun,
+        output_model: type[OutputT] | None,
+        *,
+        hooks: Hooks | None = None,
+        tools: ToolRegistry | None = None,
+        auto_tools: bool = False,
+    ) -> None:
+        super().__init__(
+            native,
+            output_model,
+            hooks=hooks,
+            tools=tools,
+            auto_hooks=False,
+            auto_tools=auto_tools,
+        )
+
+    async def __anext__(self) -> Event | ToolCallBatch | HookInvocation:
+        message = await self.next()
+        if message is None:
+            raise StopAsyncIteration
+        return message
+
+    async def next(self) -> Event | ToolCallBatch | HookInvocation | None:
+        """Return the next event, tool batch, or hook invocation, or `None` at EOF."""
+
+        return await self._next_raw()

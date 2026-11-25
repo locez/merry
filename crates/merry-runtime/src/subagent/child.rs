@@ -566,6 +566,9 @@ fn spawn_child_loop(
                     bridge_request = batch.calls().first().cloned();
                     break;
                 }
+                AgentRunMessage::HookInvocation { .. } => {
+                    break;
+                }
             }
         }
         let (loop_result, loop_error) = if timed_out || token_budget_exceeded {

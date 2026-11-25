@@ -46,6 +46,11 @@ pub(crate) fn agent_error_to_py(error: merry::AgentError) -> PyErr {
             MerryRetryability::UserActionRequired,
             "Submit exactly one result for every invocation in the active batch.",
         ),
+        merry::AgentError::HookInvocationPending | merry::AgentError::HookInvocationNotPending => (
+            MerryErrorDomain::Runtime,
+            MerryRetryability::UserActionRequired,
+            "Resolve the active hook invocation before advancing the run.",
+        ),
         merry::AgentError::AgentRunNotFinished
         | merry::AgentError::AgentRunResultConsumed
         | merry::AgentError::AgentRunResultMissing

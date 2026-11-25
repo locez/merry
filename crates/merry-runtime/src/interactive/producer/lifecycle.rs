@@ -172,6 +172,14 @@ impl InteractiveProducer {
             let notification_input = self.take_subagent_notification_input().await;
             let input = if let Some(input) = notification_input {
                 input
+            } else if let Some(note) = self.hook_continuation_note.take() {
+                match StepInput::loop_control_text(&note) {
+                    Ok(input) => input,
+                    Err(error) => {
+                        self.remember_terminal_error(InteractiveError::Runtime { source: error });
+                        return None;
+                    }
+                }
             } else if first_step {
                 first_step = false;
                 match self.coordinator_continuation_note.take() {

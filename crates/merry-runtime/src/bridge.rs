@@ -5,9 +5,7 @@
 //! growing a separate batch state machine.
 
 use crate::{Runtime, RuntimeError, ToolExecutionOutcome, events::ActiveStepPermit};
-use merry_core::{
-    PendingToolCall, PendingToolCallBatch, RuntimeJournalEvent, ToolCallBatchId, ToolCallId,
-};
+use merry_core::{PendingToolCall, PendingToolCallBatch, ToolCallBatchId, ToolCallId};
 use std::collections::BTreeSet;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -47,14 +45,14 @@ pub(crate) async fn receive_bridge_tool_result(
     }
 }
 
-pub(crate) async fn resolve_bridge_tool_result_command(
+pub(crate) async fn validate_bridge_tool_result_command(
     runtime: &Runtime,
     expected_batch: &PendingToolCallBatch,
     command: BridgeToolResultCommand,
     loop_permit: &ActiveStepPermit,
 ) -> (
     oneshot::Sender<Result<(), RuntimeError>>,
-    Result<Vec<RuntimeJournalEvent>, RuntimeError>,
+    Result<Vec<(ToolCallId, ToolExecutionOutcome)>, RuntimeError>,
 ) {
     let BridgeToolResultCommand {
         payload,
@@ -62,20 +60,20 @@ pub(crate) async fn resolve_bridge_tool_result_command(
     } = command;
     let result = match payload {
         BridgeToolResultPayload::Outcomes { batch_id, outcomes } => {
-            resolve_bridge_tool_outcomes(runtime, expected_batch, batch_id, outcomes, loop_permit)
+            validate_bridge_tool_outcomes(runtime, expected_batch, batch_id, outcomes, loop_permit)
                 .await
         }
     };
     (ack_sender, result)
 }
 
-async fn resolve_bridge_tool_outcomes(
+async fn validate_bridge_tool_outcomes(
     runtime: &Runtime,
     expected_batch: &PendingToolCallBatch,
     received_batch_id: ToolCallBatchId,
     outcomes: Vec<(ToolCallId, ToolExecutionOutcome)>,
     loop_permit: &ActiveStepPermit,
-) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
+) -> Result<Vec<(ToolCallId, ToolExecutionOutcome)>, RuntimeError> {
     if expected_batch.id() != &received_batch_id {
         return Err(RuntimeError::BridgeToolResultBatchIdMismatch {
             session_id: runtime.session_id().clone(),
@@ -103,8 +101,9 @@ async fn resolve_bridge_tool_outcomes(
     }
 
     runtime
-        .submit_tool_execution_outcomes_with_active_permit(outcomes, loop_permit)
-        .await
+        .validate_tool_execution_outcomes_with_active_permit(&outcomes, loop_permit)
+        .await?;
+    Ok(outcomes)
 }
 
 pub(crate) fn bridge_tool_result_batch_mismatch(

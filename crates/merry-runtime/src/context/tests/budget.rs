@@ -1,4 +1,7 @@
-use crate::{CheckpointDecision, ContextBudget, decide_checkpoint, resolve_context_window};
+use crate::{
+    CheckpointDecision, ContextBudget, bundled_model_context_window, decide_checkpoint,
+    resolve_context_window,
+};
 use merry_core::ContextWindowSource;
 
 #[test]
@@ -103,4 +106,28 @@ fn checkpoint_decision_uses_one_threshold() {
         decide_checkpoint(budget.compact_at_tokens(), budget),
         CheckpointDecision::Compact
     );
+}
+
+#[test]
+fn bundled_model_catalog_resolves_known_families_and_leaves_unknown_for_fallback() {
+    assert_eq!(
+        bundled_model_context_window("claude-sonnet-4-6"),
+        Some(200_000)
+    );
+    assert_eq!(
+        bundled_model_context_window("anthropic/claude-opus-4-6"),
+        Some(200_000)
+    );
+    assert_eq!(bundled_model_context_window("gpt-4o"), Some(128_000));
+    assert_eq!(
+        bundled_model_context_window("openai/gpt-4.1"),
+        Some(1_047_576)
+    );
+    assert_eq!(bundled_model_context_window("gpt-5"), Some(400_000));
+    assert_eq!(bundled_model_context_window("o3-mini"), Some(200_000));
+    assert_eq!(
+        bundled_model_context_window("gemini-2.5-pro"),
+        Some(1_048_576)
+    );
+    assert_eq!(bundled_model_context_window("unknown/custom-model"), None);
 }

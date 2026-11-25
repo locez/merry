@@ -175,6 +175,12 @@ pub enum AgentError {
     /// The caller attempted to submit a result without an active host batch.
     #[error("tool invocation batch is not pending")]
     ToolInvocationBatchNotPending,
+    /// The caller attempted to advance while a bridged hook invocation is pending.
+    #[error("hook invocation must be resolved before the run advances")]
+    HookInvocationPending,
+    /// The caller attempted to submit a hook decision without an active hook invocation.
+    #[error("hook invocation is not pending")]
+    HookInvocationNotPending,
     /// The event-only stream encountered a host-owned tool handoff.
     #[error(
         "event-only agent stream encountered a host tool handoff; use stream_with_tool_handoff"
@@ -218,6 +224,8 @@ impl AgentError {
             Self::ToolInvocationBatchResolved => "tool_batch_resolved",
             Self::ToolInvocationBatchPending => "tool_batch_pending",
             Self::ToolInvocationBatchNotPending => "tool_batch_not_pending",
+            Self::HookInvocationPending => "hook_invocation_pending",
+            Self::HookInvocationNotPending => "hook_invocation_not_pending",
             Self::ToolHandoffRequired => "tool_handoff_required",
             Self::AgentRunNotFinished => "agent_run_not_finished",
             Self::AgentRunResultConsumed => "agent_run_result_consumed",

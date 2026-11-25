@@ -7,7 +7,8 @@ from typing import Protocol, runtime_checkable
 
 import merry
 from merry import _merry
-from merry._json import JsonObject, JsonValue
+from merry._hooks import Hooks
+from merry._json import JsonObject, JsonValue, dump_json
 from merry._tools import ToolRegistration
 
 
@@ -85,6 +86,21 @@ class _FinalOutputFactory(Protocol):
 @runtime_checkable
 class _PendingResponseFactory(Protocol):
     def __call__(self, session_id: str, /) -> _merry.Agent: ...
+
+
+@runtime_checkable
+class _ContextAndHooksFactory(Protocol):
+    def __call__(
+        self,
+        session_id: str,
+        turns_json: str,
+        tool_names: list[str],
+        provider_context_window_tokens: int | None = None,
+        explicit_context_window_tokens: int | None = None,
+        hook_subscriptions_json: str | None = None,
+        max_model_turns: int | None = None,
+        /,
+    ) -> _merry.Agent: ...
 
 
 def _fake_response_native(session_id: str, final_text: str) -> _merry.Agent:
@@ -239,3 +255,32 @@ def final_output_agent(
     arguments_json = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
     native = _final_output_native(session_id, arguments_json, "unused")
     return merry.Agent._from_native(native)
+
+
+def context_and_hooks_agent(
+    session_id: str,
+    turns: Sequence[JsonValue],
+    *,
+    tools: Sequence[ToolRegistration] = (),
+    hooks: Hooks | None = None,
+    provider_context_window_tokens: int | None = None,
+    explicit_context_window_tokens: int | None = None,
+    max_model_turns: int | None = None,
+) -> merry.Agent:
+    factory: object = getattr(_merry, "test_agent_with_context_and_hooks", None)
+    if not isinstance(factory, _ContextAndHooksFactory):
+        raise TypeError("test-utils native extension is required")
+    subs_json: str | None = None
+    if hooks is not None and not hooks.is_empty():
+        subs_json = dump_json(hooks.subscriptions_wire(), "hook subscriptions")
+    turns_json = json.dumps(list(turns), ensure_ascii=False, separators=(",", ":"))
+    native = factory(
+        session_id,
+        turns_json,
+        [item.name for item in tools],
+        provider_context_window_tokens,
+        explicit_context_window_tokens,
+        subs_json,
+        max_model_turns,
+    )
+    return merry.Agent._from_native(native, tools=tuple(tools), hooks=hooks)

@@ -156,6 +156,50 @@ pub fn resolve_context_window(
     Ok(ResolvedContextWindow { tokens, source })
 }
 
+/// Conservative bundled context window lookup for well-known model identifiers.
+///
+/// Used only when neither an explicit `context_window_tokens` override nor
+/// provider-declared `ModelCapabilities::max_input_tokens` is configured.
+/// Unknown or custom model names return `None` so callers fall back to
+/// [`super::DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS`].
+#[must_use]
+pub fn bundled_model_context_window(model: &str) -> Option<u64> {
+    let base = model
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    if base.starts_with("claude-3")
+        || base.starts_with("claude-sonnet-4")
+        || base.starts_with("claude-opus-4")
+        || base.starts_with("claude-haiku-4")
+    {
+        return Some(200_000);
+    }
+    if base.starts_with("gpt-4.1") {
+        return Some(1_047_576);
+    }
+    if base.starts_with("gpt-5") {
+        return Some(400_000);
+    }
+    if base.starts_with("gpt-4o") || base.starts_with("gpt-4-turbo") {
+        return Some(128_000);
+    }
+    if base == "o1"
+        || base.starts_with("o1-")
+        || base == "o3"
+        || base.starts_with("o3-")
+        || base.starts_with("o4-mini")
+    {
+        return Some(200_000);
+    }
+    if base.starts_with("gemini-2.5") || base.starts_with("gemini-2.0") {
+        return Some(1_048_576);
+    }
+    None
+}
+
 /// Whether the dynamic body has reached the compaction threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckpointDecision {

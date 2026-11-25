@@ -46,6 +46,16 @@ class InvalidMessageNative:
     async def submit_tool_results(self, batch_id: str, results_json: str) -> str:
         raise AssertionError(f"unexpected submission: {batch_id}, {results_json}")
 
+    async def submit_hook_decision(
+        self, invocation_id: str, decision_json: str
+    ) -> None:
+        raise AssertionError(
+            f"unexpected hook decision: {invocation_id}, {decision_json}"
+        )
+
+    async def fail_hook_invocation(self, invocation_id: str, message: str) -> None:
+        raise AssertionError(f"unexpected hook failure: {invocation_id}, {message}")
+
     async def result(self) -> str:
         raise AssertionError("invalid message must not request a result")
 
@@ -62,6 +72,16 @@ class InvalidResultNative:
 
     async def submit_tool_results(self, batch_id: str, results_json: str) -> str:
         raise AssertionError(f"unexpected submission: {batch_id}, {results_json}")
+
+    async def submit_hook_decision(
+        self, invocation_id: str, decision_json: str
+    ) -> None:
+        raise AssertionError(
+            f"unexpected hook decision: {invocation_id}, {decision_json}"
+        )
+
+    async def fail_hook_invocation(self, invocation_id: str, message: str) -> None:
+        raise AssertionError(f"unexpected hook failure: {invocation_id}, {message}")
 
     async def result(self) -> str:
         self.result_calls += 1
