@@ -175,5 +175,5 @@ pub use tool_catalog::LoadedSession;
 pub use user_input::{
     MAX_USER_IMAGE_DIMENSION, MAX_USER_IMAGE_PIXELS, MAX_USER_IMAGE_PNG_BYTES,
     MAX_USER_IMAGE_TOTAL_PNG_BYTES, MAX_USER_IMAGES, StepInput, UserImageInput, UserMessageInput,
-    user_image_label,
+    normalize_line_endings, user_image_label,
 };

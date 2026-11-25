@@ -92,6 +92,27 @@ fn text_input_deleting_paste_placeholder_removes_stale_expansion() {
 }
 
 #[test]
+fn text_input_normalizes_cr_and_crlf_in_short_and_large_pastes() {
+    let mut short = TextInput::default();
+    short.insert_paste("first\r\nsecond\rthird\n");
+    assert_eq!(short.text(), "first\nsecond\nthird\n");
+    assert_eq!(
+        short.take_trimmed(),
+        Some("first\nsecond\nthird\n".to_owned())
+    );
+
+    let mut large = TextInput::default();
+    let raw = "hello world\r\n".repeat(30);
+    let expected = "hello world\n".repeat(30);
+    large.insert_paste(&raw);
+    assert_eq!(
+        large.text(),
+        format!("[pasted {} chars]", expected.chars().count())
+    );
+    assert_eq!(large.take_trimmed(), Some(expected));
+}
+
+#[test]
 fn text_input_inserts_pasted_text_at_cursor() {
     let mut input = TextInput::default();
 

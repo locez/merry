@@ -5,6 +5,32 @@
 //! These helpers only prepare text for display; they never decide what is
 //! shown or what a tool is allowed to do.
 
+pub(crate) use merry_runtime::normalize_line_endings;
+
+/// Normalizes CRLF (`\r\n`) and bare CR (`\r`) in an owned string without
+/// reallocating when no carriage returns are present.
+pub(crate) fn normalize_line_endings_owned(value: String) -> String {
+    match normalize_line_endings(&value) {
+        std::borrow::Cow::Borrowed(_) => value,
+        std::borrow::Cow::Owned(normalized) => normalized,
+    }
+}
+
+/// Normalizes pasted text for single-line search inputs by collapsing each
+/// line break (`\r\n`, `\r`, or `\n`) into a single space.
+pub(crate) fn single_line_paste_collapsed(value: &str) -> String {
+    normalize_line_endings(value).replace('\n', " ")
+}
+
+/// Normalizes pasted text for single-line value inputs (such as API keys,
+/// URLs, or model names) by stripping all line breaks.
+pub(crate) fn single_line_paste_stripped(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !matches!(character, '\r' | '\n'))
+        .collect()
+}
+
 /// Drops control characters so text stays on a single line.
 pub(crate) fn without_control_chars(value: &str) -> String {
     value
@@ -58,5 +84,17 @@ mod tests {
         assert_eq!(without_control_chars(text), text);
         assert_eq!(with_control_chars_as_spaces(text), text);
         assert_eq!(without_control_chars_keeping_newlines(text), text);
+        assert_eq!(normalize_line_endings(text), text);
+    }
+
+    #[test]
+    fn line_ending_and_single_line_paste_helpers_normalize_cr_and_crlf() {
+        assert_eq!(normalize_line_endings("a\r\nb\rc\nd\r\n"), "a\nb\nc\nd\n");
+        assert_eq!(
+            single_line_paste_collapsed("foo\r\nbar\rbaz\nqux"),
+            "foo bar baz qux"
+        );
+        assert_eq!(single_line_paste_stripped("sk-secret\r\n"), "sk-secret");
+        assert_eq!(single_line_paste_stripped("line1\rline2\n"), "line1line2");
     }
 }

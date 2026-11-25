@@ -270,6 +270,8 @@ impl TextInput {
     }
 
     pub(crate) fn insert_paste(&mut self, value: &str) {
+        let normalized = crate::text::normalize_line_endings(value);
+        let value = normalized.as_ref();
         let char_count = value.chars().count();
         if char_count < PASTE_PLACEHOLDER_THRESHOLD_CHARS {
             self.insert_str(value);
@@ -286,7 +288,7 @@ impl TextInput {
             range: end - placeholder.len()..end,
             placeholder,
             payload: InputElementPayload::LargePaste {
-                content: value.to_owned(),
+                content: normalized.into_owned(),
             },
         });
     }

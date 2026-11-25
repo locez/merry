@@ -75,7 +75,8 @@ impl ReasoningPickerOverlay {
     }
 
     pub(crate) fn insert_paste(&mut self, text: &str) {
-        self.query.insert_str(text);
+        let single_line = crate::text::single_line_paste_collapsed(text);
+        self.query.insert_str(&single_line);
         self.selected = 0;
         self.error = None;
     }

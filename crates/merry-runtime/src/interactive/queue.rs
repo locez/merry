@@ -69,8 +69,9 @@ impl InteractiveInputQueue {
 
     #[cfg(test)]
     pub(super) fn submit(&mut self, text: &str) -> Result<QueuedInputId, InteractiveError> {
-        validate_interactive_text(text)?;
-        self.submit_message(UserMessageInput::text_only(text)?)
+        let normalized = crate::user_input::normalize_line_endings(text);
+        validate_interactive_text(&normalized)?;
+        self.submit_message(UserMessageInput::text_only(&normalized)?)
     }
 
     pub(super) fn submit_message(
@@ -91,7 +92,8 @@ impl InteractiveInputQueue {
     }
 
     pub(super) fn update(&mut self, id: QueuedInputId, text: &str) -> Result<(), InteractiveError> {
-        validate_interactive_text(text)?;
+        let normalized = crate::user_input::normalize_line_endings(text);
+        validate_interactive_text(&normalized)?;
         let images = self
             .pending_item(id)?
             .message
@@ -99,7 +101,7 @@ impl InteractiveInputQueue {
             .expect("pending queued input owns its message")
             .images()
             .to_vec();
-        let message = UserMessageInput::new(text, images)?;
+        let message = UserMessageInput::new(&normalized, images)?;
         self.pending_item_mut(id)?.message = Some(message);
         Ok(())
     }
@@ -450,5 +452,24 @@ mod tests {
         queue.remove(id).expect("pending message should remove");
 
         assert_eq!(Arc::strong_count(&bytes), 1);
+    }
+
+    #[test]
+    fn queue_normalizes_crlf_and_bare_cr_while_rejecting_other_controls() {
+        let mut queue = InteractiveInputQueue::default();
+        let id = queue
+            .submit("line1\r\nline2\rline3")
+            .expect("CRLF and bare CR normalize to LF");
+        assert_eq!(queue.snapshot().items[0].text, "line1\nline2\nline3");
+
+        queue
+            .update(id, "updated\r\nline2\rline3")
+            .expect("updated CRLF and bare CR normalize to LF");
+        assert_eq!(queue.snapshot().items[0].text, "updated\nline2\nline3");
+
+        let err = queue
+            .submit("bad\u{0}control")
+            .expect_err("other control characters remain rejected");
+        assert!(matches!(err, InteractiveError::InvalidInput { .. }));
     }
 }

@@ -128,3 +128,17 @@ fn user_image_input_rejects_non_png_and_zero_dimensions() {
     assert!(UserImageInput::png("[Image #1]", Arc::<[u8]>::from([1, 2, 3]), 1, 1).is_err());
     assert!(UserImageInput::png("[Image #1]", png_bytes(PNG_SIGNATURE.len()), 0, 1).is_err());
 }
+
+#[test]
+fn user_message_input_normalizes_crlf_and_bare_cr_line_endings() {
+    let message =
+        UserMessageInput::text_only("first\r\nsecond\rthird\n").expect("CR/CRLF normalize to LF");
+    assert_eq!(message.text(), "first\nsecond\nthird\n");
+
+    let step = StepInput::user_text("a\r\nb\rc").expect("StepInput normalizes CR/CRLF");
+    assert_eq!(step.text(), "a\nb\nc");
+
+    let rejected = UserMessageInput::text_only("bad\u{0}text")
+        .expect_err("non-line-ending control characters stay rejected");
+    assert!(matches!(rejected, RuntimeError::InvalidStepInput { .. }));
+}

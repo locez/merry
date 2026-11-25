@@ -2,7 +2,7 @@
 
 use crate::RuntimeError;
 use merry_llm::{ModelContent, ModelImage};
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
@@ -140,7 +140,12 @@ impl UserMessageInput {
     }
 
     /// Creates a user message with ordered image attachments.
+    ///
+    /// Windows (`\r\n`) and bare carriage-return (`\r`) line endings are
+    /// normalized to `\n` before validation and storage.
     pub fn new(text: &str, images: Vec<UserImageInput>) -> Result<Self, RuntimeError> {
+        let normalized = normalize_line_endings(text);
+        let text = normalized.as_ref();
         validate_user_text(text)?;
         if images.len() > MAX_USER_IMAGES {
             return Err(invalid_image(
@@ -174,7 +179,7 @@ impl UserMessageInput {
         }
 
         Ok(Self {
-            text: text.to_owned(),
+            text: normalized.into_owned(),
             images,
         })
     }
@@ -318,6 +323,29 @@ impl StepInput {
 enum StepInputHistory {
     RecordUser,
     ControlOnly,
+}
+
+/// Normalizes CRLF (`\r\n`) and bare CR (`\r`) line breaks into `\n`.
+///
+/// Borrows `text` without allocating when it contains no carriage returns.
+#[must_use]
+pub fn normalize_line_endings(text: &str) -> Cow<'_, str> {
+    if !text.contains('\r') {
+        return Cow::Borrowed(text);
+    }
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            normalized.push('\n');
+        } else {
+            normalized.push(ch);
+        }
+    }
+    Cow::Owned(normalized)
 }
 
 pub(crate) fn validate_user_text(text: &str) -> Result<(), RuntimeError> {

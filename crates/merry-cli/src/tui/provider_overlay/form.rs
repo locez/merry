@@ -392,7 +392,8 @@ impl ProviderFormOverlay {
             return;
         }
         if let Some(index) = field_input_index(self.selected_field()) {
-            self.fields[index].insert_str(text);
+            let single_line = crate::text::single_line_paste_stripped(text);
+            self.fields[index].insert_str(&single_line);
         }
     }
 

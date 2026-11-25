@@ -631,6 +631,11 @@ pub fn load_workspace_prompt_file(
         path: relative_path.to_owned(),
         reason: error.to_string(),
     })?;
+    let text = if text.contains("\r\n") {
+        text.replace("\r\n", "\n")
+    } else {
+        text
+    };
     if text.trim().is_empty() {
         return Err(SubagentRoleError::InvalidPromptFile {
             role: role.to_owned(),

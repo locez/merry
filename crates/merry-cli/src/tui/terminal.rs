@@ -334,7 +334,9 @@ fn map_crossterm_event(event: Event) -> Option<TerminalEvent> {
             crate::tui::keymap::normalize_command_key(key),
         )),
         Event::Mouse(mouse) => mouse_event(mouse),
-        Event::Paste(text) => Some(TerminalEvent::Paste(text)),
+        Event::Paste(text) => Some(TerminalEvent::Paste(
+            crate::text::normalize_line_endings_owned(text),
+        )),
         Event::Resize(_, _) => Some(TerminalEvent::Resize),
         _ => None,
     }

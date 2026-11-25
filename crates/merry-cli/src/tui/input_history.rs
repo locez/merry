@@ -145,7 +145,7 @@ impl HistorySearch {
 
     pub(crate) fn insert_paste(&mut self, text: &str, entries: &[String]) {
         let previous = self.matched();
-        let single_line = text.replace(['\r', '\n'], " ");
+        let single_line = crate::text::single_line_paste_collapsed(text);
         self.query.insert_str(&single_line);
         self.recompute_matches(entries, previous);
     }

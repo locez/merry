@@ -235,7 +235,8 @@ impl SettingsOverlay {
 
     pub(crate) fn insert_paste(&mut self, text: &str) {
         if let Some(editor) = self.inline_editor.as_mut() {
-            editor.input.insert_str(text);
+            let single_line = crate::text::single_line_paste_stripped(text);
+            editor.input.insert_str(&single_line);
         }
     }
 
