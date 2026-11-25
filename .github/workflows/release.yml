@@ -96,6 +96,8 @@ jobs:
       - name: Install Zig (musl targets)
         if: matrix.use_zigbuild
         uses: mlugg/setup-zig@v2
+        with:
+          version: "0.17.1"
 
       - name: Install cargo-zigbuild (musl targets)
         if: matrix.use_zigbuild
