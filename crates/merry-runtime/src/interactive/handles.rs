@@ -171,9 +171,18 @@ impl InteractiveRunEventStream {
         };
         match handle.await {
             Ok(result) => result,
-            Err(_) => Err(InteractiveError::ProducerTaskFailed {
-                run_id: self.run_id,
-            }),
+            Err(error) => {
+                let reason = error.to_string();
+                tracing::error!(
+                    run_id = self.run_id.as_u64(),
+                    reason = %reason,
+                    "interactive run producer task failed"
+                );
+                Err(InteractiveError::ProducerTaskFailed {
+                    run_id: self.run_id,
+                    reason,
+                })
+            }
         }
     }
 
@@ -795,5 +804,51 @@ impl AgentLoopControl {
             .map_err(|_| InteractiveError::CommandChannelClosed {
                 run_id: self.run_id,
             })?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn producer_panic_preserves_join_error_reason() {
+        let (message_tx, message_rx) = mpsc::channel(1);
+        let (rate_tx, rate_rx) = watch::channel(None);
+        let (bridge_tx, _bridge_rx) = mpsc::channel(1);
+        let producer = tokio::spawn(async move {
+            let _tx = message_tx;
+            let _rate = rate_tx;
+            panic!("injected thread spawn failure: os error 11");
+        });
+
+        let mut stream = InteractiveRunEventStream::new(
+            InteractiveRunId(42),
+            ReceiverStream::new(message_rx),
+            rate_rx,
+            CancellationToken::new(),
+            producer,
+            bridge_tx,
+            Arc::new(AtomicU64::new(0)),
+        );
+
+        let err = stream
+            .next_message()
+            .await
+            .expect_err("panicked producer should surface ProducerTaskFailed");
+        match &err {
+            InteractiveError::ProducerTaskFailed { run_id, reason } => {
+                assert_eq!(*run_id, InteractiveRunId(42));
+                assert!(
+                    reason.contains("injected thread spawn failure: os error 11"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("expected ProducerTaskFailed, got {other:?}"),
+        }
+        assert!(
+            err.to_string()
+                .contains("injected thread spawn failure: os error 11")
+        );
     }
 }

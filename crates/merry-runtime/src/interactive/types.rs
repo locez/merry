@@ -65,8 +65,11 @@ pub enum InteractiveError {
         message: &'static str,
     },
     /// The producer task could not be joined successfully.
-    #[error("interactive run {run_id:?} producer task failed")]
-    ProducerTaskFailed { run_id: InteractiveRunId },
+    #[error("interactive run {run_id:?} producer task failed: {reason}")]
+    ProducerTaskFailed {
+        run_id: InteractiveRunId,
+        reason: String,
+    },
     #[error("interactive run {run_id:?} command channel is closed")]
     CommandChannelClosed { run_id: InteractiveRunId },
     #[error("interactive run {run_id:?} has unresolved tool invocations")]
