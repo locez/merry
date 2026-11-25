@@ -93,11 +93,15 @@ jobs:
         with:
           shared-key: "release-${{ matrix.target }}"
 
-      - name: Install cargo-zigbuild and Zig (musl targets)
+      - name: Install Zig (musl targets)
+        if: matrix.use_zigbuild
+        uses: mlugg/setup-zig@v2
+
+      - name: Install cargo-zigbuild (musl targets)
         if: matrix.use_zigbuild
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-zigbuild,zig
+          tool: cargo-zigbuild
 
       - name: Determine release tag
         id: meta
@@ -114,6 +118,7 @@ jobs:
         if: matrix.use_zigbuild
         shell: bash
         run: |
+          ulimit -n 8192 || true
           cargo zigbuild --locked --release -p merry-cli --features web --target "${{ matrix.target }}"
           file "target/${{ matrix.target }}/release/merry"
 
