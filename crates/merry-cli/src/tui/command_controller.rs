@@ -191,6 +191,7 @@ pub(crate) fn run_palette_command(
             }
         }
         PaletteCommand::CompactContext => compact_effect(state, None),
+        PaletteCommand::CopyLastResponse => copy_last_response_effect(state),
         PaletteCommand::SaveSession => {
             prepare_timeline_feedback(state);
             if state.is_active_run() {
@@ -221,6 +222,25 @@ pub(crate) fn run_palette_command(
         PaletteCommand::Quit => {
             state.close_overlay();
             ControllerEffect::Quit
+        }
+    }
+}
+
+fn copy_last_response_effect(state: &mut TuiState) -> ControllerEffect {
+    state.close_overlay();
+    match state.latest_assistant_response() {
+        Some(text) => match crate::tui::copy_controls::validate_copy_text(text) {
+            Ok(valid) => ControllerEffect::CopyText(valid),
+            Err(crate::tui::copy_controls::CopyTextError::TooLarge) => {
+                ControllerEffect::CopyTextTooLarge
+            }
+        },
+        None => {
+            state.show_clipboard_feedback(
+                "Nothing to copy: no assistant response yet".to_owned(),
+                true,
+            );
+            ControllerEffect::None
         }
     }
 }

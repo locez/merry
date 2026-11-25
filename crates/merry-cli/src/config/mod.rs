@@ -778,6 +778,39 @@ pub(crate) enum BrandMarkMode {
     Snowflake,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum CopyButtonPosition {
+    #[serde(alias = "top_left")]
+    TopLeft,
+    #[default]
+    #[serde(alias = "top_right")]
+    TopRight,
+    #[serde(alias = "bottom_left")]
+    BottomLeft,
+    #[serde(alias = "bottom_right")]
+    BottomRight,
+}
+
+impl CopyButtonPosition {
+    pub(crate) const fn is_top(self) -> bool {
+        matches!(self, Self::TopLeft | Self::TopRight)
+    }
+
+    pub(crate) const fn is_left(self) -> bool {
+        matches!(self, Self::TopLeft | Self::BottomLeft)
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::TopLeft => "Top-left",
+            Self::TopRight => "Top-right",
+            Self::BottomLeft => "Bottom-left",
+            Self::BottomRight => "Bottom-right",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TuiHeaderToml {
@@ -793,6 +826,7 @@ struct TuiToml {
     max_reading_width: Option<u16>,
     text_sizing: Option<TextSizingMode>,
     brand_mark: Option<BrandMarkMode>,
+    copy_button_position: Option<CopyButtonPosition>,
     header: Option<TuiHeaderToml>,
     theme: Option<TuiThemeToml>,
     keymap: Option<TuiKeymapToml>,
@@ -865,6 +899,7 @@ pub(crate) struct TuiConfig {
     pub(crate) max_reading_width: u16,
     pub(crate) text_sizing: TextSizingMode,
     pub(crate) brand_mark: BrandMarkMode,
+    pub(crate) copy_button_position: CopyButtonPosition,
     pub(crate) header_items: Vec<HeaderItemKind>,
     pub(crate) theme: TuiThemeToml,
     pub(crate) keymap: TuiKeymapToml,
@@ -879,6 +914,7 @@ impl Default for TuiConfig {
             max_reading_width: DEFAULT_MAX_READING_WIDTH,
             text_sizing: TextSizingMode::Off,
             brand_mark: BrandMarkMode::Emoji,
+            copy_button_position: CopyButtonPosition::default(),
             header_items: HeaderItemKind::DEFAULT_ITEMS.to_vec(),
             theme: TuiThemeToml::default(),
             keymap: TuiKeymapToml::default(),
@@ -903,6 +939,7 @@ impl MerryConfig {
             max_reading_width: tui.max_reading_width.unwrap_or(DEFAULT_MAX_READING_WIDTH),
             text_sizing: tui.text_sizing.unwrap_or(TextSizingMode::Off),
             brand_mark: tui.brand_mark.unwrap_or(BrandMarkMode::Emoji),
+            copy_button_position: tui.copy_button_position.unwrap_or_default(),
             header_items,
             theme: tui.theme.clone().unwrap_or_default(),
             keymap: tui.keymap.clone().unwrap_or_default(),

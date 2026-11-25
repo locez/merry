@@ -539,6 +539,7 @@ fn fresh_plan_child_state(parent: &TuiState, plan: &PlanDocument) -> TuiState {
         parent.theme().clone(),
     )
     .with_successful_command_output(parent.show_successful_command_output())
+    .with_copy_button_position(parent.copy_button_position())
     .with_animations(parent.animations_enabled())
     .with_max_reading_width(parent.max_reading_width());
     child.push_timeline_item(TimelineItem::Assistant {

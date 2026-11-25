@@ -168,15 +168,9 @@ fn copy_target_text(
             && (target.column..target.column.saturating_add(target.width)).contains(&column)
         {
             return match &target.content {
-                CopyContent::Text(text) => validate_copy_text(text.clone()).map(Some),
+                CopyContent::Text(text) => validate_copy_text(text).map(Some),
                 CopyContent::AssistantMessage(index) => match state.timeline().get(*index) {
-                    Some(TimelineItem::Assistant { text }) => {
-                        if text.len() > crate::tui::copy_controls::MAX_CLIPBOARD_BYTES {
-                            Err(CopyTextError::TooLarge)
-                        } else {
-                            Ok(Some(text.clone()))
-                        }
-                    }
+                    Some(TimelineItem::Assistant { text }) => validate_copy_text(text).map(Some),
                     _ => Ok(None),
                 },
             };

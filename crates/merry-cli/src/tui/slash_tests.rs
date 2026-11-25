@@ -102,6 +102,7 @@ fn slash_completion_uses_the_shared_registry_only_at_the_input_start() {
     for expected in [
         "/code-review",
         "/compact",
+        "/copy",
         "/exit",
         "/help",
         "/model",
@@ -291,6 +292,7 @@ fn help_and_status_render_complete_bodies_at_supported_terminal_sizes() {
             "/new",
             "/clear",
             "/compact",
+            "/copy",
             "/code-review",
             "/security-review",
             "/model",
@@ -441,6 +443,7 @@ fn help_remains_complete_at_80_by_16() {
         "/clear",
         "/resume",
         "/compact",
+        "/copy",
         "/code-review",
         "/security-review",
         "/model",
@@ -1164,4 +1167,72 @@ fn slash_completion_aligns_description_column_across_commands() {
     assert_eq!(help_col, review_col);
     assert_eq!(model_col, review_col);
     assert_eq!(new_col, review_col);
+}
+
+#[test]
+fn copy_slash_command_copies_latest_assistant_response_and_handles_empty_or_oversized_state() {
+    let mut empty = state();
+    empty.push_timeline_item(TimelineItem::User {
+        text: "Hello".to_owned(),
+    });
+    empty.insert_input_str("/copy");
+    assert_eq!(
+        handle_key_action(KeyAction::Submit, &mut empty),
+        ControllerEffect::None
+    );
+    assert_eq!(empty.input_text(), "");
+    assert!(empty.input_history_entries().is_empty());
+    assert!(
+        render::render_to_text(&empty, 100, 20)
+            .contains("Nothing to copy: no assistant response yet")
+    );
+
+    let mut populated = state();
+    populated.push_timeline_item(TimelineItem::User {
+        text: "Explain the change".to_owned(),
+    });
+    populated.push_timeline_item(TimelineItem::Assistant {
+        text: "Let me check the file first.".to_owned(),
+    });
+    populated.push_timeline_item(TimelineItem::Muted {
+        title: "Read".to_owned(),
+        detail: "src/lib.rs".to_owned(),
+    });
+    let final_output = "# Final Summary\n\nAll checks passed.\n\n```rust\nfn ok() {}\n```\n";
+    populated.push_timeline_item(TimelineItem::Assistant {
+        text: final_output.to_owned(),
+    });
+    populated.push_timeline_item(TimelineItem::LocalCommand {
+        title: "Session status".to_owned(),
+        body: "Run: ready".to_owned(),
+    });
+    let timeline_len_before = populated.timeline().len();
+    populated.insert_input_str("/copy");
+    assert_eq!(
+        handle_key_action(KeyAction::Submit, &mut populated),
+        ControllerEffect::CopyText(final_output.to_owned())
+    );
+    assert_eq!(populated.input_text(), "");
+    assert_eq!(populated.timeline().len(), timeline_len_before);
+    assert!(populated.input_history_entries().is_empty());
+
+    // Invoking via Command Palette closes the overlay and copies the same final output.
+    populated.open_command_palette();
+    assert!(populated.overlay().is_some());
+    assert_eq!(
+        run_palette_command(PaletteCommand::CopyLastResponse, &mut populated),
+        ControllerEffect::CopyText(final_output.to_owned())
+    );
+    assert!(populated.overlay().is_none());
+
+    // Responses exceeding MAX_CLIPBOARD_BYTES return CopyTextTooLarge.
+    let mut oversized = state();
+    oversized.push_timeline_item(TimelineItem::Assistant {
+        text: "x".repeat(crate::tui::copy_controls::MAX_CLIPBOARD_BYTES + 1),
+    });
+    oversized.insert_input_str("/copy");
+    assert_eq!(
+        handle_key_action(KeyAction::Submit, &mut oversized),
+        ControllerEffect::CopyTextTooLarge
+    );
 }

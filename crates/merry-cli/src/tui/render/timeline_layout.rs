@@ -34,6 +34,7 @@ fn timeline_cache_context(state: &TuiState, width: u16) -> TimelineCacheContext 
         animations: state.animations_enabled(),
         code_theme: state.code_theme(),
         show_successful_command_output: state.show_successful_command_output(),
+        copy_button_position: state.copy_button_position(),
         theme: state.theme().clone(),
     }
 }

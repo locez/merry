@@ -277,6 +277,7 @@ pub(crate) async fn run(
             configured_theme.clone(),
         )
         .with_successful_command_output(tui_config.show_successful_command_output)
+        .with_copy_button_position(tui_config.copy_button_position)
         .with_mouse_scroll_lines(tui_config.mouse_scroll_lines)
         .with_animations(tui_config.animations)
         .with_max_reading_width(tui_config.max_reading_width)

@@ -1,6 +1,6 @@
 use super::*;
 use crate::coding::{AutoFallback, PermissionMode, SandboxMode};
-use crate::config::{BrandMarkMode, HeaderItemKind, TextSizingMode};
+use crate::config::{BrandMarkMode, CopyButtonPosition, HeaderItemKind, TextSizingMode};
 use merry_llm::{ReasoningEffort, ServiceTier};
 use std::path::PathBuf;
 
@@ -66,6 +66,7 @@ async fn preferences_store_round_trips_tui_roles_and_permissions() {
         header_items: Some(vec![HeaderItemKind::Model, HeaderItemKind::Tokens]),
         mouse_scroll_lines: Some(6),
         show_successful_command_output: Some(false),
+        copy_button_position: Some(CopyButtonPosition::BottomLeft),
         keymap: BTreeMap::from([("toggle_plan".to_owned(), "ctrl+k".to_owned())]),
         provider: Some("anthropic".to_owned()),
         context_compaction_model: Some(RoleModelOverride {

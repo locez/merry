@@ -1,11 +1,15 @@
-use crate::tui::{
-    controller::{ControllerEffect, handle_key_event, handle_mouse_input},
-    keymap::Keymap,
-    render::{prepare_viewport, render_to_buffer},
-    state::{TimelineItem, TuiState},
-    tests::{find_text_position, rendered_buffer_text},
-    text_interaction::MouseInput,
-    theme::TuiTheme,
+use crate::{
+    config::CopyButtonPosition,
+    tui::{
+        controller::{ControllerEffect, handle_key_event, handle_mouse_input},
+        keymap::Keymap,
+        overlay::{Overlay, SettingItem},
+        render::{prepare_viewport, render_to_buffer},
+        state::{TimelineItem, TuiState},
+        tests::{find_text_position, rendered_buffer_text},
+        text_interaction::MouseInput,
+        theme::TuiTheme,
+    },
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -410,4 +414,124 @@ async fn clipboard_feedback_is_visible_without_an_overlay_and_expires() {
     let rendered = rendered_buffer_text(&draw(&mut state, size));
     assert!(!rendered.contains("Copy failed"));
     assert!(rendered.contains("Ready"));
+}
+
+#[test]
+fn copy_buttons_respect_all_four_configurable_corners_and_invalidate_cache_live() {
+    let markdown = "# Title\n\nBody text.\n\n```rust\nfn main() {}\n```\n";
+    let size = Size::new(80, 24);
+
+    for position in [
+        CopyButtonPosition::TopLeft,
+        CopyButtonPosition::TopRight,
+        CopyButtonPosition::BottomLeft,
+        CopyButtonPosition::BottomRight,
+    ] {
+        let mut state = state(markdown).with_copy_button_position(position);
+        let buffer = draw(&mut state, size);
+        let targets = buttons(&buffer, "⧉ Copy");
+        assert_eq!(
+            targets.len(),
+            2,
+            "expected reply and code copy buttons for {position:?}:\n{}",
+            rendered_buffer_text(&buffer)
+        );
+
+        let title_pos = point(&buffer, "Title");
+        let code_pos = point(&buffer, "fn main()");
+        let (reply_btn, code_btn) = if position.is_top() {
+            (targets[0], targets[1])
+        } else {
+            (targets[1], targets[0])
+        };
+
+        if position.is_top() {
+            assert!(
+                reply_btn.y < title_pos.y,
+                "reply button should sit above content for {position:?}"
+            );
+            assert!(
+                code_btn.y < code_pos.y,
+                "code button should sit above code body for {position:?}"
+            );
+        } else {
+            assert!(
+                code_btn.y > code_pos.y,
+                "code button should sit below code body for {position:?}"
+            );
+            assert!(
+                reply_btn.y > code_btn.y,
+                "reply button should sit below the entire reply for {position:?}"
+            );
+        }
+
+        if position.is_left() {
+            assert!(
+                reply_btn.x < size.width / 2 && code_btn.x < size.width / 2,
+                "left-aligned copy buttons should sit on the left side for {position:?}: reply={reply_btn:?}, code={code_btn:?}"
+            );
+        } else {
+            assert!(
+                reply_btn.x > size.width / 2 && code_btn.x > size.width / 2,
+                "right-aligned copy buttons should sit on the right side for {position:?}: reply={reply_btn:?}, code={code_btn:?}"
+            );
+        }
+
+        assert_eq!(
+            click(&state, size, reply_btn),
+            ControllerEffect::CopyText(markdown.into()),
+            "reply copy button should copy full markdown for {position:?}"
+        );
+        assert_eq!(
+            click(&state, size, code_btn),
+            ControllerEffect::CopyText("fn main() {}\n".into()),
+            "code copy button should copy exact code for {position:?}"
+        );
+
+        // Dragging across the message must skip copy bars in every corner configuration.
+        let mut drag_state = state.clone();
+        let _ = draw(&mut drag_state, size);
+        let start = Position::new(0, reply_btn.y.min(title_pos.y));
+        let end = Position::new(size.width.saturating_sub(1), reply_btn.y.max(code_pos.y));
+        let copied = match drag_copy(&mut drag_state, size, start, end) {
+            ControllerEffect::CopyText(text) => text,
+            effect => panic!("expected dragged text for {position:?}, got {effect:?}"),
+        };
+        assert!(
+            !copied.contains("⧉ Copy"),
+            "leaked copy label for {position:?}: {copied:?}"
+        );
+        assert!(
+            !copied.contains('▎'),
+            "leaked code rail for {position:?}: {copied:?}"
+        );
+        assert!(copied.contains("Title") && copied.contains("fn main() {}"));
+    }
+
+    // Live Settings change must invalidate timeline cache and move copy buttons immediately.
+    let mut live = state(markdown);
+    let initial_buf = draw(&mut live, size);
+    let initial_reply = buttons(&initial_buf, "⧉ Copy")[0];
+    assert!(initial_reply.x > size.width / 2);
+
+    live.open_settings();
+    if let Some(Overlay::Settings(settings)) = live.overlay_mut() {
+        settings.select_item(SettingItem::CopyButtonPosition);
+    }
+    let _ = handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &mut live);
+    assert_eq!(live.copy_button_position(), CopyButtonPosition::BottomRight);
+    live.close_overlay();
+
+    let updated_buf = draw(&mut live, size);
+    let updated_targets = buttons(&updated_buf, "⧉ Copy");
+    assert_eq!(updated_targets.len(), 2);
+    let title_y = point(&updated_buf, "Title").y;
+    assert!(
+        updated_targets[1].y > title_y && updated_targets[1].x > size.width / 2,
+        "live setting update should re-render reply copy button at bottom-right"
+    );
+    assert_eq!(
+        click(&live, size, updated_targets[1]),
+        ControllerEffect::CopyText(markdown.into())
+    );
 }

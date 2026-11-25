@@ -2,7 +2,7 @@ mod table;
 
 use self::table::{TableState, spans_width, table_lines};
 use super::{
-    copy_controls::{CopyContent, CopyTarget, code_block_header},
+    copy_controls::{CodeBlockCopyEdge, CopyContent, CopyTarget, code_block_chrome},
     highlight::highlight_code_to_lines,
     links::{LinkTarget, inline_code_link, link_style, push_text_with_bare_urls},
     state::TuiState,
@@ -589,16 +589,17 @@ impl<'state> MarkdownRenderer<'state> {
     }
 
     fn flush_code_block(&mut self, block: CodeBlockState) {
-        let copy_target = if !block.text.is_empty()
-            && let Some((header, column, width)) =
-                code_block_header(self.state, block.lang.as_deref(), self.region_width)
-        {
-            let line_index = self.rows.len();
-            self.push_row(TranscriptRow::new(header, SelectionPolicy::Skip));
-            Some((line_index, column, width))
+        let (top_bar, bottom_bar, copy_hit) = if block.text.is_empty() {
+            (None, None, None)
         } else {
-            None
+            let chrome = code_block_chrome(self.state, block.lang.as_deref(), self.region_width);
+            (chrome.top_bar, chrome.bottom_bar, chrome.copy_hit)
         };
+        let top_line_index = top_bar.map(|bar| {
+            let line_index = self.rows.len();
+            self.push_row(TranscriptRow::new(bar, SelectionPolicy::Skip));
+            line_index
+        });
         let text = block.text.strip_suffix('\n').unwrap_or(block.text.as_str());
         if let Some(lang) = block.lang {
             let highlighted = highlight_code_to_lines(text, &lang, self.state.code_theme());
@@ -617,13 +618,24 @@ impl<'state> MarkdownRenderer<'state> {
                 );
             }
         }
-        if let Some((line_index, column, width)) = copy_target {
-            self.copy_targets.push(CopyTarget {
-                line_index,
-                column,
-                width,
-                content: CopyContent::Text(block.text),
-            });
+        let bottom_line_index = bottom_bar.map(|bar| {
+            let line_index = self.rows.len();
+            self.push_row(TranscriptRow::new(bar, SelectionPolicy::Skip));
+            line_index
+        });
+        if let Some(hit) = copy_hit {
+            let line_index = match hit.edge {
+                CodeBlockCopyEdge::Top => top_line_index,
+                CodeBlockCopyEdge::Bottom => bottom_line_index,
+            };
+            if let Some(line_index) = line_index {
+                self.copy_targets.push(CopyTarget::new(
+                    line_index,
+                    hit.column,
+                    hit.width,
+                    CopyContent::Text(block.text),
+                ));
+            }
         }
     }
 

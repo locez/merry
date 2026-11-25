@@ -1,5 +1,5 @@
 use crate::{
-    config::{BrandMarkMode, HeaderItemKind, TextSizingMode},
+    config::{BrandMarkMode, CopyButtonPosition, HeaderItemKind, TextSizingMode},
     tui::{
         controller::{ControllerEffect, handle_key_event, handle_mouse_input, handle_paste_event},
         keymap::{KeyAction, KeyBinding, Keymap},
@@ -247,6 +247,50 @@ fn settings_workbench_applies_new_ui_and_execution_controls_live_and_resets() {
         &mut state,
     );
     assert!(!state.show_successful_command_output());
+
+    // Copy button corner position cycles live in wide mode, opens the 4-corner choice
+    // submenu in compact mode, and resets to inherited.
+    select_setting(&mut state, SettingItem::CopyButtonPosition);
+    let _ = handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &mut state);
+    assert_eq!(
+        state.copy_button_position(),
+        CopyButtonPosition::BottomRight
+    );
+
+    // Compact layout exposes all four corners in the Level-3 choice submenu.
+    let compact = Size::new(44, 22);
+    prepare_viewport(&mut state, compact);
+    state.open_settings_category(SettingsCategory::Interaction);
+    select_setting(&mut state, SettingItem::CopyButtonPosition);
+    let _ = handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    let menu_text = render_to_text(&state, compact.width, compact.height);
+    assert!(menu_text.contains("Top-left"), "{menu_text}");
+    assert!(menu_text.contains("Top-right"), "{menu_text}");
+    assert!(menu_text.contains("Bottom-left"), "{menu_text}");
+    assert!(menu_text.contains("Bottom-right"), "{menu_text}");
+    // Choice list: 0=Inherit, 1=Top-left, 2=Top-right, 3=Bottom-left, 4=Bottom-right (selected).
+    let _ = handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &mut state);
+    let choice_effect = handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &mut state,
+    );
+    assert!(matches!(
+        choice_effect,
+        ControllerEffect::PersistPreferences(ref prefs)
+            if prefs.copy_button_position == Some(CopyButtonPosition::BottomLeft)
+    ));
+    assert_eq!(state.copy_button_position(), CopyButtonPosition::BottomLeft);
+    let _ = handle_key_event(
+        KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+        &mut state,
+    );
+    assert_eq!(state.preferences().copy_button_position, None);
+    assert_eq!(state.copy_button_position(), CopyButtonPosition::TopRight);
+    prepare_viewport(&mut state, Size::new(104, 28));
+    state.open_settings();
 
     // Retained turns & subagent limit behavior emit ApplyRuntimePreferences.
     select_setting(&mut state, SettingItem::RetainedModelTurns);

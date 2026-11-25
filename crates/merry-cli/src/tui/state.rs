@@ -71,6 +71,7 @@ pub(crate) struct TuiState {
     next_timeline_version: u64,
     timeline_cache: crate::tui::render::timeline_cache::TimelineRenderCache,
     show_successful_command_output: bool,
+    copy_button_position: crate::config::CopyButtonPosition,
     mouse_scroll_lines: usize,
     animations: bool,
     max_reading_width: u16,
@@ -150,6 +151,7 @@ impl TuiState {
             next_timeline_version: 1,
             timeline_cache: crate::tui::render::timeline_cache::TimelineRenderCache::default(),
             show_successful_command_output: true,
+            copy_button_position: crate::config::CopyButtonPosition::default(),
             mouse_scroll_lines: crate::config::DEFAULT_MOUSE_SCROLL_LINES,
             animations: true,
             max_reading_width: crate::config::DEFAULT_MAX_READING_WIDTH,
@@ -194,6 +196,19 @@ impl TuiState {
     pub(crate) fn with_successful_command_output(mut self, show_output: bool) -> Self {
         self.show_successful_command_output = show_output;
         self
+    }
+
+    /// Sets the corner placement for clickable copy controls on replies and code blocks.
+    pub(crate) fn with_copy_button_position(
+        mut self,
+        position: crate::config::CopyButtonPosition,
+    ) -> Self {
+        self.copy_button_position = position;
+        self
+    }
+
+    pub(crate) fn copy_button_position(&self) -> crate::config::CopyButtonPosition {
+        self.copy_button_position
     }
 
     pub(crate) fn task_dock(&self) -> &crate::tui::task_dock::TaskDockState {
@@ -398,6 +413,10 @@ impl TuiState {
             .preferences
             .show_successful_command_output
             .unwrap_or(self.settings_defaults.show_successful_command_output);
+        self.copy_button_position = self
+            .preferences
+            .copy_button_position
+            .unwrap_or(self.settings_defaults.copy_button_position);
     }
 
     pub(crate) fn replace_settings_defaults(&mut self, defaults: TuiSettingsDefaults) {
@@ -419,6 +438,14 @@ impl TuiState {
 
     pub(crate) fn timeline(&self) -> &[TimelineItem] {
         &self.timeline
+    }
+
+    /// Returns the raw text of the latest non-empty assistant response in the timeline.
+    pub(crate) fn latest_assistant_response(&self) -> Option<&str> {
+        self.timeline.iter().rev().find_map(|item| match item {
+            TimelineItem::Assistant { text } if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
     }
 
     pub(crate) fn into_timeline(self) -> Vec<TimelineItem> {

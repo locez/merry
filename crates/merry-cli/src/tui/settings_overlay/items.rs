@@ -41,7 +41,7 @@ impl SettingsCategory {
     pub(crate) const fn summary(self) -> &'static str {
         match self {
             Self::Appearance => "Theme, header, layout",
-            Self::Interaction => "Scroll & output preview",
+            Self::Interaction => "Scroll, copy & output",
             Self::Models => "Provider, model, effort",
             Self::Context => "Window & auto compaction",
             Self::Agents => "Subagents & parallel tools",
@@ -70,6 +70,7 @@ impl SettingsCategory {
             Self::Interaction => &[
                 SettingItem::MouseScrollLines,
                 SettingItem::ShowSuccessfulCommandOutput,
+                SettingItem::CopyButtonPosition,
             ],
             Self::Models => &[
                 SettingItem::ActiveProvider,
@@ -164,6 +165,7 @@ pub(crate) enum SettingItem {
     HeaderItem(HeaderItemKind),
     MouseScrollLines,
     ShowSuccessfulCommandOutput,
+    CopyButtonPosition,
     ActiveProvider,
     ActiveModel,
     ReasoningEffort,
@@ -214,9 +216,9 @@ impl SettingItem {
             | Self::MaxReadingWidth
             | Self::TextSizing
             | Self::HeaderItem(_) => SettingsCategory::Appearance,
-            Self::MouseScrollLines | Self::ShowSuccessfulCommandOutput => {
-                SettingsCategory::Interaction
-            }
+            Self::MouseScrollLines
+            | Self::ShowSuccessfulCommandOutput
+            | Self::CopyButtonPosition => SettingsCategory::Interaction,
             Self::ActiveProvider
             | Self::ActiveModel
             | Self::ReasoningEffort
@@ -274,6 +276,7 @@ impl SettingItem {
             Self::HeaderItem(HeaderItemKind::Tokens) => "Header: tokens",
             Self::MouseScrollLines => "Mouse scroll lines",
             Self::ShowSuccessfulCommandOutput => "Command output preview",
+            Self::CopyButtonPosition => "Copy button",
             Self::ActiveProvider => "Provider",
             Self::ActiveModel => "Model",
             Self::ReasoningEffort => "Reasoning effort",
@@ -351,6 +354,9 @@ impl SettingItem {
             Self::MouseScrollLines => "Lines scrolled per coalesced mouse-wheel notch (1..10).",
             Self::ShowSuccessfulCommandOutput => {
                 "Display bounded output previews for successful shell commands and file reads."
+            }
+            Self::CopyButtonPosition => {
+                "Corner placement for clickable copy buttons (top-left, top-right, bottom-left, bottom-right)."
             }
             Self::ActiveProvider => {
                 "Last-used provider remembered across sessions (Enter manages providers)."
@@ -480,6 +486,7 @@ impl SettingItem {
                 | Self::BrandMark
                 | Self::TextSizing
                 | Self::MouseScrollLines
+                | Self::CopyButtonPosition
                 | Self::ServiceTier
                 | Self::CompactionProvider
                 | Self::ApprovalReviewProvider
@@ -517,6 +524,7 @@ impl SettingItem {
                     | Self::HeaderItem(_)
                     | Self::MouseScrollLines
                     | Self::ShowSuccessfulCommandOutput
+                    | Self::CopyButtonPosition
                     | Self::Shortcut(_)
             )
     }

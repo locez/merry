@@ -1,7 +1,8 @@
 use super::home;
 use crate::coding::{AutoFallback, PermissionMode};
 use crate::config::{
-    BrandMarkMode, CliDefaults, EffectiveProviderConfig, LogFormat, LogLevel, MerryConfig, XdgPaths,
+    BrandMarkMode, CliDefaults, CopyButtonPosition, EffectiveProviderConfig, LogFormat, LogLevel,
+    MerryConfig, XdgPaths,
 };
 use merry_runtime::PathAccess;
 use std::{
@@ -316,6 +317,7 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
         .expect("example TUI config should validate");
     assert!(tui.show_successful_command_output);
     assert_eq!(tui.brand_mark, BrandMarkMode::Emoji);
+    assert_eq!(tui.copy_button_position, CopyButtonPosition::TopRight);
     assert_eq!(
         tui.theme.preset,
         Some(crate::tui::theme::ThemePreset::Sakura)
@@ -344,6 +346,36 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
     assert_eq!(
         snowflake.tui_config().expect("valid tui config").brand_mark,
         BrandMarkMode::Snowflake
+    );
+
+    for (raw, expected) in [
+        ("top-left", CopyButtonPosition::TopLeft),
+        ("top-right", CopyButtonPosition::TopRight),
+        ("bottom-left", CopyButtonPosition::BottomLeft),
+        ("bottom-right", CopyButtonPosition::BottomRight),
+        ("bottom_left", CopyButtonPosition::BottomLeft),
+    ] {
+        let parsed = MerryConfig::load_optional_from_text(
+            Some(&format!("[tui]\ncopy_button_position = '{raw}'")),
+            &paths,
+        )
+        .expect("copy_button_position should parse")
+        .expect("config should be present");
+        assert_eq!(
+            parsed
+                .tui_config()
+                .expect("valid tui config")
+                .copy_button_position,
+            expected
+        );
+    }
+    assert!(
+        MerryConfig::load_optional_from_text(
+            Some("[tui]\ncopy_button_position = 'center'"),
+            &paths,
+        )
+        .is_err(),
+        "unknown copy_button_position should fail validation"
     );
 
     let preset = MerryConfig::load_optional_from_text(

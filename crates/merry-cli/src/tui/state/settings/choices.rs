@@ -1,8 +1,8 @@
 //! Level-3 choice submenu builders and appliers for compact/mobile Settings navigation.
 
 use super::{
-    BRAND_MARKS, COMPACTION_STRATEGIES, SUBAGENT_LIMIT_BEHAVIORS, TEXT_SIZINGS, TuiState,
-    brand_mark_label,
+    BRAND_MARKS, COMPACTION_STRATEGIES, COPY_BUTTON_POSITIONS, SUBAGENT_LIMIT_BEHAVIORS,
+    TEXT_SIZINGS, TuiState, brand_mark_label,
     permissions::{
         AUTO_FALLBACKS, PERMISSION_MODES, SANDBOX_MODES, auto_fallback_label,
         permission_mode_label, sandbox_label,
@@ -146,6 +146,23 @@ impl TuiState {
                 }
                 Some(choices)
             }
+            SettingItem::CopyButtonPosition => Some(
+                COPY_BUTTON_POSITIONS
+                    .into_iter()
+                    .map(|position| {
+                        let label = position.map_or_else(
+                            || {
+                                format!(
+                                    "Inherit ({})",
+                                    self.settings_defaults.copy_button_position.label()
+                                )
+                            },
+                            |pos| pos.label().to_owned(),
+                        );
+                        choice(label, self.preferences.copy_button_position == position)
+                    })
+                    .collect(),
+            ),
             SettingItem::ServiceTier => {
                 let provider = self.effective_provider_alias()?;
                 if self.settings_defaults.provider_kind(Some(provider))
@@ -468,6 +485,14 @@ impl TuiState {
                 } else {
                     return false;
                 };
+                self.sync_active_ui_preferences();
+                true
+            }
+            SettingItem::CopyButtonPosition => {
+                let Some(&position) = COPY_BUTTON_POSITIONS.get(index) else {
+                    return false;
+                };
+                self.preferences.copy_button_position = position;
                 self.sync_active_ui_preferences();
                 true
             }

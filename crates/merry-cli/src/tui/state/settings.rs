@@ -5,8 +5,8 @@ mod roles;
 use super::TuiState;
 use crate::{
     config::{
-        BrandMarkMode, ConfiguredProviderKind, HeaderItemKind, MAX_MAX_READING_WIDTH,
-        MAX_MOUSE_SCROLL_LINES, MIN_MAX_READING_WIDTH, TextSizingMode,
+        BrandMarkMode, ConfiguredProviderKind, CopyButtonPosition, HeaderItemKind,
+        MAX_MAX_READING_WIDTH, MAX_MOUSE_SCROLL_LINES, MIN_MAX_READING_WIDTH, TextSizingMode,
     },
     tui::{
         input::TextInput,
@@ -27,6 +27,13 @@ pub(super) const BRAND_MARKS: [Option<BrandMarkMode>; 3] = [
     None,
     Some(BrandMarkMode::Emoji),
     Some(BrandMarkMode::Snowflake),
+];
+pub(super) const COPY_BUTTON_POSITIONS: [Option<CopyButtonPosition>; 5] = [
+    None,
+    Some(CopyButtonPosition::TopLeft),
+    Some(CopyButtonPosition::TopRight),
+    Some(CopyButtonPosition::BottomLeft),
+    Some(CopyButtonPosition::BottomRight),
 ];
 pub(super) const TEXT_SIZINGS: [Option<TextSizingMode>; 4] = [
     None,
@@ -255,6 +262,15 @@ impl TuiState {
                 self.sync_active_ui_preferences();
                 true
             }
+            SettingItem::CopyButtonPosition => {
+                cycle_slice(
+                    &mut self.preferences.copy_button_position,
+                    &COPY_BUTTON_POSITIONS,
+                    direction,
+                );
+                self.sync_active_ui_preferences();
+                true
+            }
             SettingItem::ActiveProvider => self.adjust_provider(direction),
             SettingItem::ActiveModel => false,
             SettingItem::ReasoningEffort => self.adjust_reasoning(direction),
@@ -412,6 +428,11 @@ impl TuiState {
                 self.sync_active_ui_preferences();
                 true
             }
+            SettingItem::CopyButtonPosition => {
+                self.preferences.copy_button_position = None;
+                self.sync_active_ui_preferences();
+                true
+            }
             SettingItem::ActiveProvider => {
                 self.preferences.provider = None;
                 true
@@ -540,6 +561,7 @@ impl TuiState {
             SettingItem::ShowSuccessfulCommandOutput => {
                 self.preferences.show_successful_command_output.is_some()
             }
+            SettingItem::CopyButtonPosition => self.preferences.copy_button_position.is_some(),
             SettingItem::ActiveProvider => self.preferences.provider.is_some(),
             SettingItem::ActiveModel => {
                 provider.is_some_and(|p| self.preferences.model_for_provider(p).is_some())
@@ -639,6 +661,15 @@ impl TuiState {
             SettingItem::ShowSuccessfulCommandOutput => opt_bool_value(
                 self.preferences.show_successful_command_output,
                 self.settings_defaults.show_successful_command_output,
+            ),
+            SettingItem::CopyButtonPosition => self.preferences.copy_button_position.map_or_else(
+                || {
+                    format!(
+                        "Inherit ({})",
+                        self.settings_defaults.copy_button_position.label()
+                    )
+                },
+                |position| position.label().to_owned(),
             ),
             SettingItem::ActiveProvider => inherited_value(
                 self.preferences.provider.as_deref(),

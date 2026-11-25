@@ -7,8 +7,8 @@ pub(crate) use defaults::TuiSettingsDefaults;
 use crate::{
     coding::{AutoFallback, PermissionMode, SandboxMode},
     config::{
-        BrandMarkMode, HeaderItemKind, MAX_MAX_READING_WIDTH, MAX_MOUSE_SCROLL_LINES,
-        MIN_MAX_READING_WIDTH, ProviderAlias, TextSizingMode,
+        BrandMarkMode, CopyButtonPosition, HeaderItemKind, MAX_MAX_READING_WIDTH,
+        MAX_MOUSE_SCROLL_LINES, MIN_MAX_READING_WIDTH, ProviderAlias, TextSizingMode,
     },
     tui::theme::ThemePreset,
 };
@@ -284,6 +284,8 @@ pub(crate) struct TuiPreferences {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) show_successful_command_output: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) copy_button_position: Option<CopyButtonPosition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) provider: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     provider_states: BTreeMap<String, TuiProviderState>,
@@ -331,6 +333,7 @@ impl Default for TuiPreferences {
             header_items: None,
             mouse_scroll_lines: None,
             show_successful_command_output: None,
+            copy_button_position: None,
             provider: None,
             provider_states: BTreeMap::new(),
             context_compaction_model: None,

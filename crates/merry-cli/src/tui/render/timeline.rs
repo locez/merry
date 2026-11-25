@@ -10,7 +10,7 @@ use super::mcp_style::mcp_title_line;
 use super::sticky::{paint_sticky_header, split_timeline_content, timeline_scroll_split};
 use super::task_dock::{adjust_body_scroll, render_task_dock, split_dock_region};
 use crate::tui::{
-    copy_controls::{CopyContent, CopyTarget, copy_header},
+    copy_controls::{CopyContent, CopyTarget, copy_bar},
     links::{LinkTarget, push_text_with_bare_urls, render_link_tooltip},
     markdown::{RenderedMarkdown, markdown_lines},
     motion::{self, MotionClock},
@@ -98,20 +98,39 @@ pub(super) fn assistant_lines(
     region_width: u16,
 ) -> RenderedMarkdown {
     let mut rendered = markdown_lines(state, text, region_width);
-    if let Some((header, column, width)) = copy_header(state, region_width) {
-        rendered
-            .rows
-            .insert(0, TranscriptRow::new(header, SelectionPolicy::Skip));
-        for target in &mut rendered.copy_targets {
-            target.line_index += 1;
+    let position = state.copy_button_position();
+    if let Some(bar) = copy_bar(state, region_width, position) {
+        if position.is_top() {
+            rendered
+                .rows
+                .insert(0, TranscriptRow::new(bar.line, SelectionPolicy::Skip));
+            for target in &mut rendered.copy_targets {
+                target.line_index += 1;
+            }
+            for target in &mut rendered.link_targets {
+                target.line_index += 1;
+            }
+            rendered.copy_targets.insert(
+                0,
+                CopyTarget::new(
+                    0,
+                    bar.column,
+                    bar.width,
+                    CopyContent::AssistantMessage(item_index),
+                ),
+            );
+        } else {
+            let line_index = rendered.rows.len();
+            rendered
+                .rows
+                .push(TranscriptRow::new(bar.line, SelectionPolicy::Skip));
+            rendered.copy_targets.push(CopyTarget::new(
+                line_index,
+                bar.column,
+                bar.width,
+                CopyContent::AssistantMessage(item_index),
+            ));
         }
-        for target in &mut rendered.link_targets {
-            target.line_index += 1;
-        }
-        rendered.copy_targets.insert(
-            0,
-            CopyTarget::new(0, column, width, CopyContent::AssistantMessage(item_index)),
-        );
     }
     rendered
 }

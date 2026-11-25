@@ -496,6 +496,7 @@ fn fresh_child_state(template: &TuiState) -> TuiState {
         template.theme().clone(),
     )
     .with_successful_command_output(template.show_successful_command_output())
+    .with_copy_button_position(template.copy_button_position())
     .with_animations(template.animations_enabled())
     .with_max_reading_width(template.max_reading_width())
 }

@@ -27,7 +27,10 @@ pub(crate) use snapshot::{
 };
 use snapshot::{item_at_visual_in_starts, prefix_sum_starts};
 
-use crate::tui::{preferences::CodeTheme, theme::TuiTheme};
+use crate::{
+    config::CopyButtonPosition,
+    tui::{preferences::CodeTheme, theme::TuiTheme},
+};
 use std::{
     collections::HashSet,
     sync::{Arc, Mutex},
@@ -56,6 +59,7 @@ pub(crate) struct TimelineCacheContext {
     pub(crate) animations: bool,
     pub(crate) code_theme: CodeTheme,
     pub(crate) show_successful_command_output: bool,
+    pub(crate) copy_button_position: CopyButtonPosition,
     pub(crate) theme: TuiTheme,
 }
 

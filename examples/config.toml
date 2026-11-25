@@ -260,6 +260,9 @@ text_sizing = "off"
 # Primary Merry brand mark in the composer hairline and modal titles:
 # "emoji" (default, 🎀) or "snowflake" (monochrome ❆ across Linux/macOS/iOS).
 brand_mark = "emoji"
+# Corner placement for clickable copy buttons on assistant replies and code blocks:
+# "top-left", "top-right" (default), "bottom-left", or "bottom-right".
+copy_button_position = "top-right"
 
 [tui.header]
 # Ordered segments shown in the top bar. Supported values:

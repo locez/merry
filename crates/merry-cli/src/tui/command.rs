@@ -19,6 +19,7 @@ pub(crate) enum PaletteCommand {
     NewSession,
     ResumeSession,
     CompactContext,
+    CopyLastResponse,
     SaveSession,
     Quit,
     TogglePlanMode,
@@ -196,6 +197,13 @@ const COMMANDS: &[CommandSpec] = &[
         "Compact conversation history into a checkpoint",
     ),
     CommandSpec::new(
+        PaletteCommand::CopyLastResponse,
+        "Session",
+        "Copy last response",
+        None,
+    )
+    .with_slash("copy", "Copy the latest assistant response"),
+    CommandSpec::new(
         PaletteCommand::ShowStatus,
         "Session",
         "Show session status",
@@ -348,7 +356,7 @@ pub(crate) fn match_slash_input(input: &str) -> SlashCommandMatch<'_> {
 pub(crate) fn slash_help_body(keymap: &Keymap) -> String {
     let mut lines = vec![
         "Session   /new (/clear) · /resume · /save · /stop · /exit (/quit)".to_owned(),
-        "Context   /compact [focus] · /status · /tasks · /skills ($skill)".to_owned(),
+        "Context   /compact [focus] · /copy · /status · /tasks · /skills ($skill)".to_owned(),
         "Workflow  /plan [prompt] · /plans · /code-review (/review) · /security-review".to_owned(),
     ];
     #[cfg(feature = "web")]
@@ -407,6 +415,10 @@ mod tests {
         assert_eq!(
             find_slash_exact("compact").map(|command| command.command),
             Some(PaletteCommand::CompactContext)
+        );
+        assert_eq!(
+            find_slash_exact("copy").map(|command| command.command),
+            Some(PaletteCommand::CopyLastResponse)
         );
         assert_eq!(
             find_slash_exact("code-review").map(|command| command.command),
@@ -512,6 +524,14 @@ mod tests {
             match_slash_input("/save   "),
             SlashCommandMatch::Known(command, None) if command.command == PaletteCommand::SaveSession
         ));
+        assert!(matches!(
+            match_slash_input("/copy"),
+            SlashCommandMatch::Known(command, None) if command.command == PaletteCommand::CopyLastResponse
+        ));
+        assert_eq!(
+            match_slash_input("/copy 1"),
+            SlashCommandMatch::ArgumentsNotSupported("copy")
+        );
         assert!(matches!(
             match_slash_input("/clear"),
             SlashCommandMatch::Known(command, None) if command.command == PaletteCommand::NewSession
