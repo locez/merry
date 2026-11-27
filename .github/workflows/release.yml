@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install Node
         uses: actions/setup-node@v7
@@ -75,7 +75,7 @@ jobs:
             archive: zip
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Download tested Web assets
         uses: actions/download-artifact@v8
@@ -185,7 +185,7 @@ jobs:
       contents: write
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Download all release archives
         uses: actions/download-artifact@v8
