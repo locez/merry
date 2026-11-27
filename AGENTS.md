@@ -204,6 +204,9 @@ not require mechanically moving every existing module in one change.
 - When a `config.toml` key accepted by `merry-cli` is added, removed, renamed,
   or changed, update `examples/config.toml` in the same change unless the
   omission is deliberate and recorded.
+- When the `config.toml` or managed `providers.toml` schema accepted by
+  `merry-cli` changes, update `nix/home-manager.nix` and its provider options
+  in the same change so the declarative Home Manager module stays in sync.
 - Never put real API keys, host-specific secrets, private endpoints, or local
   machine paths in the example config.
 - CLI config tests must continue to parse `examples/config.toml`; schema drift

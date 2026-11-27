@@ -6,11 +6,16 @@
   };
 
   outputs =
-    { nixpkgs, ... }:
+    {
+      self,
+      nixpkgs,
+      ...
+    }:
     let
       systems = [
         "aarch64-darwin"
         "aarch64-linux"
+        "x86_64-darwin"
         "x86_64-linux"
       ];
 
@@ -24,8 +29,35 @@
             }
           )
         );
+
+      homeManagerModule =
+        { lib, pkgs, ... }:
+        {
+          imports = [ ./nix/home-manager.nix ];
+          programs.merry.package = lib.mkDefault (self.packages.${pkgs.stdenv.hostPlatform.system}.merry);
+        };
     in
     {
+      overlays.default = final: _prev: {
+        merry = final.callPackage ./nix/package.nix { };
+      };
+
+      packages = forEachSystem (
+        pkgs:
+        let
+          merry = pkgs.callPackage ./nix/package.nix { };
+        in
+        {
+          inherit merry;
+          default = merry;
+        }
+      );
+
+      homeManagerModules = {
+        default = homeManagerModule;
+        merry = homeManagerModule;
+      };
+
       devShells = forEachSystem (
         pkgs:
         let
