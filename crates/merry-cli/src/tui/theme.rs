@@ -18,6 +18,8 @@ pub(crate) enum ThemePreset {
     Nord,
     /// Clean daylight paper surfaces with high-contrast ink typography.
     PaperLight,
+    /// Forest-green dark surfaces with warm parchment text and botanical accents.
+    Everforest,
 }
 
 impl ThemePreset {
@@ -29,6 +31,7 @@ impl ThemePreset {
             Self::CatppuccinMocha => "Catppuccin Mocha",
             Self::Nord => "Nord",
             Self::PaperLight => "Paper Light",
+            Self::Everforest => "Everforest",
         }
     }
 
@@ -39,18 +42,20 @@ impl ThemePreset {
             Self::TokyoNight => Self::CatppuccinMocha,
             Self::CatppuccinMocha => Self::Nord,
             Self::Nord => Self::PaperLight,
-            Self::PaperLight => Self::Sakura,
+            Self::PaperLight => Self::Everforest,
+            Self::Everforest => Self::Sakura,
         }
     }
 
     pub(crate) const fn previous(self) -> Self {
         match self {
-            Self::Sakura => Self::PaperLight,
+            Self::Sakura => Self::Everforest,
             Self::Ansi => Self::Sakura,
             Self::TokyoNight => Self::Ansi,
             Self::CatppuccinMocha => Self::TokyoNight,
             Self::Nord => Self::CatppuccinMocha,
             Self::PaperLight => Self::Nord,
+            Self::Everforest => Self::PaperLight,
         }
     }
 }
@@ -115,6 +120,7 @@ impl TuiTheme {
             ThemePreset::CatppuccinMocha => Self::catppuccin_mocha(),
             ThemePreset::Nord => Self::nord(),
             ThemePreset::PaperLight => Self::paper_light(),
+            ThemePreset::Everforest => Self::everforest(),
         }
     }
 
@@ -359,6 +365,43 @@ impl TuiTheme {
                 (SemanticColor::Error, Color::Rgb(207, 34, 46)),
                 (SemanticColor::Risk, Color::Rgb(188, 76, 0)),
                 (SemanticColor::Success, Color::Rgb(26, 127, 55)),
+            ],
+        }
+    }
+
+    fn everforest() -> Self {
+        Self {
+            colors: vec![
+                (SemanticColor::Background, Color::Rgb(45, 53, 59)),
+                (SemanticColor::Surface, Color::Rgb(52, 63, 68)),
+                (SemanticColor::SurfaceSubtle, Color::Rgb(49, 59, 65)),
+                (SemanticColor::HeaderBackground, Color::Rgb(66, 80, 71)),
+                (SemanticColor::StatusBackground, Color::Rgb(45, 53, 59)),
+                (SemanticColor::UserBackground, Color::Rgb(58, 50, 58)),
+                (SemanticColor::CodeBackground, Color::Rgb(49, 59, 65)),
+                (SemanticColor::InlineCodeBackground, Color::Reset),
+                (SemanticColor::SelectionBackground, Color::Rgb(84, 58, 72)),
+                (SemanticColor::ChipBackground, Color::Reset),
+                (SemanticColor::Border, Color::Rgb(79, 88, 94)),
+                (SemanticColor::BorderFocus, Color::Rgb(131, 192, 146)),
+                (SemanticColor::DiffAddBackground, Color::Rgb(51, 65, 58)),
+                (SemanticColor::DiffDeleteBackground, Color::Rgb(76, 55, 67)),
+                (SemanticColor::Status, Color::Rgb(167, 192, 128)),
+                (SemanticColor::Muted, Color::Rgb(122, 132, 120)),
+                (SemanticColor::TextSecondary, Color::Rgb(157, 169, 160)),
+                (SemanticColor::Focus, Color::Rgb(131, 192, 146)),
+                (SemanticColor::Assistant, Color::Rgb(211, 198, 170)),
+                (SemanticColor::Heading, Color::Rgb(214, 153, 182)),
+                (SemanticColor::Link, Color::Rgb(127, 187, 179)),
+                (SemanticColor::Selection, Color::Rgb(214, 153, 182)),
+                (SemanticColor::ToolKeyword, Color::Rgb(131, 192, 146)),
+                (SemanticColor::Command, Color::Rgb(127, 187, 179)),
+                (SemanticColor::DiffAdd, Color::Rgb(167, 192, 128)),
+                (SemanticColor::DiffDelete, Color::Rgb(230, 126, 128)),
+                (SemanticColor::Warning, Color::Rgb(219, 188, 127)),
+                (SemanticColor::Error, Color::Rgb(230, 126, 128)),
+                (SemanticColor::Risk, Color::Rgb(230, 152, 117)),
+                (SemanticColor::Success, Color::Rgb(167, 192, 128)),
             ],
         }
     }
@@ -780,6 +823,7 @@ mod tests {
             ThemePreset::CatppuccinMocha,
             ThemePreset::Nord,
             ThemePreset::PaperLight,
+            ThemePreset::Everforest,
         ];
         let mut cursor = ThemePreset::Sakura;
         for expected in presets {
@@ -809,6 +853,17 @@ mod tests {
         assert_eq!(
             light.color(SemanticColor::Assistant),
             Some(Color::Rgb(36, 41, 47))
+        );
+
+        // Everforest keeps an opaque forest-green canvas with warm parchment text.
+        let everforest = TuiTheme::from_preset(ThemePreset::Everforest);
+        assert_eq!(
+            everforest.bg_color(SemanticColor::Background),
+            Some(Color::Rgb(45, 53, 59))
+        );
+        assert_eq!(
+            everforest.color(SemanticColor::Assistant),
+            Some(Color::Rgb(211, 198, 170))
         );
     }
 
