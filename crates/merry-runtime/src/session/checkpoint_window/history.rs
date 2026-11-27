@@ -18,7 +18,7 @@ use crate::{
             ToolCallPromptProjection, ToolResultPromptProjection, TranscriptItem, TranscriptItemId,
         },
     },
-    token_estimate::BYTES_PER_TOKEN,
+    token_estimate::{BYTES_PER_TOKEN, ReasoningTokenAccounting, estimate_text_tokens},
 };
 use merry_core::ToolCallId;
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,6 +33,7 @@ pub(super) struct ModelTurnHistory<'a> {
     pub(super) id: ModelTurnId,
     pub(super) status: ModelTurnStatus,
     pub(super) items: Vec<CompactionHistoryRecord<'a>>,
+    pub(super) projected_reasoning_tokens: u64,
 }
 
 /// JSON keys, the turn id, the status tag, and separators one payload turn adds.
@@ -77,8 +78,9 @@ impl ModelTurnHistory<'_> {
     pub(super) fn projected_token_estimate(
         &self,
         archived_tool_call_ids: &BTreeSet<ToolCallId>,
+        reasoning_tokens: ReasoningTokenAccounting,
     ) -> Result<u64, RuntimeError> {
-        self.items.iter().try_fold(0_u64, |total, record| {
+        let base = self.items.iter().try_fold(0_u64, |total, record| {
             total
                 .checked_add(
                     record
@@ -86,7 +88,13 @@ impl ModelTurnHistory<'_> {
                         .projected_token_estimate(archived_tool_call_ids)?,
                 )
                 .ok_or_else(|| RuntimeError::from(CompactionError::BudgetOverflow))
-        })
+        })?;
+        match reasoning_tokens {
+            ReasoningTokenAccounting::Include => base
+                .checked_add(self.projected_reasoning_tokens)
+                .ok_or_else(|| RuntimeError::from(CompactionError::BudgetOverflow)),
+            ReasoningTokenAccounting::Exclude => Ok(base),
+        }
     }
 
     pub(super) fn existing_archived_tool_call_ids(&self) -> BTreeSet<ToolCallId> {
@@ -144,10 +152,12 @@ impl SessionState {
             .into_iter()
             .filter(|turn| compacted_through.is_none_or(|boundary| turn.id() > boundary))
             .map(|turn| {
+                let projected_reasoning_tokens = projected_reasoning_tokens_for_turn(&turn)?;
                 Ok(ModelTurnHistory {
                     id: turn.id(),
                     status: turn.status(),
                     items: self.history_items_for_model_turn(&turn, hidden_tool_exchanges)?,
+                    projected_reasoning_tokens,
                 })
             })
             .collect()
@@ -368,6 +378,25 @@ impl SessionState {
             .map(|turn| turn.items.len())
             .sum())
     }
+}
+
+fn projected_reasoning_tokens_for_turn(turn: &ModelTurn<'_>) -> Result<u64, RuntimeError> {
+    let items = turn.items();
+    let mut total = 0_u64;
+    for (index, item) in items.iter().enumerate() {
+        let TranscriptItem::AssistantReasoning { text, .. } = item else {
+            continue;
+        };
+        if items[index + 1..]
+            .iter()
+            .any(|other| other.is_visible_assistant_output())
+        {
+            total = total
+                .checked_add(estimate_text_tokens(text))
+                .ok_or_else(|| RuntimeError::from(CompactionError::BudgetOverflow))?;
+        }
+    }
+    Ok(total)
 }
 
 pub(super) fn history_checkpoint_ref(

@@ -114,7 +114,7 @@ impl ModelResponse {
     /// Returns a copy with optional raw provider reasoning to replay later.
     #[must_use]
     pub fn with_reasoning(mut self, reasoning: Option<String>) -> Self {
-        self.reasoning = reasoning;
+        self.reasoning = reasoning.filter(|text| !text.trim().is_empty());
         self
     }
 

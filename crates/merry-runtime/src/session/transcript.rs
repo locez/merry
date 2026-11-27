@@ -310,6 +310,17 @@ impl TranscriptItem {
         )
     }
 
+    pub(super) const fn is_visible_assistant_output(&self) -> bool {
+        matches!(
+            self,
+            Self::AssistantText { .. }
+                | Self::ToolCall {
+                    prompt_projection: ToolCallPromptProjection::Full,
+                    ..
+                }
+        )
+    }
+
     pub(crate) fn to_full_snapshot(&self) -> TranscriptItemSnapshot {
         match self {
             Self::UserMessage {
@@ -960,19 +971,33 @@ impl SessionState {
         } else {
             transcript_items
         };
-        visible_items.iter().filter(move |item| {
-            !apply_prompt_projection
-                || !matches!(
-                    item,
+        visible_items
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, item)| {
+                if !apply_prompt_projection {
+                    return Some(item);
+                }
+                match item {
                     TranscriptItem::ToolCall {
                         prompt_projection: ToolCallPromptProjection::Hidden,
                         ..
-                    } | TranscriptItem::ToolResult {
+                    }
+                    | TranscriptItem::ToolResult {
                         prompt_projection: ToolResultPromptProjection::Hidden,
                         ..
+                    } => None,
+                    TranscriptItem::AssistantReasoning { model_turn_id, .. }
+                        if !turn_has_visible_assistant_output(
+                            &visible_items[index + 1..],
+                            *model_turn_id,
+                        ) =>
+                    {
+                        None
                     }
-                )
-        })
+                    _ => Some(item),
+                }
+            })
     }
 
     fn build_transcript_snapshot(
@@ -1020,4 +1045,14 @@ impl SessionState {
         }
         snapshot
     }
+}
+
+fn turn_has_visible_assistant_output(
+    following_items: &[TranscriptItem],
+    turn_id: ModelTurnId,
+) -> bool {
+    following_items
+        .iter()
+        .take_while(|item| item.model_turn_id() == turn_id)
+        .any(TranscriptItem::is_visible_assistant_output)
 }

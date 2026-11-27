@@ -168,6 +168,55 @@ fn responses_failed_rate_limit_is_normalized_as_retryable() {
 }
 
 #[test]
+fn responses_parser_does_not_mix_summary_and_raw_reasoning_when_summary_arrives_first() {
+    let mut parser = ResponsesStreamParser::new();
+    let lines = [
+        r#"data: {"type":"response.reasoning_summary_text.delta","delta":"Summary first."}"#,
+        r#"data: {"type":"response.reasoning_text.delta","delta":"Raw reasoning."}"#,
+        r#"data: {"type":"response.output_text.delta","delta":"Answer"}"#,
+        r#"data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Answer"}]}]}}"#,
+    ];
+    let mut events = Vec::new();
+    for line in lines {
+        events.extend(parser.parse_sse_line(line).expect("line should parse"));
+    }
+    parser.finish().expect("stream should finish");
+
+    let completed = events
+        .iter()
+        .find_map(|event| match event {
+            ModelEvent::Completed { response } => Some(response),
+            _ => None,
+        })
+        .expect("completion should be emitted");
+    assert_eq!(completed.reasoning(), Some("Raw reasoning."));
+
+    let mut summary_only = ResponsesStreamParser::new();
+    let summary_lines = [
+        r#"data: {"type":"response.reasoning_summary_text.delta","delta":"Only summary."}"#,
+        r#"data: {"type":"response.output_text.delta","delta":"Answer"}"#,
+        r#"data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Answer"}]}]}}"#,
+    ];
+    let mut summary_events = Vec::new();
+    for line in summary_lines {
+        summary_events.extend(
+            summary_only
+                .parse_sse_line(line)
+                .expect("line should parse"),
+        );
+    }
+    summary_only.finish().expect("stream should finish");
+    let completed_summary = summary_events
+        .iter()
+        .find_map(|event| match event {
+            ModelEvent::Completed { response } => Some(response),
+            _ => None,
+        })
+        .expect("completion should be emitted");
+    assert_eq!(completed_summary.reasoning(), Some("Only summary."));
+}
+
+#[test]
 fn stream_state_emits_completed_from_final_usage_line_without_trailing_newline() {
     let mut events = OpenAiEventStreamEvents::new(OpenAiProtocol::Responses);
 

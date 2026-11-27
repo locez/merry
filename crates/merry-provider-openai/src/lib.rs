@@ -416,6 +416,7 @@ mod tests {
     fn rendered_chat_request_with_service_tier_uses_service_tier_field() {
         let rendered = crate::chat_completions::render::render_chat_request(
             &request_with_service_tier(ServiceTier::Priority),
+            crate::chat_completions::render::ReasoningReplay::Enabled,
         )
         .expect("request should render");
 
@@ -426,6 +427,7 @@ mod tests {
     fn chat_completions_protocol_rejects_the_ultrafast_service_tier() {
         let error = crate::chat_completions::render::render_chat_request(
             &request_with_service_tier(ServiceTier::Ultrafast),
+            crate::chat_completions::render::ReasoningReplay::Enabled,
         )
         .expect_err("ultrafast is a Responses-only tier");
 

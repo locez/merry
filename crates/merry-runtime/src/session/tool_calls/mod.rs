@@ -109,17 +109,7 @@ impl SessionState {
         Ok(self.record_event(RuntimeJournalPayload::ToolCallBatchPending { batch }))
     }
 
-    #[cfg(test)]
     pub(crate) fn record_model_tool_call_response(
-        &mut self,
-        turn_id: ModelTurnId,
-        commentary: Option<String>,
-        calls: Vec<PendingToolCall>,
-    ) -> Result<(Option<RuntimeJournalEvent>, RuntimeJournalEvent), ErrorInfo> {
-        self.record_model_tool_call_response_with_reasoning(turn_id, commentary, calls, None)
-    }
-
-    pub(crate) fn record_model_tool_call_response_with_reasoning(
         &mut self,
         turn_id: ModelTurnId,
         commentary: Option<String>,
@@ -157,7 +147,7 @@ impl SessionState {
         let mut transcript = self.transcript.clone();
         if let Some(reasoning) = reasoning {
             transcript
-                .push_assistant_reasoning(turn_id, reasoning.as_str().into())
+                .push_assistant_reasoning(turn_id, reasoning.into())
                 .map_err(|error| tool_response_diagnostic("assistant_reasoning_record", error))?;
         }
         if let Some(text) = commentary.as_deref() {

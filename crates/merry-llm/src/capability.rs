@@ -14,6 +14,8 @@ pub struct ModelCapabilities {
     usage_reporting: bool,
     max_input_tokens: Option<u64>,
     max_output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    replays_reasoning_input: bool,
 }
 
 impl ModelCapabilities {
@@ -42,6 +44,7 @@ impl ModelCapabilities {
             usage_reporting,
             max_input_tokens,
             max_output_tokens,
+            replays_reasoning_input: false,
         })
     }
 
@@ -87,6 +90,20 @@ impl ModelCapabilities {
         self.max_input_tokens = Some(max_input_tokens.get());
         self
     }
+
+    /// Whether this provider serializes [`crate::ModelInputItem::Reasoning`]
+    /// into outbound wire requests.
+    #[must_use]
+    pub const fn replays_reasoning_input(&self) -> bool {
+        self.replays_reasoning_input
+    }
+
+    /// Returns a copy declaring whether outbound requests replay reasoning items.
+    #[must_use]
+    pub const fn with_reasoning_input_replay(mut self, replays_reasoning_input: bool) -> Self {
+        self.replays_reasoning_input = replays_reasoning_input;
+        self
+    }
 }
 
 impl Default for ModelCapabilities {
@@ -98,6 +115,7 @@ impl Default for ModelCapabilities {
             usage_reporting: false,
             max_input_tokens: None,
             max_output_tokens: None,
+            replays_reasoning_input: false,
         }
     }
 }
@@ -111,6 +129,8 @@ struct ModelCapabilitiesWire {
     usage_reporting: bool,
     max_input_tokens: Option<u64>,
     max_output_tokens: Option<u64>,
+    #[serde(default)]
+    replays_reasoning_input: bool,
 }
 
 impl<'de> Deserialize<'de> for ModelCapabilities {
@@ -127,6 +147,7 @@ impl<'de> Deserialize<'de> for ModelCapabilities {
             wire.max_input_tokens,
             wire.max_output_tokens,
         )
+        .map(|capabilities| capabilities.with_reasoning_input_replay(wire.replays_reasoning_input))
         .map_err(de::Error::custom)
     }
 }

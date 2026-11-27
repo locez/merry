@@ -2,7 +2,7 @@ use super::{CitationCompactionInput, format_compact_summary, is_degenerate_summa
 use crate::{
     RuntimeError,
     model_completion::{ModelCompletionError, complete_single_text},
-    token_estimate::estimate_model_input_tokens,
+    token_estimate::{ReasoningTokenAccounting, estimate_model_input_tokens},
 };
 use merry_core::{ProviderName, SessionId};
 use merry_llm::{
@@ -52,9 +52,12 @@ pub(crate) fn compaction_model_window(
 ///
 /// Compaction reasoning and checkpoint text share the provider output ceiling,
 /// so callers must size the window against both numbers together.
-pub(crate) fn compaction_request_required_tokens(request: &ModelRequest) -> (u64, u64) {
+pub(crate) fn compaction_request_required_tokens(
+    request: &ModelRequest,
+    reasoning: ReasoningTokenAccounting,
+) -> (u64, u64) {
     (
-        estimate_model_input_tokens(request.input()).saturating_add(
+        estimate_model_input_tokens(request.input(), reasoning).saturating_add(
             crate::token_estimate::estimate_request_contract_tokens(request),
         ),
         request.generation().max_output_tokens().unwrap_or(0),
@@ -69,12 +72,14 @@ pub(crate) fn compaction_request_required_tokens(request: &ModelRequest) -> (u64
 pub(crate) fn validate_compaction_model_window(
     request: &ModelRequest,
     compactor_window_tokens: u64,
+    reasoning: ReasoningTokenAccounting,
 ) -> Result<(), RuntimeError> {
     // Compaction reasoning and checkpoint text share the provider output
     // ceiling, so input and output must fit the window together. A request that
     // only fits because its output budget is ignored would be truncated by the
     // provider, which is exactly what this check exists to prevent.
-    let (estimated_input_tokens, max_output_tokens) = compaction_request_required_tokens(request);
+    let (estimated_input_tokens, max_output_tokens) =
+        compaction_request_required_tokens(request, reasoning);
     let required_tokens = estimated_input_tokens
         .checked_add(max_output_tokens)
         .ok_or(RuntimeError::CompactionModelRequestTooLarge {
@@ -117,7 +122,10 @@ pub(crate) async fn generate_validated_compaction_candidate(
             archived_tool_count = input.window_plan().archived_tool_call_ids().len(),
             model = request.model().as_str(),
             message_count = request.messages().len(),
-            estimated_input_tokens = estimate_model_input_tokens(request.input()),
+            estimated_input_tokens = estimate_model_input_tokens(
+                request.input(),
+                ReasoningTokenAccounting::from_capabilities(provider.capabilities()),
+            ),
             "starting compaction model attempt"
         );
         let candidate = match run_compaction_attempt(

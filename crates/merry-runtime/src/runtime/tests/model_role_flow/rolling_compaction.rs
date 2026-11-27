@@ -343,8 +343,10 @@ async fn assert_one_shot_reduction(
         payload.contains("one-shot-call-15"),
         "the newest covered exchanges are retained whole"
     );
-    let (input_tokens, output_tokens) =
-        crate::compaction::compaction_request_required_tokens(&requests[0]);
+    let (input_tokens, output_tokens) = crate::compaction::compaction_request_required_tokens(
+        &requests[0],
+        crate::token_estimate::ReasoningTokenAccounting::Exclude,
+    );
     assert!(input_tokens + output_tokens <= window_tokens);
     let final_requests = primary.recorded_requests();
     let final_request = final_requests.last().expect("primary continuation");

@@ -192,8 +192,10 @@ async fn run_three_cycle_case(window_tokens: u64) {
             output_ceiling > window_tokens * 8 / 100,
             "cycle {cycle} must reserve reasoning room above the checkpoint text budget, got {output_ceiling}"
         );
-        let compaction_input_tokens =
-            crate::token_estimate::estimate_model_input_tokens(compactor_request.input());
+        let compaction_input_tokens = crate::token_estimate::estimate_model_input_tokens(
+            compactor_request.input(),
+            crate::token_estimate::ReasoningTokenAccounting::Exclude,
+        );
         assert!(
             compaction_input_tokens + output_ceiling
                 <= compactor_capabilities()

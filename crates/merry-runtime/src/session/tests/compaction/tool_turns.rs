@@ -21,7 +21,7 @@ fn compaction_groups_user_commentary_and_two_tool_pairs_in_one_turn() {
         .record_user_message_body(turn_id, "inspect both files")
         .expect("user message records");
     session
-        .record_assistant_text_output(turn_id, "I will inspect both files.".to_owned())
+        .record_assistant_text_output(turn_id, "I will inspect both files.".to_owned(), None)
         .expect("commentary records");
     let call_a = pending_tool_call("turn-call-a");
     let call_b = pending_tool_call("turn-call-b");

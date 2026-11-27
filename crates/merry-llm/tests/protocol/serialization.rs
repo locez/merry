@@ -5,10 +5,10 @@ use crate::{
 use merry_core::ToolCallResultStatus;
 use merry_llm::{
     FinishReason, GenerationConfig, ModelCapabilities, ModelContent, ModelEvent, ModelMessage,
-    ModelMessageRole, ModelName, ModelOutput, ModelRequest, ModelResponse, ModelResponseFormat,
-    ModelStructuredOutputFormat, ModelToolCall, ModelToolCallId, ModelToolContinuation,
-    ModelToolResult, ModelToolResultContent, ParallelToolCalls, ReasoningEffort, ToolArguments,
-    Usage,
+    ModelMessageRole, ModelName, ModelOutput, ModelReasoning, ModelRequest, ModelResponse,
+    ModelResponseFormat, ModelStructuredOutputFormat, ModelToolCall, ModelToolCallId,
+    ModelToolContinuation, ModelToolResult, ModelToolResultContent, ParallelToolCalls,
+    ReasoningEffort, ToolArguments, Usage,
 };
 use serde_json::json;
 
@@ -18,6 +18,7 @@ fn protocol_types_round_trip_through_json() {
     assert_json_round_trip(&ModelToolCallId::new("call.vendor/123").expect("valid call id"));
     assert_json_round_trip(&ModelContent::text("hello").expect("valid text content"));
     assert_json_round_trip(&user_message("hello"));
+    assert_json_round_trip(&ModelReasoning::new("think first").expect("valid reasoning"));
     assert_json_round_trip(
         &GenerationConfig::new(Some(256), false).expect("valid generation config"),
     );
@@ -41,6 +42,11 @@ fn protocol_types_round_trip_through_json() {
     assert_json_round_trip(
         &ModelCapabilities::new(true, true, false, true, Some(8192), Some(2048))
             .expect("valid capabilities"),
+    );
+    assert_json_round_trip(
+        &ModelCapabilities::new(true, true, false, true, Some(8192), Some(2048))
+            .expect("valid capabilities")
+            .with_reasoning_input_replay(true),
     );
     assert_json_round_trip(&test_tool_call());
     assert_json_round_trip(&ModelOutput::text("hello"));
@@ -72,6 +78,7 @@ fn schema_generation_compiles_for_public_protocol_types() {
     assert_schema_compiles::<ModelContent>();
     assert_schema_compiles::<ModelMessageRole>();
     assert_schema_compiles::<ModelMessage>();
+    assert_schema_compiles::<ModelReasoning>();
     assert_schema_compiles::<GenerationConfig>();
     assert_schema_compiles::<ParallelToolCalls>();
     assert_schema_compiles::<ModelStructuredOutputFormat>();
@@ -99,6 +106,9 @@ fn validation_rejects_invalid_protocol_values() {
 
     assert!(ModelContent::text("").is_err());
     assert!(ModelContent::text("   ").is_err());
+    assert!(ModelReasoning::new("").is_err());
+    assert!(ModelReasoning::new("   ").is_err());
+    assert!(serde_json::from_value::<ModelReasoning>(json!({ "text": "   " })).is_err());
     assert!(serde_json::from_value::<ModelContent>(json!({ "type": "text", "text": "" })).is_err());
     assert!(
         serde_json::from_value::<ModelContent>(json!({ "type": "text", "text": "   " })).is_err()

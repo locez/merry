@@ -84,7 +84,7 @@ impl SessionStateTestExt for SessionState {
         text: String,
     ) -> Result<merry_core::RuntimeJournalEvent, RuntimeError> {
         let turn_id = self.begin_model_turn()?;
-        let event = self.record_assistant_text_output(turn_id, text)?;
+        let event = self.record_assistant_text_output(turn_id, text, None)?;
         self.close_model_response(turn_id, false)?;
         Ok(event)
     }

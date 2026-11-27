@@ -34,7 +34,7 @@ pub(super) async fn send_assistant_text_output_completed_events(
             return false;
         }
         session
-            .record_assistant_text_output_with_reasoning(turn_id, text, reasoning)
+            .record_assistant_text_output(turn_id, text, reasoning)
             .and_then(|event| {
                 session.close_model_response(turn_id, false)?;
                 let completed = session.record_step_completed();
@@ -134,8 +134,7 @@ pub(super) async fn send_model_tool_call_response_events(
         if token.is_cancelled() {
             return false;
         }
-        session
-            .record_model_tool_call_response_with_reasoning(turn_id, commentary, calls, reasoning)
+        session.record_model_tool_call_response(turn_id, commentary, calls, reasoning)
     };
 
     match events {

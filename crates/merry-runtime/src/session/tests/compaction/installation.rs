@@ -14,7 +14,7 @@ fn compaction_install_advances_prompt_boundary_without_deleting_full_transcript(
         .record_user_message_body(covered_turn, "covered user")
         .expect("covered user records");
     session
-        .record_assistant_text_output(covered_turn, "covered assistant".to_owned())
+        .record_assistant_text_output(covered_turn, "covered assistant".to_owned(), None)
         .expect("covered assistant records");
     session
         .close_model_response(covered_turn, false)

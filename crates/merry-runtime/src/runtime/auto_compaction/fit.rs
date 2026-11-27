@@ -14,6 +14,7 @@ use crate::{
         compaction_request_required_tokens, compaction_window_safety_tokens,
         compile_citation_compaction_model_request,
     },
+    token_estimate::ReasoningTokenAccounting,
 };
 use merry_llm::ReasoningEffort;
 pub(super) enum CompactionRequestFit {
@@ -50,6 +51,8 @@ pub(super) struct CompactionModelLimits {
     pub(crate) window_tokens: u64,
     /// Output limit the model declares, when it declares one.
     pub(crate) max_output_tokens: Option<u64>,
+    /// Whether the compaction provider replays reasoning items on the wire.
+    pub(crate) reasoning_tokens: ReasoningTokenAccounting,
 }
 
 /// Compiles one compaction request sized for the window and this attempt's reserve.
@@ -97,7 +100,8 @@ pub(super) fn compile_fitted_compaction_request(
         .into());
     }
     let measured = compile(text_budget_tokens)?;
-    let estimated_input_tokens = compaction_request_required_tokens(&measured).0;
+    let estimated_input_tokens =
+        compaction_request_required_tokens(&measured, limits.reasoning_tokens).0;
     let reserved_output_tokens = reserve
         .output_ceiling(
             input.resolved_budget(),
@@ -185,7 +189,10 @@ pub(super) fn trace_compaction_request(
             .generation()
             .reasoning_effort()
             .map(merry_llm::ReasoningEffort::as_str),
-        estimated_input_tokens = crate::token_estimate::estimate_model_input_tokens(request.input()),
+        estimated_input_tokens = crate::token_estimate::estimate_model_input_tokens(
+            request.input(),
+            ReasoningTokenAccounting::from_capabilities(provider.capabilities()),
+        ),
         max_output_tokens = request.generation().max_output_tokens(),
         response_format = response_format_name,
         primary_window_tokens = budget.primary_window_tokens,

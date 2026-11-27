@@ -81,7 +81,12 @@ pub(super) fn build_openai_http_request(
         ),
         OpenAiProtocol::ChatCompletions => (
             chat_completions_endpoint(config.base_url())?,
-            crate::chat_completions::render::render_chat_request(request)?,
+            crate::chat_completions::render::render_chat_request(
+                request,
+                crate::chat_completions::render::ReasoningReplay::from_capabilities(
+                    config.capabilities(),
+                ),
+            )?,
         ),
     };
     Ok(OpenAiHttpRequest {

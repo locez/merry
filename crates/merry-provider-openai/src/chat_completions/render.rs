@@ -4,14 +4,33 @@ use super::wire::{
 };
 use crate::{OpenAiProtocol, OpenAiProviderError, image::png_data_url};
 use merry_llm::{
-    ModelContentPart, ModelInputItem, ModelMessageRole, ModelRequest, ModelResponseFormat,
-    ModelToolResult,
+    ModelCapabilities, ModelContentPart, ModelInputItem, ModelMessageRole, ModelRequest,
+    ModelResponseFormat, ModelToolResult,
 };
 use serde_json::Value;
 use std::borrow::Cow;
 
-pub(crate) fn render_chat_request(request: &ModelRequest) -> Result<Value, OpenAiProviderError> {
-    let messages = render_messages(request)?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReasoningReplay {
+    Enabled,
+    Disabled,
+}
+
+impl ReasoningReplay {
+    pub(crate) const fn from_capabilities(capabilities: &ModelCapabilities) -> Self {
+        if capabilities.replays_reasoning_input() {
+            Self::Enabled
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
+pub(crate) fn render_chat_request(
+    request: &ModelRequest,
+    reasoning_replay: ReasoningReplay,
+) -> Result<Value, OpenAiProviderError> {
+    let messages = render_messages(request, reasoning_replay)?;
     let tools = request
         .tools()
         .iter()
@@ -83,6 +102,7 @@ pub(crate) fn render_chat_request(request: &ModelRequest) -> Result<Value, OpenA
 
 fn render_messages<'a>(
     request: &'a ModelRequest,
+    reasoning_replay: ReasoningReplay,
 ) -> Result<Vec<ChatMessage<'a>>, OpenAiProviderError> {
     let mut messages = Vec::new();
     let mut index = 0;
@@ -119,7 +139,6 @@ fn render_messages<'a>(
                                 },
                             })
                             .collect(),
-                        reasoning_content,
                     });
                 } else if message.role() == ModelMessageRole::Assistant
                     && matches!(
@@ -146,7 +165,9 @@ fn render_messages<'a>(
                 index += 1;
             }
             ModelInputItem::Reasoning(reasoning) => {
-                if pending_reasoning.replace(reasoning.text()).is_some() {
+                if reasoning_replay == ReasoningReplay::Enabled
+                    && pending_reasoning.replace(reasoning.text()).is_some()
+                {
                     return Err(OpenAiProviderError::invalid_request(
                         "assistant reasoning items must not be consecutive",
                     ));
@@ -183,11 +204,15 @@ fn render_messages<'a>(
                     messages.push(ChatMessage::Multimodal {
                         role: "user",
                         content: tool_images,
-                        reasoning_content: None,
                     });
                 }
             }
         }
+    }
+    if pending_reasoning.is_some() {
+        return Err(OpenAiProviderError::invalid_request(
+            "assistant reasoning must be followed by an assistant message or tool call",
+        ));
     }
     Ok(messages)
 }
@@ -302,7 +327,8 @@ mod tests {
         )
         .expect("valid request");
 
-        let rendered = render_chat_request(&request).expect("request should render");
+        let rendered =
+            render_chat_request(&request, ReasoningReplay::Enabled).expect("request should render");
         assert_eq!(rendered["stream"], true);
         assert_eq!(rendered["stream_options"]["include_usage"], true);
         assert_eq!(rendered["parallel_tool_calls"], true);
@@ -340,7 +366,8 @@ mod tests {
         )
         .expect("valid request");
 
-        let rendered = render_chat_request(&request).expect("request should render");
+        let rendered =
+            render_chat_request(&request, ReasoningReplay::Enabled).expect("request should render");
 
         assert_eq!(rendered["messages"][0]["role"], "assistant");
         assert_eq!(rendered["messages"][0]["content"], "Searching the notes");
@@ -370,13 +397,103 @@ mod tests {
         )
         .expect("valid request");
 
-        let rendered = render_chat_request(&request).expect("request should render");
+        let rendered =
+            render_chat_request(&request, ReasoningReplay::Enabled).expect("request should render");
 
         assert_eq!(rendered["messages"][0]["role"], "assistant");
         assert_eq!(rendered["messages"][0]["content"], json!(null));
         assert_eq!(rendered["messages"][0]["reasoning_content"], "Call search.");
         assert_eq!(rendered["messages"][0]["tool_calls"][0]["id"], "call-1");
         assert_eq!(rendered["messages"][1]["role"], "tool");
+    }
+
+    #[test]
+    fn omits_reasoning_content_when_reasoning_replay_is_disabled() {
+        let call = call("call-1", "alpha");
+        let request = ModelRequest::new_with_input_and_stable_prefix(
+            ModelName::new("gpt-5").expect("valid model"),
+            vec![
+                ModelInputItem::Reasoning(
+                    ModelReasoning::new("Internal thought.").expect("valid reasoning"),
+                ),
+                ModelInputItem::Message(
+                    ModelMessage::new(
+                        ModelMessageRole::Assistant,
+                        ModelContent::text("Searching").expect("valid content"),
+                    )
+                    .expect("valid message"),
+                ),
+                ModelInputItem::ToolCall(call.clone()),
+                ModelInputItem::ToolResult(result(&call, "one")),
+            ],
+            Vec::new(),
+            GenerationConfig::default(),
+            0,
+        )
+        .expect("valid request");
+
+        let rendered = render_chat_request(&request, ReasoningReplay::Disabled)
+            .expect("request should render");
+
+        assert_eq!(rendered["messages"][0]["role"], "assistant");
+        assert_eq!(rendered["messages"][0]["content"], "Searching");
+        assert!(rendered["messages"][0].get("reasoning_content").is_none());
+        assert_eq!(rendered["messages"][0]["tool_calls"][0]["id"], "call-1");
+    }
+
+    #[test]
+    fn rejects_invalid_reasoning_positions_when_replaying() {
+        let reasoning_item = |text: &str| {
+            ModelInputItem::Reasoning(ModelReasoning::new(text).expect("valid reasoning"))
+        };
+        let user_item = ModelInputItem::Message(
+            ModelMessage::new(
+                ModelMessageRole::User,
+                ModelContent::text("next user").expect("valid content"),
+            )
+            .expect("valid message"),
+        );
+        let assistant_item = ModelInputItem::Message(
+            ModelMessage::new(
+                ModelMessageRole::Assistant,
+                ModelContent::text("answer").expect("valid content"),
+            )
+            .expect("valid message"),
+        );
+
+        let consecutive = ModelRequest::new_with_input_and_stable_prefix(
+            ModelName::new("deepseek-reasoner").expect("valid model"),
+            vec![
+                reasoning_item("first"),
+                reasoning_item("second"),
+                assistant_item,
+            ],
+            Vec::new(),
+            GenerationConfig::default(),
+            0,
+        )
+        .expect("valid request");
+        assert!(render_chat_request(&consecutive, ReasoningReplay::Enabled).is_err());
+
+        let before_user = ModelRequest::new_with_input_and_stable_prefix(
+            ModelName::new("deepseek-reasoner").expect("valid model"),
+            vec![reasoning_item("orphaned"), user_item],
+            Vec::new(),
+            GenerationConfig::default(),
+            0,
+        )
+        .expect("valid request");
+        assert!(render_chat_request(&before_user, ReasoningReplay::Enabled).is_err());
+
+        let trailing = ModelRequest::new_with_input_and_stable_prefix(
+            ModelName::new("deepseek-reasoner").expect("valid model"),
+            vec![reasoning_item("trailing")],
+            Vec::new(),
+            GenerationConfig::default(),
+            0,
+        )
+        .expect("valid request");
+        assert!(render_chat_request(&trailing, ReasoningReplay::Enabled).is_err());
     }
 
     #[test]
@@ -402,7 +519,8 @@ mod tests {
         )
         .expect("valid request");
 
-        let rendered = render_chat_request(&request).expect("request should render");
+        let rendered =
+            render_chat_request(&request, ReasoningReplay::Enabled).expect("request should render");
 
         assert_eq!(
             rendered["messages"][0]["content"],
@@ -442,7 +560,8 @@ mod tests {
         )
         .expect("valid request");
 
-        let rendered = render_chat_request(&request).expect("request should render");
+        let rendered =
+            render_chat_request(&request, ReasoningReplay::Enabled).expect("request should render");
         assert_eq!(rendered["messages"][1]["role"], "tool");
         assert_eq!(rendered["messages"][2]["role"], "tool");
         assert_eq!(rendered["messages"][3]["role"], "user");

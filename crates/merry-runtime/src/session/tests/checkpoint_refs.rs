@@ -11,7 +11,7 @@ fn checkpoint_refs_record_user_and_assistant_transcript_items() {
         .record_user_message_body(covered_turn, "exact user source")
         .expect("user message records");
     session
-        .record_assistant_text_output(covered_turn, "exact assistant source".to_owned())
+        .record_assistant_text_output(covered_turn, "exact assistant source".to_owned(), None)
         .expect("assistant output records");
     session
         .close_model_response(covered_turn, false)

@@ -46,7 +46,7 @@ async fn session_state_round_trip_preserves_turns_user_text_and_projections() {
         .record_user_message_body(text_turn, "  exact persisted user text\n")
         .expect("user message should record");
     session
-        .record_assistant_text_output(text_turn, "persisted assistant".to_owned())
+        .record_assistant_text_output(text_turn, "persisted assistant".to_owned(), None)
         .expect("assistant output should record");
     session
         .close_model_response(text_turn, false)
@@ -232,7 +232,7 @@ async fn subsequent_journal_commits_only_append_deltas_and_strip_process_admissi
         .record_user_message_body(turn1, "turn one input")
         .expect("turn 1 user");
     session
-        .record_assistant_text_output(turn1, "turn one answer".to_owned())
+        .record_assistant_text_output(turn1, "turn one answer".to_owned(), None)
         .expect("turn 1 assistant");
     session
         .close_model_response(turn1, false)
@@ -364,5 +364,127 @@ async fn subsequent_journal_commits_only_append_deltas_and_strip_process_admissi
             .read_model_tool_preview(call.id(), 4096)
             .map(|preview| preview.content().to_owned()),
         Some(model_process.as_str().to_owned())
+    );
+}
+
+#[tokio::test]
+async fn session_state_round_trip_preserves_reasoning_and_hides_orphaned_final_output_reasoning() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut session = SessionState::new(session_id());
+
+    let text_turn = session.begin_model_turn().expect("text turn begins");
+    session
+        .record_user_message_body(text_turn, "Explain this.")
+        .expect("user message records");
+    session
+        .record_assistant_text_output(
+            text_turn,
+            "Here is the answer.".to_owned(),
+            Some("Think through the explanation.".to_owned()),
+        )
+        .expect("assistant output with reasoning records");
+    session
+        .close_model_response(text_turn, false)
+        .expect("text turn closes");
+
+    let final_turn = session.begin_model_turn().expect("final turn begins");
+    let final_call = pending_tool_call("final-output-with-reasoning");
+    session
+        .record_model_tool_call_response(
+            final_turn,
+            None,
+            vec![final_call.clone()],
+            Some("Format the final JSON payload.".to_owned()),
+        )
+        .expect("final tool call with reasoning records");
+    session
+        .record_final_output(final_call.id().clone(), r#"{"ok":true}"#.to_owned())
+        .expect("final output records");
+
+    let followup_turn = session.begin_model_turn().expect("followup turn begins");
+    session
+        .record_user_message_body(followup_turn, "Follow up.")
+        .expect("followup user message records");
+    session
+        .record_assistant_text_output(followup_turn, "Done.".to_owned(), None)
+        .expect("followup assistant records");
+    session
+        .close_model_response(followup_turn, false)
+        .expect("followup turn closes");
+
+    session.save_to(&store).await.expect("session saves");
+    let loaded = SessionState::load_from(&store, &session_id())
+        .await
+        .expect("session loads");
+
+    let full = loaded.full_transcript_snapshot();
+    assert!(full.iter().any(|item| matches!(
+        item,
+        crate::session::TranscriptItemSnapshot::AssistantReasoning { text }
+            if text == "Think through the explanation."
+    )));
+    assert!(full.iter().any(|item| matches!(
+        item,
+        crate::session::TranscriptItemSnapshot::AssistantReasoning { text }
+            if text == "Format the final JSON payload."
+    )));
+
+    let provider = loaded.provider_transcript_snapshot();
+    assert!(provider.iter().any(|item| matches!(
+        item,
+        crate::session::TranscriptItemSnapshot::AssistantReasoning { text }
+            if text == "Think through the explanation."
+    )));
+    assert!(
+        !provider.iter().any(|item| matches!(
+            item,
+            crate::session::TranscriptItemSnapshot::AssistantReasoning { text }
+                if text == "Format the final JSON payload."
+        )),
+        "reasoning for a hidden final-output turn without commentary must not leak into provider history"
+    );
+    assert_eq!(
+        loaded.provider_transcript_history_ids().len(),
+        provider.len(),
+        "provider history ids must stay aligned with provider transcript snapshot"
+    );
+}
+
+#[tokio::test]
+async fn session_state_load_rejects_blank_persisted_assistant_reasoning() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let mut session = SessionState::new(session_id());
+
+    let turn_id = session.begin_model_turn().expect("turn begins");
+    session
+        .record_user_message_body(turn_id, "Hi")
+        .expect("user message records");
+    session
+        .record_assistant_text_output(
+            turn_id,
+            "Hello".to_owned(),
+            Some("valid reasoning".to_owned()),
+        )
+        .expect("assistant output records");
+    session
+        .close_model_response(turn_id, false)
+        .expect("turn closes");
+    session.save_to(&store).await.expect("session saves");
+
+    let journal_path = store.journal_path(&session_id());
+    let bytes = std::fs::read_to_string(&journal_path).expect("journal reads");
+    let corrupted = bytes.replace("valid reasoning", "   ");
+    std::fs::write(&journal_path, corrupted).expect("journal rewrites");
+
+    let error = SessionState::load_from(&store, &session_id())
+        .await
+        .expect_err("blank persisted reasoning must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("stored assistant reasoning is blank"),
+        "unexpected error: {error}"
     );
 }

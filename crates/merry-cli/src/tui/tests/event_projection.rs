@@ -431,3 +431,58 @@ fn projector_confirms_local_echo_without_duplicate_user_line() {
         ]
     );
 }
+
+#[test]
+fn projector_finishes_replayed_reasoning_so_resumed_thoughts_are_foldable() {
+    let mut state = TuiState::new(
+        "/repo".into(),
+        "deepseek-reasoner".to_owned(),
+        Keymap::default(),
+        TuiTheme::default(),
+    );
+    let mut projector = TuiProjector::default();
+
+    projector.apply_transcript_item(
+        SessionTranscriptItem::UserMessage {
+            text: "Explain the bug".to_owned(),
+            images: Vec::new(),
+        },
+        &mut state,
+    );
+    projector.apply_transcript_item(
+        SessionTranscriptItem::AssistantReasoning {
+            text: "Check the transcript projection order.".to_owned(),
+        },
+        &mut state,
+    );
+    projector.apply_transcript_item(
+        SessionTranscriptItem::AssistantText {
+            text: "The projection order is fixed.".to_owned(),
+        },
+        &mut state,
+    );
+
+    assert!(matches!(
+        &state.timeline()[1],
+        TimelineItem::Thinking {
+            text,
+            elapsed: Some(_),
+            expanded: false,
+            ..
+        } if text == "Check the transcript projection order."
+    ));
+    let collapsed = render_to_text(&state, 100, 20);
+    assert!(collapsed.contains("Thought for"), "{collapsed}");
+    assert!(!collapsed.contains("Thinking…"), "{collapsed}");
+    assert!(
+        !collapsed.contains("Check the transcript projection order."),
+        "{collapsed}"
+    );
+
+    state.toggle_thinking_expanded(1);
+    let expanded = render_to_text(&state, 100, 20);
+    assert!(
+        expanded.contains("Check the transcript projection order."),
+        "{expanded}"
+    );
+}

@@ -455,8 +455,11 @@ pub(super) async fn run_provider_step(
         .observe_model_request(&request, step_sequence);
     let usage_context_snapshot =
         step_usage_context_snapshot(request_budget.as_ref().ok(), automatic_compaction_enabled);
-    let request_token_observation =
-        crate::token_estimate::RequestTokenObservation::new(provider.name(), &request);
+    let request_token_observation = crate::token_estimate::RequestTokenObservation::new(
+        provider.name(),
+        &request,
+        crate::token_estimate::ReasoningTokenAccounting::from_capabilities(provider.capabilities()),
+    );
     let sent_continuation_count = request.continuations().len();
 
     let turn_id = {

@@ -680,3 +680,40 @@ fn fit_requires_strictly_less_than_the_body_budget() {
         }
     ));
 }
+
+#[test]
+fn retained_reasoning_tokens_count_toward_compaction_budget_only_when_replayed() {
+    let mut session =
+        SessionState::new(SessionId::new("rolling-reasoning-budget").expect("valid id"));
+    record_completed_user_turn(&mut session, "old prefix");
+    let turn_id = session.begin_model_turn().expect("turn begins");
+    session
+        .record_user_message_body(turn_id, "recent")
+        .expect("user records");
+    session
+        .record_assistant_text_output(turn_id, "ok".to_owned(), Some("deep thought ".repeat(200)))
+        .expect("assistant with reasoning records");
+    session
+        .close_model_response(turn_id, false)
+        .expect("turn closes");
+
+    let base_budget = CompactionWindowBudget::new(64_000, 200, 0, 0, 128).expect("valid budget");
+    let without_reasoning = session
+        .plan_compaction_window(policy(1), base_budget)
+        .expect("plan without reasoning replay fits");
+    assert!(without_reasoning.is_some());
+
+    let with_reasoning = session
+        .plan_compaction_window(
+            policy(1),
+            base_budget
+                .with_reasoning_tokens(crate::token_estimate::ReasoningTokenAccounting::Include),
+        )
+        .expect_err("retained reasoning crosses the body budget when replayed");
+    assert!(matches!(
+        with_reasoning,
+        RuntimeError::Compaction {
+            source: CompactionError::MinimumRawTurnCannotFit { .. }
+        }
+    ));
+}

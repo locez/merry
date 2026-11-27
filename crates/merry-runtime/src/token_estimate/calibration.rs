@@ -1,6 +1,6 @@
 //! Session-local feedback from complete request estimates and matching provider usage.
 
-use super::estimate_request_input_tokens;
+use super::{ReasoningTokenAccounting, estimate_request_input_tokens};
 use merry_core::ProviderName;
 use merry_llm::{ModelInputItem, ModelName, ModelRequest, RequestContentHash};
 use serde::{Deserialize, Serialize};
@@ -90,10 +90,14 @@ pub(crate) struct RequestTokenObservation {
 }
 
 impl RequestTokenObservation {
-    pub(crate) fn new(provider: &ProviderName, request: &ModelRequest) -> Self {
+    pub(crate) fn new(
+        provider: &ProviderName,
+        request: &ModelRequest,
+        reasoning: ReasoningTokenAccounting,
+    ) -> Self {
         Self {
             profile: RequestTokenProfile::new(provider, request),
-            base_input_tokens: estimate_request_input_tokens(request),
+            base_input_tokens: estimate_request_input_tokens(request, reasoning),
         }
     }
 }

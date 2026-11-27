@@ -74,7 +74,10 @@ impl ModelProvider for MeteredProvider {
             if context.cancellation_token().is_cancelled() {
                 return Err(ModelError::Cancelled);
             }
-            let base_tokens = estimate_request_input_tokens(&request);
+            let base_tokens = estimate_request_input_tokens(
+                &request,
+                crate::token_estimate::ReasoningTokenAccounting::Exclude,
+            );
             self.requests.lock().expect("requests").push(request);
             let feedback = self
                 .feedback
@@ -144,7 +147,10 @@ async fn assert_prediction(runtime: &Runtime, provider: &MeteredProvider, multip
     let request = provider.last_request();
     assert_eq!(
         usage.last.input_tokens(),
-        estimate_request_input_tokens(&request) * 2
+        estimate_request_input_tokens(
+            &request,
+            crate::token_estimate::ReasoningTokenAccounting::Exclude
+        ) * 2
     );
     assert_eq!(
         usage.last.cached_input_tokens(),
@@ -153,7 +159,10 @@ async fn assert_prediction(runtime: &Runtime, provider: &MeteredProvider, multip
     let compaction = usage.compaction.expect("compaction snapshot");
     assert_eq!(
         compaction.dynamic_body_estimated_tokens,
-        estimate_model_input_tokens(request.dynamic_input()) * multiplier,
+        estimate_model_input_tokens(
+            request.dynamic_input(),
+            crate::token_estimate::ReasoningTokenAccounting::Exclude
+        ) * multiplier,
     );
 }
 

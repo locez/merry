@@ -66,7 +66,10 @@ async fn oversized_prose_installs_in_one_call_without_logging_the_body() {
         !logs.contains(secret_marker),
         "diagnostics must not log candidate bodies"
     );
-    let (input, output) = compaction_request_required_tokens(&requests[0]);
+    let (input, output) = compaction_request_required_tokens(
+        &requests[0],
+        crate::token_estimate::ReasoningTokenAccounting::Exclude,
+    );
     assert!(input + output <= 64_000);
 }
 

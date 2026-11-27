@@ -1,6 +1,8 @@
 //! Deterministic token estimates used by request budgeting and compaction planning.
 
-use merry_llm::{ModelContent, ModelImage, ModelInputItem, ModelRequest, ModelResponseFormat};
+use merry_llm::{
+    ModelCapabilities, ModelContent, ModelImage, ModelInputItem, ModelRequest, ModelResponseFormat,
+};
 
 mod calibration;
 
@@ -8,9 +10,33 @@ pub(crate) use calibration::{
     RequestTokenCalibration, RequestTokenObservation, TokenEstimateScale,
 };
 
+/// Whether replayed assistant reasoning items count toward estimated input tokens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ReasoningTokenAccounting {
+    /// Exclude reasoning items because the target provider drops them on the wire.
+    #[default]
+    Exclude,
+    /// Include reasoning items because the target provider replays them on the wire.
+    Include,
+}
+
+impl ReasoningTokenAccounting {
+    #[must_use]
+    pub(crate) const fn from_capabilities(capabilities: &ModelCapabilities) -> Self {
+        if capabilities.replays_reasoning_input() {
+            Self::Include
+        } else {
+            Self::Exclude
+        }
+    }
+}
+
 /// Estimates the complete input, including tools and response schemas, before calibration.
-pub(crate) fn estimate_request_input_tokens(request: &ModelRequest) -> u64 {
-    estimate_model_input_tokens(request.input())
+pub(crate) fn estimate_request_input_tokens(
+    request: &ModelRequest,
+    reasoning: ReasoningTokenAccounting,
+) -> u64 {
+    estimate_model_input_tokens(request.input(), reasoning)
         .saturating_add(estimate_request_contract_tokens(request))
 }
 
@@ -43,8 +69,14 @@ pub(crate) fn estimate_request_contract_tokens(request: &ModelRequest) -> u64 {
 /// fits the token budget is not rejected on byte count.
 pub(crate) const BYTES_PER_TOKEN: u64 = 4;
 
-pub(crate) fn estimate_model_input_tokens(input: &[ModelInputItem]) -> u64 {
-    input.iter().map(estimate_model_input_item_tokens).sum()
+pub(crate) fn estimate_model_input_tokens(
+    input: &[ModelInputItem],
+    reasoning: ReasoningTokenAccounting,
+) -> u64 {
+    input
+        .iter()
+        .map(|item| estimate_model_input_item_tokens(item, reasoning))
+        .sum()
 }
 
 pub(crate) fn estimate_text_tokens(text: &str) -> u64 {
@@ -55,10 +87,16 @@ pub(crate) const fn estimate_utf8_tokens(bytes: u64) -> u64 {
     bytes.div_ceil(BYTES_PER_TOKEN)
 }
 
-fn estimate_model_input_item_tokens(item: &ModelInputItem) -> u64 {
+fn estimate_model_input_item_tokens(
+    item: &ModelInputItem,
+    reasoning_accounting: ReasoningTokenAccounting,
+) -> u64 {
     match item {
         ModelInputItem::Message(message) => estimate_model_content_tokens(message.content()),
-        ModelInputItem::Reasoning(reasoning) => estimate_text_tokens(reasoning.text()),
+        ModelInputItem::Reasoning(reasoning) => match reasoning_accounting {
+            ReasoningTokenAccounting::Include => estimate_text_tokens(reasoning.text()),
+            ReasoningTokenAccounting::Exclude => 0,
+        },
         ModelInputItem::ToolCall(call) => {
             estimate_text_tokens(call.name().as_str())
                 + estimate_text_tokens(
@@ -89,7 +127,7 @@ fn estimate_images_tokens<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{estimate_model_input_item_tokens, estimate_text_tokens};
+    use super::{ReasoningTokenAccounting, estimate_model_input_item_tokens, estimate_text_tokens};
     use merry_llm::{
         ModelContent, ModelImage, ModelInputItem, ModelMessage, ModelMessageRole, ModelToolCallId,
         ModelToolResult, ModelToolResultContent,
@@ -113,7 +151,7 @@ mod tests {
         );
 
         assert_eq!(
-            estimate_model_input_item_tokens(&item),
+            estimate_model_input_item_tokens(&item, ReasoningTokenAccounting::Include),
             text_tokens + 85 + 1_000_000_u64.div_ceil(750)
         );
     }
@@ -132,7 +170,7 @@ mod tests {
         let item = ModelInputItem::ToolResult(result);
 
         assert_eq!(
-            estimate_model_input_item_tokens(&item),
+            estimate_model_input_item_tokens(&item, ReasoningTokenAccounting::Include),
             text_tokens + (1_200_u64 * 800).div_ceil(750)
         );
     }

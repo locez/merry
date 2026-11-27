@@ -164,6 +164,7 @@ impl CompactionRequestBudget {
             checkpoint_output_ceiling_tokens,
         )?
         .with_token_estimate_scale(request_budget.token_estimate_scale)
+        .with_reasoning_tokens(request_budget.reasoning_tokens)
         .with_retained_history_target(resolved_budget.retained_history_token_target())?;
         Ok(Self {
             source,

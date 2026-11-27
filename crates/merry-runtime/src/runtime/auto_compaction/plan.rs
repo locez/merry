@@ -76,9 +76,12 @@ pub(super) async fn fit_compaction_plan(
         &inner.session_id,
         provider.name(),
     )?;
+    let reasoning_tokens =
+        crate::token_estimate::ReasoningTokenAccounting::from_capabilities(provider.capabilities());
     let limits = CompactionModelLimits {
         window_tokens: compactor_window_tokens,
         max_output_tokens: provider.capabilities().max_output_tokens(),
+        reasoning_tokens,
     };
     let mut mode = CompactionRequestMode::Append;
 
@@ -238,7 +241,7 @@ pub(super) async fn fit_compaction_plan(
         trace_compaction_request(inner, provider.as_ref(), &request, budget, attempt);
         // One gate owns the invariant: the fitter only decides which covered
         // window to try, and this check decides whether the request may be sent.
-        validate_compaction_model_window(&request, compactor_window_tokens)?;
+        validate_compaction_model_window(&request, compactor_window_tokens, reasoning_tokens)?;
         return Ok(CompactionAttempt::Generate(CompactionPlan {
             compactor_window_tokens,
             input: Box::new(input),

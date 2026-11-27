@@ -311,3 +311,72 @@ fn provider_stream_span_uses_runtime_request_metadata_fields_without_prompt_text
     assert!(!fields.contains("sk-span-secret"));
     assert!(!fields.contains("span prompt must not be logged"));
 }
+
+#[test]
+fn chat_completions_reasoning_replay_defaults_by_protocol_and_host() {
+    let deepseek_proto_first = OpenAiProviderConfig::new("sk-deepseek")
+        .expect("valid config")
+        .with_protocol(OpenAiProtocol::ChatCompletions)
+        .with_base_url("https://api.deepseek.com/v1")
+        .expect("valid base url");
+    assert!(
+        deepseek_proto_first
+            .capabilities()
+            .replays_reasoning_input()
+    );
+
+    let deepseek_url_first = OpenAiProviderConfig::new("sk-deepseek")
+        .expect("valid config")
+        .with_base_url("https://api.deepseek.com/v1")
+        .expect("valid base url")
+        .with_protocol(OpenAiProtocol::ChatCompletions);
+    assert!(deepseek_url_first.capabilities().replays_reasoning_input());
+
+    let official_chat = OpenAiProviderConfig::new("sk-openai")
+        .expect("valid config")
+        .with_protocol(OpenAiProtocol::ChatCompletions);
+    assert!(!official_chat.capabilities().replays_reasoning_input());
+
+    let responses = OpenAiProviderConfig::new("sk-deepseek")
+        .expect("valid config")
+        .with_base_url("https://api.deepseek.com/v1")
+        .expect("valid base url")
+        .with_protocol(OpenAiProtocol::Responses);
+    assert!(!responses.capabilities().replays_reasoning_input());
+
+    let request = ModelRequest::new_with_input_and_stable_prefix(
+        ModelName::new("deepseek-reasoner").expect("valid model"),
+        vec![
+            merry_llm::ModelInputItem::Reasoning(
+                merry_llm::ModelReasoning::new("think first").expect("valid reasoning"),
+            ),
+            merry_llm::ModelInputItem::Message(
+                ModelMessage::new(
+                    ModelMessageRole::Assistant,
+                    ModelContent::text("done").expect("valid content"),
+                )
+                .expect("valid message"),
+            ),
+        ],
+        Vec::new(),
+        GenerationConfig::default(),
+        0,
+    )
+    .expect("valid request");
+    let context = ModelStreamContext::default();
+
+    let deepseek_http =
+        build_openai_http_request(&deepseek_url_first, &request, &context).expect("renders");
+    assert_eq!(
+        deepseek_http.body["messages"][0]["reasoning_content"],
+        "think first"
+    );
+
+    let official_http =
+        build_openai_http_request(&official_chat, &request, &context).expect("renders");
+    assert!(
+        official_http.body["messages"][0]
+            .get("reasoning_content")
+            .is_none()
+    );
+}

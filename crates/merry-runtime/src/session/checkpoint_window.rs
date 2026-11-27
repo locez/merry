@@ -731,7 +731,7 @@ fn hash_transcript(transcript: &Transcript, hash: &mut u64) -> Result<(), Runtim
                 fnv_update(hash, text.as_bytes());
             }
             TranscriptItem::AssistantReasoning { text, .. } => {
-                fnv_update(hash, &[4]);
+                fnv_update(hash, &[5]);
                 fnv_update(hash, text.as_bytes());
             }
             TranscriptItem::ToolCall {

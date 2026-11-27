@@ -26,7 +26,10 @@ fn assert_compaction_request_fits(request: &merry_llm::ModelRequest, window_toke
         .generation()
         .max_output_tokens()
         .expect("compaction always sends an output ceiling");
-    let estimated_input = crate::token_estimate::estimate_model_input_tokens(request.input());
+    let estimated_input = crate::token_estimate::estimate_model_input_tokens(
+        request.input(),
+        crate::token_estimate::ReasoningTokenAccounting::Exclude,
+    );
     assert!(
         estimated_input + text_budget <= window_tokens,
         "compaction request must fit the window: input {estimated_input} plus output {text_budget} exceeds {window_tokens}"

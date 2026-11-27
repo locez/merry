@@ -81,8 +81,15 @@ fn calibrated_budget_counts_fixed_input_and_body_without_scaling_output_reserve(
     .expect("request");
     let calibration = crate::token_estimate::RequestTokenCalibration::observe(
         None,
-        crate::token_estimate::RequestTokenObservation::new(&provider, &request),
-        crate::token_estimate::estimate_request_input_tokens(&request) * 2,
+        crate::token_estimate::RequestTokenObservation::new(
+            &provider,
+            &request,
+            crate::token_estimate::ReasoningTokenAccounting::Exclude,
+        ),
+        crate::token_estimate::estimate_request_input_tokens(
+            &request,
+            crate::token_estimate::ReasoningTokenAccounting::Exclude,
+        ) * 2,
     )
     .expect("calibration");
     let baseline = request_context_budget(&capabilities, &request, None, Default::default())
@@ -220,5 +227,49 @@ fn request_context_budget_prefers_an_explicit_window_override() {
     assert_eq!(
         budget.window.source(),
         crate::ContextWindowSource::ExplicitConfig
+    );
+}
+
+#[test]
+fn request_context_budget_counts_reasoning_only_when_provider_replays_it() {
+    let request = ModelRequest::new_with_input_and_stable_prefix(
+        named_model("deepseek-reasoner"),
+        vec![
+            merry_llm::ModelInputItem::Reasoning(
+                merry_llm::ModelReasoning::new(&"thought ".repeat(200)).expect("valid reasoning"),
+            ),
+            merry_llm::ModelInputItem::Message(
+                ModelMessage::new(
+                    ModelMessageRole::Assistant,
+                    ModelContent::text("ok").expect("valid content"),
+                )
+                .expect("valid message"),
+            ),
+        ],
+        Vec::new(),
+        GenerationConfig::default(),
+        0,
+    )
+    .expect("valid request");
+    let without_replay = ModelCapabilities::new(true, true, false, true, Some(64_000), None)
+        .expect("valid capabilities");
+    let with_replay = without_replay.clone().with_reasoning_input_replay(true);
+
+    let budget_without =
+        request_context_budget(&without_replay, &request, None, Default::default())
+            .expect("budget without replay");
+    let budget_with = request_context_budget(&with_replay, &request, None, Default::default())
+        .expect("budget with replay");
+
+    assert_eq!(
+        budget_without.reasoning_tokens,
+        crate::token_estimate::ReasoningTokenAccounting::Exclude
+    );
+    assert_eq!(
+        budget_with.reasoning_tokens,
+        crate::token_estimate::ReasoningTokenAccounting::Include
+    );
+    assert!(
+        budget_with.dynamic_body_estimated_tokens > budget_without.dynamic_body_estimated_tokens
     );
 }

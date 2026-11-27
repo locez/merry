@@ -308,8 +308,12 @@ impl SessionState {
                         invalid_document("stored user transcript message is invalid")
                     })?;
                 }
-                TranscriptItem::AssistantText { .. }
-                | TranscriptItem::AssistantReasoning { .. } => {}
+                TranscriptItem::AssistantText { .. } => {}
+                TranscriptItem::AssistantReasoning { text, .. } => {
+                    if text.trim().is_empty() {
+                        return Err(invalid_document("stored assistant reasoning is blank"));
+                    }
+                }
                 TranscriptItem::ToolCall {
                     model_turn_id,
                     call,

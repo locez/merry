@@ -5,7 +5,7 @@ use crate::{
     resolve_context_window,
     session::{SessionState, TranscriptItemSnapshot},
     step::{StepInput, StepModelRequestParts, compile_step_model_request},
-    token_estimate::{TokenEstimateScale, estimate_model_input_tokens},
+    token_estimate::{ReasoningTokenAccounting, TokenEstimateScale, estimate_model_input_tokens},
 };
 use merry_core::{CompactionUsageWindow, ErrorInfo, UsageContextWindow};
 use merry_llm::{GenerationConfig, ModelError, ModelName};
@@ -218,8 +218,14 @@ pub(super) fn estimate_compaction_fixed_dynamic_tokens(
     })?;
 
     Ok(CompactionFixedDynamicTokens {
-        replacement: estimate_model_input_tokens(replacement_request.dynamic_input()),
-        archive_only: estimate_model_input_tokens(archive_only_request.dynamic_input()),
+        replacement: estimate_model_input_tokens(
+            replacement_request.dynamic_input(),
+            ReasoningTokenAccounting::Exclude,
+        ),
+        archive_only: estimate_model_input_tokens(
+            archive_only_request.dynamic_input(),
+            ReasoningTokenAccounting::Exclude,
+        ),
     })
 }
 
@@ -240,6 +246,7 @@ pub(super) struct RequestContextBudget {
     pub(super) budget: ContextBudget,
     pub(super) dynamic_body_estimated_tokens: u64,
     pub(super) token_estimate_scale: TokenEstimateScale,
+    pub(super) reasoning_tokens: ReasoningTokenAccounting,
     pub(super) decision: CheckpointDecision,
 }
 
@@ -294,18 +301,22 @@ pub(super) fn request_context_budget(
         .max_output_tokens()
         .or_else(|| capabilities.max_output_tokens())
         .unwrap_or_else(|| default_output_reserve_tokens(window.tokens()));
-    let stable_prefix_estimated_tokens = estimate_model_input_tokens(request.stable_prefix_input())
-        .saturating_add(crate::token_estimate::estimate_request_contract_tokens(
-            request,
-        ));
+    let reasoning_tokens = ReasoningTokenAccounting::from_capabilities(capabilities);
+    let stable_prefix_estimated_tokens =
+        estimate_model_input_tokens(request.stable_prefix_input(), reasoning_tokens)
+            .saturating_add(crate::token_estimate::estimate_request_contract_tokens(
+                request,
+            ));
     let budget = ContextBudget::from_window(
         window.tokens(),
         DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
         token_estimate_scale.estimate(stable_prefix_estimated_tokens),
         output_reserve_tokens,
     )?;
-    let dynamic_body_estimated_tokens =
-        token_estimate_scale.estimate(estimate_model_input_tokens(request.dynamic_input()));
+    let dynamic_body_estimated_tokens = token_estimate_scale.estimate(estimate_model_input_tokens(
+        request.dynamic_input(),
+        reasoning_tokens,
+    ));
     let decision = decide_checkpoint(dynamic_body_estimated_tokens, budget);
 
     Ok(RequestContextBudget {
@@ -313,6 +324,7 @@ pub(super) fn request_context_budget(
         budget,
         dynamic_body_estimated_tokens,
         token_estimate_scale,
+        reasoning_tokens,
         decision,
     })
 }

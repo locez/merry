@@ -255,7 +255,7 @@ async fn archive_rotates_exports_markdown_with_time_range_pages_transcript_and_e
             ToolCallArguments::new(args),
         );
         session
-            .record_model_tool_call_response(t1, None, vec![call])
+            .record_model_tool_call_response(t1, None, vec![call], None)
             .expect("tool call records and awaits tool results");
         let result =
             ToolCallResult::new(old_call_id.clone(), ToolCallResultStatus::Succeeded, None)

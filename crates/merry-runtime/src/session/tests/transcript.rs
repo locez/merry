@@ -358,7 +358,7 @@ fn session_records_user_tool_result_assistant_and_second_user_in_transcript_orde
         .begin_model_turn()
         .expect("assistant model turn should begin");
     session
-        .record_assistant_text_output(assistant_turn, "assistant answer".to_owned())
+        .record_assistant_text_output(assistant_turn, "assistant answer".to_owned(), None)
         .expect("assistant records");
     session
         .close_model_response(assistant_turn, false)

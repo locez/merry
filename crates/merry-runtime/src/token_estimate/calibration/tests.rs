@@ -1,5 +1,7 @@
 use super::{RequestTokenCalibration, RequestTokenObservation, TokenEstimateScale};
-use crate::token_estimate::{estimate_model_input_tokens, estimate_request_input_tokens};
+use crate::token_estimate::{
+    ReasoningTokenAccounting, estimate_model_input_tokens, estimate_request_input_tokens,
+};
 use merry_core::{ProviderName, ToolInputSchema, ToolName, ToolSpec};
 use merry_llm::{
     GenerationConfig, ModelContent, ModelMessage, ModelMessageRole, ModelName, ModelRequest,
@@ -52,11 +54,17 @@ fn feedback_matches_the_complete_request_not_just_the_dynamic_body() {
         "hello",
         &"tool ".repeat(100),
     );
-    let base_tokens = estimate_request_input_tokens(&request);
-    assert!(base_tokens > estimate_model_input_tokens(request.dynamic_input()) * 100);
+    let base_tokens = estimate_request_input_tokens(&request, ReasoningTokenAccounting::Include);
+    assert!(
+        base_tokens
+            > estimate_model_input_tokens(
+                request.dynamic_input(),
+                ReasoningTokenAccounting::Include
+            ) * 100
+    );
     let calibration = RequestTokenCalibration::observe(
         None,
-        RequestTokenObservation::new(&provider, &request),
+        RequestTokenObservation::new(&provider, &request, ReasoningTokenAccounting::Include),
         base_tokens * 2,
     )
     .expect("measurement");
@@ -70,12 +78,12 @@ fn feedback_matches_the_complete_request_not_just_the_dynamic_body() {
 fn rising_input_cost_is_corrected_immediately_and_falling_cost_is_smoothed() {
     let provider = provider("provider");
     let request = request("model", "rules", "hello", "lookup");
-    let base_tokens = estimate_request_input_tokens(&request);
+    let base_tokens = estimate_request_input_tokens(&request, ReasoningTokenAccounting::Include);
     let mut calibration = None;
     for multiplier in [2, 3, 4] {
         calibration = RequestTokenCalibration::observe(
             calibration.as_ref(),
-            RequestTokenObservation::new(&provider, &request),
+            RequestTokenObservation::new(&provider, &request, ReasoningTokenAccounting::Include),
             base_tokens * multiplier,
         );
         assert_eq!(
@@ -89,7 +97,7 @@ fn rising_input_cost_is_corrected_immediately_and_falling_cost_is_smoothed() {
     }
     let updated = RequestTokenCalibration::observe(
         calibration.as_ref(),
-        RequestTokenObservation::new(&provider, &request),
+        RequestTokenObservation::new(&provider, &request, ReasoningTokenAccounting::Include),
         base_tokens * 2,
     )
     .expect("measurement");
@@ -101,14 +109,14 @@ fn rising_input_cost_is_corrected_immediately_and_falling_cost_is_smoothed() {
 fn consistent_overestimation_converges_without_an_abrupt_drop() {
     let provider = provider("provider");
     let request = request("model", "rules", &"abcd".repeat(1_000), "lookup");
-    let base_tokens = estimate_request_input_tokens(&request);
+    let base_tokens = estimate_request_input_tokens(&request, ReasoningTokenAccounting::Include);
     let actual_tokens = base_tokens / 2;
     let mut calibration = None;
     let mut previous = base_tokens;
     for _ in 0..32 {
         calibration = RequestTokenCalibration::observe(
             calibration.as_ref(),
-            RequestTokenObservation::new(&provider, &request),
+            RequestTokenObservation::new(&provider, &request, ReasoningTokenAccounting::Include),
             actual_tokens,
         );
         let estimated = calibration
@@ -128,8 +136,8 @@ fn unrelated_provider_model_prefix_and_tool_contracts_do_not_share_feedback() {
     let source = request("model", "rules", "first", "lookup");
     let calibration = RequestTokenCalibration::observe(
         None,
-        RequestTokenObservation::new(&source_provider, &source),
-        estimate_request_input_tokens(&source) * 2,
+        RequestTokenObservation::new(&source_provider, &source, ReasoningTokenAccounting::Include),
+        estimate_request_input_tokens(&source, ReasoningTokenAccounting::Include) * 2,
     )
     .expect("measurement");
     for (provider, candidate) in [
@@ -168,8 +176,8 @@ fn image_requests_do_not_reuse_text_only_feedback() {
     let request = request("model", "rules", "hello", "lookup");
     let calibration = RequestTokenCalibration::observe(
         None,
-        RequestTokenObservation::new(&provider, &request),
-        estimate_request_input_tokens(&request) * 2,
+        RequestTokenObservation::new(&provider, &request, ReasoningTokenAccounting::Include),
+        estimate_request_input_tokens(&request, ReasoningTokenAccounting::Include) * 2,
     )
     .expect("measurement");
     let image = merry_llm::ModelImage::png(
@@ -222,8 +230,8 @@ fn persisted_feedback_round_trips_and_rejects_a_zero_scale() {
     let request = request("model", "rules", "hello", "lookup");
     let calibration = RequestTokenCalibration::observe(
         None,
-        RequestTokenObservation::new(&provider, &request),
-        estimate_request_input_tokens(&request) * 2,
+        RequestTokenObservation::new(&provider, &request, ReasoningTokenAccounting::Include),
+        estimate_request_input_tokens(&request, ReasoningTokenAccounting::Include) * 2,
     )
     .expect("measurement");
     let mut encoded = serde_json::to_value(&calibration).expect("serialize calibration");

@@ -48,6 +48,7 @@ pub struct OpenAiProviderConfig {
     project: Option<String>,
     provider_name: ProviderName,
     capabilities: ModelCapabilities,
+    custom_capabilities: bool,
     protocol: OpenAiProtocol,
 }
 
@@ -67,6 +68,7 @@ impl OpenAiProviderConfig {
                 ))
             })?,
             capabilities: default_capabilities()?,
+            custom_capabilities: false,
             protocol: OpenAiProtocol::Responses,
         })
     }
@@ -121,6 +123,7 @@ impl OpenAiProviderConfig {
     pub fn with_base_url(mut self, base_url: &str) -> Result<Self, OpenAiProviderError> {
         validate_base_url(base_url)?;
         self.base_url = base_url.to_owned();
+        self.sync_default_reasoning_replay();
         Ok(self)
     }
 
@@ -150,6 +153,7 @@ impl OpenAiProviderConfig {
     #[must_use]
     pub fn with_capabilities(mut self, capabilities: ModelCapabilities) -> Self {
         self.capabilities = capabilities;
+        self.custom_capabilities = true;
         self
     }
 
@@ -164,8 +168,28 @@ impl OpenAiProviderConfig {
     #[must_use]
     pub fn with_protocol(mut self, protocol: OpenAiProtocol) -> Self {
         self.protocol = protocol;
+        self.sync_default_reasoning_replay();
         self
     }
+
+    fn sync_default_reasoning_replay(&mut self) {
+        if !self.custom_capabilities {
+            self.capabilities = std::mem::take(&mut self.capabilities).with_reasoning_input_replay(
+                default_replays_reasoning_input(self.protocol, &self.base_url),
+            );
+        }
+    }
+}
+
+fn default_replays_reasoning_input(protocol: OpenAiProtocol, base_url: &str) -> bool {
+    matches!(protocol, OpenAiProtocol::ChatCompletions) && !is_official_openai_base_url(base_url)
+}
+
+fn is_official_openai_base_url(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url).is_ok_and(|url| {
+        url.host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("api.openai.com"))
+    })
 }
 
 impl fmt::Debug for OpenAiProviderConfig {

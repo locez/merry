@@ -41,8 +41,6 @@ pub(crate) enum ChatMessage<'a> {
     Multimodal {
         role: &'static str,
         content: Vec<ChatContentPart<'a>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reasoning_content: Option<&'a str>,
     },
     AssistantToolCalls {
         role: &'static str,

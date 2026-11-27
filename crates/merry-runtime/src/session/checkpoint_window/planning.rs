@@ -12,6 +12,7 @@ use crate::{
         ModelTurnStatus, SessionState,
         checkpoint_window::history::{ModelTurnHistory, covered_payload_tokens},
     },
+    token_estimate::ReasoningTokenAccounting,
 };
 use merry_core::ToolCallId;
 use std::collections::BTreeSet;
@@ -188,6 +189,7 @@ impl SessionState {
                             .checked_add(projected_turn_tokens(
                                 open_turns,
                                 &existing_open_archives,
+                                window_budget.reasoning_tokens(),
                             )?)
                             .ok_or(CompactionError::BudgetOverflow)?;
                         let estimated_tokens =
@@ -220,7 +222,11 @@ impl SessionState {
                     let existing_open_archives = existing_archived_tool_call_ids(open_turns);
                     let current_only_tokens = window_budget
                         .archive_only_fixed_dynamic_body_tokens()
-                        .checked_add(projected_turn_tokens(open_turns, &existing_open_archives)?)
+                        .checked_add(projected_turn_tokens(
+                            open_turns,
+                            &existing_open_archives,
+                            window_budget.reasoning_tokens(),
+                        )?)
                         .ok_or(CompactionError::BudgetOverflow)?;
                     let estimated_tokens = window_budget.estimate_body_tokens(current_only_tokens);
                     let limit_tokens = window_budget.max_dynamic_body_tokens();
@@ -415,10 +421,11 @@ pub(super) fn archived_refs_for_plan(
 pub(super) fn projected_turn_tokens(
     turns: &[ModelTurnHistory<'_>],
     archived_tool_call_ids: &BTreeSet<ToolCallId>,
+    reasoning_tokens: ReasoningTokenAccounting,
 ) -> Result<u64, RuntimeError> {
     turns.iter().try_fold(0_u64, |total, turn| {
         total
-            .checked_add(turn.projected_token_estimate(archived_tool_call_ids)?)
+            .checked_add(turn.projected_token_estimate(archived_tool_call_ids, reasoning_tokens)?)
             .ok_or_else(|| RuntimeError::from(CompactionError::BudgetOverflow))
     })
 }
@@ -430,7 +437,11 @@ pub(super) fn retained_projection_fits(
     window_budget: CompactionWindowBudget,
 ) -> Result<bool, RuntimeError> {
     let base_tokens = base_tokens
-        .checked_add(projected_turn_tokens(raw_turns, archived_tool_call_ids)?)
+        .checked_add(projected_turn_tokens(
+            raw_turns,
+            archived_tool_call_ids,
+            window_budget.reasoning_tokens(),
+        )?)
         .ok_or(CompactionError::BudgetOverflow)?;
     Ok(window_budget.estimate_body_tokens(base_tokens) < window_budget.max_dynamic_body_tokens())
 }

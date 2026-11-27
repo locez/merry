@@ -22,7 +22,7 @@ fn compaction_window_retains_complete_model_turns_without_splitting() {
         .record_user_message_body(covered_turn, "covered user")
         .expect("covered user records");
     session
-        .record_assistant_text_output(covered_turn, "covered assistant".to_owned())
+        .record_assistant_text_output(covered_turn, "covered assistant".to_owned(), None)
         .expect("covered assistant records");
     session
         .close_model_response(covered_turn, false)
@@ -33,7 +33,7 @@ fn compaction_window_retains_complete_model_turns_without_splitting() {
         .record_user_message_body(retained_turn, "retained user")
         .expect("retained user records");
     session
-        .record_assistant_text_output(retained_turn, "retained assistant".to_owned())
+        .record_assistant_text_output(retained_turn, "retained assistant".to_owned(), None)
         .expect("retained assistant records");
     session
         .close_model_response(retained_turn, false)
@@ -87,7 +87,7 @@ fn compaction_window_never_covers_in_progress_model_turn() {
         .record_user_message_body(open_turn, "open user")
         .expect("open user records");
     session
-        .record_assistant_text_output(open_turn, "open partial assistant".to_owned())
+        .record_assistant_text_output(open_turn, "open partial assistant".to_owned(), None)
         .expect("open assistant records");
 
     let input = session
@@ -351,7 +351,11 @@ fn compaction_retains_an_entire_multi_item_tool_turn() {
         .record_user_message_body(turn_id, "retained tool user sentinel")
         .expect("tool user records");
     session
-        .record_assistant_text_output(turn_id, "retained tool commentary sentinel".to_owned())
+        .record_assistant_text_output(
+            turn_id,
+            "retained tool commentary sentinel".to_owned(),
+            None,
+        )
         .expect("tool commentary records");
     let call_a = pending_tool_call("retained-turn-call-a");
     let call_b = pending_tool_call("retained-turn-call-b");

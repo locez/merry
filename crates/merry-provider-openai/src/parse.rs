@@ -69,6 +69,7 @@ fn parse_responses_stream_events_inner(
 pub(crate) struct ResponsesStreamParser {
     aggregate_text: String,
     aggregate_reasoning: String,
+    aggregate_reasoning_summary: String,
     tool_call_buffers: BTreeMap<u64, StreamToolCallBuffer>,
     tool_calls: Vec<ModelToolCall>,
     completed: bool,
@@ -81,6 +82,7 @@ impl ResponsesStreamParser {
         Self {
             aggregate_text: String::new(),
             aggregate_reasoning: String::new(),
+            aggregate_reasoning_summary: String::new(),
             tool_call_buffers: BTreeMap::new(),
             tool_calls: Vec::new(),
             completed: false,
@@ -217,7 +219,7 @@ impl ResponsesStreamParser {
                     Ok(Vec::new())
                 } else {
                     if !delta.is_empty() {
-                        self.aggregate_reasoning.push_str(&delta);
+                        self.aggregate_reasoning_summary.push_str(&delta);
                     }
                     Ok(reasoning_delta_event(delta))
                 }
@@ -359,8 +361,12 @@ impl ResponsesStreamParser {
             ));
         }
 
-        let reasoning =
-            (!self.aggregate_reasoning.trim().is_empty()).then(|| self.aggregate_reasoning.clone());
+        let reasoning = (!self.aggregate_reasoning.trim().is_empty())
+            .then(|| self.aggregate_reasoning.clone())
+            .or_else(|| {
+                (!self.aggregate_reasoning_summary.trim().is_empty())
+                    .then(|| self.aggregate_reasoning_summary.clone())
+            });
         if !self.tool_calls.is_empty() {
             return Ok(ModelResponse::new(
                 stream_outputs(&self.aggregate_text, &self.tool_calls),

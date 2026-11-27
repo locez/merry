@@ -98,6 +98,7 @@ impl TuiProjector {
             }
             SessionTranscriptItem::AssistantReasoning { text } => {
                 state.append_reasoning_delta(&text);
+                state.finish_reasoning();
             }
             SessionTranscriptItem::ToolCall { call } => {
                 let call_id = call.id().clone();

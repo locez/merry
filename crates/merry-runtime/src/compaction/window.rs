@@ -2,7 +2,7 @@ use super::CompactionError;
 use crate::{
     checkpoint::CheckpointRef,
     session::{ModelTurnId, ModelTurnStatus},
-    token_estimate::TokenEstimateScale,
+    token_estimate::{ReasoningTokenAccounting, TokenEstimateScale},
 };
 use merry_core::{ToolCallId, ToolCallResultStatus};
 use serde::Serialize;
@@ -18,6 +18,7 @@ pub(crate) struct CompactionWindowBudget {
     archive_only_fixed_dynamic_body_tokens: u64,
     checkpoint_output_ceiling_tokens: u64,
     token_estimate_scale: TokenEstimateScale,
+    reasoning_tokens: ReasoningTokenAccounting,
 }
 
 impl CompactionWindowBudget {
@@ -49,6 +50,7 @@ impl CompactionWindowBudget {
             archive_only_fixed_dynamic_body_tokens,
             checkpoint_output_ceiling_tokens,
             token_estimate_scale: TokenEstimateScale::default(),
+            reasoning_tokens: ReasoningTokenAccounting::Exclude,
         })
     }
 
@@ -65,6 +67,18 @@ impl CompactionWindowBudget {
             token_estimate_scale: scale,
             ..self
         }
+    }
+
+    /// Controls whether retained assistant reasoning counts toward destination-body tokens.
+    pub(crate) fn with_reasoning_tokens(self, reasoning_tokens: ReasoningTokenAccounting) -> Self {
+        Self {
+            reasoning_tokens,
+            ..self
+        }
+    }
+
+    pub(crate) const fn reasoning_tokens(self) -> ReasoningTokenAccounting {
+        self.reasoning_tokens
     }
 
     /// Converts fixed context, checkpoint, and retained history to calibrated tokens.

@@ -424,7 +424,10 @@ async fn truncated_compaction_retries_with_a_bigger_reserve() {
             .generation()
             .max_output_tokens()
             .expect("compaction always sends an output ceiling");
-        let input = crate::token_estimate::estimate_model_input_tokens(request.input());
+        let input = crate::token_estimate::estimate_model_input_tokens(
+            request.input(),
+            crate::token_estimate::ReasoningTokenAccounting::Exclude,
+        );
         assert!(
             input + ceiling <= 256_000,
             "{label} must fit the window: input {input} plus output {ceiling}"
@@ -466,7 +469,10 @@ async fn compaction_fits_each_rolling_request_before_installing_the_final_tail()
         "fitting requires rolling, and manual compaction must complete both passes"
     );
     for request in &requests {
-        let (input, output) = crate::compaction::compaction_request_required_tokens(request);
+        let (input, output) = crate::compaction::compaction_request_required_tokens(
+            request,
+            crate::token_estimate::ReasoningTokenAccounting::Exclude,
+        );
         assert!(input + output <= 32_000, "every rolling request must fit");
     }
     assert_eq!(outcome.covered_history_item_count(), 10);
@@ -672,7 +678,7 @@ async fn actual_compactor_payload_too_large_is_rejected_before_provider_call() {
             )
             .expect("covered input records");
         session
-            .record_assistant_text_output(covered_turn, "covered response".to_owned())
+            .record_assistant_text_output(covered_turn, "covered response".to_owned(), None)
             .expect("covered response records");
         session
             .close_model_response(covered_turn, false)
@@ -682,7 +688,7 @@ async fn actual_compactor_payload_too_large_is_rejected_before_provider_call() {
             .record_user_message_body(retained_turn, "retained tail")
             .expect("retained input records");
         session
-            .record_assistant_text_output(retained_turn, "retained response".to_owned())
+            .record_assistant_text_output(retained_turn, "retained response".to_owned(), None)
             .expect("retained response records");
         session
             .close_model_response(retained_turn, false)

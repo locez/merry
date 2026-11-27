@@ -20,7 +20,10 @@ async fn a_full_window_summary_installs_without_a_repair_turn() {
 
     let requests = compactor.recorded_requests();
     assert_eq!(requests.len(), 1);
-    let (input, output) = compaction_request_required_tokens(&requests[0]);
+    let (input, output) = compaction_request_required_tokens(
+        &requests[0],
+        crate::token_estimate::ReasoningTokenAccounting::Exclude,
+    );
     assert!(input + output < 64_000);
     assert!(
         requests[0]
