@@ -14,6 +14,9 @@ pub enum SessionTranscriptItem {
     AssistantText {
         text: String,
     },
+    AssistantReasoning {
+        text: String,
+    },
     ToolCall {
         call: PendingToolCall,
     },
@@ -35,6 +38,9 @@ impl From<TranscriptItemSnapshot> for SessionTranscriptItem {
                     .collect(),
             },
             TranscriptItemSnapshot::AssistantText { text } => Self::AssistantText { text },
+            TranscriptItemSnapshot::AssistantReasoning { text } => {
+                Self::AssistantReasoning { text }
+            }
             TranscriptItemSnapshot::ToolCall { call } => Self::ToolCall { call },
             TranscriptItemSnapshot::ToolResult {
                 call_id,

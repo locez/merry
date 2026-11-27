@@ -308,7 +308,8 @@ impl SessionState {
                         invalid_document("stored user transcript message is invalid")
                     })?;
                 }
-                TranscriptItem::AssistantText { .. } => {}
+                TranscriptItem::AssistantText { .. }
+                | TranscriptItem::AssistantReasoning { .. } => {}
                 TranscriptItem::ToolCall {
                     model_turn_id,
                     call,

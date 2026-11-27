@@ -160,6 +160,10 @@ pub(super) async fn consume_model_stream(
                         }
                     }
                 }
+                let reasoning = response
+                    .reasoning()
+                    .filter(|text| !text.trim().is_empty())
+                    .map(str::to_owned);
                 match response.finish_reason() {
                     FinishReason::Stop => {
                         if !streamed_tool_calls.is_empty() {
@@ -186,6 +190,7 @@ pub(super) async fn consume_model_stream(
                             token,
                             turn_id,
                             text.clone(),
+                            reasoning,
                         )
                         .await
                         {
@@ -215,7 +220,7 @@ pub(super) async fn consume_model_stream(
                                 let commentary =
                                     tool_call_commentary_text(response.outputs(), &commentary_text);
                                 let sent = send_model_tool_call_response_events(
-                                    inner, sender, token, turn_id, commentary, calls,
+                                    inner, sender, token, turn_id, commentary, calls, reasoning,
                                 )
                                 .await;
                                 if !sent {

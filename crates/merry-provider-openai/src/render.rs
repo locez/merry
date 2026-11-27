@@ -164,6 +164,11 @@ fn render_input_items<'a>(
                 ));
                 index += 1;
             }
+            // Responses reasoning replay is provider-managed for the OpenAI
+            // endpoint, so the neutral reasoning item is not rendered here.
+            ModelInputItem::Reasoning(_) => {
+                index += 1;
+            }
             ModelInputItem::ToolCall(call) => {
                 let call = render_tool_call(call)?;
                 rendered.push(ResponsesInputItem::function_call(

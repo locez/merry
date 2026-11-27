@@ -92,6 +92,11 @@ pub(super) enum JournalItem {
         model_turn_id: ModelTurnId,
         text: String,
     },
+    AssistantReasoning {
+        id: u64,
+        model_turn_id: ModelTurnId,
+        text: String,
+    },
     ToolCall {
         id: u64,
         model_turn_id: ModelTurnId,
@@ -119,6 +124,7 @@ impl JournalItem {
         match self {
             Self::UserMessage { id, .. }
             | Self::AssistantText { id, .. }
+            | Self::AssistantReasoning { id, .. }
             | Self::ToolCall { id, .. }
             | Self::ToolResult { id, .. } => *id,
         }
@@ -278,7 +284,9 @@ pub(super) fn collect_journal_image_ids(bytes: &[u8]) -> std::collections::BTree
             let images = match item {
                 JournalItem::UserMessage { images, .. }
                 | JournalItem::ToolResult { images, .. } => images,
-                JournalItem::AssistantText { .. } | JournalItem::ToolCall { .. } => continue,
+                JournalItem::AssistantText { .. }
+                | JournalItem::AssistantReasoning { .. }
+                | JournalItem::ToolCall { .. } => continue,
             };
             for image in images {
                 ids.insert(image.id);

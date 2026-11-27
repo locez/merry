@@ -28,9 +28,9 @@ pub use output_progress::{ModelOutputProgress, OutputProgressTracker, StreamOutp
 pub use provider::{ModelEventStream, ModelProvider, ModelProviderFuture, ModelStreamContext};
 pub use receive_stream::receive_model_stream;
 pub use request::{
-    GenerationConfig, ModelInputItem, ModelMessage, ModelMessageRole, ModelName, ModelRequest,
-    ModelResponseFormat, ModelStructuredOutputFormat, ParallelToolCalls, ReasoningEffort,
-    RequestContentHash, ServiceTier, ToolProfileHash,
+    GenerationConfig, ModelInputItem, ModelMessage, ModelMessageRole, ModelName, ModelReasoning,
+    ModelRequest, ModelResponseFormat, ModelStructuredOutputFormat, ParallelToolCalls,
+    ReasoningEffort, RequestContentHash, ServiceTier, ToolProfileHash,
 };
 pub use response::{FinishDetail, FinishReason, ModelOutput, ModelResponse};
 pub use retry::{

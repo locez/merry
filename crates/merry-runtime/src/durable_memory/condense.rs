@@ -85,7 +85,7 @@ pub(crate) fn condense_turn_range_with_offset(
     let mut stats = CondensationStats::default();
     let mut rendered = Vec::with_capacity(selected.len());
     for item in selected {
-        rendered.push(render_item(item, &mut stats));
+        rendered.extend(render_item(item, &mut stats));
     }
     if json_len(&rendered) > TRANSCRIPT_BUDGET && rendered.len() > EDGE_ITEMS * 2 {
         let omitted = rendered.len() - EDGE_ITEMS * 2;
@@ -162,8 +162,11 @@ fn select_turn_range(
     Ok(selected)
 }
 
-fn render_item(item: &TranscriptItemSnapshot, stats: &mut CondensationStats) -> serde_json::Value {
-    match item {
+fn render_item(
+    item: &TranscriptItemSnapshot,
+    stats: &mut CondensationStats,
+) -> Option<serde_json::Value> {
+    let rendered = match item {
         TranscriptItemSnapshot::UserMessage { text, images, .. } => {
             if !images.is_empty() {
                 stats.images_dropped = true;
@@ -176,6 +179,7 @@ fn render_item(item: &TranscriptItemSnapshot, stats: &mut CondensationStats) -> 
             let (text, _) = bounded(text, ASSISTANT_TEXT_MAX);
             serde_json::json!({"role": "assistant", "text": text})
         }
+        TranscriptItemSnapshot::AssistantReasoning { .. } => return None,
         TranscriptItemSnapshot::ToolCall { call } => {
             let (arguments, trimmed) = tool_arguments(call);
             stats.tool_args_trimmed |= trimmed;
@@ -193,7 +197,8 @@ fn render_item(item: &TranscriptItemSnapshot, stats: &mut CondensationStats) -> 
             stats.tool_results_trimmed |= trimmed;
             serde_json::json!({"role": "tool_result", "text": text})
         }
-    }
+    };
+    Some(rendered)
 }
 
 fn tool_arguments(call: &PendingToolCall) -> (String, bool) {

@@ -68,6 +68,7 @@ fn parse_responses_stream_events_inner(
 
 pub(crate) struct ResponsesStreamParser {
     aggregate_text: String,
+    aggregate_reasoning: String,
     tool_call_buffers: BTreeMap<u64, StreamToolCallBuffer>,
     tool_calls: Vec<ModelToolCall>,
     completed: bool,
@@ -79,6 +80,7 @@ impl ResponsesStreamParser {
     pub(crate) fn new() -> Self {
         Self {
             aggregate_text: String::new(),
+            aggregate_reasoning: String::new(),
             tool_call_buffers: BTreeMap::new(),
             tool_calls: Vec::new(),
             completed: false,
@@ -203,6 +205,9 @@ impl ResponsesStreamParser {
                 self.output
                     .observe(StreamOutputKind::Reasoning, &delta, received_at);
                 self.saw_reasoning = true;
+                if !delta.is_empty() {
+                    self.aggregate_reasoning.push_str(&delta);
+                }
                 Ok(reasoning_delta_event(delta))
             }
             ResponsesStreamEvent::ReasoningSummaryTextDelta { delta } => {
@@ -211,6 +216,9 @@ impl ResponsesStreamParser {
                 if self.saw_reasoning {
                     Ok(Vec::new())
                 } else {
+                    if !delta.is_empty() {
+                        self.aggregate_reasoning.push_str(&delta);
+                    }
                     Ok(reasoning_delta_event(delta))
                 }
             }
@@ -351,12 +359,15 @@ impl ResponsesStreamParser {
             ));
         }
 
+        let reasoning =
+            (!self.aggregate_reasoning.trim().is_empty()).then(|| self.aggregate_reasoning.clone());
         if !self.tool_calls.is_empty() {
             return Ok(ModelResponse::new(
                 stream_outputs(&self.aggregate_text, &self.tool_calls),
                 FinishReason::ToolCalls,
                 usage,
-            ));
+            )
+            .with_reasoning(reasoning));
         }
         let (finish_reason, finish_detail) = parse_terminal_finish(
             response.status.as_deref().or(Some(fallback_status)),
@@ -367,7 +378,8 @@ impl ResponsesStreamParser {
             finish_reason,
             usage,
         )
-        .with_finish_detail(finish_detail))
+        .with_finish_detail(finish_detail)
+        .with_reasoning(reasoning))
     }
 }
 

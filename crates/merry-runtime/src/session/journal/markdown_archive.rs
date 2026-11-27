@@ -154,6 +154,7 @@ impl PreparedSegmentMarkdown {
                     body.push_str(text.trim());
                     body.push_str("\n\n");
                 }
+                TranscriptItem::AssistantReasoning { .. } => {}
                 TranscriptItem::ToolCall { call, .. } => {
                     stats.tool_calls += 1;
                     keyword_sources.push_str(call.name().as_str());

@@ -58,6 +58,7 @@ pub(crate) const fn estimate_utf8_tokens(bytes: u64) -> u64 {
 fn estimate_model_input_item_tokens(item: &ModelInputItem) -> u64 {
     match item {
         ModelInputItem::Message(message) => estimate_model_content_tokens(message.content()),
+        ModelInputItem::Reasoning(reasoning) => estimate_text_tokens(reasoning.text()),
         ModelInputItem::ToolCall(call) => {
             estimate_text_tokens(call.name().as_str())
                 + estimate_text_tokens(

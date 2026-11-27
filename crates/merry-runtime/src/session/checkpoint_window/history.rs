@@ -195,6 +195,7 @@ impl SessionState {
                         )?,
                     });
                 }
+                TranscriptItem::AssistantReasoning { .. } => {}
                 TranscriptItem::ToolCall {
                     call,
                     prompt_projection: call_projection,

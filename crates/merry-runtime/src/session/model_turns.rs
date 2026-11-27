@@ -304,7 +304,9 @@ impl Transcript {
                         &mut result_call_ids,
                     )?;
                 }
-                TranscriptItem::UserMessage { .. } | TranscriptItem::AssistantText { .. } => {}
+                TranscriptItem::UserMessage { .. }
+                | TranscriptItem::AssistantText { .. }
+                | TranscriptItem::AssistantReasoning { .. } => {}
             }
             turns[turn_index].items.push(item);
         }

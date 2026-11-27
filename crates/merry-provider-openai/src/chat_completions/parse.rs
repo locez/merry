@@ -10,6 +10,7 @@ use std::time::Instant;
 
 pub(crate) struct ChatStreamParser {
     aggregate_text: String,
+    aggregate_reasoning: String,
     tool_buffers: BTreeMap<u64, ChatToolBuffer>,
     tool_calls: Vec<ModelToolCall>,
     finish_reason: Option<FinishReason>,
@@ -22,6 +23,7 @@ impl ChatStreamParser {
     pub(crate) fn new() -> Self {
         Self {
             aggregate_text: String::new(),
+            aggregate_reasoning: String::new(),
             tool_buffers: BTreeMap::new(),
             tool_calls: Vec::new(),
             finish_reason: None,
@@ -127,6 +129,7 @@ impl ChatStreamParser {
         {
             self.output
                 .observe(StreamOutputKind::Reasoning, &reasoning, received_at);
+            self.aggregate_reasoning.push_str(&reasoning);
             events.push(ModelEvent::ReasoningTextDelta { delta: reasoning });
         }
         if let Some(content) = choice.delta.content
@@ -197,7 +200,12 @@ impl ChatStreamParser {
             outputs.push(ModelOutput::text(&self.aggregate_text));
         }
         outputs.extend(self.tool_calls.iter().cloned().map(ModelOutput::tool_call));
-        Ok(ModelResponse::new(outputs, finish_reason, self.usage))
+        Ok(
+            ModelResponse::new(outputs, finish_reason, self.usage).with_reasoning(
+                (!self.aggregate_reasoning.trim().is_empty())
+                    .then(|| self.aggregate_reasoning.clone()),
+            ),
+        )
     }
 }
 
@@ -356,6 +364,39 @@ mod tests {
             .expect("completion should be emitted");
         assert_eq!(completed.finish_reason(), FinishReason::ToolCalls);
         assert_eq!(completed.usage().expect("usage").total_tokens, 15);
+    }
+
+    #[test]
+    fn aggregates_reasoning_for_continuation_replay() {
+        let mut parser = ChatStreamParser::new();
+        let lines = [
+            r#"data: {"choices":[{"index":0,"delta":{"reasoning_content":"Inspect "},"finish_reason":null}]}"#,
+            r#"data: {"choices":[{"index":0,"delta":{"reasoning_content":"the notes."},"finish_reason":null}]}"#,
+            r#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"search_notes","arguments":"{\"query\":\"a\"}"}}]},"finish_reason":null}]}"#,
+            r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+            "data: [DONE]",
+        ];
+        let mut events = Vec::new();
+        for line in lines {
+            events.extend(parser.parse_sse_line(line).expect("line should parse"));
+        }
+        parser.finish().expect("stream should finish");
+
+        let completed = events
+            .iter()
+            .find_map(|event| match event {
+                ModelEvent::Completed { response } => Some(response),
+                _ => None,
+            })
+            .expect("completion should be emitted");
+        assert_eq!(completed.reasoning(), Some("Inspect the notes."));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ModelEvent::ReasoningTextDelta { .. }))
+                .count(),
+            2
+        );
     }
 
     #[test]

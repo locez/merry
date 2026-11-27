@@ -83,6 +83,8 @@ pub struct ModelResponse {
     usage: Option<Usage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     finish_detail: Option<FinishDetail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning: Option<String>,
 }
 
 impl ModelResponse {
@@ -98,6 +100,7 @@ impl ModelResponse {
             finish_reason,
             usage,
             finish_detail: None,
+            reasoning: None,
         }
     }
 
@@ -105,6 +108,13 @@ impl ModelResponse {
     #[must_use]
     pub fn with_finish_detail(mut self, finish_detail: Option<FinishDetail>) -> Self {
         self.finish_detail = finish_detail;
+        self
+    }
+
+    /// Returns a copy with optional raw provider reasoning to replay later.
+    #[must_use]
+    pub fn with_reasoning(mut self, reasoning: Option<String>) -> Self {
+        self.reasoning = reasoning;
         self
     }
 
@@ -130,5 +140,11 @@ impl ModelResponse {
     #[must_use]
     pub fn finish_detail(&self) -> Option<FinishDetail> {
         self.finish_detail
+    }
+
+    /// Optional raw provider reasoning that must accompany these outputs when replayed.
+    #[must_use]
+    pub fn reasoning(&self) -> Option<&str> {
+        self.reasoning.as_deref()
     }
 }

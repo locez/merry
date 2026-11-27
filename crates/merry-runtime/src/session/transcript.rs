@@ -126,6 +126,11 @@ pub(crate) enum TranscriptItem {
         model_turn_id: ModelTurnId,
         text: Arc<str>,
     },
+    AssistantReasoning {
+        id: TranscriptItemId,
+        model_turn_id: ModelTurnId,
+        text: Arc<str>,
+    },
     ToolCall {
         id: TranscriptItemId,
         model_turn_id: ModelTurnId,
@@ -200,6 +205,11 @@ pub(crate) enum PersistedTranscriptItem {
         model_turn_id: ModelTurnId,
         text: String,
     },
+    AssistantReasoning {
+        id: u64,
+        model_turn_id: ModelTurnId,
+        text: String,
+    },
     ToolCall {
         id: u64,
         model_turn_id: ModelTurnId,
@@ -231,6 +241,7 @@ impl TranscriptItem {
         match self {
             Self::UserMessage { id, .. }
             | Self::AssistantText { id, .. }
+            | Self::AssistantReasoning { id, .. }
             | Self::ToolCall { id, .. }
             | Self::ToolResult { id, .. } => *id,
         }
@@ -241,6 +252,7 @@ impl TranscriptItem {
         match self {
             Self::UserMessage { model_turn_id, .. }
             | Self::AssistantText { model_turn_id, .. }
+            | Self::AssistantReasoning { model_turn_id, .. }
             | Self::ToolCall { model_turn_id, .. }
             | Self::ToolResult { model_turn_id, .. } => *model_turn_id,
         }
@@ -255,6 +267,9 @@ pub(crate) enum TranscriptItemSnapshot {
         origin: UserInputOrigin,
     },
     AssistantText {
+        text: String,
+    },
+    AssistantReasoning {
         text: String,
     },
     ToolCall {
@@ -308,6 +323,9 @@ impl TranscriptItem {
                 origin: *origin,
             },
             Self::AssistantText { text, .. } => TranscriptItemSnapshot::AssistantText {
+                text: text.to_string(),
+            },
+            Self::AssistantReasoning { text, .. } => TranscriptItemSnapshot::AssistantReasoning {
                 text: text.to_string(),
             },
             Self::ToolCall { call, .. } => TranscriptItemSnapshot::ToolCall { call: call.clone() },
@@ -463,6 +481,21 @@ impl Transcript {
         Ok(id)
     }
 
+    pub(crate) fn push_assistant_reasoning(
+        &mut self,
+        model_turn_id: ModelTurnId,
+        text: Arc<str>,
+    ) -> Result<TranscriptItemId, RuntimeError> {
+        self.ensure_model_turn_in_progress(model_turn_id)?;
+        let id = self.allocate_id()?;
+        self.items.push(TranscriptItem::AssistantReasoning {
+            id,
+            model_turn_id,
+            text,
+        });
+        Ok(id)
+    }
+
     pub(crate) fn push_tool_call(
         &mut self,
         model_turn_id: ModelTurnId,
@@ -576,6 +609,7 @@ impl Transcript {
                 }
                 TranscriptItem::UserMessage { .. }
                 | TranscriptItem::AssistantText { .. }
+                | TranscriptItem::AssistantReasoning { .. }
                 | TranscriptItem::ToolCall { .. }
                 | TranscriptItem::ToolResult { .. } => {}
             }
@@ -770,6 +804,15 @@ impl From<&TranscriptItem> for PersistedTranscriptItem {
                 model_turn_id: *model_turn_id,
                 text: text.to_string(),
             },
+            TranscriptItem::AssistantReasoning {
+                id,
+                model_turn_id,
+                text,
+            } => Self::AssistantReasoning {
+                id: id.as_u64(),
+                model_turn_id: *model_turn_id,
+                text: text.to_string(),
+            },
             TranscriptItem::ToolCall {
                 id,
                 model_turn_id,
@@ -833,6 +876,15 @@ impl TryFrom<PersistedTranscriptItem> for TranscriptItem {
                 model_turn_id,
                 text,
             } => Self::AssistantText {
+                id: TranscriptItemId::new(id),
+                model_turn_id,
+                text: text.into(),
+            },
+            PersistedTranscriptItem::AssistantReasoning {
+                id,
+                model_turn_id,
+                text,
+            } => Self::AssistantReasoning {
                 id: TranscriptItemId::new(id),
                 model_turn_id,
                 text: text.into(),
