@@ -183,6 +183,10 @@ class MerryRuntimeError(MerryError):
     """Rust runtime or run lifecycle failure."""
 
 
+class MerrySessionLockedError(MerryRuntimeError):
+    """Another live process or handle already owns this session's exclusive lock."""
+
+
 class MerryToolError(MerryError):
     """Tool declaration, host execution, or result submission failure."""
 
@@ -310,6 +314,8 @@ def _malformed_native_info(message: str) -> MerryErrorInfo:
 def _decode_native_error(error: NativeMerryError) -> MerryError:
     payload: object = error.args[0] if len(error.args) > 0 else None
     info = _info_from_native_payload(payload)
+    if info.code == "session_already_reserved" and info.domain == "runtime":
+        return MerrySessionLockedError(info)
     error_type = _DOMAIN_ERRORS.get(info.domain, MerryInternalError)
     return error_type(info)
 
@@ -375,5 +381,34 @@ def builder_consumed_error() -> MerryConfigError:
             message="AgentBuilder has already been consumed.",
             hint="Create a new builder after a failed consuming operation.",
             retryability="user_action_required",
+        )
+    )
+
+
+def pending_agent_consumed_error() -> MerryRuntimeError:
+    """Return the stable error for awaiting or entering a PendingAgent twice."""
+
+    return MerryRuntimeError(
+        MerryErrorInfo(
+            code="pending_agent_consumed",
+            domain="runtime",
+            message="PendingAgent has already been awaited or entered.",
+            hint="Call Agent.resume(...) again to open a new handle.",
+            retryability="user_action_required",
+        )
+    )
+
+
+def session_closed_error(session_id: str) -> MerryRuntimeError:
+    """Return the stable error for entering a closed Agent context."""
+
+    return MerryRuntimeError(
+        MerryErrorInfo(
+            code="session_closed",
+            domain="runtime",
+            message=f"session {session_id} has been closed",
+            hint="Create a new Agent or resume the session from its store after closing.",
+            retryability="not_retryable",
+            context={"session_id": session_id},
         )
     )

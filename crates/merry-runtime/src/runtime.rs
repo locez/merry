@@ -20,7 +20,10 @@ use merry_core::{
     PendingToolCall, QueuedInputView, RuntimeEvent, RuntimeJournalEvent, SessionId, ToolCallId,
 };
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
-use std::{num::NonZeroU64, sync::Arc};
+use std::{
+    num::NonZeroU64,
+    sync::{Arc, atomic::Ordering},
+};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -125,10 +128,7 @@ impl Runtime {
         input: StepInput,
         context: StepContext,
     ) -> Result<RuntimeJournalEventStream, RuntimeError> {
-        let active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
-            .ok_or_else(|| RuntimeError::StepAlreadyActive {
-                session_id: self.inner.session_id.clone(),
-            })?;
+        let active_permit = self.acquire_active_step_permit()?;
 
         self.step_with_active_permit(input, context, active_permit)
     }
@@ -190,11 +190,24 @@ impl Runtime {
     }
 
     pub(crate) fn acquire_active_step_permit(&self) -> Result<ActiveStepPermit, RuntimeError> {
-        ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step)).ok_or_else(|| {
-            RuntimeError::StepAlreadyActive {
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(RuntimeError::SessionClosed {
                 session_id: self.inner.session_id.clone(),
-            }
-        })
+            });
+        }
+        let permit =
+            ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step)).ok_or_else(|| {
+                RuntimeError::StepAlreadyActive {
+                    session_id: self.inner.session_id.clone(),
+                }
+            })?;
+        // Re-check after acquiring the permit to close any race with `Runtime::close`.
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(RuntimeError::SessionClosed {
+                session_id: self.inner.session_id.clone(),
+            });
+        }
+        Ok(permit)
     }
 
     pub fn session_id(&self) -> &SessionId {
@@ -683,10 +696,7 @@ impl Runtime {
         call_id: &ToolCallId,
         context: ToolExecutionContext,
     ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
-        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
-            .ok_or_else(|| RuntimeError::StepAlreadyActive {
-                session_id: self.inner.session_id.clone(),
-            })?;
+        let _active_permit = self.acquire_active_step_permit()?;
 
         self.execute_tool_call_with_active_permit(call_id, context, &_active_permit)
             .await
@@ -755,10 +765,7 @@ impl Runtime {
         &self,
         policy: CitationCompactionPolicy,
     ) -> Result<Option<CitationCompactionInput>, RuntimeError> {
-        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
-            .ok_or_else(|| RuntimeError::StepAlreadyActive {
-                session_id: self.inner.session_id.clone(),
-            })?;
+        let _active_permit = self.acquire_active_step_permit()?;
         compaction_input_for_policy(&self.inner, policy).await
     }
 
@@ -768,10 +775,7 @@ impl Runtime {
         input: CitationCompactionInput,
         summary: &str,
     ) -> Result<CompactionOutcome, RuntimeError> {
-        let active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
-            .ok_or_else(|| RuntimeError::StepAlreadyActive {
-                session_id: self.inner.session_id.clone(),
-            })?;
+        let active_permit = self.acquire_active_step_permit()?;
         install_summary_compaction_transactionally(
             Arc::clone(&self.inner),
             input,
@@ -802,10 +806,7 @@ impl Runtime {
         focus: Option<String>,
         context: StepContext,
     ) -> Result<Option<CompactionOutcome>, RuntimeError> {
-        let active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
-            .ok_or_else(|| RuntimeError::StepAlreadyActive {
-                session_id: self.inner.session_id.clone(),
-            })?;
+        let active_permit = self.acquire_active_step_permit()?;
 
         let (token, _, _) = context.into_parts();
         if token.is_cancelled() {

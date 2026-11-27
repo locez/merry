@@ -58,7 +58,7 @@ pub mod runtime {
 
     pub use merry_runtime::{
         AgentLoopResult, AgentRun, AgentRunMessage, Runtime, RuntimeBuilder, RuntimeError,
-        RuntimeModelRole, RuntimeProfile, RuntimeProfileBuilder,
+        RuntimeModelRole, RuntimeProfile, RuntimeProfileBuilder, SessionStoreError,
     };
 }
 /// Rust-only lifetime-bearing adapter types for advanced hosts.

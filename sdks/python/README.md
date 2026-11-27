@@ -307,21 +307,36 @@ assert result.structured_output is not None
 ## Save And Resume
 
 Session persistence is file-backed through Rust's `FileSessionStore`. Each
-session journal is persisted under `<store_root>/<session_id>/journal.jsonl`:
+session journal is persisted under `<store_root>/<session_id>/journal.jsonl`,
+and exclusive OS-level session locking (`session_lock=True` by default)
+prevents concurrent processes from double-writing the same session:
 
 ```python
 from pathlib import Path
 import merry
 
 store_root = Path("sessions")
-await agent.save_session()
+provider = merry.OpenAICompatible(api_key="...", model="gpt-4.1-mini")
 
-resumed = await merry.Agent.resume(
-    "demo",
-    provider=merry.OpenAICompatible(api_key="...", model="gpt-4.1-mini"),
+async with merry.Agent(
+    session_id="demo",
+    provider=provider,
     session_store=store_root,
-)
+) as agent:
+    await agent.save_session()
+
+async with merry.Agent.resume(
+    "demo",
+    provider=provider,
+    session_store=store_root,
+) as resumed:
+    result = await resumed.run("Continue from saved state.")
 ```
+
+`Agent.resume(...)` also remains directly awaitable (`agent = await merry.Agent.resume(...)`)
+when managing `await agent.close()` manually. Opening a session already locked by
+another handle or process raises `MerrySessionLockedError`
+(`code="session_already_reserved"`). Pass `session_lock=False` to opt out.
 
 ## Errors And Tests
 

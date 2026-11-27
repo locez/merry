@@ -153,6 +153,8 @@ pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
         subagent_manager: None,
         coordinator_plan_tools: false,
         session_store: None,
+        session_reservation: std::sync::Mutex::new(None),
+        closed: AtomicBool::new(false),
         tool_batch_active: AtomicBool::new(false),
         activity_hub: Arc::new(crate::SubagentActivityHub::new()),
         subagent_event_sink,

@@ -22,7 +22,7 @@ the source of truth for every durable or policy-sensitive capability.
 | Final report | `RunResult`, `RunStatus.STOPPED_BY_HOOK`, `HookStopInfo` | Rust `merry::RunResult` and runtime status/usage | `tests/test_run.py`, `tests/test_context_and_hooks.py` |
 | Structured output | `final_output_model`, `structured_output` | Rust `FinalOutputContract` and recorded output | `tests/test_run.py`, `crates/merry/tests/agent.rs` |
 | Structured-output retry policy | `StructuredOutputRetryPolicy`, `Agent(..., structured_output_retry_policy=...)`, `AgentBuilder.structured_output_retry_policy` | Rust `StructuredOutputRetryPolicy` | `tests/test_context_and_hooks.py` |
-| Save/resume | `save_session`, `session_store`, `await Agent.resume(...)` | Rust `FileSessionStore` (`journal.jsonl`) and runtime session state | `tests/test_run.py`, `tests/test_interactive.py` |
+| Save/resume & session lock | `save_session`, `session_store`, `session_lock`, `async with Agent(...)` / `async with Agent.resume(...)` / `await Agent.resume(...)`, `Agent.close`, `MerrySessionLockedError` | Rust `FileSessionStore` (`journal.jsonl`), `SessionReservation` (`.session.lock`), `Runtime::close` | `tests/test_run.py`, `tests/test_interactive.py`, `tests/test_session_lock.py` |
 | Multi-runtime orchestration | Compose independent `Agent` instances in host code | One Rust facade/runtime per session | `examples/multi_runtime_orchestration.py` |
 | Workspace config | `WorkspaceConfig`, `WorkspaceLimits`, `PatchConfig` | `merry-coding`, `merry-tools` | `tests/test_builder.py`, `tests/test_workspace_limits.py` |
 | Error parity | `MerryErrorInfo` and typed subclasses in `merry.errors` | `merry-core::MerryErrorInfo`, facade errors | `tests/test_errors.py`, `crates/merry-py/tests/bindings.rs` |

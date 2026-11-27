@@ -64,6 +64,8 @@ pub(super) struct RuntimeInner {
     pub(super) subagent_manager: Option<SubagentManager>,
     pub(super) coordinator_plan_tools: bool,
     pub(super) session_store: Option<FileSessionStore>,
+    pub(super) session_reservation: std::sync::Mutex<Option<crate::SessionReservation>>,
+    pub(super) closed: AtomicBool,
     pub(super) tool_batch_active: AtomicBool,
     pub(super) activity_hub: Arc<SubagentActivityHub>,
     pub(super) subagent_event_sink: SubagentEventSink,

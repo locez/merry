@@ -26,6 +26,13 @@ pub enum RuntimeError {
         session_id: SessionId,
     },
 
+    /// An operation was requested on a runtime whose session has already been closed.
+    #[error("session {session_id} has been closed")]
+    SessionClosed {
+        /// Closed session identifier.
+        session_id: SessionId,
+    },
+
     /// Step input failed runtime validation.
     #[error("invalid step input: {reason}")]
     InvalidStepInput {
@@ -424,6 +431,7 @@ impl RuntimeError {
     pub const fn diagnostic_code(&self) -> &'static str {
         match self {
             Self::StepAlreadyActive { .. } => "step_already_active",
+            Self::SessionClosed { .. } => "session_closed",
             Self::InvalidStepInput { .. } => "invalid_step_input",
             Self::AgentLoopConfig { .. } => "agent_loop_config",
             Self::ChildRuntimeBuild { .. } => "child_runtime_build",
@@ -461,6 +469,9 @@ impl RuntimeError {
             Self::Context { .. } => "context_error",
             Self::Checkpoint { .. } => "checkpoint_error",
             Self::Compaction { .. } => "compaction_error",
+            Self::SessionStore {
+                source: SessionStoreError::SessionAlreadyReserved { .. },
+            } => "session_already_reserved",
             Self::SessionStore { .. } => "session_store",
             Self::MissingModelProvider { .. } => "missing_model_provider",
             Self::CompactionModelRequest { .. } => "compaction_model_request",

@@ -70,4 +70,15 @@ impl PyAgent {
             agent.save_session().await.map_err(error::agent_error_to_py)
         })
     }
+
+    fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let agent = Arc::clone(&self.inner);
+        future_into_py(py, async move {
+            agent.close().await.map_err(error::agent_error_to_py)
+        })
+    }
 }

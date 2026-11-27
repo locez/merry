@@ -41,10 +41,14 @@ pub struct AgentBuilder {
 
 impl AgentBuilder {
     /// Creates a builder for a new or persisted session.
+    ///
+    /// When a [`FileSessionStore`] is configured, exclusive OS-level session
+    /// locking is enabled by default so concurrent processes cannot double-write
+    /// the same session. Call [`Self::session_lock`] with `false` to opt out.
     #[must_use]
     pub fn new(session_id: SessionId) -> Self {
         Self {
-            runtime_builder: Runtime::builder(session_id),
+            runtime_builder: Runtime::builder(session_id).session_lock(true),
             loop_config: AgentLoopConfig::default(),
             generation_config: GenerationConfig::default(),
             has_primary_provider: false,
@@ -248,6 +252,14 @@ impl AgentBuilder {
     #[must_use]
     pub fn session_store(mut self, store: FileSessionStore) -> Self {
         self.runtime_builder = self.runtime_builder.session_store(store);
+        self
+    }
+
+    /// Controls whether this agent acquires an exclusive OS-level session lock
+    /// on its configured [`FileSessionStore`] (enabled by default).
+    #[must_use]
+    pub fn session_lock(mut self, enabled: bool) -> Self {
+        self.runtime_builder = self.runtime_builder.session_lock(enabled);
         self
     }
 
@@ -471,6 +483,21 @@ impl Agent {
             .save_session_to(store)
             .await
             .map_err(AgentError::from)
+    }
+
+    /// Returns whether [`Self::close`] has closed this agent session.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.runtime.is_closed()
+    }
+
+    /// Closes this agent session, releasing any held OS-level session lock and
+    /// removing an untouched empty session directory.
+    ///
+    /// Closing is idempotent once completed. Subsequent operations on the
+    /// closed agent fail with [`merry_runtime::RuntimeError::SessionClosed`].
+    pub async fn close(&self) -> Result<(), AgentError> {
+        self.runtime.close().await.map_err(AgentError::from)
     }
 
     async fn run_with_config(

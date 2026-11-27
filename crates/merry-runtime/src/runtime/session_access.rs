@@ -7,12 +7,49 @@ use merry_core::{
     ErrorInfo, PendingToolCall, RuntimeJournalEvent, TOOL_CANCELLED_BY_USER_CODE, ToolCallId,
     ToolCallResult, ToolCallResultStatus, ToolOutput, ToolOutputPreview,
 };
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 /// Diagnostic code recorded for a tool call a settling run gave up on.
 const TOOL_ABANDONED_BY_SETTLEMENT_CODE: &str = "tool_abandoned_by_run_settlement";
 
 impl Runtime {
+    /// Returns whether [`Self::close`] has closed this runtime session.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.inner.closed.load(Ordering::Acquire)
+    }
+
+    /// Closes this runtime session, releasing any held OS-level session lock
+    /// and removing an untouched empty session directory from the store.
+    ///
+    /// Closing is idempotent once completed. Calling `close` while an active
+    /// step, run, or interactive session still owns the runtime fails with
+    /// [`RuntimeError::StepAlreadyActive`] so in-flight persistence cannot
+    /// continue without the session lock.
+    pub async fn close(&self) -> Result<(), RuntimeError> {
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _active_permit = match self.acquire_active_step_permit() {
+            Ok(permit) => permit,
+            Err(RuntimeError::SessionClosed { .. }) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        self.inner.closed.store(true, Ordering::Release);
+        let reservation = self
+            .inner
+            .session_reservation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let (Some(reservation), Some(store)) = (reservation, self.inner.session_store.as_ref()) {
+            store
+                .release_empty_reservation(&self.inner.session_id, reservation)
+                .await;
+        }
+        Ok(())
+    }
+
     /// Returns the session's frozen external definitions, independently of availability.
     pub async fn external_tool_catalog(&self) -> merry_core::SessionToolCatalog {
         self.inner
@@ -36,10 +73,7 @@ impl Runtime {
         result: ToolCallResult,
         output: ToolOutput,
     ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
-        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
-            .ok_or_else(|| RuntimeError::StepAlreadyActive {
-                session_id: self.inner.session_id.clone(),
-            })?;
+        let _active_permit = self.acquire_active_step_permit()?;
 
         self.submit_tool_result_with_active_permit(result, output, &_active_permit)
             .await
@@ -144,10 +178,7 @@ impl Runtime {
     /// Resolves every pending tool call with a durable failed result so the
     /// session reaches a resume-safe boundary, returning how many were resolved.
     pub async fn abandon_pending_tool_calls(&self, reason: &str) -> Result<usize, RuntimeError> {
-        let active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
-            .ok_or_else(|| RuntimeError::StepAlreadyActive {
-                session_id: self.inner.session_id.clone(),
-            })?;
+        let active_permit = self.acquire_active_step_permit()?;
         let pending = {
             let session = self.inner.session.lock().await;
             session.pending_tool_calls()
@@ -393,10 +424,7 @@ impl Runtime {
 
     /// Records a structured context entry into the owning session.
     pub async fn record_context_entry(&self, entry: ContextEntry) -> Result<(), RuntimeError> {
-        let _active_permit = ActiveStepPermit::acquire(Arc::clone(&self.inner.active_step))
-            .ok_or_else(|| RuntimeError::StepAlreadyActive {
-                session_id: self.inner.session_id.clone(),
-            })?;
+        let _active_permit = self.acquire_active_step_permit()?;
 
         let mut session = self.inner.session.lock().await;
         session.record_context_entry(entry)?;

@@ -371,3 +371,105 @@ async fn save_session_to_without_configured_store_adopts_cursor_and_skips_noop_s
         ]
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_session_lock_enforces_exclusivity_and_close_lifecycle() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+    let id = session_id("runtime-session-lock");
+
+    let first = Runtime::builder(id.clone())
+        .session_store(store.clone())
+        .session_lock(true)
+        .build()
+        .expect("first locked runtime builds");
+    assert!(!first.is_closed());
+
+    // A second locked build fails fast with `session_already_reserved`.
+    let conflict = Runtime::builder(id.clone())
+        .session_store(store.clone())
+        .session_lock(true)
+        .build()
+        .err()
+        .expect("second locked runtime must fail");
+    assert_eq!(conflict.diagnostic_code(), "session_already_reserved");
+
+    // Closing while an active step holds the permit is rejected and keeps the lock held.
+    let permit = first
+        .acquire_active_step_permit()
+        .expect("permit should be acquired");
+    let active_close_error = first
+        .close()
+        .await
+        .expect_err("close must fail while a step permit is active");
+    assert_eq!(active_close_error.diagnostic_code(), "step_already_active");
+    assert!(!first.is_closed());
+    drop(permit);
+
+    // Persisting and closing releases the lock and prevents subsequent mutations.
+    first.save_session().await.expect("session saves");
+    first.close().await.expect("first runtime closes");
+    assert!(first.is_closed());
+    // Repeated close is idempotent.
+    first.close().await.expect("repeated close is idempotent");
+
+    let closed_error = first
+        .save_session()
+        .await
+        .expect_err("closed runtime rejects save_session");
+    assert_eq!(closed_error.diagnostic_code(), "session_closed");
+
+    // After close, resuming with `session_lock(true)` acquires the lock cleanly.
+    let resumed = Runtime::builder(id.clone())
+        .session_lock(true)
+        .resume_from_store(store.clone())
+        .await
+        .expect("resumed runtime acquires lock after close");
+
+    let resume_conflict = Runtime::builder(id.clone())
+        .session_lock(true)
+        .resume_from_store(store.clone())
+        .await
+        .err()
+        .expect("concurrent locked resume must fail");
+    assert_eq!(
+        resume_conflict.diagnostic_code(),
+        "session_already_reserved"
+    );
+
+    resumed.close().await.expect("resumed runtime closes");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn runtime_session_lock_cleans_up_empty_directory_on_close_and_failed_resume() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let store = FileSessionStore::new(temp.path());
+
+    // Untouched new session removes its empty directory when closed.
+    let untouched_id = session_id("runtime-lock-empty-close");
+    let untouched = Runtime::builder(untouched_id.clone())
+        .session_store(store.clone())
+        .session_lock(true)
+        .build()
+        .expect("untouched locked runtime builds");
+    assert!(store.session_dir(&untouched_id).exists());
+    untouched.close().await.expect("untouched runtime closes");
+    assert!(
+        !store.session_dir(&untouched_id).exists(),
+        "closing an untouched session must remove its empty lock directory"
+    );
+
+    // Failed resume of a non-existent session must not leave behind an empty lock directory.
+    let missing_id = session_id("runtime-lock-missing-resume");
+    let missing_error = Runtime::builder(missing_id.clone())
+        .session_lock(true)
+        .resume_from_store(store.clone())
+        .await
+        .err()
+        .expect("missing session resume must fail");
+    assert_eq!(missing_error.diagnostic_code(), "session_store");
+    assert!(
+        !store.session_dir(&missing_id).exists(),
+        "failed resume must not leave behind an empty session directory"
+    );
+}

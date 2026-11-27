@@ -6,7 +6,7 @@ from . import errors as errors
 from . import events as events
 from . import hooks as hooks
 from . import tools as tools
-from ._agent import Agent
+from ._agent import Agent, PendingAgent
 from ._builder import AgentBuilder
 from ._config import (
     UNSET,
@@ -39,6 +39,7 @@ from ._errors import (
     MerryPolicyError,
     MerryProviderError,
     MerryRuntimeError,
+    MerrySessionLockedError,
     MerryToolError,
     ToolDomainError,
 )
@@ -135,11 +136,13 @@ __all__ = [
     "MerryPolicyError",
     "MerryProviderError",
     "MerryRuntimeError",
+    "MerrySessionLockedError",
     "MerryToolError",
     "ModelUsage",
     "OpenAICompatible",
     "ParallelToolCalls",
     "PatchConfig",
+    "PendingAgent",
     "PromptBlock",
     "PromptProfile",
     "Provider",

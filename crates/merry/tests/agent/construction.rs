@@ -52,6 +52,10 @@ async fn builder_resumes_a_saved_session_with_the_same_contract() {
         .save_session()
         .await
         .expect("session should be saved");
+    first_agent
+        .close()
+        .await
+        .expect("first agent should close and release session lock");
 
     let resumed = AgentBuilder::new(session)
         .model_provider(text_provider("resumed"), model_name())
@@ -61,6 +65,50 @@ async fn builder_resumes_a_saved_session_with_the_same_contract() {
 
     assert_eq!(resumed.session_id().as_str(), "resume-test");
     assert!(resumed.run("continue").await.is_ok());
+    resumed.close().await.expect("resumed agent should close");
+}
+
+#[tokio::test]
+async fn agent_builder_locks_sessions_by_default_and_supports_opt_out() {
+    let temp = tempfile::tempdir().expect("session store directory should be created");
+    let store = FileSessionStore::new(temp.path());
+    let session = session_id("facade-lock-default");
+
+    let first = AgentBuilder::new(session.clone())
+        .model_provider(text_provider("first"), model_name())
+        .session_store(store.clone())
+        .build()
+        .expect("first agent should acquire default session lock");
+
+    let conflict = AgentBuilder::new(session.clone())
+        .model_provider(text_provider("second"), model_name())
+        .session_store(store.clone())
+        .build()
+        .err()
+        .expect("second agent on same session must fail while lock is held");
+    assert_eq!(conflict.diagnostic_code(), "session_already_reserved");
+
+    // Opting out allows building an unlocked handle when explicitly requested.
+    let unlocked = AgentBuilder::new(session.clone())
+        .model_provider(text_provider("unlocked"), model_name())
+        .session_store(store.clone())
+        .session_lock(false)
+        .build()
+        .expect("explicit opt-out should succeed");
+    unlocked.close().await.expect("unlocked agent should close");
+
+    first.close().await.expect("first agent should close");
+    assert!(first.is_closed());
+    assert!(
+        !store.session_dir(&session).exists(),
+        "untouched agent close must remove empty session lock directory"
+    );
+
+    let after_close = first
+        .run("should fail")
+        .await
+        .expect_err("closed agent must reject new runs");
+    assert_eq!(after_close.diagnostic_code(), "session_closed");
 }
 
 #[test]

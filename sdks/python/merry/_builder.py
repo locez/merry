@@ -34,7 +34,7 @@ from ._json import dump_json
 from ._tools import Tool, ToolOutputValue, ToolRegistration
 
 if TYPE_CHECKING:
-    from ._agent import Agent
+    from ._agent import Agent, PendingAgent
 
 _NativeBuilder = _merry.AgentBuilder
 
@@ -154,6 +154,18 @@ class AgentBuilder:
         self._ensure_open()
         try:
             self._native.with_session_store(str(path))
+        except NativeMerryError as error:
+            self._handle_native_error(error)
+        return self
+
+    def session_lock(self, enabled: bool = True) -> Self:
+        """Control whether the session holds an exclusive OS file lock on its store."""
+
+        self._ensure_open()
+        if type(enabled) is not bool:
+            raise TypeError("session_lock must be a boolean")
+        try:
+            self._native.with_session_lock(enabled)
         except NativeMerryError as error:
             self._handle_native_error(error)
         return self
@@ -346,9 +358,18 @@ class AgentBuilder:
             hooks=self._hooks,
         )
 
-    async def resume(self, path: PathInput | None = None) -> Agent:
-        """Consume this builder and resume from its configured or explicit store."""
+    def resume(self, path: PathInput | None = None) -> PendingAgent:
+        """Consume this builder and resume from its configured or explicit store.
 
+        Can be used either as `async with builder.resume(...) as agent:` or
+        `agent = await builder.resume(...)`.
+        """
+
+        from ._agent import PendingAgent
+
+        return PendingAgent(lambda: self._resume(path))
+
+    async def _resume(self, path: PathInput | None = None) -> Agent:
         self._ensure_open()
         if not self._provider_configured:
             raise MerryConfigError(

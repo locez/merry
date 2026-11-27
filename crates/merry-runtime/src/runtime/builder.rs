@@ -84,6 +84,7 @@ pub struct RuntimeBuilder {
     subagent_parent_scope: Option<ChildWorkspaceScope>,
     activity_hub: Arc<SubagentActivityHub>,
     session_store: Option<FileSessionStore>,
+    session_lock: bool,
     loaded_session: Option<SessionState>,
     durable_memory: Option<Arc<crate::DurableMemory>>,
     memory_maintenance: bool,
@@ -134,6 +135,7 @@ impl RuntimeBuilder {
             subagent_parent_scope: None,
             activity_hub: Arc::new(SubagentActivityHub::new()),
             session_store: None,
+            session_lock: false,
             loaded_session: None,
             durable_memory: None,
             memory_maintenance: false,
@@ -623,6 +625,23 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Controls whether this runtime acquires and holds an exclusive OS-level
+    /// [`crate::SessionReservation`] lock on its configured [`FileSessionStore`]
+    /// for the lifetime of the session.
+    ///
+    /// Applies to [`Self::build`] and [`Self::resume_from_store`] (and does not
+    /// affect read-only loading helpers without automatic savepoints). When
+    /// enabled, concurrent processes (and duplicate handles in the same
+    /// process) attempting to open or resume the same `session_id` fail fast
+    /// with [`crate::SessionStoreError::SessionAlreadyReserved`]. Call
+    /// [`Runtime::close`] to release the lock deterministically and remove an
+    /// untouched empty session directory.
+    #[must_use]
+    pub fn session_lock(mut self, enabled: bool) -> Self {
+        self.session_lock = enabled;
+        self
+    }
+
     /// Configures how compacted session history is retained in memory and on disk.
     #[must_use]
     pub fn history_retention(mut self, retention: HistoryRetention) -> Self {
@@ -642,11 +661,36 @@ impl RuntimeBuilder {
         mut self,
         store: FileSessionStore,
     ) -> Result<Runtime, RuntimeError> {
-        let session = SessionState::load_from(&store, &self.session_id).await?;
-        self.session_store = Some(store);
+        let mut reservation = if self.session_lock {
+            Some(store.reserve_session(&self.session_id).await?)
+        } else {
+            None
+        };
+        let session = match SessionState::load_from(&store, &self.session_id).await {
+            Ok(session) => session,
+            Err(error) => {
+                if let Some(reservation) = reservation.take() {
+                    store
+                        .release_empty_reservation(&self.session_id, reservation)
+                        .await;
+                }
+                return Err(error.into());
+            }
+        };
+        let session_id = self.session_id.clone();
+        self.session_store = Some(store.clone());
         self.loaded_session = Some(session);
-        let runtime = self.build()?;
-        Ok(runtime)
+        match self.build_with_reservation(&mut reservation) {
+            Ok(runtime) => Ok(runtime),
+            Err(error) => {
+                if let Some(reservation) = reservation.take() {
+                    store
+                        .release_empty_reservation(&session_id, reservation)
+                        .await;
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Loads persisted state without replaying or restarting Plan execution.
@@ -683,6 +727,14 @@ impl RuntimeBuilder {
     ///
     /// Duplicate tool names are rejected before the runtime is constructed.
     pub fn build(self) -> Result<Runtime, RuntimeError> {
+        let mut reservation = None;
+        self.build_with_reservation(&mut reservation)
+    }
+
+    fn build_with_reservation(
+        self,
+        reservation: &mut Option<crate::SessionReservation>,
+    ) -> Result<Runtime, RuntimeError> {
         let mut registered_tools = self.registered_tools;
         if self.coordinator_plan_tools {
             registered_tools
@@ -751,6 +803,18 @@ impl RuntimeBuilder {
         for (id, text) in self.initial_context_summaries {
             session.reconcile_construction_context_seed(&id, &text)?;
         }
+        // Acquire the OS session lock only after all pure configuration and
+        // state validation succeeds so failed builds never leave behind an
+        // empty `.session.lock` directory.
+        let owned_reservation = match reservation.take() {
+            Some(existing) => Some(existing),
+            None if self.session_lock => self
+                .session_store
+                .as_ref()
+                .map(|store| store.try_reserve_session(&self.session_id))
+                .transpose()?,
+            None => None,
+        };
         let trajectory =
             RuntimeObservability::new(self.session_id.clone(), tool_registry.tool_specs());
         trajectory.seed_prompt_profile(
@@ -862,6 +926,8 @@ impl RuntimeBuilder {
                 subagent_manager,
                 coordinator_plan_tools: self.coordinator_plan_tools,
                 session_store: self.session_store,
+                session_reservation: std::sync::Mutex::new(owned_reservation),
+                closed: AtomicBool::new(false),
                 tool_batch_active: AtomicBool::new(false),
                 activity_hub,
                 subagent_event_sink,

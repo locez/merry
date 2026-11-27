@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal, TypeVar, overload
+import asyncio
+from collections.abc import Callable, Coroutine, Generator, Sequence
+from types import TracebackType
+from typing import TYPE_CHECKING, Literal, Self, TypeVar, overload
 
 from pydantic import BaseModel
 
@@ -18,7 +20,13 @@ from ._config import (
     StructuredOutputRetryPolicy,
     WorkspaceConfig,
 )
-from ._errors import NativeMerryError, _decode_native_error
+from ._errors import (
+    MerryError,
+    NativeMerryError,
+    _decode_native_error,
+    pending_agent_consumed_error,
+    session_closed_error,
+)
 from ._hooks import Hooks
 from ._interactive import InteractiveSession, ManualHookInteractiveSession
 from ._json import dump_json, require_json_object
@@ -32,6 +40,48 @@ if TYPE_CHECKING:
 
 _NativeAgent = _merry.Agent
 FinalOutputT = TypeVar("FinalOutputT", bound=BaseModel)
+
+
+class PendingAgent:
+    """Awaitable and async context manager returned by `Agent.resume` and `AgentBuilder.resume`.
+
+    Supports both `async with merry.Agent.resume(...) as agent:` and
+    `agent = await merry.Agent.resume(...)` with unified Rust-owned session
+    locking and cleanup semantics.
+    """
+
+    def __init__(
+        self,
+        resume: Callable[[], Coroutine[object, object, Agent]],
+    ) -> None:
+        self._resume = resume
+        self._started = False
+        self._agent: Agent | None = None
+
+    async def _resolve(self) -> Agent:
+        if self._started:
+            raise pending_agent_consumed_error()
+        self._started = True
+        return await self._resume()
+
+    def __await__(self) -> Generator[object, None, Agent]:
+        return self._resolve().__await__()
+
+    async def __aenter__(self) -> Agent:
+        agent = await self._resolve()
+        self._agent = agent
+        return agent
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        agent = self._agent
+        self._agent = None
+        if agent is not None:
+            await agent.__aexit__(exc_type, exc, tb)
 
 
 class Agent:
@@ -48,6 +98,7 @@ class Agent:
         compaction: CompactionConfig | None = None,
         workspace: WorkspaceConfig | None = None,
         session_store: PathInput | None = None,
+        session_lock: bool = True,
         history_retention: HistoryRetention | None = None,
         tools: Sequence[ToolRegistration] = (),
         hooks: Hooks | None = None,
@@ -64,6 +115,7 @@ class Agent:
             compaction=compaction,
             workspace=workspace,
             session_store=session_store,
+            session_lock=session_lock,
             history_retention=history_retention,
             tools=tools,
             hooks=hooks,
@@ -78,12 +130,13 @@ class Agent:
         self._hooks: Hooks | None = built._hooks
 
     @classmethod
-    async def resume(
+    def resume(
         cls,
         session_id: str,
         *,
         provider: Provider,
         session_store: PathInput,
+        session_lock: bool = True,
         history_retention: HistoryRetention | None = None,
         system_prompt: str | PromptProfile | None = None,
         generation: GenerationConfig | None = None,
@@ -95,8 +148,12 @@ class Agent:
         max_model_turns: int | None = None,
         structured_output_retry_policy: StructuredOutputRetryPolicy | None = None,
         event_buffer_size: int | None = None,
-    ) -> Agent:
-        """Resume a persisted Rust-owned session from its file-backed store."""
+    ) -> PendingAgent:
+        """Resume a persisted Rust-owned session from its file-backed store.
+
+        Can be used either as `async with Agent.resume(...) as agent:` or
+        `agent = await Agent.resume(...)`.
+        """
 
         builder = _configure_builder(
             session_id=session_id,
@@ -107,6 +164,7 @@ class Agent:
             compaction=compaction,
             workspace=workspace,
             session_store=session_store,
+            session_lock=session_lock,
             history_retention=history_retention,
             tools=tools,
             hooks=hooks,
@@ -114,7 +172,7 @@ class Agent:
             structured_output_retry_policy=structured_output_retry_policy,
             event_buffer_size=event_buffer_size,
         )
-        return await builder.resume()
+        return builder.resume()
 
     @classmethod
     def builder(cls, session_id: str | None = None) -> AgentBuilder:
@@ -301,6 +359,49 @@ class Agent:
             auto_tools=auto_tools,
         )
 
+    @property
+    def closed(self) -> bool:
+        """Return whether `close()` has closed this Rust-owned session."""
+
+        return self._native_agent.is_closed()
+
+    async def close(self) -> None:
+        """Close this session, releasing any held OS session lock and cleaning up empty state.
+
+        Closing is idempotent once completed. Subsequent operations on the
+        closed agent fail with `MerryRuntimeError` (`code="session_closed"`).
+        """
+
+        try:
+            await self._native_agent.close()
+        except NativeMerryError as error:
+            raise _decode_native_error(error) from error
+
+    async def __aenter__(self) -> Self:
+        if self.closed:
+            raise session_closed_error(self._session_id)
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        if exc_type is asyncio.CancelledError:
+            try:
+                await asyncio.shield(self.close())
+            except (MerryError, asyncio.CancelledError):
+                pass
+            return
+        if exc_type is not None:
+            try:
+                await self.close()
+            except MerryError:
+                pass
+            return
+        await self.close()
+
     async def save_session(self) -> None:
         """Persist the current Rust-owned session to its configured store."""
 
@@ -320,6 +421,7 @@ def _configure_builder(
     compaction: CompactionConfig | None,
     workspace: WorkspaceConfig | None,
     session_store: PathInput | None,
+    session_lock: bool,
     history_retention: HistoryRetention | None,
     tools: Sequence[ToolRegistration],
     hooks: Hooks | None,
@@ -342,6 +444,7 @@ def _configure_builder(
         builder.workspace(workspace)
     if session_store is not None:
         builder.session_store(session_store)
+    builder.session_lock(session_lock)
     if history_retention is not None:
         builder.history_retention(history_retention)
     if max_model_turns is not None:

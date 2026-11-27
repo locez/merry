@@ -336,6 +336,41 @@ impl FileSessionStore {
         Self::new(self.session_dir(parent_session_id).join("subagents"))
     }
 
+    /// Synchronously reserves exclusive write ownership of a session id until
+    /// the returned guard is dropped.
+    ///
+    /// Uses a non-blocking OS file lock (`try_lock`), so this returns
+    /// [`SessionStoreError::SessionAlreadyReserved`] immediately when another
+    /// live handle already holds the lock.
+    pub fn try_reserve_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionReservation, SessionStoreError> {
+        let session_dir = self.session_dir(session_id);
+        std::fs::create_dir_all(&session_dir)
+            .map_err(|source| io_error(session_dir.clone(), source))?;
+        let lock_path = session_dir.join(SESSION_LOCK_FILE_NAME);
+        let mut options = StdOpenOptions::new();
+        options.read(true).write(true).create(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let file = options
+            .open(&lock_path)
+            .map_err(|source| io_error(lock_path.clone(), source))?;
+        #[cfg(unix)]
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|source| io_error(lock_path.clone(), source))?;
+        match file.try_lock() {
+            Ok(()) => Ok(SessionReservation { _lock_file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                Err(SessionStoreError::SessionAlreadyReserved {
+                    session_id: session_id.clone(),
+                })
+            }
+            Err(std::fs::TryLockError::Error(source)) => Err(io_error(lock_path, source)),
+        }
+    }
+
     /// Reserves exclusive write ownership of a session id until the returned
     /// guard is dropped.
     ///
@@ -347,46 +382,17 @@ impl FileSessionStore {
         &self,
         session_id: &SessionId,
     ) -> Result<SessionReservation, SessionStoreError> {
-        let session_dir = self.session_dir(session_id);
-        tokio::fs::create_dir_all(&session_dir)
-            .await
-            .map_err(|source| io_error(session_dir.clone(), source))?;
-        let lock_path = session_dir.join(SESSION_LOCK_FILE_NAME);
+        let store = self.clone();
         let session_id = session_id.clone();
-        let lock_file = tokio::task::spawn_blocking({
-            let lock_path = lock_path.clone();
-            move || {
-                let mut options = StdOpenOptions::new();
-                options.read(true).write(true).create(true);
-                #[cfg(unix)]
-                options.mode(0o600);
-                let file = options
-                    .open(&lock_path)
-                    .map_err(|source| io_error(lock_path.clone(), source))?;
-                #[cfg(unix)]
-                file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                    .map_err(|source| io_error(lock_path.clone(), source))?;
-                match file.try_lock() {
-                    Ok(()) => Ok(file),
-                    Err(std::fs::TryLockError::WouldBlock) => {
-                        Err(SessionStoreError::SessionAlreadyReserved {
-                            session_id: session_id.clone(),
-                        })
-                    }
-                    Err(std::fs::TryLockError::Error(source)) => Err(io_error(lock_path, source)),
-                }
-            }
-        })
-        .await
-        .map_err(|source| {
-            io_error(
-                lock_path,
-                std::io::Error::other(format!("session reservation task failed: {source}")),
-            )
-        })??;
-        Ok(SessionReservation {
-            _lock_file: lock_file,
-        })
+        let lock_path = self.session_dir(&session_id).join(SESSION_LOCK_FILE_NAME);
+        tokio::task::spawn_blocking(move || store.try_reserve_session(&session_id))
+            .await
+            .map_err(|source| {
+                io_error(
+                    lock_path,
+                    std::io::Error::other(format!("session reservation task failed: {source}")),
+                )
+            })?
     }
 
     /// Releases a session reservation and removes its directory when it contains

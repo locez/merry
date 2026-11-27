@@ -18,6 +18,24 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 pub(crate) fn agent_build_error_to_py(error: merry::AgentBuildError) -> PyErr {
+    if let merry::AgentBuildError::Runtime {
+        source:
+            merry::runtime::RuntimeError::SessionStore {
+                source: merry::runtime::SessionStoreError::SessionAlreadyReserved { session_id },
+            },
+    } = &error
+    {
+        return message_with_context_to_py(
+            error.diagnostic_code(),
+            MerryErrorDomain::Runtime,
+            MerryRetryability::Retryable,
+            error.to_string(),
+            Some(
+                "Close the active Agent holding this session lock or wait for the other process to finish before retrying.",
+            ),
+            Some(("session_id", session_id.as_str())),
+        );
+    }
     let domain = match &error {
         merry::AgentBuildError::Tool { .. } => MerryErrorDomain::Tool,
         merry::AgentBuildError::Runtime { .. } => MerryErrorDomain::Runtime,
@@ -37,6 +55,19 @@ pub(crate) fn agent_build_error_to_py(error: merry::AgentBuildError) -> PyErr {
 }
 
 pub(crate) fn agent_error_to_py(error: merry::AgentError) -> PyErr {
+    if let merry::AgentError::Runtime {
+        source: merry::runtime::RuntimeError::SessionClosed { session_id },
+    } = &error
+    {
+        return message_with_context_to_py(
+            error.diagnostic_code(),
+            MerryErrorDomain::Runtime,
+            MerryRetryability::NotRetryable,
+            error.to_string(),
+            Some("Create a new Agent or resume the session from its store after closing."),
+            Some(("session_id", session_id.as_str())),
+        );
+    }
     let (domain, retryability, hint) = match &error {
         merry::AgentError::ToolInvocationBatchMismatch { .. }
         | merry::AgentError::ToolInvocationBatchResolved
@@ -215,10 +246,25 @@ fn message_to_py(
     message: String,
     hint: Option<&str>,
 ) -> PyErr {
+    message_with_context_to_py(code, domain, retryability, message, hint, None)
+}
+
+fn message_with_context_to_py(
+    code: &str,
+    domain: MerryErrorDomain,
+    retryability: MerryRetryability,
+    message: String,
+    hint: Option<&str>,
+    context: Option<(&str, &str)>,
+) -> PyErr {
     let message = bounded_message(&message);
     let builder = MerryErrorInfo::builder(code, domain, &message, retryability);
     let builder = match hint {
         Some(hint) => builder.hint(hint),
+        None => builder,
+    };
+    let builder = match context {
+        Some((key, value)) => builder.context(key, value),
         None => builder,
     };
 

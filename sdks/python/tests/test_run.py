@@ -361,18 +361,18 @@ def test_session_store_save_and_resume_preserves_session_identity(
             model="gpt-test",
             base_url="https://api.example.test/v1",
         )
-        agent = merry.Agent(
+        async with merry.Agent(
             session_id="resume-test",
             provider=provider,
             session_store=store_root,
-        )
-        await agent.save_session()
-        resumed = await merry.Agent.resume(
+        ) as agent:
+            await agent.save_session()
+        async with merry.Agent.resume(
             "resume-test",
             provider=provider,
             session_store=store_root,
-        )
-        return resumed.session_id
+        ) as resumed:
+            return resumed.session_id
 
     assert asyncio.run(scenario()) == "resume-test"
 

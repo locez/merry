@@ -255,6 +255,12 @@ impl PyAgentBuilder {
         Ok(())
     }
 
+    fn with_session_lock(&mut self, enabled: bool) -> PyResult<()> {
+        let builder = self.take_builder()?;
+        self.inner = Some(builder.session_lock(enabled));
+        Ok(())
+    }
+
     fn with_history_retention(
         &mut self,
         mode: &str,
