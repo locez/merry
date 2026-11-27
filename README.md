@@ -25,7 +25,7 @@ Honestly, there isn't much of a *why*. I just wanted an agent of my own — it s
 One Rust runtime owns sessions, tool admission, context compilation, permissions, and lifecycle — serving the terminal UI, headless CLI, Rust crate, and Python SDK from the same core.
 
 - **Lightweight Footprint** — Single native Rust binary with no JS runtime or background daemon, idling at ~27 MiB RSS in the full interactive TUI ([comparison](#memory-footprint)).
-- **Streaming TUI** — Markdown & syntax-highlighted diffs, Plan Mode (`Alt+P`), inline review comments (`Alt+C`), image paste, and built-in themes (`Sakura`, `Tokyo Night`, `Catppuccin Mocha`, `Nord`, `Paper Light`, `ANSI`) with optional transparency.
+- **Streaming TUI** — Markdown & syntax-highlighted diffs, Plan Mode (`Alt+P`), inline review comments (`Alt+C`), image paste, and built-in themes (`Sakura`, `Tokyo Night`, `Catppuccin Mocha`, `Nord`, `Paper Light`, `Everforest`, `ANSI`) with optional transparency.
 - **Parallel Subagents** — Built-in `explore`, `coder`, and `review` roles plus custom roles, Git worktree isolation, and live monitoring in the `Tasks` dock.
 - **Sandboxed by Default** — Confines every process action via Linux Landlock + seccomp or macOS Seatbelt with workspace trust and AI/human permission review (Windows defaults to host mode with permission review and Job Object process cleanup).
 - **Structured Runtime** — Automatic turn-preserving context compaction, on-demand `SKILL.md` skills, durable memory, HTTP MCP servers, and resumable sessions.

@@ -271,7 +271,7 @@ items = ["workspace", "model", "context", "cache", "rate"]
 
 [tui.theme]
 # Built-in base preset: "sakura" (default), "ansi", "tokyo-night",
-# "catppuccin-mocha", "nord", or "paper-light".
+# "catppuccin-mocha", "nord", "paper-light", or "everforest".
 # Set transparent = true to clear the main canvas and status bar backgrounds so
 # terminal opacity/blur shows through. Both options can also be switched live
 # from Settings (Alt+X -> Settings -> Appearance).
