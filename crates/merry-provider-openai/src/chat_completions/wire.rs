@@ -35,14 +35,20 @@ pub(crate) enum ChatMessage<'a> {
     Text {
         role: &'static str,
         content: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<&'a str>,
     },
     Multimodal {
         role: &'static str,
         content: Vec<ChatContentPart<'a>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<&'a str>,
     },
     AssistantToolCalls {
         role: &'static str,
         content: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<&'a str>,
         tool_calls: Vec<ChatToolCall<'a>>,
     },
     ToolResult {

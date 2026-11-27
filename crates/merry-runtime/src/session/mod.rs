@@ -236,6 +236,9 @@ impl SessionState {
                 transcript::TranscriptItem::AssistantText { text, .. } => {
                     format!("assistant:{text}")
                 }
+                transcript::TranscriptItem::AssistantReasoning { text, .. } => {
+                    format!("reasoning:{text}")
+                }
                 transcript::TranscriptItem::ToolCall { call, .. } => {
                     format!("tool_call:{}", call.id().as_str())
                 }

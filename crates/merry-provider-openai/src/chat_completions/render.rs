@@ -86,12 +86,24 @@ fn render_messages<'a>(
 ) -> Result<Vec<ChatMessage<'a>>, OpenAiProviderError> {
     let mut messages = Vec::new();
     let mut index = 0;
+    let mut pending_reasoning: Option<&str> = None;
     while index < request.input().len() {
         match &request.input()[index] {
             ModelInputItem::Message(message) => {
+                let role = render_role(message.role());
+                let reasoning_content = if message.role() == ModelMessageRole::Assistant {
+                    pending_reasoning.take()
+                } else {
+                    if pending_reasoning.is_some() {
+                        return Err(OpenAiProviderError::invalid_request(
+                            "assistant reasoning must be followed by an assistant message or tool call",
+                        ));
+                    }
+                    None
+                };
                 if message.content().has_images() {
                     messages.push(ChatMessage::Multimodal {
-                        role: render_role(message.role()),
+                        role,
                         content: message
                             .content()
                             .parts()
@@ -107,40 +119,56 @@ fn render_messages<'a>(
                                 },
                             })
                             .collect(),
+                        reasoning_content,
                     });
+                } else if message.role() == ModelMessageRole::Assistant
+                    && matches!(
+                        request.input().get(index + 1),
+                        Some(ModelInputItem::ToolCall(_))
+                    )
+                {
+                    index += 1;
+                    let tool_calls = render_tool_calls(request.input(), &mut index)?;
+                    messages.push(ChatMessage::AssistantToolCalls {
+                        role,
+                        content: Some(message.content().as_text()),
+                        reasoning_content,
+                        tool_calls,
+                    });
+                    continue;
                 } else {
                     messages.push(ChatMessage::Text {
-                        role: render_role(message.role()),
+                        role,
                         content: message.content().as_text(),
+                        reasoning_content,
                     });
                 }
                 index += 1;
             }
-            ModelInputItem::ToolCall(_) => {
-                let mut tool_calls = Vec::new();
-                while let Some(ModelInputItem::ToolCall(call)) = request.input().get(index) {
-                    tool_calls.push(ChatToolCall {
-                        id: call.id().as_str(),
-                        kind: "function",
-                        function: ChatToolCallFunction {
-                            name: call.name().as_str(),
-                            arguments: serde_json::to_string(call.arguments().as_object())
-                                .map_err(|error| {
-                                    OpenAiProviderError::invalid_request(format!(
-                                        "failed to serialize tool arguments: {error}"
-                                    ))
-                                })?,
-                        },
-                    });
-                    index += 1;
+            ModelInputItem::Reasoning(reasoning) => {
+                if pending_reasoning.replace(reasoning.text()).is_some() {
+                    return Err(OpenAiProviderError::invalid_request(
+                        "assistant reasoning items must not be consecutive",
+                    ));
                 }
+                index += 1;
+            }
+            ModelInputItem::ToolCall(_) => {
+                let reasoning_content = pending_reasoning.take();
+                let tool_calls = render_tool_calls(request.input(), &mut index)?;
                 messages.push(ChatMessage::AssistantToolCalls {
                     role: "assistant",
                     content: None,
+                    reasoning_content,
                     tool_calls,
                 });
             }
             ModelInputItem::ToolResult(_) => {
+                if pending_reasoning.is_some() {
+                    return Err(OpenAiProviderError::invalid_request(
+                        "assistant reasoning must be followed by an assistant message or tool call",
+                    ));
+                }
                 let mut tool_images = Vec::new();
                 while let Some(ModelInputItem::ToolResult(result)) = request.input().get(index) {
                     messages.push(ChatMessage::ToolResult {
@@ -155,12 +183,38 @@ fn render_messages<'a>(
                     messages.push(ChatMessage::Multimodal {
                         role: "user",
                         content: tool_images,
+                        reasoning_content: None,
                     });
                 }
             }
         }
     }
     Ok(messages)
+}
+
+fn render_tool_calls<'a>(
+    input: &'a [ModelInputItem],
+    index: &mut usize,
+) -> Result<Vec<ChatToolCall<'a>>, OpenAiProviderError> {
+    let mut tool_calls = Vec::new();
+    while let Some(ModelInputItem::ToolCall(call)) = input.get(*index) {
+        tool_calls.push(ChatToolCall {
+            id: call.id().as_str(),
+            kind: "function",
+            function: ChatToolCallFunction {
+                name: call.name().as_str(),
+                arguments: serde_json::to_string(call.arguments().as_object()).map_err(
+                    |error| {
+                        OpenAiProviderError::invalid_request(format!(
+                            "failed to serialize tool arguments: {error}"
+                        ))
+                    },
+                )?,
+            },
+        });
+        *index += 1;
+    }
+    Ok(tool_calls)
 }
 
 fn append_tool_result_images<'a>(
@@ -196,7 +250,8 @@ mod tests {
     use merry_core::{ToolCallResultStatus, ToolInputSchema, ToolName, ToolSpec};
     use merry_llm::{
         GenerationConfig, ModelContent, ModelImage, ModelInputItem, ModelMessage, ModelName,
-        ModelToolCall, ModelToolCallId, ModelToolResult, ModelToolResultContent, ToolArguments,
+        ModelReasoning, ModelToolCall, ModelToolCallId, ModelToolResult, ModelToolResultContent,
+        ToolArguments,
     };
     use schemars::Schema;
     use serde_json::json;
@@ -258,6 +313,70 @@ mod tests {
         assert_eq!(rendered["messages"][3]["tool_call_id"], "call-2");
         assert_eq!(rendered["messages"][4]["tool_call_id"], "call-1");
         assert_eq!(rendered["tools"][0]["function"]["strict"], true);
+    }
+
+    #[test]
+    fn renders_reasoning_on_the_assistant_tool_call_message() {
+        let call = call("call-1", "alpha");
+        let request = ModelRequest::new_with_input_and_stable_prefix(
+            ModelName::new("deepseek-reasoner").expect("valid model"),
+            vec![
+                ModelInputItem::Reasoning(
+                    ModelReasoning::new("Inspect the notes first.").expect("valid reasoning"),
+                ),
+                ModelInputItem::Message(
+                    ModelMessage::new(
+                        ModelMessageRole::Assistant,
+                        ModelContent::text("Searching the notes").expect("valid content"),
+                    )
+                    .expect("valid message"),
+                ),
+                ModelInputItem::ToolCall(call.clone()),
+                ModelInputItem::ToolResult(result(&call, "one")),
+            ],
+            Vec::new(),
+            GenerationConfig::default(),
+            0,
+        )
+        .expect("valid request");
+
+        let rendered = render_chat_request(&request).expect("request should render");
+
+        assert_eq!(rendered["messages"][0]["role"], "assistant");
+        assert_eq!(rendered["messages"][0]["content"], "Searching the notes");
+        assert_eq!(
+            rendered["messages"][0]["reasoning_content"],
+            "Inspect the notes first."
+        );
+        assert_eq!(rendered["messages"][0]["tool_calls"][0]["id"], "call-1");
+        assert_eq!(rendered["messages"][1]["role"], "tool");
+    }
+
+    #[test]
+    fn renders_reasoning_on_a_tool_only_assistant_message() {
+        let call = call("call-1", "alpha");
+        let request = ModelRequest::new_with_input_and_stable_prefix(
+            ModelName::new("deepseek-reasoner").expect("valid model"),
+            vec![
+                ModelInputItem::Reasoning(
+                    ModelReasoning::new("Call search.").expect("valid reasoning"),
+                ),
+                ModelInputItem::ToolCall(call.clone()),
+                ModelInputItem::ToolResult(result(&call, "one")),
+            ],
+            Vec::new(),
+            GenerationConfig::default(),
+            0,
+        )
+        .expect("valid request");
+
+        let rendered = render_chat_request(&request).expect("request should render");
+
+        assert_eq!(rendered["messages"][0]["role"], "assistant");
+        assert_eq!(rendered["messages"][0]["content"], json!(null));
+        assert_eq!(rendered["messages"][0]["reasoning_content"], "Call search.");
+        assert_eq!(rendered["messages"][0]["tool_calls"][0]["id"], "call-1");
+        assert_eq!(rendered["messages"][1]["role"], "tool");
     }
 
     #[test]

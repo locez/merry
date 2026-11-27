@@ -70,6 +70,50 @@ impl<'de> Deserialize<'de> for ModelMessage {
     }
 }
 
+/// Provider-neutral assistant reasoning replayed into provider-visible history.
+///
+/// Some providers require the reasoning text that accompanied an earlier
+/// assistant turn to be passed back before later turns. The runtime stores it
+/// with the transcript and providers render it in their native continuation
+/// shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelReasoning {
+    text: String,
+}
+
+impl ModelReasoning {
+    /// Creates validated reasoning text.
+    pub fn new(text: &str) -> Result<Self, ModelError> {
+        validate_text("ModelReasoning text", text)?;
+        Ok(Self {
+            text: text.to_owned(),
+        })
+    }
+
+    /// Reasoning text content.
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelReasoningWire {
+    text: String,
+}
+
+impl<'de> Deserialize<'de> for ModelReasoning {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ModelReasoningWire::deserialize(deserializer)?;
+        Self::new(&wire.text).map_err(de::Error::custom)
+    }
+}
+
 /// Provider-neutral ordered model input item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(
@@ -81,6 +125,8 @@ impl<'de> Deserialize<'de> for ModelMessage {
 pub enum ModelInputItem {
     /// User, assistant, or system text message.
     Message(ModelMessage),
+    /// Assistant reasoning replayed before the assistant turn it belongs to.
+    Reasoning(ModelReasoning),
     /// Model-requested tool call replayed into provider-visible history.
     ToolCall(ModelToolCall),
     /// Tool result replayed into provider-visible history.

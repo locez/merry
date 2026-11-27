@@ -12,7 +12,7 @@ use crate::{
 use merry_core::{PendingToolCall, ToolCallResult, ToolCallResultStatus, ToolOutput, ToolSpec};
 use merry_llm::{
     GenerationConfig, ModelContent, ModelImage, ModelInputItem, ModelMessage, ModelMessageRole,
-    ModelName, ModelRequest, ModelToolCall, ModelToolCallId, ModelToolResult,
+    ModelName, ModelReasoning, ModelRequest, ModelToolCall, ModelToolCallId, ModelToolResult,
     ModelToolResultContent, ToolArguments,
 };
 use tokio_util::sync::CancellationToken;
@@ -311,6 +311,9 @@ fn model_input_from_transcript_snapshot(
         TranscriptItemSnapshot::AssistantText { text } => Ok(ModelInputItem::Message(
             ModelMessage::new(ModelMessageRole::Assistant, ModelContent::text(text)?)?,
         )),
+        TranscriptItemSnapshot::AssistantReasoning { text } => {
+            Ok(ModelInputItem::Reasoning(ModelReasoning::new(text)?))
+        }
         TranscriptItemSnapshot::ToolCall { call } => Ok(ModelInputItem::ToolCall(
             model_tool_call_from_pending(call)?,
         )),

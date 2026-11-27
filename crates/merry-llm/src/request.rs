@@ -12,7 +12,7 @@ use crate::{
 pub use generation::{GenerationConfig, ParallelToolCalls, ReasoningEffort, ServiceTier};
 pub use hashing::{RequestContentHash, ToolProfileHash};
 use merry_core::ToolSpec;
-pub use message::{ModelInputItem, ModelMessage, ModelMessageRole};
+pub use message::{ModelInputItem, ModelMessage, ModelMessageRole, ModelReasoning};
 pub use response_format::{ModelResponseFormat, ModelStructuredOutputFormat};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -515,7 +515,9 @@ fn messages_from_input(input: &[ModelInputItem]) -> Vec<ModelMessage> {
         .iter()
         .filter_map(|item| match item {
             ModelInputItem::Message(message) => Some(message.clone()),
-            ModelInputItem::ToolCall(_) | ModelInputItem::ToolResult(_) => None,
+            ModelInputItem::Reasoning(_)
+            | ModelInputItem::ToolCall(_)
+            | ModelInputItem::ToolResult(_) => None,
         })
         .collect()
 }
@@ -536,7 +538,9 @@ fn batch_continuations_from_input(
                     .iter()
                     .filter_map(|item| match item {
                         ModelInputItem::ToolCall(call) => Some(call.clone()),
-                        ModelInputItem::Message(_) | ModelInputItem::ToolResult(_) => None,
+                        ModelInputItem::Message(_)
+                        | ModelInputItem::Reasoning(_)
+                        | ModelInputItem::ToolResult(_) => None,
                     })
                     .collect::<Vec<_>>();
 
@@ -548,7 +552,9 @@ fn batch_continuations_from_input(
                     .iter()
                     .filter_map(|item| match item {
                         ModelInputItem::ToolResult(result) => Some(result.clone()),
-                        ModelInputItem::Message(_) | ModelInputItem::ToolCall(_) => None,
+                        ModelInputItem::Message(_)
+                        | ModelInputItem::Reasoning(_)
+                        | ModelInputItem::ToolCall(_) => None,
                     })
                     .collect::<Vec<_>>();
 
@@ -566,7 +572,7 @@ fn batch_continuations_from_input(
                     "ModelRequest tool result input items must follow a matching tool call batch",
                 ));
             }
-            ModelInputItem::Message(_) => {
+            ModelInputItem::Message(_) | ModelInputItem::Reasoning(_) => {
                 index += 1;
             }
         }

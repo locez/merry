@@ -495,6 +495,15 @@ async fn transcript_item_from_journal(
             model_turn_id,
             text: text.into(),
         },
+        JournalItem::AssistantReasoning {
+            id,
+            model_turn_id,
+            text,
+        } => TranscriptItem::AssistantReasoning {
+            id: TranscriptItemId::new(id),
+            model_turn_id,
+            text: text.into(),
+        },
         JournalItem::ToolCall {
             id,
             model_turn_id,

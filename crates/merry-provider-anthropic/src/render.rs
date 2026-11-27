@@ -146,6 +146,9 @@ fn render_messages<'a>(request: &'a ModelRequest) -> Vec<AnthropicMessage<'a>> {
                 });
                 index += 1;
             }
+            ModelInputItem::Reasoning(_) => {
+                index += 1;
+            }
             ModelInputItem::ToolCall(_) => {
                 let mut content = Vec::new();
                 while let Some(ModelInputItem::ToolCall(call)) = request.input().get(index) {

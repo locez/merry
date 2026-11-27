@@ -42,43 +42,49 @@ impl RuntimeObservability {
     /// Seeds the in-memory trajectory directly from a resumed session's
     /// transcript without cloning full tool outputs.
     pub(crate) fn seed_from_session(&self, session: &SessionState) {
-        let items = session.transcript().items().iter().map(|item| match item {
-            TranscriptItem::UserMessage { text, .. } => SeedItem::UserMessage {
-                text: text.as_ref(),
-            },
-            TranscriptItem::AssistantText { text, .. } => SeedItem::AssistantText {
-                text: text.as_ref(),
-            },
-            TranscriptItem::ToolCall { call, .. } => SeedItem::ToolCall { call },
-            TranscriptItem::ToolResult {
-                call_id,
-                result,
-                payload,
-                ..
-            } => SeedItem::ToolResult {
-                call_id,
-                result,
-                output: Some(payload.model_or_full()),
-            },
+        let items = session.transcript().items().iter().filter_map(|item| {
+            Some(match item {
+                TranscriptItem::UserMessage { text, .. } => SeedItem::UserMessage {
+                    text: text.as_ref(),
+                },
+                TranscriptItem::AssistantText { text, .. } => SeedItem::AssistantText {
+                    text: text.as_ref(),
+                },
+                TranscriptItem::AssistantReasoning { .. } => return None,
+                TranscriptItem::ToolCall { call, .. } => SeedItem::ToolCall { call },
+                TranscriptItem::ToolResult {
+                    call_id,
+                    result,
+                    payload,
+                    ..
+                } => SeedItem::ToolResult {
+                    call_id,
+                    result,
+                    output: Some(payload.model_or_full()),
+                },
+            })
         });
         self.seed_items(items);
     }
 
     #[cfg(test)]
     pub(crate) fn seed_from_transcript(&self, transcript: &[SessionTranscriptItem]) {
-        let items = transcript.iter().map(|item| match item {
-            SessionTranscriptItem::UserMessage { text, .. } => SeedItem::UserMessage { text },
-            SessionTranscriptItem::AssistantText { text } => SeedItem::AssistantText { text },
-            SessionTranscriptItem::ToolCall { call } => SeedItem::ToolCall { call },
-            SessionTranscriptItem::ToolResult {
-                call_id,
-                result,
-                output,
-            } => SeedItem::ToolResult {
-                call_id,
-                result,
-                output: output.as_ref(),
-            },
+        let items = transcript.iter().filter_map(|item| {
+            Some(match item {
+                SessionTranscriptItem::UserMessage { text, .. } => SeedItem::UserMessage { text },
+                SessionTranscriptItem::AssistantText { text } => SeedItem::AssistantText { text },
+                SessionTranscriptItem::AssistantReasoning { .. } => return None,
+                SessionTranscriptItem::ToolCall { call } => SeedItem::ToolCall { call },
+                SessionTranscriptItem::ToolResult {
+                    call_id,
+                    result,
+                    output,
+                } => SeedItem::ToolResult {
+                    call_id,
+                    result,
+                    output: output.as_ref(),
+                },
+            })
         });
         self.seed_items(items);
     }

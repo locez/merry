@@ -6,7 +6,10 @@ use crate::support::{
     runtime::{collect_step, runtime_with_provider, runtime_with_scripted_provider, session_id},
 };
 use merry_core::{RuntimeJournalPayload, ToolCallId, ToolCallResult, ToolOutput, ToolOutputKind};
-use merry_llm::{FinishReason, ModelOutput, testing::FakeModelProvider};
+use merry_llm::{
+    FinishReason, ModelEvent, ModelInputItem, ModelOutput, ModelResponse,
+    testing::FakeModelProvider,
+};
 
 #[tokio::test(flavor = "current_thread")]
 async fn submit_tool_result_records_success_output_and_resolves_pending() {
@@ -60,6 +63,53 @@ async fn submit_tool_result_records_success_output_and_resolves_pending() {
             .map(|event| event.sequence)
             .collect::<Vec<_>>(),
         vec![5, 6, 7, 8]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tool_turn_reasoning_is_replayed_before_its_tool_call() {
+    let reasoning = "Inspect the notes before answering.";
+    let provider = ScriptedModelProvider::new(vec![
+        vec![Ok(ModelEvent::Completed {
+            response: ModelResponse::new(
+                vec![ModelOutput::tool_call(model_tool_call())],
+                FinishReason::ToolCalls,
+                None,
+            )
+            .with_reasoning(Some(reasoning.to_owned())),
+        })],
+        vec![Ok(completed_text_event("continued with reasoning"))],
+    ]);
+    let runtime =
+        runtime_with_scripted_provider("provider-tool-reasoning-replay", provider.clone());
+    let pending_events = collect_step(&runtime, "Request a tool.").await;
+    let call = pending_tool_call(&pending_events).clone();
+    let result = ToolCallResult::succeeded(call.id().clone());
+    runtime
+        .submit_tool_result(result, ToolOutput::text("note result\n"))
+        .await
+        .expect("tool result should resolve");
+
+    collect_step(&runtime, "Continue.").await;
+
+    let requests = provider.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    let input = requests[1].input();
+    let reasoning_index = input
+        .iter()
+        .position(
+            |item| matches!(item, ModelInputItem::Reasoning(value) if value.text() == reasoning),
+        )
+        .expect("the reasoning from the tool turn should be replayed");
+    let tool_call_index = input
+        .iter()
+        .position(|item| {
+            matches!(item, ModelInputItem::ToolCall(value) if value.id().as_str() == call.id().as_str())
+        })
+        .expect("the tool call should remain in history");
+    assert!(
+        reasoning_index < tool_call_index,
+        "reasoning must precede the assistant tool call it belongs to"
     );
 }
 

@@ -509,6 +509,15 @@ fn journal_item_from_transcript(
             model_turn_id: *model_turn_id,
             text: text.to_string(),
         },
+        TranscriptItem::AssistantReasoning {
+            id,
+            model_turn_id,
+            text,
+        } => JournalItem::AssistantReasoning {
+            id: id.as_u64(),
+            model_turn_id: *model_turn_id,
+            text: text.to_string(),
+        },
         TranscriptItem::ToolCall {
             id,
             model_turn_id,

@@ -96,6 +96,9 @@ impl TuiProjector {
                 self.streaming_assistant_index = None;
                 state.push_timeline_item(TimelineItem::Assistant { text });
             }
+            SessionTranscriptItem::AssistantReasoning { text } => {
+                state.append_reasoning_delta(&text);
+            }
             SessionTranscriptItem::ToolCall { call } => {
                 let call_id = call.id().clone();
                 self.apply(

@@ -5,12 +5,25 @@ use merry_core::{
 };
 
 impl SessionState {
+    #[cfg(test)]
     pub(crate) fn record_assistant_text_output(
         &mut self,
         turn_id: ModelTurnId,
         text: String,
     ) -> Result<RuntimeJournalEvent, RuntimeError> {
+        self.record_assistant_text_output_with_reasoning(turn_id, text, None)
+    }
+
+    pub(crate) fn record_assistant_text_output_with_reasoning(
+        &mut self,
+        turn_id: ModelTurnId,
+        text: String,
+        reasoning: Option<String>,
+    ) -> Result<RuntimeJournalEvent, RuntimeError> {
         let mut transcript = self.transcript.clone();
+        if let Some(reasoning) = reasoning {
+            transcript.push_assistant_reasoning(turn_id, reasoning.as_str().into())?;
+        }
         transcript.push_assistant_text(turn_id, text.as_str().into())?;
         self.transcript = transcript;
         Ok(self.record_event(RuntimeJournalPayload::AssistantOutputRecorded { text }))
