@@ -126,7 +126,7 @@ async fn agent_loop_executes_opt_in_apply_patch_and_continues_to_final_completio
                 Arc::new(executor.clone()),
                 ToolActionKind::WorkspaceWrite,
             )
-            .with_action_proposal(),
+            .with_low_risk_workspace_patch_lane(),
         )
         .model_provider(Arc::new(provider.clone()), model_name())
         .allow_low_risk_apply_patches()

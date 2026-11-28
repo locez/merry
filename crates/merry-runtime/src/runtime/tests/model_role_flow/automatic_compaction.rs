@@ -76,7 +76,7 @@ async fn threshold_auto_compaction_emits_lifecycle_events() {
         .build()
         .expect("runtime builds");
 
-    *runtime.inner.automatic_compaction.write().await = CompactionConfig::disabled();
+    *runtime.inner.models.automatic_compaction.write().await = CompactionConfig::disabled();
     for seed in [
         format!("Old compressible ballast.\n{}", "ballast ".repeat(24_000)),
         format!("Retained tail ballast.\n{}", "tail ".repeat(6_400)),
@@ -89,7 +89,7 @@ async fn threshold_auto_compaction_emits_lifecycle_events() {
             "seed step should complete"
         );
     }
-    *runtime.inner.automatic_compaction.write().await = automatic_compaction;
+    *runtime.inner.models.automatic_compaction.write().await = automatic_compaction;
 
     let events = collect_step(
         &runtime,
@@ -208,7 +208,7 @@ async fn pre_turn_auto_compaction_failure_does_not_consume_model_turn_id() {
         "pre-turn compaction failure must not allocate the next model turn"
     );
 
-    *runtime.inner.automatic_compaction.write().await = CompactionConfig::disabled();
+    *runtime.inner.models.automatic_compaction.write().await = CompactionConfig::disabled();
     let recovered = collect_step(
         &runtime,
         "Use the still-next model turn after compaction failure.",

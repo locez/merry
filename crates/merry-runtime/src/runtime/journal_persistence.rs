@@ -2,7 +2,6 @@ use super::RuntimeInner;
 use crate::events::RuntimeJournalEventBatch;
 use crate::trajectory::TRAJECTORY_TOOL_PREVIEW_BYTES;
 use merry_core::{RuntimeJournalEvent, RuntimeJournalPayload, ToolCallId};
-use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 
 impl RuntimeInner {
@@ -103,10 +102,10 @@ impl RuntimeInner {
 pub(super) async fn write_resume_safe_savepoint(
     inner: &RuntimeInner,
 ) -> Option<crate::session::JournalCursor> {
-    if inner.tool_batch_active.load(Ordering::Acquire) {
+    if inner.tools.is_batch_active() {
         return None;
     }
-    let store = inner.session_store.clone()?;
+    let store = inner.persistence.store.clone()?;
     let prepared = {
         let session = inner.session.lock().await;
         session.persistable_bundle_if_resume_safe()

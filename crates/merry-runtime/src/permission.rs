@@ -33,8 +33,8 @@ pub use channel::{
 };
 pub(crate) use environment::{PermissionReviewEnvironmentMetadata, probe_environment_metadata};
 pub(crate) use input::{
-    RequestedCapabilitiesInput, is_request_permissions_tool, normalize_requested_capabilities,
-    normalize_requested_path, permission_reason_schema_for_schemars, permission_request_from_call,
+    RequestedCapabilitiesInput, normalize_requested_capabilities, normalize_requested_path,
+    permission_reason_schema_for_schemars, permission_request_from_call,
     permission_request_from_process_call, process_cwd_schema_for_schemars,
     requested_capabilities_schema_for_schemars, validate_optional_reason,
 };

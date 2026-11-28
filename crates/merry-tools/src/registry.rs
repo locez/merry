@@ -45,7 +45,7 @@ impl WorkspaceTools {
                 Arc::new(ApplyPatchExecutor { state: self.state }),
                 ToolActionKind::WorkspaceWrite,
             )
-            .with_action_proposal(),
+            .with_low_risk_workspace_patch_lane(),
         ]
     }
 }

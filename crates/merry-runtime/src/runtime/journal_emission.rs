@@ -142,7 +142,8 @@ pub(super) async fn send_model_tool_call_response_events(
             let bridge_calls = match &tool_event.payload {
                 RuntimeJournalPayload::ToolCallPending { call } => {
                     if inner
-                        .tool_registry
+                        .tools
+                        .registry
                         .registered_tool(call.name())
                         .is_some_and(|tool| tool.runner() == crate::ToolRunner::Bridge)
                     {
@@ -156,7 +157,8 @@ pub(super) async fn send_model_tool_call_response_events(
                     .iter()
                     .filter(|call| {
                         inner
-                            .tool_registry
+                            .tools
+                            .registry
                             .registered_tool(call.name())
                             .is_some_and(|tool| tool.runner() == crate::ToolRunner::Bridge)
                     })
@@ -177,7 +179,7 @@ pub(super) async fn send_model_tool_call_response_events(
             }
 
             for call in bridge_calls {
-                if let Some(Err(error)) = inner.tool_registry.validate_tool_input(&call) {
+                if let Some(Err(error)) = inner.tools.registry.validate_tool_input(&call) {
                     if !send_bridge_tool_input_validation_failure_events(
                         inner, sender, token, &call, error,
                     )
@@ -504,10 +506,7 @@ pub(super) async fn send_step_started_event(
         }
         let event = session.record_step_started();
         let reset =
-            if inner
-                .model_configs
-                .contains_role(crate::RuntimeModelRole::Primary)
-            {
+            if inner.models.has_primary() {
                 Some(session.record_transient_event(
                     RuntimeJournalPayload::ModelOutputRateUpdated { rate: None },
                 ))

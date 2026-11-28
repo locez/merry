@@ -30,7 +30,7 @@ pub(super) async fn execute_tool_call_batch_with_active_permit(
     context: ToolExecutionContext,
 ) -> ToolBatchExecution {
     {
-        let _batch_scope = inner.begin_tool_batch();
+        let _batch_scope = inner.tools.begin_batch();
         execute_tool_call_batch_inner(inner, calls, context, None).await
     }
 }
@@ -42,7 +42,7 @@ pub(super) async fn execute_tool_call_batch_streaming_with_active_permit(
     event_tx: mpsc::Sender<Vec<RuntimeJournalEvent>>,
 ) -> Option<RuntimeError> {
     let execution = {
-        let _batch_scope = inner.begin_tool_batch();
+        let _batch_scope = inner.tools.begin_batch();
         execute_tool_call_batch_inner(inner, calls, context, Some(event_tx)).await
     };
     execution.error
@@ -80,12 +80,7 @@ async fn execute_tool_call_batch_inner(
                         (index, result)
                     }
                 })
-                .buffer_unordered(
-                    inner
-                        .max_parallel_tool_calls
-                        .load(std::sync::atomic::Ordering::Acquire)
-                        .max(1),
-                );
+                .buffer_unordered(inner.tools.max_parallel_calls());
 
             let mut first_error: Option<(usize, RuntimeError)> = None;
             while let Some((index, result)) = running.next().await {
@@ -156,7 +151,8 @@ async fn execute_tool_call_batch_inner(
 
 fn tool_concurrency(inner: &RuntimeInner, call: &PendingToolCall) -> ToolConcurrency {
     inner
-        .tool_registry
+        .tools
+        .registry
         .registered_tool(call.name())
         .map_or(ToolConcurrency::Exclusive, |tool| tool.concurrency())
 }

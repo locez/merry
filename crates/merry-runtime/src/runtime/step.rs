@@ -27,7 +27,7 @@ impl Runtime {
         active_permit: ActiveStepPermit,
     ) -> Result<RuntimeJournalEventStream, RuntimeError> {
         let (parent_token, generation_config, final_output_contract) = context.into_parts();
-        if let Some(manager) = self.inner.subagent_manager.as_ref() {
+        if let Some(manager) = self.inner.subagents.manager.as_ref() {
             manager.update_parent_generation_config(generation_config.clone());
         }
         let step_token = parent_token.child_token();
@@ -39,10 +39,7 @@ impl Runtime {
             "runtime.step",
             session_id = self.inner.session_id.as_str(),
             event_buffer_size = self.inner.event_buffer_size.get(),
-            provider_configured = self
-                .inner
-                .model_configs
-                .contains_role(RuntimeModelRole::Primary),
+            provider_configured = self.inner.models.has_primary(),
             max_output_tokens = ?generation_config.max_output_tokens(),
             allow_parallel_tool_calls = generation_config.allow_parallel_tool_calls(),
         );

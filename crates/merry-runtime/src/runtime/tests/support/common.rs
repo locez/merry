@@ -1,9 +1,14 @@
 use crate::{
     PermissionReviewMode, RuntimeError, RuntimeModelRole, RuntimeTrustLevel,
+    memory::MemoryActivationSource,
     model_config::RuntimeModelConfigs,
     process::AcceptedLocalWorkspaceProcessAdmission,
     runtime::{
         CompactionConfig, Runtime, RuntimeInner,
+        state::{
+            MemoryState, ModelContextState, PermissionGovernanceState, ProcessExecutionLanes,
+            SessionPersistenceState, SubagentState, ToolDispatchState,
+        },
         tests::support::model_provider::RecordingModelProvider,
     },
     session::SessionState,
@@ -19,14 +24,15 @@ use merry_llm::{
     ModelToolCall, ModelToolCallId, ToolArguments,
 };
 use std::{
+    collections::{BTreeMap, VecDeque},
     future::Future,
     num::NonZeroUsize,
     sync::{
         Arc, Mutex as StdMutex, OnceLock,
-        atomic::{AtomicBool, AtomicU64},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize},
     },
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 pub(in crate::runtime::tests) fn trace_output_buffer() -> &'static Arc<StdMutex<Vec<u8>>> {
     #[derive(Clone)]
@@ -107,9 +113,12 @@ pub(in crate::runtime::tests) fn runtime_session(
     Arc::new(Mutex::new(SessionState::new(session_id)))
 }
 
-pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
-    let session_id = SessionId::new("runtime-send-test").expect("valid session id");
-    let event_buffer_size = NonZeroUsize::new(1).expect("non-zero buffer");
+pub(in crate::runtime::tests) fn runtime_inner_with(
+    session_id: SessionId,
+    event_buffer_size: NonZeroUsize,
+    model_configs: RuntimeModelConfigs,
+    memory_activation_source: Arc<dyn MemoryActivationSource>,
+) -> RuntimeInner {
     let session = runtime_session(session_id.clone());
     let trajectory = crate::trajectory::RuntimeObservability::new(session_id.clone(), Vec::new());
     let subagent_event_sink = crate::subagent::SubagentEventSink::new(
@@ -120,51 +129,67 @@ pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
     );
     RuntimeInner {
         session_id: session_id.clone(),
-        prompt_cache_key: session_id.clone(),
         session,
         active_step: Arc::new(AtomicBool::new(false)),
-        memory_projection_epoch: AtomicU64::new(0),
-        event_buffer_size,
-        max_parallel_tool_calls: std::sync::atomic::AtomicUsize::new(4),
-        model_configs: RuntimeModelConfigs::default(),
-        role_model_overrides: tokio::sync::RwLock::new(std::collections::BTreeMap::new()),
-        automatic_compaction: tokio::sync::RwLock::new(CompactionConfig::default()),
-        history_retention: crate::HistoryRetention::default(),
-        context_window_tokens: tokio::sync::RwLock::new(None),
-        capabilities: crate::RuntimeCapabilities::default(),
-        prompt_profile: crate::PromptProfile::default(),
-        progress_commentary: false,
-        tool_registry: ToolRegistry::default(),
-        tool_admission: None,
-        memory_activation_source: Arc::new(crate::memory::StoredMemoryActivationSource),
-        allow_low_risk_apply_patches: false,
-        low_risk_process_runner: None,
-        read_only_shell_process_runner: None,
-        accepted_local_workspace_process_runner: None,
-        runtime_trust_level: RuntimeTrustLevel::Agent,
-        permission_review_mode: tokio::sync::RwLock::new(PermissionReviewMode::DefaultForTrust),
-        permission_review_rules: crate::PermissionReviewRules::default(),
-        permission_review_workspace_root: None,
-        permission_actor: crate::PermissionActor::MainAgent,
-        recorded_permission_decisions: tokio::sync::RwLock::new(std::collections::VecDeque::new()),
-        permission_admission_source: tokio::sync::RwLock::new(None),
-        permissioned_process_runner_factory: None,
-        background_process_control: None,
-        subagent_manager: None,
-        coordinator_plan_tools: false,
-        session_store: None,
-        session_reservation: std::sync::Mutex::new(None),
         closed: AtomicBool::new(false),
-        tool_batch_active: AtomicBool::new(false),
-        activity_hub: Arc::new(crate::SubagentActivityHub::new()),
-        subagent_event_sink,
+        event_buffer_size,
+        capabilities: crate::RuntimeCapabilities::default(),
         trajectory,
-        durable_memory: None,
-        memory_maintenance: false,
-        memory_context: None,
-        hook_handler: None,
-        bridge_hook_subscriptions: crate::HookSubscriptions::none(),
+        persistence: SessionPersistenceState {
+            store: None,
+            reservation: StdMutex::new(None),
+            history_retention: crate::HistoryRetention::default(),
+        },
+        models: ModelContextState {
+            prompt_cache_key: session_id,
+            configs: model_configs,
+            role_overrides: RwLock::new(BTreeMap::new()),
+            automatic_compaction: RwLock::new(CompactionConfig::default()),
+            context_window_tokens: RwLock::new(None),
+            prompt_profile: crate::PromptProfile::default(),
+            progress_commentary: false,
+        },
+        memory: MemoryState {
+            activation_source: memory_activation_source,
+            projection_epoch: AtomicU64::new(0),
+            durable: None,
+            maintenance_enabled: false,
+            frozen_context: None,
+        },
+        tools: ToolDispatchState {
+            registry: ToolRegistry::default(),
+            admission: None,
+            max_parallel_calls: AtomicUsize::new(4),
+            batch_active: AtomicBool::new(false),
+            allow_low_risk_workspace_patches: false,
+            hook_handler: None,
+            bridge_hook_subscriptions: crate::HookSubscriptions::none(),
+        },
+        process_lanes: ProcessExecutionLanes::default(),
+        permissions: PermissionGovernanceState {
+            trust_level: RuntimeTrustLevel::Agent,
+            review_mode: RwLock::new(PermissionReviewMode::DefaultForTrust),
+            review_rules: crate::PermissionReviewRules::default(),
+            review_workspace_root: None,
+            actor: crate::PermissionActor::MainAgent,
+            recorded_decisions: RwLock::new(VecDeque::new()),
+            admission_source: RwLock::new(None),
+        },
+        subagents: SubagentState {
+            manager: None,
+            activity_hub: Arc::new(crate::SubagentActivityHub::new()),
+            event_sink: subagent_event_sink,
+        },
     }
+}
+
+pub(in crate::runtime::tests) fn runtime_inner() -> RuntimeInner {
+    runtime_inner_with(
+        SessionId::new("runtime-send-test").expect("valid session id"),
+        NonZeroUsize::new(1).expect("non-zero buffer"),
+        RuntimeModelConfigs::default(),
+        Arc::new(crate::memory::StoredMemoryActivationSource),
+    )
 }
 
 pub(in crate::runtime::tests) fn session_id(value: &str) -> SessionId {

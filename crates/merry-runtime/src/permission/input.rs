@@ -1,7 +1,6 @@
 use super::{
     DEFAULT_PERMISSION_STDERR_LIMIT_BYTES, DEFAULT_PERMISSION_STDOUT_LIMIT_BYTES,
     MAX_PERMISSION_REASON_BYTES, REQUEST_PERMISSIONS_TOOL_NAME,
-    permission_invalid_arguments_outcome,
 };
 use super::{
     HostIntegration, PermissionAdmissionError, PermissionRequest, PermissionReviewContextEntry,
@@ -9,15 +8,14 @@ use super::{
 };
 use crate::{
     MAX_PROCESS_ARG_BYTES, MAX_PROCESS_CWD_BYTES, PathAccess, ProcessActionIntent,
-    ProcessEnvPolicy, RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError,
-    ToolExecutor, ToolExecutorFuture,
+    ProcessEnvPolicy, RegisteredTool, tool::RuntimeIntrinsicTool,
 };
-use merry_core::{PendingToolCall, ToolName};
+use merry_core::PendingToolCall;
 use merry_tools_macros::tool;
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path};
 
 // Model-visible schema text for requested capabilities. The derive attributes
 // below and the hand-written JSON schema in `requested_capabilities_schema_json`
@@ -120,15 +118,10 @@ pub fn request_permissions_tool() -> Result<RegisteredTool, PermissionAdmissionE
     .map_err(|error| PermissionAdmissionError::Core {
         source: error.into(),
     })?;
-    Ok(RegisteredTool::new(
+    Ok(RegisteredTool::intrinsic(
         spec,
-        Arc::new(RequestPermissionsToolExecutor),
-        ToolActionKind::RuntimeControl,
+        RuntimeIntrinsicTool::RequestPermissions,
     ))
-}
-
-pub(crate) fn is_request_permissions_tool(tool_name: &ToolName) -> bool {
-    tool_name.as_str() == REQUEST_PERMISSIONS_TOOL_NAME
 }
 
 pub(crate) fn permission_request_from_call(
@@ -180,29 +173,6 @@ pub fn parse_permission_request(
     call: &PendingToolCall,
 ) -> Result<PermissionRequest, PermissionAdmissionError> {
     permission_request_from_call(call, Vec::new())
-}
-
-#[derive(Debug)]
-struct RequestPermissionsToolExecutor;
-
-impl ToolExecutor for RequestPermissionsToolExecutor {
-    fn execute<'a>(
-        &'a self,
-        call: PendingToolCall,
-        _context: ToolExecutionContext,
-    ) -> ToolExecutorFuture<'a> {
-        Box::pin(async move {
-            if let Err(error) = permission_request_from_call(&call, Vec::new()) {
-                return Ok(permission_invalid_arguments_outcome(
-                    call.name().as_str(),
-                    error,
-                ));
-            }
-            Err(ToolExecutionError::infrastructure(
-                "request_permissions must be executed through runtime permission admission",
-            ))
-        })
-    }
 }
 
 fn permission_reason_schema_json() -> Value {

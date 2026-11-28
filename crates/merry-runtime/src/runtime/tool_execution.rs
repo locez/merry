@@ -5,13 +5,10 @@ use crate::{
         is_local_workspace_effect_process_action_proposal, is_low_risk_apply_patch_proposal,
         is_low_risk_process_action_proposal, is_read_only_shell_process_action_proposal,
     },
-    permission::is_request_permissions_tool,
-    plan::tools::is_plan_tool,
     process_tool::process_call_requests_permission,
     runtime::{
-        APPLY_PATCH_TOOL_NAME, DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
-        DIAGNOSTIC_TOOL_NOT_REGISTERED, RuntimeInner, TOOL_ACTION_POLICY_DENIED_MESSAGE,
-        diagnostic_from_text,
+        DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_NOT_REGISTERED, RuntimeInner,
+        TOOL_ACTION_POLICY_DENIED_MESSAGE, diagnostic_from_text,
         diagnostics::DIAGNOSTIC_TOOL_NOT_ADMITTED,
         permission_execution::{
             HighRiskActionReview, execute_permission_request_tool_call,
@@ -20,8 +17,10 @@ use crate::{
         plan_tool_execution::execute_plan_or_todo_tool_call,
         process_execution::{ProcessExecutionAdmission, execute_admitted_process_action},
     },
-    todo::is_todo_tool,
-    tool::{ActionProposalEvidence, ToolActionPreflight, ToolExecutionContext, ToolExecutionError},
+    tool::{
+        ActionProposalEvidence, RuntimeIntrinsicTool, ToolActionPreflight, ToolActionProposalMode,
+        ToolExecutionContext, ToolExecutionError,
+    },
 };
 use merry_core::{
     CoreError, PendingToolCall, RuntimeJournalEvent, SessionId, ToolCallId, ToolCallResult,
@@ -52,18 +51,15 @@ pub(super) async fn execute_tool_call_with_active_permit(
     };
 
     if inner
-        .tool_admission
+        .tools
+        .admission
         .as_ref()
         .is_some_and(|admission| !admission.allows(pending.name()))
     {
         return resolve_tool_admission_denial(inner, &pending, context).await;
     }
 
-    if is_plan_tool(pending.name()) || is_todo_tool(pending.name()) {
-        return execute_plan_or_todo_tool_call(inner, &pending).await;
-    }
-
-    let Some(registered_tool) = inner.tool_registry.registered_tool(pending.name()) else {
+    let Some(registered_tool) = inner.tools.registry.registered_tool(pending.name()) else {
         if context.cancellation_token().is_cancelled() {
             return Err(RuntimeError::ToolExecutionCancelled {
                 session_id: inner.session_id.clone(),
@@ -98,7 +94,11 @@ pub(super) async fn execute_tool_call_with_active_permit(
         return Ok(events);
     };
 
-    if let Some(Err(error)) = inner.tool_registry.validate_tool_input(&pending) {
+    if let Some(RuntimeIntrinsicTool::Plan(intrinsic)) = registered_tool.runtime_intrinsic() {
+        return execute_plan_or_todo_tool_call(inner, intrinsic, &pending).await;
+    }
+
+    if let Some(Err(error)) = inner.tools.registry.validate_tool_input(&pending) {
         if context.cancellation_token().is_cancelled() {
             return Err(RuntimeError::ToolExecutionCancelled {
                 session_id: inner.session_id.clone(),
@@ -136,13 +136,16 @@ pub(super) async fn execute_tool_call_with_active_permit(
         }
     }
 
-    if is_request_permissions_tool(pending.name())
-        && registered_tool.action_kind() == crate::ToolActionKind::RuntimeControl
-    {
+    if registered_tool.runtime_intrinsic() == Some(RuntimeIntrinsicTool::RequestPermissions) {
         return execute_permission_request_tool_call(inner, &pending, context, false).await;
     }
 
-    let fully_trusted = inner.permission_review_mode.read().await.is_fully_trusted();
+    let fully_trusted = inner
+        .permissions
+        .review_mode
+        .read()
+        .await
+        .is_fully_trusted();
     let mut policy_decision = DefaultActionPolicy.decide(registered_tool.action_kind());
     if fully_trusted {
         policy_decision =
@@ -254,7 +257,8 @@ pub(super) async fn execute_tool_call_with_active_permit(
                 .await;
             }
             let host_process_path_review = inner
-                .accepted_local_workspace_process_runner
+                .process_lanes
+                .accepted_local_workspace_runner
                 .as_ref()
                 .is_some_and(|accepted| {
                     accepted.admission.sandbox_profile()
@@ -265,13 +269,13 @@ pub(super) async fn execute_tool_call_with_active_permit(
                                 if crate::process::requires_host_process_path_review(intent)
                         )
                 });
-            if inner.allow_low_risk_apply_patches
-                && pending.name().as_str() == APPLY_PATCH_TOOL_NAME
+            if inner.tools.allow_low_risk_workspace_patches
+                && registered_tool.low_risk_workspace_patch_lane()
                 && is_low_risk_apply_patch_proposal(registered_tool.action_kind(), &proposal)
             {
                 policy_decision = ActionPolicyDecision::allow_low_risk_apply_patch();
                 allowed_proposal = Some(proposal);
-            } else if let Some(runner) = inner.low_risk_process_runner.clone()
+            } else if let Some(runner) = inner.process_lanes.low_risk_runner.clone()
                 && !host_process_path_review
                 && is_low_risk_process_action_proposal(registered_tool.action_kind(), &proposal)
             {
@@ -289,7 +293,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     context,
                 )
                 .await;
-            } else if let Some(runner) = inner.read_only_shell_process_runner.clone()
+            } else if let Some(runner) = inner.process_lanes.read_only_shell_runner.clone()
                 && !host_process_path_review
                 && is_read_only_shell_process_action_proposal(
                     registered_tool.action_kind(),
@@ -310,7 +314,8 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     context,
                 )
                 .await;
-            } else if let Some(accepted) = inner.accepted_local_workspace_process_runner.clone()
+            } else if let Some(accepted) =
+                inner.process_lanes.accepted_local_workspace_runner.clone()
                 && !host_process_path_review
                 && is_local_workspace_effect_process_action_proposal(
                     registered_tool.action_kind(),
@@ -333,7 +338,8 @@ pub(super) async fn execute_tool_call_with_active_permit(
                     context,
                 )
                 .await;
-            } else if let Some(accepted) = inner.accepted_local_workspace_process_runner.clone()
+            } else if let Some(accepted) =
+                inner.process_lanes.accepted_local_workspace_runner.clone()
                 && registered_tool.action_kind() == crate::ToolActionKind::CommandExec
                 && proposal.action_kind() == crate::ToolActionKind::CommandExec
                 && let ActionProposalEvidence::ProcessAction(intent) = proposal.evidence()
@@ -446,6 +452,7 @@ pub(super) async fn execute_tool_call_with_active_permit(
     if let Err(error) = admit_action_to_generic_executor(
         &pending,
         registered_tool.action_kind(),
+        registered_tool.proposal_mode(),
         &policy_decision,
         allowed_proposal.as_ref(),
         &inner.session_id,
@@ -748,6 +755,7 @@ pub(super) fn action_execution_evidence_matches_proposal(
 pub(super) fn admit_action_to_generic_executor(
     pending: &PendingToolCall,
     action_kind: crate::ToolActionKind,
+    proposal_mode: ToolActionProposalMode,
     decision: &ActionPolicyDecision,
     proposal: Option<&ActionProposal>,
     session_id: &SessionId,
@@ -763,7 +771,7 @@ pub(super) fn admit_action_to_generic_executor(
     let low_risk_apply_patch_admitted = decision.is_allowed()
         && decision.action_kind() == crate::ToolActionKind::WorkspaceWrite
         && decision.risk_tier() == crate::action_policy::ActionRiskTier::EditLow
-        && pending.name().as_str() == APPLY_PATCH_TOOL_NAME
+        && proposal_mode == ToolActionProposalMode::LowRiskWorkspacePatch
         && action_kind == crate::ToolActionKind::WorkspaceWrite
         && proposal.is_some_and(|proposal| is_low_risk_apply_patch_proposal(action_kind, proposal));
 

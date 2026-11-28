@@ -25,7 +25,7 @@ pub(super) async fn manual_compaction_budget(
         let session = inner.session.lock().await;
         (
             step_request_inputs_from_session(&session)?
-                .with_memory_context(inner.memory_context.clone()),
+                .with_memory_context(inner.memory.frozen_context.clone()),
             session.provider_transcript_history_ids(),
         )
     };
@@ -38,8 +38,8 @@ pub(super) async fn manual_compaction_budget(
         &inputs,
         tools.clone(),
         generation.clone(),
-        &inner.prompt_profile,
-        inner.progress_commentary,
+        &inner.models.prompt_profile,
+        inner.models.progress_commentary,
     )
     .map_err(|error| RuntimeError::CompactionModelRequest {
         message: error.to_string(),
@@ -50,13 +50,14 @@ pub(super) async fn manual_compaction_budget(
         &inputs,
         tools,
         generation,
-        &inner.prompt_profile,
-        inner.progress_commentary,
+        &inner.models.prompt_profile,
+        inner.models.progress_commentary,
     )
     .map_err(|error| RuntimeError::CompactionModelRequest {
         message: error.to_string(),
     })?;
     let context_window_override = inner
+        .models
         .context_window_tokens
         .read()
         .await

@@ -59,9 +59,9 @@ use self::auto_compaction::{
 pub use self::builder::RuntimeBuilder;
 pub use self::config::{ArchiveConfig, CompactionConfig, HistoryRetention};
 use self::diagnostics::{
-    APPLY_PATCH_TOOL_NAME, DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED,
-    DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED, DIAGNOSTIC_TOOL_NOT_REGISTERED,
-    TOOL_ACTION_POLICY_DENIED_MESSAGE, diagnostic_from_text, runtime_error_message,
+    DIAGNOSTIC_TOOL_ACTION_POLICY_DENIED, DIAGNOSTIC_TOOL_CALL_RESULT_REQUIRED,
+    DIAGNOSTIC_TOOL_NOT_REGISTERED, TOOL_ACTION_POLICY_DENIED_MESSAGE, diagnostic_from_text,
+    runtime_error_message,
 };
 #[cfg(test)]
 use self::journal_emission::send_cancelled_event;
@@ -97,7 +97,7 @@ impl Runtime {
     /// Subscribes to the latest UI-only activity snapshots for managed subagents.
     #[must_use]
     pub fn subscribe_subagent_activity(&self) -> SubagentActivityReceiver {
-        self.inner.activity_hub.subscribe()
+        self.inner.subagents.activity_hub.subscribe()
     }
 
     /// Resumes a session from the default XDG state store.
@@ -267,7 +267,8 @@ impl Runtime {
             let session = self.inner.session.lock().await;
             let tracked_dir = self
                 .inner
-                .session_store
+                .persistence
+                .store
                 .as_ref()
                 .map(FileSessionStore::sessions_dir)
                 .or_else(|| session.tracked_store_dir());
@@ -293,7 +294,7 @@ impl Runtime {
 
     /// Saves the current resume-safe session state to the configured store.
     pub async fn save_session(&self) -> Result<(), RuntimeError> {
-        let store = match self.inner.session_store.clone() {
+        let store = match self.inner.persistence.store.clone() {
             Some(store) => store,
             None => FileSessionStore::default_store()?,
         };
@@ -304,7 +305,8 @@ impl Runtime {
     #[must_use]
     pub fn background_processes(&self) -> Vec<crate::BackgroundProcessSummary> {
         self.inner
-            .background_process_control
+            .process_lanes
+            .background_control
             .as_ref()
             .map(|control| control.list())
             .unwrap_or_default()
@@ -315,7 +317,7 @@ impl Runtime {
         &self,
         id: &crate::BackgroundProcessId,
     ) -> Result<crate::BackgroundProcessOutput, crate::BackgroundProcessLookupError> {
-        match &self.inner.background_process_control {
+        match &self.inner.process_lanes.background_control {
             Some(control) => control.read(id),
             None => Err(crate::BackgroundProcessLookupError::new(
                 id.clone(),
@@ -329,7 +331,7 @@ impl Runtime {
         &self,
         id: &crate::BackgroundProcessId,
     ) -> Result<crate::BackgroundProcessStop, crate::BackgroundProcessLookupError> {
-        match &self.inner.background_process_control {
+        match &self.inner.process_lanes.background_control {
             Some(control) => control.stop(id),
             None => Err(crate::BackgroundProcessLookupError::new(
                 id.clone(),
@@ -340,7 +342,7 @@ impl Runtime {
 
     /// Returns a compact snapshot of managed subagent statuses when configured.
     pub async fn subagent_snapshot(&self) -> Option<Vec<crate::SubagentStatusView>> {
-        match &self.inner.subagent_manager {
+        match &self.inner.subagents.manager {
             Some(manager) => Some(manager.snapshot().await),
             None => None,
         }
@@ -351,7 +353,7 @@ impl Runtime {
         &self,
         agent_id: &merry_core::SubagentId,
     ) -> Option<crate::SubagentInspectSession> {
-        match &self.inner.subagent_manager {
+        match &self.inner.subagents.manager {
             Some(manager) => manager.inspect(agent_id).await,
             None => None,
         }
@@ -363,7 +365,7 @@ impl Runtime {
         agent_id: &merry_core::SubagentId,
         message: String,
     ) -> Result<(), RuntimeError> {
-        match &self.inner.subagent_manager {
+        match &self.inner.subagents.manager {
             Some(manager) => manager.send_message(agent_id, message).await,
             None => Err(RuntimeError::InvalidSubagentSelection {
                 operation: "send_subagent_message",
@@ -376,7 +378,7 @@ impl Runtime {
         &self,
         agent_id: &merry_core::SubagentId,
     ) -> Result<crate::WaitSubagentsOutput, RuntimeError> {
-        match &self.inner.subagent_manager {
+        match &self.inner.subagents.manager {
             Some(manager) => manager.cancel(std::slice::from_ref(agent_id)).await,
             None => Err(RuntimeError::InvalidSubagentSelection {
                 operation: "cancel_subagents",
@@ -387,11 +389,11 @@ impl Runtime {
     pub(crate) fn subscribe_subagent_events(
         &self,
     ) -> tokio::sync::broadcast::Receiver<RuntimeJournalEvent> {
-        self.inner.subagent_event_sink.subscribe()
+        self.inner.subagents.event_sink.subscribe()
     }
 
     pub(crate) async fn flush_attached_session_store(&self) -> Result<(), RuntimeError> {
-        let Some(store) = self.inner.session_store.clone() else {
+        let Some(store) = self.inner.persistence.store.clone() else {
             return Ok(());
         };
         let prepared = {
@@ -407,7 +409,7 @@ impl Runtime {
     }
 
     pub(crate) fn shutdown_background_processes(&self) {
-        let Some(control) = self.inner.background_process_control.as_ref() else {
+        let Some(control) = self.inner.process_lanes.background_control.as_ref() else {
             return;
         };
         for process in control.list() {
@@ -422,7 +424,8 @@ impl Runtime {
 
     pub(crate) fn subagent_completion_notify(&self) -> Option<Arc<Notify>> {
         self.inner
-            .subagent_manager
+            .subagents
+            .manager
             .as_ref()
             .map(SubagentManager::completion_notify)
     }
@@ -430,21 +433,21 @@ impl Runtime {
     pub(crate) async fn take_subagent_completion_notifications(
         &self,
     ) -> Vec<crate::SubagentStatusView> {
-        match &self.inner.subagent_manager {
+        match &self.inner.subagents.manager {
             Some(manager) => manager.take_completion_notifications().await,
             None => Vec::new(),
         }
     }
 
     pub(crate) async fn has_subagent_completion_notifications(&self) -> bool {
-        match &self.inner.subagent_manager {
+        match &self.inner.subagents.manager {
             Some(manager) => manager.has_completion_notifications().await,
             None => false,
         }
     }
 
     pub(crate) async fn has_active_subagents(&self) -> bool {
-        match &self.inner.subagent_manager {
+        match &self.inner.subagents.manager {
             Some(manager) => manager.has_active_agents().await,
             None => false,
         }
@@ -452,7 +455,7 @@ impl Runtime {
 
     /// Cancels all live subagents owned by this runtime and awaits their task handles.
     pub async fn shutdown_subagents(&self) {
-        if let Some(manager) = &self.inner.subagent_manager {
+        if let Some(manager) = &self.inner.subagents.manager {
             manager.shutdown().await;
         }
     }
@@ -611,7 +614,7 @@ impl Runtime {
     }
 
     async fn persist_resume_safe_snapshot_if_store_attached(&self) -> Result<(), RuntimeError> {
-        let Some(store) = self.inner.session_store.as_ref() else {
+        let Some(store) = self.inner.persistence.store.as_ref() else {
             return Ok(());
         };
         let bundle = {
@@ -677,7 +680,7 @@ impl Runtime {
     /// Returns whether this runtime asks the model for tool-progress commentary.
     #[must_use]
     pub fn progress_commentary(&self) -> bool {
-        self.inner.progress_commentary
+        self.inner.models.progress_commentary
     }
 
     /// Executes one pending tool call through a runtime-registered executor.
@@ -827,7 +830,7 @@ impl Runtime {
         active_permit: ActiveStepPermit,
         started_notify: tokio::sync::oneshot::Sender<()>,
     ) -> Result<Option<CompactionOutcome>, RuntimeError> {
-        let policy = self.inner.automatic_compaction.read().await.policy();
+        let policy = self.inner.models.automatic_compaction.read().await.policy();
         compact_context_once_inner(
             &self.inner,
             policy,
@@ -901,7 +904,7 @@ impl Runtime {
 impl Runtime {
     /// Returns the automatic compaction policy used by subsequent requests.
     pub async fn automatic_compaction_config(&self) -> CompactionConfig {
-        self.inner.automatic_compaction.read().await.clone()
+        self.inner.models.automatic_compaction.read().await.clone()
     }
 
     pub(crate) async fn update_interactive_primary_model(
@@ -932,7 +935,7 @@ impl Runtime {
         });
         if role == crate::RuntimeModelRole::Primary
             && let Some(ref cfg) = entry
-            && let Some(manager) = self.inner.subagent_manager.as_ref()
+            && let Some(manager) = self.inner.subagents.manager.as_ref()
         {
             manager.update_parent_primary_model(crate::ParentPrimaryModel {
                 provider: cfg.provider(),
@@ -941,7 +944,8 @@ impl Runtime {
             });
         }
         self.inner
-            .role_model_overrides
+            .models
+            .role_overrides
             .write()
             .await
             .insert(role, entry);
@@ -949,7 +953,8 @@ impl Runtime {
 
     pub(crate) fn update_interactive_max_parallel_tool_calls(&self, limit: std::num::NonZeroUsize) {
         self.inner
-            .max_parallel_tool_calls
+            .tools
+            .max_parallel_calls
             .store(limit.get(), std::sync::atomic::Ordering::Release);
     }
 
@@ -957,21 +962,21 @@ impl Runtime {
         &self,
         mode: crate::PermissionReviewMode,
     ) {
-        *self.inner.permission_review_mode.write().await = mode;
+        *self.inner.permissions.review_mode.write().await = mode;
     }
 
     pub(crate) async fn update_interactive_permission_admission_source(
         &self,
         source: Arc<dyn crate::PermissionAdmissionSource>,
     ) {
-        *self.inner.permission_admission_source.write().await = Some(source);
+        *self.inner.permissions.admission_source.write().await = Some(source);
     }
 
     pub(crate) fn update_interactive_generation_config(
         &self,
         generation_config: merry_llm::GenerationConfig,
     ) {
-        if let Some(manager) = self.inner.subagent_manager.as_ref() {
+        if let Some(manager) = self.inner.subagents.manager.as_ref() {
             manager.update_parent_generation_config(generation_config);
         }
     }
@@ -983,7 +988,8 @@ impl Runtime {
     ) -> Result<(), RuntimeError> {
         let manager =
             self.inner
-                .subagent_manager
+                .subagents
+                .manager
                 .as_ref()
                 .ok_or(RuntimeError::InvalidStepInput {
                     reason: "interactive subagent runtime control is unavailable",
@@ -992,29 +998,29 @@ impl Runtime {
     }
 
     pub(crate) async fn update_interactive_automatic_compaction(&self, config: CompactionConfig) {
-        *self.inner.automatic_compaction.write().await = config;
+        *self.inner.models.automatic_compaction.write().await = config;
     }
 
     pub(crate) async fn update_interactive_context_window_tokens(
         &self,
         context_window_tokens: Option<NonZeroU64>,
     ) {
-        *self.inner.context_window_tokens.write().await = context_window_tokens;
+        *self.inner.models.context_window_tokens.write().await = context_window_tokens;
     }
 
     pub(crate) fn native_hook_handler(&self) -> Option<&Arc<dyn crate::RuntimeHookHandler>> {
-        self.inner.hook_handler.as_ref()
+        self.inner.tools.hook_handler.as_ref()
     }
 
     pub(crate) fn bridge_hook_subscriptions(&self) -> &crate::HookSubscriptions {
-        &self.inner.bridge_hook_subscriptions
+        &self.inner.tools.bridge_hook_subscriptions
     }
 
     pub(crate) fn validate_registered_tool_input(
         &self,
         call: &merry_core::PendingToolCall,
     ) -> Option<Result<(), crate::tool_input_validation::ToolInputValidationError>> {
-        self.inner.tool_registry.validate_tool_input(call)
+        self.inner.tools.registry.validate_tool_input(call)
     }
 
     pub(crate) async fn compact_context_for_hook_with_active_permit(
@@ -1022,7 +1028,7 @@ impl Runtime {
         cancellation_token: tokio_util::sync::CancellationToken,
         active_permit: &ActiveStepPermit,
     ) -> Result<Option<CompactionOutcome>, RuntimeError> {
-        let policy = self.inner.automatic_compaction.read().await.policy();
+        let policy = self.inner.models.automatic_compaction.read().await.policy();
         auto_compaction::compact_context_once_inner(
             &self.inner,
             policy,

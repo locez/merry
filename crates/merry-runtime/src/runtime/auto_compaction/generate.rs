@@ -40,7 +40,7 @@ pub(in crate::runtime) async fn generate_and_install_compaction(
             return Err(compaction_cancelled_before_request());
         }
         let stream_context = ModelStreamContext::new(token.clone())
-            .with_prompt_cache_key(inner.prompt_cache_key.clone());
+            .with_prompt_cache_key(inner.models.prompt_cache_key.clone());
         match generate_validated_compaction_candidate(
             provider.clone(),
             plan.request.as_ref().clone(),
@@ -54,8 +54,8 @@ pub(in crate::runtime) async fn generate_and_install_compaction(
         {
             Ok(cleaned_summary) => {
                 let segment_hint = match (
-                    &inner.session_store,
-                    inner.history_retention.archive_config(),
+                    &inner.persistence.store,
+                    inner.persistence.history_retention.archive_config(),
                 ) {
                     (Some(store), Some(cfg)) if cfg.export_markdown() => {
                         let archive_dir = store.session_dir(&inner.session_id).join("archive");

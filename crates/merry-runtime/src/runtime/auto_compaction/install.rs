@@ -18,8 +18,8 @@ pub(in crate::runtime) async fn install_summary_compaction_transactionally(
     active_permit: ActiveStepPermit,
 ) -> Result<CompactionOutcome, RuntimeError> {
     let summary = summary.to_owned();
-    let retention = inner.history_retention;
-    let has_session_store = inner.session_store.is_some();
+    let retention = inner.persistence.history_retention;
+    let has_session_store = inner.persistence.store.is_some();
     let outcome = install_compaction_transaction(inner, &token, active_permit, move |session| {
         session.prepare_summary_compaction_install_with_retention(
             input,
@@ -55,7 +55,7 @@ async fn install_compaction_transaction(
     active_permit: ActiveStepPermit,
     prepare: impl FnOnce(&SessionState) -> Result<PreparedCompactionInstall, RuntimeError>,
 ) -> Result<Option<CompactionOutcome>, RuntimeError> {
-    let store = inner.session_store.clone();
+    let store = inner.persistence.store.clone();
     let mut session = tokio::select! {
         biased;
         () = token.cancelled() => return Err(compaction_cancelled_before_install()),
@@ -66,7 +66,8 @@ async fn install_compaction_transaction(
     }
 
     let prepared = prepare(&session)?;
-    let bundle = session.persistable_bundle_with_compaction(&prepared, &inner.history_retention)?;
+    let bundle = session
+        .persistable_bundle_with_compaction(&prepared, &inner.persistence.history_retention)?;
     let cursor = bundle.cursor.clone();
     let rotated = bundle.rotation.is_some();
     let Some(store) = store else {

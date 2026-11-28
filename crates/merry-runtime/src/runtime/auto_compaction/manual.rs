@@ -25,6 +25,7 @@ pub(in crate::runtime) async fn compact_context_once_inner(
     // Manual compaction uses the runtime's compaction reasoning level, not the
     // caller's primary-model generation config, and resolves it once per invocation.
     let reasoning_effort = inner
+        .models
         .automatic_compaction
         .read()
         .await

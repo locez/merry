@@ -38,10 +38,10 @@ const DREAM_TIMEOUT: Duration = Duration::from_secs(240);
 const MAX_OUTPUT_TOKENS: u64 = 16_384;
 
 pub(super) fn schedule(inner: &Arc<RuntimeInner>) {
-    if !inner.memory_maintenance {
+    if !inner.memory.maintenance_enabled {
         return;
     }
-    let Some(memory) = inner.durable_memory.clone() else {
+    let Some(memory) = inner.memory.durable.clone() else {
         return;
     };
     let inner = Arc::clone(inner);

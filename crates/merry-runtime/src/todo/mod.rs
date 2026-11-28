@@ -1,19 +1,19 @@
 //! Lightweight session-scoped checklist state and `update_todos` intrinsic tool.
 
 use crate::{
-    RegisteredTool, ToolActionKind, ToolExecutionContext, ToolExecutionError, ToolExecutor,
-    ToolExecutorFuture,
+    RegisteredTool,
+    tool::{PlanIntrinsicTool, RuntimeIntrinsicTool},
 };
 use merry_core::{
     CoreError, MAX_TODO_CONTENT_BYTES, MAX_TODO_ID_BYTES, MAX_TODO_ITEMS, TodoItem, TodoStatus,
-    ToolName, ToolSpec,
+    ToolSpec,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, fmt::Write, sync::Arc};
+use std::{collections::BTreeSet, fmt::Write};
 use thiserror::Error;
 
-pub(crate) const UPDATE_TODOS_TOOL_NAME: &str = "update_todos";
+const UPDATE_TODOS_TOOL_NAME: &str = "update_todos";
 
 /// Errors produced when validating a checklist update.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -222,32 +222,10 @@ pub(crate) fn todo_registered_tool() -> Result<RegisteredTool, CoreError> {
         "Create and manage a lightweight execution checklist shown live to the user. Use for multi-step work (3+ steps); skip for trivial single-step tasks. Default `merge: true` lets you update status by sending only `{id, status}`. Mark an item `completed` only after verifying the actual change or check.",
     )
     .map_err(CoreError::from)?;
-    Ok(RegisteredTool::new(
+    Ok(RegisteredTool::intrinsic(
         spec,
-        Arc::new(IntrinsicTodoExecutor),
-        ToolActionKind::RuntimeControl,
+        RuntimeIntrinsicTool::Plan(PlanIntrinsicTool::UpdateTodos),
     ))
-}
-
-pub(crate) fn is_todo_tool(name: &ToolName) -> bool {
-    name.as_str() == UPDATE_TODOS_TOOL_NAME
-}
-
-struct IntrinsicTodoExecutor;
-
-impl ToolExecutor for IntrinsicTodoExecutor {
-    fn execute<'a>(
-        &'a self,
-        call: merry_core::PendingToolCall,
-        _context: ToolExecutionContext,
-    ) -> ToolExecutorFuture<'a> {
-        Box::pin(async move {
-            Err(ToolExecutionError::infrastructure(format!(
-                "intrinsic todo tool {} reached the generic executor",
-                call.name()
-            )))
-        })
-    }
 }
 
 #[cfg(test)]

@@ -27,6 +27,38 @@ pub enum ToolConcurrency {
     Exclusive,
 }
 
+/// Typed Plan Mode / checklist intrinsic operations owned by the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanIntrinsicTool {
+    EnterPlanMode,
+    WritePlan,
+    ReadPlan,
+    ExitPlanMode,
+    UpdateTodos,
+}
+
+/// Typed runtime-intrinsic dispatch target bound at tool registration time.
+///
+/// Storing the dispatch target on [`RegisteredTool`] eliminates name-based
+/// string dispatch inside tool execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeIntrinsicTool {
+    Plan(PlanIntrinsicTool),
+    RequestPermissions,
+}
+
+/// Proposal preflight and low-risk workspace patch lane policy for a registered tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolActionProposalMode {
+    /// Proposal preflight is disabled.
+    Disabled,
+    /// Runtime requests read-only proposal evidence before mutating execution.
+    Enabled,
+    /// Proposal preflight is enabled and this tool is eligible for the runtime's
+    /// opt-in low-risk workspace patch lane.
+    LowRiskWorkspacePatch,
+}
+
 /// Runtime-owned registered tool definition.
 ///
 /// A registered tool binds a provider-visible spec to an executor. It does not
@@ -39,7 +71,8 @@ pub struct RegisteredTool {
     pub(super) external_binding: Option<merry_core::ExternalToolBinding>,
     pub(super) executor: Arc<dyn ToolExecutor>,
     pub(super) action_kind: ToolActionKind,
-    pub(super) proposals_enabled: bool,
+    pub(super) proposal_mode: ToolActionProposalMode,
+    pub(super) intrinsic: Option<RuntimeIntrinsicTool>,
     pub(super) runner: ToolRunner,
     pub(super) concurrency: ToolConcurrency,
 }
@@ -61,7 +94,27 @@ impl RegisteredTool {
             external_binding: None,
             executor,
             action_kind,
-            proposals_enabled: false,
+            proposal_mode: ToolActionProposalMode::Disabled,
+            intrinsic: None,
+            runner: ToolRunner::Runtime,
+            concurrency: ToolConcurrency::Exclusive,
+        }
+    }
+
+    /// Creates a runtime-owned intrinsic control tool bound to its typed
+    /// dispatch target.
+    ///
+    /// Intrinsic tools always carry [`ToolActionKind::RuntimeControl`] and are
+    /// intercepted by runtime dispatch before the generic executor path.
+    #[must_use]
+    pub(crate) fn intrinsic(spec: ToolSpec, intrinsic: RuntimeIntrinsicTool) -> Self {
+        Self {
+            spec,
+            external_binding: None,
+            executor: Arc::new(IntrinsicToolExecutor),
+            action_kind: ToolActionKind::RuntimeControl,
+            proposal_mode: ToolActionProposalMode::Disabled,
+            intrinsic: Some(intrinsic),
             runner: ToolRunner::Runtime,
             concurrency: ToolConcurrency::Exclusive,
         }
@@ -88,7 +141,21 @@ impl RegisteredTool {
     /// explicitly opt in here. The hook is still skipped for read-only tools.
     #[must_use]
     pub fn with_action_proposal(mut self) -> Self {
-        self.proposals_enabled = true;
+        if self.proposal_mode == ToolActionProposalMode::Disabled {
+            self.proposal_mode = ToolActionProposalMode::Enabled;
+        }
+        self
+    }
+
+    /// Opts a [`ToolActionKind::WorkspaceWrite`] tool into the low-risk
+    /// workspace patch lane when the runtime enables
+    /// [`crate::RuntimeBuilder::allow_low_risk_apply_patches`].
+    ///
+    /// Automatically enables read-only action proposals so callers cannot
+    /// misconfigure the patch lane without proposal preflight.
+    #[must_use]
+    pub fn with_low_risk_workspace_patch_lane(mut self) -> Self {
+        self.proposal_mode = ToolActionProposalMode::LowRiskWorkspacePatch;
         self
     }
 
@@ -120,7 +187,8 @@ impl RegisteredTool {
             external_binding: None,
             executor: Arc::new(BridgeExecutor),
             action_kind: ToolActionKind::ReadOnly,
-            proposals_enabled: false,
+            proposal_mode: ToolActionProposalMode::Disabled,
+            intrinsic: None,
             runner: ToolRunner::Bridge,
             concurrency: ToolConcurrency::Exclusive,
         }
@@ -152,12 +220,50 @@ impl RegisteredTool {
 
     /// Returns whether this tool opted into action proposal evidence.
     #[must_use]
-    pub fn proposals_enabled(&self) -> bool {
-        self.proposals_enabled
+    pub const fn proposals_enabled(&self) -> bool {
+        !matches!(self.proposal_mode, ToolActionProposalMode::Disabled)
+    }
+
+    /// Returns whether this tool opted into the low-risk workspace patch lane.
+    #[must_use]
+    pub const fn low_risk_workspace_patch_lane(&self) -> bool {
+        matches!(
+            self.proposal_mode,
+            ToolActionProposalMode::LowRiskWorkspacePatch
+        )
+    }
+
+    /// Returns the typed proposal policy for this tool.
+    #[must_use]
+    pub(crate) const fn proposal_mode(&self) -> ToolActionProposalMode {
+        self.proposal_mode
+    }
+
+    /// Returns the typed runtime-intrinsic dispatch target, if any.
+    #[must_use]
+    pub(crate) const fn runtime_intrinsic(&self) -> Option<RuntimeIntrinsicTool> {
+        self.intrinsic
     }
 
     pub(crate) fn executor(&self) -> Arc<dyn ToolExecutor> {
         Arc::clone(&self.executor)
+    }
+}
+
+struct IntrinsicToolExecutor;
+
+impl ToolExecutor for IntrinsicToolExecutor {
+    fn execute<'a>(
+        &'a self,
+        call: PendingToolCall,
+        _context: ToolExecutionContext,
+    ) -> ToolExecutorFuture<'a> {
+        Box::pin(async move {
+            Err(ToolExecutionError::infrastructure(format!(
+                "intrinsic runtime tool {} reached the generic executor",
+                call.name().as_str()
+            )))
+        })
     }
 }
 
@@ -184,7 +290,8 @@ impl std::fmt::Debug for RegisteredTool {
             .debug_struct("RegisteredTool")
             .field("spec", &self.spec)
             .field("action_kind", &self.action_kind)
-            .field("proposals_enabled", &self.proposals_enabled)
+            .field("proposal_mode", &self.proposal_mode)
+            .field("intrinsic", &self.intrinsic)
             .field("runner", &self.runner)
             .field("concurrency", &self.concurrency)
             .finish_non_exhaustive()

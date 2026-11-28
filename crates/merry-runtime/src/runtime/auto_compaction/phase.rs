@@ -95,8 +95,8 @@ pub(in crate::runtime) async fn reduce_context_over_threshold(
         request_inputs,
         tool_specs,
         generation_config,
-        &inner.prompt_profile,
-        inner.progress_commentary,
+        &inner.models.prompt_profile,
+        inner.models.progress_commentary,
     ) {
         Ok(tokens) => tokens,
         Err(error) => {

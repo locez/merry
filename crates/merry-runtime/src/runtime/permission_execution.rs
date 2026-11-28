@@ -101,7 +101,7 @@ async fn execute_permissioned_process_request(
     context: ToolExecutionContext,
     attribute_plan_effect: bool,
 ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
-    let Some(runner_factory) = inner.permissioned_process_runner_factory.clone() else {
+    let Some(runner_factory) = inner.process_lanes.permissioned_runner_factory.clone() else {
         let outcome = permission_blocked_outcome(
             pending,
             "permissioned process execution is not configured for this runtime",
@@ -165,7 +165,7 @@ async fn execute_permissioned_process_request(
             crate::process::requires_process_action_review(intent)
         }
     };
-    let review_mode = *inner.permission_review_mode.read().await;
+    let review_mode = *inner.permissions.review_mode.read().await;
     let may_reuse_existing_grant = capabilities_are_satisfied
         && !action_requires_independent_review
         && !matches!(
@@ -366,7 +366,7 @@ pub(super) async fn review_permission_request(
     request: crate::PermissionRequest,
     context: &ToolExecutionContext,
 ) -> PermissionAdmissionResult {
-    let mode = *inner.permission_review_mode.read().await;
+    let mode = *inner.permissions.review_mode.read().await;
     if mode.is_fully_trusted() {
         return Ok(crate::PermissionAdmissionDecision::approved(
             "explicit fully trusted mode admitted this configured action",
@@ -378,13 +378,13 @@ pub(super) async fn review_permission_request(
         ));
     }
 
-    let result = if mode.requires_model_review(inner.runtime_trust_level) {
+    let result = if mode.requires_model_review(inner.permissions.trust_level) {
         if let Some(model_config) = inner
             .model_config_with_primary_fallback(RuntimeModelRole::ApprovalReview)
             .await
         {
-            let recorded_decisions = inner.recorded_permission_decisions_snapshot().await;
-            let environment = match inner.permission_review_workspace_root.as_deref() {
+            let recorded_decisions = inner.permissions.recorded_decisions_snapshot().await;
+            let environment = match inner.permissions.review_workspace_root.as_deref() {
                 Some(workspace_root) => {
                     probe_environment_metadata(
                         workspace_root,
@@ -397,7 +397,7 @@ pub(super) async fn review_permission_request(
             };
             let source = ModelBackedPermissionAdmissionSource::from_config_with_context(
                 model_config,
-                inner.permission_review_rules.clone(),
+                inner.permissions.review_rules.clone(),
                 recorded_decisions,
                 environment,
             )?;
@@ -405,7 +405,7 @@ pub(super) async fn review_permission_request(
                 .review(
                     request.clone(),
                     PermissionAdmissionContext::new(context.cancellation_token().clone())
-                        .with_actor(inner.permission_actor.clone()),
+                        .with_actor(inner.permissions.actor.clone()),
                 )
                 .await;
             match model_result {
@@ -453,20 +453,20 @@ pub(super) async fn review_permission_request(
             .await
         }
     } else {
-        let Some(source) = inner.permission_admission_source.read().await.clone() else {
+        let Some(source) = inner.permissions.admission_source.read().await.clone() else {
             return Err(crate::PermissionAdmissionError::ReviewModelUnavailable);
         };
         source
             .review(
                 request.clone(),
                 PermissionAdmissionContext::new(context.cancellation_token().clone())
-                    .with_actor(inner.permission_actor.clone()),
+                    .with_actor(inner.permissions.actor.clone()),
             )
             .await
     };
 
     if let Ok(decision) = &result {
-        inner.record_permission_decision(&request, decision).await;
+        inner.permissions.record_decision(&request, decision).await;
     }
     result
 }
@@ -481,11 +481,11 @@ async fn host_fallback_or_error(
     if !matches!(mode, crate::PermissionReviewMode::ModelThenHostFallback) {
         return Err(crate::PermissionAdmissionError::ReviewModelUnavailable);
     }
-    let Some(source) = inner.permission_admission_source.read().await.clone() else {
+    let Some(source) = inner.permissions.admission_source.read().await.clone() else {
         return Err(crate::PermissionAdmissionError::ReviewModelUnavailable);
     };
     let review_context = PermissionAdmissionContext::new(context.cancellation_token().clone())
         .with_host_fallback_reason(reason)
-        .with_actor(inner.permission_actor.clone());
+        .with_actor(inner.permissions.actor.clone());
     source.review(request, review_context).await
 }

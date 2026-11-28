@@ -451,7 +451,7 @@ async fn automatic_compaction_completed_waits_for_directory_durability() {
                 .expect("turn completes");
         }
     }
-    *runtime.inner.automatic_compaction.write().await = CompactionConfig::enabled(
+    *runtime.inner.models.automatic_compaction.write().await = CompactionConfig::enabled(
         CitationCompactionPolicy::new(None, None, 1).expect("valid policy"),
     );
 

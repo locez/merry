@@ -23,8 +23,11 @@ pub use proposal::{
     ActionExecutionEvidence, ActionProposal, ActionProposalError, ActionProposalEvidence,
     ToolActionKind,
 };
+pub(crate) use registry::{
+    PlanIntrinsicTool, RuntimeIntrinsicTool, ToolActionProposalMode, ToolRegistry,
+    ToolRegistryError,
+};
 pub use registry::{RegisteredTool, ToolConcurrency, ToolRunner};
-pub(crate) use registry::{ToolRegistry, ToolRegistryError};
 
 mod executor;
 mod outcome;

@@ -1,5 +1,8 @@
 use super::config::{CompactionConfig, HistoryRetention};
-use super::state::AcceptedLocalWorkspaceProcessRunner;
+use super::state::{
+    AcceptedLocalWorkspaceProcessRunner, MemoryState, ModelContextState, PermissionGovernanceState,
+    ProcessExecutionLanes, SessionPersistenceState, SubagentState, ToolDispatchState,
+};
 use super::{Runtime, RuntimeInner};
 use crate::{
     AcceptedLocalWorkspaceProcessAdmission, CompactedCheckpoint, FileSessionStore, LoadedSession,
@@ -32,7 +35,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize},
     },
 };
 use tokio::sync::{Mutex, RwLock};
@@ -888,55 +891,65 @@ impl RuntimeBuilder {
         Ok(Runtime {
             inner: Arc::new(RuntimeInner {
                 session_id: self.session_id.clone(),
-                prompt_cache_key: self
-                    .prompt_cache_key
-                    .unwrap_or_else(|| self.session_id.clone()),
                 session,
                 active_step: Arc::new(AtomicBool::new(false)),
-                memory_projection_epoch: AtomicU64::new(0),
-                event_buffer_size: self.event_buffer_size,
-                max_parallel_tool_calls: std::sync::atomic::AtomicUsize::new(
-                    self.max_parallel_tool_calls.get(),
-                ),
-                model_configs: self.model_configs,
-                role_model_overrides: RwLock::new(std::collections::BTreeMap::new()),
-                automatic_compaction: RwLock::new(self.automatic_compaction),
-                history_retention: self.history_retention,
-                context_window_tokens: RwLock::new(self.context_window_tokens),
-                capabilities: self.capabilities,
-                prompt_profile: self.prompt_profile,
-                progress_commentary: self.progress_commentary,
-                tool_registry,
-                tool_admission: self.tool_admission,
-                memory_activation_source: self.memory_activation_source,
-                allow_low_risk_apply_patches: self.allow_low_risk_apply_patches,
-                low_risk_process_runner: self.low_risk_process_runner,
-                read_only_shell_process_runner: self.read_only_shell_process_runner,
-                accepted_local_workspace_process_runner: self
-                    .accepted_local_workspace_process_runner,
-                runtime_trust_level: self.runtime_trust_level,
-                permission_review_mode: RwLock::new(self.permission_review_mode),
-                permission_review_rules: self.permission_review_rules,
-                permission_review_workspace_root: self.permission_review_workspace_root,
-                permission_actor: self.permission_actor,
-                recorded_permission_decisions: RwLock::new(VecDeque::new()),
-                permission_admission_source: RwLock::new(self.permission_admission_source),
-                permissioned_process_runner_factory: self.permissioned_process_runner_factory,
-                background_process_control: self.background_process_control,
-                subagent_manager,
-                coordinator_plan_tools: self.coordinator_plan_tools,
-                session_store: self.session_store,
-                session_reservation: std::sync::Mutex::new(owned_reservation),
                 closed: AtomicBool::new(false),
-                tool_batch_active: AtomicBool::new(false),
-                activity_hub,
-                subagent_event_sink,
+                event_buffer_size: self.event_buffer_size,
+                capabilities: self.capabilities,
                 trajectory,
-                durable_memory: self.durable_memory,
-                memory_maintenance: self.memory_maintenance,
-                memory_context,
-                hook_handler: self.hook_handler,
-                bridge_hook_subscriptions: self.bridge_hook_subscriptions,
+                persistence: SessionPersistenceState {
+                    store: self.session_store,
+                    reservation: std::sync::Mutex::new(owned_reservation),
+                    history_retention: self.history_retention,
+                },
+                models: ModelContextState {
+                    prompt_cache_key: self
+                        .prompt_cache_key
+                        .unwrap_or_else(|| self.session_id.clone()),
+                    configs: self.model_configs,
+                    role_overrides: RwLock::new(BTreeMap::new()),
+                    automatic_compaction: RwLock::new(self.automatic_compaction),
+                    context_window_tokens: RwLock::new(self.context_window_tokens),
+                    prompt_profile: self.prompt_profile,
+                    progress_commentary: self.progress_commentary,
+                },
+                memory: MemoryState {
+                    activation_source: self.memory_activation_source,
+                    projection_epoch: AtomicU64::new(0),
+                    durable: self.durable_memory,
+                    maintenance_enabled: self.memory_maintenance,
+                    frozen_context: memory_context,
+                },
+                tools: ToolDispatchState {
+                    registry: tool_registry,
+                    admission: self.tool_admission,
+                    max_parallel_calls: AtomicUsize::new(self.max_parallel_tool_calls.get()),
+                    batch_active: AtomicBool::new(false),
+                    allow_low_risk_workspace_patches: self.allow_low_risk_apply_patches,
+                    hook_handler: self.hook_handler,
+                    bridge_hook_subscriptions: self.bridge_hook_subscriptions,
+                },
+                process_lanes: ProcessExecutionLanes {
+                    low_risk_runner: self.low_risk_process_runner,
+                    read_only_shell_runner: self.read_only_shell_process_runner,
+                    accepted_local_workspace_runner: self.accepted_local_workspace_process_runner,
+                    permissioned_runner_factory: self.permissioned_process_runner_factory,
+                    background_control: self.background_process_control,
+                },
+                permissions: PermissionGovernanceState {
+                    trust_level: self.runtime_trust_level,
+                    review_mode: RwLock::new(self.permission_review_mode),
+                    review_rules: self.permission_review_rules,
+                    review_workspace_root: self.permission_review_workspace_root,
+                    actor: self.permission_actor,
+                    recorded_decisions: RwLock::new(VecDeque::new()),
+                    admission_source: RwLock::new(self.permission_admission_source),
+                },
+                subagents: SubagentState {
+                    manager: subagent_manager,
+                    activity_hub,
+                    event_sink: subagent_event_sink,
+                },
             }),
         })
     }

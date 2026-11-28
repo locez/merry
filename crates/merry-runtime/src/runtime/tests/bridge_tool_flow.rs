@@ -81,7 +81,8 @@ fn allow_bridge_tools_accepts_bridge_registered_tool() {
     assert!(
         runtime
             .inner
-            .tool_registry
+            .tools
+            .registry
             .registered_tool(&ToolName::new("bridge_lookup").expect("valid tool name"))
             .is_some()
     );

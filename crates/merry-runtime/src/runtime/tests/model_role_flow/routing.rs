@@ -54,7 +54,7 @@ fn role_model_config_stores_all_roles_independently_and_overrides_same_role() {
         (RuntimeModelRole::ContextCompaction, &compaction_model),
     ] {
         assert_eq!(
-            runtime.inner.model_configs.model_for_role(role),
+            runtime.inner.models.configs.model_for_role(role),
             Some(expected_model)
         );
     }
@@ -99,7 +99,8 @@ fn role_scoped_retry_policy_does_not_rewrite_existing_model_configs() {
     assert_eq!(
         runtime
             .inner
-            .model_configs
+            .models
+            .configs
             .get(RuntimeModelRole::Primary)
             .expect("primary config should exist")
             .retry_policy(),
@@ -108,7 +109,8 @@ fn role_scoped_retry_policy_does_not_rewrite_existing_model_configs() {
     assert_eq!(
         runtime
             .inner
-            .model_configs
+            .models
+            .configs
             .get(RuntimeModelRole::SummaryMemory)
             .expect("summary-memory config should exist")
             .retry_policy(),

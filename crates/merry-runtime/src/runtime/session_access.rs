@@ -38,11 +38,14 @@ impl Runtime {
         self.inner.closed.store(true, Ordering::Release);
         let reservation = self
             .inner
-            .session_reservation
+            .persistence
+            .reservation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        if let (Some(reservation), Some(store)) = (reservation, self.inner.session_store.as_ref()) {
+        if let (Some(reservation), Some(store)) =
+            (reservation, self.inner.persistence.store.as_ref())
+        {
             store
                 .release_empty_reservation(&self.inner.session_id, reservation)
                 .await;
@@ -386,7 +389,7 @@ impl Runtime {
         if hot.is_some() {
             return Ok(hot);
         }
-        let Some(store) = self.inner.session_store.as_ref() else {
+        let Some(store) = self.inner.persistence.store.as_ref() else {
             return Ok(None);
         };
         Ok(
@@ -413,7 +416,7 @@ impl Runtime {
         if hot.is_some() {
             return Ok(hot);
         }
-        let Some(store) = self.inner.session_store.as_ref() else {
+        let Some(store) = self.inner.persistence.store.as_ref() else {
             return Ok(None);
         };
         let archived =
@@ -467,7 +470,7 @@ impl Runtime {
     /// Lists surviving archived compaction segment numbers in ascending order
     /// (`1, 2, ...`) when a session store is attached.
     pub async fn archived_segment_numbers(&self) -> Result<Vec<u32>, RuntimeError> {
-        let Some(store) = self.inner.session_store.as_ref() else {
+        let Some(store) = self.inner.persistence.store.as_ref() else {
             return Ok(Vec::new());
         };
         Ok(crate::session::list_archived_segment_numbers(store, &self.inner.session_id).await?)
@@ -479,7 +482,7 @@ impl Runtime {
         &self,
         segment_number: u32,
     ) -> Result<Vec<SessionTranscriptItem>, RuntimeError> {
-        let Some(store) = self.inner.session_store.as_ref() else {
+        let Some(store) = self.inner.persistence.store.as_ref() else {
             return Ok(Vec::new());
         };
         Ok(crate::session::read_archived_segment_transcript(

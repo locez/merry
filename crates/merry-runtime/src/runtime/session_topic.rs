@@ -77,7 +77,7 @@ enum TopicError {
 }
 
 pub(super) async fn schedule(inner: &Arc<RuntimeInner>) {
-    let Some(config) = inner.model_configs.get(RuntimeModelRole::SummaryMemory) else {
+    let Some(config) = inner.models.configs.get(RuntimeModelRole::SummaryMemory) else {
         return;
     };
     let prompt = {

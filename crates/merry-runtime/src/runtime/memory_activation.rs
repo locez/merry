@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 pub(super) async fn clear_current_activated_memories(inner: &RuntimeInner) {
     let mut session = inner.session.lock().await;
     session.replace_activated_memories(Vec::new());
-    inner.memory_projection_epoch.fetch_add(1, Ordering::AcqRel);
+    inner.memory.projection_epoch.fetch_add(1, Ordering::AcqRel);
 }
 
 /// Clears pre-commit memory activation if the producer is aborted before the
@@ -42,7 +42,7 @@ impl Drop for ActivationProjectionGuard {
             return;
         }
 
-        if self.inner.memory_projection_epoch.load(Ordering::Acquire) != self.epoch {
+        if self.inner.memory.projection_epoch.load(Ordering::Acquire) != self.epoch {
             return;
         }
 
@@ -53,13 +53,14 @@ impl Drop for ActivationProjectionGuard {
         let inner = Arc::clone(&self.inner);
         let epoch = self.epoch;
         tokio::spawn(async move {
-            if inner.memory_projection_epoch.load(Ordering::Acquire) != epoch {
+            if inner.memory.projection_epoch.load(Ordering::Acquire) != epoch {
                 return;
             }
 
             let mut session = inner.session.lock().await;
             if inner
-                .memory_projection_epoch
+                .memory
+                .projection_epoch
                 .compare_exchange(epoch, epoch + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
@@ -75,7 +76,8 @@ fn clear_activated_memories_if_epoch_matches(inner: &RuntimeInner, epoch: u64) -
     };
 
     if inner
-        .memory_projection_epoch
+        .memory
+        .projection_epoch
         .compare_exchange(epoch, epoch + 1, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {

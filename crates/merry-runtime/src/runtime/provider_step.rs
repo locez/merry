@@ -135,7 +135,8 @@ pub(super) async fn run_provider_step(
                 return;
             }
             result = inner
-                .memory_activation_source
+                .memory
+                .activation_source
                 .activate(seed, candidates, activation_context) => result,
         };
         if token.is_cancelled() {
@@ -172,14 +173,15 @@ pub(super) async fn run_provider_step(
         }
         session.replace_activated_memories(activated_memories);
         let activation_epoch = inner
-            .memory_projection_epoch
+            .memory
+            .projection_epoch
             .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
         let request_inputs = match step_request_inputs_from_session(&session) {
             Ok(inputs) => inputs,
             Err(error) => {
                 session.replace_activated_memories(Vec::new());
-                inner.memory_projection_epoch.fetch_add(1, Ordering::AcqRel);
+                inner.memory.projection_epoch.fetch_add(1, Ordering::AcqRel);
                 let diagnostic = diagnostic_from_text(
                     "transcript_artifact",
                     format!("transcript artifact could not be read: {error}"),
@@ -193,7 +195,8 @@ pub(super) async fn run_provider_step(
         session.plan_state_mut().record_prompt_delivered();
         (request_inputs, activation_epoch)
     };
-    let mut request_inputs = request_inputs.with_memory_context(inner.memory_context.clone());
+    let mut request_inputs =
+        request_inputs.with_memory_context(inner.memory.frozen_context.clone());
     let mut projection_guard =
         ActivationProjectionGuard::new(Arc::clone(inner), token.clone(), activation_epoch);
     let provider = provider_config.provider();
@@ -241,8 +244,8 @@ pub(super) async fn run_provider_step(
         &request_inputs,
         tool_specs.clone(),
         generation_config.clone(),
-        &inner.prompt_profile,
-        inner.progress_commentary,
+        &inner.models.prompt_profile,
+        inner.models.progress_commentary,
     ) {
         Ok(request) => {
             tracing::debug!(
@@ -261,6 +264,7 @@ pub(super) async fn run_provider_step(
     };
 
     let context_window_override = inner
+        .models
         .context_window_tokens
         .read()
         .await
@@ -279,7 +283,7 @@ pub(super) async fn run_provider_step(
     // Read the compaction policy once for this step instead of re-locking per
     // compaction attempt.
     let (automatic_compaction_enabled, automatic_policy, compaction_reasoning_effort) = {
-        let config = inner.automatic_compaction.read().await;
+        let config = inner.models.automatic_compaction.read().await;
         (
             config.is_enabled(),
             config.policy(),
@@ -354,7 +358,7 @@ pub(super) async fn run_provider_step(
                 step_request_inputs_from_session(&session)
             };
             request_inputs = match refreshed {
-                Ok(inputs) => inputs.with_memory_context(inner.memory_context.clone()),
+                Ok(inputs) => inputs.with_memory_context(inner.memory.frozen_context.clone()),
                 Err(error) => {
                     clear_current_activated_memories(inner).await;
                     let diagnostic =
@@ -370,8 +374,8 @@ pub(super) async fn run_provider_step(
                 &request_inputs,
                 tool_specs.clone(),
                 generation_config.clone(),
-                &inner.prompt_profile,
-                inner.progress_commentary,
+                &inner.models.prompt_profile,
+                inner.models.progress_commentary,
             ) {
                 Ok(request) => request,
                 Err(error) => {
@@ -509,7 +513,7 @@ pub(super) async fn run_provider_step(
     }
 
     let stream_context = ModelStreamContext::new(token.clone())
-        .with_prompt_cache_key(inner.prompt_cache_key.clone());
+        .with_prompt_cache_key(inner.models.prompt_cache_key.clone());
     let (retry_event_sender, mut retry_event_receiver) = mpsc::channel(8);
     trace_provider_request(
         inner.session_id.as_str(),

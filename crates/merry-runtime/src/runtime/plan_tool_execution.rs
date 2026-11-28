@@ -5,13 +5,10 @@ use crate::{
     RuntimeError, ToolOutput,
     plan::{
         EnterPlanModeInput, ExitPlanModeInput, PlanError, ReadPlanInput, WritePlanInput,
-        tools::{
-            ENTER_PLAN_MODE_TOOL_NAME, EXIT_PLAN_MODE_TOOL_NAME, READ_PLAN_TOOL_NAME,
-            WRITE_PLAN_TOOL_NAME,
-        },
         unix_time_ms,
     },
-    todo::{TodoError, UPDATE_TODOS_TOOL_NAME, UpdateTodosInput},
+    todo::{TodoError, UpdateTodosInput},
+    tool::PlanIntrinsicTool,
 };
 use merry_core::{
     ErrorInfo, PendingToolCall, RuntimeJournalEvent, RuntimeJournalPayload, ToolCallResultStatus,
@@ -22,30 +19,15 @@ use super::RuntimeInner;
 
 pub(super) async fn execute_plan_or_todo_tool_call(
     inner: &RuntimeInner,
+    intrinsic: PlanIntrinsicTool,
     pending: &PendingToolCall,
 ) -> Result<Vec<RuntimeJournalEvent>, RuntimeError> {
-    if !inner.coordinator_plan_tools {
-        return Err(RuntimeError::ToolExecutionFailed {
-            session_id: inner.session_id.clone(),
-            call_id: pending.id().clone(),
-            message: format!(
-                "plan/todo tool {} is not enabled for this runtime",
-                pending.name()
-            ),
-        });
-    }
-
-    match pending.name().as_str() {
-        ENTER_PLAN_MODE_TOOL_NAME => execute_enter_plan_mode(inner, pending).await,
-        WRITE_PLAN_TOOL_NAME => execute_write_plan(inner, pending).await,
-        READ_PLAN_TOOL_NAME => execute_read_plan(inner, pending).await,
-        EXIT_PLAN_MODE_TOOL_NAME => execute_exit_plan_mode(inner, pending).await,
-        UPDATE_TODOS_TOOL_NAME => execute_update_todos(inner, pending).await,
-        _ => Err(RuntimeError::ToolExecutionFailed {
-            session_id: inner.session_id.clone(),
-            call_id: pending.id().clone(),
-            message: format!("unknown intrinsic tool {}", pending.name()),
-        }),
+    match intrinsic {
+        PlanIntrinsicTool::EnterPlanMode => execute_enter_plan_mode(inner, pending).await,
+        PlanIntrinsicTool::WritePlan => execute_write_plan(inner, pending).await,
+        PlanIntrinsicTool::ReadPlan => execute_read_plan(inner, pending).await,
+        PlanIntrinsicTool::ExitPlanMode => execute_exit_plan_mode(inner, pending).await,
+        PlanIntrinsicTool::UpdateTodos => execute_update_todos(inner, pending).await,
     }
 }
 
@@ -123,7 +105,7 @@ async fn execute_write_plan(
     };
 
     let mut file_path_display = doc.summary.file_name.clone();
-    if let Some(store) = inner.session_store.as_ref() {
+    if let Some(store) = inner.persistence.store.as_ref() {
         let written_path = store
             .write_plan_file(&inner.session_id, &doc.summary.file_name, &doc.content)
             .await?;
@@ -221,7 +203,7 @@ async fn execute_exit_plan_mode(
         (doc, event)
     };
 
-    if let Some(store) = inner.session_store.as_ref() {
+    if let Some(store) = inner.persistence.store.as_ref() {
         let _ = store
             .write_plan_file(&inner.session_id, &doc.summary.file_name, &doc.content)
             .await?;
