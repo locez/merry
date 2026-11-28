@@ -8,9 +8,9 @@ use crate::{
     },
     tui::theme::ThemePreset,
 };
-use merry_llm::{ReasoningEffort, ServiceTier};
-use merry_provider_openai::OpenAiProtocol;
-use merry_runtime::HostIntegration;
+use merry::permissions::HostIntegration;
+use merry::providers::OpenAiProtocol;
+use merry::providers::{ReasoningEffort, ServiceTier};
 use std::collections::BTreeMap;
 
 const DEFAULT_MAX_PARALLEL_TOOL_CALLS: usize = 8;
@@ -71,8 +71,8 @@ pub(crate) struct TuiSettingsDefaults {
 
 impl Default for TuiSettingsDefaults {
     fn default() -> Self {
-        let limits = merry_runtime::SubagentConfig::default();
-        let compaction = merry_runtime::CompactionConfig::default();
+        let limits = merry::coding::SubagentConfig::default();
+        let compaction = merry::CompactionConfig::default();
         let subagent_role_names = BUILTIN_SUBAGENT_ROLES
             .iter()
             .map(|name| (*name).to_owned())
@@ -110,7 +110,7 @@ impl Default for TuiSettingsDefaults {
             service_tiers: BTreeMap::new(),
             context_compaction_model: None,
             approval_review_model: None,
-            context_window_tokens: merry_runtime::DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
+            context_window_tokens: merry::coding::DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
             subagents_enabled: true,
             subagent_max_threads: limits.max_threads(),
             subagent_limit_behavior: limits.limit_behavior().into(),
@@ -237,7 +237,7 @@ impl TuiSettingsDefaults {
             approval_review_model: runtime_models
                 .approval_review
                 .map(|model| (model.provider, model.model)),
-            context_window_tokens: merry_runtime::DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
+            context_window_tokens: merry::coding::DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
             subagents_enabled: subagents.is_enabled(),
             subagent_max_threads: subagents.limits().max_threads(),
             subagent_limit_behavior: subagents.limits().limit_behavior().into(),

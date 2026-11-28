@@ -1,5 +1,5 @@
 use crate::tui::input::{DraftImage, TuiSubmission};
-use merry_core::{
+use merry::events::{
     PendingToolCall, PendingToolCallBatch, RuntimeEventSource, SessionId, ToolCallArguments,
     ToolCallBatchId, ToolCallId, ToolName,
 };

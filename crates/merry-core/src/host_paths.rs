@@ -12,6 +12,59 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+/// Validated absolute host paths that must stay invisible to both OS process
+/// sandboxes (`merry-process`) and in-process workspace file tools
+/// (`merry-tools`).
+///
+/// Using one shared value object prevents drift between sandbox deny rules and
+/// in-process tool path blocks.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProtectedHostPaths {
+    paths: Vec<PathBuf>,
+}
+
+impl ProtectedHostPaths {
+    /// Builds a deduplicated set of clean absolute protected paths.
+    ///
+    /// Non-absolute paths or paths containing `.` / `..` segments are ignored so
+    /// downstream sandbox and tool policies never receive malformed entries.
+    #[must_use]
+    pub fn new(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        let mut unique = Vec::new();
+        for path in paths {
+            if is_clean_absolute_path(&path) && !unique.contains(&path) {
+                unique.push(path);
+            }
+        }
+        Self { paths: unique }
+    }
+
+    /// Builds the standard Merry protected paths covering runtime state and
+    /// managed provider credentials.
+    #[must_use]
+    pub fn from_merry_dirs(state_dir: PathBuf, providers_dir: PathBuf) -> Self {
+        Self::new([state_dir, providers_dir])
+    }
+
+    /// Returns the protected paths in deterministic order.
+    #[must_use]
+    pub fn as_slice(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
+    /// Consumes this set and returns its owned path list.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<PathBuf> {
+        self.paths
+    }
+
+    /// Returns whether no protected paths are recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+}
+
 /// Default Windows executable extensions tried when `PATHEXT` is unset.
 const DEFAULT_WINDOWS_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
 
@@ -602,5 +655,32 @@ mod tests {
             |candidate| candidate == expected,
         );
         assert_eq!(not_found_unix, None);
+    }
+
+    #[test]
+    fn protected_host_paths_deduplicates_and_rejects_unclean_paths() {
+        let protected = ProtectedHostPaths::new([
+            PathBuf::from("/home/alice/.local/state/merry"),
+            PathBuf::from("relative/secret"),
+            PathBuf::from("/home/alice/../etc"),
+            PathBuf::from("/home/alice/.local/share/merry/providers"),
+            PathBuf::from("/home/alice/.local/state/merry"),
+        ]);
+
+        assert_eq!(
+            protected.as_slice(),
+            &[
+                PathBuf::from("/home/alice/.local/state/merry"),
+                PathBuf::from("/home/alice/.local/share/merry/providers"),
+            ]
+        );
+        assert!(!protected.is_empty());
+        assert_eq!(
+            ProtectedHostPaths::from_merry_dirs(
+                PathBuf::from("/home/alice/.local/state/merry"),
+                PathBuf::from("/home/alice/.local/share/merry/providers"),
+            ),
+            protected
+        );
     }
 }

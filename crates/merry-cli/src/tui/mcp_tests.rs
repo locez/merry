@@ -2,8 +2,8 @@ use super::{
     keymap::Keymap, project_mcp_startup_warnings, render::render_to_text, state::TuiState,
     theme::TuiTheme,
 };
-use merry_core::ToolSourceId;
-use merry_mcp::{McpDiscoveryStage, McpFailureKind, McpServerDiagnostic, McpServerIssue};
+use merry::events::ToolSourceId;
+use merry::mcp::{McpDiscoveryStage, McpFailureKind, McpServerDiagnostic, McpServerIssue};
 
 #[test]
 fn mcp_warnings_remain_visible_in_the_tui_after_startup() {

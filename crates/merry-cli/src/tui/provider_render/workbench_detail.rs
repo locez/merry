@@ -11,7 +11,7 @@ use crate::{
         theme::SemanticColor,
     },
 };
-use merry_provider_openai::OpenAiProtocol;
+use merry::providers::OpenAiProtocol;
 use ratatui::{
     Frame,
     layout::{Position, Rect},

@@ -1,6 +1,6 @@
 use crate::config::HeaderItemKind;
 use crate::tui::theme::SemanticColor;
-use merry_core::{ContextWindowSource, SessionUsage};
+use merry::events::{ContextWindowSource, SessionUsage};
 use std::path::Path;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 

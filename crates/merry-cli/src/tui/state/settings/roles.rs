@@ -6,7 +6,7 @@ use crate::tui::{
     preferences::{REASONING_EFFORT_PRESETS, RoleModelOverride, SubagentRolePreferenceOverride},
     provider_selection::{ModelBindingTarget, ModelPickerTarget, ReasoningBindingTarget},
 };
-use merry_llm::ReasoningEffort;
+use merry::providers::ReasoningEffort;
 
 pub(super) const ROLE_MAX_TURNS: [Option<u32>; 10] = [
     None,

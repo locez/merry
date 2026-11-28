@@ -11,12 +11,12 @@ use crate::tui::{
     },
     state::{CommandView, TimelineItem, ToolOutputPreview, TuiState},
 };
-use merry_core::{
+use merry::events::SessionTranscriptItem;
+use merry::events::{
     PlanModeState, PlanReviewDecision, RuntimeEvent, TOOL_CANCELLED_BY_USER_CODE, ToolCallId,
     ToolCallResultStatus, ToolName,
 };
-use merry_runtime::SessionTranscriptItem;
-use merry_tools::{APPLY_PATCH_TOOL, READ_FILE_TOOL};
+use merry::tools::{APPLY_PATCH_TOOL, READ_FILE_TOOL};
 use serde_json::Value;
 use std::collections::HashMap;
 use tokio::time::Instant;
@@ -570,7 +570,7 @@ impl TuiProjector {
         }
     }
 
-    fn start_tool(&mut self, call: merry_core::PendingToolCall, state: &mut TuiState) {
+    fn start_tool(&mut self, call: merry::events::PendingToolCall, state: &mut TuiState) {
         self.streaming_assistant_index = None;
         let call_id = call.id().clone();
         let tool_name = call.name().clone();
@@ -599,7 +599,7 @@ impl TuiProjector {
         self.started_tools.insert(
             call_id,
             StartedToolView {
-                mcp_search: (tool_name.as_str() == merry_mcp::MCP_SEARCH_TOOL)
+                mcp_search: (tool_name.as_str() == merry::mcp::MCP_SEARCH_TOOL)
                     .then(|| parse_mcp_search_display(call.arguments().as_object())),
                 name: tool_name,
                 timeline_index,
@@ -631,9 +631,9 @@ impl TuiProjector {
     }
 }
 
-fn transcript_source() -> merry_core::RuntimeEventSource {
-    merry_core::RuntimeEventSource::new(
-        merry_core::SessionId::new("resume-transcript")
+fn transcript_source() -> merry::events::RuntimeEventSource {
+    merry::events::RuntimeEventSource::new(
+        merry::events::SessionId::new("resume-transcript")
             .expect("static resume transcript session id is valid"),
         0,
     )

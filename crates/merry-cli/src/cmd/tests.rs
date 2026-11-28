@@ -1,11 +1,14 @@
 use super::*;
-use crate::runtime_events::{collect_runtime_step_events, first_pending_tool_call};
-use crate::testing::{ScriptedProvider, tool_call, workspace_tool_call};
+use crate::testing::{
+    ScriptedProvider, collect_runtime_step_events, first_pending_tool_call, tool_call,
+    workspace_tool_call,
+};
+use merry::events::ToolOutput;
 use merry::profiles::CODING_LOOP_PROCESS_TOOL;
-use merry_core::{RuntimeJournalPayload, ToolOutput};
-use merry_llm::{FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse};
-use merry_runtime::{StepContext, StepInput, ToolExecutionContext};
-use merry_tools::{APPLY_PATCH_TOOL, READ_FILE_TOOL};
+use merry::providers::{FinishReason, ModelEvent, ModelName, ModelOutput, ModelResponse};
+use merry::runtime::RuntimeJournalPayload;
+use merry::runtime::{StepContext, StepInput, ToolExecutionContext};
+use merry::tools::{APPLY_PATCH_TOOL, READ_FILE_TOOL};
 use serde_json::Value;
 use std::{
     io,
@@ -55,10 +58,7 @@ fn command_plan_final_output_contract_has_described_fields() {
     let contract = command_plan_final_output_contract()
         .expect("command plan final output contract should build");
 
-    assert_eq!(
-        contract.tool_name().as_str(),
-        merry_runtime::FINAL_OUTPUT_TOOL_NAME
-    );
+    assert_eq!(contract.tool_name().as_str(), merry::FINAL_OUTPUT_TOOL_NAME);
     let schema = serde_json::to_value(contract.tool_spec().input_schema().as_schema())
         .expect("schema should serialize");
     let properties = schema
@@ -122,7 +122,7 @@ async fn command_generation_runtime_is_read_only_workspace_only() {
         environment: CommandGenerationEnvironment::detect(&workspace),
         provider: Arc::new(provider.clone()),
         model: ModelName::new("debug-model").expect("valid model name"),
-        automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+        automatic_compaction: merry::CompactionConfig::disabled(),
         retry_policy: None,
         context_compaction: None,
         skill_roots: Vec::new(),
@@ -157,7 +157,7 @@ async fn generate_command_plan_reads_structured_final_output() {
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
     let provider = ScriptedProvider::new(vec![vec![Ok(workspace_tool_call(
         "call-final-command-plan",
-        merry_runtime::FINAL_OUTPUT_TOOL_NAME,
+        merry::FINAL_OUTPUT_TOOL_NAME,
         [
             (
                 "shell_command",
@@ -182,7 +182,7 @@ async fn generate_command_plan_reads_structured_final_output() {
         environment: CommandGenerationEnvironment::detect(&workspace),
         provider: Arc::new(provider),
         model: ModelName::new("debug-model").expect("valid model name"),
-        automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+        automatic_compaction: merry::CompactionConfig::disabled(),
         retry_policy: None,
         context_compaction: None,
         skill_roots: Vec::new(),
@@ -245,7 +245,7 @@ async fn cmd_check_command_tool_reports_path_availability() {
         environment,
         provider: Arc::new(provider),
         model: ModelName::new("debug-model").expect("valid model name"),
-        automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+        automatic_compaction: merry::CompactionConfig::disabled(),
         retry_policy: None,
         context_compaction: None,
         skill_roots: Vec::new(),

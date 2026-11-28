@@ -111,7 +111,7 @@ impl TuiState {
 
     pub(crate) fn update_subagent_activity(
         &mut self,
-        snapshots: &[merry_core::SubagentActivitySnapshot],
+        snapshots: &[merry::events::SubagentActivitySnapshot],
     ) {
         let mut bumped = Vec::new();
         for snapshot in snapshots {
@@ -150,7 +150,7 @@ impl TuiState {
 
     pub(crate) fn apply_subagent_status_views(
         &mut self,
-        views: &[merry_runtime::SubagentStatusView],
+        views: &[merry::events::SubagentStatusView],
     ) {
         let mut bumped = Vec::new();
         for view in views {

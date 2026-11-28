@@ -152,7 +152,7 @@ fn settings_reasoning_picker_accepts_custom_provider_value_and_filters_presets()
         ControllerEffect::ApplyProviderModel {
             alias: "compat".to_owned(),
             model: "gpt-5".to_owned(),
-            reasoning_effort: merry_llm::ReasoningEffort::new("model-specific")
+            reasoning_effort: merry::providers::ReasoningEffort::new("model-specific")
                 .expect("custom effort should validate"),
             target: ModelPickerTarget::SettingsReasoning(ReasoningBindingTarget::ActiveProvider),
         }
@@ -161,7 +161,8 @@ fn settings_reasoning_picker_accepts_custom_provider_value_and_filters_presets()
     state.apply_reasoning_binding(
         &ReasoningBindingTarget::ActiveProvider,
         "compat",
-        merry_llm::ReasoningEffort::new("model-specific").expect("custom effort should validate"),
+        merry::providers::ReasoningEffort::new("model-specific")
+            .expect("custom effort should validate"),
     );
     assert_eq!(
         state
@@ -188,7 +189,8 @@ fn settings_reasoning_display_and_picker_follow_the_selected_provider() {
         provider: Some("compat".to_owned()),
         reasoning_efforts: BTreeMap::from([(
             "alt".to_owned(),
-            merry_llm::ReasoningEffort::new("max ultra").expect("custom effort should validate"),
+            merry::providers::ReasoningEffort::new("max ultra")
+                .expect("custom effort should validate"),
         )]),
         ..TuiSettingsDefaults::default()
     };

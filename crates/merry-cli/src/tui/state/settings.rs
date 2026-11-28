@@ -21,7 +21,7 @@ use crate::{
     },
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_llm::ServiceTier;
+use merry::providers::ServiceTier;
 
 pub(super) const BRAND_MARKS: [Option<BrandMarkMode>; 3] = [
     None,
@@ -690,7 +690,7 @@ impl TuiState {
                     }),
                     self.settings_defaults
                         .reasoning_effort_for_provider(self.effective_provider_alias())
-                        .map(merry_llm::ReasoningEffort::as_str),
+                        .map(merry::providers::ReasoningEffort::as_str),
                 );
                 format!("{value} ▸")
             }

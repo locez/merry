@@ -152,7 +152,7 @@ impl ModelPickerOverlay {
     pub(crate) fn manual_model(&self) -> Option<&str> {
         let query = self.query.text().trim();
         (!query.is_empty()
-            && merry_llm::ModelName::new(query).is_ok()
+            && merry::providers::ModelName::new(query).is_ok()
             && !self.models.iter().any(|model| model.id == query))
         .then_some(query)
     }

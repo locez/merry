@@ -469,7 +469,11 @@ fn open_setup_provider_manager(
         .map(|profile| {
             let model = preferences
                 .model_for_provider(profile.alias().as_str())
-                .or_else(|| profile.default_model().map(merry_llm::ModelName::as_str));
+                .or_else(|| {
+                    profile
+                        .default_model()
+                        .map(merry::providers::ModelName::as_str)
+                });
             let editable = provider_management.editable_provider(profile.alias()).ok();
             let base_url = editable.as_ref().map(|entry| entry.base_url.clone());
             let reasoning_effort = editable
@@ -552,7 +556,7 @@ async fn open_setup_model_picker(
     Ok(())
 }
 
-fn setup_model_items(catalog: merry_llm::ModelCatalog) -> Vec<ModelListItem> {
+fn setup_model_items(catalog: merry::providers::ModelCatalog) -> Vec<ModelListItem> {
     catalog
         .into_models()
         .into_iter()

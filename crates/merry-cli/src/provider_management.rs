@@ -1,5 +1,5 @@
 use crate::{
-    cli_error::{CliError, debug_openai_usage_error},
+    cli_error::{CliError, usage_error},
     config::{
         ConfigError, ConfiguredProviderProfile, EffectiveProviderConfig, ManagedProviderDefinition,
         ManagedProviderKind, ManagedProviderStore, ManagedProviderStoreError, MerryConfig,
@@ -7,12 +7,11 @@ use crate::{
     },
     provider_config::materialized_provider_from_config,
 };
-use merry_llm::{
-    ModelCatalog, ModelCatalogEntry, ModelCatalogError, ModelCatalogProvider, ModelName,
-    ReasoningEffort, ServiceTier,
+use merry::providers::{
+    AnthropicProvider, AnthropicProviderConfig, ModelCatalog, ModelCatalogEntry, ModelCatalogError,
+    ModelCatalogProvider, OpenAiProtocol, OpenAiProvider, OpenAiProviderConfig,
 };
-use merry_provider_anthropic::{AnthropicProvider, AnthropicProviderConfig};
-use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
+use merry::providers::{ModelName, ReasoningEffort, ServiceTier};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt, io,
@@ -35,7 +34,7 @@ pub(crate) struct ProviderDraft {
     display_name: String,
     alias: ProviderAlias,
     kind: ManagedProviderKind,
-    protocol: Option<merry_provider_openai::OpenAiProtocol>,
+    protocol: Option<OpenAiProtocol>,
     base_url: String,
     api_key: Option<SecretString>,
     reasoning_effort: Option<ReasoningEffort>,
@@ -47,7 +46,7 @@ pub(crate) struct ProviderDiscoveryDraft {
     alias: ProviderAlias,
     original_alias: Option<ProviderAlias>,
     kind: ManagedProviderKind,
-    protocol: Option<merry_provider_openai::OpenAiProtocol>,
+    protocol: Option<OpenAiProtocol>,
     base_url: String,
     api_key: Option<SecretString>,
 }
@@ -57,7 +56,7 @@ impl ProviderDiscoveryDraft {
         alias: ProviderAlias,
         original_alias: Option<ProviderAlias>,
         kind: ManagedProviderKind,
-        protocol: Option<merry_provider_openai::OpenAiProtocol>,
+        protocol: Option<OpenAiProtocol>,
         base_url: &str,
         api_key: Option<&str>,
     ) -> Result<Self, ProviderManagementError> {
@@ -134,7 +133,7 @@ impl ProviderDraft {
         display_name: &str,
         alias: ProviderAlias,
         kind: ManagedProviderKind,
-        protocol: Option<merry_provider_openai::OpenAiProtocol>,
+        protocol: Option<OpenAiProtocol>,
         base_url: &str,
         api_key: &str,
         default_model: ModelName,
@@ -154,7 +153,7 @@ impl ProviderDraft {
         display_name: &str,
         alias: ProviderAlias,
         kind: ManagedProviderKind,
-        protocol: Option<merry_provider_openai::OpenAiProtocol>,
+        protocol: Option<OpenAiProtocol>,
         base_url: &str,
         api_key: Option<&str>,
         default_model: ModelName,
@@ -287,7 +286,7 @@ pub(crate) struct EditableProviderProfile {
     pub(crate) alias: ProviderAlias,
     pub(crate) display_name: String,
     pub(crate) kind: ManagedProviderKind,
-    pub(crate) protocol: Option<merry_provider_openai::OpenAiProtocol>,
+    pub(crate) protocol: Option<OpenAiProtocol>,
     pub(crate) base_url: String,
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
     pub(crate) service_tier: Option<ServiceTier>,
@@ -493,9 +492,8 @@ impl ProviderManagementService {
         let config = self.config.as_ref().ok_or_else(|| {
             ProviderManagementError::Invalid("no providers are configured".to_owned())
         })?;
-        let provider =
-            materialized_provider_from_config(config, alias.as_str(), debug_openai_usage_error)
-                .map_err(|error| ProviderManagementError::Invalid(cli_error_message(error)))?;
+        let provider = materialized_provider_from_config(config, alias.as_str(), usage_error)
+            .map_err(|error| ProviderManagementError::Invalid(cli_error_message(error)))?;
         if provider.profile.alias() != alias || provider.inference.name().as_str() != alias.as_str()
         {
             return Err(ProviderManagementError::Invalid(
@@ -709,10 +707,7 @@ fn cache_io(operation: &'static str, path: &Path, source: io::Error) -> Provider
 
 fn cli_error_message(error: CliError) -> String {
     match error {
-        CliError::DebugUsage(message)
-        | CliError::DebugOpenAiUsage(message)
-        | CliError::ShellUsage(message)
-        | CliError::Unexpected(message) => message,
+        CliError::Usage(message) | CliError::Unexpected(message) => message,
         CliError::BrokenPipe => "provider construction stopped by a broken pipe".to_owned(),
     }
 }

@@ -1,8 +1,9 @@
 //! Public event and result serialization for headless JSONL output.
 
 use crate::cli_error::{CliError, stdout_error, unexpected};
-use merry_core::RuntimeEvent;
-use merry_runtime::{AgentLoopResult, AgentLoopStatus};
+use merry::AgentLoopStatus;
+use merry::coding::AgentLoopResult;
+use merry::events::RuntimeEvent;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 pub(super) async fn write_public_runtime_event<W>(
@@ -33,14 +34,14 @@ where
             "status": "completed",
             "model_turns_run": result.model_turns_run(),
             "final_output": result.final_output(),
-            "final_output_json": result.final_output_json().map(merry_runtime::FinalOutput::json),
+            "final_output_json": result.final_output_json().map(merry::FinalOutput::json),
         }),
         AgentLoopStatus::Failed { diagnostic } => serde_json::json!({
             "type": "agent_loop_result",
             "status": "failed",
             "model_turns_run": result.model_turns_run(),
             "final_output": result.final_output(),
-            "final_output_json": result.final_output_json().map(merry_runtime::FinalOutput::json),
+            "final_output_json": result.final_output_json().map(merry::FinalOutput::json),
             "diagnostic": {
                 "code": diagnostic.code(),
                 "message": diagnostic.message(),
@@ -51,7 +52,7 @@ where
             "status": "cancelled",
             "model_turns_run": result.model_turns_run(),
             "final_output": result.final_output(),
-            "final_output_json": result.final_output_json().map(merry_runtime::FinalOutput::json),
+            "final_output_json": result.final_output_json().map(merry::FinalOutput::json),
             "diagnostic": {
                 "code": diagnostic.code(),
                 "message": diagnostic.message(),
@@ -62,7 +63,7 @@ where
             "status": "blocked",
             "model_turns_run": result.model_turns_run(),
             "final_output": result.final_output(),
-            "final_output_json": result.final_output_json().map(merry_runtime::FinalOutput::json),
+            "final_output_json": result.final_output_json().map(merry::FinalOutput::json),
             "blocked_reason": format!("{reason:?}"),
         }),
         _ => serde_json::json!({
@@ -70,7 +71,7 @@ where
             "status": "unknown",
             "model_turns_run": result.model_turns_run(),
             "final_output": result.final_output(),
-            "final_output_json": result.final_output_json().map(merry_runtime::FinalOutput::json),
+            "final_output_json": result.final_output_json().map(merry::FinalOutput::json),
         }),
     };
     let line = serde_json::to_string(&line).map_err(unexpected)?;

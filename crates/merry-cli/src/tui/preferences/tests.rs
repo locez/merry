@@ -1,7 +1,7 @@
 use super::*;
 use crate::coding::{AutoFallback, PermissionMode, SandboxMode};
 use crate::config::{BrandMarkMode, CopyButtonPosition, HeaderItemKind, TextSizingMode};
-use merry_llm::{ReasoningEffort, ServiceTier};
+use merry::providers::{ReasoningEffort, ServiceTier};
 use std::path::PathBuf;
 
 #[test]

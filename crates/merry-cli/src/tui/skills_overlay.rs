@@ -13,7 +13,7 @@ use super::{
     theme::SemanticColor,
 };
 use crossterm::event::{KeyCode, KeyEvent};
-use merry_runtime::SkillMetadata;
+use merry::events::SkillMetadata;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Position, Rect},

@@ -4,15 +4,14 @@ use crate::{
         resume_headless_coding,
         tests::{headless_input, test_process_backend},
     },
-    runtime_events::collect_runtime_step_events,
+    testing::collect_runtime_step_events,
     testing::{FakeProcessRunner, ScriptedProvider, model_name},
 };
-use merry_core::SessionId;
-use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelResponse};
-use merry_runtime::{
-    FileSessionStore, PermissionedProcessRunnerFactory, ProcessRunner, ProjectRules, Runtime,
-    StepContext, StepInput,
-};
+use merry::FileSessionStore;
+use merry::events::SessionId;
+use merry::process::{PermissionedProcessRunnerFactory, ProcessRunner};
+use merry::providers::{FinishReason, ModelEvent, ModelOutput, ModelResponse};
+use merry::runtime::{ProjectRules, Runtime, StepContext, StepInput};
 use std::sync::Arc;
 
 #[tokio::test(flavor = "current_thread")]
@@ -36,7 +35,7 @@ async fn coding_projects_root_agents_in_the_stable_prefix() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+            automatic_compaction: merry::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             process_backend: test_process_backend(),
@@ -96,7 +95,7 @@ async fn read_only_workspace_does_not_load_agents_md() {
         response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
     })]]);
     let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
-    let factory = Arc::new(merry_runtime::StaticPermissionedProcessRunnerFactory::new(
+    let factory = Arc::new(merry::process::StaticPermissionedProcessRunnerFactory::new(
         Arc::clone(&runner),
     ));
     let mut input = headless_input(
@@ -144,7 +143,7 @@ async fn coding_omits_project_rules_when_root_agents_is_missing() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+            automatic_compaction: merry::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             process_backend: test_process_backend(),
@@ -190,7 +189,7 @@ async fn resumed_coding_reloads_current_root_agents() {
     let store = FileSessionStore::new(temp.path().join("sessions"));
     let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
     let permissioned_factory: Arc<dyn PermissionedProcessRunnerFactory> = Arc::new(
-        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        merry::process::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
     );
 
     let first_provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
@@ -297,7 +296,7 @@ async fn resumed_coding_replaces_stale_project_capability_seed() {
 
     let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
     let permissioned_factory: Arc<dyn PermissionedProcessRunnerFactory> = Arc::new(
-        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        merry::process::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
     );
     let provider = ScriptedProvider::new(vec![vec![Ok(ModelEvent::Completed {
         response: ModelResponse::new(

@@ -8,7 +8,7 @@ use crate::tui::{
     theme::TuiTheme,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_runtime::SkillMetadata;
+use merry::events::SkillMetadata;
 use std::{fs, path::PathBuf};
 
 #[test]

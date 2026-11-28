@@ -3,7 +3,7 @@
 use super::{PendingQueueEditor, QueuePreviewState, TuiState};
 use crate::tui::input::TextInput;
 use crossterm::event::KeyEvent;
-use merry_core::QueuedInputsView;
+use merry::events::QueuedInputsView;
 
 /// Outcome of committing an active pending-queue edit.
 #[derive(Debug, Clone, PartialEq, Eq)]

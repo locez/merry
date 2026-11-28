@@ -1,5 +1,5 @@
 use super::{command, fuzzy};
-use merry_runtime::SkillMetadata;
+use merry::events::SkillMetadata;
 use std::{
     cmp::Reverse,
     fs,

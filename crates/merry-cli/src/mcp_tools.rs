@@ -1,42 +1,23 @@
 use crate::{cli_error::CliError, config::MerryConfig};
-use merry_mcp::{McpFailureKind, McpServerDiagnostic, McpServerIssue};
-use merry_runtime::RegisteredTool;
+use merry::mcp::{McpFailureKind, McpServerDiagnostic, McpServerIssue, McpToolset};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-pub(crate) struct ConfiguredMcpTools {
-    pub(crate) tools: Vec<RegisteredTool>,
-    pub(crate) warnings: Vec<McpServerDiagnostic>,
-}
-
-impl ConfiguredMcpTools {
-    fn new(tools: Vec<RegisteredTool>, warnings: Vec<McpServerDiagnostic>) -> Self {
-        Self { tools, warnings }
-    }
-}
-
-/// Discovers trusted MCP tools from user config and returns runtime tools.
+/// Discovers trusted MCP tools from user config and returns a facade toolset.
 pub(crate) async fn discover_configured_mcp_tools(
     config: Option<&MerryConfig>,
-) -> Result<ConfiguredMcpTools, CliError> {
+) -> Result<McpToolset, CliError> {
     let servers = config
         .map(MerryConfig::mcp_servers)
         .transpose()
         .map_err(crate::cli_error::unexpected)?
         .unwrap_or_default();
-    let discovery = merry_mcp::discover_mcp_tools(&servers)
+    let toolset = McpToolset::discover(&servers)
         .await
         .map_err(crate::cli_error::unexpected)?;
-    let (registrations, warnings) = discovery.into_parts();
-    for warning in &warnings {
+    for warning in toolset.warnings() {
         tracing::warn!(event = "mcp.startup.degraded", diagnostic = %format_mcp_warning(warning), "MCP startup requires attention");
     }
-    Ok(ConfiguredMcpTools::new(
-        registrations
-            .into_iter()
-            .map(|registration| registration.tool)
-            .collect(),
-        warnings,
-    ))
+    Ok(toolset)
 }
 
 pub(crate) fn format_mcp_warning(diagnostic: &McpServerDiagnostic) -> String {

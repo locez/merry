@@ -1,22 +1,7 @@
 use crate::coding::{AutoFallback, PermissionMode, SandboxMode};
 use crate::config::CliDefaults;
-use crate::debug::{Args as DebugArgs, OpenAiArgs as DebugOpenAiArgs};
 use crate::workspace_trust::TrustWorkspace;
-use clap::{Args, CommandFactory, Parser, Subcommand};
-
-pub(crate) const OPENAI_ENV_HELP: &str = "\
-Environment:
-  MERRY_OPENAI_DEBUG=1       Required opt-in before any network attempt
-  XDG_CONFIG_HOME            Optional base for merry/config.toml
-  XDG_DATA_HOME              Optional base for Merry provider credentials
-
-Default provider/model selection comes from `$XDG_CONFIG_HOME/merry/config.toml`
-or `~/.config/merry/config.toml`.
-Provider endpoints and API keys live under `$XDG_DATA_HOME/merry/providers/`
-(default `~/.local/share/merry/providers/`), managed in Merry Settings or edited
-directly there so credentials are not placed in `config.toml` and stay isolated
-from the sandbox.
-";
+use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -156,36 +141,13 @@ pub(crate) enum CliCommand {
     Run(crate::run::Args),
     #[command(about = "Generate a shell command plan from a natural-language request")]
     Cmd(crate::cmd::Args),
-    #[command(about = "Print deterministic runtime events or run opt-in provider debugging")]
-    Debug(DebugArgs),
     #[command(about = "Print a shell completion script for merry to stdout")]
     Completions(crate::completions::Args),
-}
-
-pub(crate) fn parse_max_output_tokens(value: &str) -> Result<u64, String> {
-    let tokens = value
-        .parse::<u64>()
-        .map_err(|error| format!("must be a positive integer: {error}"))?;
-
-    if tokens == 0 {
-        return Err("must be greater than zero".to_owned());
-    }
-
-    Ok(tokens)
 }
 
 pub(crate) fn root_usage() -> String {
     let mut command = Cli::command();
     command_usage(&mut command)
-}
-
-pub(crate) fn debug_usage() -> String {
-    let mut command = Cli::command();
-    let command = command
-        .find_subcommand_mut("debug")
-        .expect("debug subcommand should exist");
-    command.set_bin_name("merry debug");
-    command_usage(command)
 }
 
 pub(crate) fn run_usage() -> String {
@@ -204,26 +166,6 @@ pub(crate) fn cmd_usage() -> String {
         .expect("cmd subcommand should exist");
     command.set_bin_name("merry cmd");
     command_usage(command)
-}
-
-pub(crate) fn shell_usage() -> String {
-    let mut command = Cli::command();
-    let debug_command = command
-        .find_subcommand_mut("debug")
-        .expect("debug subcommand should exist");
-    let command = debug_command
-        .find_subcommand_mut("shell")
-        .expect("shell subcommand should exist");
-    command.set_bin_name("merry debug shell");
-    command_usage(command)
-}
-
-pub(crate) fn debug_openai_usage() -> String {
-    let mut command = DebugOpenAiArgs::augment_args(clap::Command::new("openai"))
-        .bin_name("merry debug openai")
-        .about("Run opt-in OpenAI-compatible model debugging")
-        .after_help(OPENAI_ENV_HELP);
-    command_usage(&mut command)
 }
 
 fn command_usage(command: &mut clap::Command) -> String {

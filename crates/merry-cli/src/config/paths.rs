@@ -1,7 +1,7 @@
 use super::ConfigError;
-use merry_core::host_paths::{
-    platform_config_base, platform_data_base, platform_state_base, strip_home_tilde_prefix,
-    user_home_dir,
+use merry::paths::{
+    ProtectedHostPaths, platform_config_base, platform_data_base, platform_state_base,
+    strip_home_tilde_prefix, user_home_dir,
 };
 use std::{
     env,
@@ -121,6 +121,10 @@ impl XdgPaths {
 
     pub fn managed_config_dir(&self) -> PathBuf {
         self.data_dir.join("providers")
+    }
+
+    pub fn protected_host_paths(&self) -> ProtectedHostPaths {
+        ProtectedHostPaths::from_merry_dirs(self.state_dir.clone(), self.managed_config_dir())
     }
 
     /// Previous location of the managed provider registry before it moved out

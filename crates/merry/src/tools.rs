@@ -5,4 +5,9 @@
 
 pub use merry_core::ToolSpec;
 pub use merry_runtime::{Tool, ToolBuildError};
+pub use merry_tools::{
+    APPLY_PATCH_TOOL, READ_FILE_TOOL, WorkspacePatchOperationKind, WorkspacePatchSuccess,
+    WorkspacePatchSuccessChange, WorkspacePatchSuccessLine, WorkspacePatchSuccessLineKind,
+    WorkspaceReadImageSuccess, WorkspaceReadPdfPagesSuccess,
+};
 pub use merry_tools_macros::tool;

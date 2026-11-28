@@ -198,7 +198,7 @@ fn controller_submit_exits_scrolled_review_and_jumps_to_bottom_when_idle_or_runn
         controller::project_local_effect,
         render::{prepare_viewport, render_to_text},
     };
-    use merry_core::InteractiveRunState;
+    use merry::events::InteractiveRunState;
     use ratatui::layout::Size;
 
     let mut state = TuiState::new(

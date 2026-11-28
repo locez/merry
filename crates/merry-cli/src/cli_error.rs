@@ -3,9 +3,7 @@ use std::{fmt, io};
 #[derive(Debug)]
 pub(crate) enum CliError {
     BrokenPipe,
-    DebugUsage(String),
-    DebugOpenAiUsage(String),
-    ShellUsage(String),
+    Usage(String),
     Unexpected(String),
 }
 
@@ -14,15 +12,7 @@ pub(crate) fn unexpected(err: impl fmt::Display) -> CliError {
 }
 
 pub(crate) fn usage_error(err: impl fmt::Display) -> CliError {
-    CliError::DebugUsage(err.to_string())
-}
-
-pub(crate) fn debug_openai_usage_error(err: impl fmt::Display) -> CliError {
-    CliError::DebugOpenAiUsage(err.to_string())
-}
-
-pub(crate) fn shell_usage_error(err: impl fmt::Display) -> CliError {
-    CliError::ShellUsage(err.to_string())
+    CliError::Usage(err.to_string())
 }
 
 pub(crate) fn stdout_error(err: io::Error) -> CliError {

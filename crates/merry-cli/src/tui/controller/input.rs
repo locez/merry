@@ -392,8 +392,8 @@ fn handle_plan_view_key(key: KeyEvent, state: &mut TuiState) -> ControllerEffect
             let can_review = doc.is_some_and(|d| {
                 matches!(
                     d.summary.status,
-                    merry_core::PlanDocumentStatus::AwaitingApproval
-                        | merry_core::PlanDocumentStatus::Draft
+                    merry::events::PlanDocumentStatus::AwaitingApproval
+                        | merry::events::PlanDocumentStatus::Draft
                 )
             });
             let content = doc.map(|d| d.content.clone());

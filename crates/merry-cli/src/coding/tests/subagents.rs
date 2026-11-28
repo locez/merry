@@ -3,15 +3,16 @@ use crate::{
         CodingRuntimeOptions, CodingSubagentsConfig, build_coding_runtime,
         tests::test_process_backend,
     },
-    runtime_events::collect_runtime_step_events,
+    testing::collect_runtime_step_events,
     testing::{ScriptedProvider, model_name},
 };
-use merry_core::ToolName;
-use merry_llm::{
+use merry::events::ToolName;
+use merry::providers::{
     FinishReason, ModelEvent, ModelMessageRole, ModelOutput, ModelResponse, ModelToolCall,
     ModelToolCallId, ToolArguments,
 };
-use merry_runtime::{AgentLoopConfig, AgentLoopStatus, StepContext, StepInput, SubagentConfig};
+use merry::runtime::{StepContext, StepInput, SubagentConfig};
+use merry::{AgentLoopConfig, AgentLoopStatus};
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
@@ -31,7 +32,7 @@ async fn hides_subagent_tools_by_default() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+            automatic_compaction: merry::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             process_backend: test_process_backend(),
@@ -78,7 +79,7 @@ async fn exposes_subagent_tools_when_enabled() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+            automatic_compaction: merry::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             process_backend: test_process_backend(),
@@ -127,9 +128,15 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
     .expect("write root project rules");
 
     let completion_step = || {
-        vec![Ok::<_, merry_llm::ModelError>(ModelEvent::Completed {
-            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
-        })]
+        vec![Ok::<_, merry::providers::ModelError>(
+            ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text("done")],
+                    FinishReason::Stop,
+                    None,
+                ),
+            },
+        )]
     };
     let provider = ScriptedProvider::new(vec![
         vec![Ok(ModelEvent::Completed {
@@ -176,7 +183,7 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+            automatic_compaction: merry::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             process_backend: test_process_backend(),
@@ -295,16 +302,22 @@ async fn subagent_with_narrow_tools_keeps_stable_profile_and_runtime_admission()
 #[tokio::test(flavor = "current_thread")]
 async fn custom_browser_role_routes_subagents_to_role_provider_and_model() {
     use merry::profiles::{SubagentModelOverride, SubagentRoleCatalog, SubagentRoleOverlay};
-    use merry_llm::ModelName;
+    use merry::providers::ModelName;
 
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
 
     let completion_step = || {
-        vec![Ok::<_, merry_llm::ModelError>(ModelEvent::Completed {
-            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
-        })]
+        vec![Ok::<_, merry::providers::ModelError>(
+            ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text("done")],
+                    FinishReason::Stop,
+                    None,
+                ),
+            },
+        )]
     };
     let primary = ScriptedProvider::new(vec![
         vec![Ok(ModelEvent::Completed {
@@ -349,7 +362,7 @@ async fn custom_browser_role_routes_subagents_to_role_provider_and_model() {
                 model_override: Some(SubagentModelOverride {
                     provider: Arc::new(browser_provider.clone()),
                     model: ModelName::new("browser-vision-test").expect("valid browser model"),
-                    retry_policy: Some(merry_llm::ModelRetryPolicy::disabled()),
+                    retry_policy: Some(merry::providers::ModelRetryPolicy::disabled()),
                 }),
                 allowed_tools: Some(vec![
                     ToolName::new("browser_tab").expect("valid tool"),
@@ -368,8 +381,8 @@ async fn custom_browser_role_routes_subagents_to_role_provider_and_model() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
-            retry_policy: Some(merry_llm::ModelRetryPolicy::disabled()),
+            automatic_compaction: merry::CompactionConfig::disabled(),
+            retry_policy: Some(merry::providers::ModelRetryPolicy::disabled()),
             context_compaction: None,
             process_backend: test_process_backend(),
             extra_tools: Vec::new(),
@@ -416,18 +429,24 @@ async fn custom_browser_role_routes_subagents_to_role_provider_and_model() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn interactive_primary_model_switch_routes_subsequent_subagents_to_new_model() {
-    use merry_core::{InteractiveRunState, RuntimeEvent};
-    use merry_llm::{ModelName, ModelRetryPolicy};
-    use merry_runtime::{InteractivePrimaryModel, InteractiveSettingsUpdate};
+    use merry::events::{InteractiveRunState, RuntimeEvent};
+    use merry::providers::{ModelName, ModelRetryPolicy};
+    use merry::{InteractivePrimaryModel, InteractiveSettingsUpdate};
 
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
 
     let completion_step = || {
-        vec![Ok::<_, merry_llm::ModelError>(ModelEvent::Completed {
-            response: ModelResponse::new(vec![ModelOutput::text("done")], FinishReason::Stop, None),
-        })]
+        vec![Ok::<_, merry::providers::ModelError>(
+            ModelEvent::Completed {
+                response: ModelResponse::new(
+                    vec![ModelOutput::text("done")],
+                    FinishReason::Stop,
+                    None,
+                ),
+            },
+        )]
     };
     let initial_provider = ScriptedProvider::new(vec![completion_step()]);
     let switched_provider = ScriptedProvider::new(vec![
@@ -469,7 +488,7 @@ async fn interactive_primary_model_switch_routes_subsequent_subagents_to_new_mod
         ModelName::new("initial-model").expect("valid model"),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+            automatic_compaction: merry::CompactionConfig::disabled(),
             retry_policy: Some(ModelRetryPolicy::disabled()),
             context_compaction: None,
             process_backend: test_process_backend(),
@@ -558,12 +577,14 @@ async fn interactive_primary_model_switch_routes_subsequent_subagents_to_new_mod
 #[tokio::test(flavor = "current_thread")]
 async fn subagent_emits_journal_events_rolls_up_usage_persists_and_resumes_with_wake() {
     use crate::coding::{
-        CodingPermissionPolicy, HeadlessCodingRuntimeInput,
+        CodingPermissionPolicy, HeadlessCodingRuntimeInput, build_coding_session_builder,
         build_headless_coding_with_policy_composition,
-        resume_headless_coding_composition_with_loaded_session,
     };
-    use merry_core::{ModelUsage, RuntimeJournalPayload, SessionId, SubagentId};
-    use merry_runtime::{FileSessionStore, LoadedSession, PermissionReviewRules};
+    use merry::FileSessionStore;
+    use merry::coding::CodingSessionOpenMode;
+    use merry::events::{ModelUsage, SubagentId};
+    use merry::permissions::PermissionReviewRules;
+    use merry::runtime::RuntimeJournalPayload;
 
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
@@ -628,9 +649,9 @@ async fn subagent_emits_journal_events_rolls_up_usage_persists_and_resumes_with_
         model: model_name(),
         process_backend: test_process_backend(),
         extra_tools: Vec::new(),
-        automatic_compaction: merry_runtime::CompactionConfig::disabled(),
-        history_retention: merry_runtime::HistoryRetention::default(),
-        retry_policy: Some(merry_llm::ModelRetryPolicy::disabled()),
+        automatic_compaction: merry::CompactionConfig::disabled(),
+        history_retention: merry::HistoryRetention::default(),
+        retry_policy: Some(merry::providers::ModelRetryPolicy::disabled()),
         context_compaction: None,
         approval_review: None,
         skill_roots: Vec::new(),
@@ -744,18 +765,16 @@ async fn subagent_emits_journal_events_rolls_up_usage_persists_and_resumes_with_
             Some(ModelUsage::new(80, 20)),
         ),
     })]]);
-    let loaded = LoadedSession::load(&store, &SessionId::new(session_id).expect("valid id"))
-        .await
-        .expect("load parent session");
-    let resumed = resume_headless_coding_composition_with_loaded_session(
+    let resumed = build_coding_session_builder(
         make_input(wake_provider.clone()),
-        loaded,
         CodingPermissionPolicy::default(),
         PermissionReviewRules::default(),
-        Some(store.clone()),
         None,
     )
-    .expect("resumed runtime builds")
+    .expect("resumed session builder builds")
+    .open(store.clone(), CodingSessionOpenMode::Resume)
+    .await
+    .expect("resumed session opens")
     .into_runtime();
 
     let restored = resumed
@@ -826,7 +845,9 @@ async fn child_permission_request_carries_subagent_actor_attribution() {
         build_headless_coding_with_policy_composition,
     };
     use crate::permission_prompt::{PermissionReviewView, permission_review_lines};
-    use merry_runtime::{ChannelPermissionAdmissionSource, PermissionActor, PermissionReviewRules};
+    use merry::permissions::{
+        ChannelPermissionAdmissionSource, PermissionActor, PermissionReviewRules,
+    };
 
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
@@ -909,9 +930,9 @@ async fn child_permission_request_carries_subagent_actor_attribution() {
             model: model_name(),
             process_backend: test_process_backend(),
             extra_tools: Vec::new(),
-            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
-            history_retention: merry_runtime::HistoryRetention::default(),
-            retry_policy: Some(merry_llm::ModelRetryPolicy::disabled()),
+            automatic_compaction: merry::CompactionConfig::disabled(),
+            history_retention: merry::HistoryRetention::default(),
+            retry_policy: Some(merry::providers::ModelRetryPolicy::disabled()),
             context_compaction: None,
             approval_review: None,
             skill_roots: Vec::new(),

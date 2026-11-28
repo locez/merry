@@ -10,7 +10,7 @@ use super::{
 use crate::permission_prompt::{
     PermissionCapabilityBadge, PermissionFallbackNotice, PermissionReviewView,
 };
-use merry_runtime::{PathAccess, PermissionReviewRisk};
+use merry::permissions::{PathAccess, PermissionReviewRisk};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Position, Rect},

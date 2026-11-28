@@ -106,7 +106,7 @@ async fn mouse_move_scroll_and_keys_extend_running_review_timeout_before_auto_fo
         state::TIMELINE_REVIEW_IDLE_TIMEOUT,
         text_interaction::MouseInput,
     };
-    use merry_core::InteractiveRunState;
+    use merry::events::InteractiveRunState;
     use ratatui::layout::Position;
     use std::time::Duration;
 

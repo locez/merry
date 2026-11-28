@@ -84,7 +84,7 @@ struct McpSearchOutputView {
 pub(super) fn completed_mcp_view(tool: &StartedToolView, output: &str) -> Option<TimelineItem> {
     let name = tool.name.as_str();
     let elapsed_suffix = format_elapsed_suffix(tool.started_at.map(|started| started.elapsed()));
-    if name == merry_mcp::MCP_SEARCH_TOOL {
+    if name == merry::mcp::MCP_SEARCH_TOOL {
         let (title, body) = format_completed_mcp_search(tool, output, &elapsed_suffix);
         return Some(TimelineItem::Expanded {
             title,
@@ -92,7 +92,7 @@ pub(super) fn completed_mcp_view(tool: &StartedToolView, output: &str) -> Option
             expanded: false,
         });
     }
-    if name == merry_mcp::MCP_CALL_TOOL || parse_mcp_tool_name(name).is_some() {
+    if name == merry::mcp::MCP_CALL_TOOL || parse_mcp_tool_name(name).is_some() {
         let title = format!(
             "{}{elapsed_suffix}",
             super::tool_output::expanded_tool_title(tool)

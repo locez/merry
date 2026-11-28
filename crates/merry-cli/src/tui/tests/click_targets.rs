@@ -12,8 +12,8 @@ use crate::{
         theme::TuiTheme,
     },
 };
-use merry_core::InteractiveRunState;
-use merry_provider_openai::OpenAiProtocol;
+use merry::events::InteractiveRunState;
+use merry::providers::OpenAiProtocol;
 use ratatui::{buffer::Buffer, layout::Position, layout::Size};
 
 fn state() -> TuiState {

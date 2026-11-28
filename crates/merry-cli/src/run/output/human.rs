@@ -4,8 +4,9 @@ use crate::{
     cli_error::{CliError, stdout_error},
     tool_display::format_tool_call_progress,
 };
-use merry_core::{ErrorInfo, RuntimeEvent, ToolCallResultStatus};
-use merry_runtime::{AgentLoopBlockedReason, AgentLoopResult, AgentLoopStatus};
+use merry::coding::AgentLoopResult;
+use merry::events::{ErrorInfo, RuntimeEvent, ToolCallResultStatus};
+use merry::{AgentLoopBlockedReason, AgentLoopStatus};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 pub(super) async fn write_agent_loop_summary_to<W>(

@@ -4,7 +4,7 @@ use super::{
     provider_selection::ModelPickerTarget,
 };
 use crossterm::event::{KeyCode, KeyEvent};
-use merry_llm::ReasoningEffort;
+use merry::providers::ReasoningEffort;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReasoningPickerOverlay {

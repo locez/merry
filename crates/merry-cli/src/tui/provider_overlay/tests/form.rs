@@ -3,8 +3,8 @@ use crate::tui::provider_overlay::{
     ProviderFormField, ProviderFormOverlay, ProviderFormSeed, ProviderOverlayAction,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_llm::{ReasoningEffort, ServiceTier};
-use merry_provider_openai::OpenAiProtocol;
+use merry::providers::OpenAiProtocol;
+use merry::providers::{ReasoningEffort, ServiceTier};
 use std::collections::BTreeSet;
 
 #[test]

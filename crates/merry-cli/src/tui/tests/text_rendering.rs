@@ -5,7 +5,7 @@ use crate::tui::{
     tests::{find_cell_color, find_cell_style, find_text_position, rendered_buffer_text},
     theme::{SemanticColor, TuiTheme},
 };
-use merry_core::{QueuedInputView, QueuedInputsView};
+use merry::events::{QueuedInputView, QueuedInputsView};
 use ratatui::style::{Color, Modifier};
 
 #[test]
@@ -625,7 +625,7 @@ fn composer_renders_horizontal_padding_surface_and_prompt() {
 #[test]
 fn header_respects_configured_items_including_cache_and_rate() {
     use crate::config::HeaderItemKind;
-    use merry_core::{ContextWindowSource, ModelUsage, SessionUsage, UsageContextWindow};
+    use merry::events::{ContextWindowSource, ModelUsage, SessionUsage, UsageContextWindow};
 
     let mut state = TuiState::new(
         "/repo".into(),

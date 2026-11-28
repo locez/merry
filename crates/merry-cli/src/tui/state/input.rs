@@ -7,7 +7,7 @@ use crate::tui::{
     completion::{CompletionMenu, CompletionSources},
     input::{DraftImage, TuiSubmission},
 };
-use merry_runtime::SkillMetadata;
+use merry::events::SkillMetadata;
 
 impl TuiState {
     #[cfg(test)]
@@ -215,7 +215,7 @@ impl TuiState {
     pub(crate) fn insert_input_image(
         &mut self,
         image: DraftImage,
-    ) -> Result<(), merry_runtime::RuntimeError> {
+    ) -> Result<(), merry::coding::RuntimeError> {
         self.pending_empty_input_quit = false;
         self.input.insert_image(image)?;
         self.refresh_completion_menu();

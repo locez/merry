@@ -8,7 +8,7 @@ use crate::tui::{
     theme::TuiTheme,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::InteractiveRunState;
+use merry::events::InteractiveRunState;
 
 #[test]
 fn default_keymap_maps_core_navigation_and_control_keys() {

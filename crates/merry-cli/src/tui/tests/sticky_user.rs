@@ -98,11 +98,11 @@ fn sending_a_new_user_message_immediately_anchors_it_at_the_top_above_the_task_d
         text: "fresh short reply".to_owned(),
     });
     state.sync_background_processes(vec![
-        merry_runtime::BackgroundProcessSummary::new(
-            merry_runtime::BackgroundProcessId::new("bg-1").expect("id"),
+        merry::process::BackgroundProcessSummary::new(
+            merry::process::BackgroundProcessId::new("bg-1").expect("id"),
             "sleep 60",
             None,
-            merry_runtime::BackgroundProcessState::Running { pid: 42 },
+            merry::process::BackgroundProcessState::Running { pid: 42 },
         )
         .with_display_name(Some("api server".to_owned())),
     ]);

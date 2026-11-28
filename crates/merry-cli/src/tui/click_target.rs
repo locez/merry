@@ -122,7 +122,7 @@ pub(crate) fn status_actions(state: &TuiState) -> Vec<StatusAction> {
     if !state.subagents().is_empty() {
         actions.push(StatusAction::Agents);
     }
-    if state.plan().mode() != merry_core::PlanModeState::Inactive {
+    if state.plan().mode() != merry::events::PlanModeState::Inactive {
         actions.push(StatusAction::PlanMode);
     }
     if state.plan().has_plans() {
@@ -155,10 +155,10 @@ pub(crate) fn status_action_label(state: &TuiState, action: &StatusAction) -> St
             }
         }
         StatusAction::PlanMode => match state.plan().mode() {
-            merry_core::PlanModeState::Pending => "PLAN (pending)".to_owned(),
-            merry_core::PlanModeState::Active => "PLAN".to_owned(),
-            merry_core::PlanModeState::ExitPending => "PLAN (exiting)".to_owned(),
-            merry_core::PlanModeState::Inactive => "plan mode".to_owned(),
+            merry::events::PlanModeState::Pending => "PLAN (pending)".to_owned(),
+            merry::events::PlanModeState::Active => "PLAN".to_owned(),
+            merry::events::PlanModeState::ExitPending => "PLAN (exiting)".to_owned(),
+            merry::events::PlanModeState::Inactive => "plan mode".to_owned(),
         },
         StatusAction::Plan => {
             if state.plan().is_awaiting_approval() {

@@ -2,8 +2,10 @@ use super::{
     ConfigError, MerryConfig, default_true, managed_provider::ProviderAlias,
     resolve_provider_api_key_file_path,
 };
-use merry_llm::{ModelName, ModelRetryPolicy, ModelRetryPolicyError, ReasoningEffort, ServiceTier};
-use merry_provider_openai::OpenAiProtocol;
+use merry::providers::OpenAiProtocol;
+use merry::providers::{
+    ModelName, ModelRetryPolicy, ModelRetryPolicyError, ReasoningEffort, ServiceTier,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -167,24 +169,6 @@ impl MerryConfig {
         Ok(())
     }
 
-    pub fn openai_compatible_provider(&self) -> Result<EffectiveOpenAiProviderConfig, ConfigError> {
-        let default_alias = self
-            .raw
-            .providers
-            .as_ref()
-            .and_then(|providers| providers.default.as_ref())
-            .map(|default| default.provider.as_str());
-        if let Some(alias) = default_alias
-            && alias != "openai-compatible"
-            && !self.managed_providers.contains_key(alias)
-        {
-            return Err(ConfigError::Invalid(format!(
-                "unsupported default provider {alias}"
-            )));
-        }
-        self.legacy_openai_provider()
-    }
-
     pub fn default_provider(&self) -> Result<EffectiveDefaultProviderConfig, ConfigError> {
         let providers =
             self.raw.providers.as_ref().ok_or_else(|| {
@@ -293,19 +277,6 @@ impl MerryConfig {
             "provider {alias:?} is not configured in {} (add it in Merry Settings or edit that file directly)",
             self.providers_dir.join("providers.toml").display()
         ))
-    }
-
-    fn legacy_openai_provider(&self) -> Result<EffectiveOpenAiProviderConfig, ConfigError> {
-        let default = self.default_provider()?;
-        let EffectiveProviderConfig::OpenAiCompatible(mut provider) = default.provider else {
-            return Err(ConfigError::Invalid(
-                "default provider is not openai-compatible".to_owned(),
-            ));
-        };
-        provider.model = Some(default.model);
-        provider.reasoning_effort = default.reasoning_effort;
-        provider.service_tier = default.service_tier;
-        Ok(provider)
     }
 
     pub fn provider_retry_policy(&self) -> Result<Option<ModelRetryPolicy>, ConfigError> {

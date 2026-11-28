@@ -3,7 +3,7 @@ use crate::tui::{
     keymap::Keymap, output_rate::OutputRate, projector::TuiProjector, render::render_to_text,
     state::TuiState, theme::TuiTheme,
 };
-use merry_core::{
+use merry::events::{
     ContextWindowSource, ErrorInfo, InteractiveRunState, ModelOutputRate, ModelUsage, RuntimeEvent,
     SessionUsage, UsageContextWindow,
 };
@@ -15,9 +15,9 @@ fn rate_event(tokens: u64, seconds: u64, estimated: bool) -> RuntimeEvent {
             tokens,
             Duration::from_secs(seconds),
             if estimated {
-                merry_core::OutputTokenSource::Estimated
+                merry::events::OutputTokenSource::Estimated
             } else {
-                merry_core::OutputTokenSource::ProviderUsage
+                merry::events::OutputTokenSource::ProviderUsage
             },
         )),
         source: source(),
@@ -202,19 +202,19 @@ fn backpressure_keeps_updating_the_rate_until_the_runtime_resets_it() {
     for (tokens, token_source, label) in [
         (
             400,
-            merry_core::OutputTokenSource::Estimated,
+            merry::events::OutputTokenSource::Estimated,
             "≈100.0 tok/s",
         ),
         (
             800,
-            merry_core::OutputTokenSource::ProviderUsage,
+            merry::events::OutputTokenSource::ProviderUsage,
             "≈200.0 tok/s",
         ),
     ] {
         rate.observe(&RuntimeEvent::ModelOutputRateUpdated {
             rate: Some(
                 ModelOutputRate::new(tokens, Duration::from_secs(4), token_source)
-                    .with_timing_quality(merry_core::OutputTimingQuality::ConsumerLimited),
+                    .with_timing_quality(merry::events::OutputTimingQuality::ConsumerLimited),
             ),
             source: source(),
         });
@@ -246,15 +246,15 @@ fn an_unmeasurable_new_sample_does_not_hide_the_last_measurable_sample() {
 fn timing_limitations_are_presented_as_estimates_not_missing_samples() {
     let mut rate = OutputRate::default();
     for quality in [
-        merry_core::OutputTimingQuality::PartialOutput,
-        merry_core::OutputTimingQuality::ConsumerLimited,
+        merry::events::OutputTimingQuality::PartialOutput,
+        merry::events::OutputTimingQuality::ConsumerLimited,
     ] {
         rate.observe(&RuntimeEvent::ModelOutputRateUpdated {
             rate: Some(
                 ModelOutputRate::new(
                     100,
                     Duration::from_secs(2),
-                    merry_core::OutputTokenSource::ProviderUsage,
+                    merry::events::OutputTokenSource::ProviderUsage,
                 )
                 .with_timing_quality(quality),
             ),

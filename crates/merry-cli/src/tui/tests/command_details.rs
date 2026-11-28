@@ -14,8 +14,8 @@ use crate::tui::{
     theme::TuiTheme,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::{ErrorInfo, RuntimeEvent, SessionId, ToolCallId, ToolCallResult, ToolOutput};
-use merry_runtime::Runtime;
+use merry::events::{ErrorInfo, RuntimeEvent, SessionId, ToolCallId, ToolCallResult, ToolOutput};
+use merry::runtime::Runtime;
 use ratatui::{
     layout::{Position, Size},
     style::Color,
@@ -335,7 +335,7 @@ fn upstream_truncation_binary_text_and_load_failures_are_explicit() {
 #[tokio::test]
 async fn output_loader_reads_runtime_tool_outputs_and_reports_missing_records() {
     use futures_util::StreamExt;
-    use merry_runtime::{StepContext, StepInput};
+    use merry::runtime::{StepContext, StepInput};
     use std::sync::Arc;
 
     let event = crate::testing::process_tool_call("capture", &["echo", "hi"], Some(".")).unwrap();
@@ -361,13 +361,22 @@ async fn output_loader_reads_runtime_tool_outputs_and_reports_missing_records() 
         .await
         .unwrap();
     assert_eq!(
-        load_output(&runtime, &call_id).await.unwrap().copy_text(),
+        load_output(
+            &merry::coding::CodingSessionHandle::from_runtime(runtime.clone()),
+            &call_id,
+        )
+        .await
+        .unwrap()
+        .copy_text(),
         "exact captured output\n"
     );
     assert!(
-        load_output(&runtime, &ToolCallId::new("missing").unwrap())
-            .await
-            .is_err()
+        load_output(
+            &merry::coding::CodingSessionHandle::from_runtime(runtime.clone()),
+            &ToolCallId::new("missing").unwrap(),
+        )
+        .await
+        .is_err()
     );
 }
 

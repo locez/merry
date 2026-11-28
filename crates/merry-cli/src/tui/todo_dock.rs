@@ -7,7 +7,7 @@ use crate::tui::{
     text_wrap::{semantic_style, truncate_chars},
     theme::SemanticColor,
 };
-use merry_core::{TodoItem, TodoStatus};
+use merry::events::{TodoItem, TodoStatus};
 use ratatui::{
     Frame,
     layout::{Position, Rect},

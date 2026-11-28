@@ -1,11 +1,11 @@
 //! Headless command setup; settlement and durable saving are owned by child modules.
 
 use crate::{
-    cli_error::{CliError, debug_openai_usage_error, unexpected, usage_error},
+    cli_error::{CliError, unexpected, usage_error},
     coding::{
         AutoFallback, CodingPermissionPolicy, HeadlessCodingRuntimeInput, PermissionMode,
-        SandboxMode, action_process_runner_for_mode, build_headless_coding_with_policy_composition,
-        coding_agent_process_admission, resume_headless_coding_composition_with_loaded_session,
+        SandboxMode, action_process_runner_for_mode, build_coding_session_builder,
+        coding_agent_process_admission,
     },
     config::{MerryConfig, XdgPaths},
     headless_review::{HeadlessPermissionReviewer, ReviewInputChannel},
@@ -23,11 +23,9 @@ use crate::{
     },
     workspace_trust::{self, TrustWorkspace},
 };
-use merry_core::SessionId;
-use merry_runtime::{
-    AgentLoopResult, AgentLoopStatus, FileSessionStore, LoadedSession, SessionReservation,
-    StepContext, StepInput,
-};
+use merry::coding::{AgentLoopResult, CodingSessionOpenError, CodingSessionOpenMode};
+use merry::events::SessionId;
+use merry::{AgentLoopStatus, FileSessionStore};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 mod output;
@@ -117,34 +115,31 @@ fn parse_session_id(flag: &str, value: &str) -> Result<SessionId, CliError> {
     SessionId::new(value).map_err(|error| usage_error(format!("{flag}: {error}")))
 }
 
-/// Reserves a run's session id and refuses a new run that already has state.
+/// Refuses starting a new run under a session id that already has saved state.
 ///
-/// Saving a session appends `journal.jsonl`, so starting a new run under an
-/// existing id would mix a fresh transcript into that session. A typo or a
-/// reused id has to fail here, before the run consumes its task or starts a
-/// runtime. A legacy `state.json` still occupies the id.
-async fn reserve_run_session(
+/// Checked before reading stdin so a colliding `--session-id` fails fast
+/// without consuming the task payload. Exclusive lock acquisition still happens
+/// inside [`merry::coding::CodingSessionBuilder::open`].
+async fn ensure_new_session_available(
     session: &RunSession,
     store: &FileSessionStore,
-) -> Result<SessionReservation, CliError> {
-    let reservation = store
-        .reserve_session(session.id())
-        .await
-        .map_err(unexpected)?;
+) -> Result<(), CliError> {
     if matches!(session, RunSession::New(_))
         && store
             .contains_session(session.id())
             .await
             .map_err(unexpected)?
     {
-        return Err(usage_error(format!(
-            "session {} already has saved state; pass --resume {} to continue it, \
-             or choose a different --session-id",
-            session.id(),
-            session.id()
-        )));
+        return Err(session_already_exists_error(session.id()));
     }
-    Ok(reservation)
+    Ok(())
+}
+
+fn session_already_exists_error(session_id: &SessionId) -> CliError {
+    usage_error(format!(
+        "session {session_id} already has saved state; pass --resume {session_id} to continue it, \
+         or choose a different --session-id"
+    ))
 }
 
 /// Reads the task from argv, or from `reader` when `TASK` is `-`.
@@ -206,7 +201,7 @@ pub(crate) async fn run(
         };
     let session = RunSession::from_args(args)?;
     let session_store = FileSessionStore::default_store().map_err(unexpected)?;
-    let _session_reservation = reserve_run_session(&session, &session_store).await?;
+    ensure_new_session_available(&session, &session_store).await?;
     let task = resolve_task(&args.task, tokio::io::stdin()).await?;
     let _admission = coding_agent_process_admission(sandbox_mode);
 
@@ -215,7 +210,7 @@ pub(crate) async fn run(
         context_compaction,
         approval_review,
         retry_policy,
-    } = runtime_provider_bundle_from_config(merry_config, debug_openai_usage_error)?;
+    } = runtime_provider_bundle_from_config(merry_config, usage_error)?;
     let RuntimePrimaryProviderConfig { provider, model } = primary;
     let root = workspace.root;
     let mut backend_options =
@@ -225,26 +220,13 @@ pub(crate) async fn run(
     }
     let backend = action_process_runner_for_mode(&root, backend_options, sandbox_mode)?;
     let headless_metadata = headless_session_metadata(&session_store, &session, &root).await?;
-    let loaded_session = match &session {
-        RunSession::New(_) => None,
-        RunSession::Resumed(id) => Some(
-            LoadedSession::load(&session_store, id)
-                .await
-                .map_err(|error| unexpected(format!("could not resume session {id}: {error}")))?,
-        ),
-    };
     let mcp = discover_configured_mcp_tools(merry_config).await?;
-    write_startup_warnings(&mut tokio::io::stderr(), &mcp.warnings)
+    write_startup_warnings(&mut tokio::io::stderr(), mcp.warnings())
         .await
         .map_err(unexpected)?;
     let subagents_cfg = subagents_config(merry_config).map_err(unexpected)?;
-    let coding_subagents = build_coding_subagents_config(
-        merry_config,
-        &subagents_cfg,
-        &root,
-        false,
-        debug_openai_usage_error,
-    )?;
+    let coding_subagents =
+        build_coding_subagents_config(merry_config, &subagents_cfg, &root, false, usage_error)?;
     let history_retention =
         crate::runtime_config::history_retention_config(merry_config).map_err(unexpected)?;
     let runtime_input = HeadlessCodingRuntimeInput {
@@ -253,7 +235,8 @@ pub(crate) async fn run(
         provider,
         model,
         process_backend: backend,
-        extra_tools: mcp.tools,
+        #[cfg(test)]
+        extra_tools: Vec::new(),
         automatic_compaction: automatic_compaction_config(merry_config).map_err(unexpected)?,
         history_retention,
         retry_policy,
@@ -286,37 +269,37 @@ pub(crate) async fn run(
         .transpose()
         .map_err(unexpected)?
         .flatten();
-    let coding_runtime = match loaded_session {
-        None => build_headless_coding_with_policy_composition(
-            runtime_input,
-            permission_policy,
-            permission_review_rules,
-            Some(session_store.clone()),
-            max_parallel_tool_calls,
-        )?,
-        Some(loaded) => resume_headless_coding_composition_with_loaded_session(
-            runtime_input,
-            loaded,
-            permission_policy,
-            permission_review_rules,
-            Some(session_store.clone()),
-            max_parallel_tool_calls,
-        )?,
+    let open_mode = match &session {
+        RunSession::New(_) => CodingSessionOpenMode::New,
+        RunSession::Resumed(_) => CodingSessionOpenMode::Resume,
     };
-    let loop_config = coding_runtime.loop_config();
-    let runtime = coding_runtime.into_runtime();
-    let input = StepInput::user_text(&task).map_err(unexpected)?;
-    let context = StepContext::default()
-        .with_generation_config(generation_config(merry_config).map_err(unexpected)?);
+    let coding_session = build_coding_session_builder(
+        runtime_input,
+        permission_policy,
+        permission_review_rules,
+        max_parallel_tool_calls,
+    )?
+    .mcp_tools(mcp)
+    .open(session_store.clone(), open_mode)
+    .await
+    .map_err(|error| match error {
+        CodingSessionOpenError::SessionAlreadyExists { session_id } => {
+            session_already_exists_error(&session_id)
+        }
+        other => unexpected(other),
+    })?;
+    let loop_config = coding_session.loop_config();
+    let session_handle = coding_session.handle();
+    let generation = generation_config(merry_config).map_err(unexpected)?;
     let review_task = headless_reviewer.start(review_input_channel_for_task(&args.task));
     run_agent_loop_with_persistence(
-        &runtime,
-        input,
+        &session_handle,
+        &task,
         tokio::io::stdout(),
         async { review_task.finish().await.map_err(unexpected) },
         HeadlessRunPersistence {
             loop_config,
-            context,
+            generation,
             events_jsonl: args.events_jsonl,
             session_store,
             session_id: session.id(),
@@ -326,7 +309,7 @@ pub(crate) async fn run(
     .await
 }
 
-fn default_run_session_id() -> merry_core::SessionId {
+fn default_run_session_id() -> merry::events::SessionId {
     crate::session_id::new_ephemeral_session_id()
 }
 

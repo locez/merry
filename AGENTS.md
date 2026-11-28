@@ -106,9 +106,11 @@ not require mechanically moving every existing module in one change.
 - `crates/merry` is the Rust facade. It owns application-facing construction
   and event surfaces without exposing provider wire types or CLI details.
 - `crates/merry-cli` is the product surface. It owns CLI/TUI interaction,
-  configuration, presentation, debug fixtures, and host process/sandbox
-  adaptation. It may select providers and pass runtime inputs, but it must not
-  own a second runtime state model or coding policy.
+  configuration, presentation, and terminal/web surface wiring. It consumes
+  runtime, provider, MCP, tool, and host-process capabilities through the
+  `merry` facade (plus optional `merry-web`) rather than depending directly on
+  lower workspace crates, and must not own a second runtime state model or
+  coding policy.
 - `crates/merry-py` and `sdks/python` are binding surfaces. They expose
   Rust-owned behavior; runtime state, ledger, artifacts, permissions, retry,
   and policy remain in Rust.

@@ -6,6 +6,7 @@
 //! platform can replace the concrete backend without changing coding
 //! composition or runtime call sites.
 
+mod baseline;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod confinement;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -16,6 +17,7 @@ mod host_path;
 mod host_resources;
 mod process_runner;
 
+pub use baseline::{default_development_path_rules, default_development_path_rules_with_env};
 pub use confinement::{probe_workspace_sandbox, sandbox_helper_main, sandbox_helper_requested};
 pub use gpg::GpgAgentSockets;
 pub use host_path::resolve_host_path;
@@ -29,10 +31,11 @@ pub use process_runner::{
     WorkspaceProcessRunnerFactory,
 };
 
+use merry_core::{ProtectedHostPaths, host_paths::is_clean_absolute_path};
 use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, HostIntegration, PathAccessRule, PermissionRequest,
-    PermissionedProcessRunnerFactory, ProcessRunner, ProcessRunnerError,
-    ProcessSessionPermissionView,
+    AcceptedLocalWorkspaceProcessAdmission, HostIntegration, PathAccess, PathAccessRule,
+    PathAccessRuleSource, PermissionRequest, PermissionedProcessRunnerFactory, ProcessRunner,
+    ProcessRunnerError, ProcessSessionPermissionView,
 };
 use std::{
     ffi::OsString,
@@ -324,6 +327,68 @@ impl ProcessBackendOptions {
     #[must_use]
     pub fn with_path_rules(mut self, path_rules: impl IntoIterator<Item = PathAccessRule>) -> Self {
         self.path_rules = path_rules.into_iter().collect();
+        self
+    }
+
+    /// Appends filesystem rules installed for isolated actions.
+    #[must_use]
+    pub fn extend_path_rules(
+        mut self,
+        path_rules: impl IntoIterator<Item = PathAccessRule>,
+    ) -> Self {
+        self.path_rules.extend(path_rules);
+        self
+    }
+
+    /// Appends the default local development toolchain and cache baseline rules.
+    #[must_use]
+    pub fn with_default_development_baseline(self, home: &Path) -> Self {
+        self.extend_path_rules(default_development_path_rules(home))
+    }
+
+    /// Appends Merry's product-private deny rules from a shared
+    /// [`ProtectedHostPaths`] contract.
+    #[must_use]
+    pub fn with_protected_host_paths(self, protected: &ProtectedHostPaths) -> Self {
+        self.extend_path_rules(protected.as_slice().iter().cloned().map(|path| {
+            PathAccessRule::new(path, PathAccess::Deny, PathAccessRuleSource::ProductPrivate)
+        }))
+    }
+
+    /// Appends Merry's non-secret writable product directories (config, skills,
+    /// and optional durable memory root).
+    #[must_use]
+    pub fn with_product_writable_paths(
+        mut self,
+        config_dir: &Path,
+        skill_roots: &[PathBuf],
+        memory_root: Option<&Path>,
+    ) -> Self {
+        if is_clean_absolute_path(config_dir) {
+            self.path_rules.push(PathAccessRule::new(
+                config_dir.to_path_buf(),
+                PathAccess::ReadWrite,
+                PathAccessRuleSource::ProductConfig,
+            ));
+        }
+        for skill_root in skill_roots {
+            if is_clean_absolute_path(skill_root) {
+                self.path_rules.push(PathAccessRule::new(
+                    skill_root.clone(),
+                    PathAccess::ReadWrite,
+                    PathAccessRuleSource::ProductConfig,
+                ));
+            }
+        }
+        if let Some(memory_root) = memory_root
+            && is_clean_absolute_path(memory_root)
+        {
+            self.path_rules.push(PathAccessRule::new(
+                memory_root.to_path_buf(),
+                PathAccess::ReadWrite,
+                PathAccessRuleSource::DurableMemory,
+            ));
+        }
         self
     }
 
@@ -973,5 +1038,43 @@ mod tests {
             1,
             "child-only grants must not mutate parent session permissions"
         );
+    }
+
+    #[test]
+    fn backend_options_attach_protected_and_writable_product_paths() {
+        let protected = merry_core::ProtectedHostPaths::from_merry_dirs(
+            std::path::PathBuf::from("/home/alice/.local/state/merry"),
+            std::path::PathBuf::from("/home/alice/.local/share/merry/providers"),
+        );
+        let options = ProcessBackendOptions::new()
+            .with_product_writable_paths(
+                std::path::Path::new("/home/alice/.config/merry"),
+                &[std::path::PathBuf::from("/home/alice/.config/merry/skills")],
+                Some(std::path::Path::new(
+                    "/home/alice/.local/share/merry/memory",
+                )),
+            )
+            .with_protected_host_paths(&protected);
+
+        assert!(options.path_rules().iter().any(|rule| {
+            rule.path() == std::path::Path::new("/home/alice/.local/state/merry")
+                && rule.access() == merry_runtime::PathAccess::Deny
+                && rule.source() == merry_runtime::PathAccessRuleSource::ProductPrivate
+        }));
+        assert!(options.path_rules().iter().any(|rule| {
+            rule.path() == std::path::Path::new("/home/alice/.local/share/merry/providers")
+                && rule.access() == merry_runtime::PathAccess::Deny
+                && rule.source() == merry_runtime::PathAccessRuleSource::ProductPrivate
+        }));
+        assert!(options.path_rules().iter().any(|rule| {
+            rule.path() == std::path::Path::new("/home/alice/.config/merry")
+                && rule.access() == merry_runtime::PathAccess::ReadWrite
+                && rule.source() == merry_runtime::PathAccessRuleSource::ProductConfig
+        }));
+        assert!(options.path_rules().iter().any(|rule| {
+            rule.path() == std::path::Path::new("/home/alice/.local/share/merry/memory")
+                && rule.access() == merry_runtime::PathAccess::ReadWrite
+                && rule.source() == merry_runtime::PathAccessRuleSource::DurableMemory
+        }));
     }
 }

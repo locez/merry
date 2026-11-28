@@ -20,8 +20,10 @@ use super::{
     theme::SemanticColor,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::{RuntimeEvent, SubagentActivityPhase, SubagentActivitySnapshot, SubagentStatus};
-use merry_runtime::{SessionTranscriptItem, SubagentStatusLabel, SubagentStatusView};
+use merry::events::{
+    RuntimeEvent, SubagentActivityPhase, SubagentActivitySnapshot, SubagentStatus,
+};
+use merry::events::{SessionTranscriptItem, SubagentStatusLabel, SubagentStatusView};
 use std::time::Duration;
 
 const MAX_ACTIVITY_LOG_PER_SUBAGENT: usize = 64;

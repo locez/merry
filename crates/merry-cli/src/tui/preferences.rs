@@ -12,8 +12,8 @@ use crate::{
     },
     tui::theme::ThemePreset,
 };
-use merry_llm::{ModelName, ReasoningEffort, ServiceTier};
-use merry_runtime::SubagentLimitBehavior;
+use merry::coding::SubagentLimitBehavior;
+use merry::providers::{ModelName, ReasoningEffort, ServiceTier};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,

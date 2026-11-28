@@ -244,7 +244,7 @@ mod tests {
         assert!(state.is_timeline_detached());
 
         // Starting an active run grants a fresh timeout window from run start.
-        state.set_run_state(merry_core::InteractiveRunState::RunningModel);
+        state.set_run_state(merry::events::InteractiveRunState::RunningModel);
         tokio::time::advance(TIMELINE_REVIEW_IDLE_TIMEOUT - Duration::from_millis(1)).await;
         assert!(!state.expire_idle_timeline_review());
         assert!(state.is_timeline_detached());
@@ -267,7 +267,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn idle_review_auto_follow_pauses_during_overlays_and_comment_mode() {
         let mut state = detached_state();
-        state.set_run_state(merry_core::InteractiveRunState::RunningTool);
+        state.set_run_state(merry::events::InteractiveRunState::RunningTool);
 
         // Opening an overlay pauses auto-follow and refreshes the deadline.
         state.open_command_palette();

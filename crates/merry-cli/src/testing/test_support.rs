@@ -1,19 +1,16 @@
 use crate::cli_error::{CliError, unexpected};
 use futures_util::stream;
-use merry_core::{ProviderName, ToolName};
-use merry_llm::{
+use merry::events::{ProviderName, ToolName};
+use merry::process::{
+    ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
+    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+};
+use merry::providers::{
     FinishReason, ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelName,
     ModelOutput, ModelProvider, ModelProviderFuture, ModelRequest, ModelResponse,
     ModelStreamContext, ModelToolCall, ModelToolCallId, ToolArguments,
 };
-use merry_runtime::{
-    ProcessActionIntent, ProcessExitStatus, ProcessRunner, ProcessRunnerContext,
-    ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
-};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::{Arc, Mutex};
 
 pub(crate) fn process_tool_call(
     call_id: &str,
@@ -74,8 +71,6 @@ pub(crate) fn tool_call(
 
 #[derive(Clone)]
 pub(crate) struct FakeProcessRunner {
-    calls: Arc<AtomicUsize>,
-    observed_argv: Arc<Mutex<Vec<Vec<String>>>>,
     outputs: Arc<Mutex<Vec<FakeProcessRunnerStep>>>,
 }
 
@@ -86,21 +81,8 @@ impl FakeProcessRunner {
 
     fn scripted<const N: usize>(steps: [FakeProcessRunnerStep; N]) -> Self {
         Self {
-            calls: Arc::new(AtomicUsize::new(0)),
-            observed_argv: Arc::new(Mutex::new(Vec::new())),
             outputs: Arc::new(Mutex::new(steps.into_iter().rev().collect())),
         }
-    }
-
-    pub(crate) fn call_count(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
-    }
-
-    pub(crate) fn observed_argv(&self) -> Vec<Vec<String>> {
-        self.observed_argv
-            .lock()
-            .expect("observed argv mutex should not be poisoned")
-            .clone()
     }
 }
 
@@ -128,11 +110,6 @@ impl ProcessRunner for FakeProcessRunner {
         context: ProcessRunnerContext,
     ) -> ProcessRunnerFuture<'a> {
         Box::pin(async move {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            self.observed_argv
-                .lock()
-                .expect("observed argv mutex should not be poisoned")
-                .push(intent.argv().to_vec());
             if context.cancellation_token().is_cancelled() {
                 return Err(ProcessRunnerError::Cancelled);
             }
@@ -153,89 +130,6 @@ impl ProcessRunner for FakeProcessRunner {
             )
             .map_err(|source| ProcessRunnerError::infrastructure(source.to_string()))
         })
-    }
-}
-
-pub(crate) struct CompletingProvider {
-    name: ProviderName,
-    capabilities: ModelCapabilities,
-}
-
-impl CompletingProvider {
-    pub(crate) fn new() -> Self {
-        Self {
-            name: ProviderName::new("debug-test-provider").expect("valid provider name"),
-            capabilities: ModelCapabilities::new(true, true, false, true, None, None)
-                .expect("valid capabilities"),
-        }
-    }
-}
-
-impl ModelProvider for CompletingProvider {
-    fn name(&self) -> &ProviderName {
-        &self.name
-    }
-
-    fn capabilities(&self) -> &ModelCapabilities {
-        &self.capabilities
-    }
-
-    fn stream_model<'a>(
-        &'a self,
-        _request: ModelRequest,
-        _context: ModelStreamContext,
-    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
-        Box::pin(async {
-            let response = ModelResponse::new(
-                vec![ModelOutput::text("hidden from runtime events")],
-                FinishReason::Stop,
-                None,
-            );
-            let events = vec![
-                Ok(ModelEvent::Started),
-                Ok(ModelEvent::OutputTextDelta {
-                    delta: "hidden".to_owned(),
-                }),
-                Ok(ModelEvent::Completed { response }),
-            ];
-            Ok(Box::pin(stream::iter(events)) as ModelEventStream)
-        })
-    }
-}
-
-pub(crate) struct RecordingProvider {
-    inner: CompletingProvider,
-    pub(crate) requests: Arc<Mutex<Vec<ModelRequest>>>,
-}
-
-impl RecordingProvider {
-    pub(crate) fn new() -> Self {
-        Self {
-            inner: CompletingProvider::new(),
-            requests: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-}
-
-impl ModelProvider for RecordingProvider {
-    fn name(&self) -> &ProviderName {
-        self.inner.name()
-    }
-
-    fn capabilities(&self) -> &ModelCapabilities {
-        self.inner.capabilities()
-    }
-
-    fn stream_model<'a>(
-        &'a self,
-        request: ModelRequest,
-        context: ModelStreamContext,
-    ) -> ModelProviderFuture<'a, Result<ModelEventStream, ModelError>> {
-        self.requests
-            .lock()
-            .expect("request mutex should not be poisoned")
-            .push(request.clone());
-        self.inner.stream_model(request, context)
     }
 }
 
@@ -302,4 +196,29 @@ impl ModelProvider for ScriptedProvider {
 
 pub(crate) fn model_name() -> ModelName {
     ModelName::new("debug-model").expect("valid model name")
+}
+
+pub(crate) async fn collect_runtime_step_events(
+    runtime: &merry::runtime::Runtime,
+    input: merry::runtime::StepInput,
+    context: merry::runtime::StepContext,
+) -> Result<Vec<merry::runtime::RuntimeJournalEvent>, CliError> {
+    use futures_util::StreamExt;
+
+    let mut events = runtime.step(input, context).map_err(unexpected)?;
+    let mut collected = Vec::new();
+    while let Some(event) = events.next().await {
+        collected.push(event);
+    }
+
+    Ok(collected)
+}
+
+pub(crate) fn first_pending_tool_call(
+    events: &[merry::runtime::RuntimeJournalEvent],
+) -> Option<merry::events::PendingToolCall> {
+    events.iter().find_map(|event| match &event.payload {
+        merry::runtime::RuntimeJournalPayload::ToolCallPending { call } => Some(call.clone()),
+        _ => None,
+    })
 }

@@ -1,8 +1,7 @@
-use crate::cli_error::{CliError, debug_openai_usage_error, unexpected};
+use crate::cli_error::{CliError, unexpected, usage_error};
 use crate::coding::{
     AutoFallback, CodingPermissionPolicy, HeadlessCodingRuntimeInput, PermissionMode, SandboxMode,
-    action_process_runner_for_mode, build_headless_coding_with_policy_composition,
-    coding_agent_process_admission, resume_headless_coding_composition_with_loaded_session,
+    action_process_runner_for_mode, build_coding_session_builder, coding_agent_process_admission,
 };
 use crate::config::MerryConfig;
 use crate::mcp_tools::discover_configured_mcp_tools;
@@ -17,16 +16,19 @@ use crate::runtime_config::{
 use crate::tui::preferences::{CompactionStrategy, TuiPreferences};
 use crate::tui::session_list::{TuiSessionMetadata, TuiSessionStore, now_unix_ms};
 use crate::tui::session_picker::SessionPickerSelection;
-use merry_core::SessionId;
-use merry_llm::GenerationConfig;
-use merry_mcp::McpServerDiagnostic;
-use merry_runtime::{
-    AgentLoopControl, AgentLoopInput, ChannelPermissionAdmissionSource, CompactionConfig,
-    InteractivePrimaryModel, InteractiveRunEventStream, InteractiveSettingsUpdate,
-    InteractiveSubagentSettings, LoadedSession, PermissionReviewRequest, Runtime,
-    SessionReservation, SessionTranscriptItem, SkillMetadata, StepContext,
-    SubagentActivityReceiver,
+use merry::coding::{
+    AgentLoopControl, AgentLoopInput, CodingSession, CodingSessionHandle, CodingSessionOpenError,
+    CodingSessionOpenMode, CodingSessionResumeFailure, InteractiveCodingRun, InteractiveError,
+    InteractiveRunEventStream, InteractiveSubagentSettings, RuntimeModelRole,
 };
+use merry::events::{SessionId, SessionTranscriptItem, SkillMetadata};
+use merry::mcp::McpServerDiagnostic;
+use merry::observability::SubagentActivityReceiver;
+use merry::permissions::{
+    ChannelPermissionAdmissionSource, PermissionReviewChannel, PermissionReviewRequest,
+};
+use merry::providers::GenerationConfig;
+use merry::{CompactionConfig, InteractivePrimaryModel, InteractiveSettingsUpdate};
 use std::{collections::VecDeque, num::NonZeroU64, path::PathBuf, sync::Arc};
 use tokio::sync::mpsc;
 
@@ -38,7 +40,7 @@ pub(crate) struct TuiRuntimeSession {
     metadata_written: bool,
     pub(crate) resumed: bool,
     pub(crate) startup_warnings: Vec<McpServerDiagnostic>,
-    runtime: Runtime,
+    session: CodingSession,
     session_store: TuiSessionStore,
     pub(crate) stream: InteractiveRunEventStream,
     pub(crate) subagent_activity: SubagentActivityReceiver,
@@ -52,7 +54,6 @@ pub(crate) struct TuiRuntimeSession {
     permission_source: Arc<ChannelPermissionAdmissionSource>,
     pub(crate) permission_requests: mpsc::Receiver<PermissionReviewRequest>,
     pending_permission_reviews: VecDeque<PermissionReviewRequest>,
-    session_reservation: Option<SessionReservation>,
 }
 
 pub(crate) struct TuiSessionLaunch {
@@ -66,11 +67,7 @@ pub(crate) struct TuiSessionLaunch {
     pub(crate) workspace_writable: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ResumeFailureKind {
-    IncompatibleFormat,
-    AlreadyOpen,
-}
+pub(crate) type ResumeFailureKind = CodingSessionResumeFailure;
 
 pub(crate) enum TuiSessionStartError {
     ResumeUnavailable {
@@ -93,25 +90,6 @@ impl From<crate::coding::CodingRuntimeError> for TuiSessionStartError {
     }
 }
 
-pub(super) fn classify_resume_error(
-    error: &merry_runtime::RuntimeError,
-) -> Option<ResumeFailureKind> {
-    match error {
-        merry_runtime::RuntimeError::SessionStore {
-            source: merry_runtime::SessionStoreError::SessionAlreadyReserved { .. },
-        } => Some(ResumeFailureKind::AlreadyOpen),
-        merry_runtime::RuntimeError::SessionStore {
-            source:
-                merry_runtime::SessionStoreError::UnsupportedFormatVersion { .. }
-                | merry_runtime::SessionStoreError::InvalidDocument { .. }
-                | merry_runtime::SessionStoreError::Json { .. }
-                | merry_runtime::SessionStoreError::SessionIdMismatch { .. }
-                | merry_runtime::SessionStoreError::Io { .. },
-        } => Some(ResumeFailureKind::IncompatibleFormat),
-        _ => None,
-    }
-}
-
 pub(crate) async fn start_tui_runtime_session(
     merry_config: Option<&MerryConfig>,
     session_store: TuiSessionStore,
@@ -131,7 +109,7 @@ pub(crate) async fn start_tui_runtime_session(
     } = launch;
     let _admission = coding_agent_process_admission(sandbox_mode);
     let owned_config = merry_config.cloned().ok_or_else(|| {
-        debug_openai_usage_error("Merry XDG provider config is required for runtime".to_owned())
+        usage_error("Merry XDG provider config is required for runtime".to_owned())
     })?;
 
     let role_overrides = runtime_role_overrides(merry_config, preferences);
@@ -145,7 +123,7 @@ pub(crate) async fn start_tui_runtime_session(
         preferences.provider.as_deref(),
         preference_model_override(&owned_config, preferences)?,
         role_overrides,
-        debug_openai_usage_error,
+        usage_error,
     )?;
     let RuntimePrimaryProviderConfig { provider, model } = primary;
     let model_label = model.as_str().to_owned();
@@ -156,21 +134,6 @@ pub(crate) async fn start_tui_runtime_session(
         .map(|effort| effort.as_str().to_owned());
     let (session_id, mut metadata, should_resume) = session_start(selection, &workspace_root);
     let state_store = session_store.session_state_store();
-    let session_reservation = match state_store.reserve_session(&session_id).await {
-        Ok(reservation) => reservation,
-        Err(merry_runtime::SessionStoreError::SessionAlreadyReserved { .. }) if should_resume => {
-            tracing::warn!(
-                session_id = %session_id,
-                "cannot resume session because it is already reserved by another run"
-            );
-            return Err(TuiSessionStartError::ResumeUnavailable {
-                kind: ResumeFailureKind::AlreadyOpen,
-                session_dir: state_store.session_dir(&session_id),
-                session_id,
-            });
-        }
-        Err(error) => return Err(TuiSessionStartError::Fatal(unexpected(error))),
-    };
     metadata.model = Some(model_label.clone());
     metadata.reasoning_effort = reasoning_effort_label.clone();
     let mut backend_options = prepared_action_process_backend_options_with_overrides(
@@ -183,33 +146,9 @@ pub(crate) async fn start_tui_runtime_session(
         backend_options = backend_options.read_only_workspace();
     }
     let backend = action_process_runner_for_mode(&workspace_root, backend_options, sandbox_mode)?;
-    let (permission_source, permission_requests) = ChannelPermissionAdmissionSource::channel(8);
-    let permission_source = Arc::new(permission_source);
-    let loaded_session = if should_resume {
-        match LoadedSession::load(&state_store, &session_id).await {
-            Ok(loaded) => Some(loaded),
-            Err(error) => {
-                if let Some(kind) = classify_resume_error(&error) {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %error,
-                        "cannot resume historical session directly"
-                    );
-                    return Err(TuiSessionStartError::ResumeUnavailable {
-                        kind,
-                        session_dir: state_store.session_dir(&session_id),
-                        session_id,
-                    });
-                }
-                return Err(TuiSessionStartError::Fatal(unexpected(format!(
-                    "could not resume session {session_id}: {error}"
-                ))));
-            }
-        }
-    } else {
-        None
-    };
+    let (permission_source, permission_requests) = PermissionReviewChannel::new(8).into_parts();
     let mcp = discover_configured_mcp_tools(merry_config).await?;
+    let startup_warnings = mcp.warnings().to_vec();
     let mut subagents = subagents_config(merry_config)
         .map_err(unexpected)?
         .with_overrides(
@@ -240,7 +179,7 @@ pub(crate) async fn start_tui_runtime_session(
         &subagents,
         &workspace_root,
         true,
-        debug_openai_usage_error,
+        usage_error,
     )?;
     let history_retention =
         crate::runtime_config::history_retention_config(merry_config).map_err(unexpected)?;
@@ -250,7 +189,8 @@ pub(crate) async fn start_tui_runtime_session(
         provider,
         model,
         process_backend: backend,
-        extra_tools: mcp.tools,
+        #[cfg(test)]
+        extra_tools: Vec::new(),
         automatic_compaction: automatic_compaction_config_with_preferences(
             merry_config,
             preferences,
@@ -272,7 +212,8 @@ pub(crate) async fn start_tui_runtime_session(
     let permission_policy = CodingPermissionPolicy::for_permission_mode(
         permission_mode.coding_mode(),
         auto_fallback.coding_fallback(),
-        Some(Arc::clone(&permission_source) as Arc<dyn merry_runtime::PermissionAdmissionSource>),
+        Some(Arc::clone(&permission_source)
+            as Arc<dyn merry::permissions::PermissionAdmissionSource>),
     )
     .map_err(unexpected)?;
     let permission_review_rules = merry_config
@@ -288,36 +229,51 @@ pub(crate) async fn start_tui_runtime_session(
             .transpose()
             .map_err(unexpected)?
             .flatten());
-    let coding_runtime = match loaded_session {
-        Some(loaded) => resume_headless_coding_composition_with_loaded_session(
-            runtime_input,
-            loaded,
-            permission_policy,
-            permission_review_rules,
-            Some(state_store),
-            max_parallel_tool_calls,
-        )
-        .map_err(CliError::from)?,
-        None => build_headless_coding_with_policy_composition(
-            runtime_input,
-            permission_policy,
-            permission_review_rules,
-            Some(state_store),
-            max_parallel_tool_calls,
-        )
-        .map_err(CliError::from)?,
+    let open_mode = if should_resume {
+        CodingSessionOpenMode::Resume
+    } else {
+        CodingSessionOpenMode::New
     };
-    let loop_config = coding_runtime.loop_config();
-    let runtime = coding_runtime.into_runtime();
-    let skills = runtime.skills().await;
-    let interactive = runtime
-        .start_interactive_agent_run(
-            StepContext::new(Default::default()).with_generation_config(generation),
-            loop_config,
-        )
+    let session = build_coding_session_builder(
+        runtime_input,
+        permission_policy,
+        permission_review_rules,
+        max_parallel_tool_calls,
+    )
+    .map_err(CliError::from)?
+    .mcp_tools(mcp)
+    .open(state_store, open_mode)
+    .await
+    .map_err(|error| match error {
+        CodingSessionOpenError::ResumeUnavailable {
+            kind,
+            session_id,
+            session_dir,
+            message,
+        } => {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %message,
+                "cannot resume historical session directly"
+            );
+            TuiSessionStartError::ResumeUnavailable {
+                kind,
+                session_id,
+                session_dir,
+            }
+        }
+        other => TuiSessionStartError::Fatal(unexpected(other)),
+    })?;
+    let InteractiveCodingRun {
+        stream,
+        input,
+        control,
+        subagent_activity,
+        skills,
+    } = session
+        .start_interactive(generation)
+        .await
         .map_err(unexpected)?;
-    let subagent_activity = runtime.subscribe_subagent_activity();
-    let (stream, input, control) = interactive.split();
     let mut startup_update = InteractiveSettingsUpdate::default();
     let mut needs_startup_update = false;
     if preferences.context_window_tokens.is_some() {
@@ -340,7 +296,7 @@ pub(crate) async fn start_tui_runtime_session(
             preferences.provider.as_deref(),
             preference_model_override(&owned_config, preferences)?,
             role_overrides,
-            debug_openai_usage_error,
+            usage_error,
         )?;
         startup_update = attach_live_role_models(startup_update, &bundle, preferences);
         needs_startup_update = true;
@@ -359,8 +315,8 @@ pub(crate) async fn start_tui_runtime_session(
         metadata,
         metadata_written: should_resume,
         resumed: should_resume,
-        startup_warnings: mcp.warnings,
-        runtime,
+        startup_warnings,
+        session,
         session_store,
         stream,
         subagent_activity,
@@ -374,13 +330,12 @@ pub(crate) async fn start_tui_runtime_session(
         permission_source,
         permission_requests,
         pending_permission_reviews: VecDeque::new(),
-        session_reservation: Some(session_reservation),
     })
 }
 
 impl TuiRuntimeSession {
-    pub(crate) fn runtime(&self) -> &Runtime {
-        &self.runtime
+    pub(crate) fn handle(&self) -> CodingSessionHandle {
+        self.session.handle()
     }
 
     pub(crate) fn pending_permission_review_count(&self) -> usize {
@@ -467,7 +422,7 @@ impl TuiRuntimeSession {
             preferences.provider.as_deref(),
             preference_model_override(&self.merry_config, preferences)?,
             role_overrides,
-            debug_openai_usage_error,
+            usage_error,
         )?;
         let provider = Arc::clone(&bundle.primary.provider);
         let model = bundle.primary.model.clone();
@@ -522,7 +477,7 @@ impl TuiRuntimeSession {
             .with_context_window_tokens(context_window_tokens_with_preferences(preferences)?)
             .with_max_parallel_tool_calls(max_parallel_tool_calls)
             .with_permission_admission_source(Arc::clone(&self.permission_source)
-                as Arc<dyn merry_runtime::PermissionAdmissionSource>)
+                as Arc<dyn merry::permissions::PermissionAdmissionSource>)
             .with_permission_review_mode(review_mode);
         update = attach_live_role_models(update, &bundle, preferences);
         self.control
@@ -552,9 +507,9 @@ impl TuiRuntimeSession {
     /// after runtime journal savepoints land remains resumable.
     pub(crate) async fn submit_message(
         &mut self,
-        message: merry_runtime::UserMessageInput,
+        message: merry::events::UserMessageInput,
         fallback_text: &str,
-    ) -> Result<(), merry_runtime::InteractiveError> {
+    ) -> Result<(), InteractiveError> {
         self.input.submit_message(message).await?;
         let fallback_topic = if self.metadata.topic.is_none() {
             let topic = crate::tui::session_list::compact_session_text(fallback_text);
@@ -593,7 +548,7 @@ impl TuiRuntimeSession {
     /// Refreshes picker metadata after an automatic runtime turn savepoint
     /// without blocking the TUI loop on background topic generation.
     pub(crate) async fn sync_metadata_on_turn_settled(&mut self, fallback_topic: Option<String>) {
-        if let Some(topic) = self.runtime.cached_session_topic().await {
+        if let Some(topic) = self.session.handle().cached_session_topic().await {
             self.metadata.topic = Some(topic);
         } else {
             self.metadata.set_topic_if_empty(fallback_topic);
@@ -616,7 +571,8 @@ impl TuiRuntimeSession {
     pub(crate) async fn save_on_exit(&mut self) -> Result<(), CliError> {
         self.apply_generated_topic().await;
         self.metadata.mark_active(now_unix_ms());
-        self.runtime
+        self.session
+            .handle()
             .save_session_to(self.session_store.session_state_store())
             .await
             .map_err(unexpected)?;
@@ -640,7 +596,8 @@ impl TuiRuntimeSession {
         {
             return true;
         }
-        self.runtime
+        self.session
+            .handle()
             .session_transcript()
             .await
             .is_ok_and(|items| !items.is_empty())
@@ -649,12 +606,7 @@ impl TuiRuntimeSession {
     /// Releases the reservation and removes the session directory when an
     /// untouched new session exits without writing any persisted files.
     pub(crate) async fn discard_if_empty(&mut self) {
-        if let Some(reservation) = self.session_reservation.take() {
-            self.session_store
-                .session_state_store()
-                .release_empty_reservation(&self.metadata.session_id, reservation)
-                .await;
-        }
+        self.session.discard_if_empty().await;
     }
 
     pub(crate) async fn save_now(&mut self) -> Result<(), CliError> {
@@ -670,25 +622,34 @@ impl TuiRuntimeSession {
     }
 
     async fn apply_generated_topic(&mut self) {
-        if let Some(topic) = self.runtime.session_topic().await {
+        if let Some(topic) = self.session.handle().session_topic().await {
             self.metadata.topic = Some(topic);
         }
     }
 
     pub(crate) async fn session_transcript(&self) -> Result<Vec<SessionTranscriptItem>, CliError> {
-        self.runtime.session_transcript().await.map_err(unexpected)
+        self.session
+            .handle()
+            .session_transcript()
+            .await
+            .map_err(unexpected)
     }
 
-    pub(crate) async fn plan_session_snapshot(&self) -> merry_core::PlanSessionSnapshot {
-        self.runtime.plan_session_snapshot().await
+    pub(crate) async fn plan_session_snapshot(&self) -> merry::events::PlanSessionSnapshot {
+        self.session.handle().plan_session_snapshot().await
     }
 
-    pub(crate) async fn plan_documents(&self) -> Vec<merry_core::PlanDocument> {
-        self.runtime.plan_documents().await
+    pub(crate) async fn plan_documents(&self) -> Vec<merry::events::PlanDocument> {
+        self.session.handle().plan_documents().await
     }
 
-    pub(crate) async fn todo_items(&self) -> Vec<merry_core::TodoItem> {
-        self.runtime.todo_items().await
+    pub(crate) async fn todo_items(&self) -> Vec<merry::events::TodoItem> {
+        self.session.handle().todo_items().await
+    }
+
+    #[cfg(feature = "web")]
+    pub(crate) fn trajectory_handle(&self) -> merry::observability::TrajectoryHandle {
+        self.session.trajectory_handle()
     }
 }
 
@@ -746,7 +707,7 @@ fn session_start(
     }
 }
 
-pub(crate) fn default_tui_session_id() -> merry_core::SessionId {
+pub(crate) fn default_tui_session_id() -> merry::events::SessionId {
     crate::session_id::new_ephemeral_session_id()
 }
 
@@ -852,14 +813,14 @@ fn context_window_tokens_with_preferences(
 fn permission_review_mode_for(
     mode: PermissionMode,
     fallback: AutoFallback,
-) -> merry_runtime::PermissionReviewMode {
+) -> merry::permissions::PermissionReviewMode {
     match mode {
-        PermissionMode::AlwaysApprove => merry_runtime::PermissionReviewMode::FullyTrusted,
-        PermissionMode::Deny => merry_runtime::PermissionReviewMode::DenyAll,
-        PermissionMode::Ask => merry_runtime::PermissionReviewMode::HostDecisionOnly,
+        PermissionMode::AlwaysApprove => merry::permissions::PermissionReviewMode::FullyTrusted,
+        PermissionMode::Deny => merry::permissions::PermissionReviewMode::DenyAll,
+        PermissionMode::Ask => merry::permissions::PermissionReviewMode::HostDecisionOnly,
         PermissionMode::Auto => match fallback {
-            AutoFallback::Ask => merry_runtime::PermissionReviewMode::ModelThenHostFallback,
-            AutoFallback::Deny => merry_runtime::PermissionReviewMode::Required,
+            AutoFallback::Ask => merry::permissions::PermissionReviewMode::ModelThenHostFallback,
+            AutoFallback::Deny => merry::permissions::PermissionReviewMode::Required,
         },
     }
 }
@@ -871,7 +832,7 @@ fn attach_live_role_models(
 ) -> InteractiveSettingsUpdate {
     let retry_policy = bundle.retry_policy.unwrap_or_default();
     let build_role = |role_cfg: Option<&merry::profiles::CodingModelRoleConfig>,
-                      effort: Option<merry_llm::ReasoningEffort>|
+                      effort: Option<merry::providers::ReasoningEffort>|
      -> Option<InteractivePrimaryModel> {
         if let Some(cfg) = role_cfg {
             Some(
@@ -900,11 +861,11 @@ fn attach_live_role_models(
         .as_ref()
         .and_then(|binding| binding.reasoning_effort.clone());
     update = update.with_role_model(
-        merry_runtime::RuntimeModelRole::ContextCompaction,
+        RuntimeModelRole::ContextCompaction,
         build_role(bundle.context_compaction.as_ref(), compaction_effort),
     );
     update = update.with_role_model(
-        merry_runtime::RuntimeModelRole::ApprovalReview,
+        RuntimeModelRole::ApprovalReview,
         build_role(bundle.approval_review.as_ref(), approval_effort),
     );
     update

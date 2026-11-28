@@ -14,7 +14,7 @@ use crate::tui::{
     text_wrap::{semantic_style, truncate_chars},
     theme::SemanticColor,
 };
-use merry_runtime::BackgroundProcessState;
+use merry::process::BackgroundProcessState;
 use ratatui::{
     Frame,
     layout::{Position, Rect},

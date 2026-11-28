@@ -3,13 +3,13 @@
 use super::{
     ConfigError, MerryConfig, default_true, provider::parse_reasoning_effort, validate_model_text,
 };
+use merry::coding::{DEFAULT_FOREGROUND_WAIT_BUDGET_SECS, SubagentConfig, SubagentLimitBehavior};
+use merry::events::ToolName;
 use merry::profiles::{
     DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS, MIN_CODING_SUBAGENT_MODEL_TURNS,
     SubagentWorkspaceAccess,
 };
-use merry_core::ToolName;
-use merry_llm::ReasoningEffort;
-use merry_runtime::{DEFAULT_FOREGROUND_WAIT_BUDGET_SECS, SubagentLimitBehavior};
+use merry::providers::ReasoningEffort;
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -143,7 +143,7 @@ pub struct EffectiveSubagentRoleConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentsConfig {
     enabled: bool,
-    limits: merry_runtime::SubagentConfig,
+    limits: SubagentConfig,
     toggle: BTreeMap<String, bool>,
     default: EffectiveSubagentDefaultConfig,
     roles: BTreeMap<String, EffectiveSubagentRoleConfig>,
@@ -151,7 +151,7 @@ pub struct SubagentsConfig {
 
 impl Default for SubagentsConfig {
     fn default() -> Self {
-        let limits = merry_runtime::SubagentConfig::default()
+        let limits = SubagentConfig::default()
             .with_model_turn_bounds(
                 MIN_CODING_SUBAGENT_MODEL_TURNS,
                 DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS,
@@ -176,7 +176,7 @@ impl SubagentsConfig {
     }
 
     #[must_use]
-    pub fn limits(&self) -> merry_runtime::SubagentConfig {
+    pub fn limits(&self) -> SubagentConfig {
         self.limits
     }
 
@@ -201,7 +201,7 @@ impl SubagentsConfig {
         max_threads: Option<usize>,
         limit_behavior: Option<SubagentLimitBehavior>,
     ) -> Result<Self, ConfigError> {
-        let mut limits = merry_runtime::SubagentConfig::new(
+        let mut limits = SubagentConfig::new(
             max_threads.unwrap_or_else(|| self.limits.max_threads()),
             self.limits.max_depth(),
         )
@@ -300,7 +300,7 @@ impl SubagentsToml {
             roles.insert(name.clone(), role);
         }
 
-        let mut limits = merry_runtime::SubagentConfig::new(
+        let mut limits = SubagentConfig::new(
             self.max_threads.unwrap_or(defaults.max_threads()),
             self.max_depth.unwrap_or(defaults.max_depth()),
         )

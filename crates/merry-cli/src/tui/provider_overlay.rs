@@ -7,7 +7,7 @@ pub(crate) use form::{
     ProviderDraftMode, ProviderFormField, ProviderFormOverlay, ProviderFormSeed, ProviderFormValues,
 };
 pub(crate) use manager::{ProviderListItem, ProviderManagerOverlay, ProviderWorkbenchFocus};
-use merry_llm::ReasoningEffort;
+use merry::providers::ReasoningEffort;
 pub(crate) use model_picker::{ModelListItem, ModelPickerOverlay};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -3,13 +3,13 @@ use crate::{
         CodingRuntimeOptions, CodingSubagentsConfig, build_coding_runtime,
         tests::{resolved_tool_result, test_process_backend},
     },
-    runtime_events::{collect_runtime_step_events, first_pending_tool_call},
     testing::{ScriptedProvider, model_name, workspace_tool_call},
+    testing::{collect_runtime_step_events, first_pending_tool_call},
 };
-use merry_core::ToolCallResultStatus;
-use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelResponse};
-use merry_runtime::{StepContext, StepInput, ToolExecutionContext};
-use merry_tools::READ_FILE_TOOL;
+use merry::events::ToolCallResultStatus;
+use merry::providers::{FinishReason, ModelEvent, ModelOutput, ModelResponse};
+use merry::runtime::{StepContext, StepInput, ToolExecutionContext};
+use merry::tools::READ_FILE_TOOL;
 use std::sync::Arc;
 
 #[tokio::test(flavor = "current_thread")]
@@ -35,7 +35,7 @@ async fn projects_skill_metadata_without_body() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+            automatic_compaction: merry::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             process_backend: test_process_backend(),
@@ -110,7 +110,7 @@ async fn includes_skill_roots_in_workspace_read_tools() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+            automatic_compaction: merry::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             process_backend: test_process_backend(),
@@ -155,7 +155,7 @@ async fn allows_missing_default_skill_root() {
         model_name(),
         CodingRuntimeOptions {
             approval_review: None,
-            automatic_compaction: merry_runtime::CompactionConfig::disabled(),
+            automatic_compaction: merry::CompactionConfig::disabled(),
             retry_policy: None,
             context_compaction: None,
             process_backend: test_process_backend(),

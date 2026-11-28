@@ -1,18 +1,18 @@
-use crate::cli_error::{CliError, debug_openai_usage_error, stdout_error, unexpected};
+use crate::cli_error::{CliError, stdout_error, unexpected, usage_error};
 use crate::coding::RuntimeRoleProviderConfig;
 use crate::config::MerryConfig;
 use crate::provider_config::{
-    RuntimePrimaryProviderConfig, RuntimeProviderBundle, openai_provider_bundle,
-    openai_provider_config_bundle,
+    RuntimePrimaryProviderConfig, RuntimeProviderBundle, runtime_provider_bundle_from_config,
 };
 use crate::runtime_config::{automatic_compaction_config, private_tool_paths};
+use merry::events::{ErrorInfo, PendingToolCall, SessionId, ToolInputSchema};
 use merry::profiles::{CodingRuntime, CodingRuntimeBuilder, CodingRuntimeInput};
-use merry_core::{ErrorInfo, PendingToolCall, SessionId, ToolInputSchema};
-use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
-use merry_runtime::{
-    AgentLoopConfig, AgentLoopStatus, CompactionConfig, RegisteredTool, Runtime, StepContext,
-    StepInput, ToolExecutionContext, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+use merry::providers::{ModelName, ModelProvider, ModelRetryPolicy};
+use merry::runtime::{
+    RegisteredTool, Runtime, StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture,
 };
+use merry::{AgentLoopConfig, AgentLoopStatus, CompactionConfig};
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -86,13 +86,12 @@ pub(crate) struct CommandPlan {
 }
 
 pub(crate) async fn run(args: &Args, merry_config: Option<&MerryConfig>) -> Result<(), CliError> {
-    let config = openai_provider_config_bundle(None, merry_config, debug_openai_usage_error)?;
     let RuntimeProviderBundle {
         primary,
         context_compaction,
         retry_policy,
         ..
-    } = openai_provider_bundle(config, unexpected)?;
+    } = runtime_provider_bundle_from_config(merry_config, usage_error)?;
     let RuntimePrimaryProviderConfig { provider, model } = primary;
     let root = env::current_dir().map_err(unexpected)?;
     let environment = CommandGenerationEnvironment::detect(&root);
@@ -137,9 +136,9 @@ pub(crate) async fn run(args: &Args, merry_config: Option<&MerryConfig>) -> Resu
 }
 
 pub(crate) fn command_plan_final_output_contract()
--> Result<merry_runtime::FinalOutputContract, CliError> {
+-> Result<merry::runtime::FinalOutputContract, CliError> {
     let schema = ToolInputSchema::new(schemars::schema_for!(CommandPlan)).map_err(unexpected)?;
-    merry_runtime::FinalOutputContract::new(schema).map_err(unexpected)
+    merry::runtime::FinalOutputContract::new(schema).map_err(unexpected)
 }
 
 fn command_generation_loop_config() -> Result<AgentLoopConfig, CliError> {
@@ -148,7 +147,7 @@ fn command_generation_loop_config() -> Result<AgentLoopConfig, CliError> {
         .with_final_output_contract(command_plan_final_output_contract()?))
 }
 
-fn default_cmd_session_id() -> merry_core::SessionId {
+fn default_cmd_session_id() -> merry::events::SessionId {
     crate::session_id::new_ephemeral_session_id()
 }
 
@@ -277,7 +276,7 @@ pub(crate) fn build_runtime(input: RuntimeInput<'_>) -> Result<Runtime, CliError
     if let Some(policy) = input.retry_policy {
         coding_input = coding_input.with_retry_policy(policy);
     }
-    let coding_input = crate::coding::attach_durable_memory(coding_input, input.root);
+    let coding_input = merry::coding::attach_durable_memory_from_env(coding_input);
     CodingRuntimeBuilder::for_command_generation(coding_input)
         .build()
         .map(CodingRuntime::into_runtime)

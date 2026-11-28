@@ -1,6 +1,7 @@
 //! Read-only `/tasks` text for retained processes and child agents.
 
-use merry_runtime::{BackgroundProcessSummary, SubagentStatusView};
+use merry::events::SubagentStatusView;
+use merry::process::BackgroundProcessSummary;
 
 /// Renders the session's background processes and subagents.
 #[must_use]
@@ -55,10 +56,8 @@ pub(crate) fn tasks_body(
 #[cfg(test)]
 mod tests {
     use super::tasks_body;
-    use merry_runtime::{
-        BackgroundProcessId, BackgroundProcessState, BackgroundProcessSummary, SubagentStatusLabel,
-        SubagentStatusView,
-    };
+    use merry::events::{SubagentStatusLabel, SubagentStatusView};
+    use merry::process::{BackgroundProcessId, BackgroundProcessState, BackgroundProcessSummary};
 
     #[test]
     fn tasks_body_lists_processes_and_says_when_both_are_empty() {
@@ -80,8 +79,8 @@ mod tests {
     #[test]
     fn tasks_body_lists_subagents() {
         let subagents = [SubagentStatusView::completed(
-            merry_core::SubagentId::new("agent-1").expect("agent"),
-            merry_core::SubagentTaskId::new("task-1").expect("task"),
+            merry::events::SubagentId::new("agent-1").expect("agent"),
+            merry::events::SubagentTaskId::new("task-1").expect("task"),
             "done",
             Vec::new(),
             Vec::new(),

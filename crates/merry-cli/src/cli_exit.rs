@@ -48,19 +48,14 @@ mod tests {
         let mut stderr = Vec::new();
 
         let exit_code = report_cli_exit(
-            CliExit::Unexpected(
-                "debug tool `debug_echo` was not called on the first step".to_owned(),
-            ),
+            CliExit::Unexpected("provider request failed".to_owned()),
             &mut stderr,
         );
 
         assert_eq!(exit_code, ExitCode::FAILURE);
         let stderr = String::from_utf8(stderr).expect("stderr should be utf-8");
-        assert_eq!(
-            stderr,
-            "debug tool `debug_echo` was not called on the first step\n"
-        );
-        assert!(!stderr.contains("Usage: merry debug openai"));
+        assert_eq!(stderr, "provider request failed\n");
+        assert!(!stderr.contains("Usage: merry run"));
     }
 
     #[test]
@@ -69,16 +64,15 @@ mod tests {
 
         let exit_code = report_cli_exit(
             CliExit::Usage {
-                message: "--input requires a value".to_owned(),
-                usage: cli::debug_openai_usage(),
+                message: "--session-id must not be blank".to_owned(),
+                usage: cli::run_usage(),
             },
             &mut stderr,
         );
 
         assert_eq!(exit_code, ExitCode::from(2));
         let stderr = String::from_utf8(stderr).expect("stderr should be utf-8");
-        assert!(stderr.starts_with("--input requires a value\n\n"));
-        assert!(stderr.contains("Usage: merry debug openai"));
-        assert!(stderr.contains("MERRY_OPENAI_DEBUG=1"));
+        assert!(stderr.starts_with("--session-id must not be blank\n\n"));
+        assert!(stderr.contains("Usage: merry run"));
     }
 }

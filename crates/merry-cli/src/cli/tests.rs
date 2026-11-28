@@ -1,7 +1,6 @@
-use super::{Cli, CliCommand, cmd_usage, debug_openai_usage, shell_usage};
+use super::{Cli, CliCommand, cmd_usage};
 use crate::coding::{AutoFallback, PermissionMode, SandboxMode};
 use crate::config::CliDefaults;
-use crate::debug::{Command as DebugCommand, DEFAULT_INPUT, DEFAULT_SESSION_ID};
 use crate::workspace_trust::TrustWorkspace;
 use clap::Parser;
 
@@ -137,9 +136,6 @@ fn existing_subcommands_still_parse_after_tui_entrypoint() {
 
     let cmd = Cli::try_parse_from(["merry", "cmd", "list files"]).expect("cmd parses");
     assert!(matches!(cmd.command, Some(CliCommand::Cmd(_))));
-
-    let debug = Cli::try_parse_from(["merry", "debug"]).expect("debug parses");
-    assert!(matches!(debug.command, Some(CliCommand::Debug(_))));
 }
 
 #[test]
@@ -212,121 +208,9 @@ fn cmd_usage_renders_cmd_help() {
 
     assert!(usage.contains("Usage: merry cmd"));
     assert!(usage.contains("--no-prompt"));
-    assert!(!usage.contains("merry debug openai"));
 }
 
 #[test]
-fn parses_debug_defaults() {
-    let cli = Cli::try_parse_from(["merry", "debug"]).expect("debug args should parse");
-    assert_eq!(cli.sandbox_mode(), SandboxMode::default());
-
-    match cli.command.expect("command should be present") {
-        CliCommand::Debug(debug) => {
-            assert_eq!(debug.session_id, DEFAULT_SESSION_ID);
-            assert_eq!(debug.input, DEFAULT_INPUT);
-            assert!(debug.command.is_none());
-        }
-        _ => panic!("expected debug subcommand"),
-    }
-}
-
-#[test]
-fn parses_debug_openai_options() {
-    let cli = Cli::try_parse_from([
-        "merry",
-        "debug",
-        "openai",
-        "--input",
-        "hello",
-        "--model",
-        "gpt-test",
-        "--max-output-tokens",
-        "16",
-        "--debug-tool-result",
-        "tool result",
-    ])
-    .expect("debug openai args should parse");
-
-    match cli.command.expect("command should be present") {
-        CliCommand::Debug(debug) => match debug.command {
-            Some(DebugCommand::OpenAi(openai)) => {
-                assert_eq!(openai.input, "hello");
-                assert_eq!(openai.model.as_deref(), Some("gpt-test"));
-                assert_eq!(openai.max_output_tokens, Some(16));
-                assert_eq!(openai.debug_tool_result.as_deref(), Some("tool result"));
-            }
-            Some(DebugCommand::Shell(_)) => panic!("expected debug openai subcommand"),
-            None => panic!("expected debug openai subcommand"),
-        },
-        _ => panic!("expected debug subcommand"),
-    }
-}
-
-#[test]
-fn parses_shell_argv() {
-    let cli = Cli::try_parse_from(["merry", "debug", "shell", "--", "rustc", "--version"])
-        .expect("shell args should parse");
-
-    match cli.command.expect("command should be present") {
-        CliCommand::Debug(debug) => match debug.command {
-            Some(DebugCommand::Shell(shell)) => {
-                assert!(!shell.accept_local_workspace_process_risk);
-                assert_eq!(shell.argv, ["rustc", "--version"]);
-            }
-            _ => panic!("expected shell subcommand"),
-        },
-        _ => panic!("expected shell subcommand"),
-    }
-}
-
-#[test]
-fn parses_shell_local_workspace_process_risk_acceptance() {
-    let cli = Cli::try_parse_from([
-        "merry",
-        "debug",
-        "shell",
-        "--accept-local-workspace-process-risk",
-        "--",
-        "cargo",
-        "test",
-        "-p",
-        "merry-runtime",
-    ])
-    .expect("shell args should parse");
-
-    match cli.command.expect("command should be present") {
-        CliCommand::Debug(debug) => match debug.command {
-            Some(DebugCommand::Shell(shell)) => {
-                assert!(shell.accept_local_workspace_process_risk);
-                assert_eq!(shell.argv, ["cargo", "test", "-p", "merry-runtime"]);
-            }
-            _ => panic!("expected shell subcommand"),
-        },
-        _ => panic!("expected shell subcommand"),
-    }
-}
-
-#[test]
-fn rejects_shell_argv_without_separator() {
-    let error = Cli::try_parse_from(["merry", "debug", "shell", "rustc", "--version"])
-        .expect_err("shell argv should require `--` separator");
-
-    assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
-}
-
-#[test]
-fn shell_usage_contains_shell_usage() {
-    assert!(shell_usage().contains("Usage: merry debug shell [OPTIONS] -- <ARGV>..."));
-}
-
-#[test]
-fn parses_root_sandbox_flag() {
-    let cli = Cli::try_parse_from(["merry", "--sandbox", "off", "debug"]).expect("args parse");
-
-    assert_eq!(cli.sandbox_mode(), SandboxMode::Off);
-}
-
-#[test]
-fn debug_openai_usage_contains_openai_env_help() {
-    assert!(debug_openai_usage().contains("MERRY_OPENAI_DEBUG=1"));
+fn rejects_removed_debug_subcommand() {
+    assert!(Cli::try_parse_from(["merry", "debug"]).is_err());
 }

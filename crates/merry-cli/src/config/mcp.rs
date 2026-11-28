@@ -1,5 +1,5 @@
 use super::{ConfigError, MerryConfig};
-use merry_mcp::McpServerConfig;
+use merry::mcp::McpServerConfig;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 

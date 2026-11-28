@@ -114,7 +114,7 @@ fn provider_manager_escape_returns_to_command_palette() {
         "opencode",
         "OpenCode",
         ConfiguredProviderKind::OpenAiCompatible,
-        Some(merry_provider_openai::OpenAiProtocol::ChatCompletions),
+        Some(merry::providers::OpenAiProtocol::ChatCompletions),
         Some("model-a"),
     )]);
 

@@ -4,7 +4,7 @@ use crate::tui::{
     state::{CommandView, TimelineItem, TuiState},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::ToolCallId;
+use merry::events::ToolCallId;
 
 pub(crate) use layout::{details_pointer, handle_mouse_scroll, prepare_viewport};
 pub(crate) use output::CapturedOutput;
@@ -351,12 +351,12 @@ pub(crate) fn apply_output(
 
 /// Reads only the selected tool call output, with a bounded wait and no execution side effects.
 pub(crate) async fn load_output(
-    runtime: &merry_runtime::Runtime,
+    session: &merry::coding::CodingSessionHandle,
     call_id: &ToolCallId,
 ) -> Result<CapturedOutput, String> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        runtime.read_tool_output(call_id),
+        session.read_tool_output(call_id),
     )
     .await
     .map_err(|_| "Reading the command output timed out".to_owned())?

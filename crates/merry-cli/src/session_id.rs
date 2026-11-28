@@ -1,5 +1,5 @@
-pub(crate) fn new_ephemeral_session_id() -> merry_core::SessionId {
-    merry_core::SessionId::random()
+pub(crate) fn new_ephemeral_session_id() -> merry::events::SessionId {
+    merry::events::SessionId::random()
 }
 
 #[cfg(test)]

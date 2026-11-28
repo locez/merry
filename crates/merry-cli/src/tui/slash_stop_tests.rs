@@ -6,7 +6,7 @@ use super::{
     state::{TimelineItem, TuiState},
     theme::TuiTheme,
 };
-use merry_core::{
+use merry::events::{
     ErrorInfo, InteractiveRunState, PendingToolCall, QueuedInputView, RuntimeEvent,
     RuntimeEventSource, SessionId, TOOL_CANCELLED_BY_USER_CODE, ToolCallArguments, ToolCallId,
     ToolCallResult, ToolName, ToolOutput,

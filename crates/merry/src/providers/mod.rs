@@ -5,18 +5,27 @@ mod anthropic;
 #[cfg(feature = "openai-compatible")]
 mod openai_compatible;
 
-use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_runtime::{RuntimeBuilder, RuntimeModelRole};
 use std::sync::Arc;
 
 #[cfg(feature = "anthropic")]
 pub use anthropic::{AnthropicProviderBuildError, AnthropicProviderBuilder, anthropic};
+pub use merry_llm::{
+    FinishReason, GenerationConfig, ModelCapabilities, ModelCatalog, ModelCatalogEntry,
+    ModelCatalogError, ModelCatalogErrorKind, ModelCatalogFuture, ModelCatalogProvider, ModelError,
+    ModelEvent, ModelEventStream, ModelMessageRole, ModelName, ModelOutput, ModelProvider,
+    ModelProviderFuture, ModelRequest, ModelResponse, ModelRetryPolicy, ModelRetryPolicyError,
+    ModelStreamContext, ModelToolCall, ModelToolCallId, ReasoningEffort, ServiceTier,
+    ToolArguments,
+};
 #[cfg(feature = "anthropic")]
 pub use merry_provider_anthropic::{
     AnthropicProvider, AnthropicProviderConfig, AnthropicProviderError,
 };
 #[cfg(feature = "openai-compatible")]
-pub use merry_provider_openai::{OpenAiProtocol, OpenAiProviderConfig, OpenAiProviderError};
+pub use merry_provider_openai::{
+    OpenAiProtocol, OpenAiProvider, OpenAiProviderConfig, OpenAiProviderError,
+};
 #[cfg(feature = "openai-compatible")]
 pub use openai_compatible::{
     OpenAiCompatibleProviderBuildError, OpenAiCompatibleProviderBuilder, openai_compatible,

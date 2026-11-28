@@ -138,7 +138,7 @@ pub(crate) async fn run(
     let startup_sandbox = resolve_effective_sandbox(explicit_flags, &preferences, sandbox_mode);
     if startup_sandbox == SandboxMode::Workspace
         && sandbox_mode != SandboxMode::Workspace
-        && let Err(error) = merry_process::probe_workspace_sandbox()
+        && let Err(error) = merry::process::probe_workspace_sandbox()
     {
         return Err(crate::cli_error::unexpected(format!(
             "{error}\nSee SANDBOX.md (https://github.com/locez/merry/blob/main/SANDBOX.md)."
@@ -170,8 +170,7 @@ pub(crate) async fn run(
     };
     let workspace_root = workspace.root;
     let session_store = TuiSessionStore::new(
-        merry_runtime::FileSessionStore::default_sessions_dir()
-            .map_err(crate::cli_error::unexpected)?,
+        merry::FileSessionStore::default_sessions_dir().map_err(crate::cli_error::unexpected)?,
     );
     if !provider_setup::has_runtime_selection(active_config.as_ref(), &preferences) {
         let mut setup_state = TuiState::new(
@@ -306,13 +305,13 @@ pub(crate) async fn run(
                     projector.apply_transcript_item(item, &mut state);
                 }
             }
-            if let Ok(archived_segments) = session.runtime().archived_segment_numbers().await {
+            if let Ok(archived_segments) = session.handle().archived_segment_numbers().await {
                 state.set_unloaded_archive_segments(archived_segments);
             }
-            if let Some(subagents) = session.runtime().subagent_snapshot().await {
+            if let Some(subagents) = session.handle().subagent_snapshot().await {
                 state.apply_subagent_status_views(&subagents);
             }
-            if let Some(usage) = session.runtime().usage().await {
+            if let Some(usage) = session.handle().usage().await {
                 state.set_usage(usage);
             }
         } else if announce_new_session {
@@ -429,7 +428,10 @@ pub(crate) fn resolve_effective_auto_fallback(
         .unwrap_or(config_or_default)
 }
 
-fn project_mcp_startup_warnings(state: &mut TuiState, warnings: &[merry_mcp::McpServerDiagnostic]) {
+fn project_mcp_startup_warnings(
+    state: &mut TuiState,
+    warnings: &[merry::mcp::McpServerDiagnostic],
+) {
     for warning in warnings {
         state.push_timeline_item(state::TimelineItem::Diagnostic {
             title: "MCP startup warning".to_owned(),

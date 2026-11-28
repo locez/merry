@@ -1,4 +1,4 @@
-use merry_core::PendingToolCall;
+use merry::events::PendingToolCall;
 use serde_json::{Map, Value};
 
 pub(crate) fn format_tool_call_progress(prefix: &str, call: &PendingToolCall) -> String {
@@ -22,8 +22,8 @@ pub(crate) fn format_tool_call_detail(
         "read_plan" => format_read_plan_call_detail(arguments),
         "exit_plan_mode" => format_exit_plan_call_detail(arguments),
         "update_todos" => format_update_todos_call_detail(arguments),
-        merry_mcp::MCP_CALL_TOOL => format_mcp_call_detail(arguments),
-        merry_mcp::MCP_SEARCH_TOOL => format_mcp_search_detail(arguments),
+        merry::mcp::MCP_CALL_TOOL => format_mcp_call_detail(arguments),
+        merry::mcp::MCP_SEARCH_TOOL => format_mcp_search_detail(arguments),
         _ => format_generic_tool_call_detail(arguments),
     }
 }

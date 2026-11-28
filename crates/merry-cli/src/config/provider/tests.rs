@@ -60,7 +60,9 @@ api_key_file = "secrets/opencode.key"
     assert_eq!(profile.alias().as_str(), "opencode");
     assert_eq!(profile.display_name(), "OpenCode");
     assert_eq!(
-        profile.default_model().map(merry_llm::ModelName::as_str),
+        profile
+            .default_model()
+            .map(merry::providers::ModelName::as_str),
         Some("deepseek-v4-pro")
     );
     assert_eq!(profile.protocol(), Some(OpenAiProtocol::Responses));
@@ -113,17 +115,18 @@ api_key_file = "secrets/openai.key"
     .expect("config should parse")
     .expect("config should be present");
 
-    let provider = config
-        .openai_compatible_provider()
-        .expect("provider should validate");
-    assert_eq!(provider.model.as_deref(), Some("gpt-4.1-mini"));
+    let default = config.default_provider().expect("provider should validate");
+    assert_eq!(default.model, "gpt-4.1-mini");
     assert_eq!(
-        provider
+        default
             .reasoning_effort
             .as_ref()
             .map(|effort| effort.as_str()),
         Some("high")
     );
+    let super::EffectiveProviderConfig::OpenAiCompatible(provider) = default.provider else {
+        panic!("expected openai-compatible provider");
+    };
     assert_eq!(
         provider.base_url.as_deref(),
         Some("https://api.example.test/v1")

@@ -1,23 +1,6 @@
 //! Runtime profile components.
 
-pub use merry_coding::{
-    CODING_AGENT_DYNAMIC_CONTEXT_LAYOUT, CODING_AGENT_POLICY_PROMPT, CODING_AGENT_PROFILE_ID,
-    CODING_AGENT_STABLE_PREFIX_LAYOUT, CODING_LOOP_PROCESS_TOOL, CodingAgentProfile,
-    CodingAgentProfileBuildError, CodingAgentProfileBuilder, CodingAgentProfileHash,
-    CodingAgentRunPolicy, CodingAgentRunPolicyError, CodingAutoFallback, CodingFinalReportPolicy,
-    CodingModelRoleConfig, CodingModelRoleConfigError, CodingPermissionMode,
-    CodingPermissionPolicy, CodingPermissionPolicyError, CodingRuntime, CodingRuntimeBuildError,
-    CodingRuntimeBuilder, CodingRuntimeInput, CodingSubagentsConfig, CodingWorkflowCommand,
-    DEFAULT_CODING_AGENT_MAX_MODEL_TURNS, DEFAULT_CODING_SUBAGENT_MAX_MODEL_TURNS,
-    MAX_ROLE_PROMPT_FILE_BYTES, MAX_ROOT_PROJECT_RULES_BYTES, MIN_CODING_SUBAGENT_MODEL_TURNS,
-    ProjectRulesLoadError, ROOT_PROJECT_RULES_FILE, ResolvedSubagentRuntime,
-    SubagentDefaultOverride, SubagentModelOverride, SubagentResolutionInput, SubagentRoleCatalog,
-    SubagentRoleError, SubagentRoleOverlay, SubagentRoleSpec, SubagentWorkspaceAccess,
-    WorkspaceToolLimits, WorktreeError, WorktreeGcReport, WorktreeIsolationManager,
-    cleanup_orphaned_worktrees, cleanup_orphaned_worktrees_default, coding_agent,
-    default_worktree_base_dir, load_root_project_rules, load_workspace_prompt_file,
-    resolve_subagent_runtime,
-};
+pub use crate::coding::surface::*;
 
 pub use merry_process::{ProcessBackend, ProcessSession};
 

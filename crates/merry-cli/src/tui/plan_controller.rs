@@ -53,7 +53,7 @@ pub(crate) async fn dispatch_effect(
                 return true;
             }
             if let Some(prompt) = initial_prompt
-                && let Ok(message) = merry_runtime::UserMessageInput::text_only(prompt)
+                && let Ok(message) = merry::events::UserMessageInput::text_only(prompt)
             {
                 if let Err(error) = session.submit_message(message, prompt).await {
                     state.show_error_dialog("Plan prompt failed", error.to_string());

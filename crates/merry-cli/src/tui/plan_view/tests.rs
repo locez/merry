@@ -12,7 +12,7 @@ use crate::tui::{
     theme::TuiTheme,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::{
+use merry::events::{
     PlanDocument, PlanDocumentStatus, PlanDocumentSummary, PlanId, PlanModeState, RuntimeEvent,
     RuntimeEventSource, SessionId, TodoItem, TodoStatus,
 };

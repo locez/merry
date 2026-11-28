@@ -3,7 +3,7 @@ use crate::tui::provider_overlay::{
     ProviderListItem, ProviderManagerOverlay, ProviderOverlayAction,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_provider_openai::OpenAiProtocol;
+use merry::providers::OpenAiProtocol;
 
 #[test]
 fn provider_manager_keeps_duplicate_endpoint_profiles_as_distinct_rows() {

@@ -9,14 +9,16 @@ use crate::{
     },
     testing::{FakeProcessRunner, ScriptedProvider, model_name, process_tool_call},
 };
+use merry::AgentLoopConfig;
+use merry::coding::CodingSessionHandle;
+use merry::events::ToolName;
+use merry::process::ProcessRunner;
+use merry::process::ProcessSession;
 use merry::profiles::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
-use merry_core::ToolName;
-use merry_llm::{
-    FinishReason, ModelEvent, ModelOutput, ModelResponse, ModelToolCall, ModelToolCallId,
-    ToolArguments,
+use merry::providers::{
+    FinishReason, GenerationConfig, ModelEvent, ModelOutput, ModelResponse, ModelToolCall,
+    ModelToolCallId, ToolArguments,
 };
-use merry_process::ProcessSession;
-use merry_runtime::{AgentLoopConfig, ProcessRunner, StepContext, StepInput};
 use std::{
     io,
     pin::Pin,
@@ -65,21 +67,21 @@ async fn writer_prints_final_output_without_event_jsonl() {
     })]]);
     let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
     let permissioned_factory = Arc::new(
-        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        merry::process::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
     );
     let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
         session_id: "run-writer-test",
         root: &workspace,
         process_backend: fixed_process_backend(ProcessSession::from_parts(
-            merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+            merry::process::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
             runner,
             permissioned_factory,
         )),
         provider: Arc::new(provider),
         model: model_name(),
         extra_tools: Vec::new(),
-        automatic_compaction: merry_runtime::CompactionConfig::disabled(),
-        history_retention: merry_runtime::HistoryRetention::default(),
+        automatic_compaction: merry::CompactionConfig::disabled(),
+        history_retention: merry::HistoryRetention::default(),
         retry_policy: None,
         context_compaction: None,
         approval_review: None,
@@ -93,10 +95,10 @@ async fn writer_prints_final_output_without_event_jsonl() {
 
     let mut output = Vec::new();
     let status = write_agent_loop_output(
-        &runtime,
-        StepInput::user_text("finish").expect("valid input"),
+        &CodingSessionHandle::from_runtime(runtime),
+        "finish",
         AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
-        StepContext::default(),
+        GenerationConfig::default(),
         &mut output,
     )
     .await
@@ -135,21 +137,21 @@ async fn writer_streams_progress_commentary_before_final_output() {
     let runner: Arc<dyn ProcessRunner> =
         Arc::new(FakeProcessRunner::succeeding("110.242.74.102 baidu.com\n"));
     let permissioned_factory = Arc::new(
-        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        merry::process::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
     );
     let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
         session_id: "run-progress-writer-test",
         root: &workspace,
         process_backend: fixed_process_backend(ProcessSession::from_parts(
-            merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+            merry::process::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
             runner,
             permissioned_factory,
         )),
         provider: Arc::new(provider),
         model: model_name(),
         extra_tools: Vec::new(),
-        automatic_compaction: merry_runtime::CompactionConfig::disabled(),
-        history_retention: merry_runtime::HistoryRetention::default(),
+        automatic_compaction: merry::CompactionConfig::disabled(),
+        history_retention: merry::HistoryRetention::default(),
         retry_policy: None,
         context_compaction: None,
         approval_review: None,
@@ -163,10 +165,10 @@ async fn writer_streams_progress_commentary_before_final_output() {
 
     let mut output = Vec::new();
     let status = write_agent_loop_output(
-        &runtime,
-        StepInput::user_text("ping baidu.com").expect("valid input"),
+        &CodingSessionHandle::from_runtime(runtime),
+        "ping baidu.com",
         AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
-        StepContext::default(),
+        GenerationConfig::default(),
         &mut output,
     )
     .await
@@ -196,21 +198,21 @@ async fn jsonl_writer_streams_agent_loop_result() {
     })]]);
     let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
     let permissioned_factory = Arc::new(
-        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        merry::process::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
     );
     let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
         session_id: "run-jsonl-writer-test",
         root: &workspace,
         process_backend: fixed_process_backend(ProcessSession::from_parts(
-            merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+            merry::process::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
             runner,
             permissioned_factory,
         )),
         provider: Arc::new(provider),
         model: model_name(),
         extra_tools: Vec::new(),
-        automatic_compaction: merry_runtime::CompactionConfig::disabled(),
-        history_retention: merry_runtime::HistoryRetention::default(),
+        automatic_compaction: merry::CompactionConfig::disabled(),
+        history_retention: merry::HistoryRetention::default(),
         retry_policy: None,
         context_compaction: None,
         approval_review: None,
@@ -224,10 +226,10 @@ async fn jsonl_writer_streams_agent_loop_result() {
 
     let mut output = FlushCountingWriter::default();
     let status = write_agent_loop_jsonl_output(
-        &runtime,
-        StepInput::user_text("finish").expect("valid input"),
+        &CodingSessionHandle::from_runtime(runtime),
+        "finish",
         AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
-        StepContext::default(),
+        GenerationConfig::default(),
         &mut output,
     )
     .await
@@ -264,21 +266,21 @@ async fn writer_returns_incomplete_when_agent_loop_blocks() {
     })]]);
     let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
     let permissioned_factory = Arc::new(
-        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        merry::process::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
     );
     let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
         session_id: "run-blocked-writer-test",
         root: &workspace,
         process_backend: fixed_process_backend(ProcessSession::from_parts(
-            merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+            merry::process::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
             runner,
             permissioned_factory,
         )),
         provider: Arc::new(provider),
         model: model_name(),
         extra_tools: Vec::new(),
-        automatic_compaction: merry_runtime::CompactionConfig::disabled(),
-        history_retention: merry_runtime::HistoryRetention::default(),
+        automatic_compaction: merry::CompactionConfig::disabled(),
+        history_retention: merry::HistoryRetention::default(),
         retry_policy: None,
         context_compaction: None,
         approval_review: None,
@@ -292,10 +294,10 @@ async fn writer_returns_incomplete_when_agent_loop_blocks() {
 
     let mut output = Vec::new();
     let status = write_agent_loop_output(
-        &runtime,
-        StepInput::user_text("read README").expect("valid input"),
+        &CodingSessionHandle::from_runtime(runtime),
+        "read README",
         AgentLoopConfig::new(1).expect("valid config"),
-        StepContext::default(),
+        GenerationConfig::default(),
         &mut output,
     )
     .await

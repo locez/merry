@@ -1,8 +1,9 @@
 //! CLI-owned adapters for the runtime-neutral local Web service.
 
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream::BoxStream};
-use merry_core::{SessionId, ToolCallId, TrajectoryEvent, TrajectorySnapshot};
-use merry_runtime::Runtime;
+use merry::observability::{
+    SessionId, ToolCallId, TrajectoryEvent, TrajectoryHandle, TrajectorySnapshot,
+};
 use merry_web::{
     WebBackend, WebBackendError, WebServerConfig, WebServerError, WebServerHandle, WebToolOutput,
 };
@@ -14,23 +15,23 @@ use tokio::sync::broadcast;
 
 const MAX_WEB_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
 
-/// Adapts one runtime session to the local Web service boundary.
+/// Adapts one read-only session trajectory handle to the local Web service boundary.
 pub(crate) struct RuntimeWebBackend {
-    runtime: Runtime,
+    trajectory: TrajectoryHandle,
 }
 
-/// Owns the local Web service for the lifetime of one TUI runtime.
+/// Owns the local Web service for the lifetime of one TUI session.
 pub(crate) struct RuntimeWebService {
-    runtime: Runtime,
+    trajectory: TrajectoryHandle,
     server: Option<WebServerHandle>,
 }
 
 impl RuntimeWebService {
-    /// Creates an unstarted service bound to one runtime session.
+    /// Creates an unstarted service bound to one session trajectory handle.
     #[must_use]
-    pub(crate) fn new(runtime: Runtime) -> Self {
+    pub(crate) fn new(trajectory: TrajectoryHandle) -> Self {
         Self {
-            runtime,
+            trajectory,
             server: None,
         }
     }
@@ -47,7 +48,7 @@ impl RuntimeWebService {
         {
             tracing::warn!(%error, "previous Web service task ended unexpectedly");
         }
-        let server = start_server(self.runtime.clone()).await?;
+        let server = start_server(self.trajectory.clone()).await?;
         self.server = Some(server);
         Ok(())
     }
@@ -73,14 +74,14 @@ impl RuntimeWebService {
     }
 }
 
-async fn start_server(runtime: Runtime) -> Result<WebServerHandle, WebServerError> {
+async fn start_server(trajectory: TrajectoryHandle) -> Result<WebServerHandle, WebServerError> {
     let default_config = WebServerConfig::default();
-    match merry_web::start(RuntimeWebBackend::new(runtime.clone()), default_config).await {
+    match merry_web::start(RuntimeWebBackend::new(trajectory.clone()), default_config).await {
         Err(WebServerError::Bind { source, .. })
             if source.kind() == std::io::ErrorKind::AddrInUse =>
         {
             merry_web::start(
-                RuntimeWebBackend::new(runtime),
+                RuntimeWebBackend::new(trajectory),
                 WebServerConfig::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             )
             .await
@@ -90,14 +91,14 @@ async fn start_server(runtime: Runtime) -> Result<WebServerHandle, WebServerErro
 }
 
 impl RuntimeWebBackend {
-    /// Creates a backend bound to one runtime-owned session.
+    /// Creates a backend bound to one read-only session trajectory handle.
     #[must_use]
-    pub(crate) fn new(runtime: Runtime) -> Self {
-        Self { runtime }
+    pub(crate) fn new(trajectory: TrajectoryHandle) -> Self {
+        Self { trajectory }
     }
 
     fn owns_session(&self, session_id: &SessionId) -> bool {
-        self.runtime.session_id() == session_id
+        self.trajectory.session_id() == session_id
     }
 }
 
@@ -109,9 +110,9 @@ impl WebBackend for RuntimeWebBackend {
         if !self.owns_session(session_id) {
             return async { Err(WebBackendError::SessionUnavailable) }.boxed();
         }
-        let runtime = self.runtime.clone();
+        let trajectory = self.trajectory.clone();
         async move {
-            runtime.trajectory_snapshot().await.map_err(|error| {
+            trajectory.trajectory_snapshot().await.map_err(|error| {
                 tracing::debug!(error = %error, "trajectory snapshot read failed");
                 WebBackendError::Unavailable
             })
@@ -129,13 +130,16 @@ impl WebBackend for RuntimeWebBackend {
         if !self.owns_session(session_id) {
             return async { Err(WebBackendError::SessionUnavailable) }.boxed();
         }
-        let runtime = self.runtime.clone();
+        let trajectory = self.trajectory.clone();
         async move {
             let (snapshot, receiver) =
-                runtime.trajectory_subscription().await.map_err(|error| {
-                    tracing::debug!(error = %error, "trajectory subscription failed");
-                    WebBackendError::Unavailable
-                })?;
+                trajectory
+                    .trajectory_subscription()
+                    .await
+                    .map_err(|error| {
+                        tracing::debug!(error = %error, "trajectory subscription failed");
+                        WebBackendError::Unavailable
+                    })?;
             Ok(trajectory_stream(
                 snapshot.clone(),
                 receiver,
@@ -153,10 +157,10 @@ impl WebBackend for RuntimeWebBackend {
         if !self.owns_session(session_id) {
             return async { Err(WebBackendError::SessionUnavailable) }.boxed();
         }
-        let runtime = self.runtime.clone();
+        let trajectory = self.trajectory.clone();
         let call_id = call_id.clone();
         async move {
-            let preview = runtime
+            let preview = trajectory
                 .read_tool_output_preview(&call_id, MAX_WEB_TOOL_OUTPUT_BYTES)
                 .await
                 .map_err(|error| {
@@ -244,7 +248,7 @@ pub(crate) async fn open_in_browser(url: &str) -> Result<(), String> {
 mod tests {
     use super::trajectory_stream;
     use futures_util::StreamExt;
-    use merry_core::{SessionId, TrajectoryEvent, TrajectorySnapshot};
+    use merry::observability::{SessionId, TrajectoryEvent, TrajectorySnapshot};
     use tokio::sync::broadcast;
 
     #[tokio::test]

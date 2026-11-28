@@ -1,16 +1,17 @@
 use super::{action_process_backend_options, temp_home_outside_baseline_writes};
 use crate::{
     config::{MerryConfig, XdgPaths},
-    runtime_events::{collect_runtime_step_events, first_pending_tool_call},
     testing::{ScriptedProvider, model_name, tool_call},
+    testing::{collect_runtime_step_events, first_pending_tool_call},
 };
-use merry_core::{RuntimeJournalPayload, SessionId, ToolCallResultStatus};
-use merry_process::{LocalProcessBackend, ProcessBackend, ProcessBackendMode};
-use merry_runtime::{
+use merry::events::{SessionId, ToolCallResultStatus};
+use merry::permissions::{
     PermissionAdmissionContext, PermissionAdmissionDecision, PermissionAdmissionFuture,
-    PermissionAdmissionSource, PermissionRequest, PermissionReviewMode, Runtime, StepContext,
-    StepInput, ToolExecutionContext, request_permissions_tool,
+    PermissionAdmissionSource, PermissionRequest, PermissionReviewMode, request_permissions_tool,
 };
+use merry::process::{LocalProcessBackend, ProcessBackend, ProcessBackendMode};
+use merry::runtime::RuntimeJournalPayload;
+use merry::runtime::{Runtime, StepContext, StepInput, ToolExecutionContext};
 use serde_json::json;
 use std::{
     fs,

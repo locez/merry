@@ -1,20 +1,20 @@
-use crate::cli_error::{CliError, debug_openai_usage_error};
+use crate::cli_error::CliError;
 use crate::coding::{CodingSubagentsConfig, RuntimeRoleProviderConfig};
 use crate::config::{
-    ConfiguredProviderProfile, EffectiveOpenAiProviderConfig, EffectiveProviderConfig,
-    EffectiveSubagentRoleConfig, MerryConfig, SubagentsConfig, load_project_subagent_roles,
+    ConfiguredProviderProfile, EffectiveProviderConfig, EffectiveSubagentRoleConfig, MerryConfig,
+    SubagentsConfig, load_project_subagent_roles,
 };
+use merry::coding::RuntimeModelRole;
 use merry::profiles::{
     SubagentDefaultOverride, SubagentModelOverride, SubagentRoleCatalog, SubagentRoleOverlay,
     load_workspace_prompt_file,
 };
-use merry_llm::{ModelCatalogProvider, ModelName, ModelProvider, ModelRetryPolicy};
-use merry_provider_anthropic::{AnthropicProvider, AnthropicProviderConfig};
-use merry_provider_openai::{OpenAiProvider, OpenAiProviderConfig};
-use merry_runtime::{RuntimeBuilder, RuntimeModelRole};
-use std::{collections::BTreeMap, env, num::NonZeroU64, path::Path, sync::Arc};
-
-pub(crate) const MERRY_OPENAI_DEBUG_ENV: &str = "MERRY_OPENAI_DEBUG";
+use merry::providers::{
+    AnthropicProvider, AnthropicProviderConfig, ModelCatalogProvider, OpenAiProvider,
+    OpenAiProviderConfig,
+};
+use merry::providers::{ModelName, ModelProvider, ModelRetryPolicy};
+use std::{collections::BTreeMap, num::NonZeroU64, path::Path, sync::Arc};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RuntimeRoleOverrides<'a> {
@@ -285,147 +285,6 @@ fn provider_handles(
     }
 }
 
-pub(crate) fn openai_provider_config_bundle(
-    model_flag: Option<&str>,
-    merry_config: Option<&MerryConfig>,
-    map_usage_error: fn(String) -> CliError,
-) -> Result<OpenAiProviderConfigBundle, CliError> {
-    let merry_config = merry_config.ok_or_else(|| {
-        map_usage_error(
-            "Merry XDG provider config is required for OpenAI-compatible runtime".to_owned(),
-        )
-    })?;
-    let provider_config = merry_config
-        .openai_compatible_provider()
-        .map_err(|error| map_usage_error(error.to_string()))?;
-    let api_key = provider_config
-        .resolve_api_key()
-        .map_err(|error| map_usage_error(error.to_string()))?;
-    let primary_model = match model_flag {
-        Some(model) => model.to_owned(),
-        None => provider_config.model.clone().ok_or_else(|| {
-            map_usage_error(
-                "[providers.default].model must be set or --model must be provided".to_owned(),
-            )
-        })?,
-    };
-    let primary =
-        openai_provider_config(&provider_config, &api_key, primary_model, map_usage_error)?;
-
-    let runtime_models = merry_config
-        .runtime_models()
-        .map_err(|error| map_usage_error(error.to_string()))?;
-    let retry_policy = merry_config
-        .provider_retry_policy()
-        .map_err(|error| map_usage_error(error.to_string()))?;
-    let context_compaction = runtime_models
-        .context_compaction
-        .map(|model| {
-            openai_provider_config(&provider_config, &api_key, model.model, map_usage_error)
-        })
-        .transpose()?;
-    let approval_review = runtime_models
-        .approval_review
-        .map(|model| {
-            openai_provider_config(&provider_config, &api_key, model.model, map_usage_error)
-        })
-        .transpose()?;
-
-    Ok(OpenAiProviderConfigBundle {
-        primary,
-        context_compaction,
-        approval_review,
-        retry_policy,
-    })
-}
-
-fn openai_provider_config(
-    provider_config: &EffectiveOpenAiProviderConfig,
-    api_key: &str,
-    model: String,
-    map_usage_error: fn(String) -> CliError,
-) -> Result<OpenAiConfig, CliError> {
-    let mut provider = OpenAiProviderConfig::new(api_key)
-        .map_err(|error| map_usage_error(error.to_string()))?
-        .with_protocol(provider_config.protocol)
-        .with_provider_name(&provider_config.alias)
-        .map_err(|error| map_usage_error(error.to_string()))?;
-    if let Some(base_url) = provider_config.base_url.as_deref() {
-        provider = provider
-            .with_base_url(base_url)
-            .map_err(|error| map_usage_error(error.to_string()))?;
-    }
-    Ok(OpenAiConfig { provider, model })
-}
-
-pub(crate) fn apply_openai_context_compaction_provider(
-    mut builder: RuntimeBuilder,
-    context_compaction: Option<OpenAiConfig>,
-) -> Result<RuntimeBuilder, CliError> {
-    if let Some(config) = context_compaction {
-        let role_provider = openai_context_compaction_provider(config)?;
-        builder = builder.model_provider_for_role(
-            role_provider.role(),
-            role_provider.provider(),
-            role_provider.model().clone(),
-        );
-    }
-    Ok(builder)
-}
-
-pub(crate) fn openai_context_compaction_provider(
-    config: OpenAiConfig,
-) -> Result<RuntimeRoleProviderConfig, CliError> {
-    openai_role_provider_config(
-        RuntimeModelRole::ContextCompaction,
-        config,
-        debug_openai_usage_error,
-    )
-}
-
-pub(crate) fn openai_role_provider_config(
-    role: RuntimeModelRole,
-    config: OpenAiConfig,
-    map_usage_error: fn(String) -> CliError,
-) -> Result<RuntimeRoleProviderConfig, CliError> {
-    RuntimeRoleProviderConfig::new(
-        role,
-        Arc::new(OpenAiProvider::new(config.provider)),
-        ModelName::new(&config.model).map_err(|error| map_usage_error(error.to_string()))?,
-    )
-    .map_err(|error| map_usage_error(error.to_string()))
-}
-
-pub(crate) fn openai_provider_bundle(
-    config: OpenAiProviderConfigBundle,
-    map_usage_error: fn(String) -> CliError,
-) -> Result<RuntimeProviderBundle, CliError> {
-    Ok(RuntimeProviderBundle {
-        primary: openai_primary_provider(config.primary, map_usage_error)?,
-        context_compaction: config
-            .context_compaction
-            .map(|config| {
-                openai_role_provider_config(
-                    RuntimeModelRole::ContextCompaction,
-                    config,
-                    map_usage_error,
-                )
-            })
-            .transpose()?,
-        approval_review: config
-            .approval_review
-            .map(|config| {
-                openai_role_provider_config(
-                    RuntimeModelRole::ApprovalReview,
-                    config,
-                    map_usage_error,
-                )
-            })
-            .transpose()?,
-        retry_policy: config.retry_policy,
-    })
-}
-
 /// Builds a [`CodingSubagentsConfig`] by combining built-in roles, project
 /// `.merry/roles/*.toml` files, user `[subagents.default]` / `[subagents.roles.*]`
 /// config overrides, and `[subagents.toggle]` flags.
@@ -622,41 +481,6 @@ fn resolve_subagent_model_override(
     }))
 }
 
-fn openai_primary_provider(
-    config: OpenAiConfig,
-    map_usage_error: fn(String) -> CliError,
-) -> Result<RuntimePrimaryProviderConfig, CliError> {
-    Ok(RuntimePrimaryProviderConfig {
-        provider: Arc::new(OpenAiProvider::new(config.provider)),
-        model: ModelName::new(&config.model).map_err(|error| map_usage_error(error.to_string()))?,
-    })
-}
-
-pub(crate) fn optional_env(name: &'static str) -> Result<Option<String>, CliError> {
-    match env::var(name) {
-        Ok(value) if value.trim().is_empty() => Err(debug_openai_usage_error(format!(
-            "{name} must not be blank"
-        ))),
-        Ok(value) => Ok(Some(value)),
-        Err(env::VarError::NotPresent) => Ok(None),
-        Err(env::VarError::NotUnicode(_)) => Err(debug_openai_usage_error(format!(
-            "{name} must be valid UTF-8"
-        ))),
-    }
-}
-
-pub(crate) struct OpenAiConfig {
-    pub(crate) provider: OpenAiProviderConfig,
-    pub(crate) model: String,
-}
-
-pub(crate) struct OpenAiProviderConfigBundle {
-    pub(crate) primary: OpenAiConfig,
-    pub(crate) context_compaction: Option<OpenAiConfig>,
-    pub(crate) approval_review: Option<OpenAiConfig>,
-    pub(crate) retry_policy: Option<ModelRetryPolicy>,
-}
-
 pub(crate) struct RuntimePrimaryProviderConfig {
     pub(crate) provider: Arc<dyn ModelProvider>,
     pub(crate) model: ModelName,
@@ -683,9 +507,8 @@ struct ProviderHandles {
 #[cfg(test)]
 mod tests {
     use crate::config::{MerryConfig, XdgPaths};
-    use crate::debug::openai::config_with_env;
-    use merry_llm::ModelCatalogProvider;
-    use merry_runtime::RuntimeModelRole;
+    use merry::coding::RuntimeModelRole;
+    use merry::providers::ModelCatalogProvider;
     use std::path::PathBuf;
 
     fn load_managed_test_config(
@@ -739,7 +562,7 @@ api_key_file = "secrets/opencode.key"
         let resolved = super::materialized_provider_from_config(
             &config,
             "opencode",
-            crate::cli_error::debug_openai_usage_error,
+            crate::cli_error::usage_error,
         )
         .expect("provider should materialize");
         let _catalog: std::sync::Arc<dyn ModelCatalogProvider> = resolved.model_catalog.clone();
@@ -770,115 +593,12 @@ api_key_file = "secrets/opencode.key"
             Some(&config),
             Some("opencode"),
             None,
-            crate::cli_error::debug_openai_usage_error,
+            crate::cli_error::usage_error,
         )
         .expect("profile default model should resolve");
 
         assert_eq!(primary.provider.name().as_str(), "opencode");
         assert_eq!(primary.model.as_str(), "deepseek-v4-pro");
-    }
-
-    #[test]
-    fn openai_debug_config_uses_xdg_toml_provider_and_secret_file() {
-        let (_temp, config) = load_managed_test_config(
-            Some(
-                r#"
-[providers.default]
-provider = "openai-compatible"
-model = "gpt-test"
-
-[models.context_compaction]
-model = "gpt-compact"
-
-[models.approval_review]
-model = "gpt-review"
-"#,
-            ),
-            r#"
-version = 1
-
-[providers.openai-compatible]
-base_url = "https://api.example.test/v1"
-api_key_file = "secrets/openai.key"
-"#,
-            &[("openai.key", "sk-test\n")],
-        );
-
-        let loaded = config_with_env(None, Some(&config), |name| {
-            Ok((name == super::MERRY_OPENAI_DEBUG_ENV).then(|| "1".to_owned()))
-        })
-        .expect("debug config should load");
-        assert_eq!(loaded.primary.model, "gpt-test");
-        assert_eq!(
-            loaded.primary.provider.base_url(),
-            "https://api.example.test/v1"
-        );
-        let context_compaction = loaded
-            .context_compaction
-            .expect("context compaction debug config should load");
-        assert_eq!(context_compaction.model, "gpt-compact");
-        assert_eq!(
-            context_compaction.provider.base_url(),
-            "https://api.example.test/v1"
-        );
-        let approval_review = loaded
-            .approval_review
-            .expect("approval review debug config should load");
-        assert_eq!(approval_review.model, "gpt-review");
-        assert_eq!(
-            approval_review.provider.base_url(),
-            "https://api.example.test/v1"
-        );
-    }
-
-    #[test]
-    fn openai_debug_model_flag_overrides_only_primary_model() {
-        let (_temp, config) = load_managed_test_config(
-            Some(
-                r#"
-[providers.default]
-provider = "openai-compatible"
-model = "gpt-primary"
-
-[models.context_compaction]
-provider = "openai-compatible"
-model = "gpt-compact"
-
-[models.approval_review]
-provider = "openai-compatible"
-model = "gpt-review"
-"#,
-            ),
-            r#"
-version = 1
-
-[providers.openai-compatible]
-protocol = "chat_completions"
-api_key_file = "secrets/openai.key"
-"#,
-            &[("openai.key", "sk-managed-secret\n")],
-        );
-
-        let loaded = config_with_env(Some("gpt-flag"), Some(&config), |name| {
-            Ok((name == super::MERRY_OPENAI_DEBUG_ENV).then(|| "1".to_owned()))
-        })
-        .expect("debug config should load");
-
-        assert_eq!(loaded.primary.model, "gpt-flag");
-        assert_eq!(
-            loaded
-                .context_compaction
-                .expect("context compaction debug config should load")
-                .model,
-            "gpt-compact"
-        );
-        assert_eq!(
-            loaded
-                .approval_review
-                .expect("approval review debug config should load")
-                .model,
-            "gpt-review"
-        );
     }
 
     #[test]
@@ -915,7 +635,7 @@ api_key_file = "secrets/compat.key"
 
         let bundle = super::runtime_provider_bundle_from_config(
             Some(&config),
-            crate::cli_error::debug_openai_usage_error,
+            crate::cli_error::usage_error,
         )
         .expect("runtime provider bundle should build");
         assert_eq!(bundle.primary.provider.name().as_str(), "claude");
@@ -963,7 +683,7 @@ api_key_file = "secrets/claude.key"
             Some("claude"),
             Some("claude-next"),
             super::RuntimeRoleOverrides::default(),
-            crate::cli_error::debug_openai_usage_error,
+            crate::cli_error::usage_error,
         )
         .expect("runtime provider bundle should build");
 
@@ -1005,16 +725,7 @@ api_key_file = "secrets/openai.key"
 "#,
             &[("openai.key", "sk-managed-secret\n")],
         );
-        let runtime_config = super::openai_provider_config_bundle(None, Some(&config), |message| {
-            crate::cli_error::CliError::Unexpected(message)
-        })
-        .expect("runtime config should load");
-        assert_eq!(
-            runtime_config.primary.provider.protocol(),
-            merry_provider_openai::OpenAiProtocol::ChatCompletions
-        );
-
-        let bundle = super::openai_provider_bundle(runtime_config, |message| {
+        let bundle = super::runtime_provider_bundle_from_config(Some(&config), |message| {
             crate::cli_error::CliError::Unexpected(message)
         })
         .expect("runtime provider bundle should build");

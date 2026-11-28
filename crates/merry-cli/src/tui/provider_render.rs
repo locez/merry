@@ -19,7 +19,7 @@ use super::{
     theme::SemanticColor,
 };
 use crate::config::ConfiguredProviderKind;
-use merry_provider_openai::OpenAiProtocol;
+use merry::providers::OpenAiProtocol;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},

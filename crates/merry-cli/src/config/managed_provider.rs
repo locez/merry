@@ -5,9 +5,8 @@ use super::{
         validate_provider_display_name, validate_service_tier_support,
     },
 };
-use merry_llm::{ModelName, ReasoningEffort, ServiceTier};
-use merry_provider_anthropic::AnthropicProviderConfig;
-use merry_provider_openai::{OpenAiProtocol, OpenAiProviderConfig};
+use merry::providers::{AnthropicProviderConfig, OpenAiProtocol, OpenAiProviderConfig};
+use merry::providers::{ModelName, ReasoningEffort, ServiceTier};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -746,7 +745,7 @@ fn invalid_alias(value: &str, reason: &str) -> ConfigError {
 mod tests {
     use super::*;
     use crate::config::{MerryConfig, XdgPaths};
-    use merry_llm::ModelName;
+    use merry::providers::ModelName;
 
     #[tokio::test]
     async fn managed_store_keeps_duplicate_endpoints_under_different_aliases() {

@@ -55,7 +55,6 @@ fn is_baseline_write_path(path: &std::path::Path) -> bool {
 pub fn merry_without_openai_env() -> Command {
     let mut command = merry();
     command
-        .env_remove("MERRY_OPENAI_DEBUG")
         .env_remove("MERRY_OPENAI_API_KEY")
         .env_remove("OPENAI_API_KEY")
         .env_remove("MERRY_OPENAI_MODEL")
@@ -101,26 +100,6 @@ pub fn repo_root() -> PathBuf {
         .and_then(|path| path.parent())
         .expect("merry-cli lives under crates/merry-cli")
         .to_path_buf()
-}
-
-pub fn assert_debug_output(stdout: &[u8], expected_session_id: &str) {
-    let text = std::str::from_utf8(stdout).expect("stdout should be utf-8");
-    assert!(text.ends_with('\n'), "stdout should end with a newline");
-
-    let lines = text.lines().collect::<Vec<_>>();
-    assert_eq!(lines.len(), 3, "debug should emit exactly 3 JSON lines");
-
-    let events = lines
-        .iter()
-        .map(|line| serde_json::from_str::<Value>(line).expect("each line should be JSON"))
-        .collect::<Vec<_>>();
-
-    let expected_kinds = ["session_started", "step_started", "step_completed"];
-    for (index, event) in events.iter().enumerate() {
-        assert_eq!(event["session_id"], expected_session_id);
-        assert_eq!(event["sequence"], index as u64);
-        assert_eq!(event["payload"]["type"], expected_kinds[index]);
-    }
 }
 
 pub fn parse_jsonl(stdout: &[u8]) -> Vec<Value> {

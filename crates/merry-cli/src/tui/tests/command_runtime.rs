@@ -9,14 +9,16 @@ use crate::{
         theme::TuiTheme,
     },
 };
-use merry_core::{InteractiveRunState, RuntimeEvent};
-use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelResponse};
-use merry_process::ProcessSession;
-use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, AgentLoopConfig, CompactionConfig, ProcessActionIntent,
-    ProcessExitStatus, ProcessRunner, ProcessRunnerContext, ProcessRunnerError,
-    ProcessRunnerFuture, ProcessRunnerOutput, StaticPermissionedProcessRunnerFactory, StepContext,
+use merry::events::{InteractiveRunState, RuntimeEvent};
+use merry::process::ProcessSession;
+use merry::process::{
+    AcceptedLocalWorkspaceProcessAdmission, ProcessActionIntent, ProcessExitStatus, ProcessRunner,
+    ProcessRunnerContext, ProcessRunnerError, ProcessRunnerFuture, ProcessRunnerOutput,
+    StaticPermissionedProcessRunnerFactory,
 };
+use merry::providers::{FinishReason, ModelEvent, ModelOutput, ModelResponse};
+use merry::runtime::StepContext;
+use merry::{AgentLoopConfig, CompactionConfig};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Notify;
 
@@ -98,7 +100,7 @@ async fn runtime_process_stays_running_and_animates_until_the_backend_completes(
             )),
             extra_tools: Vec::new(),
             automatic_compaction: CompactionConfig::disabled(),
-            history_retention: merry_runtime::HistoryRetention::default(),
+            history_retention: merry::HistoryRetention::default(),
             retry_policy: None,
             context_compaction: None,
             approval_review: None,
@@ -175,7 +177,11 @@ async fn runtime_process_stays_running_and_animates_until_the_backend_completes(
         let crate::tui::controller::ControllerEffect::LoadCommandOutput(call_id) = effect else {
             panic!("completed runtime command should expose its tool call id");
         };
-        let output = crate::tui::command_details::load_output(&runtime, &call_id).await;
+        let output = crate::tui::command_details::load_output(
+            &merry::coding::CodingSessionHandle::from_runtime(runtime.clone()),
+            &call_id,
+        )
+        .await;
         crate::tui::command_details::apply_output(&mut state, &call_id, output);
         let inspected = render_to_text(&state, 100, 24);
         assert!(inspected.contains("stdout"), "{inspected}");

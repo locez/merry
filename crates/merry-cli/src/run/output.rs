@@ -6,8 +6,10 @@ use crate::{
 };
 use human::{write_agent_loop_summary_to, write_human_progress_event};
 use jsonl::{write_agent_loop_result, write_public_runtime_event};
-use merry_core::RuntimeEvent;
-use merry_runtime::{AgentLoopConfig, AgentLoopResult, Runtime, StepContext, StepInput};
+use merry::AgentLoopConfig;
+use merry::coding::{AgentLoopResult, AgentRunMessage, CodingSessionHandle};
+use merry::events::RuntimeEvent;
+use merry::providers::GenerationConfig;
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 
 mod human;
@@ -35,20 +37,20 @@ impl SettledRun {
 
 #[cfg(test)]
 pub(super) async fn write_agent_loop_output<W>(
-    runtime: &Runtime,
-    input: StepInput,
+    session: &CodingSessionHandle,
+    task: &str,
     config: AgentLoopConfig,
-    context: StepContext,
+    generation: GenerationConfig,
     writer: W,
 ) -> Result<RunExitStatus, CliError>
 where
     W: AsyncWrite + Unpin,
 {
     settle_agent_loop_output(
-        runtime,
-        input,
+        session,
+        task,
         config,
-        context,
+        generation,
         writer,
         RunOutput::new(false),
     )
@@ -108,10 +110,10 @@ impl RunOutput {
 }
 
 pub(super) async fn settle_agent_loop_output<W>(
-    runtime: &Runtime,
-    input: StepInput,
+    session: &CodingSessionHandle,
+    task: &str,
     config: AgentLoopConfig,
-    context: StepContext,
+    generation: GenerationConfig,
     writer: W,
     mut output: RunOutput,
 ) -> SettledRun
@@ -119,7 +121,7 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut writer = BufWriter::new(writer);
-    let mut stream = match runtime.run_agent_loop_stream(input, context, config) {
+    let mut stream = match session.run_agent_loop_stream(task, generation, config) {
         Ok(stream) => stream,
         Err(error) => {
             return SettledRun {
@@ -130,8 +132,8 @@ where
     };
     loop {
         let event = match stream.next_message().await {
-            Ok(Some(merry_runtime::AgentRunMessage::Event(event))) => event,
-            Ok(Some(merry_runtime::AgentRunMessage::ToolInvocations { batch })) => {
+            Ok(Some(AgentRunMessage::Event(event))) => event,
+            Ok(Some(AgentRunMessage::ToolInvocations { batch })) => {
                 stream.cancel_and_wait().await;
                 return SettledRun {
                     runtime_result: Err(unexpected(format!(
@@ -181,20 +183,20 @@ where
 
 #[cfg(test)]
 pub(super) async fn write_agent_loop_jsonl_output<W>(
-    runtime: &Runtime,
-    input: StepInput,
+    session: &CodingSessionHandle,
+    task: &str,
     config: AgentLoopConfig,
-    context: StepContext,
+    generation: GenerationConfig,
     writer: W,
 ) -> Result<RunExitStatus, CliError>
 where
     W: AsyncWrite + Unpin,
 {
     settle_agent_loop_output(
-        runtime,
-        input,
+        session,
+        task,
         config,
-        context,
+        generation,
         writer,
         RunOutput::new(true),
     )

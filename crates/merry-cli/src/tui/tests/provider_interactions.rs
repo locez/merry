@@ -59,7 +59,7 @@ fn structured_permission_review_renders_hierarchy_badges_queue_and_scrolls() {
     use crate::permission_prompt::{
         PermissionCapabilityBadge, PermissionFallbackNotice, PermissionReviewView,
     };
-    use merry_runtime::{PathAccess, PermissionReviewRisk, PermissionUserAuthorization};
+    use merry::permissions::{PathAccess, PermissionReviewRisk, PermissionUserAuthorization};
 
     let mut state = TuiState::new(
         "/repo".into(),
@@ -167,7 +167,7 @@ fn provider_error_dialog_wraps_and_restores_provider_manager() {
         "opencode",
         "OpenCode",
         ConfiguredProviderKind::OpenAiCompatible,
-        Some(merry_provider_openai::OpenAiProtocol::Responses),
+        Some(merry::providers::OpenAiProtocol::Responses),
         Some("model-a"),
     )]);
     state.set_provider_overlay_error(
@@ -256,7 +256,8 @@ fn model_selection_requires_reasoning_before_it_emits_a_runtime_change() {
         ControllerEffect::ApplyProviderModel {
             alias: "opencode".to_owned(),
             model: "model-a".to_owned(),
-            reasoning_effort: merry_llm::ReasoningEffort::new("minimal").expect("preset is valid"),
+            reasoning_effort: merry::providers::ReasoningEffort::new("minimal")
+                .expect("preset is valid"),
             target: crate::tui::provider_overlay::ModelPickerTarget::ActiveProvider,
         }
     );
@@ -274,7 +275,7 @@ fn provider_surfaces_fit_supported_terminal_sizes_without_secret_exposure() {
         "opencode",
         "OpenCode Gateway",
         ConfiguredProviderKind::OpenAiCompatible,
-        Some(merry_provider_openai::OpenAiProtocol::ChatCompletions),
+        Some(merry::providers::OpenAiProtocol::ChatCompletions),
         Some("deepseek-v4-pro"),
     )]);
     let manager = render_to_text(&state, 100, 30);
@@ -318,7 +319,7 @@ fn provider_surfaces_fit_supported_terminal_sizes_without_secret_exposure() {
             display_name: "OpenCode Gateway".to_owned(),
             alias: "opencode".to_owned(),
             kind: crate::config::ManagedProviderKind::OpenAiCompatible,
-            protocol: Some(merry_provider_openai::OpenAiProtocol::ChatCompletions),
+            protocol: Some(merry::providers::OpenAiProtocol::ChatCompletions),
             base_url: "https://gateway.example.test/v1".to_owned(),
             model: "deepseek-v4-pro".to_owned(),
             reasoning_effort: None,
@@ -364,7 +365,7 @@ fn provider_form_model_picker_returns_selection_to_the_form() {
             display_name: "OpenCode".to_owned(),
             alias: "opencode".to_owned(),
             kind: crate::config::ManagedProviderKind::OpenAiCompatible,
-            protocol: Some(merry_provider_openai::OpenAiProtocol::ChatCompletions),
+            protocol: Some(merry::providers::OpenAiProtocol::ChatCompletions),
             base_url: "https://opencode.example.test/v1".to_owned(),
             model: "model-a".to_owned(),
             reasoning_effort: None,
@@ -399,7 +400,8 @@ fn provider_form_model_picker_returns_selection_to_the_form() {
         ControllerEffect::ApplyProviderModel {
             alias: "opencode".to_owned(),
             model: "model-b".to_owned(),
-            reasoning_effort: merry_llm::ReasoningEffort::new("minimal").expect("preset is valid"),
+            reasoning_effort: merry::providers::ReasoningEffort::new("minimal")
+                .expect("preset is valid"),
             target: crate::tui::provider_overlay::ModelPickerTarget::ProviderForm,
         }
     );
@@ -468,7 +470,7 @@ fn provider_workbench_supports_inline_two_column_editing_adding_and_close_click(
             "alpha",
             "Alpha Managed",
             ConfiguredProviderKind::OpenAiCompatible,
-            Some(merry_provider_openai::OpenAiProtocol::Responses),
+            Some(merry::providers::OpenAiProtocol::Responses),
             Some("gpt-5"),
         )
         .with_details(
@@ -526,7 +528,7 @@ fn provider_workbench_supports_inline_two_column_editing_adding_and_close_click(
                 &format!("p{idx}"),
                 &format!("Provider {idx}"),
                 ConfiguredProviderKind::OpenAiCompatible,
-                Some(merry_provider_openai::OpenAiProtocol::Responses),
+                Some(merry::providers::OpenAiProtocol::Responses),
                 Some(&format!("m{idx}")),
             )
         })

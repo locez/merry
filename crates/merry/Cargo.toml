@@ -15,11 +15,13 @@ description = "Rust SDK facade for the Merry coding agent runtime (CLI available
 default = ["openai-compatible"]
 openai-compatible = ["dep:merry-provider-openai"]
 anthropic = ["dep:merry-provider-anthropic"]
+mcp = ["dep:merry-mcp"]
 
 [dependencies]
 merry-core = { path = "../merry-core", version = "0.1.0" }
 merry-coding = { path = "../merry-coding", version = "0.1.0" }
 merry-llm = { path = "../merry-llm", version = "0.1.0" }
+merry-mcp = { path = "../merry-mcp", version = "0.1.0", optional = true }
 merry-process = { path = "../merry-process", version = "0.1.0" }
 merry-tools-macros = { path = "../merry-tools-macros", version = "0.1.0" }
 merry-provider-anthropic = { path = "../merry-provider-anthropic", version = "0.1.0", optional = true }
@@ -27,9 +29,11 @@ merry-provider-openai = { path = "../merry-provider-openai", version = "0.1.0", 
 merry-runtime = { path = "../merry-runtime", version = "0.1.0" }
 merry-tools = { path = "../merry-tools", version = "0.1.0" }
 schemars.workspace = true
-serde.workspace = true
+serde = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true

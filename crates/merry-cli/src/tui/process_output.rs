@@ -1,6 +1,6 @@
 use crate::tui::state::ToolOutputPreview;
-use merry_core::ToolOutput;
-use merry_runtime::{ProcessOutputEnvelope, ProcessOutputStream};
+use merry::events::ToolOutput;
+use merry::process::{ProcessOutputEnvelope, ProcessOutputStream};
 
 /// A normalized captured process stream.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -2,7 +2,7 @@
 
 use super::TuiState;
 use crate::tui::{state::TimelineItem, status::format_session_usage_full};
-use merry_core::InteractiveRunState;
+use merry::events::InteractiveRunState;
 use std::time::{Duration, Instant};
 
 impl TuiState {

@@ -1,4 +1,4 @@
-use merry_runtime::{
+use merry::permissions::{
     HostIntegration, PathAccess, PathAccessRule, PathAccessRuleSource, PermissionReviewRules,
 };
 use serde::{Deserialize, Serialize};
@@ -29,8 +29,8 @@ pub(crate) use managed_provider::{
     ManagedProviderStoreError, ProviderAlias, derive_provider_alias,
 };
 use mcp::McpToml;
+pub use provider::EffectiveProviderConfig;
 pub(crate) use provider::{ConfiguredProviderKind, ConfiguredProviderProfile};
-pub use provider::{EffectiveOpenAiProviderConfig, EffectiveProviderConfig};
 use provider::{NamedProviderToml, ProvidersToml};
 use runtime::RuntimeToml;
 use subagents::SubagentsToml;

@@ -2,7 +2,8 @@ use super::{
     ConfigError, MerryConfig, RuntimeModelToml, default_true, provider::parse_reasoning_effort,
     validate_model_text,
 };
-use merry_runtime::{ArchiveConfig, CitationCompactionPolicy, CompactionConfig, HistoryRetention};
+use merry::coding::CitationCompactionPolicy;
+use merry::{ArchiveConfig, CompactionConfig, HistoryRetention};
 use serde::Deserialize;
 
 impl MerryConfig {
@@ -321,7 +322,7 @@ one_shot_retained_tool_exchanges = 2
         assert_eq!(
             auto_compaction
                 .reasoning_effort()
-                .map(merry_llm::ReasoningEffort::as_str),
+                .map(merry::providers::ReasoningEffort::as_str),
             Some("medium")
         );
     }
@@ -360,7 +361,7 @@ reasoning_effort = " padded "
             .expect("config should be present")
             .automatic_compaction_config()
             .expect("default auto compaction config should validate");
-        assert_eq!(missing, merry_runtime::CompactionConfig::default());
+        assert_eq!(missing, merry::CompactionConfig::default());
 
         let disabled = MerryConfig::load_optional_from_text(
             Some(
@@ -379,7 +380,7 @@ retained_model_turns = 4
         assert!(!disabled.is_enabled());
         assert_eq!(
             disabled.policy(),
-            merry_runtime::CompactionConfig::default().policy()
+            merry::CompactionConfig::default().policy()
         );
     }
 

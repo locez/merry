@@ -12,18 +12,20 @@ use crate::{
     testing::{FakeProcessRunner, ScriptedProvider, model_name},
     tui::session_list::TuiSessionMetadata,
 };
+use merry::coding::CodingSessionHandle;
+use merry::events::SessionTranscriptItem;
+use merry::events::{SessionId, ToolInputSchema, ToolName, ToolOutput, ToolSpec};
+use merry::process::ProcessRunner;
+use merry::process::ProcessSession;
 use merry::profiles::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
-use merry_core::{SessionId, ToolInputSchema, ToolName, ToolOutput, ToolSpec};
-use merry_llm::{
-    FinishReason, ModelError, ModelEvent, ModelOutput, ModelProvider, ModelResponse, ModelToolCall,
-    ModelToolCallId, ToolArguments,
+use merry::providers::{
+    FinishReason, GenerationConfig, ModelError, ModelEvent, ModelOutput, ModelProvider,
+    ModelResponse, ModelToolCall, ModelToolCallId, ToolArguments,
 };
-use merry_process::ProcessSession;
-use merry_runtime::{
-    AgentLoopConfig, FileSessionStore, ProcessRunner, RegisteredTool, Runtime,
-    SessionTranscriptItem, StepContext, StepInput, ToolExecutionContext, ToolExecutionError,
-    ToolExecutor, ToolExecutorFuture,
+use merry::runtime::{
+    RegisteredTool, ToolExecutionContext, ToolExecutionError, ToolExecutor, ToolExecutorFuture,
 };
+use merry::{AgentLoopConfig, FileSessionStore};
 use std::{
     io,
     path::Path,
@@ -62,7 +64,7 @@ struct InfrastructureErrorExecutor;
 impl ToolExecutor for InfrastructureErrorExecutor {
     fn execute<'a>(
         &'a self,
-        _call: merry_core::PendingToolCall,
+        _call: merry::events::PendingToolCall,
         _context: ToolExecutionContext,
     ) -> ToolExecutorFuture<'a> {
         Box::pin(async {
@@ -92,10 +94,10 @@ fn infrastructure_error_tool(tool_name: &str) -> RegisteredTool {
 fn fake_process_backend() -> ActionProcessBackend {
     let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
     let permissioned_factory = Arc::new(
-        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        merry::process::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
     );
     fixed_process_backend(ProcessSession::from_parts(
-        merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+        merry::process::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
         runner,
         permissioned_factory,
     ))
@@ -113,8 +115,8 @@ fn headless_input<'a>(
         model: model_name(),
         process_backend: fake_process_backend(),
         extra_tools: Vec::new(),
-        automatic_compaction: merry_runtime::CompactionConfig::disabled(),
-        history_retention: merry_runtime::HistoryRetention::default(),
+        automatic_compaction: merry::CompactionConfig::disabled(),
+        history_retention: merry::HistoryRetention::default(),
         retry_policy: None,
         context_compaction: None,
         approval_review: None,
@@ -130,7 +132,7 @@ fn build_runtime(
     session_id: &SessionId,
     workspace: &Path,
     provider: Arc<dyn ModelProvider>,
-) -> Runtime {
+) -> CodingSessionHandle {
     build_runtime_with_tools(session_id, workspace, provider, Vec::new())
 }
 
@@ -139,10 +141,10 @@ fn build_runtime_with_tools(
     workspace: &Path,
     provider: Arc<dyn ModelProvider>,
     extra_tools: Vec<RegisteredTool>,
-) -> Runtime {
+) -> CodingSessionHandle {
     let mut input = headless_input(session_id.as_str(), workspace, provider);
     input.extra_tools = extra_tools;
-    build_headless_coding(input).expect("runtime should build")
+    CodingSessionHandle::from_runtime(build_headless_coding(input).expect("runtime should build"))
 }
 
 fn metadata(session_id: &SessionId, workspace: &Path) -> TuiSessionMetadata {
@@ -246,7 +248,7 @@ async fn runtime_settlement_error_is_persisted_and_partial_state_can_resume() {
     );
     let result = run_agent_loop_with_persistence(
         &runtime,
-        StepInput::user_text("retain this partial task").expect("valid input"),
+        "retain this partial task",
         Vec::new(),
         async {
             Err(CliError::Unexpected(
@@ -256,7 +258,7 @@ async fn runtime_settlement_error_is_persisted_and_partial_state_can_resume() {
         HeadlessRunPersistence {
             loop_config: AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS)
                 .expect("valid config"),
-            context: StepContext::default(),
+            generation: GenerationConfig::default(),
             events_jsonl: true,
             session_store: store.clone(),
             session_id: &session_id,
@@ -298,13 +300,13 @@ async fn save_error_precedes_runtime_settlement_error() {
 
     let result = run_agent_loop_with_persistence(
         &runtime,
-        StepInput::user_text("save failure must win").expect("valid input"),
+        "save failure must win",
         &mut output,
         async { Ok(()) },
         HeadlessRunPersistence {
             loop_config: AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS)
                 .expect("valid config"),
-            context: StepContext::default(),
+            generation: GenerationConfig::default(),
             events_jsonl: false,
             session_store: FileSessionStore::new(invalid_store_root),
             session_id: &session_id,
@@ -334,13 +336,13 @@ async fn completed_jsonl_broken_pipe_cancels_and_persists_before_error_mapping()
 
     let result = run_agent_loop_with_persistence(
         &runtime,
-        StepInput::user_text("completed task").expect("valid input"),
+        "completed task",
         FailingWriter::new(io::ErrorKind::BrokenPipe, "closed JSONL consumer"),
         std::future::ready(Ok(())),
         HeadlessRunPersistence {
             loop_config: AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS)
                 .expect("valid config"),
-            context: StepContext::default(),
+            generation: GenerationConfig::default(),
             events_jsonl: true,
             session_store: store.clone(),
             session_id: &session_id,
@@ -371,13 +373,13 @@ async fn incomplete_terminal_run_is_persisted_and_remains_incomplete() {
 
     let status = run_agent_loop_with_persistence(
         &runtime,
-        StepInput::user_text("cancel this run").expect("valid input"),
+        "cancel this run",
         &mut output,
         std::future::ready(Ok(())),
         HeadlessRunPersistence {
             loop_config: AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS)
                 .expect("valid config"),
-            context: StepContext::default(),
+            generation: GenerationConfig::default(),
             events_jsonl: false,
             session_store: store.clone(),
             session_id: &session_id,
@@ -404,13 +406,13 @@ async fn incomplete_human_output_failure_still_persists() {
 
     let result = run_agent_loop_with_persistence(
         &runtime,
-        StepInput::user_text("cancel with closed output").expect("valid input"),
+        "cancel with closed output",
         FailingWriter::new(io::ErrorKind::BrokenPipe, "closed human-output consumer"),
         std::future::ready(Ok(())),
         HeadlessRunPersistence {
             loop_config: AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS)
                 .expect("valid config"),
-            context: StepContext::default(),
+            generation: GenerationConfig::default(),
             events_jsonl: false,
             session_store: store.clone(),
             session_id: &session_id,
@@ -440,7 +442,7 @@ async fn output_error_precedes_reviewer_error_after_persistence() {
 
     let result = run_agent_loop_with_persistence(
         &runtime,
-        StepInput::user_text("ordering task").expect("valid input"),
+        "ordering task",
         FailingWriter::new(io::ErrorKind::Other, "injected final output failure"),
         std::future::ready(Err(CliError::Unexpected(
             "injected reviewer presentation failure".to_owned(),
@@ -448,7 +450,7 @@ async fn output_error_precedes_reviewer_error_after_persistence() {
         HeadlessRunPersistence {
             loop_config: AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS)
                 .expect("valid config"),
-            context: StepContext::default(),
+            generation: GenerationConfig::default(),
             events_jsonl: false,
             session_store: store.clone(),
             session_id: &session_id,
@@ -488,7 +490,7 @@ async fn reviewer_settles_before_persistence_and_its_error_is_returned_after_sav
 
     let result = run_agent_loop_with_persistence(
         &runtime,
-        StepInput::user_text("reviewer failure task").expect("valid input"),
+        "reviewer failure task",
         &mut output,
         async {
             tokio::fs::remove_file(&sessions_dir)
@@ -504,7 +506,7 @@ async fn reviewer_settles_before_persistence_and_its_error_is_returned_after_sav
         HeadlessRunPersistence {
             loop_config: AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS)
                 .expect("valid config"),
-            context: StepContext::default(),
+            generation: GenerationConfig::default(),
             events_jsonl: false,
             session_store: store.clone(),
             session_id: &session_id,
@@ -539,7 +541,7 @@ async fn save_error_precedes_broken_pipe_and_reviewer_errors() {
 
     let result = run_agent_loop_with_persistence(
         &runtime,
-        StepInput::user_text("must report save failure").expect("valid input"),
+        "must report save failure",
         FailingWriter::new(io::ErrorKind::BrokenPipe, "closed human-output consumer"),
         std::future::ready(Err(CliError::Unexpected(
             "injected reviewer presentation failure".to_owned(),
@@ -547,7 +549,7 @@ async fn save_error_precedes_broken_pipe_and_reviewer_errors() {
         HeadlessRunPersistence {
             loop_config: AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS)
                 .expect("valid config"),
-            context: StepContext::default(),
+            generation: GenerationConfig::default(),
             events_jsonl: false,
             session_store: FileSessionStore::new(invalid_store_root),
             session_id: &session_id,
@@ -592,13 +594,13 @@ async fn production_reviewer_shutdown_leaves_a_resumable_session() {
 
     let result = run_agent_loop_with_persistence(
         &runtime,
-        StepInput::user_text("keep this task resumable").expect("valid input"),
+        "keep this task resumable",
         Vec::new(),
         async { review_task.finish().await.map_err(unexpected) },
         HeadlessRunPersistence {
             loop_config: AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS)
                 .expect("valid config"),
-            context: StepContext::default(),
+            generation: GenerationConfig::default(),
             events_jsonl: false,
             session_store: store.clone(),
             session_id: &session_id,

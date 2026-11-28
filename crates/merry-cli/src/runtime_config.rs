@@ -1,17 +1,14 @@
 use crate::cli_error::{CliError, unexpected};
 use crate::coding::ActionProcessBackendOptions;
 use crate::config::{self, EffectiveLogSettings, MerryConfig, XdgPaths};
-use merry_core::SessionId;
-use merry_llm::{GenerationConfig, ReasoningEffort, ServiceTier};
-use merry_runtime::{
-    CompactionConfig, HistoryRetention, MemoryLayout, PathAccess, PathAccessRule,
-    PathAccessRuleSource, Runtime, RuntimeBuilder,
-};
-use std::{
-    env,
-    ffi::OsString,
-    path::{Path, PathBuf},
-};
+use merry::coding::MemoryLayout;
+use merry::paths::{ProtectedHostPaths, user_home_dir};
+use merry::process::GpgAgentSockets;
+use merry::providers::{GenerationConfig, ReasoningEffort, ServiceTier};
+use merry::{CompactionConfig, HistoryRetention};
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+use std::path::Path;
+use std::{env, ffi::OsString, path::PathBuf};
 
 pub(crate) fn validate_loaded_config(
     config: Option<&MerryConfig>,
@@ -105,207 +102,6 @@ pub(crate) fn main_reasoning_effort(
         .and_then(|provider| provider.reasoning_effort))
 }
 
-/// Paths ordinary local development commands can use without another grant.
-///
-/// Covers common Rust, Python, Node/JS, Go, Nix, and polyglot version-manager
-/// toolchains and build caches. Toolchain binaries, interpreters, and
-/// non-secret config files stay read-only; package and compiler caches are
-/// writable. Optional language caches are only marked writable when explicitly
-/// configured via environment variables or when their toolchain/cache tree
-/// exists, so Merry does not create empty directories in `$HOME` for unused
-/// languages. Credentials under `$HOME` (such as `~/.cargo/credentials.toml`,
-/// `~/.npmrc`, `~/.pypirc`, `~/.netrc`, `~/.ssh`, `~/.aws`, `~/.gnupg`) are
-/// never included.
-fn default_development_path_rules(home: &Path) -> Vec<PathAccessRule> {
-    default_development_path_rules_with_env(home, |name| env::var_os(name))
-}
-
-fn default_development_path_rules_with_env(
-    home: &Path,
-    env_var: impl Fn(&str) -> Option<OsString>,
-) -> Vec<PathAccessRule> {
-    let env_path = |name: &str| {
-        env_var(name)
-            .map(PathBuf::from)
-            .filter(|path| is_clean_absolute_path(path))
-    };
-
-    let cargo_home = env_path("CARGO_HOME").unwrap_or_else(|| home.join(".cargo"));
-    let rustup_home = env_path("RUSTUP_HOME").unwrap_or_else(|| home.join(".rustup"));
-    let cache_home = env_path("XDG_CACHE_HOME").unwrap_or_else(|| home.join(".cache"));
-    let data_home = env_path("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share"));
-
-    let mut rules = vec![
-        // User binaries & Nix profile
-        (home.join(".local/bin"), PathAccess::ReadOnly),
-        (home.join(".nix-profile"), PathAccess::ReadOnly),
-        // Rust (`credentials.toml` stays excluded)
-        (cargo_home.join("bin"), PathAccess::ReadOnly),
-        (cargo_home.join("config.toml"), PathAccess::ReadOnly),
-        (cargo_home.join("config"), PathAccess::ReadOnly),
-        (cargo_home.join("registry"), PathAccess::ReadWrite),
-        (cargo_home.join("git"), PathAccess::ReadWrite),
-        (rustup_home.join("settings.toml"), PathAccess::ReadOnly),
-        (rustup_home.join("toolchains"), PathAccess::ReadOnly),
-        // Shared XDG cache
-        (cache_home, PathAccess::ReadWrite),
-        // Python toolchains & managed interpreters (never all of `$XDG_DATA_HOME`)
-        (data_home.join("uv"), PathAccess::ReadOnly),
-        (data_home.join("pipx"), PathAccess::ReadOnly),
-        (data_home.join("pypoetry"), PathAccess::ReadOnly),
-        // Polyglot version managers (`mise`, `asdf`)
-        (data_home.join("mise/installs"), PathAccess::ReadOnly),
-        (data_home.join("mise/shims"), PathAccess::ReadOnly),
-    ];
-
-    let pyenv_root = env_path("PYENV_ROOT").unwrap_or_else(|| home.join(".pyenv"));
-    rules.push((pyenv_root.join("versions"), PathAccess::ReadOnly));
-    rules.push((pyenv_root.join("shims"), PathAccess::ReadOnly));
-
-    if let Some(uv_python) = env_path("UV_PYTHON_INSTALL_DIR") {
-        rules.push((uv_python, PathAccess::ReadOnly));
-    }
-    if let Some(poetry_home) = env_path("POETRY_HOME") {
-        rules.push((poetry_home, PathAccess::ReadOnly));
-    }
-    if let Some(mise_data) = env_path("MISE_DATA_DIR") {
-        rules.push((mise_data.join("installs"), PathAccess::ReadOnly));
-        rules.push((mise_data.join("shims"), PathAccess::ReadOnly));
-    }
-    let asdf_data = env_path("ASDF_DATA_DIR").unwrap_or_else(|| home.join(".asdf"));
-    rules.push((asdf_data.join("installs"), PathAccess::ReadOnly));
-    rules.push((asdf_data.join("shims"), PathAccess::ReadOnly));
-
-    // Node / JS / TS toolchains (`~/.npmrc` stays excluded)
-    let nvm_dir = env_path("NVM_DIR").unwrap_or_else(|| home.join(".nvm"));
-    rules.push((nvm_dir.join("versions"), PathAccess::ReadOnly));
-
-    if let Some(fnm_dir) = env_path("FNM_DIR") {
-        rules.push((fnm_dir, PathAccess::ReadOnly));
-    } else {
-        rules.push((data_home.join("fnm"), PathAccess::ReadOnly));
-        rules.push((home.join(".fnm"), PathAccess::ReadOnly));
-        #[cfg(target_os = "macos")]
-        rules.push((
-            home.join("Library/Application Support/fnm"),
-            PathAccess::ReadOnly,
-        ));
-    }
-
-    let volta_home = env_path("VOLTA_HOME").unwrap_or_else(|| home.join(".volta"));
-    rules.push((volta_home.join("bin"), PathAccess::ReadOnly));
-    rules.push((volta_home.join("tools"), PathAccess::ReadOnly));
-
-    let bun_env = env_path("BUN_INSTALL");
-    let bun_install = bun_env.clone().unwrap_or_else(|| home.join(".bun"));
-    rules.push((bun_install.join("bin"), PathAccess::ReadOnly));
-    if bun_env.is_some() || bun_install.exists() {
-        rules.push((bun_install.join("install/cache"), PathAccess::ReadWrite));
-    }
-
-    let pnpm_home = env_path("PNPM_HOME").unwrap_or_else(|| {
-        #[cfg(target_os = "macos")]
-        {
-            home.join("Library/pnpm")
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            data_home.join("pnpm")
-        }
-    });
-    rules.push((pnpm_home.clone(), PathAccess::ReadOnly));
-    if pnpm_home.join("store").exists() {
-        rules.push((pnpm_home.join("store"), PathAccess::ReadWrite));
-    }
-
-    if let Some(npm_cache) = env_path("NPM_CONFIG_CACHE") {
-        rules.push((npm_cache, PathAccess::ReadWrite));
-    } else if home.join(".npm").exists() {
-        rules.push((home.join(".npm/_cacache"), PathAccess::ReadWrite));
-    }
-
-    // Go toolchain & module cache
-    let gopath_env = env_path("GOPATH");
-    let gopath = gopath_env.clone().unwrap_or_else(|| home.join("go"));
-    rules.push((gopath.join("bin"), PathAccess::ReadOnly));
-    if let Some(gomodcache) = env_path("GOMODCACHE") {
-        rules.push((gomodcache, PathAccess::ReadWrite));
-    } else if gopath_env.is_some() || gopath.exists() {
-        rules.push((gopath.join("pkg/mod"), PathAccess::ReadWrite));
-    } else {
-        rules.push((gopath.join("pkg/mod"), PathAccess::ReadOnly));
-    }
-
-    // Explicit env-configured compiler/package caches
-    for var in ["GOCACHE", "UV_CACHE_DIR", "PIP_CACHE_DIR"] {
-        if let Some(path) = env_path(var) {
-            rules.push((path, PathAccess::ReadWrite));
-        }
-    }
-
-    // macOS CLI dev caches live under `~/Library/Caches/<tool>` rather than
-    // `$XDG_CACHE_HOME`. Grant only explicit dev subdirectories, never the
-    // whole `~/Library/Caches` tree.
-    #[cfg(target_os = "macos")]
-    {
-        let library_caches = home.join("Library/Caches");
-        if library_caches.is_dir() {
-            for subdir in ["go-build", "pip", "uv", "pnpm", "Yarn", "node-gyp", "clang"] {
-                rules.push((library_caches.join(subdir), PathAccess::ReadWrite));
-            }
-        }
-    }
-
-    // Windows CLI dev toolchains and caches live under `%LOCALAPPDATA%` /
-    // `%APPDATA%` / `%USERPROFILE%\scoop`. Grant only explicit dev
-    // subdirectories, never the whole AppData tree.
-    #[cfg(windows)]
-    {
-        if let Some(local_appdata) = env_path("LOCALAPPDATA") {
-            for subdir in [
-                "go-build",
-                "pip",
-                "uv",
-                "pnpm",
-                "Yarn",
-                "node-gyp",
-                "npm-cache",
-            ] {
-                let candidate = local_appdata.join(subdir);
-                if candidate.exists() {
-                    rules.push((candidate, PathAccess::ReadWrite));
-                }
-            }
-            for subdir in ["fnm", "Programs\\Python", "Programs\\Git"] {
-                let candidate = local_appdata.join(subdir);
-                if candidate.exists() {
-                    rules.push((candidate, PathAccess::ReadOnly));
-                }
-            }
-        }
-        let scoop_shims = home.join("scoop").join("shims");
-        if scoop_shims.exists() {
-            rules.push((scoop_shims, PathAccess::ReadOnly));
-        }
-    }
-
-    rules
-        .into_iter()
-        .filter(|(path, _)| is_clean_absolute_path(path))
-        .map(|(path, access)| {
-            PathAccessRule::new(
-                path,
-                access,
-                PathAccessRuleSource::DefaultDevelopmentBaseline,
-            )
-        })
-        .collect()
-}
-
-fn is_clean_absolute_path(path: &Path) -> bool {
-    merry_core::host_paths::is_clean_absolute_path(path)
-}
-
 /// Builds the action backend inputs that need no asynchronous discovery.
 ///
 /// GnuPG socket discovery has to run on the async runtime, so this is the
@@ -317,7 +113,7 @@ fn action_process_backend_options(
 ) -> Result<ActionProcessBackendOptions, config::ConfigError> {
     let home = config
         .map(|config| config.home().to_path_buf())
-        .or_else(merry_core::host_paths::user_home_dir)
+        .or_else(user_home_dir)
         .unwrap_or_else(|| {
             if cfg!(windows) {
                 env::temp_dir()
@@ -325,15 +121,11 @@ fn action_process_backend_options(
                 PathBuf::from("/home/merry")
             }
         });
-    let mut path_rules = default_development_path_rules(&home);
-    if let Some(config) = config {
-        path_rules.extend(config.trusted_global_path_rules()?);
-    }
-    let (config_dir, skill_roots, private_paths) = if let Some(config) = config {
+    let (config_dir, skill_roots, protected) = if let Some(config) = config {
         (
             config.config_dir().to_path_buf(),
             config.skill_roots()?,
-            config.private_process_paths()?,
+            ProtectedHostPaths::new(config.private_process_paths()?),
         )
     } else {
         let paths = XdgPaths::from_env()?;
@@ -342,42 +134,20 @@ fn action_process_backend_options(
         (
             config_dir,
             vec![default_skills],
-            vec![paths.state_dir().to_path_buf(), paths.managed_config_dir()],
+            paths.protected_host_paths(),
         )
     };
-    // Merry's own non-secret config directory and configured skill roots stay
-    // writable so the agent can update config.toml and skills directly. State
-    // and Settings-managed credentials live under state_dir and stay denied.
-    if is_clean_absolute_path(&config_dir) {
-        path_rules.push(PathAccessRule::new(
-            config_dir,
-            PathAccess::ReadWrite,
-            PathAccessRuleSource::ProductConfig,
-        ));
+    let memory_root = MemoryLayout::memory_root_from_env().ok();
+    let mut options = ActionProcessBackendOptions::new().with_default_development_baseline(&home);
+    if let Some(config) = config {
+        options = options.extend_path_rules(config.trusted_global_path_rules()?);
     }
-    for skill_root in skill_roots {
-        if is_clean_absolute_path(&skill_root) {
-            path_rules.push(PathAccessRule::new(
-                skill_root,
-                PathAccess::ReadWrite,
-                PathAccessRuleSource::ProductConfig,
-            ));
-        }
-    }
-    path_rules.extend(private_paths.into_iter().map(|path| {
-        PathAccessRule::new(path, PathAccess::Deny, PathAccessRuleSource::ProductPrivate)
-    }));
-    // The memory tree is outside the workspace. Grant only that root, whether
-    // or not the workspace itself is writable. State and credentials stay denied.
-    if let Ok(memory_root) = MemoryLayout::memory_root_from_env()
-        && is_clean_absolute_path(&memory_root)
-    {
-        path_rules.push(PathAccessRule::new(
-            memory_root,
-            PathAccess::ReadWrite,
-            PathAccessRuleSource::DurableMemory,
-        ));
-    }
+    // Merry's own non-secret config directory, configured skill roots, and
+    // durable memory stay writable while state and managed credentials stay
+    // denied through the shared ProtectedHostPaths contract.
+    options = options
+        .with_product_writable_paths(&config_dir, &skill_roots, memory_root.as_deref())
+        .with_protected_host_paths(&protected);
     let environment_overrides: Vec<(OsString, OsString)> = config
         .map(MerryConfig::process_environment_overrides)
         .transpose()?
@@ -385,8 +155,7 @@ fn action_process_backend_options(
         .into_iter()
         .map(|(name, value)| (OsString::from(name), OsString::from(value)))
         .collect();
-    Ok(ActionProcessBackendOptions::new()
-        .with_path_rules(path_rules)
+    Ok(options
         .with_network_requests_allowed(config.is_none_or(MerryConfig::network_requests_allowed))
         .with_environment_overrides(environment_overrides)
         // Trusted global config is the user's own preauthorization for the
@@ -401,30 +170,12 @@ fn action_process_backend_options(
 pub(crate) fn private_tool_paths(
     config: Option<&MerryConfig>,
 ) -> Result<Vec<PathBuf>, config::ConfigError> {
-    if let Some(config) = config {
-        config.private_process_paths()
+    let protected = if let Some(config) = config {
+        ProtectedHostPaths::new(config.private_process_paths()?)
     } else {
-        let paths = XdgPaths::from_env()?;
-        Ok(vec![
-            paths.state_dir().to_path_buf(),
-            paths.managed_config_dir(),
-        ])
-    }
-}
-
-pub(crate) fn configured_runtime_builder(
-    session_id: SessionId,
-    config: Option<&MerryConfig>,
-) -> Result<RuntimeBuilder, CliError> {
-    let review_rules = config
-        .map(MerryConfig::permission_review_rules)
-        .transpose()
-        .map_err(unexpected)?
-        .unwrap_or_default();
-    Ok(Runtime::builder(session_id)
-        .automatic_compaction(automatic_compaction_config(config).map_err(unexpected)?)
-        .history_retention(history_retention_config(config).map_err(unexpected)?)
-        .permission_review_rules(review_rules))
+        XdgPaths::from_env()?.protected_host_paths()
+    };
+    Ok(protected.into_vec())
 }
 
 pub(crate) async fn prepared_action_process_backend_options(
@@ -454,17 +205,17 @@ pub(crate) async fn prepared_action_process_backend_options_with_overrides(
             .unwrap_or_default();
         set_host_integration(
             &mut integrations,
-            merry_runtime::HostIntegration::SshAgent,
+            merry::permissions::HostIntegration::SshAgent,
             overrides.ssh_agent,
         );
         set_host_integration(
             &mut integrations,
-            merry_runtime::HostIntegration::GpgAgent,
+            merry::permissions::HostIntegration::GpgAgent,
             overrides.gpg_agent,
         );
         set_host_integration(
             &mut integrations,
-            merry_runtime::HostIntegration::SessionBus,
+            merry::permissions::HostIntegration::SessionBus,
             overrides.dbus,
         );
         options = options.with_host_integrations(integrations);
@@ -480,10 +231,10 @@ pub(crate) async fn prepared_action_process_backend_options_with_overrides(
         config.is_some_and(|config| {
             config
                 .host_integrations()
-                .contains(&merry_runtime::HostIntegration::GpgAgent)
+                .contains(&merry::permissions::HostIntegration::GpgAgent)
         })
     });
-    match merry_process::GpgAgentSockets::discover(home, options.environment_overrides())
+    match GpgAgentSockets::discover(home, options.environment_overrides())
         .await
         .map_err(unexpected)?
     {
@@ -501,8 +252,8 @@ pub(crate) async fn prepared_action_process_backend_options_with_overrides(
 }
 
 fn set_host_integration(
-    integrations: &mut Vec<merry_runtime::HostIntegration>,
-    target: merry_runtime::HostIntegration,
+    integrations: &mut Vec<merry::permissions::HostIntegration>,
+    target: merry::permissions::HostIntegration,
     override_value: Option<bool>,
 ) {
     let Some(enabled) = override_value else {
@@ -557,13 +308,14 @@ mod tests {
     use super::temp_home_outside_baseline_writes;
     use super::{action_process_backend_options, generation_config, validate_loaded_config};
     use crate::config::{MerryConfig, XdgPaths};
-    use merry_llm::ServiceTier;
-    use merry_runtime::{MemoryLayout, PathAccessRuleSource};
+    use merry::coding::MemoryLayout;
+    use merry::permissions::PathAccessRuleSource;
+    use merry::providers::ServiceTier;
     use std::{fs, path::PathBuf};
 
     #[test]
     fn configured_host_integrations_preauthorize_inner_actions() {
-        use merry_runtime::HostIntegration;
+        use merry::permissions::HostIntegration;
 
         let paths = XdgPaths::from_parts(PathBuf::from("/home/alice"), None, None);
         let config = MerryConfig::load_optional_from_text(
@@ -618,7 +370,7 @@ readwrite_paths = ["/srv/trusted-writable"]
             .iter()
             .find(|rule| rule.path() == std::path::Path::new("/srv/trusted-readonly"))
             .expect("configured read-only path should remain visible to the inner runner");
-        assert_eq!(readonly.access(), merry_runtime::PathAccess::ReadOnly);
+        assert_eq!(readonly.access(), merry::permissions::PathAccess::ReadOnly);
         assert_eq!(readonly.source(), PathAccessRuleSource::TrustedGlobalConfig);
 
         let writable = options
@@ -626,7 +378,7 @@ readwrite_paths = ["/srv/trusted-writable"]
             .iter()
             .find(|rule| rule.path() == std::path::Path::new("/srv/trusted-writable"))
             .expect("configured writable ceiling should remain visible to the inner runner");
-        assert_eq!(writable.access(), merry_runtime::PathAccess::ReadWrite);
+        assert_eq!(writable.access(), merry::permissions::PathAccess::ReadWrite);
         assert_eq!(writable.source(), PathAccessRuleSource::TrustedGlobalConfig);
     }
 
@@ -640,107 +392,11 @@ readwrite_paths = ["/srv/trusted-writable"]
             .iter()
             .find(|rule| rule.path() == root)
             .expect("memory root should be granted");
-        assert_eq!(rule.access(), merry_runtime::PathAccess::ReadWrite);
+        assert_eq!(rule.access(), merry::permissions::PathAccess::ReadWrite);
         assert_eq!(rule.source(), PathAccessRuleSource::DurableMemory);
         assert!(options.path_rules().iter().all(|rule| {
             rule.source() != PathAccessRuleSource::DurableMemory || rule.path() == root
         }));
-    }
-
-    #[test]
-    fn default_development_baseline_covers_polyglot_toolchains_and_excludes_credentials() {
-        let home = tempfile::tempdir().expect("temp home");
-        let home_path = home.path();
-        fs::create_dir_all(home_path.join("go/pkg/mod")).expect("go dir");
-        fs::create_dir_all(home_path.join(".npm")).expect("npm dir");
-        fs::create_dir_all(home_path.join(".bun")).expect("bun dir");
-        #[cfg(target_os = "macos")]
-        fs::create_dir_all(home_path.join("Library/Caches")).expect("macos caches dir");
-
-        let rules = super::default_development_path_rules_with_env(home_path, |_| None);
-        let access_for = |path: PathBuf| {
-            rules
-                .iter()
-                .find(|rule| rule.path() == path)
-                .map(merry_runtime::PathAccessRule::access)
-        };
-
-        assert_eq!(
-            access_for(home_path.join(".rustup/settings.toml")),
-            Some(merry_runtime::PathAccess::ReadOnly)
-        );
-        assert_eq!(
-            access_for(home_path.join(".cargo/config.toml")),
-            Some(merry_runtime::PathAccess::ReadOnly)
-        );
-        assert_eq!(
-            access_for(home_path.join(".local/share/uv")),
-            Some(merry_runtime::PathAccess::ReadOnly)
-        );
-        assert_eq!(
-            access_for(home_path.join(".nvm/versions")),
-            Some(merry_runtime::PathAccess::ReadOnly)
-        );
-        assert_eq!(
-            access_for(home_path.join(".nix-profile")),
-            Some(merry_runtime::PathAccess::ReadOnly)
-        );
-        assert_eq!(
-            access_for(home_path.join("go/bin")),
-            Some(merry_runtime::PathAccess::ReadOnly)
-        );
-        assert_eq!(
-            access_for(home_path.join("go/pkg/mod")),
-            Some(merry_runtime::PathAccess::ReadWrite)
-        );
-        assert_eq!(
-            access_for(home_path.join(".npm/_cacache")),
-            Some(merry_runtime::PathAccess::ReadWrite)
-        );
-        assert_eq!(
-            access_for(home_path.join(".bun/install/cache")),
-            Some(merry_runtime::PathAccess::ReadWrite)
-        );
-
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(
-                access_for(home_path.join("Library/Caches/go-build")),
-                Some(merry_runtime::PathAccess::ReadWrite)
-            );
-            assert_eq!(
-                access_for(home_path.join("Library/Caches/uv")),
-                Some(merry_runtime::PathAccess::ReadWrite)
-            );
-            assert!(
-                rules
-                    .iter()
-                    .all(|rule| rule.path() != home_path.join("Library/Caches")),
-                "whole ~/Library/Caches must not be granted"
-            );
-        }
-
-        // Credentials and Merry private directories must never be covered.
-        for forbidden in [
-            home_path.to_path_buf(),
-            home_path.join(".cargo"),
-            home_path.join(".cargo/credentials.toml"),
-            home_path.join(".npmrc"),
-            home_path.join(".pypirc"),
-            home_path.join(".netrc"),
-            home_path.join(".ssh"),
-            home_path.join(".local/share"),
-            home_path.join(".local/share/merry"),
-            home_path.join("Library/Caches/com.apple.Safari"),
-        ] {
-            assert!(
-                rules.iter().all(|rule| {
-                    forbidden != rule.path() && !forbidden.starts_with(rule.path())
-                }),
-                "forbidden path {} must not be covered by baseline rules",
-                forbidden.display()
-            );
-        }
     }
 
     #[test]
@@ -782,8 +438,8 @@ api_key_file = "secrets/opencode.key"
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]
     async fn product_private_paths_are_not_inherited_as_task_grants() {
-        use merry_process::{LocalProcessBackend, ProcessBackend, ProcessBackendMode};
-        use merry_runtime::{ProcessActionIntent, ProcessEnvPolicy, ProcessRunnerContext};
+        use merry::process::{LocalProcessBackend, ProcessBackend, ProcessBackendMode};
+        use merry::process::{ProcessActionIntent, ProcessEnvPolicy, ProcessRunnerContext};
         let fixture = temp_home_outside_baseline_writes();
         let paths = XdgPaths::from_parts(
             fixture.path().to_path_buf(),

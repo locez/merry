@@ -1,13 +1,14 @@
 use super::*;
-use merry_core::{SessionId, ToolSourceId};
-use merry_mcp::{McpDiscoveryStage, McpFailureKind, McpServerIssue};
-use merry_runtime::{FileSessionStore, LoadedSession, Runtime, RuntimeError};
+use merry::FileSessionStore;
+use merry::events::{SessionId, ToolSourceId};
+use merry::mcp::{McpDiscoveryStage, McpFailureKind, McpServerIssue};
+use merry::runtime::{LoadedSession, Runtime, RuntimeError};
 
 #[tokio::test]
 async fn a_new_session_without_mcp_has_no_warnings_or_tools() {
     let result = discover_configured_mcp_tools(None).await.unwrap();
-    assert!(result.tools.is_empty());
-    assert!(result.warnings.is_empty());
+    assert!(result.is_empty());
+    assert!(result.warnings().is_empty());
 }
 
 #[tokio::test]

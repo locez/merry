@@ -1,7 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_runtime::{
-    MAX_USER_IMAGES, RuntimeError, UserImageInput, UserMessageInput, user_image_label,
-};
+use merry::coding::RuntimeError;
+use merry::events::{MAX_USER_IMAGES, UserImageInput, UserMessageInput, user_image_label};
 use std::ops::Range;
 use unicode_width::UnicodeWidthStr;
 

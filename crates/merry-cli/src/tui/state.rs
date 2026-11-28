@@ -11,7 +11,7 @@ use crate::tui::{
     todo_dock::TodoDockState,
 };
 use clipboard::ClipboardFeedback;
-use merry_core::{InteractiveRunState, RuntimeEvent, SessionUsage};
+use merry::events::{InteractiveRunState, RuntimeEvent, SessionUsage};
 use overlays::OverlayState;
 pub(crate) use pending_queue::PendingEditCommit;
 use std::{
@@ -263,7 +263,7 @@ impl TuiState {
 
     pub(crate) fn sync_background_processes(
         &mut self,
-        processes: Vec<merry_runtime::BackgroundProcessSummary>,
+        processes: Vec<merry::process::BackgroundProcessSummary>,
     ) -> bool {
         self.task_dock.set_background_processes(processes)
     }

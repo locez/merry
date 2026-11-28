@@ -13,7 +13,7 @@ use crate::tui::{
     theme::TuiTheme,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::{
+use merry::events::{
     RuntimeEvent, RuntimeEventSource, SessionId, SubagentActivityPhase, SubagentActivitySnapshot,
     SubagentId, SubagentTaskId,
 };

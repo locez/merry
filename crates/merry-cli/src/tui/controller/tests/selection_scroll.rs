@@ -601,11 +601,11 @@ fn scrolling_to_top_triggers_archive_segment_load_and_prepends_without_jumping_o
     super::super::ArchiveSegmentCompletion::new(
         2,
         Ok(vec![
-            merry_runtime::SessionTranscriptItem::UserMessage {
+            merry::events::SessionTranscriptItem::UserMessage {
                 text: "Archived segment two question".into(),
                 images: Vec::new(),
             },
-            merry_runtime::SessionTranscriptItem::AssistantText {
+            merry::events::SessionTranscriptItem::AssistantText {
                 text: "Archived segment two answer".into(),
             },
         ]),

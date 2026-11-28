@@ -1,4 +1,4 @@
-use merry_core::SessionId;
+use merry::events::SessionId;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
@@ -97,8 +97,8 @@ impl TuiSessionStore {
         Self { sessions_dir }
     }
 
-    pub(crate) fn session_state_store(&self) -> merry_runtime::FileSessionStore {
-        merry_runtime::FileSessionStore::new(&self.sessions_dir)
+    pub(crate) fn session_state_store(&self) -> merry::FileSessionStore {
+        merry::FileSessionStore::new(&self.sessions_dir)
     }
 
     pub(crate) fn metadata_path(&self, session_id: &SessionId) -> PathBuf {

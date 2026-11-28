@@ -179,7 +179,7 @@ impl TuiState {
         &mut self,
         agent_id: &str,
         task: &str,
-        transcript: &[merry_runtime::SessionTranscriptItem],
+        transcript: &[merry::events::SessionTranscriptItem],
     ) {
         let fallback = self.subagent_by_id(agent_id).cloned();
         if let Some(Overlay::SubagentInspect(view)) = self.overlays.overlay.as_mut() {
@@ -190,7 +190,7 @@ impl TuiState {
     pub(crate) fn apply_subagent_live_event(
         &mut self,
         agent_id: &str,
-        event: merry_core::RuntimeEvent,
+        event: merry::events::RuntimeEvent,
     ) {
         if let Some(Overlay::SubagentInspect(view)) = self.overlays.overlay.as_mut()
             && view.selected_agent_id() == agent_id
@@ -210,7 +210,7 @@ impl TuiState {
 
     pub(crate) fn update_background_task_output(
         &mut self,
-        output: merry_runtime::BackgroundProcessOutput,
+        output: merry::process::BackgroundProcessOutput,
     ) {
         if let Some(Overlay::BackgroundTaskInspect(inspector)) = self.overlays.overlay.as_mut()
             && inspector.process_id() == output.summary().id().as_str()
@@ -511,7 +511,7 @@ impl TuiState {
         self.show_dialog(MessageDialogKind::Info, title, message);
     }
 
-    pub(crate) fn open_plan_view(&mut self, plan_id: Option<merry_core::PlanId>) {
+    pub(crate) fn open_plan_view(&mut self, plan_id: Option<merry::events::PlanId>) {
         let target_id = plan_id.or_else(|| self.plan.preferred_plan_id());
         let Some(plan) = target_id
             .as_ref()
@@ -527,7 +527,7 @@ impl TuiState {
         self.overlays.overlay = Some(Overlay::PlanView(overlay));
     }
 
-    pub(crate) fn select_plan_view(&mut self, plan_id: merry_core::PlanId) {
+    pub(crate) fn select_plan_view(&mut self, plan_id: merry::events::PlanId) {
         let Some(plan) = self.plan.plan_by_id(&plan_id).cloned() else {
             return;
         };
@@ -565,7 +565,7 @@ impl TuiState {
         self.select_plan_view(next_id);
     }
 
-    pub(crate) fn refresh_open_plan_view(&mut self, plan: &merry_core::PlanDocument) {
+    pub(crate) fn refresh_open_plan_view(&mut self, plan: &merry::events::PlanDocument) {
         let mut overlay = match self.overlays.overlay.take() {
             Some(Overlay::PlanView(view)) => view,
             other => {

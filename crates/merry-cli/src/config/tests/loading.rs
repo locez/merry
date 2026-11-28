@@ -4,7 +4,7 @@ use crate::config::{
     BrandMarkMode, CliDefaults, CopyButtonPosition, EffectiveProviderConfig, LogFormat, LogLevel,
     MerryConfig, XdgPaths,
 };
-use merry_runtime::PathAccess;
+use merry::permissions::PathAccess;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -468,7 +468,7 @@ fn example_config_toml_matches_current_schema_and_resolves_user_defaults() {
     assert_eq!(subagents.limits().foreground_wait_budget_secs(), 120);
     assert_eq!(
         subagents.limits().limit_behavior(),
-        merry_runtime::SubagentLimitBehavior::Queue
+        merry::runtime::SubagentLimitBehavior::Queue
     );
     assert_eq!(subagents.roles()["explore"].max_model_turns, Some(30));
     assert_eq!(subagents.roles()["coder"].max_model_turns, Some(80));

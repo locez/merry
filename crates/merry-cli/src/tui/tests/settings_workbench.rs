@@ -429,7 +429,7 @@ fn settings_role_bindings_reuse_model_picker_and_configure_subagent_roles() {
         ControllerEffect::ApplyProviderModel {
             alias: "compat".to_owned(),
             model: "gpt-5-mini".to_owned(),
-            reasoning_effort: merry_llm::ReasoningEffort::new("high")
+            reasoning_effort: merry::providers::ReasoningEffort::new("high")
                 .expect("preset effort should validate"),
             target: ModelPickerTarget::SettingsReasoning(ReasoningBindingTarget::Compaction),
         }
@@ -438,7 +438,7 @@ fn settings_role_bindings_reuse_model_picker_and_configure_subagent_roles() {
     state.apply_reasoning_binding(
         &ReasoningBindingTarget::Compaction,
         "compat",
-        merry_llm::ReasoningEffort::new("high").expect("preset effort should validate"),
+        merry::providers::ReasoningEffort::new("high").expect("preset effort should validate"),
     );
     assert_eq!(
         state.setting_value(SettingItem::CompactionReasoning),

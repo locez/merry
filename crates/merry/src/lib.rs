@@ -47,8 +47,16 @@
 mod agent;
 mod agent_loop;
 pub mod binding;
+pub mod coding;
 mod errors;
+pub mod events;
 mod interactive;
+#[cfg(feature = "mcp")]
+pub mod mcp;
+pub mod observability;
+pub mod paths;
+pub mod permissions;
+pub mod process;
 mod profile;
 pub mod profiles;
 pub mod providers;
@@ -56,9 +64,17 @@ pub mod providers;
 pub mod runtime {
     //! Explicit low-level runtime escape hatch for advanced integrations.
 
+    pub use merry_core::{RuntimeJournalEvent, RuntimeJournalPayload};
     pub use merry_runtime::{
-        AgentLoopResult, AgentRun, AgentRunMessage, Runtime, RuntimeBuilder, RuntimeError,
-        RuntimeModelRole, RuntimeProfile, RuntimeProfileBuilder, SessionStoreError,
+        AgentLoopControl, AgentLoopInput, AgentLoopResult, AgentRun, AgentRunMessage,
+        CitationCompactionPolicy, DEFAULT_CONTEXT_WINDOW_FALLBACK_TOKENS,
+        DEFAULT_FOREGROUND_WAIT_BUDGET_SECS, DurableMemory, FinalOutputContract, InteractiveError,
+        InteractiveRunEventStream, InteractiveRunMessage, InteractiveSubagentSettings,
+        LoadedSession, MemoryLayout, ProjectRules, RegisteredTool, Runtime, RuntimeBuilder,
+        RuntimeError, RuntimeModelRole, RuntimeProfile, RuntimeProfileBuilder, SessionReservation,
+        SessionStoreError, StepContext, StepInput, SubagentConfig, SubagentLimitBehavior,
+        ToolExecutionContext, ToolExecutionError, ToolExecutionOutcome, ToolExecutor,
+        ToolExecutorFuture,
     };
 }
 /// Rust-only lifetime-bearing adapter types for advanced hosts.

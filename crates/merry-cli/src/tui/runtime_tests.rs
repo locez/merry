@@ -43,7 +43,7 @@ api_key_file = "managed/secrets/compat.key"
     preferences
         .set_reasoning_effort_for_provider(
             "compat",
-            Some(merry_llm::ReasoningEffort::new("high").unwrap()),
+            Some(merry::providers::ReasoningEffort::new("high").unwrap()),
         )
         .expect("reasoning preference should be valid");
 
@@ -142,7 +142,7 @@ api_key_file = "managed/secrets/alt.key"
 
     assert_eq!(
         generation.service_tier(),
-        Some(merry_llm::ServiceTier::Priority)
+        Some(merry::providers::ServiceTier::Priority)
     );
 }
 
@@ -184,12 +184,12 @@ async fn test_tui_runtime_session(
     workspace: &std::path::Path,
     sessions_dir: &std::path::Path,
     session_id: &str,
-    provider: Arc<dyn merry_llm::ModelProvider>,
+    provider: Arc<dyn merry::providers::ModelProvider>,
 ) -> TuiRuntimeSession {
     use crate::coding::{CodingSubagentsConfig, fixed_process_backend};
     use crate::testing::{FakeProcessRunner, model_name};
-    use merry_process::ProcessSession;
-    use merry_runtime::{
+    use merry::process::ProcessSession;
+    use merry::process::{
         AcceptedLocalWorkspaceProcessAdmission, ProcessRunner,
         StaticPermissionedProcessRunnerFactory,
     };
@@ -197,10 +197,6 @@ async fn test_tui_runtime_session(
     let session_store = TuiSessionStore::new(sessions_dir.to_path_buf());
     let state_store = session_store.session_state_store();
     let session_id = SessionId::new(session_id).expect("valid session id");
-    let reservation = state_store
-        .reserve_session(&session_id)
-        .await
-        .expect("session should reserve");
     let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding("ok\n"));
     let permissioned_factory = Arc::new(StaticPermissionedProcessRunnerFactory::new(Arc::clone(
         &runner,
@@ -210,10 +206,11 @@ async fn test_tui_runtime_session(
     let permission_policy = CodingPermissionPolicy::for_permission_mode(
         PermissionMode::AlwaysApprove.coding_mode(),
         AutoFallback::Deny.coding_fallback(),
-        Some(Arc::clone(&permission_source) as Arc<dyn merry_runtime::PermissionAdmissionSource>),
+        Some(Arc::clone(&permission_source)
+            as Arc<dyn merry::permissions::PermissionAdmissionSource>),
     )
     .expect("permission policy should build");
-    let coding_runtime = build_headless_coding_with_policy_composition(
+    let session = build_coding_session_builder(
         HeadlessCodingRuntimeInput {
             session_id: session_id.as_str(),
             root: workspace,
@@ -226,7 +223,7 @@ async fn test_tui_runtime_session(
             )),
             extra_tools: Vec::new(),
             automatic_compaction: CompactionConfig::disabled(),
-            history_retention: merry_runtime::HistoryRetention::default(),
+            history_retention: merry::HistoryRetention::default(),
             retry_policy: None,
             context_compaction: None,
             approval_review: None,
@@ -237,18 +234,23 @@ async fn test_tui_runtime_session(
             workspace_writable: true,
         },
         permission_policy,
-        merry_runtime::PermissionReviewRules::default(),
-        Some(state_store),
+        merry::permissions::PermissionReviewRules::default(),
         None,
     )
-    .expect("coding runtime should build");
-    let loop_config = coding_runtime.loop_config();
-    let runtime = coding_runtime.into_runtime();
-    let interactive = runtime
-        .start_interactive_agent_run(StepContext::default(), loop_config)
+    .expect("coding session builder should build")
+    .open(state_store, CodingSessionOpenMode::New)
+    .await
+    .expect("coding session should open");
+    let InteractiveCodingRun {
+        stream,
+        input,
+        control,
+        subagent_activity,
+        skills,
+    } = session
+        .start_interactive(GenerationConfig::default())
+        .await
         .expect("interactive run should start");
-    let subagent_activity = runtime.subscribe_subagent_activity();
-    let (stream, input, control) = interactive.split();
     let mut metadata = TuiSessionMetadata::new(session_id, workspace.to_path_buf(), now_unix_ms());
     metadata.model = Some("test-model".to_owned());
 
@@ -260,13 +262,13 @@ async fn test_tui_runtime_session(
         metadata_written: false,
         resumed: false,
         startup_warnings: Vec::new(),
-        runtime,
+        session,
         session_store,
         stream,
         subagent_activity,
         input,
         control,
-        skills: Vec::new(),
+        skills,
         merry_config: MerryConfig::load_optional_from_text(
             Some(""),
             &XdgPaths::from_parts(workspace.to_path_buf(), None, None),
@@ -279,7 +281,6 @@ async fn test_tui_runtime_session(
         permission_source,
         permission_requests,
         pending_permission_reviews: VecDeque::new(),
-        session_reservation: Some(reservation),
     }
 }
 
@@ -321,12 +322,13 @@ async fn untouched_session_writes_no_metadata_and_cleans_up_on_discard() {
 #[tokio::test]
 async fn submit_writes_metadata_immediately_so_mid_turn_crash_is_resumable() {
     use futures_util::stream::{self, StreamExt};
-    use merry_core::{ProviderName, RuntimeEvent};
-    use merry_llm::{
+    use merry::events::UserMessageInput;
+    use merry::events::{ProviderName, RuntimeEvent};
+    use merry::providers::{
         ModelCapabilities, ModelError, ModelEvent, ModelEventStream, ModelProvider,
         ModelProviderFuture, ModelRequest, ModelStreamContext,
     };
-    use merry_runtime::{InteractiveRunMessage, UserMessageInput};
+    use merry::runtime::InteractiveRunMessage;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct MidStreamStallingProvider {
@@ -436,7 +438,7 @@ async fn submit_writes_metadata_immediately_so_mid_turn_crash_is_resumable() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].session_id, session_id);
     assert_eq!(listed[0].topic.as_deref(), Some("fix crash resume"));
-    LoadedSession::load(&store.session_state_store(), &session_id)
+    merry::runtime::LoadedSession::load(&store.session_state_store(), &session_id)
         .await
         .expect("mid-turn savepoint should load cleanly for resume");
 }

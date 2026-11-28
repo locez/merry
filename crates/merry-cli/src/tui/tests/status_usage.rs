@@ -2,7 +2,7 @@ use crate::tui::{
     keymap::Keymap, projector::TuiProjector, render::render_to_text, state::TuiState,
     tests::source, theme::TuiTheme,
 };
-use merry_core::{
+use merry::events::{
     CompactionUsageWindow, ContextWindowSource, InteractiveRunState, ModelUsage, RuntimeEvent,
     SessionUsage, UsageContextWindow,
 };
@@ -20,8 +20,8 @@ fn projector_updates_queue_preview_and_usage_without_timeline_noise() {
 
     projector.apply(
         RuntimeEvent::QueuedInputsChanged {
-            inputs: merry_core::QueuedInputsView {
-                items: vec![merry_core::QueuedInputView {
+            inputs: merry::events::QueuedInputsView {
+                items: vec![merry::events::QueuedInputView {
                     id: 1,
                     text: "urgent".to_owned(),
                     position: 0,

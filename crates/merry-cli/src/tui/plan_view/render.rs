@@ -14,7 +14,7 @@ use crate::tui::{
     state::TuiState,
     theme::SemanticColor,
 };
-use merry_core::{PlanDocument, PlanDocumentStatus};
+use merry::events::{PlanDocument, PlanDocumentStatus};
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Position, Rect, Size},

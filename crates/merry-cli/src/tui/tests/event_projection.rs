@@ -6,10 +6,10 @@ use crate::tui::{
     tests::{pending_call_with_args, source},
     theme::TuiTheme,
 };
-use merry_core::{
+use merry::events::SessionTranscriptItem;
+use merry::events::{
     ErrorInfo, QueuedInputView, RuntimeEvent, ToolCallId, ToolCallResult, ToolOutput,
 };
-use merry_runtime::SessionTranscriptItem;
 use serde_json::json;
 
 #[test]

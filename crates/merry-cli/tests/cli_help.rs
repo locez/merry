@@ -1,6 +1,6 @@
 mod support;
 
-use support::{merry, merry_without_openai_env};
+use support::merry;
 
 #[test]
 fn unknown_command_exits_with_usage_error() {
@@ -21,63 +21,6 @@ fn unknown_command_exits_with_usage_error() {
 }
 
 #[test]
-fn invalid_session_id_exits_with_usage_error() {
-    let output = merry()
-        .args(["debug", "--session-id", " "])
-        .output()
-        .expect("merry debug should run");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        output.stdout.is_empty(),
-        "validation errors should not write stdout"
-    );
-    assert!(
-        !output.stderr.is_empty(),
-        "validation errors should write stderr"
-    );
-    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("Usage: merry debug"));
-    assert!(stderr.contains("--session-id <SESSION_ID>"));
-    assert!(stderr.contains("--input <TEXT>"));
-}
-
-#[test]
-fn missing_debug_flag_value_exits_with_debug_usage_error() {
-    let output = merry()
-        .args(["debug", "--input"])
-        .output()
-        .expect("merry debug should run");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        output.stdout.is_empty(),
-        "usage errors should not write stdout"
-    );
-    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("a value is required for '--input <TEXT>'"));
-    assert!(stderr.contains("try '--help'"));
-    assert!(stderr.contains("--input <TEXT>"));
-}
-
-#[test]
-fn debug_rejects_openai_after_debug_options_as_unexpected_argument() {
-    let output = merry_without_openai_env()
-        .args(["debug", "--input", "hello", "openai"])
-        .output()
-        .expect("merry debug should run");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(
-        output.stdout.is_empty(),
-        "usage errors should not write stdout"
-    );
-    let stderr = std::str::from_utf8(&output.stderr).expect("stderr should be utf-8");
-    assert!(stderr.contains("the subcommand 'openai' cannot be used with '--input <TEXT>'"));
-    assert!(stderr.contains("Usage: merry debug"));
-}
-
-#[test]
 fn root_help_writes_usage_to_stdout() {
     let output = merry()
         .arg("--help")
@@ -90,7 +33,9 @@ fn root_help_writes_usage_to_stdout() {
     assert!(stdout.contains("Usage: merry [OPTIONS] [COMMAND]"));
     assert!(stdout.contains("run"));
     assert!(stdout.contains("cmd"));
-    assert!(stdout.contains("debug"));
+    assert!(stdout.contains("resume"));
+    assert!(stdout.contains("completions"));
+    assert!(!stdout.contains("debug"));
     assert!(!stdout.contains("tui"));
 }
 
@@ -108,28 +53,22 @@ fn root_with_sandbox_help_writes_usage_to_stdout_without_reexec() {
     assert!(stdout.contains("Usage: merry [OPTIONS] [COMMAND]"));
     assert!(stdout.contains("run"));
     assert!(stdout.contains("cmd"));
-    assert!(stdout.contains("debug"));
+    assert!(!stdout.contains("debug"));
     assert!(!stdout.contains("tui"));
 }
 
 #[test]
-fn debug_help_writes_usage_to_stdout() {
+fn run_help_writes_usage_to_stdout() {
     let output = merry()
-        .args(["debug", "--help"])
+        .args(["run", "--help"])
         .output()
-        .expect("merry debug --help should run");
+        .expect("merry run --help should run");
 
-    assert!(
-        output.status.success(),
-        "debug help should exit successfully"
-    );
-    assert!(
-        output.stderr.is_empty(),
-        "debug help should not write stderr"
-    );
+    assert!(output.status.success(), "run help should exit successfully");
+    assert!(output.stderr.is_empty(), "run help should not write stderr");
     let stdout = std::str::from_utf8(&output.stdout).expect("stdout should be utf-8");
-    assert!(stdout.contains("Usage: merry debug"));
-    assert!(stdout.contains("--session-id <SESSION_ID>"));
-    assert!(stdout.contains("--input <TEXT>"));
-    assert!(stdout.contains("openai"));
+    assert!(stdout.contains("Usage: merry run"));
+    assert!(stdout.contains("--events-jsonl"));
+    assert!(stdout.contains("--session-id"));
+    assert!(stdout.contains("--resume"));
 }

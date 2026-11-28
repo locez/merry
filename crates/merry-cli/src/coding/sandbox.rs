@@ -1,5 +1,5 @@
 use crate::coding::SandboxMode;
-use merry_runtime::AcceptedLocalWorkspaceProcessAdmission;
+use merry::process::AcceptedLocalWorkspaceProcessAdmission;
 
 /// Admits the process profile for the selected sandbox mode.
 ///

@@ -5,7 +5,7 @@
 //! These helpers only prepare text for display; they never decide what is
 //! shown or what a tool is allowed to do.
 
-pub(crate) use merry_runtime::normalize_line_endings;
+pub(crate) use merry::events::normalize_line_endings;
 
 /// Normalizes CRLF (`\r\n`) and bare CR (`\r`) in an owned string without
 /// reallocating when no carriage returns are present.

@@ -12,7 +12,7 @@ pub(crate) use render::{
 
 use super::state::{TimelineItem, TuiState};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::{
+use merry::events::{
     PlanDocument, PlanDocumentStatus, PlanId, PlanModeState, PlanReviewDecision,
     PlanSessionSnapshot,
 };

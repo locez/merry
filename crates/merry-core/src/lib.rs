@@ -18,6 +18,7 @@ pub mod usage;
 
 pub use error::CoreError;
 pub use event::{ErrorInfo, MerryErrorDomain, MerryErrorInfo, MerryRetryability};
+pub use host_paths::ProtectedHostPaths;
 pub use id::{
     PlanId, ProviderName, SessionId, SkillId, SubagentId, SubagentTaskId, ToolAdapterId,
     ToolBindingName, ToolCallBatchId, ToolCallId, ToolName, ToolSourceFingerprint, ToolSourceId,

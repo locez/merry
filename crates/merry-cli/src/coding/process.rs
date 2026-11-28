@@ -1,8 +1,8 @@
 use super::CodingRuntimeError;
 use clap::ValueEnum;
 #[cfg(test)]
-use merry_process::ProcessSession;
-use merry_process::{
+use merry::process::ProcessSession;
+use merry::process::{
     LocalProcessBackend, ProcessBackend, ProcessBackendMode, ProcessBackendOptions,
 };
 use serde::{Deserialize, Serialize};
@@ -39,13 +39,6 @@ impl SandboxMode {
             Self::Workspace => ProcessBackendMode::Isolated,
         }
     }
-}
-
-pub(crate) fn action_process_runner(
-    workspace_root: &Path,
-    options: ActionProcessBackendOptions,
-) -> Result<ActionProcessBackend, CodingRuntimeError> {
-    action_process_runner_for_mode(workspace_root, options, SandboxMode::Workspace)
 }
 
 pub(crate) fn action_process_runner_for_mode(

@@ -17,7 +17,8 @@ use crate::{
         state::{TimelineItem, TuiState},
     },
 };
-use merry_runtime::{InteractiveError, InterruptReason, QueuedInputId};
+use merry::coding::InteractiveError;
+use merry::{InterruptReason, QueuedInputId};
 use tokio::{sync::mpsc, task::JoinSet};
 
 pub(super) struct InputHistoryController<'a> {
@@ -40,7 +41,7 @@ pub(super) struct ControllerServices<'a> {
     pub(super) background_tasks: &'a mut JoinSet<()>,
     pub(super) subagent_live_stream: &'a mut Option<(
         String,
-        tokio::sync::broadcast::Receiver<merry_core::RuntimeEvent>,
+        tokio::sync::broadcast::Receiver<merry::events::RuntimeEvent>,
     )>,
 }
 
@@ -83,7 +84,7 @@ pub(super) async fn dispatch_effect(
     match effect {
         ControllerEffect::None => Ok(None),
         ControllerEffect::LoadCommandOutput(call_id) => {
-            let runtime = session.runtime().clone();
+            let runtime = session.handle().clone();
             let sender = command_output_tx.clone();
             let generation = state.command_details_generation();
             background_tasks.spawn(async move {
@@ -95,7 +96,7 @@ pub(super) async fn dispatch_effect(
             Ok(None)
         }
         ControllerEffect::LoadArchiveSegment(segment) => {
-            let runtime = session.runtime().clone();
+            let runtime = session.handle().clone();
             let sender = archive_segment_tx.clone();
             background_tasks.spawn(async move {
                 let result = runtime
@@ -299,9 +300,9 @@ pub(super) async fn dispatch_effect(
             Ok(None)
         }
         ControllerEffect::ShowTasks => {
-            let processes = session.runtime().background_processes();
+            let processes = session.handle().background_processes();
             state.sync_background_processes(processes.clone());
-            let subagents = session.runtime().subagent_snapshot().await;
+            let subagents = session.handle().subagent_snapshot().await;
             if let Some(views) = subagents.as_deref() {
                 state.apply_subagent_status_views(views);
             }
@@ -312,13 +313,13 @@ pub(super) async fn dispatch_effect(
             Ok(None)
         }
         ControllerEffect::RefreshSubagents => {
-            state.sync_background_processes(session.runtime().background_processes());
-            if let Some(views) = session.runtime().subagent_snapshot().await {
+            state.sync_background_processes(session.handle().background_processes());
+            if let Some(views) = session.handle().subagent_snapshot().await {
                 state.apply_subagent_status_views(&views);
             }
             if let Some(agent_id) = state.inspected_subagent_id()
-                && let Ok(id) = merry_core::SubagentId::new(&agent_id)
-                && let Some(inspect) = session.runtime().inspect_subagent(&id).await
+                && let Ok(id) = merry::events::SubagentId::new(&agent_id)
+                && let Some(inspect) = session.handle().inspect_subagent(&id).await
             {
                 state.load_subagent_inspect_transcript(
                     &agent_id,
@@ -330,49 +331,49 @@ pub(super) async fn dispatch_effect(
             Ok(None)
         }
         ControllerEffect::SendSubagentMessage { agent_id, message } => {
-            if let Ok(id) = merry_core::SubagentId::new(&agent_id) {
+            if let Ok(id) = merry::events::SubagentId::new(&agent_id) {
                 let already_subscribed = subagent_live_stream
                     .as_ref()
                     .is_some_and(|(current_id, _)| current_id == &agent_id);
                 if !already_subscribed
-                    && let Some(inspect) = session.runtime().inspect_subagent(&id).await
+                    && let Some(inspect) = session.handle().inspect_subagent(&id).await
                 {
                     *subagent_live_stream = Some((agent_id.clone(), inspect.events));
                 }
-                if let Err(error) = session.runtime().send_subagent_message(&id, message).await {
+                if let Err(error) = session.handle().send_subagent_message(&id, message).await {
                     state.apply_subagent_live_event(
                         &agent_id,
-                        merry_core::RuntimeEvent::RunFailed {
-                            diagnostic: merry_core::ErrorInfo::new(
+                        merry::events::RuntimeEvent::RunFailed {
+                            diagnostic: merry::events::ErrorInfo::new(
                                 "subagent_message_failed",
                                 &error.to_string(),
                             )
                             .expect("static diagnostic code is valid"),
-                            source: merry_core::RuntimeEventSource::new(
+                            source: merry::events::RuntimeEventSource::new(
                                 session.metadata.session_id.clone(),
                                 0,
                             ),
                         },
                     );
-                } else if let Some(views) = session.runtime().subagent_snapshot().await {
+                } else if let Some(views) = session.handle().subagent_snapshot().await {
                     state.apply_subagent_status_views(&views);
                 }
             }
             Ok(None)
         }
         ControllerEffect::CancelSubagent(agent_id) => {
-            if let Ok(id) = merry_core::SubagentId::new(&agent_id) {
-                let _ = session.runtime().cancel_subagent(&id).await;
-                if let Some(views) = session.runtime().subagent_snapshot().await {
+            if let Ok(id) = merry::events::SubagentId::new(&agent_id) {
+                let _ = session.handle().cancel_subagent(&id).await;
+                if let Some(views) = session.handle().subagent_snapshot().await {
                     state.apply_subagent_status_views(&views);
                 }
             }
             Ok(None)
         }
         ControllerEffect::InspectBackgroundProcess(process_id) => {
-            state.sync_background_processes(session.runtime().background_processes());
-            match merry_runtime::BackgroundProcessId::new(process_id.clone()) {
-                Ok(id) => match session.runtime().read_background_process(&id) {
+            state.sync_background_processes(session.handle().background_processes());
+            match merry::process::BackgroundProcessId::new(process_id.clone()) {
+                Ok(id) => match session.handle().read_background_process(&id) {
                     Ok(output) => state.update_background_task_output(output),
                     Err(err) => state.update_background_task_error(&process_id, err.message()),
                 },
@@ -381,16 +382,16 @@ pub(super) async fn dispatch_effect(
             Ok(None)
         }
         ControllerEffect::StopBackgroundProcess(process_id) => {
-            if let Ok(id) = merry_runtime::BackgroundProcessId::new(process_id.clone()) {
-                let _ = session.runtime().stop_background_process(&id);
+            if let Ok(id) = merry::process::BackgroundProcessId::new(process_id.clone()) {
+                let _ = session.handle().stop_background_process(&id);
                 if state.inspected_background_process_id().as_deref() == Some(process_id.as_str()) {
-                    match session.runtime().read_background_process(&id) {
+                    match session.handle().read_background_process(&id) {
                         Ok(output) => state.update_background_task_output(output),
                         Err(err) => state.update_background_task_error(&process_id, err.message()),
                     }
                 }
             }
-            state.sync_background_processes(session.runtime().background_processes());
+            state.sync_background_processes(session.handle().background_processes());
             Ok(None)
         }
         ControllerEffect::CompactContext { focus } => {

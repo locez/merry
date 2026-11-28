@@ -1,9 +1,10 @@
 //! Structured presentation and plain-text formatting for permission reviews.
 
-use merry_runtime::{
+use merry::permissions::{
     HostFallbackReason, PathAccess, PermissionActor, PermissionReviewRequest, PermissionReviewRisk,
-    PermissionUserAuthorization, RequestedCapability, shell_command_for_argv,
+    PermissionUserAuthorization, RequestedCapability,
 };
+use merry::process::shell_command_for_argv;
 
 /// One requested capability badge shown in the permission review UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,7 +65,7 @@ impl PermissionReviewView {
     pub(crate) fn from_request(request: &PermissionReviewRequest, queue_total: usize) -> Self {
         let permission_request = request.request();
         let (command, cwd) = match permission_request.action() {
-            merry_runtime::PermissionedAction::Process(intent) => (
+            merry::permissions::PermissionedAction::Process(intent) => (
                 shell_command_for_argv(intent.argv()),
                 intent.cwd().unwrap_or(".").to_owned(),
             ),

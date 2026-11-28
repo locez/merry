@@ -2125,6 +2125,7 @@ dependencies = [
  "merry-coding",
  "merry-core",
  "merry-llm",
+ "merry-mcp",
  "merry-process",
  "merry-provider-anthropic",
  "merry-provider-openai",
@@ -2137,6 +2138,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2151,14 +2153,6 @@ dependencies = [
  "image",
  "libc",
  "merry",
- "merry-core",
- "merry-llm",
- "merry-mcp",
- "merry-process",
- "merry-provider-anthropic",
- "merry-provider-openai",
- "merry-runtime",
- "merry-tools",
  "merry-web",
  "pulldown-cmark",
  "ratatui",

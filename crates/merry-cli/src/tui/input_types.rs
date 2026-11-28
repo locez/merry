@@ -1,4 +1,5 @@
-use merry_runtime::{RuntimeError, UserImageInput, UserMessageInput};
+use merry::coding::RuntimeError;
+use merry::events::{UserImageInput, UserMessageInput};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

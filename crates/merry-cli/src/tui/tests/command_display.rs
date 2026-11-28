@@ -8,10 +8,10 @@ use crate::tui::{
     text_interaction::MouseInput,
     theme::TuiTheme,
 };
-use merry_core::{
+use merry::events::SessionTranscriptItem;
+use merry::events::{
     ErrorInfo, RuntimeEvent, TOOL_CANCELLED_BY_USER_CODE, ToolCallId, ToolCallResult, ToolOutput,
 };
-use merry_runtime::SessionTranscriptItem;
 use ratatui::layout::{Position, Size};
 use serde_json::json;
 use std::time::Duration;

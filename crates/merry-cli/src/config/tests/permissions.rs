@@ -1,6 +1,6 @@
 use super::home;
 use crate::config::{MerryConfig, XdgPaths};
-use merry_runtime::{PathAccess, PathAccessRuleSource};
+use merry::permissions::{PathAccess, PathAccessRuleSource};
 use std::path::{Path, PathBuf};
 
 #[test]
@@ -166,9 +166,9 @@ gpg_agent = true
     assert_eq!(
         config.host_integrations(),
         vec![
-            merry_runtime::HostIntegration::SshAgent,
-            merry_runtime::HostIntegration::SessionBus,
-            merry_runtime::HostIntegration::GpgAgent,
+            merry::permissions::HostIntegration::SshAgent,
+            merry::permissions::HostIntegration::SessionBus,
+            merry::permissions::HostIntegration::GpgAgent,
         ]
     );
 }

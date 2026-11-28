@@ -7,7 +7,7 @@
 
 use crate::tui::subagent_view::{SubagentEntry, SubagentPhase};
 use crossterm::event::{KeyCode, KeyEvent};
-use merry_runtime::{BackgroundProcessOutput, BackgroundProcessState, BackgroundProcessSummary};
+use merry::process::{BackgroundProcessOutput, BackgroundProcessState, BackgroundProcessSummary};
 
 /// Maximum visible list rows inside the expanded inline dock drawer so 30+
 /// background tasks or subagents never take over the terminal viewport.
@@ -320,7 +320,7 @@ impl BackgroundTaskOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use merry_runtime::BackgroundProcessId;
+    use merry::process::BackgroundProcessId;
 
     fn bg(id: &str, running: bool) -> BackgroundProcessSummary {
         BackgroundProcessSummary::new(

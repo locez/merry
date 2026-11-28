@@ -1,5 +1,5 @@
 use crate::tui::input::TextInput;
-use merry_core::{QueuedInputsView, ToolCallId};
+use merry::events::{QueuedInputsView, ToolCallId};
 use std::time::Duration;
 use tokio::time::Instant;
 

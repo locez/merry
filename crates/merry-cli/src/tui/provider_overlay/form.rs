@@ -8,8 +8,8 @@ use crate::{
     },
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_llm::{ReasoningEffort, ServiceTier};
-use merry_provider_openai::OpenAiProtocol;
+use merry::providers::OpenAiProtocol;
+use merry::providers::{ReasoningEffort, ServiceTier};
 use std::{collections::BTreeSet, fmt};
 
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -103,10 +103,11 @@ impl ProviderFormValues {
     pub(crate) fn to_draft(
         &self,
         mode: ProviderDraftMode,
-    ) -> Result<(ProviderAlias, merry_llm::ModelName, ProviderDraft), ProviderManagementError> {
+    ) -> Result<(ProviderAlias, merry::providers::ModelName, ProviderDraft), ProviderManagementError>
+    {
         let alias = ProviderAlias::new(self.alias.trim())
             .map_err(|error| ProviderManagementError::Invalid(error.to_string()))?;
-        let model = merry_llm::ModelName::new(self.model.trim())
+        let model = merry::providers::ModelName::new(self.model.trim())
             .map_err(|error| ProviderManagementError::Invalid(error.to_string()))?;
         let draft = match mode {
             ProviderDraftMode::Update => ProviderDraft::for_update(

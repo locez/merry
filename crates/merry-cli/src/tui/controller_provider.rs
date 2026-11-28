@@ -547,10 +547,11 @@ fn provider_list_items(
         .into_iter()
         .map(|profile| {
             let alias = profile.alias().as_str();
-            let model = state
-                .preferences()
-                .model_for_provider(alias)
-                .or_else(|| profile.default_model().map(merry_llm::ModelName::as_str));
+            let model = state.preferences().model_for_provider(alias).or_else(|| {
+                profile
+                    .default_model()
+                    .map(merry::providers::ModelName::as_str)
+            });
             let editable = provider_management.editable_provider(profile.alias()).ok();
             let base_url = editable
                 .as_ref()
@@ -717,7 +718,7 @@ fn cancel_model_discovery(token: &mut Option<CancellationToken>) {
     }
 }
 
-fn model_list_items(catalog: merry_llm::ModelCatalog) -> Vec<ModelListItem> {
+fn model_list_items(catalog: merry::providers::ModelCatalog) -> Vec<ModelListItem> {
     catalog
         .into_models()
         .into_iter()

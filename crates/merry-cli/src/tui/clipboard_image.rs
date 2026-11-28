@@ -2,9 +2,8 @@ use super::input::DraftImage;
 use image::{
     AnimationDecoder, DynamicImage, GenericImageView, ImageFormat, ImageReader, RgbaImage,
 };
-use merry_runtime::{
-    MAX_USER_IMAGE_DIMENSION, MAX_USER_IMAGE_PIXELS, MAX_USER_IMAGE_PNG_BYTES, RuntimeError,
-};
+use merry::coding::RuntimeError;
+use merry::events::{MAX_USER_IMAGE_DIMENSION, MAX_USER_IMAGE_PIXELS, MAX_USER_IMAGE_PNG_BYTES};
 use std::{
     fs::File,
     io::{Cursor, Read},

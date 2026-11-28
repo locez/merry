@@ -13,9 +13,9 @@ use crate::{
         tool_error::compact_failed_tool_body,
     },
 };
-use merry_core::ToolOutput;
-use merry_runtime::ProcessOutputEnvelope;
-use merry_tools::{
+use merry::events::ToolOutput;
+use merry::process::ProcessOutputEnvelope;
+use merry::tools::{
     APPLY_PATCH_TOOL, READ_FILE_TOOL, WorkspacePatchOperationKind, WorkspacePatchSuccess,
     WorkspacePatchSuccessLineKind, WorkspaceReadImageSuccess, WorkspaceReadPdfPagesSuccess,
 };
@@ -34,7 +34,10 @@ pub(super) fn completed_tool_title(tool: &StartedToolView, status: &str) -> Stri
     format!("{} -> {status}", expanded_tool_title(tool))
 }
 
-pub(super) fn failed_tool_body(diagnostic: Option<&merry_core::ErrorInfo>, text: &str) -> String {
+pub(super) fn failed_tool_body(
+    diagnostic: Option<&merry::events::ErrorInfo>,
+    text: &str,
+) -> String {
     diagnostic
         .map(|diagnostic| compact_failed_tool_body(diagnostic.code(), diagnostic.message(), text))
         .unwrap_or_else(|| compact_tool_output(text))
@@ -58,8 +61,10 @@ pub(super) fn started_tool_title_and_detail(
 }
 
 pub(super) fn tui_tool_title(name: &str) -> &'static str {
-    if matches!(name, merry_mcp::MCP_CALL_TOOL | merry_mcp::MCP_SEARCH_TOOL)
-        || parse_mcp_tool_name(name).is_some()
+    if matches!(
+        name,
+        merry::mcp::MCP_CALL_TOOL | merry::mcp::MCP_SEARCH_TOOL
+    ) || parse_mcp_tool_name(name).is_some()
     {
         return "MCP";
     }
@@ -81,7 +86,10 @@ pub(super) fn tui_tool_title(name: &str) -> &'static str {
 }
 
 pub(super) fn tui_tool_detail(name: &str, arguments: &serde_json::Map<String, Value>) -> String {
-    if matches!(name, merry_mcp::MCP_CALL_TOOL | merry_mcp::MCP_SEARCH_TOOL) {
+    if matches!(
+        name,
+        merry::mcp::MCP_CALL_TOOL | merry::mcp::MCP_SEARCH_TOOL
+    ) {
         return format_tool_call_detail(name, arguments)
             .filter(|detail| !detail.is_empty())
             .unwrap_or_else(|| name.to_owned());
@@ -336,14 +344,14 @@ pub(super) fn completed_process_view(
     tool: &StartedToolView,
     output: &str,
     exit_code: Option<i64>,
-    result: &merry_core::ToolCallResult,
+    result: &merry::events::ToolCallResult,
 ) -> TimelineItem {
     let failure = if result
         .diagnostic()
-        .is_some_and(|diagnostic| diagnostic.code() == merry_core::TOOL_CANCELLED_BY_USER_CODE)
+        .is_some_and(|diagnostic| diagnostic.code() == merry::events::TOOL_CANCELLED_BY_USER_CODE)
     {
         Some(CommandFailure::Cancelled)
-    } else if result.status() == merry_core::ToolCallResultStatus::Failed
+    } else if result.status() == merry::events::ToolCallResultStatus::Failed
         && !exit_code.is_some_and(|code| code != 0)
     {
         Some(CommandFailure::Failed)
@@ -467,7 +475,7 @@ pub(super) fn parse_apply_patch_view(
 }
 
 /// Maps one envelope line onto the timeline's line view.
-fn envelope_line_view(line: &merry_tools::WorkspacePatchSuccessLine) -> Option<PatchLineView> {
+fn envelope_line_view(line: &merry::tools::WorkspacePatchSuccessLine) -> Option<PatchLineView> {
     let kind = match line.kind {
         WorkspacePatchSuccessLineKind::Context => PatchLineKind::Context,
         WorkspacePatchSuccessLineKind::Remove => PatchLineKind::Remove,

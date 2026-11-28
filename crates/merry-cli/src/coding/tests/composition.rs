@@ -3,16 +3,17 @@ use crate::{
         CodingSubagentsConfig, HeadlessCodingRuntimeInput, SandboxMode, build_headless_coding,
         coding_agent_process_admission, fixed_process_backend,
     },
-    runtime_events::collect_runtime_step_events,
+    testing::collect_runtime_step_events,
     testing::{FakeProcessRunner, ScriptedProvider, model_name},
 };
+use merry::events::{ToolInputSchema, ToolName, ToolSpec};
+use merry::process::ProcessSession;
+use merry::process::{AcceptedLocalWorkspaceProcessAdmission, ProcessRunner};
 use merry::profiles::CODING_LOOP_PROCESS_TOOL;
-use merry_core::{ToolInputSchema, ToolName, ToolSpec};
-use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelResponse};
-use merry_process::ProcessSession;
-use merry_runtime::{
-    AcceptedLocalWorkspaceProcessAdmission, ProcessRunner, RegisteredTool, StepContext, StepInput,
-    ToolExecutionContext, ToolExecutionOutcome, ToolExecutor, ToolExecutorFuture,
+use merry::providers::{FinishReason, ModelEvent, ModelOutput, ModelResponse};
+use merry::runtime::{
+    RegisteredTool, StepContext, StepInput, ToolExecutionContext, ToolExecutionOutcome,
+    ToolExecutor, ToolExecutorFuture,
 };
 use std::sync::Arc;
 
@@ -22,7 +23,7 @@ fn off_mode_admits_the_host_process_profile() {
 
     assert_eq!(
         admission.sandbox_profile(),
-        merry_runtime::LocalWorkspaceProcessSandboxProfile::Host
+        merry::process::LocalWorkspaceProcessSandboxProfile::Host
     );
 }
 
@@ -32,7 +33,7 @@ fn workspace_mode_admits_the_local_workspace_process_profile() {
 
     assert_eq!(
         admission.sandbox_profile(),
-        merry_runtime::LocalWorkspaceProcessSandboxProfile::LocalWorkspace
+        merry::process::LocalWorkspaceProcessSandboxProfile::LocalWorkspace
     );
 }
 
@@ -41,7 +42,7 @@ struct StaticOkExecutor;
 impl ToolExecutor for StaticOkExecutor {
     fn execute<'a>(
         &'a self,
-        _call: merry_core::PendingToolCall,
+        _call: merry::events::PendingToolCall,
         _context: ToolExecutionContext,
     ) -> ToolExecutorFuture<'a> {
         Box::pin(async { Ok(ToolExecutionOutcome::succeeded_text("ok")) })
@@ -58,7 +59,7 @@ async fn headless_runtime_uses_coding_agent_profile() {
     })]]);
     let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
     let permissioned_factory = Arc::new(
-        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        merry::process::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
     );
 
     let runtime = build_headless_coding(HeadlessCodingRuntimeInput {
@@ -72,8 +73,8 @@ async fn headless_runtime_uses_coding_agent_profile() {
             permissioned_factory,
         )),
         extra_tools: Vec::new(),
-        automatic_compaction: merry_runtime::CompactionConfig::disabled(),
-        history_retention: merry_runtime::HistoryRetention::default(),
+        automatic_compaction: merry::CompactionConfig::disabled(),
+        history_retention: merry::HistoryRetention::default(),
         retry_policy: None,
         context_compaction: None,
         approval_review: None,
@@ -124,7 +125,7 @@ async fn headless_runtime_registers_extra_tools() {
     })]]);
     let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
     let permissioned_factory = Arc::new(
-        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        merry::process::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
     );
     let schema = schemars::Schema::try_from(serde_json::json!({
         "type": "object",
@@ -148,8 +149,8 @@ async fn headless_runtime_registers_extra_tools() {
             runner,
             permissioned_factory,
         )),
-        automatic_compaction: merry_runtime::CompactionConfig::disabled(),
-        history_retention: merry_runtime::HistoryRetention::default(),
+        automatic_compaction: merry::CompactionConfig::disabled(),
+        history_retention: merry::HistoryRetention::default(),
         retry_policy: None,
         context_compaction: None,
         approval_review: None,

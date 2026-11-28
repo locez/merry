@@ -8,7 +8,7 @@ use crate::tui::{
     theme::TuiTheme,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::{QueuedInputView, QueuedInputsView};
+use merry::events::{QueuedInputView, QueuedInputsView};
 use ratatui::style::Modifier;
 
 #[test]

@@ -12,7 +12,7 @@ use super::{
     theme::TuiTheme,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use merry_core::{
+use merry::events::{
     ErrorInfo, InteractiveRunState, QueuedInputView, RuntimeEvent, RuntimeEventSource, SessionId,
 };
 use ratatui::{Terminal, backend::TestBackend};
@@ -44,13 +44,13 @@ fn draft_image() -> DraftImage {
     .expect("valid draft image")
 }
 
-fn sample_plan_document() -> merry_core::PlanDocument {
-    merry_core::PlanDocument {
-        summary: merry_core::PlanDocumentSummary {
-            id: merry_core::PlanId::new("plan-1").expect("plan id"),
+fn sample_plan_document() -> merry::events::PlanDocument {
+    merry::events::PlanDocument {
+        summary: merry::events::PlanDocumentSummary {
+            id: merry::events::PlanId::new("plan-1").expect("plan id"),
             title: "Slash test plan".to_owned(),
             file_name: "001-slash-test-plan.md".to_owned(),
-            status: merry_core::PlanDocumentStatus::AwaitingApproval,
+            status: merry::events::PlanDocumentStatus::AwaitingApproval,
             revision: 1,
             created_at_ms: 1,
             updated_at_ms: 2,
@@ -345,7 +345,9 @@ fn status_reports_every_runtime_state_and_the_current_plan_phase() {
         (InteractiveRunState::Closed, "Run: closed"),
     ] {
         let mut state = state();
-        state.plan_mut().set_mode(merry_core::PlanModeState::Active);
+        state
+            .plan_mut()
+            .set_mode(merry::events::PlanModeState::Active);
         state.plan_mut().upsert_plan(sample_plan_document());
         state.set_run_state(run_state);
 
@@ -415,7 +417,9 @@ fn invalid_slash_feedback_is_visible_and_remains_correctable() {
         ("/help now", "Command not run"),
     ] {
         let mut state = state();
-        state.plan_mut().set_mode(merry_core::PlanModeState::Active);
+        state
+            .plan_mut()
+            .set_mode(merry::events::PlanModeState::Active);
         state.insert_input_str(input);
 
         assert_eq!(
@@ -1093,14 +1097,14 @@ fn skills_slash_command_opens_fuzzy_picker_and_inserts_skill_token() {
     ));
 
     let skills = vec![
-        merry_runtime::SkillMetadata::new(
+        merry::events::SkillMetadata::new(
             "brainstorming",
             "Explore intent and architecture collaboratively.",
             std::path::PathBuf::from("skills/brainstorming/SKILL.md"),
             std::path::PathBuf::from("/skills"),
         )
         .expect("valid skill"),
-        merry_runtime::SkillMetadata::new(
+        merry::events::SkillMetadata::new(
             "frontend-design",
             "Create distinctive production UI.",
             std::path::PathBuf::from("skills/frontend-design/SKILL.md"),

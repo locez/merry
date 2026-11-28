@@ -8,10 +8,11 @@ use crate::{
     },
     tui::session_list::{TuiSessionMetadata, TuiSessionStore, compact_session_text, now_unix_ms},
 };
-use merry_core::SessionId;
-use merry_runtime::{
-    AgentLoopConfig, FileSessionStore, Runtime, SessionTranscriptItem, StepContext, StepInput,
-};
+use merry::coding::CodingSessionHandle;
+use merry::events::SessionId;
+use merry::events::SessionTranscriptItem;
+use merry::providers::GenerationConfig;
+use merry::{AgentLoopConfig, FileSessionStore};
 use std::future::Future;
 use tokio::io::AsyncWrite;
 
@@ -27,7 +28,7 @@ pub(super) const ABANDONED_TOOL_CALL_REASON: &str =
 /// after that save attempt.
 pub(super) struct HeadlessRunPersistence<'a> {
     pub(super) loop_config: AgentLoopConfig,
-    pub(super) context: StepContext,
+    pub(super) generation: GenerationConfig,
     pub(super) events_jsonl: bool,
     pub(super) session_store: FileSessionStore,
     pub(super) session_id: &'a SessionId,
@@ -35,8 +36,8 @@ pub(super) struct HeadlessRunPersistence<'a> {
 }
 
 pub(super) async fn run_agent_loop_with_persistence<W, F>(
-    runtime: &Runtime,
-    input: StepInput,
+    session: &CodingSessionHandle,
+    task: &str,
     writer: W,
     review_result: F,
     persistence: HeadlessRunPersistence<'_>,
@@ -46,17 +47,17 @@ where
     F: Future<Output = Result<(), CliError>>,
 {
     let settled = settle_agent_loop_output(
-        runtime,
-        input,
+        session,
+        task,
         persistence.loop_config,
-        persistence.context,
+        persistence.generation,
         writer,
         RunOutput::new(persistence.events_jsonl),
     )
     .await;
     let review_result = review_result.await;
     finish_settled_run(
-        runtime,
+        session,
         persistence.session_store,
         persistence.session_id,
         persistence.metadata,
@@ -73,7 +74,7 @@ where
 /// was not written. When persistence succeeds, errors are returned in runtime,
 /// presentation, then reviewer order.
 pub(super) async fn finish_settled_run(
-    runtime: &Runtime,
+    session: &CodingSessionHandle,
     session_store: FileSessionStore,
     session_id: &SessionId,
     metadata: TuiSessionMetadata,
@@ -84,7 +85,7 @@ pub(super) async fn finish_settled_run(
         runtime_result,
         presentation_result,
     } = settled;
-    persist_settled_session(runtime, session_store, session_id, metadata).await?;
+    persist_settled_session(session, session_store, session_id, metadata).await?;
     let status = runtime_result?;
     presentation_result?;
     review_result?;
@@ -99,12 +100,12 @@ pub(super) async fn finish_settled_run(
 /// transcript resumable on the shipped path, rather than only under a reviewer
 /// that happens to submit results of its own.
 pub(super) async fn persist_settled_session(
-    runtime: &Runtime,
+    session: &CodingSessionHandle,
     session_store: FileSessionStore,
     session_id: &SessionId,
     mut metadata: TuiSessionMetadata,
 ) -> Result<(), CliError> {
-    runtime
+    session
         .abandon_pending_tool_calls(ABANDONED_TOOL_CALL_REASON)
         .await
         .map_err(|error| {
@@ -114,10 +115,10 @@ pub(super) async fn persist_settled_session(
         })?;
     // Wait for the side call before the journal commit so the topic is in
     // the side state this save writes. A miss here is not retried.
-    if let Some(topic) = runtime.session_topic().await {
+    if let Some(topic) = session.session_topic().await {
         metadata.topic = Some(topic);
     } else if metadata.topic.is_none()
-        && let Ok(items) = runtime.session_transcript().await
+        && let Ok(items) = session.session_transcript().await
     {
         let topic = items.into_iter().find_map(|item| match item {
             SessionTranscriptItem::UserMessage { text, .. } => {
@@ -128,7 +129,7 @@ pub(super) async fn persist_settled_session(
         });
         metadata.set_topic_if_empty(topic);
     }
-    runtime
+    session
         .save_session_to(session_store.clone())
         .await
         .map_err(|error| {

@@ -8,7 +8,7 @@ use crate::tui::{
     text_interaction::MouseInput,
     theme::TuiTheme,
 };
-use merry_core::{ErrorInfo, RuntimeEvent, ToolCallId, ToolCallResult, ToolOutput};
+use merry::events::{ErrorInfo, RuntimeEvent, ToolCallId, ToolCallResult, ToolOutput};
 use ratatui::{
     layout::{Position, Size},
     style::Color,
@@ -238,7 +238,7 @@ async fn running_command_stays_collapsed_until_clicked_to_reveal_live_output() {
     projector.apply(
         RuntimeEvent::ToolCallOutputDelta {
             call_id: ToolCallId::new("live-cmd").unwrap(),
-            stream: merry_core::ToolOutputStream::Stdout,
+            stream: merry::events::ToolOutputStream::Stdout,
             delta: "worker-1 tick 1\nworker-1 tick 2\n".to_owned(),
             source: source(),
         },
@@ -271,7 +271,7 @@ async fn running_command_stays_collapsed_until_clicked_to_reveal_live_output() {
     projector.apply(
         RuntimeEvent::ToolCallOutputDelta {
             call_id: ToolCallId::new("live-cmd").unwrap(),
-            stream: merry_core::ToolOutputStream::Stdout,
+            stream: merry::events::ToolOutputStream::Stdout,
             delta: more,
             source: source(),
         },

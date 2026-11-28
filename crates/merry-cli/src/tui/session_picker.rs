@@ -532,7 +532,7 @@ pub(crate) fn render_picker_to_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use merry_core::SessionId;
+    use merry::events::SessionId;
     use std::path::PathBuf;
 
     fn metadata(id: &str, active: u128) -> TuiSessionMetadata {
@@ -652,33 +652,6 @@ mod tests {
                 &mut state_for_new,
             ),
             Some(SessionPickerSelection::New)
-        );
-    }
-
-    #[test]
-    fn incompatible_resume_error_classifier_matches_legacy_locked_and_corrupt_store_errors() {
-        use merry_runtime::{RuntimeError, SessionStoreError};
-        assert_eq!(
-            super::super::runtime::classify_resume_error(&RuntimeError::SessionStore {
-                source: SessionStoreError::UnsupportedFormatVersion { actual: 6 },
-            }),
-            Some(ResumeFailureKind::IncompatibleFormat)
-        );
-        assert_eq!(
-            super::super::runtime::classify_resume_error(&RuntimeError::SessionStore {
-                source: SessionStoreError::InvalidDocument {
-                    reason: "legacy journal",
-                },
-            }),
-            Some(ResumeFailureKind::IncompatibleFormat)
-        );
-        assert_eq!(
-            super::super::runtime::classify_resume_error(&RuntimeError::SessionStore {
-                source: SessionStoreError::SessionAlreadyReserved {
-                    session_id: SessionId::new("busy").expect("valid id"),
-                },
-            }),
-            Some(ResumeFailureKind::AlreadyOpen)
         );
     }
 }

@@ -1,6 +1,6 @@
 use super::{
     Args, CliError, RunExitStatus, RunSession, STDIN_TASK, default_run_session_id,
-    output::write_agent_loop_output, reserve_run_session, resolve_task,
+    ensure_new_session_available, output::write_agent_loop_output, resolve_task,
     review_input_channel_for_task,
 };
 use crate::{
@@ -12,11 +12,15 @@ use crate::{
     testing::{FakeProcessRunner, ScriptedProvider, model_name},
 };
 use clap::Parser;
+use merry::AgentLoopConfig;
+use merry::coding::CodingSessionHandle;
+use merry::events::SessionId;
+use merry::process::ProcessRunner;
+use merry::process::ProcessSession;
 use merry::profiles::DEFAULT_CODING_AGENT_MAX_MODEL_TURNS;
-use merry_core::SessionId;
-use merry_llm::{FinishReason, ModelEvent, ModelOutput, ModelProvider, ModelResponse};
-use merry_process::ProcessSession;
-use merry_runtime::{AgentLoopConfig, ProcessRunner, StepContext, StepInput};
+use merry::providers::{
+    FinishReason, GenerationConfig, ModelEvent, ModelOutput, ModelProvider, ModelResponse,
+};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -41,7 +45,7 @@ fn parse_run_args(argv: &[&str]) -> Args {
 
 fn usage_message(error: CliError) -> String {
     match error {
-        CliError::DebugUsage(message) => message,
+        CliError::Usage(message) => message,
         other => panic!("expected a usage error, got {other:?}"),
     }
 }
@@ -55,10 +59,10 @@ fn completing_provider(text: &str) -> ScriptedProvider {
 fn fake_process_backend() -> ActionProcessBackend {
     let runner: Arc<dyn ProcessRunner> = Arc::new(FakeProcessRunner::succeeding(""));
     let permissioned_factory = Arc::new(
-        merry_runtime::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
+        merry::process::StaticPermissionedProcessRunnerFactory::new(Arc::clone(&runner)),
     );
     fixed_process_backend(ProcessSession::from_parts(
-        merry_runtime::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
+        merry::process::AcceptedLocalWorkspaceProcessAdmission::accept_local_workspace(),
         runner,
         permissioned_factory,
     ))
@@ -76,8 +80,8 @@ fn headless_input<'a>(
         model: model_name(),
         process_backend: fake_process_backend(),
         extra_tools: Vec::new(),
-        automatic_compaction: merry_runtime::CompactionConfig::disabled(),
-        history_retention: merry_runtime::HistoryRetention::default(),
+        automatic_compaction: merry::CompactionConfig::disabled(),
+        history_retention: merry::HistoryRetention::default(),
         retry_policy: None,
         context_compaction: None,
         approval_review: None,
@@ -213,7 +217,7 @@ async fn a_saved_run_session_resumes_with_its_recorded_transcript() {
     let temp = tempfile::tempdir().expect("tempdir");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("mkdir workspace");
-    let store = merry_runtime::FileSessionStore::new(temp.path().join("sessions"));
+    let store = merry::FileSessionStore::new(temp.path().join("sessions"));
     let session_id = "run-resume-session";
 
     let first = build_headless_coding(headless_input(
@@ -224,10 +228,10 @@ async fn a_saved_run_session_resumes_with_its_recorded_transcript() {
     .expect("runtime should build");
     let mut output = Vec::new();
     let status = write_agent_loop_output(
-        &first,
-        StepInput::user_text("first task").expect("valid input"),
+        &CodingSessionHandle::from_runtime(first.clone()),
+        "first task",
         AgentLoopConfig::new(DEFAULT_CODING_AGENT_MAX_MODEL_TURNS).expect("valid config"),
-        StepContext::default(),
+        GenerationConfig::default(),
         &mut output,
     )
     .await
@@ -257,7 +261,7 @@ async fn a_saved_run_session_resumes_with_its_recorded_transcript() {
     assert!(
         transcript.iter().any(|item| matches!(
             item,
-            merry_runtime::SessionTranscriptItem::UserMessage { text, .. }
+            merry::events::SessionTranscriptItem::UserMessage { text, .. }
                 if text == "first task"
         )),
         "the resumed session should keep the first task: {transcript:?}"
@@ -265,7 +269,7 @@ async fn a_saved_run_session_resumes_with_its_recorded_transcript() {
     assert!(
         transcript.iter().any(|item| matches!(
             item,
-            merry_runtime::SessionTranscriptItem::AssistantText { text }
+            merry::events::SessionTranscriptItem::AssistantText { text }
                 if text == "first answer"
         )),
         "the resumed session should keep the first answer: {transcript:?}"
@@ -300,10 +304,10 @@ async fn a_new_run_refuses_a_session_id_that_already_has_saved_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join("sessions");
     let state_path = save_existing_session_state(&sessions_dir, "already-saved", b"existing state");
-    let store = merry_runtime::FileSessionStore::new(&sessions_dir);
+    let store = merry::FileSessionStore::new(&sessions_dir);
     let session_id = SessionId::new("already-saved").expect("valid session id");
 
-    let error = reserve_run_session(&RunSession::New(session_id), &store)
+    let error = ensure_new_session_available(&RunSession::New(session_id), &store)
         .await
         .expect_err("a new run must not take over a saved session id");
 
@@ -322,10 +326,10 @@ async fn a_new_run_refuses_a_session_id_that_already_has_saved_state() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_new_run_accepts_a_session_id_the_store_does_not_hold() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let store = merry_runtime::FileSessionStore::new(temp.path().join("sessions"));
+    let store = merry::FileSessionStore::new(temp.path().join("sessions"));
     let session_id = SessionId::new("never-saved").expect("valid session id");
 
-    reserve_run_session(&RunSession::New(session_id), &store)
+    ensure_new_session_available(&RunSession::New(session_id), &store)
         .await
         .expect("an unused session id should start a new run");
 }
@@ -335,10 +339,10 @@ async fn resuming_a_saved_session_id_is_not_a_collision() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_dir = temp.path().join("sessions");
     save_existing_session_state(&sessions_dir, "resume-me", b"existing state");
-    let store = merry_runtime::FileSessionStore::new(&sessions_dir);
+    let store = merry::FileSessionStore::new(&sessions_dir);
     let session_id = SessionId::new("resume-me").expect("valid session id");
 
-    reserve_run_session(&RunSession::Resumed(session_id), &store)
+    ensure_new_session_available(&RunSession::Resumed(session_id), &store)
         .await
         .expect("resuming is how an existing session id is meant to be reused");
 }

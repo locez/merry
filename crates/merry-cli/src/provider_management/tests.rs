@@ -1,11 +1,11 @@
 use super::{ProviderDiscoveryDraft, ProviderDraft, ProviderManagementService};
 use crate::config::{ManagedProviderKind, ProviderAlias, XdgPaths};
-use merry_llm::ReasoningEffort;
-use merry_llm::{
+use merry::providers::OpenAiProtocol;
+use merry::providers::ReasoningEffort;
+use merry::providers::{
     ModelCatalog, ModelCatalogEntry, ModelCatalogError, ModelCatalogFuture, ModelCatalogProvider,
     ModelName,
 };
-use merry_provider_openai::OpenAiProtocol;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -394,7 +394,7 @@ async fn update_provider_preserves_service_tier_optional_fields_and_copies_retai
         ModelName::new("gpt-5").expect("model"),
     )
     .expect("valid draft")
-    .with_service_tier(Some(merry_llm::ServiceTier::Ultrafast))
+    .with_service_tier(Some(merry::providers::ServiceTier::Ultrafast))
     .expect("valid service tier");
     service
         .save_provider(initial)
@@ -428,7 +428,7 @@ async fn update_provider_preserves_service_tier_optional_fields_and_copies_retai
         ModelName::new("gpt-5-mini").expect("model"),
     )
     .expect("valid update draft")
-    .with_service_tier(Some(merry_llm::ServiceTier::Fast))
+    .with_service_tier(Some(merry::providers::ServiceTier::Fast))
     .expect("valid service tier");
     service
         .update_provider(&alias, updated)
@@ -437,7 +437,10 @@ async fn update_provider_preserves_service_tier_optional_fields_and_copies_retai
 
     let editable = service.editable_provider(&alias).expect("editable");
     assert_eq!(editable.display_name, "Gateway Updated");
-    assert_eq!(editable.service_tier, Some(merry_llm::ServiceTier::Fast));
+    assert_eq!(
+        editable.service_tier,
+        Some(merry::providers::ServiceTier::Fast)
+    );
     assert_eq!(
         service
             .copy_retained_api_key(&alias)
@@ -466,7 +469,7 @@ impl ModelCatalogProvider for ScriptedCatalog {
             match self {
                 Self::Success(catalog) => Ok(catalog.clone()),
                 Self::Failure => Err(ModelCatalogError::new(
-                    merry_llm::ModelCatalogErrorKind::Transport,
+                    merry::providers::ModelCatalogErrorKind::Transport,
                     "fixture transport failure",
                 )),
                 Self::Cancelled => unreachable!(),

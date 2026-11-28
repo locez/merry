@@ -485,6 +485,12 @@ impl Agent {
             .map_err(AgentError::from)
     }
 
+    /// Returns a read-only trajectory observability handle for this session.
+    #[must_use]
+    pub fn trajectory_handle(&self) -> crate::observability::TrajectoryHandle {
+        crate::observability::TrajectoryHandle::from_runtime(self.runtime.clone())
+    }
+
     /// Returns whether [`Self::close`] has closed this agent session.
     #[must_use]
     pub fn is_closed(&self) -> bool {

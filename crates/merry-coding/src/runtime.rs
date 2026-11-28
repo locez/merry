@@ -11,7 +11,7 @@ use crate::{
     MIN_CODING_SUBAGENT_MODEL_TURNS, ProjectRulesLoadError, SubagentRoleCatalog, coding_agent,
     load_root_project_rules,
 };
-use merry_core::{CoreError, SessionId};
+use merry_core::{CoreError, ProtectedHostPaths, SessionId};
 use merry_llm::{ModelName, ModelProvider, ModelRetryPolicy};
 use merry_process::ProcessBackend;
 use merry_runtime::{
@@ -272,14 +272,24 @@ impl CodingRuntimeInput {
         }
     }
 
-    /// Keeps the workspace read-only and does not load `AGENTS.md`.
-    ///
-    /// Used when the person declined read-write access on first open. The
-    /// sandbox stays in place; this does not switch to host execution.
+    /// Sets whether the workspace is writable (`false` keeps it read-only and
+    /// skips `AGENTS.md`).
     #[must_use]
     pub fn read_only_workspace(mut self) -> Self {
         self.workspace_writable = false;
         self
+    }
+
+    /// Returns the session identifier owned by this input.
+    #[must_use]
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// Returns the workspace root directory owned by this input.
+    #[must_use]
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
     }
 
     /// Creates read-only command-generation inputs without a process backend.
@@ -392,6 +402,14 @@ impl CodingRuntimeInput {
     {
         self.denied_absolute_paths = paths.into_iter().map(Into::into).collect();
         self
+    }
+
+    /// Sets protected host paths from the shared [`ProtectedHostPaths`] contract
+    /// so in-process file tools enforce the exact same private-path boundary as
+    /// the process sandbox.
+    #[must_use]
+    pub fn with_protected_host_paths(self, protected: &ProtectedHostPaths) -> Self {
+        self.with_denied_absolute_paths(protected.as_slice().iter().cloned())
     }
 
     /// Sets the parent subagent policy.

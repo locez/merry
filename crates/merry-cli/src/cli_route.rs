@@ -3,9 +3,6 @@ use crate::cli_error::CliError;
 use crate::cli_exit::CliExit;
 use crate::cmd;
 use crate::config::MerryConfig;
-use crate::debug::{
-    self, Args as DebugArgs, Command as DebugCommand, OpenAiArgs as DebugOpenAiArgs,
-};
 use crate::run as run_command;
 use crate::tui;
 
@@ -37,7 +34,6 @@ pub(crate) async fn run(
             )
             .await,
             cli::root_usage,
-            cli::debug_openai_usage,
         ),
         Some(CliCommand::Resume) => map_result(
             tui::run(
@@ -51,7 +47,6 @@ pub(crate) async fn run(
             )
             .await,
             cli::root_usage,
-            cli::debug_openai_usage,
         ),
         Some(CliCommand::Run(args)) => map_run_result(
             run_command::run(
@@ -64,43 +59,9 @@ pub(crate) async fn run(
             )
             .await,
         ),
-        Some(CliCommand::Cmd(args)) => map_result(
-            cmd::run(&args, merry_config.as_ref()).await,
-            cli::cmd_usage,
-            cli::cmd_usage,
-        ),
-        Some(CliCommand::Debug(DebugArgs {
-            session_id,
-            input,
-            command: None,
-        })) => map_result(
-            debug::basic::run(&session_id, &input, merry_config.as_ref()).await,
-            cli::debug_usage,
-            cli::debug_openai_usage,
-        ),
-        Some(CliCommand::Debug(DebugArgs {
-            command:
-                Some(DebugCommand::OpenAi(DebugOpenAiArgs {
-                    input,
-                    model,
-                    max_output_tokens,
-                    debug_tool_result,
-                })),
-            ..
-        })) => map_debug_openai_result(
-            debug::openai::run(
-                &input,
-                model.as_deref(),
-                max_output_tokens,
-                debug_tool_result.as_deref(),
-                merry_config.as_ref(),
-            )
-            .await,
-        ),
-        Some(CliCommand::Debug(DebugArgs {
-            command: Some(DebugCommand::Shell(args)),
-            ..
-        })) => map_shell_result(debug::shell::run(args, merry_config.as_ref()).await),
+        Some(CliCommand::Cmd(args)) => {
+            map_result(cmd::run(&args, merry_config.as_ref()).await, cli::cmd_usage)
+        }
         // `main` answers this before loading config; kept here so the route
         // stays total if that short-circuit ever moves.
         Some(CliCommand::Completions(args)) => crate::completions::print_completions(args.shell),
@@ -129,24 +90,12 @@ pub(crate) async fn run(
     exit
 }
 
-fn map_result(
-    result: Result<(), CliError>,
-    debug_usage: impl FnOnce() -> String,
-    debug_openai_usage: impl FnOnce() -> String,
-) -> CliExit {
+fn map_result(result: Result<(), CliError>, usage: impl FnOnce() -> String) -> CliExit {
     match result {
         Ok(()) | Err(CliError::BrokenPipe) => CliExit::Success,
-        Err(CliError::DebugUsage(message)) => CliExit::Usage {
+        Err(CliError::Usage(message)) => CliExit::Usage {
             message,
-            usage: debug_usage(),
-        },
-        Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
-            message,
-            usage: debug_openai_usage(),
-        },
-        Err(CliError::ShellUsage(message)) => CliExit::Usage {
-            message,
-            usage: cli::shell_usage(),
+            usage: usage(),
         },
         Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
     }
@@ -157,55 +106,9 @@ fn map_run_result(result: Result<run_command::RunExitStatus, CliError>) -> CliEx
         Ok(run_command::RunExitStatus::Completed | run_command::RunExitStatus::Declined)
         | Err(CliError::BrokenPipe) => CliExit::Success,
         Ok(run_command::RunExitStatus::Incomplete) => CliExit::Failure,
-        Err(CliError::DebugUsage(message)) => CliExit::Usage {
+        Err(CliError::Usage(message)) => CliExit::Usage {
             message,
             usage: cli::run_usage(),
-        },
-        Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
-            message,
-            usage: cli::run_usage(),
-        },
-        Err(CliError::ShellUsage(message)) => CliExit::Usage {
-            message,
-            usage: cli::shell_usage(),
-        },
-        Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
-    }
-}
-
-fn map_debug_openai_result(result: Result<(), CliError>) -> CliExit {
-    match result {
-        Ok(()) | Err(CliError::BrokenPipe) => CliExit::Success,
-        Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
-            message,
-            usage: cli::debug_openai_usage(),
-        },
-        Err(CliError::DebugUsage(message)) => CliExit::Usage {
-            message,
-            usage: cli::debug_usage(),
-        },
-        Err(CliError::ShellUsage(message)) => CliExit::Usage {
-            message,
-            usage: cli::shell_usage(),
-        },
-        Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
-    }
-}
-
-fn map_shell_result(result: Result<(), CliError>) -> CliExit {
-    match result {
-        Ok(()) | Err(CliError::BrokenPipe) => CliExit::Success,
-        Err(CliError::ShellUsage(message)) => CliExit::Usage {
-            message,
-            usage: cli::shell_usage(),
-        },
-        Err(CliError::DebugUsage(message)) => CliExit::Usage {
-            message,
-            usage: cli::debug_usage(),
-        },
-        Err(CliError::DebugOpenAiUsage(message)) => CliExit::Usage {
-            message,
-            usage: cli::debug_openai_usage(),
         },
         Err(CliError::Unexpected(message)) => CliExit::Unexpected(message),
     }

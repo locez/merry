@@ -1,8 +1,8 @@
 use super::{ProviderFormField, ProviderFormOverlay, ProviderFormSeed, ProviderOverlayAction};
 use crate::config::{ConfiguredProviderKind, ManagedProviderKind, derive_provider_alias};
 use crossterm::event::{KeyCode, KeyEvent};
-use merry_llm::{ReasoningEffort, ServiceTier};
-use merry_provider_openai::OpenAiProtocol;
+use merry::providers::OpenAiProtocol;
+use merry::providers::{ReasoningEffort, ServiceTier};
 use std::collections::BTreeSet;
 
 /// Which pane currently owns keyboard input in the two-column Provider Workbench.

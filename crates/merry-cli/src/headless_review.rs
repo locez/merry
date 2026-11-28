@@ -1,4 +1,6 @@
-use merry_runtime::{ChannelPermissionAdmissionSource, PermissionReviewRequest};
+use merry::permissions::{
+    ChannelPermissionAdmissionSource, PermissionReviewChannel, PermissionReviewRequest,
+};
 use std::{io, path::PathBuf, sync::Arc};
 use terminal::open_review_terminal;
 use tokio::{
@@ -53,9 +55,9 @@ pub(crate) struct HeadlessPermissionReviewTask {
 
 impl HeadlessPermissionReviewer {
     pub(crate) fn new() -> Self {
-        let (source, requests) = ChannelPermissionAdmissionSource::channel(8);
+        let (source, requests) = PermissionReviewChannel::new(8).into_parts();
         Self {
-            source: Arc::new(source),
+            source,
             requests,
             cancellation: CancellationToken::new(),
         }
@@ -269,8 +271,8 @@ mod tests {
         HeadlessDecision, NO_REVIEW_INPUT_REASON, parse_decision, read_headless_decision,
         review_request,
     };
-    use merry_core::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
-    use merry_runtime::{
+    use merry::events::{PendingToolCall, ToolCallArguments, ToolCallId, ToolName};
+    use merry::permissions::{
         ChannelPermissionAdmissionSource, PermissionAdmissionContext, PermissionAdmissionDecision,
         PermissionAdmissionSource, PermissionRequest, parse_permission_request,
     };

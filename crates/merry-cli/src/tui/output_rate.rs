@@ -1,4 +1,4 @@
-use merry_core::{ModelOutputRate, RuntimeEvent};
+use merry::events::{ModelOutputRate, RuntimeEvent};
 
 /// Presentation of the last measurable runtime-owned throughput sample.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

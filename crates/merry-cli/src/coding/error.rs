@@ -1,6 +1,6 @@
+use merry::events::CoreError;
+use merry::process::ProcessBackendError;
 use merry::profiles::CodingRuntimeBuildError;
-use merry_core::CoreError;
-use merry_process::ProcessBackendError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

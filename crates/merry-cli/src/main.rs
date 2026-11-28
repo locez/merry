@@ -9,7 +9,6 @@ mod cmd;
 mod coding;
 mod completions;
 mod config;
-mod debug;
 mod headless_review;
 mod mcp_tools;
 mod observability;
@@ -18,7 +17,6 @@ mod provider_config;
 mod provider_management;
 mod run;
 mod runtime_config;
-mod runtime_events;
 mod session_id;
 mod testing;
 mod text;
@@ -38,9 +36,7 @@ use cli_exit::CliExit;
 use runtime_config::{effective_log_settings, validate_loaded_config};
 
 fn main() -> CliExit {
-    if merry_process::sandbox_helper_requested() {
-        merry_process::sandbox_helper_main();
-    }
+    merry::process::maybe_run_sandbox_helper();
 
     let argv = env::args_os().collect::<Vec<_>>();
     let mut cli = match Cli::try_parse_from(argv.clone()) {
@@ -83,7 +79,7 @@ fn main() -> CliExit {
     let sandbox_mode = cli.sandbox_mode();
     if sandbox_mode == SandboxMode::Workspace
         && cli.is_product_surface()
-        && let Err(error) = merry_process::probe_workspace_sandbox()
+        && let Err(error) = merry::process::probe_workspace_sandbox()
     {
         return CliExit::Unexpected(format!(
             "{error}\nSee SANDBOX.md (https://github.com/locez/merry/blob/main/SANDBOX.md)."

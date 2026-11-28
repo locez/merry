@@ -6,8 +6,8 @@ use crate::tui::{
     tests::{find_cell_color, pending_batch, pending_call, pending_call_with_args, source},
     theme::TuiTheme,
 };
-use merry_core::{ErrorInfo, RuntimeEvent, ToolCallId, ToolCallResult, ToolOutput};
-use merry_tools::APPLY_PATCH_TOOL;
+use merry::events::{ErrorInfo, RuntimeEvent, ToolCallId, ToolCallResult, ToolOutput};
+use merry::tools::APPLY_PATCH_TOOL;
 use serde_json::json;
 
 #[test]
@@ -432,7 +432,7 @@ fn projector_renders_dynamic_mcp_meta_tools_with_target_details() {
         RuntimeEvent::ToolCallStarted {
             call: pending_call_with_args(
                 "call-mcp-meta-search",
-                merry_mcp::MCP_SEARCH_TOOL,
+                merry::mcp::MCP_SEARCH_TOOL,
                 json!({ "query": "responses api", "server": "docs", "refresh": true }),
             ),
             source: source(),
@@ -443,7 +443,7 @@ fn projector_renders_dynamic_mcp_meta_tools_with_target_details() {
         RuntimeEvent::ToolCallStarted {
             call: pending_call_with_args(
                 "call-mcp-meta-call",
-                merry_mcp::MCP_CALL_TOOL,
+                merry::mcp::MCP_CALL_TOOL,
                 json!({
                     "server": "openaiDeveloperDocs",
                     "tool": "search_openai_docs",

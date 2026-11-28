@@ -27,7 +27,7 @@ pub(super) use input::project_local_effect;
 pub(crate) use input::{
     apply_clipboard_image_completion, handle_key_action, handle_key_event, handle_paste_event,
 };
-use merry_runtime::InteractiveRunMessage;
+use merry::coding::{InteractiveError, InteractiveRunMessage};
 pub(crate) use pointer::{
     handle_mouse_input, handle_mouse_scroll_down, handle_mouse_scroll_down_by,
     handle_mouse_scroll_up, handle_mouse_scroll_up_by,
@@ -185,13 +185,11 @@ pub(crate) enum ControllerExit {
 }
 
 pub(super) struct CompactionCompletion {
-    result: Result<Option<merry_runtime::CompactionOutcome>, merry_runtime::InteractiveError>,
+    result: Result<Option<merry::CompactionOutcome>, InteractiveError>,
 }
 
 impl CompactionCompletion {
-    pub(super) fn new(
-        result: Result<Option<merry_runtime::CompactionOutcome>, merry_runtime::InteractiveError>,
-    ) -> Self {
+    pub(super) fn new(result: Result<Option<merry::CompactionOutcome>, InteractiveError>) -> Self {
         Self { result }
     }
 
@@ -205,7 +203,7 @@ impl CompactionCompletion {
                     body: "Conversation history is already within the retained tail.".to_owned(),
                 });
             }
-            Err(merry_runtime::InteractiveError::CompactRequiresIdle) => {
+            Err(InteractiveError::CompactRequiresIdle) => {
                 state.follow_latest();
                 state.push_timeline_item(crate::tui::state::TimelineItem::LocalCommand {
                     title: "Compaction unavailable".to_owned(),
@@ -221,14 +219,14 @@ impl CompactionCompletion {
 }
 
 pub(super) struct CommandOutputCompletion {
-    call_id: merry_core::ToolCallId,
+    call_id: merry::events::ToolCallId,
     generation: u64,
     result: Result<super::command_details::CapturedOutput, String>,
 }
 
 impl CommandOutputCompletion {
     pub(super) fn new(
-        call_id: merry_core::ToolCallId,
+        call_id: merry::events::ToolCallId,
         generation: u64,
         result: Result<super::command_details::CapturedOutput, String>,
     ) -> Self {
@@ -248,13 +246,13 @@ impl CommandOutputCompletion {
 
 pub(super) struct ArchiveSegmentCompletion {
     segment: u32,
-    result: Result<Vec<merry_runtime::SessionTranscriptItem>, String>,
+    result: Result<Vec<merry::events::SessionTranscriptItem>, String>,
 }
 
 impl ArchiveSegmentCompletion {
     pub(super) fn new(
         segment: u32,
-        result: Result<Vec<merry_runtime::SessionTranscriptItem>, String>,
+        result: Result<Vec<merry::events::SessionTranscriptItem>, String>,
     ) -> Self {
         Self { segment, result }
     }
@@ -302,7 +300,7 @@ pub(crate) enum ControllerEffect {
     },
     FlushPendingInputs,
     PasteImage,
-    LoadCommandOutput(merry_core::ToolCallId),
+    LoadCommandOutput(merry::events::ToolCallId),
     LoadArchiveSegment(u32),
     CopyText(String),
     CopyTextTooLarge,
@@ -345,7 +343,7 @@ pub(crate) enum ControllerEffect {
     ApplyProviderModel {
         alias: String,
         model: String,
-        reasoning_effort: merry_llm::ReasoningEffort,
+        reasoning_effort: merry::providers::ReasoningEffort,
         target: ModelPickerTarget,
     },
     ApplyRoleModel {
@@ -358,14 +356,14 @@ pub(crate) enum ControllerEffect {
         initial_prompt: Option<String>,
     },
     ApprovePlan {
-        plan_id: merry_core::PlanId,
+        plan_id: merry::events::PlanId,
         note: Option<String>,
     },
     RequestPlanChanges {
-        plan_id: merry_core::PlanId,
+        plan_id: merry::events::PlanId,
         feedback: String,
     },
-    AbandonPlan(merry_core::PlanId),
+    AbandonPlan(merry::events::PlanId),
     ApprovePermission(String),
     DenyPermission(String),
     NewSession,
@@ -422,15 +420,15 @@ pub(crate) async fn run_controller(
     let mut permission_requests_open = true;
     let mut input_history_warning_shown = false;
     #[cfg(feature = "web")]
-    let mut web_service = RuntimeWebService::new(session.runtime().clone());
+    let mut web_service = RuntimeWebService::new(session.trajectory_handle());
     let mut bg_poll_ticks: u8 = 0;
     let mut subagent_live_stream: Option<(
         String,
-        tokio::sync::broadcast::Receiver<merry_core::RuntimeEvent>,
+        tokio::sync::broadcast::Receiver<merry::events::RuntimeEvent>,
     )> = None;
     let run_result: Result<ControllerExit, CliError> = async {
         state.update_subagent_activity(&session.subagent_activity.borrow().clone());
-        state.sync_background_processes(session.runtime().background_processes());
+        state.sync_background_processes(session.handle().background_processes());
         let mut refresh_interval = new_refresh_interval();
         refresh_interval.tick().await;
         render_once(terminal, &mut state)?;
@@ -447,11 +445,11 @@ pub(crate) async fn run_controller(
                         && (state.has_running_background_processes()
                             || state.inspected_background_process_id().is_some())
                     {
-                        state.sync_background_processes(session.runtime().background_processes());
+                        state.sync_background_processes(session.handle().background_processes());
                         if let Some(process_id) = state.inspected_background_process_id()
-                            && let Ok(id) = merry_runtime::BackgroundProcessId::new(process_id.clone())
+                            && let Ok(id) = merry::process::BackgroundProcessId::new(process_id.clone())
                         {
-                            match session.runtime().read_background_process(&id) {
+                            match session.handle().read_background_process(&id) {
                                 Ok(output) => state.update_background_task_output(output),
                                 Err(err) => {
                                     state.update_background_task_error(&process_id, err.message())
@@ -588,10 +586,10 @@ pub(crate) async fn run_controller(
                         Some((agent_id, event)) => {
                             let stream_progress = matches!(
                                 event,
-                                merry_core::RuntimeEvent::AssistantMessageDelta { .. }
-                                    | merry_core::RuntimeEvent::ReasoningDelta { .. }
-                                    | merry_core::RuntimeEvent::ToolCallOutputDelta { .. }
-                                    | merry_core::RuntimeEvent::ModelOutputRateUpdated { .. }
+                                merry::events::RuntimeEvent::AssistantMessageDelta { .. }
+                                    | merry::events::RuntimeEvent::ReasoningDelta { .. }
+                                    | merry::events::RuntimeEvent::ToolCallOutputDelta { .. }
+                                    | merry::events::RuntimeEvent::ModelOutputRateUpdated { .. }
                             );
                             state.apply_subagent_live_event(&agent_id, event);
                             if !stream_progress || !needs_refresh(&state) {
@@ -611,18 +609,18 @@ pub(crate) async fn run_controller(
                         InteractiveRunMessage::Event(event) => {
                             let was_active = state.is_active_run();
                             let stream_progress = matches!(event,
-                                merry_core::RuntimeEvent::AssistantMessageDelta { .. }
-                                | merry_core::RuntimeEvent::ReasoningDelta { .. }
-                                | merry_core::RuntimeEvent::ToolCallOutputDelta { .. }
-                                | merry_core::RuntimeEvent::ModelOutputRateUpdated { .. });
+                                merry::events::RuntimeEvent::AssistantMessageDelta { .. }
+                                | merry::events::RuntimeEvent::ReasoningDelta { .. }
+                                | merry::events::RuntimeEvent::ToolCallOutputDelta { .. }
+                                | merry::events::RuntimeEvent::ModelOutputRateUpdated { .. });
                             let tool_finished = matches!(
                                 event,
-                                merry_core::RuntimeEvent::ToolCallFinished { .. }
+                                merry::events::RuntimeEvent::ToolCallFinished { .. }
                             );
                             projector.apply(event, &mut state);
                             if tool_finished {
                                 state.sync_background_processes(
-                                    session.runtime().background_processes(),
+                                    session.handle().background_processes(),
                                 );
                                 if !session.is_metadata_written() {
                                     session
@@ -796,9 +794,9 @@ fn needs_refresh(state: &TuiState) -> bool {
 async fn recv_subagent_live_event(
     stream: &mut Option<(
         String,
-        tokio::sync::broadcast::Receiver<merry_core::RuntimeEvent>,
+        tokio::sync::broadcast::Receiver<merry::events::RuntimeEvent>,
     )>,
-) -> Option<(String, merry_core::RuntimeEvent)> {
+) -> Option<(String, merry::events::RuntimeEvent)> {
     let (agent_id, receiver) = stream.as_mut()?;
     loop {
         match receiver.recv().await {
