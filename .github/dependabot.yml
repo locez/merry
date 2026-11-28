@@ -3,37 +3,93 @@ updates:
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
+      interval: "monthly"
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 2
+    groups:
+      cargo-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      cargo-major:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
     commit-message:
       prefix: "build(deps)"
 
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns:
+          - "*"
     commit-message:
       prefix: "build(deps)"
 
   - package-ecosystem: "nix"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
+      interval: "monthly"
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 1
+    groups:
+      nix-inputs:
+        patterns:
+          - "*"
     commit-message:
       prefix: "build(deps)"
 
   - package-ecosystem: "npm"
     directory: "/web"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 2
+    groups:
+      npm-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      npm-major:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
     commit-message:
       prefix: "build(deps)"
 
   - package-ecosystem: "uv"
     directory: "/sdks/python"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
+      interval: "monthly"
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 2
+    groups:
+      uv-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      uv-major:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
     commit-message:
       prefix: "build(deps)"
