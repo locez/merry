@@ -1042,37 +1042,50 @@ mod tests {
 
     #[test]
     fn backend_options_attach_protected_and_writable_product_paths() {
+        let home = if cfg!(windows) {
+            std::path::PathBuf::from(r"C:\Users\alice")
+        } else {
+            std::path::PathBuf::from("/home/alice")
+        };
+        let state_dir = home.join(".local").join("state").join("merry");
+        let providers_dir = home
+            .join(".local")
+            .join("share")
+            .join("merry")
+            .join("providers");
+        let config_dir = home.join(".config").join("merry");
+        let skills_dir = config_dir.join("skills");
+        let memory_dir = home
+            .join(".local")
+            .join("share")
+            .join("merry")
+            .join("memory");
+
         let protected = merry_core::ProtectedHostPaths::from_merry_dirs(
-            std::path::PathBuf::from("/home/alice/.local/state/merry"),
-            std::path::PathBuf::from("/home/alice/.local/share/merry/providers"),
+            state_dir.clone(),
+            providers_dir.clone(),
         );
         let options = ProcessBackendOptions::new()
-            .with_product_writable_paths(
-                std::path::Path::new("/home/alice/.config/merry"),
-                &[std::path::PathBuf::from("/home/alice/.config/merry/skills")],
-                Some(std::path::Path::new(
-                    "/home/alice/.local/share/merry/memory",
-                )),
-            )
+            .with_product_writable_paths(&config_dir, &[skills_dir], Some(&memory_dir))
             .with_protected_host_paths(&protected);
 
         assert!(options.path_rules().iter().any(|rule| {
-            rule.path() == std::path::Path::new("/home/alice/.local/state/merry")
+            rule.path() == state_dir
                 && rule.access() == merry_runtime::PathAccess::Deny
                 && rule.source() == merry_runtime::PathAccessRuleSource::ProductPrivate
         }));
         assert!(options.path_rules().iter().any(|rule| {
-            rule.path() == std::path::Path::new("/home/alice/.local/share/merry/providers")
+            rule.path() == providers_dir
                 && rule.access() == merry_runtime::PathAccess::Deny
                 && rule.source() == merry_runtime::PathAccessRuleSource::ProductPrivate
         }));
         assert!(options.path_rules().iter().any(|rule| {
-            rule.path() == std::path::Path::new("/home/alice/.config/merry")
+            rule.path() == config_dir
                 && rule.access() == merry_runtime::PathAccess::ReadWrite
                 && rule.source() == merry_runtime::PathAccessRuleSource::ProductConfig
         }));
         assert!(options.path_rules().iter().any(|rule| {
-            rule.path() == std::path::Path::new("/home/alice/.local/share/merry/memory")
+            rule.path() == memory_dir
                 && rule.access() == merry_runtime::PathAccess::ReadWrite
                 && rule.source() == merry_runtime::PathAccessRuleSource::DurableMemory
         }));

@@ -659,27 +659,32 @@ mod tests {
 
     #[test]
     fn protected_host_paths_deduplicates_and_rejects_unclean_paths() {
+        let home = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\alice")
+        } else {
+            PathBuf::from("/home/alice")
+        };
+        let state_dir = home.join(".local").join("state").join("merry");
+        let providers_dir = home
+            .join(".local")
+            .join("share")
+            .join("merry")
+            .join("providers");
         let protected = ProtectedHostPaths::new([
-            PathBuf::from("/home/alice/.local/state/merry"),
+            state_dir.clone(),
             PathBuf::from("relative/secret"),
-            PathBuf::from("/home/alice/../etc"),
-            PathBuf::from("/home/alice/.local/share/merry/providers"),
-            PathBuf::from("/home/alice/.local/state/merry"),
+            home.join("..").join("etc"),
+            providers_dir.clone(),
+            state_dir.clone(),
         ]);
 
         assert_eq!(
             protected.as_slice(),
-            &[
-                PathBuf::from("/home/alice/.local/state/merry"),
-                PathBuf::from("/home/alice/.local/share/merry/providers"),
-            ]
+            &[state_dir.clone(), providers_dir.clone()]
         );
         assert!(!protected.is_empty());
         assert_eq!(
-            ProtectedHostPaths::from_merry_dirs(
-                PathBuf::from("/home/alice/.local/state/merry"),
-                PathBuf::from("/home/alice/.local/share/merry/providers"),
-            ),
+            ProtectedHostPaths::from_merry_dirs(state_dir, providers_dir),
             protected
         );
     }
