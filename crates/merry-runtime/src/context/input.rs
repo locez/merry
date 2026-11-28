@@ -12,6 +12,15 @@ fn validate_non_blank(field: &'static str, value: &str) -> Result<(), ContextErr
     Ok(())
 }
 
+fn sanitize_context_text(field: &'static str, value: String) -> Result<String, ContextError> {
+    let cleaned = match crate::user_input::sanitize_freeform_text(&value) {
+        std::borrow::Cow::Borrowed(_) => value,
+        std::borrow::Cow::Owned(cleaned) => cleaned,
+    };
+    validate_non_blank(field, &cleaned)?;
+    Ok(cleaned)
+}
+
 fn validate_no_control_characters(field: &'static str, value: &str) -> Result<(), ContextError> {
     if value
         .chars()
@@ -163,9 +172,7 @@ impl ProjectRules {
         validate_non_blank("project rules source path", &source_path)?;
         validate_no_control_characters("project rules source path", &source_path)?;
 
-        let text = text.into();
-        validate_non_blank("project rules text", &text)?;
-        validate_no_control_characters("project rules text", &text)?;
+        let text = sanitize_context_text("project rules text", text.into())?;
 
         let content_hash = stable_content_hash(text.as_bytes());
         Ok(Self {
@@ -217,9 +224,7 @@ pub struct TaskAnchor {
 impl TaskAnchor {
     /// Creates a validated task anchor objective.
     pub fn new(objective: impl Into<String>) -> Result<Self, ContextError> {
-        let objective = objective.into();
-        validate_non_blank("task anchor objective", &objective)?;
-        validate_no_control_characters("task anchor objective", &objective)?;
+        let objective = sanitize_context_text("task anchor objective", objective.into())?;
         Ok(Self { objective })
     }
 
@@ -252,9 +257,7 @@ pub struct CompactedCheckpointSummary;
 impl CompactedCheckpoint {
     /// Creates validated compacted checkpoint text.
     pub fn new(text: impl Into<String>) -> Result<Self, ContextError> {
-        let text = text.into();
-        validate_non_blank("compacted checkpoint text", &text)?;
-        validate_no_control_characters("compacted checkpoint text", &text)?;
+        let text = sanitize_context_text("compacted checkpoint text", text.into())?;
 
         Ok(Self { text })
     }

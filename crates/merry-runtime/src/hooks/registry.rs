@@ -223,11 +223,12 @@ impl RuntimeHookHandler for HookRegistry {
                 }) else {
                     break;
                 };
-                let decision = tokio::select! {
+                let mut decision = tokio::select! {
                     biased;
                     () = cancellation_token.cancelled() => return Err(HookError::Cancelled),
                     result = hook(hook_ctx, cancellation_token.clone()) => result?,
                 };
+                decision.sanitize_and_validate()?;
                 match decision {
                     BeforeModelDecision::Continue {
                         generation_override,
@@ -240,9 +241,7 @@ impl RuntimeHookHandler for HookRegistry {
                             }
                             merged_generation = Some(generation_cfg);
                         }
-                        if let Some(note) = dynamic_steering_note
-                            && !note.trim().is_empty()
-                        {
+                        if let Some(note) = dynamic_steering_note {
                             notes.push(note);
                         }
                         force_compact |= compact;
@@ -280,11 +279,12 @@ impl RuntimeHookHandler for HookRegistry {
                 }) else {
                     break;
                 };
-                let decision = tokio::select! {
+                let mut decision = tokio::select! {
                     biased;
                     () = cancellation_token.cancelled() => return Err(HookError::Cancelled),
                     result = hook(hook_ctx, cancellation_token.clone()) => result?,
                 };
+                decision.sanitize_and_validate()?;
                 match decision {
                     AfterModelDecision::Accept => {}
                     short_circuit => return Ok(short_circuit),
@@ -316,11 +316,12 @@ impl RuntimeHookHandler for HookRegistry {
                 let is_last = idx + 1 == total;
                 if is_last {
                     let saved_args = modified.then(|| context.arguments.clone());
-                    let decision = tokio::select! {
+                    let mut decision = tokio::select! {
                         biased;
                         () = cancellation_token.cancelled() => return Err(HookError::Cancelled),
                         result = hook(context, cancellation_token.clone()) => result?,
                     };
+                    decision.sanitize_and_validate()?;
                     return Ok(match decision {
                         BeforeToolDecision::Allow => match saved_args {
                             Some(arguments) => BeforeToolDecision::ModifyInput { arguments },
@@ -330,11 +331,12 @@ impl RuntimeHookHandler for HookRegistry {
                     });
                 }
 
-                let decision = tokio::select! {
+                let mut decision = tokio::select! {
                     biased;
                     () = cancellation_token.cancelled() => return Err(HookError::Cancelled),
                     result = hook(context.clone(), cancellation_token.clone()) => result?,
                 };
+                decision.sanitize_and_validate()?;
                 match decision {
                     BeforeToolDecision::Allow => {}
                     BeforeToolDecision::ModifyInput { arguments } => {
@@ -370,11 +372,12 @@ impl RuntimeHookHandler for HookRegistry {
                 let is_last = idx + 1 == total;
                 if is_last {
                     let saved_output = modified.then(|| context.output.clone());
-                    let decision = tokio::select! {
+                    let mut decision = tokio::select! {
                         biased;
                         () = cancellation_token.cancelled() => return Err(HookError::Cancelled),
                         result = hook(context, cancellation_token.clone()) => result?,
                     };
+                    decision.sanitize_and_validate()?;
                     return Ok(match decision {
                         AfterToolDecision::Continue => match saved_output {
                             Some(output) => AfterToolDecision::ModifyOutput { output },
@@ -384,11 +387,12 @@ impl RuntimeHookHandler for HookRegistry {
                     });
                 }
 
-                let decision = tokio::select! {
+                let mut decision = tokio::select! {
                     biased;
                     () = cancellation_token.cancelled() => return Err(HookError::Cancelled),
                     result = hook(context.clone(), cancellation_token.clone()) => result?,
                 };
+                decision.sanitize_and_validate()?;
                 match decision {
                     AfterToolDecision::Continue => {}
                     AfterToolDecision::ModifyOutput { output } => {
@@ -450,14 +454,73 @@ mod tests {
                 .is_err()
         );
         assert!(
-            HookDecision::AfterToolCall(AfterToolDecision::stop_turn("bad\0reason", None))
+            HookDecision::AfterToolCall(AfterToolDecision::stop_turn("\0\x07", None))
                 .validate()
                 .is_err()
+        );
+        let mut dirty =
+            HookDecision::AfterToolCall(AfterToolDecision::stop_turn("dirty\0\x07reason", None));
+        dirty
+            .sanitize_and_validate()
+            .expect("dirty hook reason should sanitize cleanly");
+        assert_eq!(
+            dirty,
+            HookDecision::AfterToolCall(AfterToolDecision::stop_turn("dirtyreason", None))
         );
         assert!(
             HookDecision::AfterModelStep(AfterModelDecision::continue_with("refine answer"))
                 .validate()
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn native_hook_registry_sanitizes_dirty_decisions_across_points() {
+        let registry = HookRegistry::new()
+            .before_model_step(|_ctx| async {
+                BeforeModelDecision::stop_turn(
+                    "stop\x07\r\nreason\0",
+                    Some("final\x07\r\noutput\0".to_owned()),
+                )
+            })
+            .after_model_step(|_ctx| async {
+                AfterModelDecision::continue_with("keep\x07\r\ngoing\0")
+            });
+
+        let session_id = merry_core::SessionId::new("hook-sanitize").expect("valid session id");
+        let before = RuntimeHookHandler::before_model_step(
+            &registry,
+            BeforeModelStepContext {
+                session_id: session_id.clone(),
+                model_turn: 1,
+                max_model_turns: 4,
+                session_usage: None,
+                generation_config: merry_llm::GenerationConfig::default(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("before hook should sanitize");
+        assert_eq!(
+            before,
+            BeforeModelDecision::stop_turn("stop\nreason", Some("final\noutput".to_owned()))
+        );
+
+        let after = RuntimeHookHandler::after_model_step(
+            &registry,
+            AfterModelStepContext {
+                session_id,
+                model_turn: 1,
+                max_model_turns: 4,
+                assistant_text: None,
+                pending_tool_names: Vec::new(),
+                is_final_turn: true,
+                session_usage: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("after hook should sanitize");
+        assert_eq!(after, AfterModelDecision::continue_with("keep\ngoing"));
     }
 }

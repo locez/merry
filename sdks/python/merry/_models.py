@@ -17,6 +17,7 @@ from ._json import (
     JsonObject,
     JsonValue,
     _contains_control,
+    _sanitize_bounded_text,
     dump_json,
     require_json_object,
     require_json_value,
@@ -62,12 +63,15 @@ class TextContent:
     text: str
 
     def __post_init__(self) -> None:
-        _validate_text(
-            "tool text content",
-            self.text,
-            1_048_576,
-            allow_blank=True,
-            allow_newline_tab=True,
+        object.__setattr__(
+            self,
+            "text",
+            _sanitize_bounded_text(
+                "tool text content",
+                self.text,
+                1_048_576,
+                allow_blank=True,
+            ),
         )
 
 
@@ -105,7 +109,11 @@ class ToolDiagnostic:
 
     def __post_init__(self) -> None:
         _validate_identifier("tool diagnostic code", self.code, 128)
-        _validate_text("tool diagnostic message", self.message, 4096)
+        object.__setattr__(
+            self,
+            "message",
+            _sanitize_bounded_text("tool diagnostic message", self.message, 4096),
+        )
 
     @classmethod
     def from_error_info(cls, info: MerryErrorInfo) -> ToolDiagnostic:
@@ -226,7 +234,11 @@ class HookStopInfo:
 
     def __post_init__(self) -> None:
         _validate_identifier("hook point", self.hook_point, 64)
-        _validate_text("hook stop reason", self.reason, 4096)
+        object.__setattr__(
+            self,
+            "reason",
+            _sanitize_bounded_text("hook stop reason", self.reason, 4096),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,11 +376,15 @@ class RunResult(Generic[OutputT]):
             raise TypeError("run result events must be a tuple of Event values")
         _validate_usize("model turns run", self.model_turns_run)
         if self.final_output is not None:
-            _validate_text(
-                "final output",
-                self.final_output,
-                1_048_576,
-                allow_newline_tab=True,
+            object.__setattr__(
+                self,
+                "final_output",
+                _sanitize_bounded_text(
+                    "final output",
+                    self.final_output,
+                    1_048_576,
+                    normalize_line_breaks=False,
+                ),
             )
         if self.final_output_json is not None:
             object.__setattr__(
@@ -473,21 +489,14 @@ def _validate_tool_name(value: str) -> None:
         )
 
 
-def _validate_text(
-    name: str,
-    value: str,
-    maximum: int,
-    *,
-    allow_blank: bool = False,
-    allow_newline_tab: bool = False,
-) -> None:
+def _validate_text(name: str, value: str, maximum: int) -> None:
     if not isinstance(value, str):
         raise TypeError(f"{name} must be a string")
-    if not allow_blank and not value.strip():
+    if not value.strip():
         raise ValueError(f"{name} must not be blank")
     if len(value) > maximum:
         raise ValueError(f"{name} is too long")
-    if _contains_control(value, allow_newline_tab=allow_newline_tab):
+    if _contains_control(value):
         raise ValueError(f"{name} must not contain control characters")
 
 

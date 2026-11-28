@@ -89,7 +89,7 @@ impl StreamHookBridge<'_> {
             }
 
             match outcome {
-                Ok(decision) => {
+                Ok(mut decision) => {
                     if decision.point() != expected_point {
                         let err = RuntimeError::HookFailed {
                             session_id: runtime.session_id().clone(),
@@ -103,7 +103,7 @@ impl StreamHookBridge<'_> {
                         let _ = ack_sender.send(Err(err));
                         continue;
                     }
-                    if let Err(validation_err) = decision.validate() {
+                    if let Err(validation_err) = decision.sanitize_and_validate() {
                         let err = RuntimeError::HookFailed {
                             session_id: runtime.session_id().clone(),
                             hook_point: expected_point,

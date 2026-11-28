@@ -371,7 +371,7 @@ impl TuiState {
         if merry::events::UserMessageInput::text_only(&text).is_err() {
             self.push_timeline_item(TimelineItem::Diagnostic {
                 title: "Comment".to_owned(),
-                body: "The review text could not be sent. Remove control characters other than newline or tab and try again.".to_owned(),
+                body: "The review text could not be sent because it was empty.".to_owned(),
             });
             return None;
         }

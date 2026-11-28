@@ -456,9 +456,11 @@ mod tests {
     }
 
     #[test]
-    fn user_text_rejects_other_control_characters() {
-        let err = StepInput::user_text("hello\u{7}").expect_err("bell should be rejected");
+    fn user_text_sanitizes_other_control_characters_and_rejects_control_only() {
+        let input = StepInput::user_text("hello\u{7}\0").expect("controls should be stripped");
+        assert_eq!(input.text(), "hello");
 
+        let err = StepInput::user_text("\u{7}\0").expect_err("control-only input becomes blank");
         assert!(matches!(err, RuntimeError::InvalidStepInput { .. }));
     }
 

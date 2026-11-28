@@ -10,7 +10,13 @@ from typing import Literal, Protocol, TypeAlias, overload
 
 from ._config import GenerationConfig
 from ._event_types import EventDiagnostic
-from ._json import JsonObject, JsonValue, _contains_control, require_json_object
+from ._json import (
+    JsonObject,
+    JsonValue,
+    _contains_control,
+    _sanitize_freeform_text,
+    require_json_object,
+)
 from ._models import JsonContent, SessionUsage, TextContent, ToolContent
 
 HookToolStatus: TypeAlias = Literal["succeeded", "failed"]
@@ -25,13 +31,27 @@ class HookPoint(StrEnum):
     AFTER_TOOL_CALL = "after_tool_call"
 
 
-def _require_nonblank(name: str, value: str, *, allow_newline_tab: bool = True) -> None:
+def _require_nonblank(name: str, value: str, *, allow_newline_tab: bool = True) -> str:
     if type(value) is not str:
         raise TypeError(f"{name} must be a string")
+    if allow_newline_tab:
+        cleaned = _sanitize_freeform_text(value)
+        if not cleaned.strip():
+            raise ValueError(f"{name} must not be blank")
+        return cleaned
     if not value.strip():
         raise ValueError(f"{name} must not be blank")
-    if _contains_control(value, allow_newline_tab=allow_newline_tab):
+    if _contains_control(value, allow_newline_tab=False):
         raise ValueError(f"{name} must not contain control characters")
+    return value
+
+
+def _sanitize_optional_text(name: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise TypeError(f"{name} must be a string or None")
+    return _sanitize_freeform_text(value)
 
 
 def _tool_output_to_wire(output: ToolContent | str) -> JsonObject:
@@ -85,15 +105,24 @@ class BeforeModelDecision:
             ):
                 raise TypeError("generation_override must be GenerationConfig or None")
             if self.dynamic_steering_note is not None:
-                _require_nonblank("dynamic_steering_note", self.dynamic_steering_note)
+                object.__setattr__(
+                    self,
+                    "dynamic_steering_note",
+                    _require_nonblank(
+                        "dynamic_steering_note", self.dynamic_steering_note
+                    ),
+                )
             if type(self.force_compact) is not bool:
                 raise TypeError("force_compact must be a boolean")
         elif self.action == "stop_turn":
             if self.reason is None:
                 raise ValueError("stop_turn requires a non-blank reason")
-            _require_nonblank("reason", self.reason)
-            if self.final_output is not None and type(self.final_output) is not str:
-                raise TypeError("final_output must be a string or None")
+            object.__setattr__(self, "reason", _require_nonblank("reason", self.reason))
+            object.__setattr__(
+                self,
+                "final_output",
+                _sanitize_optional_text("final_output", self.final_output),
+            )
         else:
             raise ValueError(f"unsupported BeforeModelDecision action: {self.action!r}")
 
@@ -172,14 +201,17 @@ class AfterModelDecision:
         if self.action == "continue_with_input":
             if self.text is None:
                 raise ValueError("continue_with_input requires non-blank text")
-            _require_nonblank("text", self.text)
+            object.__setattr__(self, "text", _require_nonblank("text", self.text))
             return
         if self.action == "stop_turn":
             if self.reason is None:
                 raise ValueError("stop_turn requires a non-blank reason")
-            _require_nonblank("reason", self.reason)
-            if self.final_output is not None and type(self.final_output) is not str:
-                raise TypeError("final_output must be a string or None")
+            object.__setattr__(self, "reason", _require_nonblank("reason", self.reason))
+            object.__setattr__(
+                self,
+                "final_output",
+                _sanitize_optional_text("final_output", self.final_output),
+            )
             return
         raise ValueError(f"unsupported AfterModelDecision action: {self.action!r}")
 
@@ -264,7 +296,9 @@ class BeforeToolDecision:
         if self.action == "deny":
             if self.message is None:
                 raise ValueError("deny requires a non-blank message")
-            _require_nonblank("message", self.message)
+            object.__setattr__(
+                self, "message", _require_nonblank("message", self.message)
+            )
             return
         if self.action == "short_circuit":
             if not isinstance(self.output, (TextContent, JsonContent)):
@@ -273,9 +307,12 @@ class BeforeToolDecision:
         if self.action == "stop_turn":
             if self.reason is None:
                 raise ValueError("stop_turn requires a non-blank reason")
-            _require_nonblank("reason", self.reason)
-            if self.final_output is not None and type(self.final_output) is not str:
-                raise TypeError("final_output must be a string or None")
+            object.__setattr__(self, "reason", _require_nonblank("reason", self.reason))
+            object.__setattr__(
+                self,
+                "final_output",
+                _sanitize_optional_text("final_output", self.final_output),
+            )
             return
         raise ValueError(f"unsupported BeforeToolDecision action: {self.action!r}")
 
@@ -382,9 +419,12 @@ class AfterToolDecision:
         if self.action == "stop_turn":
             if self.reason is None:
                 raise ValueError("stop_turn requires a non-blank reason")
-            _require_nonblank("reason", self.reason)
-            if self.final_output is not None and type(self.final_output) is not str:
-                raise TypeError("final_output must be a string or None")
+            object.__setattr__(self, "reason", _require_nonblank("reason", self.reason))
+            object.__setattr__(
+                self,
+                "final_output",
+                _sanitize_optional_text("final_output", self.final_output),
+            )
             return
         raise ValueError(f"unsupported AfterToolDecision action: {self.action!r}")
 

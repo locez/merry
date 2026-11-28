@@ -9,7 +9,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Literal, TypeAlias
 
-from ._json import _contains_control
+from ._json import _contains_control, _sanitize_freeform_text
 
 PathInput: TypeAlias = str | PathLike[str]
 
@@ -23,13 +23,22 @@ def require_positive_int(name: str, value: int) -> None:
         raise ValueError(f"{name} must be greater than zero")
 
 
-def _require_text(name: str, value: str, *, allow_newline_tab: bool = False) -> None:
+def _require_text(name: str, value: str) -> None:
     if type(value) is not str:
         raise TypeError(f"{name} must be a string")
     if not value.strip():
         raise ValueError(f"{name} must not be blank")
-    if _contains_control(value, allow_newline_tab=allow_newline_tab):
+    if _contains_control(value):
         raise ValueError(f"{name} must not contain control characters")
+
+
+def _sanitize_required_text(name: str, value: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be a string")
+    cleaned = _sanitize_freeform_text(value)
+    if not cleaned.strip():
+        raise ValueError(f"{name} must not be blank")
+    return cleaned
 
 
 def _paths(value: Sequence[PathInput], label: str) -> tuple[Path, ...]:
@@ -109,7 +118,9 @@ class PromptBlock:
             raise ValueError(
                 "prompt block tag must contain only ASCII letters, digits, '_' or '-'"
             )
-        _require_text("prompt block text", self.text, allow_newline_tab=True)
+        object.__setattr__(
+            self, "text", _sanitize_required_text("prompt block text", self.text)
+        )
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -130,18 +141,17 @@ class PromptProfile:
         stable_blocks: Sequence[PromptBlock] = (),
     ) -> None:
         if base_instructions is not None:
-            _require_text(
-                "base_instructions", base_instructions, allow_newline_tab=True
+            base_instructions = _sanitize_required_text(
+                "base_instructions", base_instructions
             )
         if progress_commentary is not None and not isinstance(
             progress_commentary, bool
         ):
             raise TypeError("progress_commentary must be a boolean or None")
         if progress_commentary_instructions is not None:
-            _require_text(
+            progress_commentary_instructions = _sanitize_required_text(
                 "progress_commentary_instructions",
                 progress_commentary_instructions,
-                allow_newline_tab=True,
             )
         blocks = tuple(stable_blocks)
         seen_tags: set[str] = set()

@@ -13,12 +13,61 @@ JsonValue: TypeAlias = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"
 JsonObject: TypeAlias = dict[str, JsonValue]
 
 
+_ALLOWED_NORMALIZED_CONTROLS: frozenset[str] = frozenset({"\n", "\t"})
+_ALLOWED_RAW_CONTROLS: frozenset[str] = frozenset({"\n", "\r", "\t"})
+
+
 def _contains_control(value: str, *, allow_newline_tab: bool = False) -> bool:
     return any(
         unicodedata.category(character) == "Cc"
-        and not (allow_newline_tab and character in {"\n", "\r", "\t"})
+        and not (allow_newline_tab and character in _ALLOWED_RAW_CONTROLS)
         for character in value
     )
+
+
+def _sanitize_freeform_text(value: str, *, normalize_line_breaks: bool = True) -> str:
+    """Strip unsafe Unicode control (Cc) characters, optionally normalizing CRLF/CR."""
+
+    allowed = (
+        _ALLOWED_NORMALIZED_CONTROLS if normalize_line_breaks else _ALLOWED_RAW_CONTROLS
+    )
+    if not any(
+        unicodedata.category(character) == "Cc" and character not in allowed
+        for character in value
+    ):
+        return value
+    cleaned_source = (
+        value.replace("\r\n", "\n").replace("\r", "\n")
+        if normalize_line_breaks
+        else value
+    )
+    return "".join(
+        character
+        for character in cleaned_source
+        if unicodedata.category(character) != "Cc" or character in allowed
+    )
+
+
+def _sanitize_bounded_text(
+    name: str,
+    value: str,
+    maximum: int,
+    *,
+    allow_blank: bool = False,
+    normalize_line_breaks: bool = True,
+) -> str:
+    """Validate string bounds and strip unsafe control characters from freeform text."""
+
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    if len(value) > maximum:
+        raise ValueError(f"{name} is too long")
+    cleaned = _sanitize_freeform_text(
+        value, normalize_line_breaks=normalize_line_breaks
+    )
+    if not allow_blank and not cleaned.strip():
+        raise ValueError(f"{name} must not be blank")
+    return cleaned
 
 
 def require_json_value(value: object, label: str) -> JsonValue:

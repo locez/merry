@@ -142,10 +142,11 @@ impl UserMessageInput {
     /// Creates a user message with ordered image attachments.
     ///
     /// Windows (`\r\n`) and bare carriage-return (`\r`) line endings are
-    /// normalized to `\n` before validation and storage.
+    /// normalized to `\n`, and other non-whitespace Unicode control characters
+    /// (such as NUL, BEL, or ESC) are stripped before validation and storage.
     pub fn new(text: &str, images: Vec<UserImageInput>) -> Result<Self, RuntimeError> {
-        let normalized = normalize_line_endings(text);
-        let text = normalized.as_ref();
+        let sanitized = sanitize_freeform_text(text);
+        let text = sanitized.as_ref();
         validate_user_text(text)?;
         if images.len() > MAX_USER_IMAGES {
             return Err(invalid_image(
@@ -179,7 +180,7 @@ impl UserMessageInput {
         }
 
         Ok(Self {
-            text: normalized.into_owned(),
+            text: sanitized.into_owned(),
             images,
         })
     }
@@ -346,19 +347,68 @@ pub fn normalize_line_endings(text: &str) -> Cow<'_, str> {
     Cow::Owned(normalized)
 }
 
+pub(crate) fn is_stripped_control_char(ch: char) -> bool {
+    ch.is_control() && ch != '\n' && ch != '\t'
+}
+
+/// Sanitizes untrusted freeform natural-language text for runtime storage and
+/// model requests.
+///
+/// - Normalizes CRLF (`\r\n`) and bare CR (`\r`) line breaks into `\n`.
+/// - Preserves `\n` and `\t`.
+/// - Strips all other Unicode control characters (`char::is_control()`),
+///   including NUL (`\0`), BEL (`\x07`), ESC (`\x1b`), DEL (`\x7f`), and C1
+///   controls, so dirty upstream text never aborts a turn or leaks terminal
+///   escape sequences.
+/// - Borrows `text` without allocating when it is already clean.
+#[must_use]
+pub fn sanitize_freeform_text(text: &str) -> Cow<'_, str> {
+    if !text.chars().any(is_stripped_control_char) {
+        return Cow::Borrowed(text);
+    }
+
+    let mut cleaned = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut stripped_controls = 0_usize;
+    let mut stripped_nuls = 0_usize;
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            cleaned.push('\n');
+        } else if ch == '\0' {
+            stripped_nuls += 1;
+            stripped_controls += 1;
+        } else if is_stripped_control_char(ch) {
+            stripped_controls += 1;
+        } else {
+            cleaned.push(ch);
+        }
+    }
+
+    if stripped_nuls > 0 {
+        tracing::warn!(
+            event = "input.sanitized_control_chars",
+            stripped_controls,
+            stripped_nuls,
+            "stripped NUL and control characters from freeform text"
+        );
+    } else if stripped_controls > 0 {
+        tracing::debug!(
+            event = "input.sanitized_control_chars",
+            stripped_controls,
+            "stripped non-whitespace control characters from freeform text"
+        );
+    }
+
+    Cow::Owned(cleaned)
+}
+
 pub(crate) fn validate_user_text(text: &str) -> Result<(), RuntimeError> {
     if text.trim().is_empty() {
         return Err(RuntimeError::InvalidStepInput {
             reason: "user text must not be blank",
-        });
-    }
-
-    if text
-        .chars()
-        .any(|character| character.is_control() && character != '\n' && character != '\t')
-    {
-        return Err(RuntimeError::InvalidStepInput {
-            reason: "user text must not contain control characters other than newline or tab",
         });
     }
 

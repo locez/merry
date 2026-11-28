@@ -15,5 +15,5 @@ pub use merry_core::{
 pub use merry_runtime::{
     MAX_USER_IMAGE_DIMENSION, MAX_USER_IMAGE_PIXELS, MAX_USER_IMAGE_PNG_BYTES, MAX_USER_IMAGES,
     SessionTranscriptItem, SkillMetadata, SubagentStatusLabel, SubagentStatusView, UserImageInput,
-    UserMessageInput, normalize_line_endings, user_image_label,
+    UserMessageInput, normalize_line_endings, sanitize_freeform_text, user_image_label,
 };

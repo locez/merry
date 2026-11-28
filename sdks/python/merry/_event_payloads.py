@@ -39,6 +39,7 @@ from ._event_types import (
     _validate_identifier,
     _validate_text,
 )
+from ._json import _sanitize_bounded_text
 from ._models import ModelUsage
 from ._output_rate import ModelOutputRateUpdatedPayload
 
@@ -51,12 +52,16 @@ class AssistantMessagePayload(SourcedEventPayload):
 
     def __post_init__(self) -> None:
         _validate_event_source(self.source)
-        _validate_text(
-            "assistant message",
-            self.text,
-            1_048_576,
-            allow_blank=True,
-            allow_newline_tab=True,
+        object.__setattr__(
+            self,
+            "text",
+            _sanitize_bounded_text(
+                "assistant message",
+                self.text,
+                1_048_576,
+                allow_blank=True,
+                normalize_line_breaks=False,
+            ),
         )
 
 
@@ -68,12 +73,16 @@ class AssistantMessageDeltaPayload(SourcedEventPayload):
 
     def __post_init__(self) -> None:
         _validate_event_source(self.source)
-        _validate_text(
-            "assistant message delta",
-            self.delta,
-            1_048_576,
-            allow_blank=True,
-            allow_newline_tab=True,
+        object.__setattr__(
+            self,
+            "delta",
+            _sanitize_bounded_text(
+                "assistant message delta",
+                self.delta,
+                1_048_576,
+                allow_blank=True,
+                normalize_line_breaks=False,
+            ),
         )
 
 
@@ -85,12 +94,16 @@ class ReasoningDeltaPayload(SourcedEventPayload):
 
     def __post_init__(self) -> None:
         _validate_event_source(self.source)
-        _validate_text(
-            "reasoning delta",
-            self.delta,
-            1_048_576,
-            allow_blank=True,
-            allow_newline_tab=True,
+        object.__setattr__(
+            self,
+            "delta",
+            _sanitize_bounded_text(
+                "reasoning delta",
+                self.delta,
+                1_048_576,
+                allow_blank=True,
+                normalize_line_breaks=False,
+            ),
         )
 
 
@@ -181,9 +194,17 @@ class SubagentSpawnedPayload(SourcedEventPayload):
         _validate_event_source(self.source)
         _validate_identifier("subagent id", self.agent_id, 256)
         _validate_identifier("subagent task id", self.task_id, 256)
-        _validate_text("subagent task anchor", self.task_anchor, 4096)
+        object.__setattr__(
+            self,
+            "task_anchor",
+            _sanitize_bounded_text("subagent task anchor", self.task_anchor, 4096),
+        )
         if self.display_name is not None:
-            _validate_text("subagent display name", self.display_name, 256)
+            object.__setattr__(
+                self,
+                "display_name",
+                _sanitize_bounded_text("subagent display name", self.display_name, 256),
+            )
         if self.role is not None:
             _validate_identifier("subagent role", self.role, 128)
 
@@ -232,7 +253,11 @@ class SubagentCompletedPayload(SourcedEventPayload):
         _validate_event_source(self.source)
         _validate_identifier("subagent id", self.agent_id, 256)
         _validate_identifier("subagent task id", self.task_id, 256)
-        _validate_text("subagent summary", self.summary, 4096)
+        object.__setattr__(
+            self,
+            "summary",
+            _sanitize_bounded_text("subagent summary", self.summary, 4096),
+        )
         _validate_strings("subagent output paths", self.output_paths, 4096)
         _validate_strings("subagent changed paths", self.changed_paths, 4096)
         if self.usage is not None and not isinstance(self.usage, ModelUsage):

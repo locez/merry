@@ -69,9 +69,9 @@ impl InteractiveInputQueue {
 
     #[cfg(test)]
     pub(super) fn submit(&mut self, text: &str) -> Result<QueuedInputId, InteractiveError> {
-        let normalized = crate::user_input::normalize_line_endings(text);
-        validate_interactive_text(&normalized)?;
-        self.submit_message(UserMessageInput::text_only(&normalized)?)
+        let sanitized = crate::user_input::sanitize_freeform_text(text);
+        validate_interactive_text(&sanitized)?;
+        self.submit_message(UserMessageInput::text_only(&sanitized)?)
     }
 
     pub(super) fn submit_message(
@@ -92,8 +92,8 @@ impl InteractiveInputQueue {
     }
 
     pub(super) fn update(&mut self, id: QueuedInputId, text: &str) -> Result<(), InteractiveError> {
-        let normalized = crate::user_input::normalize_line_endings(text);
-        validate_interactive_text(&normalized)?;
+        let sanitized = crate::user_input::sanitize_freeform_text(text);
+        validate_interactive_text(&sanitized)?;
         let images = self
             .pending_item(id)?
             .message
@@ -101,7 +101,7 @@ impl InteractiveInputQueue {
             .expect("pending queued input owns its message")
             .images()
             .to_vec();
-        let message = UserMessageInput::new(&normalized, images)?;
+        let message = UserMessageInput::new(&sanitized, images)?;
         self.pending_item_mut(id)?.message = Some(message);
         Ok(())
     }
@@ -294,15 +294,6 @@ fn validate_interactive_text(text: &str) -> Result<(), InteractiveError> {
         });
     }
 
-    if text
-        .chars()
-        .any(|character| character.is_control() && character != '\n' && character != '\t')
-    {
-        return Err(InteractiveError::InvalidInput {
-            reason: "input text must not contain control characters other than newline or tab",
-        });
-    }
-
     Ok(())
 }
 
@@ -455,21 +446,21 @@ mod tests {
     }
 
     #[test]
-    fn queue_normalizes_crlf_and_bare_cr_while_rejecting_other_controls() {
+    fn queue_sanitizes_control_characters_and_rejects_control_only_input() {
         let mut queue = InteractiveInputQueue::default();
         let id = queue
-            .submit("line1\r\nline2\rline3")
-            .expect("CRLF and bare CR normalize to LF");
+            .submit("line1\r\nline2\rline3\x07\0")
+            .expect("CR/CRLF normalize and control characters are stripped");
         assert_eq!(queue.snapshot().items[0].text, "line1\nline2\nline3");
 
         queue
-            .update(id, "updated\r\nline2\rline3")
-            .expect("updated CRLF and bare CR normalize to LF");
+            .update(id, "updated\r\nline2\rline3\x1b")
+            .expect("updated CR/CRLF normalize and control characters are stripped");
         assert_eq!(queue.snapshot().items[0].text, "updated\nline2\nline3");
 
         let err = queue
-            .submit("bad\u{0}control")
-            .expect_err("other control characters remain rejected");
+            .submit("\x07\0\x1b")
+            .expect_err("control-only input becomes blank and stays rejected");
         assert!(matches!(err, InteractiveError::InvalidInput { .. }));
     }
 }

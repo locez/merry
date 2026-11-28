@@ -89,9 +89,8 @@ impl PromptBlock {
     /// Creates a named stable prompt block.
     pub fn new(tag: impl Into<String>, text: impl Into<String>) -> Result<Self, PromptError> {
         let tag = tag.into();
-        let text = text.into();
         validate_tag(&tag)?;
-        validate_text("prompt block", &text)?;
+        let text = sanitize_prompt_text("prompt block", text.into())?;
         Ok(Self { tag, text })
     }
 
@@ -183,12 +182,11 @@ impl PromptProfile {
         base_instructions: impl Into<String>,
         progress_commentary_instructions: impl Into<String>,
     ) -> Result<Self, PromptError> {
-        let base_instructions = base_instructions.into();
-        let progress_commentary_instructions = progress_commentary_instructions.into();
-        validate_text("base instructions", &base_instructions)?;
-        validate_text(
+        let base_instructions =
+            sanitize_prompt_text("base instructions", base_instructions.into())?;
+        let progress_commentary_instructions = sanitize_prompt_text(
             "progress commentary instructions",
-            &progress_commentary_instructions,
+            progress_commentary_instructions.into(),
         )?;
         Ok(Self {
             base_instructions,
@@ -202,9 +200,8 @@ impl PromptProfile {
         mut self,
         base_instructions: impl Into<String>,
     ) -> Result<Self, PromptError> {
-        let base_instructions = base_instructions.into();
-        validate_text("base instructions", &base_instructions)?;
-        self.base_instructions = base_instructions;
+        self.base_instructions =
+            sanitize_prompt_text("base instructions", base_instructions.into())?;
         Ok(self)
     }
 
@@ -213,12 +210,10 @@ impl PromptProfile {
         mut self,
         progress_commentary_instructions: impl Into<String>,
     ) -> Result<Self, PromptError> {
-        let progress_commentary_instructions = progress_commentary_instructions.into();
-        validate_text(
+        self.progress_commentary_instructions = sanitize_prompt_text(
             "progress commentary instructions",
-            &progress_commentary_instructions,
+            progress_commentary_instructions.into(),
         )?;
-        self.progress_commentary_instructions = progress_commentary_instructions;
         Ok(self)
     }
 
@@ -272,9 +267,6 @@ pub enum PromptError {
     /// A required prompt value was empty or whitespace-only.
     #[error("{field} must not be blank")]
     Blank { field: &'static str },
-    /// A prompt value contains an unsupported control character.
-    #[error("{field} contains an unsupported control character")]
-    ControlCharacter { field: &'static str },
     /// A prompt block tag is not a valid stable identifier.
     #[error("prompt block tag must contain only ASCII letters, digits, '_' or '-': {tag:?}")]
     InvalidTag { tag: String },
@@ -283,17 +275,15 @@ pub enum PromptError {
     DuplicateBlockTag { tag: String },
 }
 
-fn validate_text(field: &'static str, value: &str) -> Result<(), PromptError> {
-    if value.trim().is_empty() {
+fn sanitize_prompt_text(field: &'static str, value: String) -> Result<String, PromptError> {
+    let cleaned = match crate::user_input::sanitize_freeform_text(&value) {
+        std::borrow::Cow::Borrowed(_) => value,
+        std::borrow::Cow::Owned(cleaned) => cleaned,
+    };
+    if cleaned.trim().is_empty() {
         return Err(PromptError::Blank { field });
     }
-    if value
-        .chars()
-        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
-    {
-        return Err(PromptError::ControlCharacter { field });
-    }
-    Ok(())
+    Ok(cleaned)
 }
 
 fn validate_tag(tag: &str) -> Result<(), PromptError> {
@@ -343,6 +333,22 @@ mod tests {
             .expect_err("duplicate block should be rejected");
 
         assert!(matches!(error, PromptError::DuplicateBlockTag { .. }));
+    }
+
+    #[test]
+    fn prompt_text_sanitizes_control_characters_and_rejects_control_only_input() {
+        let block = PromptBlock::new("persona", "hello\x07\r\nworld\0\t!")
+            .expect("control characters should be sanitized");
+        assert_eq!(block.text(), "hello\nworld\t!");
+
+        let blank_error = PromptBlock::new("persona", "\x07\0\x1b")
+            .expect_err("control-only block becomes blank");
+        assert!(matches!(
+            blank_error,
+            PromptError::Blank {
+                field: "prompt block"
+            }
+        ));
     }
 
     #[test]

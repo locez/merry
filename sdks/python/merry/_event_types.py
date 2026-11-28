@@ -10,6 +10,7 @@ from typing import ClassVar
 from ._json import (
     JsonObject,
     _contains_control,
+    _sanitize_bounded_text,
     require_json_object,
     require_json_value,
 )
@@ -93,7 +94,11 @@ class EventDiagnostic:
 
     def __post_init__(self) -> None:
         _validate_identifier("event diagnostic code", self.code, 128)
-        _validate_text("event diagnostic message", self.message, 4096)
+        object.__setattr__(
+            self,
+            "message",
+            _sanitize_bounded_text("event diagnostic message", self.message, 4096),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +165,19 @@ class RuntimeToolOutput:
     def __post_init__(self) -> None:
         if not isinstance(self.kind, RuntimeToolOutputKind):
             raise TypeError("runtime tool output kind must be a RuntimeToolOutputKind")
+        if self.kind is RuntimeToolOutputKind.TEXT:
+            object.__setattr__(
+                self,
+                "value",
+                _sanitize_bounded_text(
+                    "runtime tool output",
+                    self.value,
+                    1_048_576,
+                    allow_blank=True,
+                    normalize_line_breaks=False,
+                ),
+            )
+            return
         _validate_text(
             "runtime tool output",
             self.value,
@@ -247,7 +265,11 @@ class TodoItem:
 
     def __post_init__(self) -> None:
         _validate_identifier("todo item id", self.id, 128)
-        _validate_text("todo item content", self.content, 512)
+        object.__setattr__(
+            self,
+            "content",
+            _sanitize_bounded_text("todo item content", self.content, 512),
+        )
         if not isinstance(self.status, TodoStatus):
             raise TypeError("todo item status must be a TodoStatus")
 
@@ -272,8 +294,10 @@ class QueuedInput:
 
     def __post_init__(self) -> None:
         _validate_nonnegative("queued input id", self.id)
-        _validate_text(
-            "queued input text", self.text, 1_048_576, allow_newline_tab=True
+        object.__setattr__(
+            self,
+            "text",
+            _sanitize_bounded_text("queued input text", self.text, 1_048_576),
         )
         _validate_nonnegative("queued input position", self.position)
 

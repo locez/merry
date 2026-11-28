@@ -84,12 +84,6 @@ pub fn load_root_project_rules(root: &Path) -> Result<Option<ProjectRules>, Proj
             });
         }
     };
-    let text = if text.contains("\r\n") {
-        text.replace("\r\n", "\n")
-    } else {
-        text
-    };
-
     ProjectRules::new(ROOT_PROJECT_RULES_FILE, text)
         .map(Some)
         .map_err(|source| ProjectRulesLoadError::ProjectRulesInvalid {
@@ -207,13 +201,18 @@ mod tests {
     }
 
     #[test]
-    fn lone_carriage_return_remains_invalid() {
+    fn bare_carriage_return_and_controls_are_sanitized_and_control_only_rejects() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = expected_rules_path(temp.path());
-        std::fs::write(&path, "Use rule.\rNot a CRLF line.").expect("write lone CR rules");
+        std::fs::write(&path, "Use rule.\rSecond line.\x07\0").expect("write dirty rules");
 
-        let error = load_root_project_rules(temp.path()).expect_err("lone CR rules reject");
+        let rules = load_root_project_rules(temp.path())
+            .expect("dirty rules sanitize")
+            .expect("rules exist");
+        assert_eq!(rules.text(), "Use rule.\nSecond line.");
 
+        std::fs::write(&path, "\x07\0").expect("write control-only rules");
+        let error = load_root_project_rules(temp.path()).expect_err("control-only rules reject");
         assert!(matches!(
             error,
             ProjectRulesLoadError::ProjectRulesInvalid { path: actual, .. } if actual == path

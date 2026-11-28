@@ -20,8 +20,17 @@ fn project_rules_validate_fields_and_hash_text() {
         })
     ));
     assert!(matches!(
-        ProjectRules::new("AGENTS.md", "bad\u{7}rules"),
+        ProjectRules::new("AGENTS\u{7}.md", "Use project rules."),
         Err(ContextError::InvalidControlCharacter {
+            field: "project rules source path"
+        })
+    ));
+    let sanitized = ProjectRules::new("AGENTS.md", "good\u{7}\r\nrules\0")
+        .expect("project rules body should sanitize control characters");
+    assert_eq!(sanitized.text(), "good\nrules");
+    assert!(matches!(
+        ProjectRules::new("AGENTS.md", "\u{7}\0"),
+        Err(ContextError::BlankField {
             field: "project rules text"
         })
     ));
@@ -43,9 +52,12 @@ fn task_anchor_validates_objective_and_renders_dynamic_control_text() {
             field: "task anchor objective"
         })
     ));
+    let sanitized = TaskAnchor::new("clean\u{7}\r\ntask\0")
+        .expect("task anchor should sanitize control characters");
+    assert_eq!(sanitized.objective(), "clean\ntask");
     assert!(matches!(
-        TaskAnchor::new("bad\u{7}task"),
-        Err(ContextError::InvalidControlCharacter {
+        TaskAnchor::new("\u{7}\0"),
+        Err(ContextError::BlankField {
             field: "task anchor objective"
         })
     ));
@@ -63,9 +75,12 @@ fn compacted_checkpoint_validates_text() {
             field: "compacted checkpoint text"
         })
     ));
+    let sanitized = CompactedCheckpoint::new("clean\u{7}\r\ntext\0")
+        .expect("checkpoint should sanitize control characters");
+    assert_eq!(sanitized.text(), "clean\ntext");
     assert!(matches!(
-        CompactedCheckpoint::new("bad\u{7}text"),
-        Err(ContextError::InvalidControlCharacter {
+        CompactedCheckpoint::new("\u{7}\0"),
+        Err(ContextError::BlankField {
             field: "compacted checkpoint text"
         })
     ));

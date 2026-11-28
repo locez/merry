@@ -555,6 +555,17 @@ impl HookDecision {
         }
     }
 
+    /// Sanitizes freeform decision text in place and validates non-blank
+    /// invariants for decisions crossing external boundaries.
+    pub fn sanitize_and_validate(&mut self) -> Result<(), HookError> {
+        match self {
+            Self::BeforeModelStep(decision) => decision.sanitize_and_validate(),
+            Self::AfterModelStep(decision) => decision.sanitize_and_validate(),
+            Self::BeforeToolCall(decision) => decision.sanitize_and_validate(),
+            Self::AfterToolCall(decision) => decision.sanitize_and_validate(),
+        }
+    }
+
     /// Validates non-blank text invariants for decisions crossing external boundaries.
     pub fn validate(&self) -> Result<(), HookError> {
         match self {
@@ -584,18 +595,103 @@ impl HookDecision {
     }
 }
 
-fn validate_nonblank_hook_text(field: &str, value: &str) -> Result<(), HookError> {
+impl BeforeModelDecision {
+    pub(crate) fn sanitize_and_validate(&mut self) -> Result<(), HookError> {
+        match self {
+            Self::Continue {
+                dynamic_steering_note,
+                ..
+            } => {
+                if let Some(note) = dynamic_steering_note.as_mut() {
+                    sanitize_hook_text_in_place(note);
+                    if note.trim().is_empty() {
+                        *dynamic_steering_note = None;
+                    }
+                }
+                Ok(())
+            }
+            Self::StopTurn {
+                reason,
+                final_output,
+            } => sanitize_stop_turn(reason, final_output),
+        }
+    }
+}
+
+impl AfterModelDecision {
+    pub(crate) fn sanitize_and_validate(&mut self) -> Result<(), HookError> {
+        match self {
+            Self::Accept => Ok(()),
+            Self::ContinueWithInput { text } => {
+                sanitize_nonblank_hook_text_in_place("continue_with text", text)
+            }
+            Self::StopTurn {
+                reason,
+                final_output,
+            } => sanitize_stop_turn(reason, final_output),
+        }
+    }
+}
+
+impl BeforeToolDecision {
+    pub(crate) fn sanitize_and_validate(&mut self) -> Result<(), HookError> {
+        match self {
+            Self::Allow | Self::ModifyInput { .. } | Self::ShortCircuit { .. } => Ok(()),
+            Self::Deny { message } => sanitize_nonblank_hook_text_in_place("deny message", message),
+            Self::StopTurn {
+                reason,
+                final_output,
+            } => sanitize_stop_turn(reason, final_output),
+        }
+    }
+}
+
+impl AfterToolDecision {
+    pub(crate) fn sanitize_and_validate(&mut self) -> Result<(), HookError> {
+        match self {
+            Self::Continue | Self::ModifyOutput { .. } => Ok(()),
+            Self::StopTurn {
+                reason,
+                final_output,
+            } => sanitize_stop_turn(reason, final_output),
+        }
+    }
+}
+
+fn sanitize_stop_turn(
+    reason: &mut String,
+    final_output: &mut Option<String>,
+) -> Result<(), HookError> {
+    sanitize_nonblank_hook_text_in_place("stop_turn reason", reason)?;
+    if let Some(output) = final_output.as_mut() {
+        sanitize_hook_text_in_place(output);
+    }
+    Ok(())
+}
+
+fn sanitize_hook_text_in_place(value: &mut String) {
+    if let std::borrow::Cow::Owned(cleaned) = crate::user_input::sanitize_freeform_text(value) {
+        *value = cleaned;
+    }
+}
+
+fn sanitize_nonblank_hook_text_in_place(field: &str, value: &mut String) -> Result<(), HookError> {
+    sanitize_hook_text_in_place(value);
     if value.trim().is_empty() {
         return Err(HookError::InvalidDecision {
             message: format!("{field} must not be blank"),
         });
     }
-    if value
+    Ok(())
+}
+
+fn validate_nonblank_hook_text(field: &str, value: &str) -> Result<(), HookError> {
+    let has_visible_content = value
         .chars()
-        .any(|ch| ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t')
-    {
+        .any(|ch| !ch.is_whitespace() && !crate::user_input::is_stripped_control_char(ch));
+    if !has_visible_content {
         return Err(HookError::InvalidDecision {
-            message: format!("{field} must not contain control characters"),
+            message: format!("{field} must not be blank"),
         });
     }
     Ok(())
